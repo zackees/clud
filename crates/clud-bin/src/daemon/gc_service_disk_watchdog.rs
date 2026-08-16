@@ -33,6 +33,7 @@ pub(super) fn purge_old_reclaimable_entries_for_roots(
     live_cwds_provider: &LiveCwdsProvider,
     roots: &[PathBuf],
     min_age: Duration,
+    spare_reasons: &mut SpareReasons,
 ) -> GcReply {
     let cutoff = now_unix().saturating_sub(duration_secs_i64(min_age));
     let candidates = match registry.select_older_than(cutoff, None) {
@@ -48,7 +49,13 @@ pub(super) fn purge_old_reclaimable_entries_for_roots(
         .filter(|entry| entry.kind == WORKTREE_KIND || entry.kind == SIBLING_CLONE_KIND)
         .filter(|entry| tracked_entry_matches_any_root(entry, roots))
         .collect();
-    dispatch_purge_entries(pool_tx, completion_tx, candidates, live_cwds_provider())
+    dispatch_purge_entries(
+        pool_tx,
+        completion_tx,
+        candidates,
+        live_cwds_provider(),
+        spare_reasons,
+    )
 }
 
 fn tracked_entry_matches_any_root(entry: &TrackedEntry, roots: &[PathBuf]) -> bool {

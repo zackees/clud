@@ -567,6 +567,36 @@ pub struct ListRow {
     pub agent_id: Option<String>,
     pub created_unix: i64,
     pub live_locked: bool,
+    /// Issue #896: `reclaimable` | `pinned` | `dangling`.
+    ///
+    /// This and the fields below are `#[serde(default)]` because `ListRow`
+    /// crosses the daemon wire: a new client may talk to an already-running
+    /// old daemon (fields absent → defaults) just as an old client may
+    /// receive them from a new one (unknown fields ignored). `live_locked`
+    /// is deliberately kept rather than folded into `state`, so existing
+    /// consumers keep working.
+    #[serde(default = "default_state")]
+    pub state: String,
+    /// Short human-readable explanation, present only for non-default
+    /// states (e.g. `pinned: uncommitted or unpushed work`).
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Whether GC will take this row on a future tick.
+    #[serde(default = "default_reclaimable")]
+    pub reclaimable: bool,
+    /// When the purge tick last evaluated this row, if ever. Lets a
+    /// consumer judge how stale `state`/`reason` are — worst case one tick
+    /// (1 h by default), since `gc list` never re-probes (see #946).
+    #[serde(default)]
+    pub evaluated_unix: Option<i64>,
+}
+
+fn default_state() -> String {
+    "reclaimable".to_string()
+}
+
+fn default_reclaimable() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -985,5 +1015,53 @@ mod tests {
             DaemonResponse::ShutdownAck { pid } => assert_eq!(pid, 142500),
             other => panic!("expected ShutdownAck, got {other:?}"),
         }
+    }
+
+    /// `ListRow` crosses the daemon wire, and a new client routinely talks
+    /// to an already-running older daemon (the daemon outlives a `clud`
+    /// upgrade). Issue #896's new fields must therefore be optional on the
+    /// way in, or `clud gc list` breaks entirely against an old daemon.
+    #[test]
+    fn list_row_deserializes_from_a_pre_896_daemon() {
+        let old_wire = r#"{
+            "id": 7,
+            "kind": "extern-repo",
+            "path": "/tmp/checkout",
+            "repo_root": null,
+            "branch": null,
+            "agent_id": null,
+            "created_unix": 1700000000,
+            "live_locked": false
+        }"#;
+        let row: ListRow = serde_json::from_str(old_wire).expect("old wire must still parse");
+        assert_eq!(row.id, 7);
+        // Absent state must read as the neutral default, never as a
+        // fabricated "pinned"/"dangling" verdict.
+        assert_eq!(row.state, "reclaimable");
+        assert!(row.reclaimable);
+        assert_eq!(row.reason, None);
+        assert_eq!(row.evaluated_unix, None);
+    }
+
+    /// Guards against a future `deny_unknown_fields` being added: serde
+    /// ignores unknown keys by default, and that default is what lets an
+    /// older client keep parsing rows from a newer daemon. (This
+    /// deserializes into the current `ListRow`, so it exercises the
+    /// tolerance, not a genuinely old client.)
+    #[test]
+    fn list_row_tolerates_unknown_future_fields() {
+        let future_wire = r#"{
+            "id": 1, "kind": "worktree", "path": "/tmp/w",
+            "repo_root": null, "branch": null, "agent_id": null,
+            "created_unix": 1, "live_locked": false,
+            "state": "pinned", "reason": "pinned: something",
+            "reclaimable": false, "evaluated_unix": 42,
+            "a_field_from_the_future": {"nested": true}
+        }"#;
+        let row: ListRow = serde_json::from_str(future_wire).expect("unknown fields are ignored");
+        assert_eq!(row.state, "pinned");
+        assert_eq!(row.reason.as_deref(), Some("pinned: something"));
+        assert!(!row.reclaimable);
+        assert_eq!(row.evaluated_unix, Some(42));
     }
 }

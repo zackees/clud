@@ -683,6 +683,7 @@ fn print_table_from_rows(rows: &[crate::daemon::ListRow]) {
         return;
     }
     let now = now_unix();
+    let color_mode = ListColor::for_stdout();
     let kind_w = rows.iter().map(|r| r.kind.len()).max().unwrap_or(0).max(4);
     let agent_w = rows
         .iter()
@@ -690,27 +691,92 @@ fn print_table_from_rows(rows: &[crate::daemon::ListRow]) {
         .max()
         .unwrap_or(0)
         .max(5);
+    let state_w = rows.iter().map(|r| r.state.len()).max().unwrap_or(0).max(5);
     println!(
-        "{:<kind_w$}  {:>6}  {:<agent_w$}  {:<20}  PATH",
+        "{:<kind_w$}  {:>6}  {:<agent_w$}  {:<20}  {:<state_w$}  PATH",
         "KIND",
         "AGE",
         "AGENT",
         "BRANCH",
+        "STATE",
         kind_w = kind_w,
         agent_w = agent_w,
+        state_w = state_w,
     );
     for r in rows {
         let age = Duration::from_secs((now - r.created_unix).max(0) as u64);
+        // Issue #896: yellow marks rows deliberately retained, red marks
+        // rows that are a problem. Machine consumers use `--json`, which
+        // carries `state`/`reason` without escapes.
+        let (color, reset) = match color_mode.color_for(&r.state) {
+            Some(c) => (c, ANSI_RESET),
+            None => ("", ""),
+        };
+        // The reason trails the path so the columns stay aligned when it
+        // is absent, which is the common case.
+        let reason = r
+            .reason
+            .as_deref()
+            .map(|s| format!("  — {s}"))
+            .unwrap_or_default();
         println!(
-            "{:<kind_w$}  {:>6}  {:<agent_w$}  {:<20}  {}",
+            "{color}{:<kind_w$}  {:>6}  {:<agent_w$}  {:<20}  {:<state_w$}  {}{reason}{reset}",
             r.kind,
             worktrees::fmt_age(age),
             r.agent_id.as_deref().unwrap_or("-"),
             r.branch.as_deref().unwrap_or("-"),
+            r.state,
             r.path,
             kind_w = kind_w,
             agent_w = agent_w,
+            state_w = state_w,
         );
+    }
+}
+
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// Whether `gc list` colours its table. Mirrors
+/// `large_file_guard::ColorMode`: colour only for an interactive terminal
+/// with `NO_COLOR` unset, so `clud gc list > rows.txt` and
+/// `clud gc list | grep ...` do not get escape codes baked into them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListColor {
+    Plain,
+    Ansi,
+}
+
+impl ListColor {
+    /// Split from the environment probe so the decision is testable
+    /// without a terminal.
+    fn decide(stdout_is_terminal: bool, no_color_set: bool) -> Self {
+        if stdout_is_terminal && !no_color_set {
+            Self::Ansi
+        } else {
+            Self::Plain
+        }
+    }
+
+    fn for_stdout() -> Self {
+        use std::io::IsTerminal;
+        Self::decide(
+            std::io::stdout().is_terminal(),
+            std::env::var_os("NO_COLOR").is_some(),
+        )
+    }
+
+    /// Colour for a row's `state`, or `None` when this mode is plain. An
+    /// unrecognized value — a newer daemon sending a state this client does
+    /// not know — renders plain rather than being guessed at.
+    fn color_for(self, state: &str) -> Option<&'static str> {
+        if self == Self::Plain {
+            return None;
+        }
+        match state {
+            "pinned" => Some("\x1b[33m"),
+            "dangling" => Some("\x1b[31m"),
+            _ => None,
+        }
     }
 }
 
@@ -945,6 +1011,30 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// Issue #896: yellow for deliberately-retained rows, red for problem
+    /// rows, nothing for ordinary ones — and an unrecognized state from a
+    /// newer daemon renders plain rather than being guessed at.
+    #[test]
+    fn only_pinned_and_dangling_states_are_colored() {
+        let ansi = ListColor::Ansi;
+        assert_eq!(ansi.color_for("pinned"), Some("\x1b[33m"));
+        assert_eq!(ansi.color_for("dangling"), Some("\x1b[31m"));
+        assert_eq!(ansi.color_for("reclaimable"), None);
+        assert_eq!(ansi.color_for("something-newer"), None);
+    }
+
+    /// Redirected output must stay parseable: no escapes when stdout is not
+    /// a terminal, and none when the user sets `NO_COLOR`.
+    #[test]
+    fn color_is_suppressed_when_redirected_or_no_color_is_set() {
+        assert_eq!(ListColor::decide(true, false), ListColor::Ansi);
+        assert_eq!(ListColor::decide(false, false), ListColor::Plain);
+        assert_eq!(ListColor::decide(true, true), ListColor::Plain);
+        assert_eq!(ListColor::decide(false, true), ListColor::Plain);
+        assert_eq!(ListColor::Plain.color_for("pinned"), None);
+        assert_eq!(ListColor::Plain.color_for("dangling"), None);
     }
 
     #[test]

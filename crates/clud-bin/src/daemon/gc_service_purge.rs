@@ -1,21 +1,46 @@
 use super::*;
 
+/// `spare_reasons` accumulates each extern-repo verdict so `clud gc list`
+/// can explain a retained row without re-running the git probe (issue #896,
+/// and see `list_state`). It is owned by the registry worker loop, which is
+/// also the thread that runs the periodic tick, so no lock is involved.
 pub(super) fn partition_purgeable(
     candidates: Vec<TrackedEntry>,
     live_cwds: Vec<PathBuf>,
+    spare_reasons: &mut SpareReasons,
 ) -> (Vec<TrackedEntry>, usize) {
     let live_locks = collect_live_lock_paths();
     let live_cwds = canonicalize_live_cwds(live_cwds);
+    let now = now_unix();
     let mut purgeable = Vec::new();
     let mut skipped = 0usize;
     for candidate in candidates {
         if entry_is_live(&candidate, &live_locks, &live_cwds) {
+            // Record it. `list_state` can re-derive only the *worktree*
+            // lock flavour of liveness (`live_locked`); the other flavour,
+            // an agent cwd inside the entry, is exactly what spares
+            // extern-repo rows and is invisible to `gc list`. Skipping the
+            // insert here would let the end-of-tick eviction drop such a
+            // row's prior verdict, and the checkout GC is actively
+            // refusing to touch would then report as plain `reclaimable`.
+            //
+            // Note this asks `entry_is_cacheable`, NOT `entry_purge_verdict`:
+            // the latter runs the mtime walk and the git probe, and a live
+            // entry has already been spared — paying three subprocesses just
+            // to decide whether to write a marker would be the opposite of
+            // what this cache exists for.
+            if entry_is_cacheable(&candidate) {
+                spare_reasons.record(candidate.path.clone(), live_session_decision(), now);
+            }
             skipped += 1;
             continue;
         }
-        if !entry_kind_allows_purge(&candidate) {
-            skipped += 1;
-            continue;
+        if let Some(decision) = entry_purge_verdict(&candidate) {
+            spare_reasons.record(candidate.path.clone(), decision, now);
+            if !decision.purge {
+                skipped += 1;
+                continue;
+            }
         }
         purgeable.push(candidate);
     }
@@ -25,8 +50,9 @@ pub(super) fn partition_purgeable(
 pub(super) fn dry_run_purge_entries(
     candidates: Vec<TrackedEntry>,
     live_cwds: Vec<PathBuf>,
+    spare_reasons: &mut SpareReasons,
 ) -> GcReply {
-    let (purgeable, skipped) = partition_purgeable(candidates, live_cwds);
+    let (purgeable, skipped) = partition_purgeable(candidates, live_cwds, spare_reasons);
     GcReply::PurgeOk {
         removed: purgeable.len(),
         skipped,
@@ -44,8 +70,9 @@ pub(super) fn dispatch_purge_entries(
     completion_tx: &mpsc::Sender<RegistryMsg>,
     candidates: Vec<TrackedEntry>,
     live_cwds: Vec<PathBuf>,
+    spare_reasons: &mut SpareReasons,
 ) -> GcReply {
-    let (purgeable, skipped) = partition_purgeable(candidates, live_cwds);
+    let (purgeable, skipped) = partition_purgeable(candidates, live_cwds, spare_reasons);
     let mut dispatched = 0usize;
     for entry in purgeable {
         let job = PurgeJob {
@@ -106,11 +133,34 @@ pub(super) fn entry_path_contains_live_cwd(entry: &TrackedEntry, live_cwds: &[Pa
         .any(|cwd| cwd == &entry_path || cwd.starts_with(&entry_path))
 }
 
-pub(super) fn entry_kind_allows_purge(entry: &TrackedEntry) -> bool {
-    if entry.kind == EXTERN_REPO_KIND {
-        return extern_repo_is_purgeable(entry, extern_repo_stale_after());
+/// The verdict recorded for an entry spared because a live session holds
+/// it. Not produced by `extern_repo_purge_decision`, which never sees the
+/// liveness check — that gate runs earlier, in `partition_purgeable`.
+pub(super) fn live_session_decision() -> PurgeDecision {
+    PurgeDecision {
+        purge: false,
+        reason: "spared: live session",
+        class: PurgeClass::Pinned,
     }
-    true
+}
+
+/// The kind-specific purge verdict, or `None` for kinds that have no
+/// extra gate beyond the shared liveness check (they are always allowed).
+/// Returning the decision rather than a bare bool keeps the reason
+/// available to `gc list` (issue #896) instead of discarding it here.
+pub(super) fn entry_purge_verdict(entry: &TrackedEntry) -> Option<PurgeDecision> {
+    if entry.kind == EXTERN_REPO_KIND {
+        return Some(extern_repo_purge_verdict(entry, extern_repo_stale_after()));
+    }
+    None
+}
+
+/// Whether this kind produces a verdict worth caching for `gc list`.
+/// Cheap by design — the same question as [`entry_purge_verdict`] but
+/// without computing the answer, for callers that only need to know
+/// whether a cache slot applies.
+pub(super) fn entry_is_cacheable(entry: &TrackedEntry) -> bool {
+    entry.kind == EXTERN_REPO_KIND
 }
 
 pub(super) fn now_unix() -> i64 {
