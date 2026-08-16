@@ -9,13 +9,14 @@
 //! **`gc list` must never run the extern-repo git probe.** It is a hot
 //! client op — the launch path calls into the same registry worker — and
 //! that probe costs up to three subprocesses per checkout. So the verdict
-//! is *not* recomputed here: the periodic purge tick evaluates every
-//! extern-repo entry anyway, and this module caches what it decided.
+//! is *not* recomputed here. Since #946 the probe runs on its own thread
+//! (`spawn_extern_probe`) and publishes a complete snapshot back to the
+//! worker as `RegistryMsg::ExternVerdicts`; this module holds that snapshot.
 //!
 //! That does not make `List` subprocess-free, and it would be dishonest to
 //! imply so: it still calls `collect_live_lock_paths`, which shells out to
 //! `git worktree list --porcelain` via the *unbounded* `worktrees::run_git`.
-//! That predates this module; #946 covers moving such work off the worker.
+//! That is a separate, pre-existing path from the probe #946 moved.
 
 use std::collections::HashMap;
 
@@ -29,9 +30,15 @@ pub(super) struct CachedDecision {
     /// When the tick computed this. Surfaced in `--json` so a consumer can
     /// see how stale the verdict is (worst case one tick, default 1 h).
     pub(super) evaluated_unix: i64,
-    /// Which tick recorded it. Eviction compares generations rather than
-    /// timestamps so a backwards clock step cannot wipe the cache.
-    generation: u64,
+}
+
+impl CachedDecision {
+    /// Whether this verdict authorizes a purge. Derived from the class so
+    /// there is one source of truth: only `Reclaimable` ever purges, and
+    /// every spare flavour (`Spared`, `Pinned`, `Dangling`) does not.
+    pub(super) fn purge(&self) -> bool {
+        matches!(self.class, PurgeClass::Reclaimable)
+    }
 }
 
 /// Path → last recorded verdict. Owned by the registry worker loop, which
@@ -39,18 +46,16 @@ pub(super) struct CachedDecision {
 #[derive(Debug, Default)]
 pub(super) struct SpareReasons {
     entries: HashMap<String, CachedDecision>,
-    generation: u64,
+    /// Issue #946: whether an off-worker probe is currently recomputing the
+    /// snapshot. Owned here rather than in a `static` so it is per-worker
+    /// (a test binary runs many) and cannot be left set by an unrelated
+    /// thread — the same reason the cache itself is loop-owned.
+    probe_in_flight: bool,
 }
 
 impl SpareReasons {
     pub(super) fn new() -> Self {
         Self::default()
-    }
-
-    /// Open a new eviction generation. Verdicts recorded after this call
-    /// survive the matching [`SpareReasons::evict_stale`].
-    pub(super) fn begin_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
     }
 
     pub(super) fn record(&mut self, path: String, decision: PurgeDecision, evaluated_unix: i64) {
@@ -60,21 +65,46 @@ impl SpareReasons {
                 class: decision.class,
                 reason: decision.reason,
                 evaluated_unix,
-                generation: self.generation,
             },
         );
+    }
+
+    /// Issue #946: install a complete snapshot of extern-repo verdicts
+    /// computed off-worker. Wholesale replacement rather than a merge —
+    /// the probe was handed every extern-repo row, so anything absent from
+    /// the reply no longer exists and its verdict must not linger.
+    pub(super) fn replace_extern(
+        &mut self,
+        verdicts: Vec<(String, PurgeDecision)>,
+        evaluated_unix: i64,
+    ) {
+        self.probe_in_flight = false;
+        self.entries.clear();
+        for (path, decision) in verdicts {
+            self.record(path, decision, evaluated_unix);
+        }
     }
 
     pub(super) fn get(&self, path: &str) -> Option<&CachedDecision> {
         self.entries.get(path)
     }
 
-    /// Drop verdicts not re-recorded in the current generation. Only sound
-    /// after a pass that re-evaluated every cacheable row.
-    pub(super) fn evict_stale(&mut self) {
-        let current = self.generation;
-        self.entries
-            .retain(|_, cached| cached.generation == current);
+    /// Claim the right to start a probe. `false` means one is already
+    /// running; a second would duplicate every `git` spawn for no benefit.
+    pub(super) fn begin_probe(&mut self) -> bool {
+        if self.probe_in_flight {
+            return false;
+        }
+        self.probe_in_flight = true;
+        true
+    }
+
+    pub(super) fn probe_finished(&mut self) {
+        self.probe_in_flight = false;
+    }
+
+    pub(super) fn probe_in_flight(&self) -> bool {
+        self.probe_in_flight
     }
 
     #[cfg(test)]
@@ -158,7 +188,6 @@ mod tests {
             class,
             reason,
             evaluated_unix: 1_000,
-            generation: 0,
         }
     }
 
@@ -246,29 +275,51 @@ mod tests {
         assert_eq!(reason, Some("spared: recently active"));
     }
 
-    /// Eviction is keyed on a generation counter, not a timestamp, so a
-    /// backwards clock step cannot wipe the cache.
     #[test]
-    fn eviction_drops_only_entries_missing_from_the_current_generation() {
+    /// Issue #946: the probe is handed *every* extern-repo row, so its reply
+    /// is the complete truth. Installing it replaces the cache wholesale —
+    /// a row absent from the new snapshot no longer exists, and leaving its
+    /// verdict behind would have `gc list` explain a row that is gone. This
+    /// is also what bounds the cache: it can never exceed the row count.
+    fn snapshot_replaces_the_cache_wholesale() {
         let mut cache = SpareReasons::new();
         let pinned = PurgeDecision {
             purge: false,
             reason: "pinned: uncommitted or unpushed work",
             class: PurgeClass::Pinned,
         };
+        let clean = PurgeDecision {
+            purge: true,
+            reason: "reclaimable: clean and pushed",
+            class: PurgeClass::Reclaimable,
+        };
 
-        cache.begin_generation();
-        cache.record("/a".to_string(), pinned, 100);
-        cache.record("/b".to_string(), pinned, 100);
+        cache.replace_extern(
+            vec![("/a".to_string(), pinned), ("/b".to_string(), pinned)],
+            100,
+        );
+        assert!(cache.get("/a").is_some());
+        assert!(cache.get("/b").is_some());
 
-        // Next tick re-records only /a — /b's row is gone from the registry.
-        cache.begin_generation();
-        // A wall clock that jumped *backwards* must not matter.
-        cache.record("/a".to_string(), pinned, 1);
-        cache.evict_stale();
+        // Next snapshot: /b is gone from the registry, /a is now clean.
+        cache.replace_extern(vec![("/a".to_string(), clean)], 200);
+        assert!(cache.get("/b").is_none(), "vanished row must not linger");
+        let a = cache.get("/a").expect("still tracked");
+        assert!(a.purge(), "the newer verdict must win");
+        assert_eq!(a.evaluated_unix, 200);
+    }
 
-        assert!(cache.get("/a").is_some(), "re-evaluated row must survive");
-        assert!(cache.get("/b").is_none(), "stale row must be evicted");
+    /// Applying a snapshot also releases the probe slot, so the next tick
+    /// can start a fresh probe.
+    #[test]
+    fn applying_a_snapshot_releases_the_probe_slot() {
+        let mut cache = SpareReasons::new();
+        assert!(cache.begin_probe());
+        cache.replace_extern(Vec::new(), 1);
+        assert!(
+            cache.begin_probe(),
+            "a delivered snapshot must free the slot"
+        );
     }
 
     #[test]

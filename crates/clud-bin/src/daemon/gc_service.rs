@@ -29,7 +29,7 @@ mod list_state;
 
 use super::watch_service as gc_watch_service;
 
-use extern_repo::{extern_repo_purge_verdict, extern_repo_stale_after, PurgeClass, PurgeDecision};
+use extern_repo::{extern_repo_purge_verdict, extern_repo_stale_after, PurgeDecision};
 use filesystem::{
     collect_live_lock_paths, reap_trash_entries, remove_entry_and_delete_row,
     remove_entry_filesystem,
@@ -85,6 +85,13 @@ pub(super) enum RegistryMsg {
     /// A daemon watch root needs its insert-only reconciliation pass. The
     /// notification thread never touches redb directly.
     WatchRescan(Vec<GcWatchRoot>),
+    /// Issue #946: extern-repo purge verdicts computed off-worker. The probe
+    /// spawns up to three `git` processes per checkout, which must never run
+    /// on the thread that owns redb — see `spawn_extern_probe`. The payload
+    /// is a *complete* snapshot of every extern-repo row the probe was
+    /// handed, so the worker replaces the cache wholesale rather than
+    /// merging (which is what keeps it from growing without bound).
+    ExternVerdicts(Vec<(String, PurgeDecision)>),
 }
 
 /// Issue #268: result of one entry's parallel filesystem deletion,
@@ -95,6 +102,9 @@ pub(super) struct PurgeCompletion {
     pub(super) path: String,
     pub(super) kind: String,
     pub(super) result: Result<(), String>,
+    /// Set when the pool re-checked the entry at delete time and decided
+    /// against it. The row is kept, not dropped — see `reverify_before_delete`.
+    pub(super) spared: Option<&'static str>,
 }
 
 /// One unit of work for the purge pool — the entry to remove plus the
@@ -152,12 +162,24 @@ fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
             guard.recv()
         };
         let Ok(job) = job else { return };
-        let result = remove_entry_filesystem(&job.entry);
+        // Issue #946: the verdict that authorized this delete was computed by
+        // the probe thread, up to a tick ago. Re-check it here, immediately
+        // before `remove_dir_all` and still off the registry worker, so a
+        // checkout the developer came back to in the meantime is not deleted
+        // on a stale "clean and pushed". Before the probe was decoupled this
+        // was implicit: the verdict was computed inline microseconds earlier.
+        let spared = reverify_before_delete(&job.entry);
+        let result = if spared.is_some() {
+            Ok(())
+        } else {
+            remove_entry_filesystem(&job.entry)
+        };
         let completion = PurgeCompletion {
             id: job.entry.id,
             path: job.entry.path.clone(),
             kind: job.entry.kind.clone(),
             result,
+            spared,
         };
         // If the worker has hung up we just drop the completion;
         // there's nothing left to apply it against.
@@ -350,12 +372,17 @@ fn run_worker_loop(
     let session_state_dir = config.session_state_dir.as_deref();
     let mut watch_service = None;
     let Some(tick_cadence) = config.tick_cadence else {
-        // No periodic tick in this mode. A client-initiated purge still
-        // fills the cache, but nothing ever evicts from it, so a verdict
-        // here can outlive the state it described. Bounded in practice —
-        // only extern-repo rows are cached, one entry per registry row —
-        // and `evaluated_unix` lets a reader see the staleness.
+        // No periodic tick in this mode, so the startup probe below is the
+        // only one that ever runs. Without it extern-repo rows would have no
+        // verdict at all and could never be reclaimed by any path, since
+        // "no verdict" means spare.
         let mut spare_reasons = SpareReasons::new();
+        prime_extern_verdicts(
+            &registry,
+            &completion_tx,
+            config.activity.as_ref(),
+            &mut spare_reasons,
+        );
         while let Ok(msg) = rx.recv() {
             handle_registry_msg(
                 &registry,
@@ -374,6 +401,16 @@ fn run_worker_loop(
     // tick — so the cache the tick fills is the same one `GcOp::List`
     // reads, with no lock and no cross-thread staleness (issue #896).
     let mut spare_reasons = SpareReasons::new();
+    // Issue #946: a row with no verdict is spared, so waiting for the first
+    // tick (1 h by default) would leave extern-repo GC inert for that long
+    // after every daemon start — and the daemon restarts on every clud
+    // upgrade. Prime the cache immediately instead.
+    prime_extern_verdicts(
+        &registry,
+        &completion_tx,
+        config.activity.as_ref(),
+        &mut spare_reasons,
+    );
     let mut next_tick = Instant::now() + tick_cadence;
     loop {
         let timeout = next_tick.saturating_duration_since(Instant::now());
@@ -459,6 +496,9 @@ fn handle_registry_msg(
             let _ = req.reply_tx.send(reply);
         }
         RegistryMsg::PurgeCompletion(c) => apply_purge_completion(registry, c),
+        RegistryMsg::ExternVerdicts(verdicts) => {
+            spare_reasons.replace_extern(verdicts, now_unix());
+        }
         RegistryMsg::WatchRescan(roots) => {
             for root in roots {
                 let _ = reconcile_registered_dir(
@@ -476,7 +516,29 @@ fn handle_registry_msg(
 /// for the removed entry; on failure, log and keep the row so the next
 /// purge attempt retries. Stale rows during/after a partial purge are
 /// acceptable — eventual consistency by design (#268).
+/// Last-moment safety re-check, run on the purge-pool thread. Returns the
+/// spare reason when the entry must NOT be deleted after all.
+///
+/// Only extern-repo rows carry a probe verdict, and only they can go stale in
+/// a way that costs data: their verdict encodes "no uncommitted or unpushed
+/// work", which a developer can invalidate at any moment. Other kinds have no
+/// such gate and are unchanged.
+fn reverify_before_delete(entry: &TrackedEntry) -> Option<&'static str> {
+    if entry.kind != EXTERN_REPO_KIND {
+        return None;
+    }
+    let decision = extern_repo_purge_verdict(entry, extern_repo_stale_after());
+    (!decision.purge).then_some(decision.reason)
+}
+
 fn apply_purge_completion(registry: &Registry, c: PurgeCompletion) {
+    if let Some(reason) = c.spared {
+        eprintln!(
+            "[clud] gc purge: spared {} ({}) at delete time — {reason}",
+            c.path, c.kind
+        );
+        return;
+    }
     match c.result {
         Ok(()) => match registry.delete(c.id) {
             Ok(()) => eprintln!("[gc] purge: removed {} ({})", c.path, c.kind),
@@ -548,17 +610,11 @@ fn run_periodic_purge_tick_with_free_space<F>(
 where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
 {
-    // Anything not re-evaluated during this tick is evicted below, which is
-    // what keeps the cache from growing forever as entries come and go.
-    // Keyed on a monotonic generation rather than the wall clock: an NTP
-    // step backwards mid-tick would make every fresh stamp look older than
-    // `tick_start` and wipe the whole cache.
     let PeriodicPurgeContext {
         session_state_dir,
         activity,
         spare_reasons,
     } = context;
-    spare_reasons.begin_generation();
 
     let mut dispatched = run_disk_watchdog_tick(
         registry,
@@ -596,17 +652,17 @@ where
         live_cwds_provider(),
         spare_reasons,
     );
-    let extern_pass_evaluated = !matches!(extern_reply, GcReply::Error { .. });
     dispatched += log_periodic_purge_reply(EXTERN_REPO_KIND, extern_reply);
 
-    // The extern-repo pass above ran with `duration: None`, so every
-    // extern-repo row was a candidate and any survivor from an older
-    // generation is stale — its registry entry is gone. Drop it rather
-    // than let `gc list` show a verdict for a row that no longer has one.
-    // Skipped when that pass errored: it evaluated nothing, so retaining
-    // would empty the cache on a transient registry failure.
-    if extern_pass_evaluated {
-        spare_reasons.evict_stale();
+    // Issue #946: refresh the verdicts the pass above consumed, off-worker.
+    // Listing is the one part only this thread can do (it owns redb); the
+    // probe's `git` spawns happen on their own thread and land back as
+    // `RegistryMsg::ExternVerdicts`. Results are therefore one tick behind,
+    // which is the trade: a checkout becomes reclaimable on the tick after
+    // it is first seen clean, rather than stalling every client op.
+    match registry.list(Some(EXTERN_REPO_KIND)) {
+        Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
+        Err(err) => eprintln!("[clud] gc tick: extern-repo list failed: {err}"),
     }
 
     match reap_trash_entries(registry) {
@@ -651,6 +707,75 @@ where
     spawn_maintenance_sweeps(disk_config, activity.cloned());
 
     dispatched
+}
+
+/// Kick off the first probe so extern-repo verdicts exist before the first
+/// tick. Failures are logged, not fatal: the next tick retries.
+fn prime_extern_verdicts(
+    registry: &Registry,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    activity: Option<&DaemonActivity>,
+    spare_reasons: &mut SpareReasons,
+) {
+    match registry.list(Some(EXTERN_REPO_KIND)) {
+        Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
+        Err(err) => eprintln!("[clud] gc: initial extern-repo list failed: {err}"),
+    }
+}
+
+/// Compute extern-repo purge verdicts **off** the registry worker thread and
+/// deliver them back as `RegistryMsg::ExternVerdicts`.
+///
+/// The probe spawns up to three `git` processes per checkout. Running that on
+/// the worker — the single thread that owns redb — puts it in front of every
+/// client op, including launch-path `record_repo_visit`, which is what this
+/// issue exists to fix. The worker instead does the one thing only it can
+/// (read the registry), hands the rows over, and returns to serving.
+///
+/// `entries` is every extern-repo row, so the reply is a complete snapshot.
+fn spawn_extern_probe(
+    entries: Vec<TrackedEntry>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    activity: Option<&DaemonActivity>,
+    spare_reasons: &mut SpareReasons,
+) {
+    if entries.is_empty() {
+        // Nothing to probe. Publish an empty snapshot so the cache drops
+        // verdicts for rows that no longer exist — but NOT while a real
+        // probe is running: applying a snapshot also frees the probe slot,
+        // so an empty one would let a second probe start and its older
+        // reply could then overwrite the newer one.
+        if !spare_reasons.probe_in_flight() {
+            let _ = completion_tx.send(RegistryMsg::ExternVerdicts(Vec::new()));
+        }
+        return;
+    }
+    if !spare_reasons.begin_probe() {
+        // A previous probe is still running — let it finish.
+        return;
+    }
+    let tx = completion_tx.clone();
+    let activity = activity.cloned();
+    let stale_after = extern_repo_stale_after();
+    let spawned = thread::Builder::new()
+        .name("clud-gc-extern-probe".to_string())
+        .spawn(move || {
+            let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
+            let verdicts = entries
+                .into_iter()
+                .map(|entry| {
+                    let decision = extern_repo_purge_verdict(&entry, stale_after);
+                    (entry.path, decision)
+                })
+                .collect();
+            // The worker clears the in-flight flag when it applies this
+            // message. A send failure means the worker is gone (teardown),
+            // so there is nothing left to unblock.
+            let _ = tx.send(RegistryMsg::ExternVerdicts(verdicts));
+        });
+    if spawned.is_err() {
+        spare_reasons.probe_finished();
+    }
 }
 
 /// Guards against overlapping background maintenance sweeps. The tick fires
@@ -854,10 +979,17 @@ fn process_op(
         GcOp::List { kind } => match registry.list(kind.as_deref()) {
             Ok(rows) => {
                 let live_locks = collect_live_lock_paths();
+                // The other flavour of liveness: an agent cwd inside the
+                // entry. This is what actually spares extern-repo rows, and
+                // it is pure path arithmetic — no subprocess — so `List` can
+                // derive it rather than rely on a cached marker the next
+                // probe snapshot would wipe.
+                let live_cwds = canonicalize_live_cwds(live_cwds);
                 let out: Vec<ListRow> = rows
                     .into_iter()
                     .map(|r| {
-                        let live_locked = r.kind == "worktree" && live_locks.contains(&r.path);
+                        let live_locked = (r.kind == "worktree" && live_locks.contains(&r.path))
+                            || entry_path_contains_live_cwd_path(&r.path, &live_cwds);
                         let cached = spare_reasons.get(&r.path);
                         // Issue #896. Deliberately no git probe here — the
                         // verdict comes from the tick's cache; see

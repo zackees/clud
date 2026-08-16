@@ -145,28 +145,52 @@ The tracked-entry subcommands are thin IPC clients against the daemon. `--no-dae
   human table paints `pinned` yellow and `dangling` red; `--json` carries `state`, `reason`,
   `reclaimable` and `evaluated_unix` so tooling never parses ANSI.
 
-  The load-bearing constraint is that **`gc list` never runs the extern-repo git probe.**
-  It is a hot client op on the single registry worker thread, and that probe costs up to
-  three subprocesses per checkout. So the verdict is not recomputed at list time: the
-  periodic purge tick already evaluates every extern-repo entry, and
-  `gc_service/list_state.rs` caches what it decided (`SpareReasons`, owned by the worker
-  loop — the same thread that runs the tick, hence no lock). `gc list` reads that cache plus
-  a `try_exists()` stat per row for the `dangling` state.
+  The load-bearing constraint is that **nothing on the registry worker thread runs the
+  extern-repo git probe** — not `gc list`, not `gc purge`, not the periodic tick. That probe
+  costs up to three subprocesses per checkout, and the worker is the single thread that owns
+  redb, so every client op (including launch-path `record_repo_visit`) queues behind whatever
+  it does.
 
-  It is *not* subprocess-free, and the doc should not pretend otherwise: `GcOp::List` still
-  calls `collect_live_lock_paths()`, which shells out to `git worktree list --porcelain`
-  through `worktrees::run_git` — the deliberately-unbounded runner that
-  `gc_service/extern_repo.rs` warns must not be used on this thread. That predates the
-  state/reason work; **#946** covers moving this class of work off the worker.
+  How verdicts are produced (issue #946):
 
-  Consequences worth knowing: a verdict can be up to one tick stale (1 h by default — hence
-  `evaluated_unix`), and rows never yet evaluated report plain `reclaimable` rather than a
-  fabricated verdict. Eviction is keyed on a monotonic tick generation, not a timestamp, so
-  a backwards clock step cannot wipe the cache.
+  1. The periodic tick does the one thing only the worker can — `registry.list(extern-repo)` —
+     and hands the rows to `spawn_extern_probe` (`gc_service.rs`).
+  2. A `clud-gc-extern-probe` thread computes `extern_repo_purge_verdict` for each row and
+     sends the **complete snapshot** back as `RegistryMsg::ExternVerdicts`, reusing the same
+     background-thread → worker channel that `RegistryMsg::PurgeCompletion` already uses for
+     the purge pool.
+  3. The worker installs it with `SpareReasons::replace_extern` — wholesale replacement, so a
+     row absent from the snapshot loses its verdict and the cache can never exceed the row
+     count. Only one probe runs at a time (`begin_probe`/`probe_finished`, owned by the loop
+     rather than a `static`, so a test binary's many workers do not share it).
+  4. `partition_purgeable` and `GcOp::List` then *look up* verdicts instead of computing them.
+
+  **A row with no verdict yet is spared, never purged.** A fresh daemon, or a checkout added
+  since the last probe, has nothing cached; falling back to the mtime gate would delete a
+  checkout no probe has ever inspected, which is the data loss the extern-repo guard exists
+  to prevent. The visible consequence is that a checkout becomes reclaimable on the tick
+  *after* it is first seen clean.
+
+  `gc list` additionally does a `try_exists()` stat per row for the `dangling` state, and a
+  verdict can be up to one tick stale (1 h by default — hence `evaluated_unix`).
+
+  **The verdict is re-checked at delete time.** Decoupling put up to a tick between "this is
+  clean and pushed" and `remove_dir_all`, and a developer can invalidate it in that window
+  just by editing. So `reverify_before_delete` re-runs the verdict on the **purge-pool
+  thread** — still off the worker, and immediately before the destructive call. A veto keeps
+  the row and logs `spared … at delete time`. Before #946 this was implicit, because the
+  verdict was computed inline microseconds earlier.
+
+  Still *not* subprocess-free, and the doc should not pretend otherwise. Four worker-side
+  paths still shell out through the deliberately-unbounded `worktrees::run_git`:
+  `collect_live_lock_paths()` from `GcOp::List`, from `GcOp::DeleteById`, and from
+  `partition_purgeable` (so twice per tick); plus `best_effort_branch` on the
+  `GcOp::Reconcile` / `RegistryMsg::WatchRescan` paths. These are pre-existing and separate
+  from the extern-repo probe that #946 moved.
 - **`clud gc prune <kind> [--dry-run]`** and
   **`clud gc all [--dry-run]`** call `daemon::gc_client_purge` with the kind-specific safe
   prune policy. Worktree-like rows use the built-in stale duration, extern-repo rows rely on
-  their filesystem-mtime purgeability gate, trash rows are reaped, and `uv-cache` uses its
+  the cached probe verdict (recomputed at delete time), trash rows are reaped, and `uv-cache` uses its
   filesystem-only stale-env sweep.
 - **`clud gc purge <kind> --yes [--dry-run]`** and
   **`clud gc all --purge --yes [--dry-run]`** are the destructive forms. The CLI requires
