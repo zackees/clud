@@ -12,7 +12,7 @@ Diagnoses a wedged Docker Desktop (engine pipe/socket absent while the
 backend/UI stay alive — the failure mode from zackees/clud#531, whose root
 cause was a killed `com.docker.build` child, NOT memory or disk pressure)
 and drives a bounded, non-destructive recovery. It classifies the failure
-(engine-unavailable / resource-pressure / storage-pressure) before acting,
+(engine-unavailable / engine-wedged / resource-pressure / storage-pressure) before acting,
 polls readiness on a bounded schedule (10 attempts, 2s interval — the
 FastLED WASM `8cf7f663` precedent), and verifies recovery against the
 server API plus a minimal container run.
@@ -119,6 +119,27 @@ EXIT_NOT_AUTO_EXECUTED = 64
 # FastLED WASM `8cf7f663` Windows Docker/WSL readiness-retry precedent).
 READY_ATTEMPTS = 10
 READY_INTERVAL_SECONDS = 2.0
+# Issue #891: a Docker Desktop *cold* start routinely takes 60-120s, so the
+# 20s bounded poll above (10 x 2s) reports "not ready" long before the engine
+# has had a chance. Restart/reset use this longer budget instead.
+READY_ATTEMPTS_COLD = 60
+# Issue #891: the clud tool runner aborts a child that emits nothing for
+# 120s. Any wait longer than this must print a heartbeat.
+PROGRESS_HEARTBEAT_SECONDS = 15.0
+HELLO_WORLD_TIMEOUT_SECONDS = 120.0
+
+# Engine reachability, split three ways (issue #891). Collapsing these is what
+# made a 5xx engine report as "docker CLI could not be executed": the CLI was
+# fine, the engine was not.
+ENGINE_OK = "ok"
+ENGINE_CLI_MISSING = "cli-missing"
+ENGINE_UNREACHABLE = "unreachable"
+ENGINE_SERVER_ERROR = "server-error"
+# A probe that ran out of time. Deliberately NOT `server-error`: a cold
+# Docker Desktop times out the same way for a minute or two, and treating
+# that as the wedged signature would recommend deleting the data disk during
+# a perfectly normal start (issue #891 review).
+ENGINE_TIMEOUT = "timeout"
 
 WINDOWS_DAEMON_GUARD_ARG = "__windows-daemon-guard"
 WINDOWS_DAEMON_GUARD_MUTEX = r"Local\clud-docker-recover-daemon-guard"
@@ -152,6 +173,10 @@ DOCKER_DATA_FILENAME = "docker_data.vhdx"
 # Failure categories — classified before any action is taken.
 CAT_HEALTHY = "healthy"
 CAT_ENGINE_UNAVAILABLE = "engine-unavailable"
+# Issue #891: the distro is Running and the server *answers* — with a 5xx —
+# while RAM and disk are fine. `restart` does not fix this; the engine's data
+# disk is wedged, and the ladder has to reach the gated data-disk reset.
+CAT_ENGINE_WEDGED = "engine-wedged"
 CAT_RESOURCE_PRESSURE = "resource-pressure"
 CAT_STORAGE_PRESSURE = "storage-pressure"
 
@@ -176,6 +201,9 @@ class HealthSnapshot:
     runtime_processes: list[str] = field(default_factory=list)
     build_child_present: bool | None = None
     wsl_docker_distro_state: str | None = None
+    #: One of the ENGINE_* constants (issue #891). `None` on snapshots from
+    #: before the split; treated as "unknown", never as a 5xx.
+    engine_state: str | None = None
 
 
 @dataclass
@@ -201,7 +229,30 @@ def classify_failure(snap: HealthSnapshot) -> str:
         return CAT_STORAGE_PRESSURE
     if snap.free_mem_bytes is not None and snap.free_mem_bytes < LOW_MEM_BYTES:
         return CAT_RESOURCE_PRESSURE
+    if engine_is_wedged(snap):
+        return CAT_ENGINE_WEDGED
     return CAT_ENGINE_UNAVAILABLE
+
+
+def engine_is_wedged(snap: HealthSnapshot) -> bool:
+    """Distro Running + server answering 5xx + resources fine (issue #891).
+
+    This is a different failure from #531's "pipe absent while the UI stayed
+    alive": here the server is *reachable* and returns an error, which is the
+    signature of a corrupted engine data disk. Distinguishing it matters
+    because the remedy differs — `restart` will not clear it.
+
+    Deliberately conservative: an unknown distro state or an unknown engine
+    state does not qualify, so this can only ever narrow a diagnosis that
+    would otherwise be `engine-unavailable`.
+    """
+    # Only a *classified* 5xx qualifies. A bare probe timeout does not: a
+    # cold Docker Desktop produces one for a minute or two, and #891's own
+    # evidence was 12+ minutes of sustained HTTP 500, not a single timeout.
+    if snap.engine_state != ENGINE_SERVER_ERROR:
+        return False
+    state = (snap.wsl_docker_distro_state or "").strip().lower()
+    return state == "running"
 
 
 def assess_health(snap: HealthSnapshot) -> HealthReport:
@@ -217,7 +268,17 @@ def assess_health(snap: HealthSnapshot) -> HealthReport:
         failures.append("docker CLI not found on PATH — Docker is not installed")
     if not snap.server_ok:
         err = snap.engine_error or "no server response"
-        failures.append(f"docker engine unreachable: {err}")
+        if snap.engine_state == ENGINE_TIMEOUT:
+            failures.append(f"docker engine did not answer in time: {err}")
+        elif snap.engine_state == ENGINE_SERVER_ERROR:
+            # Issue #891: saying "unreachable" here sent the operator after
+            # the CLI and the pipe, when the server was answering and sick.
+            failures.append(
+                "docker server reachable but engine unhealthy "
+                f"(HTTP 5xx / init control API not responding): {err}"
+            )
+        else:
+            failures.append(f"docker engine unreachable: {err}")
 
     if snap.free_disk_bytes is not None and snap.free_disk_bytes < LOW_DISK_BYTES:
         advisories.append(
@@ -723,12 +784,79 @@ def recommended_remedy(report: HealthReport, *, disk_low: bool) -> list[str]:
         steps.append("gc")
     if not report.healthy:
         steps.append("restart")
-    if disk_low:
+    if report.category == CAT_ENGINE_WEDGED:
+        # Issue #891: a wedged engine survives both restart and reset — the
+        # incident that produced this ladder needed the data disk deleted, and
+        # nothing lighter worked. `disk` stays gated and never auto-executes,
+        # so naming it here is a recommendation, not an action.
+        steps.append("reset")
+        if "disk" not in steps:
+            steps.append("disk")
+    if disk_low and "disk" not in steps:
         steps.append("disk")
     return steps
 
 
 # ---- Recovery plans (pure, testable text) --------------------------------
+def windows_disk_unlock_steps(path: str) -> list[str]:
+    """The step the old plan was missing (issue #891, highest-value gap).
+
+    After `wsl --shutdown` the VHDX stays SURFACE-ATTACHED at the Hyper-V/HCS
+    level — `Get-DiskImage` reports `Attached=True` — and both `Remove-Item`
+    and `Optimize-VHD` fail with "being used by another process". Verified
+    across repeated attempts, including with WslService stopped. The reliable
+    release is `Dismount-DiskImage`, which freed it instantly and let the
+    delete succeed on the next try.
+
+    The `docker_stopped` gate (server unreachable + no docker processes) is
+    necessary but NOT sufficient: it passes while the VHD is still attached.
+    """
+    return [
+        f"Release the surface-attached VHD: `Dismount-DiskImage -ImagePath '{path}'`.",
+        f"Verify it released: `Get-DiskImage -ImagePath '{path}'` must report "
+        "`Attached : False` before continuing.",
+        "If still attached: stop WslService (and LxssManager), retry the "
+        "dismount; as a last resort stop vmcompute (Hyper-V Host Compute "
+        "Service) — note its dependents (e.g. hns) so you can restart them — "
+        "then retry, and restart the services afterwards.",
+    ]
+
+
+def windows_disk_plan(action: str, path: str) -> list[str]:
+    """The vetted manual plan for a Windows disk action, as testable text.
+
+    Extracted from `cmd_disk` so the dismount/verify sequence is asserted by
+    a unit test rather than only existing inside a print statement.
+    """
+    steps = [
+        f"Back up {path} to a separate volume first.",
+        # Issue #891 gap 5: the UI respawns and can re-attach the disk
+        # mid-operation, so the service goes first and processes are
+        # re-checked immediately before any mutation.
+        "Stop the `com.docker.service` Windows service FIRST, then quit "
+        "Docker Desktop.",
+        "Confirm Docker Desktop and WSL are fully stopped (`wsl --shutdown`).",
+    ]
+    if action in ("delete", "compact"):
+        steps.extend(windows_disk_unlock_steps(path))
+        steps.append(
+            "Re-check for respawned Docker Desktop / com.docker.backend / "
+            "com.docker.build processes immediately before mutating the disk."
+        )
+    if action == "compact":
+        steps.append(f"Compact: `Optimize-VHD -Path '{path}' -Mode Full` (admin).")
+    elif action == "prune":
+        steps.append("Prune from a HEALTHY daemon: `docker system prune` (opt-in).")
+    elif action == "delete":
+        steps.append(f"Delete only after backup: remove {path}; Docker recreates it.")
+    elif action == "reset":
+        steps.append(
+            "Factory reset via Docker Desktop > Troubleshoot (wipes images/volumes)."
+        )
+    steps.append("Relaunch Docker Desktop and run `doctor` to verify.")
+    return steps
+
+
 def windows_restart_plan() -> list[str]:
     return [
         "Stop orphaned Docker helper processes (com.docker.build, "
@@ -811,17 +939,112 @@ def docker_server_version() -> str | None:
     return out or None
 
 
-def docker_engine_error() -> str | None:
-    r = _run(["docker", "version", "--format", "{{.Server.Version}}"])
-    if r is None:
-        return "docker CLI could not be executed"
-    if r.returncode != 0:
-        return (r.stderr or r.stdout).strip() or "unknown engine error"
-    return None
+def _run_timed(
+    cmd: list[str], timeout: float = 20.0
+) -> tuple[CompletedProcess | None, bool]:
+    """`_run`, but reporting *why* it failed.
+
+    Issue #891: `_run` collapses a timeout and a missing binary to the same
+    `None`, so an engine answering 5xx slowly was reported as "docker CLI
+    could not be executed" — blaming the CLI for the engine's fault. The
+    second element is True when the call timed out.
+    """
+    try:
+        return (
+            RunningProcess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            ),
+            False,
+        )
+    except TimeoutExpired:
+        return None, True
+    except (OSError, RuntimeError):
+        return None, False
 
 
-def run_hello_world() -> tuple[bool, str]:
-    r = _run(["docker", "run", "--rm", "hello-world"], timeout=120.0)
+def probe_engine() -> tuple[str, str | None]:
+    """Return `(ENGINE_* state, message)` for the Docker engine.
+
+    Three outcomes, never conflated (issue #891):
+
+    * `ENGINE_CLI_MISSING`  - the `docker` binary could not be executed.
+    * `ENGINE_SERVER_ERROR` - the server answered and the answer was a 5xx /
+      init-control-API stall. That is the documented signature of a
+      corrupted engine data disk.
+    * `ENGINE_TIMEOUT`      - the probe ran out of time without an answer.
+      Distinct from the above on purpose: a cold start looks identical for a
+      minute or two, so this must not by itself recommend disk deletion.
+    * `ENGINE_UNREACHABLE`  - the CLI ran and reported no server.
+    """
+    result, timed_out = _run_timed(
+        ["docker", "version", "--format", "{{.Server.Version}}"]
+    )
+    if timed_out:
+        return ENGINE_TIMEOUT, (
+            "docker server did not respond within the probe timeout "
+            "(still starting, or wedged — re-run `doctor` to distinguish)"
+        )
+    if result is None:
+        return ENGINE_CLI_MISSING, "docker CLI could not be executed"
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout).strip() or "unknown engine error"
+        return classify_engine_message(message), message
+    return (ENGINE_OK, None) if (result.stdout or "").strip() else (
+        ENGINE_UNREACHABLE,
+        "docker server reported no version",
+    )
+
+
+def classify_engine_message(message: str) -> str:
+    """Pure: does this CLI error mean the server answered, or that it is gone?
+
+    The daemon-unreachable wording is stable across platforms ("cannot
+    connect to the Docker daemon", "the docker daemon is not running"); a 5xx
+    or the WSL init-control-API stall means the server *is* there and sick.
+    """
+    lowered = message.lower()
+    unreachable_markers = (
+        "cannot connect to the docker daemon",
+        "is the docker daemon running",
+        "the docker daemon is not running",
+        "no such file or directory",
+        "system cannot find the file specified",
+    )
+    if any(marker in lowered for marker in unreachable_markers):
+        return ENGINE_UNREACHABLE
+    server_markers = (
+        "500 internal server error",
+        "http 500",
+        "init control api",
+        "request returned 5",
+        "internal server error",
+    )
+    if any(marker in lowered for marker in server_markers):
+        return ENGINE_SERVER_ERROR
+    return ENGINE_UNREACHABLE
+
+
+def run_hello_world(out=None) -> tuple[bool, str]:
+    """Verify with a minimal container run.
+
+    Issue #891: this call is silent for up to 120s, which starves the clud
+    tool runner's progress heartbeat and gets the whole recovery killed with
+    exit 124 — observed twice on `reset --yes`, both times at exactly 120s.
+    Announcing the wait before blocking keeps the runner fed.
+    """
+    sink = out or sys.stderr
+    write = sink.write
+    flush = getattr(sink, "flush", lambda: None)
+    write(
+        "  verifying with `docker run --rm hello-world` "
+        f"(up to {HELLO_WORLD_TIMEOUT_SECONDS:g}s; first run pulls the image)\n"
+    )
+    flush()
+    r = _run(["docker", "run", "--rm", "hello-world"], timeout=HELLO_WORLD_TIMEOUT_SECONDS)
     if r is None:
         return False, "docker run could not be executed"
     if r.returncode != 0:
@@ -973,10 +1196,19 @@ def gather_snapshot() -> HealthSnapshot:
     server = docker_server_version() if client else None
     processes = list_docker_processes()
     listing = wsl_list_verbose() if platform.system() == "Windows" else None
+    # Issue #891: probe once and keep the *state*, not just the message, so
+    # `classify_failure` can tell "server answered 5xx" from "server absent".
+    if server is not None:
+        engine_state, engine_error = ENGINE_OK, None
+    elif client:
+        engine_state, engine_error = probe_engine()
+    else:
+        engine_state, engine_error = ENGINE_CLI_MISSING, "no docker CLI"
     return HealthSnapshot(
         client_present=client,
         server_ok=server is not None,
-        engine_error=None if server else (docker_engine_error() if client else "no docker CLI"),
+        engine_state=engine_state,
+        engine_error=engine_error,
         free_mem_bytes=host_free_memory(),
         free_disk_bytes=host_free_disk(),
         runtime_processes=processes,
@@ -993,25 +1225,43 @@ def wait_for_docker(
     sleep=time.sleep,
     out=None,
 ) -> bool:
-    """Bounded readiness poll. Returns True once `check()` is truthy."""
-    write = (out or sys.stderr).write
+    """Bounded readiness poll. Returns True once `check()` is truthy.
+
+    Issue #891: callers recovering from a *cold* start pass
+    `READY_ATTEMPTS_COLD`, because Docker Desktop routinely needs 60-120s
+    while the default 10 x 2s budget declares failure at 20s. Every attempt
+    prints, so the poll keeps the clud tool runner's progress heartbeat alive
+    instead of being killed at 120s with exit 124.
+    """
+    sink = out or sys.stderr
+    write = sink.write
+    # Flush every line: `_run_recovery` passes stdout, which is block-buffered
+    # under a pipe, and buffered progress is invisible progress as far as the
+    # runner's watchdog is concerned.
+    flush = getattr(sink, "flush", lambda: None)
+    budget = attempts * interval
+    write(f"  waiting for the engine (up to {budget:g}s, {attempts} attempts)\n")
+    flush()
     for i in range(attempts):
         if check():
+            write(f"  engine ready after {i + 1} attempt(s)\n")
+            flush()
             return True
         write(f"  readiness attempt {i + 1}/{attempts}: engine not ready\n")
+        flush()
         if i < attempts - 1:
             sleep(interval)
     return False
 
 
-def verify_recovery() -> tuple[bool, list[str]]:
+def verify_recovery(out=None) -> tuple[bool, list[str]]:
     """Confirm recovery via the server API AND a minimal container run."""
     details: list[str] = []
     version = docker_server_version()
     if version is None:
         return False, ["docker server API still unreachable"]
     details.append(f"docker server API reachable: v{version}")
-    ok, msg = run_hello_world()
+    ok, msg = run_hello_world(out=out)
     details.append(msg)
     return ok, details
 
@@ -1314,6 +1564,18 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
                 "anonymous volumes first (safe, reversible) before restart/reset "
                 "or VHD remediation.\n"
             )
+        if "disk" in remedy:
+            # Issue #891: the lighter rungs each say what they cost, and
+            # restart/reset are advertised as preserving images and volumes.
+            # The terminal rung must not be the one recommendation that stays
+            # silent about being irreversible.
+            out.write(
+                "  disk is the LAST rung. Bare `disk` is read-only (it only "
+                "resolves and reports). `disk --action delete` irreversibly "
+                "removes every image, container, volume and build cache — "
+                "Docker recreates an empty data disk. Exhaust restart/reset "
+                "first.\n"
+            )
 
     if report.healthy:
         out.write("\ndoctor: healthy\n")
@@ -1354,15 +1616,25 @@ def _run_recovery(args: argparse.Namespace, *, label: str) -> int:
         return EXIT_REFUSED_CONFIRM
 
     out.write(f"\nexecuting {label} (containers will stop; images/volumes preserved)...\n")
+    out.flush()
     for detail in _execute_restart(system, hard=(label == "reset")):
         out.write(f"  launch: {detail}\n")
-    ready = wait_for_docker()
+        # Issue #891: this loop is the longest silent stretch of a recovery
+        # (a hard reset can spend 60s in `wsl --shutdown` alone), and the
+        # clud tool runner kills a child that prints nothing for 120s. Flush
+        # each line rather than letting a pipe buffer them all to the end.
+        out.flush()
+    # Issue #891: both labels are recovering from a COLD Docker Desktop, and
+    # a cold start routinely takes 60-120s. The default 10 x 2s budget gave
+    # up at 20s and reported "engine not ready" while Desktop was still
+    # starting normally.
+    ready = wait_for_docker(attempts=READY_ATTEMPTS_COLD, out=out)
     if not ready:
         sys.stderr.write(f"{label} FAILED: engine not ready after bounded wait\n")
         sys.stderr.write(f"  preserved diagnosis: {diagnosis}\n")
         return EXIT_UNHEALTHY
 
-    ok, details = verify_recovery()
+    ok, details = verify_recovery(out=out)
     for detail in details:
         out.write(f"  verify: {detail}\n")
     if ok:
@@ -2093,17 +2365,8 @@ def cmd_disk(args: argparse.Namespace) -> int:
     assert chosen is not None  # guaranteed by the gate
     out.write(f"\ngates passed for `{args.action}` on {chosen.path}. v0 will NOT run it.\n")
     out.write("Vetted manual plan:\n")
-    out.write(f"  1. Back up {chosen.path} to a separate volume first.\n")
-    out.write("  2. Confirm Docker Desktop and WSL are fully stopped (`wsl --shutdown`).\n")
-    if args.action == "compact":
-        out.write(f"  3. Compact: `Optimize-VHD -Path '{chosen.path}' -Mode Full` (admin).\n")
-    elif args.action == "prune":
-        out.write("  3. Prune from a HEALTHY daemon: `docker system prune` (opt-in).\n")
-    elif args.action == "delete":
-        out.write(f"  3. Delete only after backup: remove {chosen.path}; Docker recreates it.\n")
-    elif args.action == "reset":
-        out.write("  3. Factory reset via Docker Desktop > Troubleshoot (wipes images/volumes).\n")
-    out.write("  4. Relaunch Docker Desktop and run `doctor` to verify.\n")
+    for index, step in enumerate(windows_disk_plan(args.action, chosen.path), start=1):
+        out.write(f"  {index}. {step}\n")
     return EXIT_NOT_AUTO_EXECUTED
 
 

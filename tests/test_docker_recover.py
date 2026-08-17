@@ -13,6 +13,7 @@ or filesystem: paths are canned in a FakeProbe.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
 import ntpath
@@ -346,7 +347,9 @@ def test_wait_for_docker_gives_up_after_attempts(dr):
 
 def test_verify_recovery_checks_api_then_container(dr, monkeypatch):
     monkeypatch.setattr(dr, "docker_server_version", lambda: "27.0.1")
-    monkeypatch.setattr(dr, "run_hello_world", lambda: (True, "hello-world ran"))
+    # `run_hello_world` takes an `out=` sink since #891 (it announces the
+    # wait before blocking, so the tool runner's heartbeat does not starve).
+    monkeypatch.setattr(dr, "run_hello_world", lambda **_: (True, "hello-world ran"))
     ok, details = dr.verify_recovery()
     assert ok is True
     assert any("27.0.1" in d for d in details)
@@ -936,3 +939,351 @@ def _namespace():
     import argparse
 
     return argparse.Namespace()
+
+
+# ==========================================================================
+# Issue #891 - corrupted engine DATA disk on the WSL2 backend.
+#
+# The incident these cover: Docker Desktop 28.5.1, docker-desktop distro
+# STATE=Running, engine answering HTTP 500 for 12+ minutes, 86 GiB RAM and
+# 55 GiB disk free. Both `restart` and `reset` failed; only deleting
+# docker_data.vhdx fixed it, and the delete only worked after
+# `Dismount-DiskImage` released the surface-attached VHD.
+# ==========================================================================
+def test_engine_probe_states_are_not_collapsed(dr):
+    """A slow/5xx engine must not be reported as a missing CLI.
+
+    `_run` returns None for a timeout AND for a missing binary, so
+    the engine probe blamed the CLI when the engine was the sick part.
+    """
+    assert (
+        dr.classify_engine_message(
+            "Error response from daemon: 500 Internal Server Error"
+        )
+        == dr.ENGINE_SERVER_ERROR
+    )
+    assert (
+        dr.classify_engine_message(
+            "still waiting for linux/wsl init control API to respond"
+        )
+        == dr.ENGINE_SERVER_ERROR
+    )
+    # The daemon genuinely being absent stays 'unreachable'.
+    assert (
+        dr.classify_engine_message(
+            "error during connect: cannot connect to the Docker daemon at npipe"
+        )
+        == dr.ENGINE_UNREACHABLE
+    )
+
+
+def test_engine_probe_timeout_reports_server_error_not_cli_missing(dr, monkeypatch):
+    """The exact #891 gap-1 misdiagnosis, at the probe boundary."""
+    monkeypatch.setattr(dr, "_run_timed", lambda *a, **k: (None, True))
+    state, message = dr.probe_engine()
+    # A timeout is its OWN state: a cold Docker Desktop looks identical for a
+    # minute or two, and treating it as the wedged signature would recommend
+    # deleting the data disk during a normal start.
+    assert state == dr.ENGINE_TIMEOUT
+    assert "did not respond" in message
+    assert "CLI could not be executed" not in message
+
+    # And a genuinely missing binary still says so.
+    monkeypatch.setattr(dr, "_run_timed", lambda *a, **k: (None, False))
+    state, message = dr.probe_engine()
+    assert state == dr.ENGINE_CLI_MISSING
+    assert "CLI could not be executed" in message
+
+
+def test_engine_wedged_classification_and_ladder(dr):
+    """Distro Running + 5xx + resources fine is its own category.
+
+    Previously this landed in `engine-unavailable`, whose remedy is
+    `restart` - which does not clear a corrupted data disk.
+    """
+    wedged = dr.HealthSnapshot(
+        client_present=True,
+        server_ok=False,
+        engine_error="500 Internal Server Error",
+        engine_state=dr.ENGINE_SERVER_ERROR,
+        free_mem_bytes=86 * 1024**3,
+        free_disk_bytes=55 * 1024**3,
+        wsl_docker_distro_state="Running",
+    )
+    assert dr.classify_failure(wedged) == dr.CAT_ENGINE_WEDGED
+
+    report = dr.assess_health(wedged)
+    ladder = dr.recommended_remedy(report, disk_low=False)
+    assert ladder[0] == "restart"
+    assert "reset" in ladder
+    # The ladder has to reach the gated data-disk reset; restart/reset alone
+    # did not fix the incident.
+    assert ladder[-1] == "disk"
+
+
+def test_doctor_reports_engine_unhealthy_not_unreachable(dr):
+    """Criterion 1's wording: the server is reachable, the engine is sick."""
+    wedged = dr.HealthSnapshot(
+        client_present=True,
+        server_ok=False,
+        engine_error="500 Internal Server Error",
+        engine_state=dr.ENGINE_SERVER_ERROR,
+        free_mem_bytes=86 * 1024**3,
+        free_disk_bytes=55 * 1024**3,
+        wsl_docker_distro_state="Running",
+    )
+    text = " ".join(dr.assess_health(wedged).failures)
+    assert "server reachable but engine unhealthy" in text
+    assert "docker engine unreachable" not in text
+    assert "CLI could not be executed" not in text
+
+    # A genuinely absent daemon keeps the original wording.
+    absent = dr.HealthSnapshot(
+        client_present=True,
+        server_ok=False,
+        engine_error="cannot connect to the Docker daemon",
+        engine_state=dr.ENGINE_UNREACHABLE,
+    )
+    assert "docker engine unreachable" in " ".join(dr.assess_health(absent).failures)
+
+
+def test_engine_wedged_is_conservative(dr):
+    """It only ever narrows a diagnosis that would be engine-unavailable."""
+    base = dict(
+        client_present=True,
+        server_ok=False,
+        free_mem_bytes=86 * 1024**3,
+        free_disk_bytes=55 * 1024**3,
+    )
+    # Distro not running -> the #531 shape, not this one.
+    stopped = dr.HealthSnapshot(
+        **base, engine_state=dr.ENGINE_SERVER_ERROR, wsl_docker_distro_state="Stopped"
+    )
+    assert dr.classify_failure(stopped) == dr.CAT_ENGINE_UNAVAILABLE
+    # Server unreachable (pipe absent) -> also not this one.
+    unreachable = dr.HealthSnapshot(
+        **base, engine_state=dr.ENGINE_UNREACHABLE, wsl_docker_distro_state="Running"
+    )
+    assert dr.classify_failure(unreachable) == dr.CAT_ENGINE_UNAVAILABLE
+    # Unknown engine state (older snapshot) -> unchanged behaviour.
+    unknown = dr.HealthSnapshot(**base, wsl_docker_distro_state="Running")
+    assert dr.classify_failure(unknown) == dr.CAT_ENGINE_UNAVAILABLE
+    # Resource pressure still wins - it is checked first.
+    starved = dr.HealthSnapshot(
+        client_present=True,
+        server_ok=False,
+        engine_state=dr.ENGINE_SERVER_ERROR,
+        free_mem_bytes=1,
+        free_disk_bytes=1,
+        wsl_docker_distro_state="Running",
+    )
+    assert dr.classify_failure(starved) == dr.CAT_STORAGE_PRESSURE
+
+
+def test_disk_plan_dismounts_the_surface_attached_vhd(dr):
+    """Gap 3, the highest-value one.
+
+    `wsl --shutdown` does not release the VHDX - `Get-DiskImage` still
+    reports Attached=True and the delete fails with "being used by another
+    process". Only `Dismount-DiskImage` released it.
+    """
+    path = "E:\\Docker\\wsl\\disk\\docker_data.vhdx"
+    for action in ("delete", "compact"):
+        plan = dr.windows_disk_plan(action, path)
+        text = "\n".join(plan)
+        assert "Dismount-DiskImage" in text, action
+        assert "Get-DiskImage" in text, action
+        assert "Attached : False" in text, action
+        # The escalation ladder if it is still locked.
+        assert "WslService" in text, action
+        assert "vmcompute" in text, action
+
+        dismount = next(i for i, s in enumerate(plan) if "Dismount-DiskImage" in s)
+        verify = next(i for i, s in enumerate(plan) if "Get-DiskImage" in s)
+        mutate = next(
+            i
+            for i, s in enumerate(plan)
+            if ("remove " in s.lower() or "Optimize-VHD" in s)
+        )
+        assert dismount < verify < mutate, action
+
+
+def test_disk_plan_stops_service_first_and_rechecks_processes(dr):
+    """Gap 5: the UI respawns and can re-attach the disk mid-operation."""
+    plan = dr.windows_disk_plan("delete", "E:\\d\\docker_data.vhdx")
+    service = next(i for i, s in enumerate(plan) if "com.docker.service" in s)
+    shutdown = next(i for i, s in enumerate(plan) if "wsl --shutdown" in s)
+    recheck = next(i for i, s in enumerate(plan) if "respawned" in s)
+    mutate = next(i for i, s in enumerate(plan) if "remove " in s.lower())
+    assert service < shutdown, "service must stop before wsl --shutdown"
+    assert recheck < mutate, "processes re-checked immediately before mutation"
+
+
+def test_non_mutating_disk_actions_skip_the_unlock(dr):
+    """`prune` and `reset` never touch the VHD file, so no dismount."""
+    for action in ("prune", "reset"):
+        text = "\n".join(dr.windows_disk_plan(action, "E:\\d\\docker_data.vhdx"))
+        assert "Dismount-DiskImage" not in text, action
+
+
+def test_readiness_poll_emits_progress_and_supports_cold_start(dr):
+    """Gap 4: `reset --yes` was killed twice at exactly 120s (exit 124).
+
+    Every attempt must print, so the clud tool runner's progress heartbeat
+    never starves, and the cold-start budget must exceed a Docker Desktop
+    cold start (60-120s) rather than giving up at 20s.
+    """
+    assert dr.READY_ATTEMPTS_COLD * dr.READY_INTERVAL_SECONDS >= 120.0
+
+    out = io.StringIO()
+    calls = {"n": 0}
+
+    def check():
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    assert (
+        dr.wait_for_docker(check, attempts=5, interval=0, sleep=lambda _: None, out=out)
+        is True
+    )
+    text = out.getvalue()
+    assert "waiting for the engine" in text
+    assert "readiness attempt 1/5" in text
+    assert "engine ready after 3 attempt(s)" in text
+
+
+def test_hello_world_announces_before_blocking(dr, monkeypatch):
+    """The 120s silent call is what tripped the runner's progress timeout."""
+    monkeypatch.setattr(dr, "_run", lambda *a, **k: None)
+    out = io.StringIO()
+    ok, _ = dr.run_hello_world(out=out)
+    assert ok is False
+    text = out.getvalue()
+    assert "hello-world" in text
+    # It must say how long it may block, before it blocks.
+    assert f"{dr.HELLO_WORLD_TIMEOUT_SECONDS:g}s" in text
+
+
+# --------------------------------------------------------------------------
+# Wiring tests (issue #891 review).
+#
+# The first cut of this work implemented every fix as a well-tested pure
+# function and then never called any of them from the command path. The pure
+# tests stayed green while the shipped tool behaved exactly as before. These
+# assert the COMMAND path, so an unwired fix fails.
+# --------------------------------------------------------------------------
+def test_cmd_disk_actually_prints_the_unlock_plan(dr, monkeypatch, capsys):
+    """`cmd_disk` must render `windows_disk_plan`, not a hardcoded plan."""
+    path = "E:\\Docker\\wsl\\disk\\docker_data.vhdx"
+    chosen = dr.DiskCandidate(
+        path=path,
+        resolved_path=path,
+        size_bytes=INCIDENT_DISK_SIZE,
+        kind=dr.KIND_WSL,
+        source="CustomWslDistroDir",
+        score=100,
+        signals=["configured-parent-match"],
+    )
+    resolution = dr.DiskResolution(
+        candidates=[chosen],
+        chosen=chosen,
+        settings_present=True,
+        settings_source="settings-store.json",
+        used_fallback=False,
+        ambiguous=False,
+    )
+    monkeypatch.setattr(dr.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(dr, "_windows_resolution", lambda: resolution)
+    # Gates: Docker is stopped and the user confirmed.
+    monkeypatch.setattr(dr, "docker_server_version", lambda: None)
+    monkeypatch.setattr(dr, "list_docker_processes", lambda: [])
+
+    args = argparse.Namespace(action="delete", select=None, yes=True, json=False)
+    code = dr.cmd_disk(args)
+
+    assert code == dr.EXIT_NOT_AUTO_EXECUTED, "must still refuse to auto-execute"
+    printed = capsys.readouterr().out
+    assert "Dismount-DiskImage" in printed
+    assert "Attached : False" in printed
+    assert "com.docker.service" in printed
+    assert "respawned" in printed
+
+
+def test_recovery_uses_the_cold_start_budget(dr, monkeypatch):
+    """`_run_recovery` must pass READY_ATTEMPTS_COLD, not the 20s default."""
+    seen = {}
+
+    def fake_wait(check=None, **kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(dr, "wait_for_docker", fake_wait)
+    monkeypatch.setattr(dr, "_execute_restart", lambda *a, **k: ["launched"])
+    monkeypatch.setattr(dr, "verify_recovery", lambda **_: (True, ["ok"]))
+    monkeypatch.setattr(
+        dr,
+        "gather_snapshot",
+        lambda: dr.HealthSnapshot(client_present=True, server_ok=False),
+    )
+    monkeypatch.setattr(dr.platform, "system", lambda: "Windows")
+
+    args = argparse.Namespace(yes=True, force=False, json=False)
+    dr._run_recovery(args, label="reset")
+
+    assert seen.get("attempts") == dr.READY_ATTEMPTS_COLD, (
+        "a cold Docker Desktop start needs the long budget; the 20s default "
+        "reports 'not ready' while Desktop is still starting normally"
+    )
+
+
+def test_engine_timeout_alone_never_recommends_deleting_the_disk(dr):
+    """The safety property behind splitting ENGINE_TIMEOUT out.
+
+    A cold Docker Desktop produces a probe timeout with the distro already
+    Running. If that classified as `engine-wedged`, `doctor` would recommend
+    a ladder ending in `disk --action delete` — total image/volume loss —
+    during an ordinary start.
+    """
+    starting = dr.HealthSnapshot(
+        client_present=True,
+        server_ok=False,
+        engine_state=dr.ENGINE_TIMEOUT,
+        engine_error="docker server did not respond within the probe timeout",
+        free_mem_bytes=86 * 1024**3,
+        free_disk_bytes=55 * 1024**3,
+        wsl_docker_distro_state="Running",
+    )
+    assert dr.classify_failure(starting) != dr.CAT_ENGINE_WEDGED
+    ladder = dr.recommended_remedy(dr.assess_health(starting), disk_low=False)
+    assert "disk" not in ladder
+    # And it must not claim the server was reachable.
+    text = " ".join(dr.assess_health(starting).failures)
+    assert "reachable" not in text
+
+
+def test_engine_wedged_does_not_steal_healthy_or_resource_pressure(dr):
+    """Completes the conservatism matrix the first cut left partial."""
+    # Reachable server wins outright, whatever the engine_state says.
+    healthy = dr.HealthSnapshot(
+        client_present=True, server_ok=True, engine_state=dr.ENGINE_SERVER_ERROR
+    )
+    assert dr.classify_failure(healthy) == dr.CAT_HEALTHY
+    # Low memory (disk fine) is resource-pressure, checked before the wedge.
+    mem = dr.HealthSnapshot(
+        client_present=True,
+        server_ok=False,
+        engine_state=dr.ENGINE_SERVER_ERROR,
+        free_mem_bytes=1,
+        free_disk_bytes=55 * 1024**3,
+        wsl_docker_distro_state="Running",
+    )
+    assert dr.classify_failure(mem) == dr.CAT_RESOURCE_PRESSURE
+    # No WSL distro state at all (macOS/Linux) never wedges.
+    posix = dr.HealthSnapshot(
+        client_present=True,
+        server_ok=False,
+        engine_state=dr.ENGINE_SERVER_ERROR,
+        free_mem_bytes=86 * 1024**3,
+        free_disk_bytes=55 * 1024**3,
+    )
+    assert dr.classify_failure(posix) == dr.CAT_ENGINE_UNAVAILABLE

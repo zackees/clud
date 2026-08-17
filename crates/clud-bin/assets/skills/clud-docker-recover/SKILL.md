@@ -49,14 +49,43 @@ classification. Read the classification before choosing a remedy.
 | `healthy` | Server reachable | Nothing to do (low disk/memory surface as ADVISORY, never blocking) |
 | `engine-unavailable` | Server down, host has RAM+disk to spare — the #531 case | `restart` (or `reset` if the WSL distro is Stopped) |
 | `resource-pressure` | Server down + low free memory | Free memory / raise Docker's memory limit, then `restart` |
+| `engine-wedged` | Distro **Running**, server answers **5xx**, RAM+disk fine — the #891 case | `restart` → `reset` → gated **data-disk reset** (`disk --action delete`) |
 | `storage-pressure` | Server down + low free disk | Free host disk; only then consider the gated `disk` flow |
+
+`engine-wedged` is the one classification whose remedy ladder does **not** end
+at `reset`. It means the engine's data disk is corrupt: in the #891 incident
+the distro booted fine and `dockerd` never became healthy, `restart` and
+`reset` both failed, and only deleting `docker_data.vhdx` fixed it (Docker
+recreates an empty one). Confirm it against the backend log at
+`%LOCALAPPDATA%\Docker\log\host\com.docker.backend.exe.log`, which shows
+`still waiting for linux/wsl init control API to respond` and
+`still waiting for the engine to respond to _ping ... HTTP 500`.
+
+Do not read a 5xx engine as "docker is not installed". `doctor` now
+distinguishes CLI-missing / server-unreachable / server-5xx explicitly; a
+timeout on `docker version` means the **engine** is sick, not the CLI.
+
+## Run restart/reset backgrounded under `clud tool run`
+
+`restart` and `reset` can exceed the tool runner's **120s progress timeout**
+and get killed with exit 124 — this happened twice in #891, both times at
+exactly 120s, because `docker run --rm hello-world` blocks silently for up to
+120s. The tool now prints a heartbeat before and during every long wait, but a
+cold Docker Desktop start still routinely takes 60–120s on its own. So:
+
+- prefer `clud tool run --background docker/docker_recover.py reset --yes`
+  (or raise the progress timeout) for `restart`/`reset`;
+- `doctor`, `gc` and `disk` are *usually* short. On a badly wedged host
+  `doctor` can still spend several 20s probes in `gather_snapshot` before it
+  prints anything, so background it too if the engine is unresponsive.
 
 ## Bounded readiness polling
 
 After any launch attempt, poll the engine on a bounded schedule — 10
 attempts, 2-second interval (the numbers from #531; the FastLED WASM
-`8cf7f663` Windows Docker/WSL readiness-retry precedent). Never spin
-unbounded:
+`8cf7f663` Windows Docker/WSL readiness-retry precedent). A **cold** start
+gets the longer `READY_ATTEMPTS_COLD` budget (60 attempts) instead, because
+20s is well short of a Docker Desktop cold start. Never spin unbounded:
 
 ```
 fn ensure_docker_running(attempts = 10, interval = 2s) -> Result<()> {
@@ -146,6 +175,35 @@ prevent more writes. Report the resolved VHDX path, its size, and free bytes on
 its actual host volume. Freeing host space may permit a subsequent mount, but
 an aborted ext4 journal can still require repair or replacement. Never loop on
 restart while the host volume remains full.
+
+## The VHD stays locked after `wsl --shutdown` (issue #891)
+
+`wsl --shutdown` is **not** enough to release `docker_data.vhdx`. It stays
+SURFACE-ATTACHED at the Hyper-V/HCS level — `Get-DiskImage -ImagePath <vhdx>`
+still reports `Attached : True` — and both `Remove-Item` and `Optimize-VHD`
+fail with *"being used by another process"*. Verified across repeated
+attempts, including with `WslService` already stopped.
+
+The tool's `disk --action delete|compact` plan therefore includes an explicit
+unlock step. Follow it in order:
+
+1. Stop the `com.docker.service` Windows service **first**, then quit Docker
+   Desktop — the UI respawns with new PIDs and can re-attach the disk
+   mid-operation.
+2. `wsl --shutdown`.
+3. `Dismount-DiskImage -ImagePath '<vhdx>'` — this released it instantly, and
+   the delete then succeeded on the first attempt.
+4. Verify `Get-DiskImage -ImagePath '<vhdx>'` reports `Attached : False`.
+5. Re-check for respawned Docker Desktop / `com.docker.backend` /
+   `com.docker.build` processes immediately before mutating the disk.
+
+Still attached? Stop `WslService` (and `LxssManager`) and retry; as a last
+resort stop `vmcompute` (Hyper-V Host Compute Service), noting its dependents
+(e.g. `hns`) so you can restart them, then retry and restart the services.
+
+Note the tool's `docker_stopped` gate (server unreachable + no docker
+processes) is necessary but **not sufficient** — it passes while the VHD is
+still attached. The `Attached : False` check is the real gate.
 
 ## Garbage collection — the lightest rung (default-safe)
 
