@@ -1518,6 +1518,9 @@ fn serve_messages(
         });
         match streamed {
             Ok(Ok(summary)) => {
+                if summary.orphaned_outputs_repaired > 0 {
+                    log_orphaned_outputs_repaired(log, summary.orphaned_outputs_repaired);
+                }
                 if let Some(failure) = summary.in_band_failure.as_ref() {
                     log_in_band_failure(log, failure, request_phase(body), summary.request_shape);
                 }
@@ -1677,6 +1680,27 @@ fn log_continuation_invariant(
         "function_call_output_count": failure.function_call_output_count,
         "unmatched_call_count": failure.unmatched_call_count,
         "source": failure.source,
+    });
+    if let Some(log) = log {
+        lock_log(log).record(event.clone());
+    }
+    if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
+        eprintln!("[clud] codex bridge: {event}");
+    }
+}
+
+/// Record that a turn rewrote orphaned tool results to keep the Responses
+/// API from rejecting it outright. Counts only — no call ids, no outputs.
+///
+/// Worth logging because the untreated form of this is a *permanent* 400
+/// that wedges a session until the process restarts, and the bridge log is
+/// what identified it.
+fn log_orphaned_outputs_repaired(log: Option<&SharedBridgeLog>, repaired: usize) {
+    let event = serde_json::json!({
+        "ts_ms": unix_ms(),
+        "event": "orphaned_outputs_repaired",
+        "repaired_count": repaired,
+        "reason": "history_compaction_elided_the_originating_call",
     });
     if let Some(log) = log {
         lock_log(log).record(event.clone());
@@ -4905,6 +4929,120 @@ Connection: close
             assert_eq!(calls[index]["call_id"], format!("call_{index}"));
             assert_eq!(outputs[index]["call_id"], format!("call_{index}"));
         }
+    }
+
+    /// A harness transcript whose compaction dropped the assistant `tool_use`
+    /// but kept the user `tool_result` — the shape that wedged production.
+    fn orphaned_tool_result_body() -> String {
+        serde_json::json!({
+            "model": "claude-x",
+            "messages": [
+                {"role": "user", "content": "carry on"},
+                {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_0",
+                    "content": "result-0",
+                }]},
+            ],
+            "stream": false,
+        })
+        .to_string()
+    }
+
+    /// End-to-end reproduction of the `/loop` wedge, through the real bridge.
+    ///
+    /// Sequence, exactly as the fastled session ran it:
+    ///   1. a turn that leaves a tool batch outstanding (canonical history now
+    ///      holds a `function_call` with no result);
+    ///   2. `POST /_clud/context/compact` — `validate_canonical_history` fails
+    ///      on that outstanding call, so the bridge takes the documented
+    ///      fallback and `clear_items()` the history;
+    ///   3. the harness sends its own compacted transcript, in which the
+    ///      assistant `tool_use` is gone but the user `tool_result` remains.
+    ///
+    /// Before the fix, step 3 reached upstream verbatim and earned a permanent
+    /// `invalid_request_error: No tool call found for function call output`,
+    /// which then repeated on every scheduled firing.
+    #[test]
+    fn compaction_fallback_then_orphaned_result_still_reaches_upstream_valid() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            Some(parallel_function_call_response(2)),
+            None,
+        ]);
+        let mut bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+
+        // 1. Upstream answers with a parallel tool batch, so canonical
+        //    history now holds `function_call`s whose results have not
+        //    arrived — the "tool batch outstanding" state the bridge's own
+        //    comment calls out.
+        let first = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        // 2. Compaction with the batch outstanding -> documented fallback,
+        //    which clears the canonical history.
+        let compacted = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/_clud/context/compact",
+                bridge.bearer_token(),
+                r#"{"hook_event_name":"PreCompact","trigger":"auto"}"#,
+            ),
+        );
+        assert_eq!(
+            status(&compacted),
+            204,
+            "the fallback must not block the harness's compaction lifecycle: {compacted}"
+        );
+
+        // 3. The harness's own compacted transcript, orphaned.
+        let after = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                &orphaned_tool_result_body(),
+            ),
+        );
+        assert_ne!(
+            status(&after),
+            400,
+            "an orphaned tool result must not wedge the session: {after}"
+        );
+
+        // The decisive assertion: whatever we sent upstream carried no
+        // function_call_output without a matching function_call.
+        let sent = upstream.requests();
+        let last = sent.last().expect("a request must have reached upstream");
+        let body: serde_json::Value =
+            serde_json::from_str(last.split("\r\n\r\n").nth(1).expect("request body"))
+                .expect("upstream body is json");
+        let input = body["input"].as_array().cloned().unwrap_or_default();
+        let calls: std::collections::HashSet<&str> = input
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .filter_map(|item| item["call_id"].as_str())
+            .collect();
+        let orphans = input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .filter(|item| {
+                item["call_id"]
+                    .as_str()
+                    .is_none_or(|id| !calls.contains(id))
+            })
+            .count();
+        assert_eq!(orphans, 0, "orphaned tool result reached upstream: {body}");
+        // And the result itself was preserved rather than dropped.
+        assert!(
+            last.contains("result-0"),
+            "the tool output must survive the repair: {last}"
+        );
+        let _ = bridge.shutdown();
     }
 
     #[test]
