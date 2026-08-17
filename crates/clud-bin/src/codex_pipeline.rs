@@ -14,7 +14,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use std::{collections::BTreeMap, collections::HashMap};
+use std::{collections::BTreeMap, collections::HashMap, collections::HashSet};
 
 use crate::codex_history::{ConversationHistory, HistoryError};
 use crate::codex_model::ModelSpec;
@@ -55,6 +55,11 @@ pub struct StreamSummary {
     /// Field names, item kinds, and counts from the translated Responses
     /// request. It intentionally omits all user/model/tool values.
     pub request_shape: serde_json::Value,
+    /// How many orphaned tool results this turn had to rewrite into user
+    /// messages (compaction wedge — see `repair_orphaned_outputs`). Non-zero
+    /// means the session was about to be permanently 400ed by the Responses
+    /// API, so the bridge logs it.
+    pub orphaned_outputs_repaired: usize,
     /// Complete upstream `response.output_item.done` items in wire order.
     /// These are canonical Responses transcript entries and must remain opaque.
     pub output_items: Vec<serde_json::Value>,
@@ -129,6 +134,12 @@ pub struct ContinuationInvariantFailure {
     pub function_call_count: usize,
     pub function_call_output_count: usize,
     pub unmatched_call_count: usize,
+    /// Tool results whose originating call is absent. The *opposite*
+    /// invariant to `unmatched_call_count`, and the one the Responses API
+    /// rejects with "No tool call found for function call output".
+    /// Tracked separately so the bridge log can tell them apart — the log is
+    /// what identified this failure in the first place.
+    pub orphaned_output_count: usize,
     pub source: &'static str,
 }
 
@@ -623,6 +634,82 @@ fn call_id(item: &serde_json::Value) -> Option<&str> {
     item.get("call_id").and_then(serde_json::Value::as_str)
 }
 
+/// Render a `function_call_output`'s payload as text.
+///
+/// The Responses API accepts either a bare string or a structured value here,
+/// so both shapes have to survive the conversion below.
+fn function_call_output_text(item: &serde_json::Value) -> String {
+    match item.get("output") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Rewrite tool results whose originating call is not in `context` into
+/// ordinary user messages, returning how many were rewritten.
+///
+/// Why this exists: compaction replaces the canonical history wholesale, and a
+/// tool result that was already in flight is appended *after* the replacement.
+/// Its `function_call` went out with the old history, so the request carries a
+/// `function_call_output` with nothing to attach to and the Responses API
+/// rejects the whole turn:
+///
+/// ```text
+/// invalid_request_error: No tool call found for function call output
+/// with call_id ...
+/// ```
+///
+/// That is a *permanent* 400 — the orphan is then persisted, so every later
+/// turn replays it and the session is wedged until the process restarts.
+///
+/// Converting rather than dropping is deliberate. Dropping makes the model
+/// re-issue the tool call, and these tools merge PRs and delete directories;
+/// replaying a side effect is worse than losing a transcript nicety.
+/// Synthesizing the missing `function_call` is not possible faithfully — the
+/// output item carries only `call_id` and `output`, never the tool `name` or
+/// its arguments — and replaying the *original* call from pre-compaction
+/// history trades this violation for a different one on reasoning models,
+/// which reject a `function_call` whose paired `reasoning` item is absent.
+/// A plain user message satisfies every pairing rule.
+pub(crate) fn repair_orphaned_outputs(
+    pending: &mut [serde_json::Value],
+    context: &[serde_json::Value],
+) -> usize {
+    let known: HashSet<&str> = context
+        .iter()
+        .chain(pending.iter())
+        .filter(|item| response_item_kind(item) == "function_call")
+        .filter_map(call_id)
+        .collect();
+
+    let orphans: Vec<usize> = pending
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| response_item_kind(item) == "function_call_output")
+        .filter(|(_, item)| call_id(item).is_none_or(|id| !known.contains(id)))
+        .map(|(index, _)| index)
+        .collect();
+
+    for index in &orphans {
+        let item = &pending[*index];
+        let id = call_id(item).unwrap_or("unknown").to_string();
+        let text = function_call_output_text(item);
+        pending[*index] = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!(
+                    "[tool result for call {id}; the call itself was elided by \
+                     history compaction]: {text}"
+                ),
+            }],
+        });
+    }
+    orphans.len()
+}
+
 /// Reject a continuation the Responses API cannot accept before spending a
 /// network request on it. The scan retains call ids only in this stack frame;
 /// the returned failure contains fixed categories and counts exclusively.
@@ -633,6 +720,7 @@ fn validate_continuation_input(
     let mut input_kinds = BTreeMap::new();
     let mut unresolved = HashMap::<&str, usize>::new();
     let mut unidentified_calls = 0_usize;
+    let mut orphaned_outputs = 0_usize;
     let mut function_call_count = 0;
     let mut function_call_output_count = 0;
 
@@ -649,14 +737,17 @@ fn validate_continuation_input(
             }
             "function_call_output" => {
                 function_call_output_count += 1;
-                if let Some(id) = call_id(item) {
-                    let should_remove = unresolved.get_mut(id).is_some_and(|remaining| {
+                // An output only ever *decremented* here, so one with no call
+                // at all was silently accepted and sent upstream, which is
+                // precisely the request the API refuses. Count it.
+                match call_id(item).and_then(|id| unresolved.get_mut(id).map(|r| (id, r))) {
+                    Some((id, remaining)) => {
                         *remaining = remaining.saturating_sub(1);
-                        *remaining == 0
-                    });
-                    if should_remove {
-                        unresolved.remove(id);
+                        if *remaining == 0 {
+                            unresolved.remove(id);
+                        }
                     }
+                    None => orphaned_outputs += 1,
                 }
             }
             _ => {}
@@ -664,7 +755,7 @@ fn validate_continuation_input(
     }
 
     let unmatched_call_count = unresolved.values().sum::<usize>() + unidentified_calls;
-    if unmatched_call_count == 0 {
+    if unmatched_call_count == 0 && orphaned_outputs == 0 {
         return Ok(());
     }
 
@@ -686,6 +777,7 @@ fn validate_continuation_input(
             function_call_count,
             function_call_output_count,
             unmatched_call_count,
+            orphaned_output_count: orphaned_outputs,
             source,
         },
     )))
@@ -709,7 +801,23 @@ fn history_aware_input(
     pending_input: &[serde_json::Value],
 ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     if history.is_empty() {
-        return (translated_input.to_vec(), translated_input.to_vec());
+        // The production wedge arrives HERE, not through the pipeline's own
+        // compaction recovery. When `/context_compact` cannot validate the
+        // canonical history — "Claude may start compaction while a tool batch
+        // is outstanding" — the bridge calls
+        // `begin_harness_compaction_fallback`, which `clear_items()` the whole
+        // history. The harness then keeps sending its OWN compacted
+        // transcript, and if its compaction dropped the assistant turn holding
+        // the `tool_use` while keeping the user turn holding the
+        // `tool_result`, the translated input is orphaned on arrival.
+        //
+        // With history empty there is nothing to pair against, so this branch
+        // has to repair the client's input directly. It is also why the
+        // failure survives a daemon restart: the poison lives in the harness's
+        // transcript, which it resends verbatim every turn.
+        let mut input = translated_input.to_vec();
+        repair_orphaned_outputs(&mut input, &[]);
+        return (input.clone(), input);
     }
 
     let mut turn_input = translated_input
@@ -723,7 +831,17 @@ fn history_aware_input(
         .filter(|item| !is_developer_item(item))
         .cloned()
         .collect::<Vec<_>>();
+    // Repair `turn_input` itself, not the assembled copy: this same vector is
+    // what `record_successful_turn` persists. Repairing only what goes
+    // upstream would send a valid request and then store the orphan again,
+    // so the fix would work exactly once.
+    repair_orphaned_outputs(&mut turn_input, &upstream_input);
     append_pending_input(&mut upstream_input, &turn_input);
+    // And sweep the assembled input, which also covers an orphan that is
+    // already resident in `history`. Without this the tightened validator
+    // would simply move the wedge from upstream to a local 400 — the same
+    // dead session with a different error message.
+    repair_orphaned_outputs(&mut upstream_input, &[]);
     (upstream_input, turn_input)
 }
 
@@ -1057,6 +1175,7 @@ impl<C: CredentialSource> Pipeline<C> {
             emit_deferred_frames(&first.deferred_frames, sink)?;
             if first.in_band_provider_failure {
                 return Ok(StreamSummary {
+                    orphaned_outputs_repaired: 0,
                     terminal_account_failure: first.terminal_account_failure,
                     in_band_failure: first.in_band_failure,
                     request_shape,
@@ -1069,6 +1188,7 @@ impl<C: CredentialSource> Pipeline<C> {
                 None => false,
             };
             return Ok(StreamSummary {
+                orphaned_outputs_repaired: 0,
                 terminal_account_failure: first.terminal_account_failure,
                 in_band_failure: first.in_band_failure,
                 request_shape,
@@ -1093,7 +1213,17 @@ impl<C: CredentialSource> Pipeline<C> {
             .replace_history(&compact_output)
             .map_err(history_error)?;
         upstream_input = compact_output;
+        // This is where the wedge was born. `replace_history` just discarded
+        // the `function_call` that `turn_input`'s pending tool result belongs
+        // to, so re-appending it unchanged produces exactly the request the
+        // Responses API refuses — and `record_successful_turn` below then
+        // persists the orphan, poisoning every subsequent turn.
+        let mut turn_input = turn_input;
+        let repaired = repair_orphaned_outputs(&mut turn_input, &upstream_input);
         append_pending_input(&mut upstream_input, &turn_input);
+        // Re-validate: the check at assembly ran against the pre-compaction
+        // history, so it says nothing about the input actually being sent now.
+        validate_continuation_input(&upstream_input, &[])?;
         let retry = self.stream_attempt(
             &request,
             Some(&upstream_input),
@@ -1108,6 +1238,7 @@ impl<C: CredentialSource> Pipeline<C> {
         emit_deferred_frames(&retry.deferred_frames, sink)?;
         if retry.in_band_provider_failure {
             return Ok(StreamSummary {
+                orphaned_outputs_repaired: repaired,
                 terminal_account_failure: retry.terminal_account_failure,
                 in_band_failure: retry.in_band_failure,
                 request_shape,
@@ -1118,6 +1249,7 @@ impl<C: CredentialSource> Pipeline<C> {
         let history_append_rejected =
             record_successful_turn(history, &turn_input, &retry.output_items)?;
         Ok(StreamSummary {
+            orphaned_outputs_repaired: repaired,
             terminal_account_failure: retry.terminal_account_failure,
             in_band_failure: retry.in_band_failure,
             request_shape,
@@ -1867,5 +1999,156 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
                 .contains("old instruction"),
             "a continuation must replace rather than deduplicate developer instructions"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Orphaned tool results after history compaction.
+    //
+    // Production failure (bridge.jsonl, fastled session): every turn for
+    // 4.5 hours returned
+    //   invalid_request_error: No tool call found for function call output
+    //   with call_id ...
+    // classified `permanent`, so no retry, and the orphan was persisted —
+    // wedging the session until the process restarted.
+    // ----------------------------------------------------------------
+    fn call_item(call_id: &str) -> serde_json::Value {
+        json!({"type": "function_call", "call_id": call_id, "name": "bash", "arguments": "{}"})
+    }
+
+    fn output_item(call_id: &str, output: serde_json::Value) -> serde_json::Value {
+        json!({"type": "function_call_output", "call_id": call_id, "output": output})
+    }
+
+    fn orphan_count(items: &[serde_json::Value]) -> usize {
+        let known: std::collections::HashSet<&str> = items
+            .iter()
+            .filter(|item| response_item_kind(item) == "function_call")
+            .filter_map(call_id)
+            .collect();
+        items
+            .iter()
+            .filter(|item| response_item_kind(item) == "function_call_output")
+            .filter(|item| call_id(item).is_none_or(|id| !known.contains(id)))
+            .count()
+    }
+
+    #[test]
+    fn assembly_repairs_a_tool_result_whose_call_compaction_elided() {
+        // The exact post-compaction shape: history is just the compaction
+        // summary, and the in-flight tool result arrives after it.
+        let history = vec![json!({"type": "compaction", "id": "cmp_1"})];
+        let pending = vec![output_item("call_1", json!("18C"))];
+
+        let (upstream_input, turn_input) = history_aware_input(&history, &[], &pending);
+
+        assert_eq!(
+            orphan_count(&upstream_input),
+            0,
+            "the request sent upstream must contain no orphaned tool result"
+        );
+        // `turn_input` is what `record_successful_turn` persists. Repairing
+        // only the outgoing copy would store the orphan again and the fix
+        // would work exactly once.
+        assert_eq!(
+            orphan_count(&turn_input),
+            0,
+            "the PERSISTED suffix must be repaired too, or the wedge returns"
+        );
+        // The result itself survives, as a user message.
+        let text = serde_json::to_string(&turn_input).unwrap();
+        assert!(text.contains("18C"), "tool output must not be lost: {text}");
+        assert!(text.contains("call_1"));
+        assert!(text.contains("compaction"));
+        // And it is now a plain message, so no pairing rule applies to it.
+        assert!(turn_input
+            .iter()
+            .all(|item| response_item_kind(item) != "function_call_output"));
+    }
+
+    #[test]
+    fn assembly_leaves_a_properly_paired_tool_result_alone() {
+        let history = vec![
+            json!({"type": "message", "role": "user", "content": []}),
+            call_item("call_1"),
+        ];
+        let pending = vec![output_item("call_1", json!("18C"))];
+
+        let (upstream_input, turn_input) = history_aware_input(&history, &[], &pending);
+
+        // Untouched: it is still a function_call_output, matched by its call.
+        assert_eq!(response_item_kind(&turn_input[0]), "function_call_output");
+        assert_eq!(orphan_count(&upstream_input), 0);
+        validate_continuation_input(&upstream_input, &[]).expect("paired input stays valid");
+    }
+
+    #[test]
+    fn validator_catches_an_orphaned_output() {
+        // The blind spot: outputs only ever *decremented* the unresolved-call
+        // map, so one with no call at all passed straight through to upstream.
+        let input = vec![
+            json!({"type": "compaction", "id": "cmp_1"}),
+            output_item("call_1", json!("18C")),
+        ];
+        let error = validate_continuation_input(&input, &[]).unwrap_err();
+        match error {
+            PipelineError::ContinuationInvariant(failure) => {
+                assert_eq!(failure.orphaned_output_count, 1);
+                // Distinct from the opposite invariant, so the bridge log can
+                // tell the two apart.
+                assert_eq!(failure.unmatched_call_count, 0);
+            }
+            other => panic!("expected ContinuationInvariant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repair_preserves_structured_output_and_reports_a_count() {
+        let mut pending = vec![
+            output_item("call_1", json!({"stdout": "ok", "exit": 0})),
+            output_item("call_2", json!("plain")),
+        ];
+        let repaired = repair_orphaned_outputs(&mut pending, &[]);
+        assert_eq!(repaired, 2);
+        let text = serde_json::to_string(&pending).unwrap();
+        assert!(
+            text.contains("stdout"),
+            "structured output must survive: {text}"
+        );
+        assert!(text.contains("plain"));
+    }
+
+    #[test]
+    fn repair_is_a_no_op_when_the_call_is_present() {
+        let mut pending = vec![call_item("call_1"), output_item("call_1", json!("18C"))];
+        let before = pending.clone();
+        assert_eq!(repair_orphaned_outputs(&mut pending, &[]), 0);
+        assert_eq!(pending, before);
+    }
+
+    #[test]
+    fn empty_history_repairs_the_harness_transcript_that_actually_wedged_production() {
+        // The real sequence from the fastled session:
+        //   /context_compact -> validate_canonical_history fails (tool batch
+        //   outstanding) -> begin_harness_compaction_fallback -> clear_items()
+        // History is now EMPTY, and the harness keeps resending its own
+        // compacted transcript whose assistant tool_use was dropped while the
+        // user tool_result survived.
+        //
+        // This branch returns early, so it must repair the client's input
+        // directly — and it is why the wedge survives a daemon restart: the
+        // poison lives in the harness transcript, resent verbatim every turn.
+        let translated = vec![
+            json!({"type": "message", "role": "user", "content": []}),
+            output_item("call_1", json!("18C")),
+        ];
+        let (upstream_input, turn_input) = history_aware_input(&[], &translated, &[]);
+
+        assert_eq!(orphan_count(&upstream_input), 0);
+        assert_eq!(orphan_count(&turn_input), 0);
+        validate_continuation_input(&upstream_input, &[])
+            .expect("the repaired request must be sendable");
+        assert!(serde_json::to_string(&upstream_input)
+            .unwrap()
+            .contains("18C"));
     }
 }
