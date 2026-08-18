@@ -60,6 +60,10 @@ pub struct StreamSummary {
     /// means the session was about to be permanently 400ed by the Responses
     /// API, so the bridge logs it.
     pub orphaned_outputs_repaired: usize,
+    /// Real tool outputs recovered from Claude's full replay after a failed
+    /// turn moved them behind the final-assistant pending-input boundary.
+    /// Counts only; identifiers and payloads never leave this module.
+    pub pending_outputs_recovered: usize,
     /// Complete upstream `response.output_item.done` items in wire order.
     /// These are canonical Responses transcript entries and must remain opaque.
     pub output_items: Vec<serde_json::Value>,
@@ -85,6 +89,7 @@ impl StreamSummary {
 pub struct Completion {
     pub message: serde_json::Value,
     pub history_append_rejected: bool,
+    pub pending_outputs_recovered: usize,
 }
 
 impl Completion {
@@ -634,6 +639,71 @@ fn call_id(item: &serde_json::Value) -> Option<&str> {
     item.get("call_id").and_then(serde_json::Value::as_str)
 }
 
+fn consume_matching_output(
+    unresolved: &mut HashMap<String, usize>,
+    item: &serde_json::Value,
+) -> bool {
+    if response_item_kind(item) != "function_call_output" {
+        return false;
+    }
+    let Some(id) = call_id(item) else {
+        return false;
+    };
+    let Some(remaining) = unresolved.get_mut(id) else {
+        return false;
+    };
+    *remaining = remaining.saturating_sub(1);
+    if *remaining == 0 {
+        unresolved.remove(id);
+    }
+    true
+}
+
+/// Recover real outputs that a failed turn left outside the normal pending
+/// suffix.
+///
+/// Canonical history deliberately commits neither input nor partial output
+/// when an upstream turn fails. Claude nevertheless persists the tool result
+/// that triggered that turn, followed by a synthetic or partial assistant
+/// error. On its next request, the final-assistant suffix starts *after* the
+/// still-needed result. The complete Messages replay retains it, so reconcile
+/// only outputs required by unresolved canonical calls. Calls with no real
+/// replayed output remain invalid and are rejected by the validator below.
+fn recover_pending_outputs(
+    history: &[serde_json::Value],
+    translated_input: &[serde_json::Value],
+    pending_input: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let mut unresolved = HashMap::<String, usize>::new();
+    for item in history {
+        match response_item_kind(item) {
+            "function_call" => {
+                if let Some(id) = call_id(item) {
+                    *unresolved.entry(id.to_string()).or_insert(0) += 1;
+                }
+            }
+            "function_call_output" => {
+                consume_matching_output(&mut unresolved, item);
+            }
+            _ => {}
+        }
+    }
+    for item in pending_input {
+        consume_matching_output(&mut unresolved, item);
+    }
+
+    let mut recovered = Vec::new();
+    for item in translated_input {
+        if consume_matching_output(&mut unresolved, item) {
+            recovered.push(item.clone());
+        }
+        if unresolved.is_empty() {
+            break;
+        }
+    }
+    recovered
+}
+
 /// Render a `function_call_output`'s payload as text.
 ///
 /// The Responses API accepts either a bare string or a structured value here,
@@ -799,7 +869,7 @@ fn history_aware_input(
     history: &[serde_json::Value],
     translated_input: &[serde_json::Value],
     pending_input: &[serde_json::Value],
-) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>, usize) {
     if history.is_empty() {
         // The production wedge arrives HERE, not through the pipeline's own
         // compaction recovery. When `/context_compact` cannot validate the
@@ -817,14 +887,17 @@ fn history_aware_input(
         // transcript, which it resends verbatim every turn.
         let mut input = translated_input.to_vec();
         repair_orphaned_outputs(&mut input, &[]);
-        return (input.clone(), input);
+        return (input.clone(), input, 0);
     }
 
+    let recovered = recover_pending_outputs(history, translated_input, pending_input);
+    let pending_outputs_recovered = recovered.len();
     let mut turn_input = translated_input
         .iter()
         .filter(|item| is_developer_item(item))
         .cloned()
         .collect::<Vec<_>>();
+    append_pending_input(&mut turn_input, &recovered);
     append_pending_input(&mut turn_input, pending_input);
     let mut upstream_input = history
         .iter()
@@ -842,7 +915,7 @@ fn history_aware_input(
     // would simply move the wedge from upstream to a local 400 — the same
     // dead session with a different error message.
     repair_orphaned_outputs(&mut upstream_input, &[]);
-    (upstream_input, turn_input)
+    (upstream_input, turn_input, pending_outputs_recovered)
 }
 
 fn translated_request_shape(
@@ -1135,14 +1208,14 @@ impl<C: CredentialSource> Pipeline<C> {
         let (request, tool_names, request_shape, translated_input) = self.prepare(request_body)?;
         let pending_input = crate::codex_translate::pending_input_items_as_values(request_body)
             .map_err(PipelineError::Translate)?;
-        let (mut upstream_input, turn_input) = match history.as_ref() {
+        let (mut upstream_input, turn_input, pending_outputs_recovered) = match history.as_ref() {
             Some(history) => {
                 let assembled =
                     history_aware_input(&history.snapshot(), &translated_input, &pending_input);
                 validate_continuation_input(&assembled.0, &translated_input)?;
                 assembled
             }
-            None => (translated_input.clone(), translated_input),
+            None => (translated_input.clone(), translated_input, 0),
         };
 
         let first = self.stream_attempt(
@@ -1176,6 +1249,7 @@ impl<C: CredentialSource> Pipeline<C> {
             if first.in_band_provider_failure {
                 return Ok(StreamSummary {
                     orphaned_outputs_repaired: 0,
+                    pending_outputs_recovered,
                     terminal_account_failure: first.terminal_account_failure,
                     in_band_failure: first.in_band_failure,
                     request_shape,
@@ -1189,6 +1263,7 @@ impl<C: CredentialSource> Pipeline<C> {
             };
             return Ok(StreamSummary {
                 orphaned_outputs_repaired: 0,
+                pending_outputs_recovered,
                 terminal_account_failure: first.terminal_account_failure,
                 in_band_failure: first.in_band_failure,
                 request_shape,
@@ -1239,6 +1314,7 @@ impl<C: CredentialSource> Pipeline<C> {
         if retry.in_band_provider_failure {
             return Ok(StreamSummary {
                 orphaned_outputs_repaired: repaired,
+                pending_outputs_recovered,
                 terminal_account_failure: retry.terminal_account_failure,
                 in_band_failure: retry.in_band_failure,
                 request_shape,
@@ -1250,6 +1326,7 @@ impl<C: CredentialSource> Pipeline<C> {
             record_successful_turn(history, &turn_input, &retry.output_items)?;
         Ok(StreamSummary {
             orphaned_outputs_repaired: repaired,
+            pending_outputs_recovered,
             terminal_account_failure: retry.terminal_account_failure,
             in_band_failure: retry.in_band_failure,
             request_shape,
@@ -1320,6 +1397,7 @@ impl<C: CredentialSource> Pipeline<C> {
         Ok(Completion {
             message: aggregator.finish(),
             history_append_rejected: summary.history_append_rejected,
+            pending_outputs_recovered: summary.pending_outputs_recovered,
         })
     }
 
@@ -1985,8 +2063,9 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
             json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "current user"}]}),
         ];
 
-        let (upstream, turn) = history_aware_input(&history, &translated, &pending);
+        let (upstream, turn, recovered) = history_aware_input(&history, &translated, &pending);
 
+        assert_eq!(recovered, 0);
         assert_eq!(turn.len(), 2);
         assert_eq!(turn[0]["content"][0]["text"], "current instruction");
         assert_eq!(upstream.len(), 3);
@@ -2039,8 +2118,9 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
         let history = vec![json!({"type": "compaction", "id": "cmp_1"})];
         let pending = vec![output_item("call_1", json!("18C"))];
 
-        let (upstream_input, turn_input) = history_aware_input(&history, &[], &pending);
+        let (upstream_input, turn_input, recovered) = history_aware_input(&history, &[], &pending);
 
+        assert_eq!(recovered, 0);
         assert_eq!(
             orphan_count(&upstream_input),
             0,
@@ -2073,12 +2153,41 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
         ];
         let pending = vec![output_item("call_1", json!("18C"))];
 
-        let (upstream_input, turn_input) = history_aware_input(&history, &[], &pending);
+        let (upstream_input, turn_input, recovered) = history_aware_input(&history, &[], &pending);
 
+        assert_eq!(recovered, 0);
         // Untouched: it is still a function_call_output, matched by its call.
         assert_eq!(response_item_kind(&turn_input[0]), "function_call_output");
         assert_eq!(orphan_count(&upstream_input), 0);
         validate_continuation_input(&upstream_input, &[]).expect("paired input stays valid");
+    }
+
+    /// #960: a failed turn leaves these real outputs in Claude's replay but
+    /// outside the normal final-assistant pending suffix.
+    #[test]
+    fn assembly_recovers_failed_turn_outputs_in_replay_order() {
+        let history = vec![call_item("call_1"), call_item("call_2")];
+        let translated = vec![
+            call_item("call_1"),
+            call_item("call_2"),
+            output_item("call_1", json!("one")),
+            output_item("call_2", json!("two")),
+            json!({"type": "message", "role": "assistant", "content": []}),
+            json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}),
+        ];
+        let pending = vec![
+            json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}),
+        ];
+
+        let (upstream_input, turn_input, recovered) =
+            history_aware_input(&history, &translated, &pending);
+
+        assert_eq!(recovered, 2);
+        assert_eq!(call_id(&turn_input[0]), Some("call_1"));
+        assert_eq!(call_id(&turn_input[1]), Some("call_2"));
+        assert_eq!(turn_input[2]["content"][0]["text"], "continue");
+        validate_continuation_input(&upstream_input, &translated)
+            .expect("real replayed outputs complete canonical history");
     }
 
     #[test]
@@ -2141,8 +2250,9 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
             json!({"type": "message", "role": "user", "content": []}),
             output_item("call_1", json!("18C")),
         ];
-        let (upstream_input, turn_input) = history_aware_input(&[], &translated, &[]);
+        let (upstream_input, turn_input, recovered) = history_aware_input(&[], &translated, &[]);
 
+        assert_eq!(recovered, 0);
         assert_eq!(orphan_count(&upstream_input), 0);
         assert_eq!(orphan_count(&turn_input), 0);
         validate_continuation_input(&upstream_input, &[])

@@ -1603,6 +1603,13 @@ fn serve_messages(
                 if summary.orphaned_outputs_repaired > 0 {
                     log_orphaned_outputs_repaired(log, summary.orphaned_outputs_repaired);
                 }
+                if summary.pending_outputs_recovered > 0 {
+                    log_pending_outputs_recovered(
+                        log,
+                        conversation_key,
+                        summary.pending_outputs_recovered,
+                    );
+                }
                 if let Some(failure) = summary.in_band_failure.as_ref() {
                     log_in_band_failure(log, failure, request_phase(body), summary.request_shape);
                 }
@@ -1656,6 +1663,13 @@ fn serve_messages(
         let completed = pipeline
             .complete_with_history(body, &message_id, shutdown, history)
             .map(|completion| {
+                if completion.pending_outputs_recovered > 0 {
+                    log_pending_outputs_recovered(
+                        log,
+                        conversation_key,
+                        completion.pending_outputs_recovered,
+                    );
+                }
                 let rendered = serde_json::to_vec(&completion.message).unwrap_or_default();
                 if write_response(stream, 200, "application/json", &rendered, false).is_ok() {
                     completion.clear_history_after_client_commit(history);
@@ -1783,6 +1797,28 @@ fn log_orphaned_outputs_repaired(log: Option<&SharedBridgeLog>, repaired: usize)
         "event": "orphaned_outputs_repaired",
         "repaired_count": repaired,
         "reason": "history_compaction_elided_the_originating_call",
+    });
+    if let Some(log) = log {
+        lock_log(log).record(event.clone());
+    }
+    if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
+        eprintln!("[clud] codex bridge: {event}");
+    }
+}
+
+/// Record that canonical continuation assembly found real, previously omitted
+/// tool outputs in Claude's full replay. Counts and scope only: the identifiers
+/// and output payloads remain request-local.
+fn log_pending_outputs_recovered(
+    log: Option<&SharedBridgeLog>,
+    conversation_key: &ConversationKey,
+    recovered: usize,
+) {
+    let event = serde_json::json!({
+        "ts_ms": unix_ms(),
+        "event": "pending_outputs_recovered",
+        "conversation_scope": conversation_key.scope(),
+        "recovered_count": recovered,
     });
     if let Some(log) = log {
         lock_log(log).record(event.clone());
@@ -2619,6 +2655,46 @@ Connection: close
              event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_parent\",\"name\":\"Workflow\",\"arguments\":\"{}\"}}\n\n\
              event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
         )
+    }
+
+    fn visible_transport_failure_response() -> Vec<u8> {
+        let events = "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+                      event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\n";
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len() + 1024
+        )
+        .into_bytes()
+    }
+
+    fn failed_turn_replay_body(mut suffix: Vec<serde_json::Value>) -> String {
+        let mut messages = vec![
+            serde_json::json!({"role": "user", "content": "hi"}),
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "call_parent",
+                    "name": "Workflow",
+                    "input": {},
+                }],
+            }),
+            serde_json::json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_parent",
+                    "content": "result-parent",
+                }],
+            }),
+        ];
+        messages.append(&mut suffix);
+        serde_json::json!({
+            "model": "claude-x",
+            "messages": messages,
+            "stream": true,
+        })
+        .to_string()
     }
 
     fn parallel_function_call_response(count: usize) -> Vec<u8> {
@@ -5071,6 +5147,156 @@ Connection: close
         for index in 0..8 {
             assert_eq!(calls[index]["call_id"], format!("call_{index}"));
             assert_eq!(outputs[index]["call_id"], format!("call_{index}"));
+        }
+    }
+
+    /// Regression for #960: a failed turn does not commit its pending tool
+    /// result, and Claude records a later assistant error before replaying the
+    /// conversation. The bridge must recover the real result from that full
+    /// replay rather than wedging on the final-assistant suffix boundary.
+    #[test]
+    fn failed_stream_recovers_pending_output_from_full_replay() {
+        let failed_assistants = [
+            (
+                "synthetic-error",
+                serde_json::json!({
+                    "role": "assistant",
+                    "content": "API Error: Server error mid-response.",
+                }),
+            ),
+            (
+                "partial-tool-use",
+                serde_json::json!({
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call_partial",
+                        "name": "SendMessage",
+                        "input": {},
+                    }],
+                }),
+            ),
+        ];
+
+        for (case, failed_assistant) in failed_assistants {
+            let upstream = FakeResponses::start_with_responses(vec![
+                Some(function_call_response()),
+                Some(visible_transport_failure_response()),
+                None,
+                None,
+            ]);
+            let tmp = tempfile::tempdir().unwrap();
+            let log_path = tmp.path().join("bridge.jsonl");
+            let mut bridge =
+                BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone()))
+                    .unwrap();
+            let headers = [("X-Claude-Code-Session-Id", "secret-session-960")];
+
+            let first = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    PROBE_STREAM_BODY,
+                    &headers,
+                ),
+            );
+            assert_eq!(status(&first), 200, "{case}: {first}");
+
+            let failed = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    &failed_turn_replay_body(Vec::new()),
+                    &headers,
+                ),
+            );
+            assert_eq!(status(&failed), 200, "{case}: {failed}");
+            assert!(failed.contains("partial"), "{case}: {failed}");
+            assert!(failed.contains("event: error"), "{case}: {failed}");
+            assert_eq!(
+                upstream
+                    .requests()
+                    .iter()
+                    .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                    .count(),
+                2,
+                "{case}: a visible failed turn must not be retried"
+            );
+
+            let recovered = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    &failed_turn_replay_body(vec![
+                        failed_assistant.clone(),
+                        serde_json::json!({"role": "user", "content": "continue"}),
+                    ]),
+                    &headers,
+                ),
+            );
+            assert_eq!(status(&recovered), 200, "{case}: {recovered}");
+
+            let later = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    &failed_turn_replay_body(vec![
+                        failed_assistant,
+                        serde_json::json!({"role": "user", "content": "continue"}),
+                        serde_json::json!({"role": "assistant", "content": "bridged reply"}),
+                        serde_json::json!({"role": "user", "content": "still usable"}),
+                    ]),
+                    &headers,
+                ),
+            );
+            assert_eq!(status(&later), 200, "{case}: {later}");
+
+            let requests = upstream
+                .requests()
+                .into_iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .collect::<Vec<_>>();
+            assert_eq!(requests.len(), 4, "{case}: recovery did not reach upstream");
+            for request in &requests[2..] {
+                let body: serde_json::Value =
+                    serde_json::from_str(request.split_once("\r\n\r\n").expect("upstream body").1)
+                        .expect("upstream JSON");
+                let outputs = body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| {
+                        item["type"] == "function_call_output" && item["call_id"] == "call_parent"
+                    })
+                    .count();
+                assert_eq!(outputs, 1, "{case}: recovered output duplicated: {body}");
+            }
+
+            bridge.shutdown().unwrap();
+            let log = std::fs::read_to_string(log_path).unwrap();
+            assert!(
+                log.contains(r#""event":"pending_outputs_recovered""#),
+                "{case}: {log}"
+            );
+            assert!(log.contains(r#""recovered_count":1"#), "{case}: {log}");
+            assert!(
+                log.contains(r#""conversation_scope":"main""#),
+                "{case}: {log}"
+            );
+            for forbidden in ["call_parent", "result-parent", "secret-session-960"] {
+                assert!(
+                    !log.contains(forbidden),
+                    "{case}: leaked {forbidden}: {log}"
+                );
+            }
         }
     }
 
