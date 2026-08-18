@@ -1930,3 +1930,78 @@ provider routing, `--deepseek` remains backward compatible, and DSH's unstable
 grammar is isolated in the command adapter. The picker must restore terminal
 state on every exit, and Claude/Codex-specific options must error for DSH
 instead of becoming misleading no-ops.
+
+## DD-045: Direct Codex-through-Claude uses provider-scoped gateway discovery
+
+**Status:** Accepted
+
+**Context:** DD-038's one-row ceiling was correct for Claude Code 2.1.212, but
+became stale after Claude Code 2.1.223 admitted clud's reserved
+`clud-claude-*` gateway-discovery IDs and #912 implemented that protocol for
+unified mode. The direct bridge still emitted `gpt-5.6-terra@medium` through
+Claude's `--model` flag. That string was a bridge-private compound selector,
+not an OpenAI model ID, so current Claude Code classified it as unknown,
+presented one scalar custom row, and enforced its assumed 200K compaction
+window despite the GPT-5.6 family's 1.05M context.
+
+**Decision:** The direct bridge exposes `GET /v1/models` with exactly the
+three registered Codex discovery rows. Known launch selections are emitted as
+their discovery IDs; the bridge resolves those IDs before translation and
+sends only the catalog wire ID to OpenAI. Ordinary effort is a separate Claude
+session value. The provider-native `none` value remains a discovery-ID suffix
+because Claude's CLI does not accept it. The direct child enables discovery,
+scrubs the retired scalar custom-row variables, declares the 1,050,000-token
+context ceiling, and adopts unified mode's Claude Code 2.1.223 version floor.
+An inherited nonessential-traffic kill switch fails the launch because it
+would silently disable the required discovery request.
+
+This is provider-scoped discovery, not an alias for `--unified`: direct mode
+keeps bearer authentication, Codex credential ownership, plan-mode and Task
+suppression, and a catalog containing no Claude or DeepSeek routes. Legacy
+wire IDs and `<model>@<effort>` remain accepted for continued sessions and
+forward compatibility.
+
+**Consequences:** `/model` honestly presents Sol, Terra, and Luna; the harness
+never sees `gpt-5.6-terra@medium`; and auto-compaction no longer falls back to
+200K solely because the model name is unknown. Direct and unified gateways now
+share the discovery-ID contract while retaining different authentication and
+provider-routing boundaries. DD-038's one-row decision remains historical for
+pre-2.1.223 Claude Code and is superseded for supported clients.
+
+## DD-046: One catalog row is the model-extension unit
+
+**Status:** Accepted
+
+**Context:** zackees/clud#955. Two design audits followed the direct
+Codex-through-Claude failure. The history audit found repeated churn across
+model aliases, picker rows, effort transport, defaults, and context handling.
+The extension audit traced a hypothetical fourth Codex model through native
+Codex, direct Claude, unified Claude, launch plans, repeats, discovery, and
+request translation. `provider_catalog.rs` already owned the three identifier
+namespaces, but the translator still restated Terra as a default constant, the
+direct overlay restated 1,050,000 tokens, and important bridge tests restated
+three-element model arrays.
+
+**Decision:** A `CatalogModel` row is the sole production model-extension
+unit. It owns the clud/settings ID, provider wire ID, optional Claude discovery
+ID, display metadata, aliases, capabilities/defaults, provider-default marker,
+and Claude context metadata. Native harnesses consume the wire ID; Claude
+gateways advertise the discovery ID and resolve it through the same row. The
+Codex translator derives its fallback from the unique reviewed catalog
+default. Provider-scoped Claude discovery derives its process-wide context
+ceiling only when every advertised row declares the same value.
+
+Conformance tests iterate catalog rows for native and Claude argv, discovery
+advertisement, discovery-to-wire routing, and every supported effort. Separate
+literal assertions remain only where they intentionally guard billing policy
+(Terra is the reviewed default) or a historical upstream fixture. Unknown
+reserved discovery IDs fail locally; unknown explicit provider wire IDs keep
+the compatibility path.
+
+**Consequences:** Adding a non-default Codex model requires one production
+catalog-row edit, followed by normal documentation/review. Missing addressing
+or context metadata fails tests or launch locally instead of degrading the
+picker, choosing another paid model, or reviving Claude's unknown-model 200K
+assumption. A future harness must consume an existing namespace or add one
+explicit catalog field; private model tables and display-name inference are
+not allowed.

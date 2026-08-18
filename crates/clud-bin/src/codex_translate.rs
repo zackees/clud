@@ -25,7 +25,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::backend::ModelProvider;
 use crate::codex_model::{Effort, ModelSpec, SelectionError};
+use crate::provider_catalog;
 
 /// Return the new pending input for a continuation request.
 ///
@@ -68,21 +70,6 @@ pub fn pending_input_items_as_values(
     }
     input_items_as_values(&items)
 }
-
-/// Default upstream model. Codex fetches its catalogue from the server and
-/// hardcodes almost nothing, so this stays a single overridable value rather
-/// than growing into a table that would rot (`gpt-5.4` retires from
-/// ChatGPT-auth Codex on 2026-08-31).
-///
-/// `terra`, not the `sol` flagship: same 1.05M context, 2.5x cheaper on both
-/// input and output ($2/$12 per 1M vs $5/$30), and `medium` -- terra's own
-/// catalog default effort -- so the cheap tier is also the correctly-
-/// configured one. Defaulting to the flagship drained a real account (#776);
-/// a default nobody chose should not be the most expensive option available.
-///
-/// This is only the *fallback*. A request that names a model
-/// ([`resolve_selection`]) wins over it.
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-terra";
 
 /// Responses rejects identifiers longer than this.
 const MAX_IDENTIFIER_LEN: usize = 64;
@@ -147,9 +134,18 @@ pub enum SystemPlacement {
 }
 
 /// The default selection when a request does not carry one of its own.
+///
+/// The selected row lives only in the shared provider catalog; the translator
+/// consumes it rather than maintaining a second model/default table. Terra,
+/// not the Sol flagship, remains the reviewed fallback: it has the same 1.05M
+/// context, costs 2.5x less on both input and output, and uses its own medium
+/// default effort. Defaulting to the flagship drained a real account (#776).
+/// A request naming a model through [`resolve_selection`] still wins.
 pub fn default_model_spec() -> ModelSpec {
+    let model = provider_catalog::reviewed_default_model(ModelProvider::Codex)
+        .expect("the Codex catalog must contain exactly one reviewed provider default");
     ModelSpec {
-        model: DEFAULT_CODEX_MODEL.to_string(),
+        model: model.wire_id.to_string(),
         effort: None,
     }
 }
@@ -1645,7 +1641,7 @@ mod tests {
             assert_eq!(resolved(Some(claude)), default, "{claude}");
         }
         assert_eq!(resolved(None), default);
-        assert_eq!(DEFAULT_CODEX_MODEL, "gpt-5.6-terra");
+        assert_eq!(default_model_spec().model, "gpt-5.6-terra");
     }
 
     /// Issue #820: every model the picker can name has to reach the wire as
@@ -1731,10 +1727,11 @@ mod tests {
     #[test]
     fn wire_shape_matches_the_reference_request() {
         let out = ok(json!({"messages": [{"role": "user", "content": "hi"}]}));
+        let default_model = default_model_spec().model;
         assert_eq!(
             serde_json::to_value(&out).unwrap(),
             json!({
-                "model": DEFAULT_CODEX_MODEL,
+                "model": default_model,
                 "stream": true,
                 "store": false,
                 "include": ["reasoning.encrypted_content"],

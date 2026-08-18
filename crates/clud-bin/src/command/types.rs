@@ -42,11 +42,10 @@ pub struct LaunchPlan {
     /// through `stream_json::render_line` so the user sees live progress.
     #[serde(default)]
     pub stream_json_progress: bool,
-    /// The Codex model+effort selection for a Codex-provider / Claude-harness
-    /// launch, canonicalized (`gpt-5.6-terra@high`) from whatever short form
-    /// the user gave. Carried on the plan rather than re-derived from argv so
-    /// every launch path — subprocess, PTY, daemon, detach, repeat — hands the
-    /// bridge the same value, and so `--dry-run` can show it.
+    /// Legacy Codex model+effort compatibility selection, canonicalized as
+    /// `gpt-5.6-terra@high`. New plans use `model_selection` and emit a
+    /// harness-facing discovery ID; this field remains for old daemon payloads
+    /// and continued sessions that still carry the compound spelling.
     #[serde(default)]
     pub codex_model: Option<String>,
     /// Additive normalized selection. Older daemon payloads retain `codex_model`.

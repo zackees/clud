@@ -77,11 +77,9 @@ Entry and orchestration:
   re-confirmed against OpenAI's model guidance in #821). Selection rides the
   model string because that is the one field a custom `ANTHROPIC_BASE_URL`
   gateway is allowed to own, so it cannot be dropped in transit the way
-  `output_config` can (DD-035). Also owns `picker_entry` / `PickerEntry`
-  (#820, DD-038) -- the single `/model` row clud can add, rendered from the
-  shared registry so it cannot advertise a model or effort the parser rejects.
-  Its doc comment enumerates the six row sources in Claude Code and why none
-  of them yields three Codex entries.
+  `output_config` can (DD-035). The compound spelling remains a compatibility
+  input; current Claude launches advertise provider-scoped discovery IDs and
+  carry ordinary effort separately.
 - `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
   mapping: typed in/out structs, transcript-order-preserving tool loops,
   auth-mode-dependent system placement, reasoning round-trip, and bounded
@@ -143,8 +141,8 @@ Entry and orchestration:
   optional-provider notices, registers launch-scoped authenticated `PreCompact`
   and `SessionStart(clear)` HTTP hooks, and tears the listener down on every
   runner return path. Unified mode enables discovery while preserving Claude
-  credentials and ambient session effort; the direct Codex route retains
-  #820/DD-038's one custom `/model` row.
+  credentials and ambient session effort; the direct Codex route enables the
+  same protocol with a Codex-only catalog and child-local 1.05M context metadata.
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a

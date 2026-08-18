@@ -199,6 +199,12 @@ clud --codex --harness claude
 clud --codex --harness claude --model terra@high
 ```
 
+Claude Code 2.1.223 or newer shows separate Codex Sol, Terra, and Luna rows in
+`/model`. Clud advertises reserved discovery IDs to the harness, rewrites them
+to the real OpenAI model IDs inside the launch-scoped bridge, and carries
+reasoning effort independently. Older Claude Code clients fail at launch with
+an update instruction instead of silently showing a degraded picker.
+
 Provider and harness are separate choices. `--harness default` restores the
 provider's native harness for one launch. An explicit session/global choice is
 offered interactively; global choices are stored in `~/.clud/settings.json`.

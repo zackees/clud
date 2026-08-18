@@ -705,10 +705,21 @@ fn run(mut args: args::Args) {
             }
         }
     };
-    if launch_target.routing_mode == backend::RoutingMode::Unified && !args.dry_run {
-        if let Err(error) =
-            backend_bootstrap::require_unified_claude_version(std::path::Path::new(&backend_path))
+    if !args.dry_run {
+        let discovery_version = if launch_target.routing_mode == backend::RoutingMode::Unified {
+            Some(backend_bootstrap::require_unified_claude_version(
+                std::path::Path::new(&backend_path),
+            ))
+        } else if launch_target.model_provider == backend::ModelProvider::Codex
+            && launch_target.effective_harness == backend::Backend::Claude
         {
+            Some(backend_bootstrap::require_codex_bridge_claude_version(
+                std::path::Path::new(&backend_path),
+            ))
+        } else {
+            None
+        };
+        if let Some(Err(error)) = discovery_version {
             eprintln!("{error}");
             std::process::exit(2);
         }

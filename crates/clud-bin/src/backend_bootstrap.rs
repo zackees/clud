@@ -604,29 +604,51 @@ fn verify_backend(_backend: Backend, path: &Path) -> Result<(), String> {
 /// 2.1.223 and newer. Probe the executable selected by bootstrap so a stale
 /// client fails before the launch-scoped gateway or any paid request starts.
 pub fn require_unified_claude_version(path: &Path) -> Result<ClaudeCodeVersion, String> {
+    require_claude_discovery_version(path, "unified routing")
+}
+
+/// The direct Codex-through-Claude route now uses the same synthetic model
+/// discovery surface as unified routing, and therefore has the same client
+/// floor.
+pub fn require_codex_bridge_claude_version(path: &Path) -> Result<ClaudeCodeVersion, String> {
+    require_claude_discovery_version(path, "Codex-through-Claude model discovery")
+}
+
+fn require_claude_discovery_version(
+    path: &Path,
+    feature: &str,
+) -> Result<ClaudeCodeVersion, String> {
     let command = vec![path.to_string_lossy().to_string(), "--version".to_string()];
     let (exit_code, output) = run_captured_command(command).map_err(|error| {
         format!(
-            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but the installed client version could not be checked: {error}"
+            "{feature} requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but the installed client version could not be checked: {error}"
         )
     })?;
     if exit_code != 0 {
         return Err(format!(
-            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but the installed client's --version command exited with {exit_code}"
+            "{feature} requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but the installed client's --version command exited with {exit_code}"
         ));
     }
-    validate_unified_claude_version_output(&output)
+    validate_claude_discovery_version_output(&output, feature)
 }
 
+#[cfg(test)]
 fn validate_unified_claude_version_output(output: &str) -> Result<ClaudeCodeVersion, String> {
+    validate_claude_discovery_version_output(output, "unified routing")
+}
+
+fn validate_claude_discovery_version_output(
+    output: &str,
+    feature: &str,
+) -> Result<ClaudeCodeVersion, String> {
     let installed = parse_claude_code_version(output).ok_or_else(|| {
         format!(
-            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but no installed version could be parsed from `claude --version`"
+            "{feature} requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but no installed version could be parsed from `claude --version`"
         )
     })?;
     if installed < MIN_UNIFIED_CLAUDE_CODE_VERSION {
         return Err(format!(
-            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}; installed version is {installed}. Run `claude update` and retry"
+            "{feature} requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}; installed version is {installed}. Run `claude update` and retry"
         ));
     }
     Ok(installed)

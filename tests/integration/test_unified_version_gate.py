@@ -1,4 +1,4 @@
-"""Integration tests for the unified-mode Claude Code version floor (#921).
+"""Integration tests for Claude Code gateway-discovery version floors (#921).
 
 `clud --unified` advertises connector rows through gateway model discovery,
 which Claude Code 2.1.223+ consumes. A pre-floor client must refuse the
@@ -29,6 +29,19 @@ def _run_unified(
 ) -> process.CompletedProcess[str]:
     return process.run(
         [str(clud), "--unified", "-p", "hello"],
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        env=env,
+    )
+
+
+def _run_direct_codex(
+    clud: Path,
+    env: dict[str, str],
+) -> process.CompletedProcess[str]:
+    return process.run(
+        [str(clud), "--codex", "--harness", "claude", "-p", "hello"],
         capture_output=True,
         text=True,
         timeout=_TIMEOUT,
@@ -75,3 +88,25 @@ def test_unified_refuses_when_the_version_is_unverifiable(
     _assert_rc(result, 2)
     assert "no installed version could be parsed" in result.stderr
     assert "2.1.223" in result.stderr
+
+
+def test_direct_codex_refuses_a_pre_223_claude_code(
+    clud_binary: Path, mock_env: dict[str, str]
+) -> None:
+    mock_env["MOCK_CLAUDE_VERSION"] = "2.1.212 (Claude Code)"
+    result = _run_direct_codex(clud_binary, mock_env)
+    _assert_rc(result, 2)
+    assert (
+        "Codex-through-Claude model discovery requires Claude Code >= 2.1.223"
+        in result.stderr
+    )
+    assert "installed version is 2.1.212" in result.stderr
+    assert "claude update" in result.stderr
+
+
+def test_direct_codex_launches_at_the_223_floor(
+    clud_binary: Path, mock_env: dict[str, str]
+) -> None:
+    mock_env["MOCK_CLAUDE_VERSION"] = "2.1.223 (Claude Code)"
+    result = _run_direct_codex(clud_binary, mock_env)
+    _assert_rc(result, 0)

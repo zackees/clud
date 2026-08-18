@@ -501,6 +501,37 @@ def test_dry_run_reports_independent_provider_and_harness() -> None:
     assert data["harness_source"] == "cli"
     assert data["backend"] == "claude"
     assert "--harness" not in data["command"]
+    model_index = data["command"].index("--model")
+    assert data["command"][model_index + 1] == "clud-claude-codex-terra"
+    effort_index = data["command"].index("--effort")
+    assert data["command"][effort_index + 1] == "medium"
+
+
+def test_dry_run_keeps_sol_selected_through_the_claude_loop_path() -> None:
+    """Issue #955: loop/repeat planning must not lose the discovery address."""
+    result = _run(
+        "--dry-run",
+        "--codex",
+        "--harness",
+        "claude",
+        "--model",
+        "codex-sol",
+        "--effort",
+        "low",
+        "loop",
+        "--loop-count",
+        "1",
+        "--no-done",
+        "reply once",
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["iterations"] == 1
+    assert data["model_selection"]["wire_model"] == "gpt-5.6-sol"
+    model_index = data["command"].index("--model")
+    assert data["command"][model_index + 1] == "clud-claude-codex-sol"
+    effort_index = data["command"].index("--effort")
+    assert data["command"][effort_index + 1] == "low"
 
 
 def test_dry_run_uses_global_harness_and_cli_can_override_it(tmp_path: Path) -> None:

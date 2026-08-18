@@ -328,6 +328,9 @@ fn main() {
     let api_timeout_ms = std::env::var("API_TIMEOUT_MS").ok();
     let disable_nonessential_traffic =
         std::env::var("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").ok();
+    let enable_gateway_model_discovery =
+        std::env::var("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY").ok();
+    let max_context_tokens = std::env::var("CLAUDE_CODE_MAX_CONTEXT_TOKENS").ok();
     let bridge_probe = codex_bridge_probe_to.as_deref().map(run_codex_bridge_probe);
     let cwd = std::env::current_dir()
         .ok()
@@ -354,6 +357,8 @@ fn main() {
             "ANTHROPIC_API_KEY_PRESENT": anthropic_api_key_present,
             "API_TIMEOUT_MS": api_timeout_ms,
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": disable_nonessential_traffic,
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": enable_gateway_model_discovery,
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": max_context_tokens,
         },
         "codex_bridge_probe": bridge_probe,
     });
