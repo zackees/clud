@@ -304,12 +304,16 @@ class TestCodexBridgeForeground:
             "ANTHROPIC_API_KEY_PRESENT",
             "API_TIMEOUT_MS",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
         }
         assert report["env"]["ANTHROPIC_BASE_URL_PRESENT"] is True
         assert report["env"]["ANTHROPIC_AUTH_TOKEN_PRESENT"] is True
         assert report["env"]["ANTHROPIC_API_KEY_PRESENT"] is False
         assert report["env"]["API_TIMEOUT_MS"] == "3000000"
-        assert report["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+        assert report["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] is None
+        assert report["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+        assert report["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1050000"
         probe = json.loads(probe_path.read_text(encoding="utf-8"))
         assert probe == report["codex_bridge_probe"]
         assert set(probe) == {
@@ -360,6 +364,45 @@ class TestCodexBridgeForeground:
         else:
             connection.close()
             pytest.fail("bridge listener survived foreground process exit")
+
+    def test_sol_selection_survives_single_iteration_claude_loop(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        fake_responses: _FakeResponsesServer,
+    ) -> None:
+        """Issue #955: the paid loop request must reach the selected Sol row."""
+        env = mock_env.copy()
+        env["CLUD_INTEGRATION_TESTS"] = "1"
+        env["CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL"] = fake_responses.base_url
+        probe_path = tmp_path / "sol-loop-probe.json"
+        result = _run(
+            clud_binary,
+            "--codex",
+            "--harness",
+            "claude",
+            "--subprocess",
+            "--model",
+            "codex-sol",
+            "--effort",
+            "low",
+            "loop",
+            "--loop-count",
+            "1",
+            "--no-done",
+            "reply once",
+            "--",
+            "--mock-codex-bridge-probe",
+            str(probe_path),
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert len(fake_responses.requests) == 1
+        _, _, body = fake_responses.requests[0].partition(b"\r\n\r\n")
+        sent = json.loads(body)
+        assert sent["model"] == "gpt-5.6-sol"
+        assert sent["reasoning"]["effort"] == "low"
 
     @pytest.mark.parametrize("provider_flag", ["--claude", "--codex"])
     def test_native_routes_receive_no_bridge_overlay(

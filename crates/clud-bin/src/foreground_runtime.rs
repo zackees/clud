@@ -4,8 +4,7 @@ use crate::backend::{Backend, ModelProvider, RoutingMode};
 use crate::codex_bridge::{
     BridgeConfig, BridgeError, BridgeHandle, UnifiedGatewayConfig, UNIFIED_GATEWAY_TOKEN_HEADER,
 };
-use crate::codex_model::{picker_entry, ModelSpec};
-use crate::codex_translate::default_model_spec;
+use crate::codex_model::ModelSpec;
 use crate::command::LaunchPlan;
 use crate::subprocess::ManagedSubprocess;
 use running_process::pty::NativePtyProcess;
@@ -16,7 +15,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 const DEFAULT_API_TIMEOUT_MS: &str = "3000000";
-const DEFAULT_DISABLE_NONESSENTIAL_TRAFFIC: &str = "1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
@@ -113,15 +111,10 @@ impl ForegroundRuntime {
             // the first turn: by the time a request is in flight the user has
             // already waited, and the message would arrive wrapped in the
             // harness's own API-error framing.
-            let selection = match plan.codex_model.as_deref() {
-                Some(raw) => Some(
-                    ModelSpec::parse(raw).map_err(|error| BridgeError::Model(error.to_string()))?,
-                ),
-                None => None,
-            };
+            let selection = codex_selection_from_plan(plan)?;
             let bridge =
                 BridgeHandle::start(BridgeConfig::default().with_default_model(selection.clone()))?;
-            apply_cross_route_overlay(&mut env, &bridge, selection.as_ref());
+            apply_cross_route_overlay(&mut env, &bridge)?;
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), Vec::new())
         } else if is_anthropic_compat_via_claude(plan) {
@@ -416,19 +409,48 @@ fn apply_anthropic_compat_overlay(
     }
 }
 
+fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, BridgeError> {
+    if let Some(selection) = plan
+        .model_selection
+        .as_ref()
+        .filter(|selection| selection.provider == ModelProvider::Codex)
+    {
+        if let Some(model) = selection.wire_model.clone() {
+            return Ok(Some(ModelSpec {
+                model,
+                effort: selection.effort,
+            }));
+        }
+    }
+    plan.codex_model
+        .as_deref()
+        .map(ModelSpec::parse)
+        .transpose()
+        .map_err(|error| BridgeError::Model(error.to_string()))
+}
+
 fn apply_cross_route_overlay(
     env: &mut Vec<(String, String)>,
     bridge: &BridgeHandle,
-    selection: Option<&ModelSpec>,
-) {
+) -> Result<(), BridgeError> {
+    if env.iter().any(|(key, value)| {
+        env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            && (value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
+    }) {
+        return Err(BridgeError::DiscoveryDisabled);
+    }
     env.retain(|(key, _)| {
         ![
             "ANTHROPIC_BASE_URL",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         ]
         .iter()
         .any(|sensitive| env_key_eq(key, sensitive))
+            && !key
+                .to_ascii_uppercase()
+                .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
     });
     env.push((
         "ANTHROPIC_BASE_URL".to_string(),
@@ -438,26 +460,26 @@ fn apply_cross_route_overlay(
         "ANTHROPIC_AUTH_TOKEN".to_string(),
         bridge.bearer_token().to_string(),
     ));
-    // Put the selection in the harness's model picker. The harness renders
-    // exactly one custom row (see `codex_model::PickerEntry` for the six row
-    // sources and why none of them yields three), so the row is
-    // unconditional — an unpinned launch would otherwise show only Anthropic
-    // names that quietly run on the bridge's default — and its description
-    // carries the models the row itself cannot name.
-    let entry = picker_entry(&selection.cloned().unwrap_or_else(default_model_spec));
-    push_default(env, "ANTHROPIC_CUSTOM_MODEL_OPTION", &entry.value);
-    push_default(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", &entry.name);
-    push_default(
+    // Claude Code 2.1.223+ discovers every provider-scoped row from the
+    // bridge. Its context override is process-wide, so the catalog must prove
+    // that every switchable Codex row has one common real ceiling.
+    let context_tokens = crate::provider_catalog::common_claude_context_tokens(
+        ModelProvider::Codex,
+    )
+    .ok_or_else(|| {
+        BridgeError::Model(
+            "Codex Claude-discovery models need one explicit common context-token ceiling"
+                .to_string(),
+        )
+    })?;
+    set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+    set_env(
         env,
-        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
-        &entry.description,
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        &context_tokens.to_string(),
     );
     push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
-    push_default(
-        env,
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        DEFAULT_DISABLE_NONESSENTIAL_TRAFFIC,
-    );
+    Ok(())
 }
 
 fn apply_unified_overlay(
@@ -951,66 +973,60 @@ mod tests {
         assert_eq!(lookup(env, "API_TIMEOUT_MS"), Some("custom-timeout"));
         assert_eq!(
             lookup(env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+            None
+        );
+        assert_eq!(
+            lookup(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some("1")
+        );
+        assert_eq!(
+            lookup(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some("1050000")
         );
         assert_eq!(lookup(&base, "ANTHROPIC_API_KEY"), Some("ambient-key"));
     }
 
-    /// The selection reaches the child as a picker entry. Gateway model
-    /// discovery cannot carry it (it drops every id not prefixed `claude`),
-    /// so this variable is the only route to a visible, honest row.
+    /// The discovery catalog replaces the old scalar custom-row extension.
     #[test]
-    fn a_selection_becomes_a_picker_entry_in_the_child_environment() {
-        let mut plan = plan(ModelProvider::Codex, Backend::Claude);
-        plan.codex_model = Some("gpt-5.6-luna@high".to_string());
-        let runtime = ForegroundRuntime::start(&plan, Vec::new()).unwrap();
-        let env = runtime.env();
-        assert_eq!(
-            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"),
-            Some("gpt-5.6-luna@high")
-        );
-        assert_eq!(
-            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"),
-            Some("Codex gpt-5.6-luna@high")
-        );
+    fn direct_codex_discovery_scrubs_the_legacy_custom_picker_row() {
+        let runtime = ForegroundRuntime::start(
+            &plan(ModelProvider::Codex, Backend::Claude),
+            vec![(
+                "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
+                "stale-row".to_string(),
+            )],
+        )
+        .unwrap();
+        assert_eq!(lookup(runtime.env(), "ANTHROPIC_CUSTOM_MODEL_OPTION"), None);
     }
 
-    /// Issue #820: all three gpt-5.6 models must be reachable from the picker.
-    ///
-    /// Claude Code renders **one** custom row — `ANTHROPIC_CUSTOM_MODEL_OPTION`
-    /// is a scalar and has no indexed or list form — so the row's description
-    /// is the only place the models the user did *not* launch with can appear.
+    /// Discovery cannot work while the harness's network kill switch is set.
     #[test]
-    fn the_picker_row_makes_every_codex_model_discoverable() {
-        let mut plan = plan(ModelProvider::Codex, Backend::Claude);
-        plan.codex_model = Some("sol".to_string());
-        let runtime = ForegroundRuntime::start(&plan, Vec::new()).unwrap();
-        let env = runtime.env();
-        assert_eq!(
-            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"),
-            Some("gpt-5.6-sol")
-        );
-        let description = lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION")
-            .expect("the single custom row must carry the rest of the catalog");
-        for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
-            assert!(description.contains(id), "{description} must name {id}");
-        }
+    fn direct_codex_refuses_disabled_model_discovery() {
+        let error = ForegroundRuntime::start(
+            &plan(ModelProvider::Codex, Backend::Claude),
+            vec![(
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                "1".to_string(),
+            )],
+        )
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::DiscoveryDisabled));
     }
 
-    /// Without `--model` the picker used to show no Codex row at all, so every
-    /// visible row was an Anthropic name that quietly ran on the bridge's
-    /// default. The honest row is now unconditional and spells that default.
+    /// New typed plans no longer depend on the compatibility selector field.
     #[test]
-    fn an_unpinned_launch_still_gets_an_honest_default_row() {
-        let runtime =
-            ForegroundRuntime::start(&plan(ModelProvider::Codex, Backend::Claude), Vec::new())
-                .unwrap();
-        let env = runtime.env();
-        assert_eq!(
-            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"),
-            Some(crate::codex_translate::DEFAULT_CODEX_MODEL)
-        );
-        assert!(lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION").is_some());
+    fn normalized_selection_supersedes_the_legacy_plan_field() {
+        let mut route = plan(ModelProvider::Codex, Backend::Claude);
+        route.codex_model = Some("tera".to_string());
+        route.model_selection = crate::provider_catalog::resolve(
+            Some(ModelProvider::Codex),
+            Some("luna"),
+            Some("high"),
+            None,
+        )
+        .unwrap();
+        ForegroundRuntime::start(&route, Vec::new()).unwrap();
     }
 
     /// A bad selection fails the launch, not the first turn: by the time a
@@ -1372,7 +1388,15 @@ mod tests {
         assert_eq!(lookup(env, "api_timeout_ms"), Some("custom-timeout"));
         assert_eq!(
             lookup(env, "claude_code_disable_nonessential_traffic"),
-            Some("custom-traffic")
+            None
+        );
+        assert_eq!(
+            lookup(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some("1")
+        );
+        assert_eq!(
+            lookup(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some("1050000")
         );
         assert_eq!(
             env.iter()

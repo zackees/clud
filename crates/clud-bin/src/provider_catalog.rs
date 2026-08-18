@@ -102,6 +102,12 @@ pub struct CatalogModel {
     /// Reviewed direct-launch default for this provider. Claude intentionally
     /// has no row marked: its harness-owned default remains authoritative.
     pub provider_default: bool,
+    /// The model's real input context ceiling when Claude Code reaches it
+    /// through a discovery ID that the harness does not natively recognize.
+    /// Provider-scoped discovery sessions require one common non-`None` value
+    /// across every advertised row; [`common_claude_context_tokens`] enforces
+    /// that contract instead of letting an adapter restate the number.
+    pub claude_max_context_tokens: Option<u32>,
     /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` value to set in the child-env overlay
     /// when this row's wire ID is selected, or `None` if the overlay should
     /// leave the variable unset. Replaces a hardcoded `model.ends_with("[1m]")`
@@ -122,6 +128,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Low),
         default_context_window: None,
         provider_default: false,
+        claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
     },
     CatalogModel {
@@ -136,6 +143,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
         provider_default: true,
+        claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
     },
     CatalogModel {
@@ -150,6 +158,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
         provider_default: false,
+        claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
     },
     CatalogModel {
@@ -167,6 +176,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Max),
         default_context_window: Some("1m"),
         provider_default: true,
+        claude_max_context_tokens: None,
         claude_compact_window: Some(786_432),
     },
     CatalogModel {
@@ -181,6 +191,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_max_context_tokens: None,
         claude_compact_window: None,
     },
     CatalogModel {
@@ -195,6 +206,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Max),
         default_context_window: Some("1m"),
         provider_default: true,
+        claude_max_context_tokens: None,
         claude_compact_window: Some(1_048_576),
     },
     CatalogModel {
@@ -210,6 +222,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Max),
         default_context_window: None,
         provider_default: true,
+        claude_max_context_tokens: None,
         claude_compact_window: None,
     },
     // Claude tier aliases are compatibility rows. Versioned Claude inventory
@@ -226,6 +239,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_max_context_tokens: None,
         claude_compact_window: None,
     },
     CatalogModel {
@@ -240,6 +254,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_max_context_tokens: None,
         claude_compact_window: None,
     },
     CatalogModel {
@@ -254,6 +269,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_max_context_tokens: None,
         claude_compact_window: None,
     },
 ];
@@ -438,6 +454,21 @@ pub fn models_for_provider(provider: ModelProvider) -> impl Iterator<Item = Cata
 
 pub fn reviewed_default_model(provider: ModelProvider) -> Option<CatalogModel> {
     models_for_provider(provider).find(|entry| entry.provider_default)
+}
+
+/// Return the common real context ceiling for a provider-scoped Claude
+/// discovery catalog.
+///
+/// Claude Code's `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is process-wide, while a
+/// provider-scoped picker can switch among every registered row. Returning
+/// `None` for missing or inconsistent metadata forces a future model addition
+/// to make that policy explicit instead of silently inheriting a stale value.
+pub fn common_claude_context_tokens(provider: ModelProvider) -> Option<u32> {
+    let mut models = models_for_provider(provider);
+    let context_tokens = models.next()?.claude_max_context_tokens?;
+    models
+        .all(|entry| entry.claude_max_context_tokens == Some(context_tokens))
+        .then_some(context_tokens)
 }
 
 pub fn supported_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
@@ -797,6 +828,28 @@ pub fn resolve_for_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #955: an adapter must never have to choose between duplicate
+    /// defaults or restate a provider's context ceiling outside this table.
+    #[test]
+    fn provider_defaults_are_unique_and_codex_discovery_has_one_context_policy() {
+        for provider in ModelProvider::ALL.iter().copied() {
+            assert!(
+                models_for_provider(provider)
+                    .filter(|entry| entry.provider_default)
+                    .count()
+                    <= 1,
+                "{provider} has more than one reviewed default"
+            );
+        }
+
+        assert_eq!(
+            common_claude_context_tokens(ModelProvider::Codex),
+            Some(1_050_000)
+        );
+        assert!(models_for_provider(ModelProvider::Codex)
+            .all(|entry| entry.claude_max_context_tokens == Some(1_050_000)));
+    }
 
     /// Guardrail: `apply_anthropic_compat_overlay` (foreground_runtime.rs)
     /// expects `reviewed_default_model` to resolve for every

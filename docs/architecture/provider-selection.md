@@ -53,8 +53,9 @@ Code discovery version, or starting the gateway.
 | Provider wire ID | `gpt-5.6-terra` |
 
 The catalog also owns display names, compatibility aliases, effort/context
-capabilities, and reviewed defaults. Direct launch parsing and the gateway
-consume these rows instead of maintaining parallel provider tables.
+capabilities, reviewed defaults, and harness-specific context metadata. Direct
+launch parsing and gateways consume these rows instead of maintaining parallel
+provider tables.
 
 All three registered namespaces resolve through the same rows. Unknown custom
 wire IDs remain reachable under an already resolved provider. The typed
@@ -84,6 +85,32 @@ An unknown future `gpt-*` wire ID remains directly reachable for backwards
 compatibility. Its normalized selection records Codex as the provider while
 the model and wire values remain byte-for-byte (for example,
 `gpt-5.7-nova`).
+
+### Adding a cataloged model
+
+For an additional model of an existing provider, the only production model
+mapping edit is one `CatalogModel` row. That row must declare its stable clud
+ID, provider wire ID, optional Claude discovery ID, display name, legacy
+aliases, effort/context capabilities and defaults, provider-default status,
+and any Claude context/compaction metadata. Existing adapters then select the
+appropriate namespace:
+
+- clud settings and command lines use `cli_id`;
+- the provider-native harness/API uses `wire_id`;
+- a Claude gateway advertises `discovery_id` and resolves it back through the
+  same row before contacting the provider.
+
+Catalog conformance tests iterate the rows. They reject duplicate discovery
+IDs or provider defaults, unresolved namespace round trips, and—in a
+provider-scoped Claude picker—missing or inconsistent process-wide context
+metadata. Bridge and command tests also iterate every Codex row, so adding a
+fourth model cannot leave discovery, routing, or native-harness addressing on
+an old three-element list.
+
+Adding an entirely new harness transport is a separate adapter decision: it
+must name which existing catalog namespace it consumes or add one explicit
+namespace field to `CatalogModel`. It must not infer IDs from display names,
+strip provider prefixes, or create a private model table.
 
 ## Resolution and validation
 
@@ -132,8 +159,10 @@ accepted work.
   explicit effort through Claude Code's `--effort` session flag.
 - Native Codex receives the wire model through `-m` and effort through
   the documented `model_reasoning_effort` config override.
-- Codex through Claude retains the bridge-compatible `wire@effort` spelling
-  while also carrying the independent normalized fields on `LaunchPlan`.
+- Codex through Claude emits a registered `clud-claude-codex-*` discovery ID
+  and carries ordinary effort through Claude Code's independent `--effort`
+  session flag. The bridge still accepts `wire@effort` as a compatibility
+  input; only the provider wire ID reaches OpenAI.
 - Direct DeepSeek keeps its reviewed no-override max/1m child profile. Explicit
   model, effort, and context selections replace only their corresponding
   child-profile values.
@@ -175,4 +204,5 @@ selection and its sources so routing can be audited without a paid request.
 Focused guardrails cover provider inference and conflicts, modifier
 coalescing, Claude/Codex namespace separation, future wire-ID compatibility,
 CLI ownership around `--`, unified saved-preference isolation, native harness
-argv/config emission, serde defaults, and repeat reconstruction.
+argv/config emission, catalog-driven discovery/routing matrices, provider
+default/context uniqueness, serde defaults, and repeat reconstruction.

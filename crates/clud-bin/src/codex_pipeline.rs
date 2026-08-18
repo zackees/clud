@@ -1684,9 +1684,9 @@ mod tests {
     }
 
     /// The billed default, asserted as a literal on the wire rather than
-    /// through `DEFAULT_CODEX_MODEL` — a constant-based assertion follows the
-    /// constant wherever it goes and cannot notice a change in what the user
-    /// is charged for. `terra` at `medium` is the pair #776 selected: `sol`
+    /// through the catalog's provider-default row — a metadata-based assertion
+    /// follows the row wherever it goes and cannot notice a change in what the
+    /// user is charged for. `terra` at `medium` is the pair #776 selected: `sol`
     /// costs 2.5x on both input and output, and `medium` is terra's own
     /// catalog default effort.
     #[test]

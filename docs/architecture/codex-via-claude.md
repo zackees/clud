@@ -7,6 +7,29 @@ credential route. Native Claude launches and every non-bridge route remain
 unchanged; stopping the foreground runtime stops the listener and is the
 rollback boundary.
 
+## Model discovery and context
+
+Claude Code 2.1.223 or newer discovers a Codex-only catalog from the bridge's
+authenticated `GET /v1/models`. The three rows use reserved harness-facing
+IDs (`clud-claude-codex-sol`, `clud-claude-codex-terra`, and
+`clud-claude-codex-luna`); the bridge rewrites the selected row to its real
+`gpt-5.6-*` wire ID before calling OpenAI. Unknown reserved IDs fail locally.
+Provider wire IDs and the legacy `<model>@<effort>` spelling remain accepted
+for continued sessions and forward-compatible explicit IDs, but clud no
+longer emits a compound wire ID to Claude Code.
+
+Ordinary effort travels through Claude Code's session effort field and reaches
+the translator as `output_config.effort`. The provider-native `none` value,
+which Claude Code's CLI does not accept, remains a suffix on the synthetic ID.
+The child overlay enables gateway discovery, removes the retired scalar custom
+picker row, and derives `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1050000` from the
+common context metadata on every advertised Codex catalog row so Claude Code
+does not apply its unknown-model 200K compaction fallback. A future Codex row
+with missing or different context metadata fails the catalog invariant rather
+than silently inheriting this value. Setting
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is incompatible with this route
+and fails before child launch.
+
 ## Conversation state and compaction
 
 The bridge owns an in-memory canonical Responses transcript for its lifetime.

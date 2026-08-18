@@ -147,6 +147,40 @@ fn test_loop_under_codex_provider_claude_harness_disallows_interactive_tools() {
         .any(|a| a == "--disallowedTools=EnterPlanMode,Task,AskUserQuestion"));
 }
 
+/// Issue #955 acceptance path: Sol stays selected when `loop` turns the
+/// Claude harness launch into a subprocess/repeat plan.
+#[test]
+fn sol_through_claude_loop_keeps_the_discovery_model_and_wire_selection() {
+    let args = parse(&[
+        "clud",
+        "--model",
+        "codex-sol",
+        "--effort",
+        "low",
+        "loop",
+        "--loop-count",
+        "1",
+        "--no-done",
+        "reply once",
+    ]);
+    let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert_eq!(plan.iterations, 1);
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--model", "clud-claude-codex-sol"]));
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--effort", "low"]));
+    assert_eq!(
+        plan.model_selection
+            .as_ref()
+            .and_then(|selection| selection.wire_model.as_deref()),
+        Some("gpt-5.6-sol")
+    );
+}
+
 /// `clud --codex --harness claude`, interactive, no `--unattended`.
 fn bridge_target() -> ResolvedLaunchTarget {
     ResolvedLaunchTarget {
@@ -368,17 +402,55 @@ fn test_plain_codex_harness_keeps_getting_no_claude_only_flag() {
     assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
 }
 
-/// On the bridge, `--model` names a *Codex* model even though the flag goes
-/// to the Claude harness. The short name is expanded so `--dry-run` shows
-/// what will actually be billed, not the shorthand that was typed.
+/// The Claude harness receives the registered discovery ID while the plan
+/// retains the provider wire selection for bridge/default compatibility.
 #[test]
-fn test_bridge_expands_a_short_model_name_in_argv_and_on_the_plan() {
+fn test_bridge_uses_a_discovery_id_and_separate_effort() {
     let args = parse(&["clud", "--model", "terra@high"]);
     let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
     let model_index = p.command.iter().position(|a| a == "--model").unwrap();
-    assert_eq!(p.command[model_index + 1], "gpt-5.6-terra@high");
+    assert_eq!(p.command[model_index + 1], "clud-claude-codex-terra");
     assert_eq!(p.codex_model.as_deref(), Some("gpt-5.6-terra@high"));
-    assert!(!p.command.iter().any(|arg| arg == "--effort"));
+    assert!(p
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--effort", "high"]));
+}
+
+/// Issue #955: the shared catalog is the extension seam for both the native
+/// Codex harness and Claude's discovery namespace. This deliberately iterates
+/// rows instead of restating Sol/Terra/Luna in the adapter test.
+#[test]
+fn every_registered_codex_model_has_native_and_claude_harness_addresses() {
+    for model in crate::provider_catalog::models_for_provider(ModelProvider::Codex) {
+        let args = parse(&["clud", "--model", model.cli_id, "--effort", "high"]);
+        let claude = build_launch_plan_for_target(&args, bridge_target(), "claude");
+        let discovery_id = model.discovery_id.expect("Codex discovery id");
+        assert!(
+            claude
+                .command
+                .windows(2)
+                .any(|pair| pair == ["--model", discovery_id]),
+            "{}",
+            claude.command.join(" ")
+        );
+        assert!(claude
+            .command
+            .windows(2)
+            .any(|pair| pair == ["--effort", "high"]));
+
+        let native_target =
+            crate::backend::resolve_launch_target(false, true, false, None, None, None).unwrap();
+        let native = build_launch_plan_for_target(&args, native_target, "codex");
+        assert!(
+            native
+                .command
+                .windows(2)
+                .any(|pair| pair == ["-m", model.wire_id]),
+            "{}",
+            native.command.join(" ")
+        );
+    }
 }
 
 #[test]
@@ -422,9 +494,23 @@ fn model_less_bridge_effort_pins_the_reviewed_default_model() {
     assert!(plan
         .command
         .windows(2)
-        .any(|pair| pair == ["--model", "gpt-5.6-terra@high"]));
-    assert!(!plan.command.iter().any(|arg| arg == "--effort"));
+        .any(|pair| pair == ["--model", "clud-claude-codex-terra"]));
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--effort", "high"]));
     assert_eq!(plan.codex_model.as_deref(), Some("gpt-5.6-terra@high"));
+}
+
+#[test]
+fn bridge_keeps_none_effort_on_the_discovery_id() {
+    let args = parse(&["clud", "--model", "luna", "--effort", "none"]);
+    let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--model", "clud-claude-codex-luna@none"]));
+    assert!(!plan.command.iter().any(|arg| arg == "--effort"));
 }
 
 #[test]

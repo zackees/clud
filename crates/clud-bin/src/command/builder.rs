@@ -245,27 +245,39 @@ fn build_launch_plan_for_target_at(
         cmd.push(format!("--disallowedTools={}", disallowed.join(",")));
     }
 
-    // On the Codex-provider / Claude-harness bridge, `--model` selects a
-    // *Codex* model even though the flag is handed to the Claude harness. The
-    // short name is expanded to the wire id here so the harness forwards
-    // something upstream understands, and so `--dry-run` shows what will
-    // actually be billed rather than the shorthand that was typed.
-    //
-    // This works at all because a custom `ANTHROPIC_BASE_URL` makes the
-    // gateway the owner of the model namespace: the harness passes the string
-    // through without validating it. An id that does not parse is left alone
-    // and rejected by the bridge, which owns the error message.
+    // A Claude-harness gateway must receive its catalog discovery id, not the
+    // provider wire id. Claude Code sees and classifies this value before the
+    // bridge can rewrite it; handing it `gpt-5.6-terra@medium` makes the
+    // harness treat a valid 1M model as an unknown 200K model. The bridge owns
+    // the `clud-claude-*` namespace and translates it to the wire id at the
+    // request boundary.
     let codex_model = codex_model_selection(args, target, model_selection.as_ref());
-    let emitted_model = if target.routing_mode == crate::backend::RoutingMode::Unified {
-        unified_gateway_model_selection(model_selection.as_ref()).or_else(|| args.model.clone())
-    } else {
-        codex_model.clone().or_else(|| {
-            model_selection
-                .as_ref()
-                .and_then(|selection| selection.wire_model.clone())
-                .or_else(|| args.model.clone())
-        })
-    };
+    let codex_discovery_route = target.model_provider == ModelProvider::Codex
+        && target.effective_harness == Backend::Claude;
+    let mut emitted_model =
+        if target.routing_mode == crate::backend::RoutingMode::Unified || codex_discovery_route {
+            gateway_model_selection(model_selection.as_ref()).or_else(|| args.model.clone())
+        } else {
+            codex_model.clone().or_else(|| {
+                model_selection
+                    .as_ref()
+                    .and_then(|selection| selection.wire_model.clone())
+                    .or_else(|| args.model.clone())
+            })
+        };
+    // Claude Code's session effort flag does not accept `none`. Preserve that
+    // one provider-native value on the discovery id; the bridge strips it
+    // before sending the real model id and effort to OpenAI.
+    if codex_discovery_route
+        && model_selection
+            .as_ref()
+            .and_then(|selection| selection.effort)
+            == Some(crate::provider_catalog::EffortLevel::None)
+    {
+        if let Some(model) = emitted_model.as_mut() {
+            model.push_str("@none");
+        }
+    }
     if let Some(emitted) = emitted_model {
         match backend {
             Backend::Claude => {
@@ -279,16 +291,10 @@ fn build_launch_plan_for_target_at(
             Backend::DeepSeek => {}
         }
     }
-    // Direct Codex-via-Claude already carries effort in the bridge-owned
-    // `<wire-model>@<effort>` compatibility spelling. Passing Claude's
-    // `--effort` as well would mutate harness session state and change the
-    // established direct-route contract. Native Claude, DeepSeek's
-    // Anthropic-compatible route, and future unified sessions use the harness
-    // effort field directly.
-    if matches!(backend, Backend::Claude)
-        && !(target.routing_mode == crate::backend::RoutingMode::Direct
-            && target.model_provider == ModelProvider::Codex)
-    {
+    // Effort is harness-owned session state and travels independently from
+    // the discovered model id. (`none` is the sole exception above because it
+    // is not a Claude Code CLI value.)
+    if matches!(backend, Backend::Claude) {
         if let Some(effort) = model_selection
             .as_ref()
             .and_then(|selection| selection.effort)
@@ -568,22 +574,21 @@ fn codex_model_selection(
 }
 
 /// Translate a normalized initial selection into the ID Claude Code must send
-/// back to the unified discovery gateway. Provider wire IDs are not safe here:
+/// back to a discovery gateway. Provider wire IDs are not safe here:
 /// an unrecognized `gpt-*` would look like an ordinary native Claude ID and
 /// could be proxied to Anthropic.
-fn unified_gateway_model_selection(
+fn gateway_model_selection(
     selection: Option<&provider_catalog::ResolvedModelSelection>,
 ) -> Option<String> {
     let selection = selection?;
     if selection.provider == ModelProvider::Claude {
         return selection.wire_model.clone();
     }
-    selection
-        .model
-        .as_deref()
-        .and_then(provider_catalog::model_by_cli_id)
-        .and_then(|model| model.discovery_id)
-        .map(str::to_string)
+    let model = match selection.model.as_deref() {
+        Some(model) => provider_catalog::model_by_cli_id(model),
+        None => provider_catalog::reviewed_default_model(selection.provider),
+    }?;
+    model.discovery_id.map(str::to_string)
 }
 
 fn has_codex_project_doc_fallback_override(overrides: &[String]) -> bool {

@@ -305,7 +305,7 @@ impl fmt::Display for BridgeError {
                 "provider credentials are unavailable at the child-spawn boundary",
             ),
             Self::DiscoveryDisabled => formatter.write_str(
-                "unified routing requires Claude Code gateway discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled",
+                "this Claude gateway requires model discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled",
             ),
         }
     }
@@ -753,9 +753,10 @@ fn handle_connection(
                 }
             }
         }
-        ("GET", "/v1/models") if matches!(config.gateway_mode, GatewayMode::Unified(_)) => {
-            serve_unified_catalog(&mut stream, config);
-        }
+        ("GET", "/v1/models") => match &config.gateway_mode {
+            GatewayMode::Codex => serve_codex_catalog(&mut stream),
+            GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config),
+        },
         ("HEAD", "/v1/messages") => {
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
@@ -836,7 +837,7 @@ fn handle_connection(
                     log,
                 );
             } else {
-                serve_messages(
+                serve_codex_discovery_messages(
                     &mut stream,
                     config,
                     shutdown,
@@ -844,7 +845,6 @@ fn handle_connection(
                     &body,
                     streaming,
                     &conversation_key,
-                    None,
                     log,
                 );
             }
@@ -877,6 +877,24 @@ fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
             ModelProvider::OpenRouter => false,
             ModelProvider::Claude => false,
         })
+        .filter_map(|entry| {
+            entry.discovery_id.map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "display_name": entry.display_name,
+                    "type": "model",
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let body = serde_json::json!({"data": data, "has_more": false}).to_string();
+    let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
+}
+
+fn serve_codex_catalog(stream: &mut TcpStream) {
+    let data = provider_catalog::MODELS
+        .iter()
+        .filter(|entry| entry.provider == ModelProvider::Codex)
         .filter_map(|entry| {
             entry.discovery_id.map(|id| {
                 serde_json::json!({
@@ -1464,6 +1482,70 @@ fn serve_anthropic_proxy(
     let _ = stream.write_all(b"0\r\n\r\n");
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Both);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_codex_discovery_messages(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    shutdown: &AtomicBool,
+    conversations: &ConversationStore,
+    body: &[u8],
+    streaming: bool,
+    conversation_key: &ConversationKey,
+    log: Option<&SharedBridgeLog>,
+) {
+    let mut request: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(_) => {
+            let _ = write_error(stream, 400);
+            return;
+        }
+    };
+    let Some(model) = request.get("model").and_then(serde_json::Value::as_str) else {
+        let _ = write_error(stream, 400);
+        return;
+    };
+    let (base, effort) = model
+        .rsplit_once('@')
+        .map_or((model, None), |(base, effort)| (base, Some(effort)));
+    let discovered = provider_catalog::model_by_discovery_id(base)
+        .filter(|entry| entry.provider == ModelProvider::Codex);
+    if base.starts_with("clud-claude-") && discovered.is_none() {
+        let ids = provider_catalog::models_for_provider(ModelProvider::Codex)
+            .filter_map(|entry| entry.discovery_id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": format!("unknown clud Codex model; available IDs: {ids}"),
+            }
+        })
+        .to_string();
+        let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+        return;
+    }
+    if let Some(entry) = discovered {
+        let wire_model = effort.map_or_else(
+            || entry.wire_id.to_string(),
+            |effort| format!("{}@{effort}", entry.wire_id),
+        );
+        request["model"] = serde_json::Value::String(wire_model);
+    }
+    let rewritten = serde_json::to_vec(&request).unwrap_or_default();
+    serve_messages(
+        stream,
+        config,
+        shutdown,
+        conversations,
+        &rewritten,
+        streaming,
+        conversation_key,
+        None,
+        log,
+    );
 }
 
 /// Serve one `POST /v1/messages`.
@@ -2839,6 +2921,70 @@ Connection: close
         }
     }
 
+    /// Issue #955: a future Codex row must become both discoverable and
+    /// routable without adding another bridge-specific model list.
+    #[test]
+    fn direct_codex_catalog_advertises_and_routes_every_registered_row() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let token = bridge.bearer_token().to_owned();
+        let catalog_response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models?limit=1000", &token, ""),
+        );
+        assert_eq!(status(&catalog_response), 200, "{catalog_response}");
+        let catalog: serde_json::Value = serde_json::from_str(
+            catalog_response
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("catalog response body"),
+        )
+        .unwrap();
+        let ids = catalog["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let registered = provider_catalog::models_for_provider(ModelProvider::Codex)
+            .map(|entry| {
+                (
+                    entry.discovery_id.expect("Codex discovery id"),
+                    entry.wire_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            registered
+                .iter()
+                .map(|(discovery_id, _)| *discovery_id)
+                .collect::<Vec<_>>()
+        );
+
+        for (discovery_id, wire_id) in &registered {
+            let body = PROBE_BODY.replace("claude-x", &format!("{discovery_id}@high"));
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", &token, &body),
+            );
+            assert_eq!(status(&response), 200, "{discovery_id}: {response}");
+            let requests = upstream.requests();
+            let sent: serde_json::Value =
+                serde_json::from_str(captured_body(requests.last().unwrap())).unwrap();
+            assert_eq!(sent["model"], *wire_id);
+            assert_eq!(sent["reasoning"]["effort"], "high");
+        }
+
+        let unknown = PROBE_BODY.replace("claude-x", "clud-claude-codex-nova");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", &token, &unknown),
+        );
+        assert_eq!(status(&response), 400, "{response}");
+        assert_eq!(upstream.requests().len(), registered.len());
+    }
+
     #[test]
     fn unified_catalog_requires_its_custom_token_and_omits_unavailable_routes() {
         let fake = FakeResponses::start();
@@ -3326,27 +3472,24 @@ Connection: close
         let codex = FakeResponses::start();
         let deepseek = FakeResponses::start();
         let bridge = BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
-        let models = [
-            ("clud-claude-codex-sol", "gpt-5.6-sol"),
-            ("clud-claude-codex-terra", "gpt-5.6-terra"),
-            ("clud-claude-codex-luna", "gpt-5.6-luna"),
-        ];
-        let efforts = ["none", "low", "medium", "high", "xhigh", "max"];
+        let models =
+            provider_catalog::models_for_provider(ModelProvider::Codex).collect::<Vec<_>>();
         let mut expected = Vec::new();
-        for (model_index, (discovery, wire)) in models.iter().enumerate() {
-            for (effort_index, effort) in efforts.iter().enumerate() {
+        for (model_index, model) in models.iter().enumerate() {
+            let discovery = model.discovery_id.expect("Codex discovery id");
+            for (effort_index, effort) in model.supported_efforts.iter().enumerate() {
                 let body = serde_json::json!({
                     "model": discovery,
                     "messages": [{"role": "user", "content": "route matrix"}],
                     "thinking": {"type": "adaptive"},
-                    "output_config": {"effort": effort},
+                    "output_config": {"effort": effort.as_str()},
                     "stream": false,
                 })
                 .to_string();
                 let session = format!("codex-{model_index}-{effort_index}");
                 let response = unified_request(&bridge, &body, &session, None);
                 assert_eq!(status(&response), 200, "{discovery} {effort}: {response}");
-                expected.push((*wire, *effort));
+                expected.push((model.wire_id, effort.as_str()));
             }
         }
 
