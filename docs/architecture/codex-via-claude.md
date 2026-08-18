@@ -63,6 +63,16 @@ the bridge atomically clears that conversation's canonical transcript. The next
 replay therefore seeds fresh canonical history rather than continuing stale
 items.
 
+A failed streamed turn can leave its triggering tool result uncommitted even
+though Claude retained that result in its display transcript. If Claude then
+records a synthetic error or partial assistant block, the result precedes the
+ordinary final-assistant pending suffix. Continuation assembly reconciles
+unresolved canonical calls against real outputs in the complete Messages replay
+and commits each recovered output exactly once with the next successful turn.
+It never invents a result when the replay does not contain one, and it never
+replays model output or tool effects from the failed turn. Recovery diagnostics
+contain only conversation scope and a count, not call IDs or payloads.
+
 When a first inference attempt fails with the exact
 `context_length_exceeded` code **before any Anthropic-visible text, reasoning,
 or tool-call frame**, the bridge performs one bounded recovery cycle. The code
