@@ -126,14 +126,29 @@ def _copy_clud_for_test(temp_dir: str) -> Path:
     return launch
 
 
+#: Must stay >= MIN_UNIFIED_CLAUDE_CODE_VERSION in
+#: crates/clud-bin/src/backend_bootstrap.rs. A fake `claude` that answers
+#: nothing to `--version` is rejected by the discovery version gate, and clud
+#: exits 2 before announcing anything -- which is not what these tests are about.
+_FAKE_CLAUDE_VERSION = "2.1.223 (Claude Code)"
+
+
 def _fake_claude_on_path(bin_dir: Path) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
         fake = bin_dir / "claude.cmd"
-        fake.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+        fake.write_text(
+            f'@echo off\r\nif "%1"=="--version" echo {_FAKE_CLAUDE_VERSION}\r\nexit /b 0\r\n',
+            encoding="utf-8",
+        )
     else:
         fake = bin_dir / "claude"
-        fake.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+        fake.write_text(
+            "#!/usr/bin/env sh\n"
+            f'if [ "$1" = "--version" ]; then echo "{_FAKE_CLAUDE_VERSION}"; fi\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
         fake.chmod(0o755)
 
 
