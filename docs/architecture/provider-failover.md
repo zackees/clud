@@ -1,14 +1,14 @@
-# Provider failover (design proposal — issue #968)
+# Provider failover (#968)
 
-**Status: implemented except section 5's operator surfaces (#968).** Landed:
-routing OpenRouter through the gateway (section 1), the failure taxonomy and
-route ledger (`route_health.rs`, section 2), the cost-labeled ladder
-(`failover.rs`, section 3), pre-commit replay (section 4), and section 5's
-cooldown recovery, stickiness, sanitized notices, and the `/_clud/route/*`
-control surface. Reachable with `--failover <routes>` and
-`--failover-allow-metered`.
+**Status: implemented (#968).** Routing OpenRouter through the gateway
+(section 1), the failure taxonomy and route ledger (`route_health.rs`,
+section 2), the cost-labeled ladder (`failover.rs`, section 3), pre-commit
+replay (section 4), and section 5's cooldown recovery, stickiness, sanitized
+notices, and `/_clud/route/*` control surface. Reachable with
+`--failover <routes>` and `--failover-allow-metered`; `--dry-run` reports the
+resolved ladder and rejects an unroutable rung.
 
-One section-5 item is deliberately **not** built: a standalone `clud route
+One thing is deliberately **not** built: a standalone `clud route
 status` command. The gateway is launch-scoped and its port and token are never
 serialized -- that is the property that keeps a launch's credentials off disk --
 so a separate process has nothing to connect to. Health is exposed instead on
@@ -20,10 +20,14 @@ file that the current design intentionally avoids. This document builds on the
 unified gateway ([unified-gateway.md](unified-gateway.md)) and the provider
 catalog ([provider-selection.md](provider-selection.md)).
 
-Current limits, stated plainly: failover triggers only on the
-Anthropic-compatible proxy routes (Claude, DeepSeek). Codex is a valid
-*destination* rung but never a probe source, because its pipeline commits
-through a different path, so a descent that lands on Codex stops there.
+Current limits, stated plainly. Failover triggers on the
+Anthropic-compatible proxy routes -- Claude, DeepSeek, and OpenRouter. Codex is
+a valid *destination* rung but never a probe source, because its pipeline
+commits through a different path, so a descent that lands on Codex stops there.
+A quota failure delivered in-band inside a `200` stream is likewise not
+recorded against the route on the proxy path: that response is already
+committed, so post-commit degradation applies and the next request carries the
+recovery.
 
 ## The problem
 
