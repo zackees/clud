@@ -46,6 +46,7 @@ pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport 
         ));
     }
     warnings.extend(broken_git_rev_parse_warnings(repo_root, home));
+    warnings.extend(double_declared_hook_warnings(repo_root, home));
     HookHealthReport {
         repo_root: repo_root.to_path_buf(),
         home: home.map(Path::to_path_buf),
@@ -79,6 +80,45 @@ fn broken_git_rev_parse_warnings(repo_root: &Path, home: Option<&Path>) -> Vec<S
                  advance, `cd \"\"` is a silent no-op, and the hook resolves its script path \
                  against whatever cwd it inherited. Replace the prefix with {}",
                 crate::block_bad_cmd::GIT_REV_PARSE_PREFIX_FIX
+            )
+        })
+        .collect()
+}
+
+/// Warn when a command is declared in **both** `.clud/hooks.json` and a
+/// frontend's own hook config (zackees/clud#967 Phase 2).
+///
+/// Both copies run: the harness fires its own, and clud fires the declared
+/// one. Only clud's is rooted at the repo, so the duplicate is the unrooted
+/// copy — the exact failure the declaration was meant to fix. Migrating means
+/// *moving* a hook, not copying it.
+fn double_declared_hook_warnings(repo_root: &Path, home: Option<&Path>) -> Vec<String> {
+    let Some(declared) = crate::clud_hooks::discover(repo_root) else {
+        return Vec::new();
+    };
+    let declared_commands: HashSet<&str> = declared
+        .events()
+        .flat_map(|event| declared.for_event(event))
+        .map(|entry| entry.command.as_str())
+        .collect();
+    if declared_commands.is_empty() {
+        return Vec::new();
+    }
+
+    let mut duplicates = BTreeSet::new();
+    for hook in crate::block_bad_cmd::frontend_hook_commands(repo_root, home) {
+        if declared_commands.contains(hook.command.as_str()) {
+            duplicates.insert((hook.command.clone(), display_path(&hook.source)));
+        }
+    }
+    duplicates
+        .into_iter()
+        .map(|(command, source)| {
+            format!(
+                "Hook command `{command}` is declared in .clud/hooks.json and still present in \
+                 {source}, so it runs twice — and the copy {source} fires is the one that is not \
+                 rooted at the repo. Remove it from {source}; declaring it in .clud/hooks.json is \
+                 what moves it under clud's control."
             )
         })
         .collect()

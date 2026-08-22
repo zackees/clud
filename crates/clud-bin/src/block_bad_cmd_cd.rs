@@ -587,6 +587,26 @@ fn truncate_command(command: &str) -> String {
 /// and this path also has to stay cheap enough for a per-tool-call hook.
 pub fn scan_hook_cwd_sensitivity(repo_root: &Path, home: Option<&Path>) -> HookCwdScan {
     let mut scan = HookCwdScan::default();
+    for hook in frontend_hook_commands(repo_root, home) {
+        scan.any_hooks = true;
+        if has_broken_git_rev_parse_prefix(&hook.command) {
+            scan.broken_git_prefix.push(hook.clone());
+        }
+        if is_cwd_sensitive_hook_command(&hook.command) {
+            scan.sensitive.push(hook);
+        }
+    }
+    scan
+}
+
+/// Every hook command configured for `repo_root` (and `home`), across all
+/// events and both frontends, paired with the file it came from.
+///
+/// Split out from the sensitivity scan because `hook_health` also needs the
+/// raw list, to notice a command declared in *both* `.clud/hooks.json` and a
+/// frontend's own settings — which would run twice, and only once rooted.
+pub fn frontend_hook_commands(repo_root: &Path, home: Option<&Path>) -> Vec<SensitiveHook> {
+    let mut found = Vec::new();
     let mut candidates = vec![
         repo_root.join(".claude").join("settings.json"),
         repo_root.join(".claude").join("settings.local.json"),
@@ -604,20 +624,13 @@ pub fn scan_hook_cwd_sensitivity(repo_root: &Path, home: Option<&Path>) -> HookC
             continue;
         };
         for command in hook_commands(&json) {
-            scan.any_hooks = true;
-            let hook = SensitiveHook {
+            found.push(SensitiveHook {
                 source: path.clone(),
                 command,
-            };
-            if has_broken_git_rev_parse_prefix(&hook.command) {
-                scan.broken_git_prefix.push(hook.clone());
-            }
-            if is_cwd_sensitive_hook_command(&hook.command) {
-                scan.sensitive.push(hook);
-            }
+            });
         }
     }
-    scan
+    found
 }
 
 /// Every hook command string in a frontend config, regardless of event.

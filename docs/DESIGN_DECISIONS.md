@@ -2067,3 +2067,86 @@ PreToolUse text scan (Phase 5's `CwdChanged` handler is the reactive backstop),
 and once the cwd has already escaped, config discovery from the drifted cwd
 finds no `.clud/settings.json`, so the policy resolves off — this layer
 prevents drift, it cannot force a return.
+
+## DD-048: clud runs a repo's declared hooks itself, and never writes them to a config file
+
+**Context:** Harness hooks execute with the session cwd, which follows the
+agent. A hook written as a repo-relative script path — the overwhelmingly
+common shape — breaks the moment the agent `cd`s, and a *blocking* hook that
+breaks wedges the session outright (DD-047 covers the preventive half; this is
+the corrective one). Two adjacent failures share the cause: a nested repo's own
+hooks never load, because the harness reads hooks only from the session root,
+and the parent's hooks keep firing inside a nested checkout against files they
+know nothing about.
+
+**Decision:** A repo declares clud-managed hooks in `.clud/hooks.json`, and
+clud executes them, with a fixed rooting contract: cwd and `CLUD_PROJECT_DIR`
+are both the declaring repo's root, whatever the session cwd is. The harness's
+payload is forwarded on stdin byte-for-byte, with the pipe closed so a hook
+blocking in `json.load(sys.stdin)` receives EOF.
+
+Three choices inside that are worth stating:
+
+1. **A separate declaration file, not the harness's own settings.** A hook left
+   in `.claude/settings.json` fires natively *and* through clud, and only
+   clud's copy is rooted. Declaring is the explicit act that moves a hook from
+   the harness's control to clud's; `hook_health` warns when the same command
+   appears in both, because migrating means moving, not copying.
+2. **Only exit 2 blocks.** A non-2 exit, a spawn failure, or a timeout warns
+   and continues. This fails open deliberately: a guard that cannot run is a
+   bug in the guard, and converting it into a wall in front of every tool call
+   reproduces the exact wedge the feature exists to prevent. A blocking hook's
+   stdout is relayed verbatim rather than re-wrapped, since it may be speaking
+   the harness's own JSON protocol.
+3. **A bare `clud-cmd-scan` still means `PreToolUse`.** Every already-installed
+   hook line is bare; changing what those mean would silently repoint every
+   existing user's guard. Other events are named with `--event <Event>`.
+
+**Consequences:** Hooks become cwd-immune for repos that migrate, which is what
+later phases build on — the typed root registry needs a loader it controls
+before it can root a sub-repo's hooks at the sub-repo. Repos that do not
+migrate are unaffected; discovery costs one `is_file` probe. clud is now
+responsible for a contract the harness used to own, so divergence in matcher
+semantics or exit-code handling is a real risk, mitigated by mirroring the
+harness's rules and asserting them directly in tests.
+
+## DD-049: settings reach the harness as compiled CLI arguments, never as file writes
+
+**Context:** Delivering clud's hook set to the harness needs the harness to
+read it from somewhere. The obvious route is writing hook lines into a settings
+file — the checked-in `.claude/settings.json` (a dirty working tree on every
+launch), or the gitignored `.claude/settings.local.json`.
+
+**Decision:** clud compiles its settings into each frontend's native
+configuration surface and passes them **as command-line arguments at launch**.
+Claude takes `--settings <file-or-json>`, an *additional* source that merges
+with the settings files rather than replacing them, with hook entries
+concatenating across levels; codex takes repeated `-c key=value` overrides.
+Neither path writes to a file the user owns.
+
+clud already did exactly this for the bridge routes — `foreground_runtime.rs`
+composes a settings document, writes it to a session-lifetime tempfile, injects
+`--settings`, and merges into a user-supplied `--settings` so neither shadows
+the other — so this generalizes an existing mechanism rather than inventing
+one.
+
+**Alternatives rejected:** Writing managed lines into a settings file, in any
+location. It carries an idempotence requirement, a read-modify-write
+lost-update risk (every existing writer rewrites the whole file, and only one
+of them takes `~/.clud/settings.lock`), the two-writers-one-file fight that
+caused #847, a per-repo assumption that the target is gitignored, and stale
+state left behind when a session is killed. Argument injection has none of
+those: there is nothing on disk to converge, and the tempfile dies with the
+session.
+
+**Consequences:** The Claude path becomes file-free. Codex still has no
+`--settings` equivalent, so its hook surface stays file-based and bounded by
+what codex supports (apparently `PreToolUse` only) — the asymmetry is
+documented rather than papered over. One route deliberately left open: Claude's
+`--setting-sources` can *exclude* a settings source outright (verified on the
+shipped CLI — a project `SessionStart` hook fires under
+`--setting-sources user,project` and does not under `--setting-sources user`),
+which would let clud absorb a repo's existing hooks and fix repos with no
+migration at all. Not taken yet, because excluding a source drops everything it
+contributes: a bug there costs the user `permissions`, a security control, not
+just hooks. It is strictly additive to this decision, so deferring it is free.

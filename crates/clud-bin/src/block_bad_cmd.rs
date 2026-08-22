@@ -208,6 +208,36 @@ struct StdinRead {
 }
 
 pub fn run() -> i32 {
+    run_for_event(&hook_event_from_args(std::env::args().skip(1)))
+}
+
+/// Which hook event this invocation is serving.
+///
+/// A bare `clud-cmd-scan` stays `PreToolUse`, because that is what every
+/// already-installed hook line means and those lines must keep working
+/// untouched. `--event <Event>` is how the compiled dispatcher lines name
+/// the other events (#967 Phase 2).
+pub fn hook_event_from_args<I: IntoIterator<Item = String>>(args: I) -> String {
+    let mut args = args.into_iter();
+    while let Some(argument) = args.next() {
+        if let Some(event) = argument.strip_prefix("--event=") {
+            if !event.is_empty() {
+                return event.to_string();
+            }
+        }
+        if argument == "--event" {
+            if let Some(event) = args.next().filter(|event| !event.is_empty()) {
+                return event;
+            }
+        }
+    }
+    PRE_TOOL_USE_EVENT.to_string()
+}
+
+/// The event a bare invocation serves.
+pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
+
+pub fn run_for_event(event: &str) -> i32 {
     let stdin = read_stdin_bounded();
     for message in &stdin.log_messages {
         append_log(message);
@@ -282,6 +312,33 @@ pub fn run() -> i32 {
         evaluation.reason = block_cd_denial(&payload, &config);
     }
 
+    // #967 Phase 2: the repo's own declared hooks ("Tier B"). clud's policy
+    // has already had its say; a project guard runs last so its message is
+    // not buried under one clud would have produced anyway.
+    if evaluation.reason.is_none() {
+        if let Some(denial) = declared_hook_denial(event, &payload, &stdin.text) {
+            for message in &denial.log_messages {
+                append_log(message);
+            }
+            let msg = format!(
+                "[clud hooks] {event} hook refused {:?}: {}",
+                payload.tool_name, denial.reason
+            );
+            append_log(&format!("BLOCKED: {msg}"));
+            // A hook that spoke the harness's JSON protocol gets relayed
+            // verbatim; re-wrapping would rewrite its decision.
+            match denial.stdout {
+                Some(stdout) => print!("{stdout}"),
+                None if event == PRE_TOOL_USE_EVENT => {
+                    println!("{}", deny_json(&denial.reason));
+                }
+                None => {}
+            }
+            eprintln!("{msg}");
+            return 2;
+        }
+    }
+
     if let Some(base_reason) = evaluation.reason {
         // #525: when a config `bad_commands` rule fired, append concise,
         // human-readable provenance to the reason (mirrored to stderr) and
@@ -346,6 +403,38 @@ pub fn run() -> i32 {
 
     append_log("allowed");
     0
+}
+
+struct DeclaredHookDenial {
+    reason: String,
+    stdout: Option<String>,
+    log_messages: Vec<String>,
+}
+
+/// Run the repo's `.clud/hooks.json` hooks for `event` and report a block.
+///
+/// Costs one `is_file` probe when a repo declares nothing, which is every
+/// repo that has not opted in.
+fn declared_hook_denial(
+    event: &str,
+    payload: &HookPayloadView,
+    raw_payload: &str,
+) -> Option<DeclaredHookDenial> {
+    let repo_root = crate::clud_hooks_run::resolve_root(&payload.cwd)?;
+    let hooks = crate::clud_hooks::discover(&repo_root)?;
+    let tool_name = (!payload.tool_name.is_empty() && payload.tool_name != "?")
+        .then_some(payload.tool_name.as_str());
+    let entries = hooks.matching(event, tool_name);
+    if entries.is_empty() {
+        return None;
+    }
+    let outcome = crate::clud_hooks_run::run_hooks(&entries, &repo_root, raw_payload);
+    let reason = outcome.deny_reason?;
+    Some(DeclaredHookDenial {
+        reason,
+        stdout: outcome.deny_stdout,
+        log_messages: outcome.log_messages,
+    })
 }
 
 /// Resolve `bash.block_cd` and decide whether this command's
@@ -2213,9 +2302,18 @@ use block_bad_cmd_cd::{
     BLOCK_CD_RULE_ID,
 };
 pub use block_bad_cmd_cd::{
-    has_broken_git_rev_parse_prefix, is_cwd_sensitive_hook_command, scan_hook_cwd_sensitivity,
-    HookCwdScan, SensitiveHook, GIT_REV_PARSE_PREFIX_FIX,
+    frontend_hook_commands, has_broken_git_rev_parse_prefix, is_cwd_sensitive_hook_command,
+    scan_hook_cwd_sensitivity, HookCwdScan, SensitiveHook, GIT_REV_PARSE_PREFIX_FIX,
 };
+
+/// The lexical repo-root walk, for callers outside this module.
+///
+/// Deliberately not `loop_spec::git_root_from`, which returns `start` when
+/// there is no repo and so cannot distinguish "no repo" from "repo at cwd".
+#[must_use]
+pub fn nearest_repo_root_public(start: &std::path::Path) -> Option<PathBuf> {
+    block_bad_cmd_cd::nearest_repo_root(start)
+}
 
 fn py_string_repr(value: &str) -> String {
     let mut out = String::from("'");
@@ -4219,5 +4317,41 @@ mod tests {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
+    }
+
+    /// #967 Phase 2: which event an invocation serves.
+    #[test]
+    fn a_bare_invocation_still_means_pretooluse() {
+        // Every already-installed hook line is bare. Changing what those mean
+        // would silently repoint every existing user's guard.
+        assert_eq!(hook_event_from_args(Vec::<String>::new()), "PreToolUse");
+        assert_eq!(
+            hook_event_from_args(vec!["--unrelated".to_string()]),
+            "PreToolUse"
+        );
+    }
+
+    #[test]
+    fn the_event_flag_names_the_event_in_both_spellings() {
+        assert_eq!(
+            hook_event_from_args(vec!["--event".to_string(), "Stop".to_string()]),
+            "Stop"
+        );
+        assert_eq!(
+            hook_event_from_args(vec!["--event=PostToolUse".to_string()]),
+            "PostToolUse"
+        );
+    }
+
+    #[test]
+    fn a_valueless_event_flag_falls_back_rather_than_dispatching_nothing() {
+        assert_eq!(
+            hook_event_from_args(vec!["--event".to_string()]),
+            "PreToolUse"
+        );
+        assert_eq!(
+            hook_event_from_args(vec!["--event=".to_string()]),
+            "PreToolUse"
+        );
     }
 }
