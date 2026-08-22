@@ -149,6 +149,8 @@ fn transcript_forces_centralized_daemon() {
         set_web_term: None,
         provider: None,
         unified: false,
+        failover: None,
+        failover_allow_metered: false,
         mode: None,
         effort: None,
         context_window: None,

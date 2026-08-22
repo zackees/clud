@@ -98,11 +98,25 @@ impl ForegroundRuntime {
             let deepseek_key = store.get().ok().flatten();
             let codex_available =
                 crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
-            let startup_notices = unified_startup_notices(codex_available, deepseek_key.is_some());
-            let bridge = BridgeHandle::start(
-                BridgeConfig::default()
-                    .with_unified_gateway(UnifiedGatewayConfig::new(deepseek_key, codex_available)),
-            )?;
+            let mut startup_notices =
+                unified_startup_notices(codex_available, deepseek_key.is_some());
+            // An unroutable rung fails the launch rather than a turn: by the
+            // time a request is in flight the user has already waited, and the
+            // error would arrive wrapped in the harness's API-error framing.
+            let failover = crate::failover::FailoverLadder::parse(
+                plan.failover.as_deref().unwrap_or_default(),
+                plan.failover_allow_metered,
+            )
+            .map_err(|error| BridgeError::Failover(error.to_string()))?;
+            if !failover.withheld_for_consent().is_empty() {
+                startup_notices.push(
+                    "[clud] failover: metered rungs are listed but will not be taken; \
+                     pass --failover-allow-metered to consent",
+                );
+            }
+            let bridge = BridgeHandle::start(BridgeConfig::default().with_unified_gateway(
+                UnifiedGatewayConfig::new(deepseek_key, codex_available).with_failover(failover),
+            ))?;
             apply_unified_overlay(&mut env, &bridge)?;
             let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), startup_notices)
@@ -848,6 +862,8 @@ mod tests {
             stream_json_progress: false,
             codex_model: None,
             model_selection: None,
+            failover: None,
+            failover_allow_metered: false,
         }
     }
 
