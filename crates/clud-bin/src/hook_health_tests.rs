@@ -494,3 +494,53 @@ fn a_self_rooted_hook_earns_no_git_rev_parse_warning() {
         .iter()
         .any(|warning| warning.contains("--show-superproject-working-tree")));
 }
+
+#[test]
+fn a_hook_declared_in_both_places_is_warned_about_as_a_double_fire() {
+    // Migrating a hook means moving it. A copy left in the frontend's own
+    // settings still fires there, unrooted — which is the failure the
+    // declaration was supposed to fix.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    let command = "uv run python ci/hooks/check.py";
+    write(
+        &repo.join(".claude").join("settings.json"),
+        &format!(
+            r#"{{"hooks":{{"PreToolUse":[{{"matcher":"Bash","hooks":[{{"type":"command","command":"{command}"}}]}}]}}}}"#
+        ),
+    );
+    write(
+        &repo.join(".clud").join("hooks.json"),
+        &format!(r#"{{"hooks":{{"PreToolUse":[{{"command":"{command}"}}]}}}}"#),
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("runs twice"))
+        .expect("double declaration warned");
+    assert!(warning.contains(command), "{warning}");
+    assert!(warning.contains("settings.json"), "{warning}");
+}
+
+#[test]
+fn a_hook_that_only_moved_earns_no_double_fire_warning() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude").join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"clud-cmd-scan"}]}]}}"#,
+    );
+    write(
+        &repo.join(".clud").join("hooks.json"),
+        r#"{"hooks":{"PreToolUse":[{"command":"uv run python ci/hooks/check.py"}]}}"#,
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    assert!(!report.warnings.iter().any(|w| w.contains("runs twice")));
+}

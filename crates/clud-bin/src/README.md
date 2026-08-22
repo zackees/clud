@@ -305,6 +305,19 @@ which test tier a change belongs in — lives in
   guide lives in the root `README.md`. Also enforces `bash.block_cd` via
   `block_bad_cmd_cd.rs` (see below), after the command rules so an
   independently forbidden command reports the stronger reason.
+- `clud_hooks.rs` - `.clud/hooks.json` schema, discovery, and matcher
+  semantics (#967 Phase 2). Matchers are anchored regexes over the tool name;
+  an uncompilable one falls back to equality so a declaration clud cannot parse
+  under-matches rather than firing someone's guard against tools they never
+  named. Parsing is lenient per entry, like `repo_clud_config`.
+- `clud_hooks_run.rs` - Tier-B execution. Runs each declared hook with cwd and
+  `CLUD_PROJECT_DIR` set to the declaring repo's root, the harness payload
+  forwarded on stdin (pipe closed, so a hook blocking in `json.load(sys.stdin)`
+  gets EOF), and the harness's exit-code contract: 0 continues, 2 blocks and
+  relays the child's own words, anything else — including a timeout — warns and
+  continues. Failing open there is deliberate: a broken guard must not become a
+  wall in front of every tool call. The only in-repo user of
+  `StdinMode::Piped`. See `docs/architecture/hook-dispatch.md`.
 - `block_bad_cmd_cd.rs` - `bash.block_cd` session-cwd pinning (#967 Phase 1,
   DD-047). Scans for `cd`s that would move the *session* cwd — subshells,
   `$(...)`, and nested shells are skipped because they cannot leak — resolves

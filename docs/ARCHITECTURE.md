@@ -20,6 +20,7 @@ re-explaining.
 | [architecture/provider-selection.md](architecture/provider-selection.md) | ~120 | #900's compatible launch grammar, direct-vs-unified routing mode, provider-neutral model catalog, modifier normalization, and plan/repeat propagation |
 | [architecture/unified-gateway.md](architecture/unified-gateway.md) | ~130 | #898/#899's authenticated foreground multiplexer: version gate, discovery, provider routing, route epochs, token counting, credential isolation, and cross-provider effort contract |
 | [architecture/codex-via-claude.md](architecture/codex-via-claude.md) | ~120 | Canonical cross-route ownership: resolution, bridge protocol, credentials, security boundary, rollback |
+| [architecture/hook-dispatch.md](architecture/hook-dispatch.md) | ~150 | clud running a repo's own hooks instead of the harness: `.clud/hooks.json` declaration, the rooting contract (cwd + `CLUD_PROJECT_DIR` = the declaring repo), the exit-code contract and why it fails open, and delivery by compiling settings into CLI args rather than writing config files (#966/#967/#977) |
 | [architecture/crash-reports.md](architecture/crash-reports.md) | ~110 | Panic-hook + native crash handler + `clud symbols` verifier: JSON schema, embed-line-tables-everywhere choice, opportunistic-verify model (#374) |
 | [architecture/process-reaping.md](architecture/process-reaping.md) | ~200 | The two disjoint reapers, the `(pid, creation_time)` keyspace and its single purge sweep, daemon-sparing by OS signal (marker second, whitelist last), the cooperative-marker caveat, and which test tier a reaper change belongs in |
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
@@ -45,6 +46,7 @@ re-explaining.
 - **"Which model ID is stable, and how do effort/context reach a worker?"** -> [provider-selection.md](architecture/provider-selection.md)
 - **"How does one Claude session switch safely among providers?"** -> [unified-gateway.md](architecture/unified-gateway.md)
 - **"How does Codex run through Claude, and how do I roll it back?"** -> [codex-via-claude.md](architecture/codex-via-claude.md)
+- **"Why did a project hook stop working after the agent `cd`'d, and who runs hooks now?"** -> [hook-dispatch.md](architecture/hook-dispatch.md)
 - **"What happens when clud crashes, and how do I read the report?"** -> [crash-reports.md](architecture/crash-reports.md)
 - **"What happens when my provider runs out of quota mid-session?"** -> [provider-failover.md](architecture/provider-failover.md) *(design proposal, #968)*
 - **"Should I run all the tests or just some?"** -> [test-runtime-memory.md](architecture/test-runtime-memory.md) *(design proposal, #405)*

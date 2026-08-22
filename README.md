@@ -497,6 +497,50 @@ which looks like it does this but does not: that flag exits 0 with empty output
 outside a submodule, so the `||` fallback never runs and `cd ""` silently does
 nothing.
 
+### Let clud run your project's hooks
+
+Project hooks are usually written as repo-relative script paths, which is why a
+stray `cd` breaks them: the hook resolves its path against wherever the agent
+ended up. You can hand those hooks to clud instead, and it will always run them
+from your repo root.
+
+Declare them in `.clud/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "command": "uv run python ci/hooks/check_cmd.py" }
+    ],
+    "Stop": [
+      { "command": "uv run python ci/hooks/check_on_stop.py", "timeout": 120 }
+    ]
+  }
+}
+```
+
+Every hook declared here runs with:
+
+- **the working directory set to your repo root**, whatever the session cwd is
+- **`CLUD_PROJECT_DIR`** set to that same root, on every backend
+- the hook payload on stdin, exactly as the harness would have sent it
+
+`matcher` is a regex over the tool name and is anchored, so `Edit` matches
+`Edit` and not `MultiEdit`; leave it out to match every tool. `timeout` is in
+seconds and defaults to 60.
+
+Exit codes work the way you already expect: **0** carries on, **2** blocks the
+call and shows the model whatever your hook printed. Anything else — a crash, a
+missing interpreter, a timeout — is reported as a warning and the call
+proceeds. A guard that can't run is a bug in the guard, and turning it into a
+wall in front of every tool call is exactly the wedge this feature exists to
+prevent.
+
+**Move hooks here, don't copy them.** A command left in `.claude/settings.json`
+*and* declared in `.clud/hooks.json` runs twice, and the copy the harness fires
+is the one that isn't rooted — the failure you were trying to fix. clud warns
+when it sees the same command in both places.
+
 ### What it is (and isn't)
 
 This is a guardrail for a *cooperative* agent, not a security wall. If it can't
