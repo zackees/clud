@@ -96,10 +96,29 @@ impl ForegroundRuntime {
             // availability metadata here; the actual credentials stay inside
             // the launch-scoped bridge and are not serialized into the plan.
             let deepseek_key = store.get().ok().flatten();
+            // OpenRouter keeps its own vault record, so it needs its own store
+            // rather than the injected DeepSeek-scoped one. Probed inline for
+            // the same reason `codex_available` is: an absent optional
+            // credential must omit a discovery row, never fail the launch.
+            let openrouter_key = crate::provider_auth::NativeSecretStore::new_for(
+                crate::provider_auth::OPENROUTER_VAULT_SERVICE,
+                crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
+            )
+            .ok()
+            .and_then(|store| {
+                use crate::provider_auth::SecretStore as _;
+                store.get().ok().flatten()
+            });
             let codex_available =
                 crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
             let mut startup_notices =
                 unified_startup_notices(codex_available, deepseek_key.is_some());
+            if openrouter_key.is_none() {
+                startup_notices.push(
+                    "[clud] unified: OpenRouter is not configured; \
+                     run `clud auth login openrouter` to add its route",
+                );
+            }
             // An unroutable rung fails the launch rather than a turn: by the
             // time a request is in flight the user has already waited, and the
             // error would arrive wrapped in the harness's API-error framing.
@@ -114,9 +133,13 @@ impl ForegroundRuntime {
                      pass --failover-allow-metered to consent",
                 );
             }
-            let bridge = BridgeHandle::start(BridgeConfig::default().with_unified_gateway(
-                UnifiedGatewayConfig::new(deepseek_key, codex_available).with_failover(failover),
-            ))?;
+            let bridge = BridgeHandle::start(
+                BridgeConfig::default().with_unified_gateway(
+                    UnifiedGatewayConfig::new(deepseek_key, codex_available)
+                        .with_openrouter(openrouter_key)
+                        .with_failover(failover),
+                ),
+            )?;
             apply_unified_overlay(&mut env, &bridge)?;
             let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), startup_notices)

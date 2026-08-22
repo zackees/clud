@@ -1,11 +1,12 @@
 # Provider failover (design proposal — issue #968)
 
-**Status: partly implemented (#968).** Sections 2-4 have landed: the failure
-taxonomy and route ledger (`route_health.rs`), the cost-labeled ladder
-(`failover.rs`), and pre-commit replay in the unified gateway, reachable with
-`--failover <routes>` and `--failover-allow-metered`. Section 1 (routing
-OpenRouter through the gateway) and section 5's `clud route status` and
-`/_clud/route/*` surfaces are still proposals. This document builds on the
+**Status: implemented except section 5's operator surfaces (#968).** Landed:
+routing OpenRouter through the gateway (section 1), the failure taxonomy and
+route ledger (`route_health.rs`, section 2), the cost-labeled ladder
+(`failover.rs`, section 3), pre-commit replay (section 4), and section 5's
+cooldown recovery, stickiness, and sanitized notices. Reachable with
+`--failover <routes>` and `--failover-allow-metered`. Still proposals: `clud
+route status` and the `POST /_clud/route/*` control endpoint. This document builds on the
 unified gateway ([unified-gateway.md](unified-gateway.md)) and the provider
 catalog ([provider-selection.md](provider-selection.md)).
 

@@ -196,6 +196,25 @@ reachable but are best-effort through the Claude harness. `--dry-run` resolves
 and reports all of the above without reading the OpenRouter vault, whereas a
 live `/model` inventory or request requires a stored OpenRouter credential.
 
+#### Unified mode advertises exactly one OpenRouter row
+
+`--unified` makes clud the gateway, so OpenRouter's own live discovery is not
+available to the harness. Unified therefore advertises the single reviewed row
+(`clud-claude-openrouter-sonnet` -> `~anthropic/claude-sonnet-latest`), and only
+when an OpenRouter credential is stored; an absent key omits the row rather than
+advertising a route that cannot serve. This is deliberately *not* a mirror of
+OpenRouter's changing inventory into the static catalog, and it adds no
+clud-side picker: the picker is still Claude Code's `/model`. Live inventory
+remains the direct `--openrouter` launch's story, exactly as above.
+
+The point of the row is that in unified mode the model picker *is* the route
+picker, so a session on a spent OpenRouter account can move to another provider
+without a restart -- and can be failed over automatically. See
+[provider-failover.md](provider-failover.md).
+
+`~anthropic/*` wire IDs still never infer the OpenRouter provider, so
+`non_claude_model_by_any_id` continues to exclude it.
+
 No normalized field may contain credentials. Dry-run output exposes the
 selection and its sources so routing can be audited without a paid request.
 
