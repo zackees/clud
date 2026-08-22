@@ -2067,3 +2067,67 @@ PreToolUse text scan (Phase 5's `CwdChanged` handler is the reactive backstop),
 and once the cwd has already escaped, config discovery from the drifted cwd
 finds no `.clud/settings.json`, so the policy resolves off — this layer
 prevents drift, it cannot force a return.
+
+## DD-048: Route health is a second question, and failover is opt-in and cost-labeled
+
+**Context:** #968. A session on OpenRouter's free daily tier ran out mid-loop.
+Every later request died `429 ... free-models-per-day-stealth`, four scheduled
+`/loop` wakeups burned against a dead account, and three `/model` switches
+failed identically — because the model picker moves the model ID, not the
+upstream. The base URL is fixed at process launch, so nothing reachable from
+inside the session could leave the drained account. The only exit was killing
+the session and paying a full uncached context re-read on `--resume`.
+
+**Decision:** three choices that are not obvious from the code alone.
+
+**1. Route health is a separate question from retry, and needs its own module.**
+`codex_upstream` already answers "can this *attempt* succeed if I try again
+right now?" and then discards the answer. Routing needs a longer-lived one:
+"can this *route* serve at all, and until when?" The two are not the same
+question. A drained account and a malformed request are both
+`FailureClass::Permanent` to the retry loop and could not be more opposite to
+a router — the first must move traffic elsewhere, the second must **never**
+move it, because the next route would reject the same bytes and charge a
+second account to do it. `route_health::RouteVerdict` names the six distinct
+routing decisions; collapsing any two either strands a session on a dead route
+or replays a bad request onto a paid fallback.
+
+The ledger is launch-scoped, not global: a wedged account in one session must
+never suppress a route in another. Clocks are passed in rather than read, so
+every rule is testable without sleeping.
+
+**2. The ladder is configured, never guessed, and every rung declares who
+pays.** The default holds exactly one rung — the selected route — so a user who
+has not asked for failover sees no change in behavior and no change in spend.
+Descending onto a `CostOwner::Metered` rung requires consent recorded once
+(`--failover-allow-metered`). Automatic recovery must not become an automatic
+invoice; that is a worse failure than the outage being fixed.
+
+Ordering matters and is the caller's: a switch inside one provider family costs
+only a cold prompt cache, while crossing families additionally costs a Codex
+reseed. Same-family rungs belong first.
+
+**3. Replay happens only before commit.** `serve_messages` already documented
+the seam — *"The status is chosen only while nothing has been written."* Before
+the first frame the status is still ours, so a route-terminal failure is
+re-issued against the next rung and the client sees one ordinary `200`. Context
+survives trivially because Claude Code sends the full Anthropic-visible
+transcript on every request: the gateway forwards what the client sent rather
+than reconstructing it. After commit the status is spent, so the honest answer
+is to end the turn — one turn lost, never the conversation.
+
+**Rejected: a standalone `clud route status` command.** The gateway is
+launch-scoped and its port and token are never serialized — the property that
+keeps a launch's credentials off disk — so a separate process has nothing to
+connect to. Building the CLI would require publishing a discovery file the
+design deliberately avoids. Health is exposed on the gateway itself at
+`GET /_clud/route/status`, beside the existing `/_clud/context/*`, with
+`POST /_clud/route/clear` as the escape hatch for a clock-less drain (a spent
+balance has no reset time, so after a top-up nothing else brings it back).
+
+**Rejected: shrinking `max_tokens` to fit a balance.** The observed `402` reads
+"requested up to 32000 tokens, but can only afford 1600". Trimming the request
+to fit is the obvious-looking fix and the wrong one: it converts a billing
+failure into a silently truncated answer.
+
+See [`architecture/provider-failover.md`](architecture/provider-failover.md).
