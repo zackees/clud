@@ -1511,7 +1511,7 @@ fn serve_unified_messages(
                     Some(ConversationRoute::Codex),
                     log,
                 );
-                ProxyOutcome::Committed
+                ProxyOutcome::local(200)
             }
             _ => {
                 // Defense in depth: unavailable routes are omitted from
@@ -1525,13 +1525,19 @@ fn serve_unified_messages(
                 })
                 .to_string();
                 let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
-                ProxyOutcome::Committed
+                ProxyOutcome::local(400)
             }
         };
 
         match outcome {
-            ProxyOutcome::Committed => {
-                unified.record_route_success(attempt.route);
+            ProxyOutcome::Committed { status } => {
+                // Only a served turn is evidence the route recovered. A
+                // committed *failure* -- a malformed request, an upstream
+                // outage -- says nothing about the route, so it must not clear
+                // a cooldown the ledger is still serving.
+                if status < 400 {
+                    unified.record_route_success(attempt.route);
+                }
                 return;
             }
             ProxyOutcome::Declined(verdict) => {
@@ -1655,7 +1661,7 @@ fn serve_unified_anthropic_proxy(
     shutdown: &AtomicBool,
     probe: bool,
 ) -> ProxyOutcome {
-    let mut outcome = ProxyOutcome::Committed;
+    let mut outcome = ProxyOutcome::local(500);
     let routed = conversations.with_history(&conversation_key.id, |history| {
         // Crossing a provider boundary starts a new route epoch, which is
         // exactly what a failover is: a provider switch nobody typed.
@@ -1680,7 +1686,7 @@ fn serve_unified_anthropic_proxy(
             error.to_string(),
         ));
         let _ = write_pipeline_error(stream, &failure, None);
-        return ProxyOutcome::Committed;
+        return ProxyOutcome::local(500);
     }
     outcome
 }
@@ -1775,10 +1781,20 @@ struct AnthropicProxyTarget<'a> {
 /// the turn.
 #[derive(Debug)]
 enum ProxyOutcome {
-    /// Bytes reached the client. Nothing may be retried.
-    Committed,
+    /// Bytes reached the client. Nothing may be retried. Carries the status so
+    /// the caller can tell a served turn from a committed failure: only the
+    /// former is evidence that the route recovered.
+    Committed { status: u16 },
     /// Nothing was written. The route declined with this verdict.
     Declined(RouteVerdict),
+}
+
+impl ProxyOutcome {
+    /// A status the gateway produced itself, with no upstream verdict behind
+    /// it. Treated as a committed failure so it never clears a cooldown.
+    const fn local(status: u16) -> Self {
+        Self::Committed { status }
+    }
 }
 
 /// Bounded prefix read from a failing upstream so it can be classified.
@@ -1840,7 +1856,7 @@ fn serve_anthropic_proxy(
                 br#"{"error":{"type":"api_error","message":"gateway upstream unavailable"}}"#,
                 false,
             );
-            return ProxyOutcome::Committed;
+            return ProxyOutcome::local(502);
         }
     };
     let status = response.status();
@@ -1910,7 +1926,7 @@ fn serve_anthropic_proxy(
         let _ = write!(stream, "request-id: {request_id}\r\n");
     }
     if stream.write_all(b"\r\n").is_err() || stream.flush().is_err() {
-        return ProxyOutcome::Committed;
+        return ProxyOutcome::Committed { status };
     }
     // Anything the probe already consumed has to go out first, or the client
     // would receive a truncated error envelope.
@@ -1921,7 +1937,7 @@ fn serve_anthropic_proxy(
             .and_then(|()| stream.flush()))
         .is_err()
     {
-        return ProxyOutcome::Committed;
+        return ProxyOutcome::Committed { status };
     }
     let mut chunk = [0_u8; 8192];
     loop {
@@ -1945,7 +1961,7 @@ fn serve_anthropic_proxy(
     let _ = stream.write_all(b"0\r\n\r\n");
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Both);
-    ProxyOutcome::Committed
+    ProxyOutcome::Committed { status }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3953,6 +3969,63 @@ Connection: close
         assert!(
             !restored.contains("\"reason\":\"drained\""),
             "clearing must restore the route a top-up fixed: {restored}"
+        );
+    }
+
+    /// `route_health` asserts this at the unit level; this pins the gateway
+    /// wiring to the same contract. A committed *failure* says nothing about
+    /// the route, so it must not clear a cooldown the ledger is still serving.
+    #[test]
+    fn a_committed_failure_does_not_clear_a_cooling_route() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![
+            // First: drains the route and is failed over.
+            Some(raw_response(
+                402,
+                "Payment Required",
+                r#"{"error":{"message":"This request requires more credits"}}"#,
+            )),
+            // Second: a malformed request, committed straight through.
+            Some(raw_response(
+                400,
+                "Bad Request",
+                r#"{"error":{"type":"invalid_request_error","message":"bad shape"}}"#,
+            )),
+        ]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        for session in ["drain", "fatal"] {
+            let _ = request(
+                addr,
+                &unified_message_request(
+                    &bridge,
+                    "clud-claude-deepseek-v4-flash",
+                    session,
+                    "native-claude-oauth-canary",
+                ),
+            );
+        }
+
+        let status_body = request(
+            addr,
+            &authorized_with_headers(
+                "GET",
+                "/_clud/route/status",
+                "native-claude-oauth-canary",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+            ),
+        );
+        assert!(
+            status_body.contains("\"reason\":\"drained\""),
+            "the 400 must not have resurrected the drained route: {status_body}"
         );
     }
 
