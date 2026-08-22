@@ -208,6 +208,21 @@ impl FailoverLadder {
         ledger: &RouteLedger,
         now: Instant,
     ) -> Option<&FailoverRung> {
+        self.next_available_excluding(after, None, ledger, now)
+    }
+
+    /// As [`Self::next_available`], but dropping rungs that sit on a route the
+    /// caller is already using. Without that filter a ladder naming only the
+    /// active route reads as a usable fallback right up until the moment it
+    /// declines, and the gateway spends a second upstream call to rediscover
+    /// what it just learned.
+    pub fn next_available_excluding(
+        &self,
+        after: Option<&str>,
+        exclude: Option<ConversationRoute>,
+        ledger: &RouteLedger,
+        now: Instant,
+    ) -> Option<&FailoverRung> {
         let start = match after {
             Some(spec) => self
                 .rungs
@@ -219,7 +234,8 @@ impl FailoverLadder {
         self.rungs[start.min(self.rungs.len())..]
             .iter()
             .find(|rung| {
-                (self.allow_metered || rung.cost == CostOwner::Subscription)
+                exclude != Some(rung.route)
+                    && (self.allow_metered || rung.cost == CostOwner::Subscription)
                     && ledger.is_available(rung.route, now)
             })
     }
@@ -376,6 +392,23 @@ mod tests {
                 .map(|rung| rung.spec.as_str()),
             None,
             "the ladder must end rather than wrap around and loop forever"
+        );
+    }
+
+    /// A ladder naming only the route already in use is not a fallback.
+    #[test]
+    fn a_rung_on_the_route_already_in_use_is_not_a_fallback() {
+        let now = Instant::now();
+        let ledger = RouteLedger::new();
+        let ladder = FailoverLadder::parse("deepseek-v4-flash", true).unwrap();
+        assert!(
+            ladder.next_available(None, &ledger, now).is_some(),
+            "it is a real rung for any other route"
+        );
+        assert_eq!(
+            ladder.next_available_excluding(None, Some(ConversationRoute::DeepSeek), &ledger, now),
+            None,
+            "but never for the route already serving the request"
         );
     }
 

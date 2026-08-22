@@ -165,10 +165,10 @@ impl UnifiedGatewayConfig {
     }
 
     /// The next rung below `after` that the ledger says can serve.
-    fn next_rung(&self, after: Option<&str>) -> Option<FailoverRung> {
+    fn next_rung(&self, after: Option<&str>, current: ConversationRoute) -> Option<FailoverRung> {
         let ledger = self.route_ledger.lock().ok()?;
         self.failover
-            .next_available(after, &ledger, Instant::now())
+            .next_available_excluding(after, Some(current), &ledger, Instant::now())
             .cloned()
     }
 }
@@ -1446,7 +1446,7 @@ fn serve_unified_messages(
             }
             None => body.to_vec(),
         };
-        let fallback = unified.next_rung(attempt.spec.as_deref());
+        let fallback = unified.next_rung(attempt.spec.as_deref(), attempt.route);
         let probe = fallback.is_some();
 
         let outcome = match attempt.provider {
@@ -1538,7 +1538,7 @@ fn serve_unified_messages(
                 let state = unified.record_route(attempt.route, verdict);
                 // Recomputed after recording, so the route that just declined
                 // is skipped on its own merits rather than by position.
-                let Some(rung) = unified.next_rung(attempt.spec.as_deref()) else {
+                let Some(rung) = unified.next_rung(attempt.spec.as_deref(), attempt.route) else {
                     // Nothing left to try. Re-issue against the same route with
                     // probing off so the client receives the real upstream
                     // status instead of a silent hang.
