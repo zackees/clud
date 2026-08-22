@@ -108,10 +108,10 @@ fn route_for(provider: ModelProvider) -> Option<ConversationRoute> {
         ModelProvider::Claude => Some(ConversationRoute::Claude),
         ModelProvider::Codex => Some(ConversationRoute::Codex),
         ModelProvider::DeepSeek => Some(ConversationRoute::DeepSeek),
-        // Direct-launch providers. They have no gateway route to fall back to
-        // until they are promoted, and a rung that cannot be served is worse
-        // than no rung: it would consume a descent and then fail.
-        ModelProvider::Kimi | ModelProvider::OpenRouter => None,
+        ModelProvider::OpenRouter => Some(ConversationRoute::OpenRouter),
+        // Still direct-launch only. A rung that cannot be served is worse than
+        // no rung: it would consume a descent and then fail.
+        ModelProvider::Kimi => None,
     }
 }
 
@@ -262,12 +262,12 @@ mod tests {
 
     #[test]
     fn a_provider_without_a_gateway_route_is_rejected_at_parse_time() {
-        let error = FailoverLadder::parse("openrouter-claude-sonnet", true).unwrap_err();
+        let error = FailoverLadder::parse("kimi-k3", true).unwrap_err();
         assert_eq!(
             error,
             LadderError::Unroutable {
-                spec: "openrouter-claude-sonnet".to_string(),
-                provider: "openrouter",
+                spec: "kimi-k3".to_string(),
+                provider: "kimi",
             },
             "a rung that cannot be served must fail the launch, not a turn"
         );

@@ -213,8 +213,11 @@ pub const MODELS: &[CatalogModel] = &[
         cli_id: "openrouter-claude-sonnet",
         provider: ModelProvider::OpenRouter,
         wire_id: "~anthropic/claude-sonnet-latest",
-        // OpenRouter's live gateway discovery owns its changing inventory.
-        discovery_id: None,
+        // One reviewed row, advertised only in unified mode so the route can be
+        // selected and failed over (#968). OpenRouter's live gateway discovery
+        // still owns its changing inventory in a direct `--openrouter` launch;
+        // that inventory is deliberately not mirrored here.
+        discovery_id: Some("clud-claude-openrouter-sonnet"),
         display_name: "Claude Sonnet via OpenRouter",
         legacy_aliases: &[],
         supported_efforts: ANTHROPIC_EFFORTS,

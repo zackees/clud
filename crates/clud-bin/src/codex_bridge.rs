@@ -84,6 +84,10 @@ type SharedBridgeLog = Arc<Mutex<BridgeLog>>;
 
 const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
 const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
+/// OpenRouter's native Anthropic Messages endpoint. Note the missing `/v1`:
+/// the path is appended by the proxy, and `https://openrouter.ai/api/v1` is a
+/// different (OpenAI-shaped) surface.
+const OPENROUTER_ANTHROPIC_BASE_URL: &str = "https://openrouter.ai/api";
 pub const UNIFIED_GATEWAY_TOKEN_HEADER: &str = "X-Clud-Gateway-Token";
 
 /// A launch-scoped multiplexer configuration. Secret material is intentionally
@@ -91,9 +95,11 @@ pub const UNIFIED_GATEWAY_TOKEN_HEADER: &str = "X-Clud-Gateway-Token";
 #[derive(Clone)]
 pub struct UnifiedGatewayConfig {
     deepseek_api_key: Option<String>,
+    openrouter_api_key: Option<String>,
     codex_available: bool,
     anthropic_base_url: String,
     deepseek_base_url: String,
+    openrouter_base_url: String,
     /// Ordered fallback routes. Empty by default, so a launch that did not ask
     /// for failover keeps exactly today's behavior and today's spend.
     failover: FailoverLadder,
@@ -108,12 +114,21 @@ impl UnifiedGatewayConfig {
     pub fn new(deepseek_api_key: Option<String>, codex_available: bool) -> Self {
         Self {
             deepseek_api_key,
+            openrouter_api_key: None,
             codex_available,
             anthropic_base_url: ANTHROPIC_MESSAGES_BASE_URL.to_string(),
             deepseek_base_url: DEEPSEEK_ANTHROPIC_BASE_URL.to_string(),
+            openrouter_base_url: OPENROUTER_ANTHROPIC_BASE_URL.to_string(),
             failover: FailoverLadder::default(),
             route_ledger: Arc::new(Mutex::new(RouteLedger::new())),
         }
+    }
+
+    /// OpenRouter's key, when the launch has one. Absent leaves the route out
+    /// of discovery entirely rather than advertising a row that cannot serve.
+    pub fn with_openrouter(mut self, api_key: Option<String>) -> Self {
+        self.openrouter_api_key = api_key;
+        self
     }
 
     pub fn with_failover(mut self, failover: FailoverLadder) -> Self {
@@ -125,6 +140,12 @@ impl UnifiedGatewayConfig {
     fn with_upstreams(mut self, anthropic_base_url: String, deepseek_base_url: String) -> Self {
         self.anthropic_base_url = anthropic_base_url;
         self.deepseek_base_url = deepseek_base_url;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_openrouter_upstream(mut self, base_url: String) -> Self {
+        self.openrouter_base_url = base_url;
         self
     }
 
@@ -157,6 +178,7 @@ impl fmt::Debug for UnifiedGatewayConfig {
         formatter
             .debug_struct("UnifiedGatewayConfig")
             .field("deepseek_configured", &self.deepseek_api_key.is_some())
+            .field("openrouter_configured", &self.openrouter_api_key.is_some())
             .field("codex_available", &self.codex_available)
             .field("failover_rungs", &self.failover.rungs().len())
             .finish()
@@ -919,7 +941,7 @@ fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
             // Phase 4 of #937 wires Kimi's unified route; until then it is
             // never advertised, so a direct `--kimi` launch is unaffected.
             ModelProvider::Kimi => false,
-            ModelProvider::OpenRouter => false,
+            ModelProvider::OpenRouter => unified.openrouter_api_key.is_some(),
             ModelProvider::Claude => false,
         })
         .filter_map(|entry| {
@@ -1272,6 +1294,7 @@ fn serve_unified_messages(
             route: match entry.provider {
                 ModelProvider::Codex => ConversationRoute::Codex,
                 ModelProvider::DeepSeek => ConversationRoute::DeepSeek,
+                ModelProvider::OpenRouter => ConversationRoute::OpenRouter,
                 _ => ConversationRoute::Claude,
             },
             model: Some(codex_effort_suffix.map_or_else(
@@ -1322,6 +1345,22 @@ fn serve_unified_messages(
                     &payload,
                     headers,
                     unified.deepseek_api_key.as_deref(),
+                    config.stream_idle_timeout,
+                    shutdown,
+                    probe,
+                )
+            }
+            ModelProvider::OpenRouter if unified.openrouter_api_key.is_some() => {
+                serve_unified_anthropic_proxy(
+                    stream,
+                    conversations,
+                    conversation_key,
+                    ConversationRoute::OpenRouter,
+                    &unified.openrouter_base_url,
+                    "/v1/messages",
+                    &payload,
+                    headers,
+                    unified.openrouter_api_key.as_deref(),
                     config.stream_idle_timeout,
                     shutdown,
                     probe,
@@ -1448,6 +1487,10 @@ fn finish_without_failover(
         ConversationRoute::DeepSeek => (
             unified.deepseek_base_url.as_str(),
             unified.deepseek_api_key.as_deref(),
+        ),
+        ConversationRoute::OpenRouter => (
+            unified.openrouter_base_url.as_str(),
+            unified.openrouter_api_key.as_deref(),
         ),
         _ => (unified.anthropic_base_url.as_str(), None),
     };
@@ -1577,7 +1620,7 @@ fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
             ModelProvider::DeepSeek => config.deepseek_api_key.is_some(),
             // Phase 4 of #937 wires Kimi's unified route.
             ModelProvider::Kimi => false,
-            ModelProvider::OpenRouter => false,
+            ModelProvider::OpenRouter => config.openrouter_api_key.is_some(),
             ModelProvider::Claude => false,
         })
         .filter_map(|entry| entry.discovery_id)
@@ -3643,6 +3686,58 @@ Connection: close
         assert!(
             !replayed.contains("deepseek-vault-canary"),
             "credentials must not cross a provider boundary: {replayed}"
+        );
+    }
+
+    /// The reported wedge, reproduced and fixed (#968).
+    ///
+    /// A session on OpenRouter's free daily tier exhausted its quota and had no
+    /// in-session escape: `/model` moves the model ID, not the upstream. Routed
+    /// through the gateway, the same exhaustion lands on the Claude rung and
+    /// the turn completes.
+    #[test]
+    fn an_exhausted_openrouter_route_continues_on_claude_without_the_client_noticing() {
+        let claude = FakeResponses::start();
+        let openrouter = FakeResponses::start_with_responses(vec![Some(raw_response(
+            429,
+            "Too Many Requests",
+            r#"{"error":{"message":"Rate limit exceeded: free-models-per-day-stealth"}}"#,
+        ))]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(None, false)
+                .with_openrouter(Some("openrouter-vault-canary".to_string()))
+                .with_upstreams(claude.base_url.clone(), String::new())
+                .with_openrouter_upstream(openrouter.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-openrouter-sonnet",
+                "openrouter-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        assert_eq!(status(&response), 200, "{response}");
+        let sent = openrouter.requests().pop().expect("openrouter was tried");
+        assert!(
+            sent.contains("~anthropic/claude-sonnet-latest"),
+            "the reviewed OpenRouter wire ID must be used: {sent}"
+        );
+        assert!(
+            sent.contains("Bearer openrouter-vault-canary"),
+            "OpenRouter must receive its own credential: {sent}"
+        );
+
+        let rescued = claude.requests().pop().expect("the Claude rung was taken");
+        assert!(rescued.contains("claude-opus-4-1"), "{rescued}");
+        assert!(
+            !rescued.contains("openrouter-vault-canary"),
+            "credentials must not cross a provider boundary: {rescued}"
         );
     }
 
