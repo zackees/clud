@@ -4,9 +4,19 @@
 routing OpenRouter through the gateway (section 1), the failure taxonomy and
 route ledger (`route_health.rs`, section 2), the cost-labeled ladder
 (`failover.rs`, section 3), pre-commit replay (section 4), and section 5's
-cooldown recovery, stickiness, and sanitized notices. Reachable with
-`--failover <routes>` and `--failover-allow-metered`. Still proposals: `clud
-route status` and the `POST /_clud/route/*` control endpoint. This document builds on the
+cooldown recovery, stickiness, sanitized notices, and the `/_clud/route/*`
+control surface. Reachable with `--failover <routes>` and
+`--failover-allow-metered`.
+
+One section-5 item is deliberately **not** built: a standalone `clud route
+status` command. The gateway is launch-scoped and its port and token are never
+serialized -- that is the property that keeps a launch's credentials off disk --
+so a separate process has nothing to connect to. Health is exposed instead on
+the gateway itself at `GET /_clud/route/status`, reachable by anything already
+holding the gateway token, and `POST /_clud/route/clear` forgets one route's
+health after a top-up or a key swap (a drained route has no clock, so nothing
+else can bring it back). Building the CLI would require publishing a discovery
+file that the current design intentionally avoids. This document builds on the
 unified gateway ([unified-gateway.md](unified-gateway.md)) and the provider
 catalog ([provider-selection.md](provider-selection.md)).
 
@@ -155,10 +165,13 @@ route  openrouter exhausted (429 free-models-per-day, resets 00:00Z)
        -> continuing on claude/opus (subscription)  · cache cold for one request
 ```
 
-Two surfaces expose the state itself: `clud route status` prints the ladder
-with each rung's health and reset clock, and `POST /_clud/route/*` sits beside
-the existing `/_clud/context/compact` and `/_clud/context/clear` control
-endpoints so a wedged session can be pushed to a specific rung from outside.
+The state itself is exposed on the gateway, beside the existing
+`/_clud/context/compact` and `/_clud/context/clear`: `GET /_clud/route/status`
+returns the ladder with each rung's cost owner, whether it is withheld for
+consent, and every known route's health and reset clock; `POST
+/_clud/route/clear` forgets one route so a topped-up balance or replaced key
+takes effect without a restart. Both require the gateway token, and neither
+reports a credential, base URL, prompt, or response body.
 
 ## What it costs
 
@@ -184,6 +197,8 @@ endpoints so a wedged session can be pushed to a specific rung from outside.
 | A metered rung is skipped without recorded consent | `metered_rungs_require_recorded_consent` |
 | Cooldown expiry restores original priority; no rung changes twice in one turn | `exhausted_routes_rejoin_the_ladder_after_reset` |
 | Notices name provider and reason only | `failover_notices_are_sanitized_and_actionable` |
+| Status reports cost owner, consent, and a clock-less drain; clear restores it | `route_status_reports_health_and_clear_restores_a_drained_route` |
+| The control surface is gateway-token gated | `route_status_requires_the_gateway_token` |
 
 ## Out of scope
 
