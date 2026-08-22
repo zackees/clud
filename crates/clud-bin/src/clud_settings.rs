@@ -39,6 +39,7 @@ pub struct GlobalSettingsPatch {
     pub harness: Option<HarnessSelection>,
     pub pr_wait_fail_fast: Option<bool>,
     pub web_term: Option<bool>,
+    pub block_cd: Option<crate::repo_clud_config::BlockCd>,
     pub provider_profiles: Vec<ProviderProfilePatch>,
 }
 
@@ -614,6 +615,9 @@ fn save_settings_transaction_at(
     if let Some(enabled) = patch.web_term {
         object_entry(&mut document, "web_term").insert("enabled".to_string(), Value::Bool(enabled));
     }
+    if let Some(block_cd) = patch.block_cd {
+        object_entry(&mut document, "bash").insert("block_cd".to_string(), block_cd.as_json());
+    }
     for profile in patch.provider_profiles {
         let Some(provider) = profile.provider else {
             continue;
@@ -699,6 +703,27 @@ pub fn save_pr_wait_fail_fast_enabled_at(home: &Path, enabled: bool) -> Result<(
             .or_insert_with(|| Value::String(GIT_PR_WAIT_FAIL_FAST_NOTE.to_string()));
         git.insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
     })
+}
+
+/// `bash.block_cd` as set at the user level (`~/.clud/settings.json`).
+///
+/// The same file `repo_clud_config` reads as its user layer, so this is a
+/// writer for a key the hook already resolves — deliberately not a second
+/// source of truth. A repo's own `.clud/settings.json` still overrides it.
+pub fn load_block_cd() -> Result<crate::repo_clud_config::BlockCd, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_block_cd_at(&home)
+}
+
+pub fn load_block_cd_at(home: &Path) -> Result<crate::repo_clud_config::BlockCd, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(document
+        .get("bash")
+        .and_then(|item| item.get("block_cd"))
+        .and_then(crate::repo_clud_config::BlockCd::from_json)
+        .unwrap_or_default())
 }
 
 /// Whether bare interactive launches should open in clud's owned web terminal.

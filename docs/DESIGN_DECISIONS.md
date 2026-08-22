@@ -2005,3 +2005,65 @@ picker, choosing another paid model, or reviving Claude's unknown-model 200K
 assumption. A future harness must consume an existing namespace or add one
 explicit catalog field; private model tables and display-name inference are
 not allowed.
+
+## DD-047: `bash.block_cd` is a first-class setting, not a `bad_commands` rule
+
+**Context:** A `cd` in a Bash tool call mutates the *session* cwd, not just
+that command's. Every later tool call inherits the moved cwd, and anything
+resolving a relative path against it breaks immediately. Project hooks are the
+common casualty: they are conventionally written as repo-relative script paths
+(`uv run python ci/hooks/check-on-stop.py`), so drift makes them ENOENT and
+the session wedges — no tool can run until a human intervenes. The reported
+case drifted *within* the same repo, so "stay inside the repo" is not a
+sufficient rule.
+
+Upstream will not fix the underlying behavior: the cwd contract is documented
+as following the agent, and the tracker's own reports contradict each other
+about whether cwd drifts or silently resets
+(anthropics/claude-code#83636, #76708, #84685; the exact failure class in
+#50960 and #42282 was closed NOT_PLANNED).
+
+**Decision:** `bash.block_cd: "auto" | true | false` in `.clud/settings.json`,
+defaulting to `"auto"`, enforced by `clud-cmd-scan` at PreToolUse.
+
+The existing DD-016 `bad_commands` engine cannot express this. It matches an
+executable plus argument-token predicates; deciding whether a `cd` target
+escapes the registered roots requires *resolving* the argument against those
+roots — path resolution, not pattern matching. A regex rule would either deny
+all `cd` (too blunt: `cd src/` is harmless in most repos) or miss `cd ../..`,
+`cd $HOME`, `cd %USERPROFILE%`, and absolute paths.
+
+Four properties make the guard safe to default on:
+
+1. **Only session-mutating `cd`s count.** A `cd` inside `(...)`, `$(...)`,
+   backticks, or a nested shell runs in a child process and cannot leak, so it
+   is always allowed. That keeps the recommended workaround —
+   `(cd dir && cmd)` — available under every setting.
+2. **`cd` back to a registered root is always allowed**, so a session whose cwd
+   has already drifted can recover.
+3. **`"auto"` resolves against the environment at fire time**, not at parse
+   time: hooks that run relative script paths pin the cwd to the repo root;
+   hooks that are all PATH binaries or absolute paths only forbid leaving the
+   repo; no hooks means no policy at all.
+4. **An unresolvable target is treated per policy, not guessed.** Strict denies
+   it (it cannot prove the destination is a root); escape-only allows it (it
+   has no evidence of an escape), matching the scanner's general habit of
+   narrowing only on evidence.
+
+**Alternatives rejected:** A `bad_commands` rule (cannot resolve paths, per
+above). A plain `true|false` toggle — the right answer depends on what the
+repo's hooks look like, which clud can determine, so it ships the opinion
+rather than a knob. Forcing the cwd back from a `CwdChanged` handler as the
+primary mechanism — cwd state is documented-unstable and shared across
+concurrent subagents, so nothing may depend on it for correctness.
+
+**Consequences:** Pinning is *hygiene*, not correctness. It protects the
+agent's own relative-path commands and keeps the invariant the harness snaps
+back to anyway; rooting hooks correctly is the dispatcher's job (#967 Phase
+2+), and once a repo's hooks are dispatcher-managed and cwd-immune, `"auto"`
+relaxes (#967 Phase 5). Two limits are deliberate and documented rather than
+worked around: a `cd` performed by a sourced script is invisible to a
+PreToolUse text scan (Phase 5's `CwdChanged` handler is the reactive backstop),
+and once the cwd has already escaped, config discovery from the drifted cwd
+finds no `.clud/settings.json`, so the policy resolves off — this layer
+prevents drift, it cannot force a return.

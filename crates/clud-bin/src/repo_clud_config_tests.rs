@@ -748,3 +748,65 @@ fn compile_match_pattern_is_case_insensitive() {
     assert!(re.is_match("PLAYWRIGHT"));
     assert!(re.is_match("Playwright"));
 }
+
+// -----------------------------------------------------------------
+// Issue #967 Phase 1: the `bash.block_cd` tri-state.
+// -----------------------------------------------------------------
+
+#[test]
+fn block_cd_defaults_to_auto_when_unset() {
+    let config = parse_repo_clud_config(r#"{"rust":{"use_soldr":true}}"#).unwrap();
+    assert_eq!(config.bash.block_cd, BlockCd::Auto);
+}
+
+#[test]
+fn block_cd_accepts_the_documented_spellings() {
+    for (body, expected) in [
+        (r#"{"bash":{"block_cd":"auto"}}"#, BlockCd::Auto),
+        (r#"{"bash":{"block_cd":true}}"#, BlockCd::Always),
+        (r#"{"bash":{"block_cd":false}}"#, BlockCd::Never),
+        // Hand-edited files grow string spellings of the booleans.
+        (r#"{"bash":{"block_cd":"never"}}"#, BlockCd::Never),
+        (r#"{"bash":{"block_cd":"ALWAYS"}}"#, BlockCd::Always),
+    ] {
+        assert_eq!(
+            parse_repo_clud_config(body).unwrap().bash.block_cd,
+            expected,
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn an_unrecognized_block_cd_value_does_not_take_the_rest_of_the_file_down() {
+    // `read_and_parse_raw` drops a document it cannot parse, so a strict
+    // enum here would let one typo silently disarm the file's command rules.
+    let config = parse_repo_clud_config(
+        r#"{"bash":{"block_cd":"strictt"},"bad_commands":[{"id":"soldr","match":"cargo","replacement":"soldr cargo"}]}"#,
+    )
+    .expect("document still parses");
+    assert_eq!(config.bash.block_cd, BlockCd::Auto);
+    assert_eq!(config.bad_commands.len(), 1, "rules survive the bad value");
+}
+
+#[test]
+fn block_cd_layers_repo_over_user_like_every_other_scalar() {
+    let tmp = TempDir::new().unwrap();
+    mark_repo_root(tmp.path());
+    write_settings(tmp.path(), r#"{"bash":{"block_cd":false}}"#);
+    let repo = discover_repo_clud_config(tmp.path()).expect("repo config");
+    assert_eq!(repo.bash.block_cd, BlockCd::Never);
+
+    // The repo-local layer wins over the repo layer.
+    write_local_settings(tmp.path(), r#"{"bash":{"block_cd":true}}"#);
+    let local = discover_repo_clud_config(tmp.path()).expect("repo config");
+    assert_eq!(local.bash.block_cd, BlockCd::Always);
+}
+
+#[test]
+fn a_block_cd_only_file_counts_as_a_directive() {
+    // Otherwise a user-level file that sets nothing but this key would be
+    // treated as absent and the setting silently ignored.
+    let raw = parse_raw_repo_clud_config(r#"{"bash":{"block_cd":true}}"#).unwrap();
+    assert!(has_directive(&raw));
+}

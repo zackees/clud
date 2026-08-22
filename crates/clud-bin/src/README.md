@@ -295,7 +295,23 @@ which test tier a change belongs in — lives in
   provenance (matched token, rule id, `<file>#/bad_commands/<index>`) in the
   reason and log a structured `bad_cmd_denied` event to
   `~/.clud/tools/hooks/block-bad-cmd.log` (#525). User-facing rule-writing
-  guide lives in the root `README.md`.
+  guide lives in the root `README.md`. Also enforces `bash.block_cd` via
+  `block_bad_cmd_cd.rs` (see below), after the command rules so an
+  independently forbidden command reports the stronger reason.
+- `block_bad_cmd_cd.rs` - `bash.block_cd` session-cwd pinning (#967 Phase 1,
+  DD-047). Scans for `cd`s that would move the *session* cwd — subshells,
+  `$(...)`, and nested shells are skipped because they cannot leak — resolves
+  the target against the registered roots (Phase 1: the containing repo root)
+  and denies per policy. `"auto"` resolves at fire time by classifying every
+  hook command in scope for cwd sensitivity: a relative script path pins the
+  cwd (strict), all-PATH-binary hooks only block leaving the repo, no hooks
+  means no policy. That classifier reads `.claude/settings*.json` and
+  `.codex/hooks.json` across **all** events, deliberately not through
+  `hook_health::inspect`, which parses only `PreToolUse` — the wedge that
+  motivated the issue came from a `Stop` hook. `hook_health` reuses it for the
+  broken-`git rev-parse`-prefix warning. Every settings/hook read sits behind
+  a word-boundary pre-filter so a command with no `cd` pays one lowercase
+  scan.
 - `block_bad_cmd_rm_vars.rs` - #963's POSIX/Bash abstract interpreter for
   catastrophic `rm`/`rmdir` operands rooted at `$VAR` or `${VAR}`. It rewrites
   only single, statically proven literal assignments into a complete
