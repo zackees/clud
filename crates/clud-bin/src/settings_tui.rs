@@ -62,6 +62,7 @@ const HARNESS_OPTIONS: [ChoiceOption<HarnessSelection>; 4] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SettingValue {
     Bool(bool),
+    BlockCd(crate::repo_clud_config::BlockCd),
     ModelProvider(ModelProvider),
     Harness(HarnessSelection),
     Model {
@@ -82,6 +83,14 @@ impl SettingValue {
     fn cycle(&mut self) {
         match self {
             Self::Bool(value) => *value = !*value,
+            Self::BlockCd(value) => {
+                use crate::repo_clud_config::BlockCd;
+                *value = match value {
+                    BlockCd::Auto => BlockCd::Always,
+                    BlockCd::Always => BlockCd::Never,
+                    BlockCd::Never => BlockCd::Auto,
+                };
+            }
             Self::ModelProvider(value) => {
                 let mut selector = ChoiceSelector::new(&model_options(), *value, *value);
                 selector.cycle();
@@ -129,6 +138,7 @@ impl SettingValue {
         match self {
             Self::Bool(true) => "[x]".to_string(),
             Self::Bool(false) => "[ ]".to_string(),
+            Self::BlockCd(value) => format!("[{}]", value.label()),
             Self::ModelProvider(value) => format!("[{}]", value.as_str()),
             Self::Harness(value) => format!("[{}]", value.as_str()),
             Self::Model { value, .. } => {
@@ -149,6 +159,7 @@ impl SettingValue {
         match self {
             Self::Bool(true) => "true".to_string(),
             Self::Bool(false) => "false".to_string(),
+            Self::BlockCd(value) => value.label().to_string(),
             Self::ModelProvider(value) => value.as_str().to_string(),
             Self::Harness(value) => value.as_str().to_string(),
             Self::Model { value, .. } => (*value).to_string(),
@@ -198,6 +209,12 @@ fn setting_items() -> Vec<SettingItem> {
                a bundled fail-fast waiter script. Off by default; may \
                become the default later.",
         value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false)),
+    });
+    items.push(SettingItem {
+        key: "bash.block_cd",
+        label: "Pin the session cwd to the repo root",
+        note: "A stray `cd` moves the cwd for every later tool call and breaks                repo-relative hooks. `auto` decides per repo from the hooks in                scope; a repo's .clud/settings.json overrides this.",
+        value: SettingValue::BlockCd(clud_settings::load_block_cd().unwrap_or_default()),
     });
     items.push(SettingItem {
         key: "web_term.enabled",
@@ -576,6 +593,9 @@ fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
             ("git.pr_wait_fail_fast", SettingValue::Bool(value)) => {
                 patch.pr_wait_fail_fast = Some(*value);
             }
+            ("bash.block_cd", SettingValue::BlockCd(value)) => {
+                patch.block_cd = Some(*value);
+            }
             ("web_term.enabled", SettingValue::Bool(value)) => {
                 patch.web_term = Some(*value);
             }
@@ -780,6 +800,7 @@ mod tests {
         assert_eq!(
             patch_from_menu(&menu),
             clud_settings::GlobalSettingsPatch {
+                block_cd: None,
                 model_provider: Some(ModelProvider::Codex),
                 harness: Some(HarnessSelection::Claude),
                 pr_wait_fail_fast: Some(true),
@@ -815,6 +836,7 @@ mod tests {
         assert_eq!(
             patch_from_menu(&menu),
             clud_settings::GlobalSettingsPatch {
+                block_cd: None,
                 model_provider: None,
                 harness: None,
                 pr_wait_fail_fast: Some(true),
@@ -888,5 +910,33 @@ mod tests {
         assert!(is_ctrl_c_or_d(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(!is_ctrl_c_or_d(KeyCode::Char('c'), KeyModifiers::NONE));
         assert!(!is_ctrl_c_or_d(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn block_cd_cycles_through_its_three_states() {
+        use crate::repo_clud_config::BlockCd;
+        let mut value = SettingValue::BlockCd(BlockCd::Auto);
+        value.cycle();
+        assert_eq!(value, SettingValue::BlockCd(BlockCd::Always));
+        value.cycle();
+        assert_eq!(value, SettingValue::BlockCd(BlockCd::Never));
+        value.cycle();
+        assert_eq!(value, SettingValue::BlockCd(BlockCd::Auto));
+        assert_eq!(value.marker(), "[auto]");
+        assert_eq!(value.list_value(), "auto");
+    }
+
+    #[test]
+    fn block_cd_row_lands_in_the_patch() {
+        use crate::repo_clud_config::BlockCd;
+        let mut menu = Menu::new(vec![SettingItem {
+            key: "bash.block_cd",
+            label: "Pin the session cwd to the repo root",
+            note: "",
+            value: SettingValue::BlockCd(BlockCd::Auto),
+        }]);
+        menu.items[0].value = SettingValue::BlockCd(BlockCd::Never);
+
+        assert_eq!(patch_from_menu(&menu).block_cd, Some(BlockCd::Never));
     }
 }

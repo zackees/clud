@@ -439,6 +439,63 @@ The `id:reason` form is required; an override with no reason is ignored and the
 command stays blocked. It has to be a real environment variable — you can't
 just type it in front of the command.
 
+### Keep the agent from wandering out of the repo
+
+A `cd` in a Bash tool call moves the **session** cwd — not just that one
+command's. Every later tool call inherits it, and anything resolving a relative
+path against it breaks at once. Project hooks are the usual casualty: they are
+conventionally written as repo-relative script paths, so one stray `cd` can
+wedge a session badly enough that no tool runs.
+
+`bash.block_cd` pins the session cwd:
+
+```json
+{
+  "bash": {
+    "block_cd": "auto"
+  }
+}
+```
+
+| Value | Meaning |
+| --- | --- |
+| `"auto"` (default) | decide per repo, from the hooks actually in scope |
+| `true` | always pin: the session cwd must *be* the repo root |
+| `false` | never police `cd` |
+
+`"auto"` looks at every hook configured for the repo — all events, both
+frontends. A hook that runs a relative script path (`uv run python
+ci/hooks/check.py`) breaks on *any* drift, so `"auto"` pins the cwd to the repo
+root. A repo whose hooks are all PATH binaries or absolute paths only needs the
+weaker rule, so `cd src/` stays allowed and only leaving the repo is blocked. A
+repo with no hooks at all is left alone entirely.
+
+A `cd` that cannot move the session is never blocked, so the workaround is
+always available:
+
+```bash
+(cd build && cmake --build .)    # subshell — the session never moves
+git -C vendor/lib log -1         # tool-level directory flag
+bash -c 'cd build && make'       # child process
+```
+
+`cd` back to the repo root stays allowed under every setting — that is how a
+session recovers if the cwd has already drifted. To move for one call anyway,
+`CLUD_BAD_CMD_OVERRIDE="block-cd:<reason>"` works exactly as it does for
+`bad_commands` rules.
+
+If clud tells you a hook is cwd-sensitive, the one-line fix is to root it at
+the session's project directory instead of hoping the cwd is right:
+
+```bash
+cd "$CLAUDE_PROJECT_DIR" && uv run python ci/hooks/check.py
+```
+
+`clud hooks` also warns about the widely-copied `git rev-parse
+--show-superproject-working-tree || ...` prefix, which looks like it does this
+but does not: that flag exits 0 with empty output outside a submodule, so the
+`||` fallback never runs and `cd ""` silently does nothing.
+
 ### What it is (and isn't)
 
 This is a guardrail for a *cooperative* agent, not a security wall. If it can't
@@ -448,7 +505,8 @@ throwaway script, etc. Its whole job is to stop an agent from *accidentally*
 grabbing the wrong tool.
 
 For the complete field reference, see **DD-016** and **DD-017** in
-[`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md).
+[`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md); **DD-047** covers
+`bash.block_cd`.
 
 ## Detached Sessions
 

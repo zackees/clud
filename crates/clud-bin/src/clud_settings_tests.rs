@@ -192,6 +192,7 @@ fn round_trips_harness_preference_and_reads_old_settings() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             harness: Some(HarnessSelection::Claude),
             ..GlobalSettingsPatch::default()
         },
@@ -213,6 +214,7 @@ fn deepseek_model_provider_round_trips_through_settings() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             model_provider: Some(ModelProvider::DeepSeek),
             ..GlobalSettingsPatch::default()
         },
@@ -239,6 +241,7 @@ fn kimi_model_provider_round_trips_through_settings() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             model_provider: Some(ModelProvider::Kimi),
             ..GlobalSettingsPatch::default()
         },
@@ -266,6 +269,7 @@ fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             model_provider: Some(ModelProvider::Codex),
             harness: Some(HarnessSelection::Claude),
             pr_wait_fail_fast: Some(true),
@@ -290,6 +294,7 @@ fn partial_settings_patch_preserves_omission_and_latest_launch_preferences() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             pr_wait_fail_fast: Some(true),
             ..GlobalSettingsPatch::default()
         },
@@ -302,6 +307,7 @@ fn partial_settings_patch_preserves_omission_and_latest_launch_preferences() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             model_provider: Some(ModelProvider::Codex),
             harness: Some(HarnessSelection::Default),
             ..GlobalSettingsPatch::default()
@@ -311,6 +317,7 @@ fn partial_settings_patch_preserves_omission_and_latest_launch_preferences() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             harness: Some(HarnessSelection::Claude),
             ..GlobalSettingsPatch::default()
         },
@@ -323,6 +330,7 @@ fn partial_settings_patch_preserves_omission_and_latest_launch_preferences() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             pr_wait_fail_fast: Some(false),
             ..GlobalSettingsPatch::default()
         },
@@ -343,6 +351,7 @@ fn atomic_settings_patch_validates_the_merged_launch_preferences() {
     let error = save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             harness: Some(HarnessSelection::Codex),
             ..GlobalSettingsPatch::default()
         },
@@ -366,6 +375,7 @@ fn global_prompt_save_rejects_a_concurrently_invalidated_partial_choice() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             model_provider: Some(ModelProvider::Codex),
             harness: Some(HarnessSelection::Default),
             ..GlobalSettingsPatch::default()
@@ -379,6 +389,7 @@ fn global_prompt_save_rejects_a_concurrently_invalidated_partial_choice() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             model_provider: Some(ModelProvider::Claude),
             ..GlobalSettingsPatch::default()
         },
@@ -828,6 +839,7 @@ fn provider_profile_round_trips_through_save_and_load() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             provider_profiles: vec![ProviderProfilePatch {
                 provider: Some(ModelProvider::Codex),
                 model: Some("codex-luna".to_string()),
@@ -862,6 +874,7 @@ fn provider_profile_round_trips_for_kimi() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             provider_profiles: vec![ProviderProfilePatch {
                 provider: Some(ModelProvider::Kimi),
                 model: Some("kimi-k3".to_string()),
@@ -893,6 +906,7 @@ fn provider_profile_effort_clears_when_patched_to_none() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             provider_profiles: vec![ProviderProfilePatch {
                 provider: Some(ModelProvider::Codex),
                 effort: Some(Some(EffortLevel::High)),
@@ -905,6 +919,7 @@ fn provider_profile_effort_clears_when_patched_to_none() {
     save_settings_patch_at(
         home.path(),
         GlobalSettingsPatch {
+            block_cd: None,
             provider_profiles: vec![ProviderProfilePatch {
                 provider: Some(ModelProvider::Codex),
                 effort: Some(None),
@@ -1056,4 +1071,47 @@ fn launcher_last_harness_round_trips_without_changing_routing_preferences() {
     );
     let document = read_settings_json_file(&settings_path_at(home.path())).unwrap();
     assert_eq!(document["custom"]["keep"], true);
+}
+
+/// zackees/clud#967 Phase 1. `~/.clud/settings.json` is the same file
+/// `repo_clud_config` reads as its user layer, so writing the key here has
+/// to produce the spelling that parser accepts — not a second encoding.
+#[test]
+fn block_cd_round_trips_through_the_settings_file() {
+    use crate::repo_clud_config::BlockCd;
+    let home = tempdir().unwrap();
+
+    for setting in [BlockCd::Always, BlockCd::Never, BlockCd::Auto] {
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                block_cd: Some(setting),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(load_block_cd_at(home.path()).unwrap(), setting);
+
+        let text = std::fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let written = document
+            .get("bash")
+            .and_then(|bash| bash.get("block_cd"))
+            .expect("bash.block_cd written");
+        assert_eq!(
+            BlockCd::from_json(written),
+            Some(setting),
+            "the repo-config parser must accept what the TUI wrote"
+        );
+    }
+}
+
+#[test]
+fn block_cd_defaults_to_auto_when_the_settings_file_says_nothing() {
+    let home = tempdir().unwrap();
+    assert_eq!(
+        load_block_cd_at(home.path()).unwrap(),
+        crate::repo_clud_config::BlockCd::Auto
+    );
 }

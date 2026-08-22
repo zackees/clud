@@ -452,3 +452,45 @@ fn different_command_claude_hooks_stay_per_matcher_prompts() {
         _ => false,
     }));
 }
+
+#[test]
+fn the_broken_git_rev_parse_prefix_is_warned_about_with_the_fix() {
+    // zackees/clud#967 Phase 1. Deliberately a Stop hook: the parser behind
+    // `report.claude` reads only PreToolUse, so a warning built from that
+    // summary alone would miss the exact shape that wedged a real session.
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude").join("settings.json"),
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cd \"$(git rev-parse --show-superproject-working-tree 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || echo .)\" && uv run python ci/hooks/check-on-stop.py"}]}]}}"#,
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("--show-superproject-working-tree"))
+        .expect("broken git rev-parse prefix warned");
+    assert!(warning.contains("exits 0 with empty output"), "{warning}");
+    assert!(warning.contains("CLAUDE_PROJECT_DIR"), "{warning}");
+}
+
+#[test]
+fn a_self_rooted_hook_earns_no_git_rev_parse_warning() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude").join("settings.json"),
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cd \"$CLAUDE_PROJECT_DIR\" && uv run python ci/hooks/check-on-stop.py"}]}]}}"#,
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    assert!(!report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("--show-superproject-working-tree")));
+}

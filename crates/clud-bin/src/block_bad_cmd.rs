@@ -257,7 +257,7 @@ pub fn run() -> i32 {
     let pr_wait_fail_fast_enabled =
         crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false);
     let rust_use_soldr = config.rust.use_soldr;
-    let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
+    let mut evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
         &payload.command,
         Some(&payload.cwd),
         allow_hybrid_uv_run,
@@ -273,6 +273,13 @@ pub fn run() -> i32 {
     }
     for warning in &evaluation.warnings {
         eprintln!("{warning}");
+    }
+
+    // #967 Phase 1: session cwd pinning. Runs after the command rules so a
+    // command that is independently forbidden still reports the stronger
+    // reason.
+    if evaluation.reason.is_none() {
+        evaluation.reason = block_cd_denial(&payload, &config);
     }
 
     if let Some(base_reason) = evaluation.reason {
@@ -339,6 +346,61 @@ pub fn run() -> i32 {
 
     append_log("allowed");
     0
+}
+
+/// Resolve `bash.block_cd` and decide whether this command's
+/// session-mutating `cd`s may run (zackees/clud#966 §8, #967 Phase 1).
+///
+/// Every read below — settings discovery, hook-config scanning, the repo-root
+/// walk — sits behind a word-boundary pre-filter, so a tool call that never
+/// mentions `cd` pays one lowercase scan and nothing else. The override is
+/// consulted only once a denial is certain, so unrelated commands do not
+/// litter the log with override attempts.
+fn block_cd_denial(
+    payload: &HookPayloadView,
+    config: &crate::repo_clud_config::RepoCludConfig,
+) -> Option<String> {
+    use crate::repo_clud_config::BlockCd;
+
+    let dialect = shell_dialect_for_tool(&payload.tool_name);
+    if !command_may_change_directory(&payload.command, dialect) {
+        return None;
+    }
+    let setting = config.bash.block_cd;
+    if setting == BlockCd::Never {
+        return None;
+    }
+    let repo_root = nearest_repo_root(&payload.cwd);
+    let home = home_dir();
+    // Only `"auto"` needs to know what the hooks look like; an explicit
+    // `true` has already decided.
+    let scan = match (&repo_root, setting) {
+        (Some(root), BlockCd::Auto) => scan_hook_cwd_sensitivity(root, home.as_deref()),
+        _ => HookCwdScan::default(),
+    };
+    let policy = resolve_policy(setting, repo_root.is_some(), &scan);
+    if policy == CdPolicy::Off {
+        return None;
+    }
+    let roots = repo_root.into_iter().collect::<Vec<_>>();
+    let hint = scan.hint();
+    let reason = cd_denial_reason(
+        &payload.command,
+        dialect,
+        policy,
+        &payload.cwd,
+        &roots,
+        home.as_deref(),
+        hint.as_deref(),
+    )?;
+    if let Some(override_reason) = accepted_override_reason(BLOCK_CD_RULE_ID) {
+        append_log(&format!(
+            "block_cd_override_accepted policy={policy:?} reason={override_reason}"
+        ));
+        return None;
+    }
+    append_log(&format!("block_cd_denied policy={policy:?}"));
+    Some(reason)
 }
 
 /// Cheap, conservative pre-filter for whether `command_text` could possibly
@@ -2143,6 +2205,17 @@ use block_bad_cmd_shell::*;
 #[path = "block_bad_cmd_rm_vars.rs"]
 mod block_bad_cmd_rm_vars;
 use block_bad_cmd_rm_vars::*;
+
+#[path = "block_bad_cmd_cd.rs"]
+mod block_bad_cmd_cd;
+use block_bad_cmd_cd::{
+    cd_denial_reason, command_may_change_directory, nearest_repo_root, resolve_policy, CdPolicy,
+    BLOCK_CD_RULE_ID,
+};
+pub use block_bad_cmd_cd::{
+    has_broken_git_rev_parse_prefix, is_cwd_sensitive_hook_command, scan_hook_cwd_sensitivity,
+    HookCwdScan, SensitiveHook, GIT_REV_PARSE_PREFIX_FIX,
+};
 
 fn py_string_repr(value: &str) -> String {
     let mut out = String::from("'");

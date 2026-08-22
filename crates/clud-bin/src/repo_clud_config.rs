@@ -38,6 +38,11 @@
 //!                               // a settings file is present).
 //!     "install":   true,        // auto-install soldr if missing (default: true).
 //!     "version":   "0.7.55"     // optional pinned version; absent = latest.
+//!   },
+//!   "bash": {
+//!     "block_cd": "auto"        // "auto" | true | false — pin the session
+//!                               // cwd to a registered repo root. See
+//!                               // `block_bad_cmd_cd.rs` and DD-047.
 //!   }
 //! }
 //! ```
@@ -49,6 +54,7 @@
 
 use regex::Regex;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -62,6 +68,7 @@ use std::path::{Path, PathBuf};
 pub struct RawRepoCludConfig {
     pub rust: RawRustConfig,
     pub optimize: RawOptimizeConfig,
+    pub bash: RawBashConfig,
     #[serde(deserialize_with = "deserialize_bad_commands")]
     pub bad_commands: Vec<BadCommandRule>,
     #[serde(deserialize_with = "deserialize_bad_pipelines")]
@@ -74,6 +81,18 @@ pub struct RawRustConfig {
     pub use_soldr: Option<bool>,
     pub install: Option<bool>,
     pub version: Option<String>,
+}
+
+/// The `bash` section. `block_cd` is deliberately typed as a raw
+/// [`Value`] rather than the [`BlockCd`] enum: a typo like
+/// `"block_cd": "strictt"` would otherwise fail the whole document, and
+/// `read_and_parse_raw` drops a document it cannot parse — silently taking
+/// the file's `bad_commands` rules down with it. `parse_raw_repo_clud_config`
+/// normalizes the value and warns instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RawBashConfig {
+    pub block_cd: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -671,8 +690,72 @@ fn concat_dedupe_bad_pipelines(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepoCludConfig {
     pub rust: RustConfig,
+    pub bash: BashConfig,
     pub bad_commands: Vec<BadCommandRule>,
     pub bad_pipelines: Vec<BadPipelineRule>,
+}
+
+/// The `bash` section of `.clud/settings.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BashConfig {
+    pub block_cd: BlockCd,
+}
+
+/// `bash.block_cd` — how strictly a session-mutating `cd` is policed
+/// (zackees/clud#966 §8).
+///
+/// `"auto"` is the default because the right answer depends on the repo:
+/// it resolves at hook-fire time against the hooks actually in scope. See
+/// `block_bad_cmd_cd::resolve_policy` for the resolution table and DD-047
+/// for why this is a first-class key rather than a `bad_commands` rule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BlockCd {
+    /// Resolve against the environment at hook-fire time.
+    #[default]
+    Auto,
+    /// Always pin the session cwd to a registered repo root.
+    Always,
+    /// Never police `cd`.
+    Never,
+}
+
+impl BlockCd {
+    /// Parse the JSON spelling: `true` / `false` / `"auto"`, plus the
+    /// `"true"` / `"false"` string forms a hand-edited file tends to grow.
+    /// `None` for anything else, which the caller reports and ignores.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        match value {
+            Value::Bool(true) => Some(Self::Always),
+            Value::Bool(false) => Some(Self::Never),
+            Value::String(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "auto" => Some(Self::Auto),
+                "true" | "always" | "strict" => Some(Self::Always),
+                "false" | "never" | "off" => Some(Self::Never),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The canonical JSON spelling, for writers.
+    #[must_use]
+    pub fn as_json(self) -> Value {
+        match self {
+            Self::Auto => Value::String("auto".to_string()),
+            Self::Always => Value::Bool(true),
+            Self::Never => Value::Bool(false),
+        }
+    }
+
+    /// The label `clud settings` shows.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -751,6 +834,7 @@ fn has_directive(raw: &RawRepoCludConfig) -> bool {
         || raw.optimize.rust.use_soldr_shims.is_some()
         || raw.optimize.rust.install_soldr.is_some()
         || raw.optimize.rust.soldr_version.is_some()
+        || raw.bash.block_cd.is_some()
         || !raw.bad_commands.is_empty()
         || !raw.bad_pipelines.is_empty()
 }
@@ -869,6 +953,18 @@ pub fn parse_raw_repo_clud_config(text: &str) -> Result<RawRepoCludConfig, Strin
             parsed.optimize.rust.soldr_version = None;
         }
     }
+    // An unrecognized `bash.block_cd` is dropped with a warning rather than
+    // rejected: the alternative is `read_and_parse_raw` discarding the whole
+    // document, which would silently disarm the file's `bad_commands` rules
+    // over one typo.
+    if let Some(value) = parsed.bash.block_cd.take() {
+        match BlockCd::from_json(&value) {
+            Some(_) => parsed.bash.block_cd = Some(value),
+            None => eprintln!(
+                "clud: ignoring unrecognized bash.block_cd value {value}; expected true, false, or \"auto\""
+            ),
+        }
+    }
     Ok(parsed)
 }
 
@@ -890,6 +986,8 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
     let lower_bad_commands = lower.bad_commands.clone();
     let upper_bad_pipelines = upper.bad_pipelines.clone();
     let lower_bad_pipelines = lower.bad_pipelines.clone();
+    let upper_bash = upper.bash.clone();
+    let lower_bash = lower.bash.clone();
     let upper_rust = normalize_raw_rust(upper);
     let lower_rust = normalize_raw_rust(lower);
     RawRepoCludConfig {
@@ -899,6 +997,9 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
             version: upper_rust.version.or(lower_rust.version),
         },
         optimize: RawOptimizeConfig::default(),
+        bash: RawBashConfig {
+            block_cd: upper_bash.block_cd.or(lower_bash.block_cd),
+        },
         bad_commands: concat_dedupe_bad_commands(upper_bad_commands, lower_bad_commands),
         bad_pipelines: concat_dedupe_bad_pipelines(upper_bad_pipelines, lower_bad_pipelines),
     }
@@ -908,6 +1009,7 @@ fn normalize_raw_rust(raw: RawRepoCludConfig) -> RawRustConfig {
     let RawRepoCludConfig {
         rust,
         optimize,
+        bash: _,
         bad_commands: _,
         bad_pipelines: _,
     } = raw;
@@ -930,6 +1032,14 @@ pub fn resolve(raw: RawRepoCludConfig) -> RepoCludConfig {
             use_soldr: use_soldr.unwrap_or(true),
             install: install.unwrap_or(true),
             version,
+        },
+        bash: BashConfig {
+            block_cd: raw
+                .bash
+                .block_cd
+                .as_ref()
+                .and_then(BlockCd::from_json)
+                .unwrap_or_default(),
         },
         bad_commands: raw.bad_commands,
         bad_pipelines: raw.bad_pipelines,

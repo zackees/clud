@@ -45,6 +45,7 @@ pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport 
             display_path(config_path)
         ));
     }
+    warnings.extend(broken_git_rev_parse_warnings(repo_root, home));
     HookHealthReport {
         repo_root: repo_root.to_path_buf(),
         home: home.map(Path::to_path_buf),
@@ -54,6 +55,33 @@ pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport 
         codex_legacy_hook_feature_configs,
         warnings,
     }
+}
+
+/// Warn about hook commands carrying the broken `git rev-parse` self-rooting
+/// prefix (zackees/clud#967 Phase 1).
+///
+/// Scanned separately from [`collect_claude`] / [`collect_codex`] because
+/// those read only `PreToolUse`, and the wedge this warning exists to prevent
+/// came from a `Stop` hook.
+fn broken_git_rev_parse_warnings(repo_root: &Path, home: Option<&Path>) -> Vec<String> {
+    let scan = crate::block_bad_cmd::scan_hook_cwd_sensitivity(repo_root, home);
+    let mut sources = BTreeSet::new();
+    for hook in &scan.broken_git_prefix {
+        sources.insert(display_path(&hook.source));
+    }
+    sources
+        .into_iter()
+        .map(|source| {
+            format!(
+                "Hook command in {source} roots itself with `git rev-parse \
+                 --show-superproject-working-tree || ...`, which never reaches its fallback: \
+                 that flag exits 0 with empty output outside a submodule, so `||` does not \
+                 advance, `cd \"\"` is a silent no-op, and the hook resolves its script path \
+                 against whatever cwd it inherited. Replace the prefix with {}",
+                crate::block_bad_cmd::GIT_REV_PARSE_PREFIX_FIX
+            )
+        })
+        .collect()
 }
 
 pub(in crate::hook_health) fn collect_claude(

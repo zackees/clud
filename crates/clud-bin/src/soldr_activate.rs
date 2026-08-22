@@ -474,6 +474,7 @@ mod tests {
     fn cfg_with_rust(r: RustConfig) -> RepoCludConfig {
         RepoCludConfig {
             rust: r,
+            bash: crate::repo_clud_config::BashConfig::default(),
             bad_commands: Vec::new(),
             bad_pipelines: Vec::new(),
         }
