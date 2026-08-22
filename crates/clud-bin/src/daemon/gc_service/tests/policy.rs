@@ -88,8 +88,15 @@ fn watch_registration_acks_before_initial_scan_and_discovers_matching_child() {
             reply_tx: list_tx,
         }))
         .unwrap();
-        if matches!(list_rx.recv_timeout(Duration::from_secs(1)).unwrap(), GcReply::ListOk { rows } if rows.len() == 1 && rows[0].path.ends_with("agent-zz"))
-        {
+        // A slow individual reply is not a failure: the contract this test
+        // asserts is "the initial scan lands within the deadline", so a
+        // timeout on one poll has to fall through to the deadline check and
+        // try again. Unwrapping it instead turned a loaded runner into a hard
+        // `Err(Timeout)` panic while seconds of budget remained.
+        if matches!(
+            list_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(GcReply::ListOk { rows }) if rows.len() == 1 && rows[0].path.ends_with("agent-zz")
+        ) {
             break;
         }
         assert!(
