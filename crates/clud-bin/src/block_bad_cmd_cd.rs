@@ -545,8 +545,9 @@ pub struct HookCwdScan {
     /// cwd, with the file they came from. First entry is quoted in denials.
     pub sensitive: Vec<SensitiveHook>,
     /// Hook commands carrying the broken `git rev-parse` self-rooting
-    /// prefix, which `clud hooks` reports with the one-line fix. A subset of
-    /// `sensitive`, tracked separately because it has a specific remedy.
+    /// prefix, which `hook_health` reports with the one-line fix at launch and
+    /// under `clud --fix-hooks`. A subset of `sensitive`, tracked separately
+    /// because it has a specific remedy.
     pub broken_git_prefix: Vec<SensitiveHook>,
 }
 
