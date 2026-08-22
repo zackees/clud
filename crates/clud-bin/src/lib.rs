@@ -34,6 +34,7 @@ pub mod daemon;
 pub mod dashboard_auth;
 
 pub mod dnd;
+pub mod failover;
 pub mod foreground_runtime;
 pub mod gc;
 pub mod graphics;
