@@ -491,10 +491,11 @@ the session's project directory instead of hoping the cwd is right:
 cd "$CLAUDE_PROJECT_DIR" && uv run python ci/hooks/check.py
 ```
 
-`clud hooks` also warns about the widely-copied `git rev-parse
---show-superproject-working-tree || ...` prefix, which looks like it does this
-but does not: that flag exits 0 with empty output outside a submodule, so the
-`||` fallback never runs and `cd ""` silently does nothing.
+clud also warns at launch — and in `clud --fix-hooks` — about the
+widely-copied `git rev-parse --show-superproject-working-tree || ...` prefix,
+which looks like it does this but does not: that flag exits 0 with empty output
+outside a submodule, so the `||` fallback never runs and `cd ""` silently does
+nothing.
 
 ### What it is (and isn't)
 
