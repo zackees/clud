@@ -126,14 +126,33 @@ def _copy_clud_for_test(temp_dir: str) -> Path:
     return launch
 
 
+# Claude's model-discovery routes probe `claude --version` and fail closed
+# when no version parses out of it
+# (`backend_bootstrap.rs::require_claude_discovery_version`), so a fake that
+# answers nothing blocks the launch before the behavior under test runs. Same
+# "new enough" value the version-gate integration fixtures use; raise it when
+# `MIN_UNIFIED_CLAUDE_CODE_VERSION` rises.
+_FAKE_CLAUDE_VERSION = "2.1.223 (Claude Code)"
+
+
 def _fake_claude_on_path(bin_dir: Path) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
         fake = bin_dir / "claude.cmd"
-        fake.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+        fake.write_text(
+            f'@echo off\r\nif "%~1"=="--version" echo {_FAKE_CLAUDE_VERSION}\r\nexit /b 0\r\n',
+            encoding="utf-8",
+        )
     else:
         fake = bin_dir / "claude"
-        fake.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+        fake.write_text(
+            "#!/usr/bin/env sh\n"
+            'if [ "$1" = "--version" ]; then\n'
+            f"  printf '%s\\n' '{_FAKE_CLAUDE_VERSION}'\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         fake.chmod(0o755)
 
 
