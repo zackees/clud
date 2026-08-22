@@ -118,6 +118,7 @@ pub struct HookPayloadView {
     pub tool_name: String,
     pub command: String,
     pub cwd: PathBuf,
+    pub tool_input: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +157,7 @@ const EXTERN_REPOS_DIR_NAME: &str = ".extern-repos";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandEvaluation {
     pub reason: Option<String>,
+    pub rewritten_command: Option<String>,
     pub warnings: Vec<String>,
     pub log_messages: Vec<String>,
     pub git_path_captures: Vec<GitPathCapture>,
@@ -294,6 +296,38 @@ pub fn run() -> i32 {
         return 2;
     }
 
+    if let Some(rewritten_command) = &evaluation.rewritten_command {
+        let Some(mut updated_input) = payload.tool_input.clone() else {
+            let reason = "Blocked unsafe removal: the hook payload did not contain an object-shaped tool_input to rewrite safely. Retry using a validated literal path directly.";
+            println!("{}", deny_json(reason));
+            eprintln!(
+                "[block-bad-cmd hook] refusing to run {:?}: {reason}",
+                payload.tool_name
+            );
+            return 2;
+        };
+        let Some(input) = updated_input.as_object_mut() else {
+            let reason = "Blocked unsafe removal: the hook payload did not contain an object-shaped tool_input to rewrite safely. Retry using a validated literal path directly.";
+            println!("{}", deny_json(reason));
+            eprintln!(
+                "[block-bad-cmd hook] refusing to run {:?}: {reason}",
+                payload.tool_name
+            );
+            return 2;
+        };
+        let Some(command) = input.get_mut("command").filter(|value| value.is_string()) else {
+            let reason = "Blocked unsafe removal: tool_input.command was missing or not a string, so the hook could not rewrite it safely. Retry using a validated literal path directly.";
+            println!("{}", deny_json(reason));
+            eprintln!(
+                "[block-bad-cmd hook] refusing to run {:?}: {reason}",
+                payload.tool_name
+            );
+            return 2;
+        };
+        *command = Value::String(rewritten_command.clone());
+        println!("{}", allow_with_updated_input_json(updated_input));
+    }
+
     // zackees/clud#532: the command is actually going to run, so any git
     // clone / worktree-add destination it detected gets handed to the
     // daemon's GC registry now instead of waiting for its shared watcher
@@ -396,6 +430,10 @@ pub fn parse_payload_value(value: &Value, process_cwd: &Path) -> Option<HookPayl
         tool_name,
         command,
         cwd,
+        tool_input: object
+            .get("tool_input")
+            .or_else(|| object.get("toolInput"))
+            .cloned(),
     })
 }
 
@@ -424,6 +462,16 @@ pub fn deny_json(reason: &str) -> Value {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
+        }
+    })
+}
+
+pub fn allow_with_updated_input_json(updated_input: Value) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input,
         }
     })
 }
@@ -531,6 +579,30 @@ fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
     };
     let mut evaluation = CommandEvaluation::default();
     evaluate_command_into(command_text, &context, dialect, 0, &mut evaluation);
+    if evaluation.reason.is_none() && dialect == ShellDialect::Posix {
+        match resolve_posix_rm_variable_expansions(command_text) {
+            RmVariableResolution::Unchanged => evaluation
+                .log_messages
+                .push("rm_variable_resolution=unchanged".to_string()),
+            RmVariableResolution::Deny { reason } => {
+                evaluation.reason = Some(reason);
+                evaluation
+                    .log_messages
+                    .push("rm_variable_resolution=denied".to_string());
+            }
+            RmVariableResolution::Rewritten(rewritten) => {
+                let mut verified = CommandEvaluation::default();
+                evaluate_command_into(&rewritten, &context, dialect, 0, &mut verified);
+                verified
+                    .log_messages
+                    .push("rm_variable_resolution=rewritten".to_string());
+                if verified.reason.is_none() {
+                    verified.rewritten_command = Some(rewritten);
+                }
+                evaluation = verified;
+            }
+        }
+    }
     evaluation
 }
 
@@ -2068,6 +2140,10 @@ fn extract_command(payload: &Value) -> String {
 mod block_bad_cmd_shell;
 use block_bad_cmd_shell::*;
 
+#[path = "block_bad_cmd_rm_vars.rs"]
+mod block_bad_cmd_rm_vars;
+use block_bad_cmd_rm_vars::*;
+
 fn py_string_repr(value: &str) -> String {
     let mut out = String::from("'");
     for ch in value.chars() {
@@ -2279,6 +2355,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             command: r#"C:\tools\clud-manual-bad-command.exe --example"#.to_string(),
             cwd: std::path::PathBuf::from(r#"C:\repo"#),
+            tool_input: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, r#"C:\py\clud-block-bad-cmd.exe"#);
         assert_eq!(event["event"], "bad_cmd_denied");
@@ -2317,6 +2394,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             command: "wget http://x".to_string(),
             cwd: std::path::PathBuf::from("/tmp"),
+            tool_input: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, "");
         assert_eq!(event["match_mode"], "regex");
@@ -2735,6 +2813,45 @@ mod tests {
             value["hookSpecificOutput"]["permissionDecisionReason"],
             Value::String("nope".to_string())
         );
+    }
+
+    #[test]
+    fn allow_rewrite_matches_claude_and_codex_hook_contract() {
+        let updated_input = json!({
+            "command": "rm -f '/tmp/safe/path'/*.txt",
+            "description": "cleanup",
+            "future_field": {"preserved": true},
+        });
+        let value = allow_with_updated_input_json(updated_input.clone());
+        let output = &value["hookSpecificOutput"];
+        assert_eq!(output["hookEventName"], "PreToolUse");
+        assert_eq!(output["permissionDecision"], "allow");
+        assert_eq!(output["updatedInput"], updated_input);
+        assert!(output.get("permissionDecisionReason").is_none());
+        assert_ne!(output["permissionDecision"], "ask");
+    }
+
+    #[test]
+    fn rm_rewrite_is_rechecked_against_existing_argument_policy() {
+        let evaluation = evaluation_with_policy(
+            r#"SP=/tmp/safe/path; rm -f "$SP"/*.txt"#,
+            r#"{"bad_commands":[{"match":"rm","arguments":{"any":["/tmp/safe/path/*"]},"replacement":"approved-cleanup"}]}"#,
+        );
+        assert!(evaluation.reason.is_some());
+        assert!(evaluation.rewritten_command.is_none());
+    }
+
+    #[test]
+    fn rm_variable_resolution_is_not_applied_to_other_shell_dialects() {
+        for dialect in [ShellDialect::PowerShell, ShellDialect::Cmd] {
+            let evaluation = evaluation_with_policy_and_dialect(
+                r#"SP=/tmp/safe/path; rm -f "$SP"/*.txt"#,
+                "{}",
+                dialect,
+            );
+            assert!(evaluation.reason.is_none());
+            assert!(evaluation.rewritten_command.is_none());
+        }
     }
 
     // -----------------------------------------------------------------

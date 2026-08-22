@@ -128,6 +128,123 @@ def test_block_bad_cmd_allows_malformed_json(tmp_path: Path) -> None:
     assert "permissionDecision" not in result.stdout
 
 
+def test_rm_literal_assignment_rewrites_before_backend_prompt(tmp_path: Path) -> None:
+    """#963: resolve a preceding literal assignment before Claude can ask."""
+    scratchpad = "C:/Users/test/.clud/tmp/claude/session/scratchpad"
+    command = (
+        'git status --porcelain; '
+        f'SP="{scratchpad}"; '
+        'rm -f "$SP"/*.txt "$SP"/*.json "$SP"/*.md 2>/dev/null; '
+        'ls "$SP"'
+    )
+    tool_input = {
+        "command": command,
+        "description": "clear scratchpad",
+        "timeout": 120_000,
+        "run_in_background": False,
+        "future_field": {"preserve": True},
+    }
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    result = _run_hook_with_open_stdin(tmp_path, payload)
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    hook_output = output["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "PreToolUse"
+    assert hook_output["permissionDecision"] == "allow"
+    updated = hook_output["updatedInput"]
+    assert updated.keys() == tool_input.keys()
+    assert updated["description"] == "clear scratchpad"
+    assert updated["timeout"] == 120_000
+    assert updated["run_in_background"] is False
+    assert updated["future_field"] == {"preserve": True}
+    assert "$SP" not in updated["command"].split("rm -f", 1)[1].split(";", 1)[0]
+    assert updated["command"].count(scratchpad) == 4
+
+
+def test_rm_unresolved_variable_is_a_structured_noninteractive_denial(
+    tmp_path: Path,
+) -> None:
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": 'rm -rf "$UNSET"/*'},
+            "cwd": str(tmp_path),
+        }
+    )
+
+    result = _run_hook_with_open_stdin(tmp_path, payload)
+
+    assert result.returncode == 2
+    hook_output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "deny"
+    assert "could not be proven" in hook_output["permissionDecisionReason"]
+    assert "ask" not in result.stdout
+
+
+def test_rm_rewrite_and_deny_support_camel_case_codex_payloads(
+    tmp_path: Path,
+) -> None:
+    tool_input = {
+        "command": 'SP=/tmp/safe/path; rm -f "$SP"/*.txt',
+        "timeoutMs": 30_000,
+        "futureField": {"preserve": True},
+    }
+    rewrite_payload = json.dumps(
+        {
+            "toolName": "Bash",
+            "toolInput": tool_input,
+            "cwdPath": str(tmp_path),
+        }
+    )
+
+    rewritten = _run_hook_with_open_stdin(tmp_path, rewrite_payload)
+
+    assert rewritten.returncode == 0, rewritten.stderr
+    hook_output = json.loads(rewritten.stdout)["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "allow"
+    assert hook_output["updatedInput"]["timeoutMs"] == 30_000
+    assert hook_output["updatedInput"]["futureField"] == {"preserve": True}
+    assert "$SP" not in hook_output["updatedInput"]["command"].split("rm -f", 1)[1]
+
+    deny_payload = json.dumps(
+        {
+            "toolName": "Bash",
+            "toolInput": {"command": 'rm -rf "$UNSET"/*'},
+            "cwdPath": str(tmp_path),
+        }
+    )
+    denied = _run_hook_with_open_stdin(tmp_path, deny_payload)
+    assert denied.returncode == 2
+    denied_output = json.loads(denied.stdout)["hookSpecificOutput"]
+    assert denied_output["permissionDecision"] == "deny"
+    assert "ask" not in denied.stdout
+
+
+def test_normal_command_remains_silent_instead_of_emitting_bare_allow(
+    tmp_path: Path,
+) -> None:
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo ordinary"},
+            "cwd": str(tmp_path),
+        }
+    )
+
+    result = _run_hook_with_open_stdin(tmp_path, payload)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
 def test_telemetry_hook_reads_payload_without_waiting_for_stdin_eof(
     tmp_path: Path,
 ) -> None:

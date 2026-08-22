@@ -290,6 +290,12 @@ which test tier a change belongs in — lives in
   reason and log a structured `bad_cmd_denied` event to
   `~/.clud/tools/hooks/block-bad-cmd.log` (#525). User-facing rule-writing
   guide lives in the root `README.md`.
+- `block_bad_cmd_rm_vars.rs` - #963's POSIX/Bash abstract interpreter for
+  catastrophic `rm`/`rmdir` operands rooted at `$VAR` or `${VAR}`. It rewrites
+  only single, statically proven literal assignments into a complete
+  `allow + updatedInput` hook response; unresolved, dynamic, conflicting, or
+  root-like values become deterministic denials so unattended agents can retry
+  without an approval prompt.
 - `settings_tui.rs` - `clud settings`: small cross-platform TUI checkbox menu
   over global boolean settings in `~/.clud/settings.json` (`clud_settings.rs`
   owns persistence). Pure `Menu` state machine + crossterm raw-mode I/O shell,
