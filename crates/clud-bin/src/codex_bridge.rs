@@ -824,6 +824,36 @@ fn handle_connection(
             GatewayMode::Codex => serve_codex_catalog(&mut stream),
             GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config),
         },
+        ("GET", "/_clud/route/status") => match &config.gateway_mode {
+            GatewayMode::Unified(unified) => serve_route_status(&mut stream, unified),
+            GatewayMode::Codex => {
+                record_rejection(log, 404, "route_status_unsupported");
+                let _ = write_error(&mut stream, 404);
+            }
+        },
+        ("POST", "/_clud/route/clear") => {
+            let body_deadline = Instant::now() + config.body_timeout;
+            match read_body(
+                &mut stream,
+                parsed.body_prefix,
+                parsed.content_length,
+                body_deadline,
+                shutdown,
+            ) {
+                Ok(body) => match &config.gateway_mode {
+                    GatewayMode::Unified(unified) => serve_route_clear(&mut stream, unified, &body),
+                    GatewayMode::Codex => {
+                        record_rejection(log, 404, "route_clear_unsupported");
+                        let _ = write_error(&mut stream, 404);
+                    }
+                },
+                Err(ABANDON) => {}
+                Err(status) => {
+                    record_rejection(log, status, "route_control_body");
+                    let _ = write_error(&mut stream, status);
+                }
+            }
+        }
         ("HEAD", "/v1/messages") => {
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
@@ -927,6 +957,106 @@ fn handle_connection(
             let _ = write_error(&mut stream, 404);
         }
     }
+}
+
+/// `GET /_clud/route/status` -- the configured ladder and each route's health.
+///
+/// Sits beside `/_clud/context/*` and carries the same gateway-token
+/// requirement. Deliberately names only the public route, its cost owner, and a
+/// reset clock: never a credential, base URL, prompt, or response body.
+fn serve_route_status(stream: &mut TcpStream, unified: &UnifiedGatewayConfig) {
+    let now = Instant::now();
+    let ladder: Vec<serde_json::Value> = unified
+        .failover
+        .rungs()
+        .iter()
+        .map(|rung| {
+            let state = unified
+                .route_ledger
+                .lock()
+                .map(|ledger| ledger.state(rung.route, now))
+                .unwrap_or(RouteState::Available);
+            serde_json::json!({
+                "spec": rung.spec,
+                "route": rung.route.as_str(),
+                "cost": rung.cost.as_str(),
+                "withheld_for_consent": !unified.failover.allows_metered()
+                    && rung.cost == crate::failover::CostOwner::Metered,
+                "state": route_state_json(state),
+            })
+        })
+        .collect();
+    let routes: Vec<serde_json::Value> = unified
+        .route_ledger
+        .lock()
+        .map(|ledger| {
+            ledger
+                .snapshot(now)
+                .into_iter()
+                .map(|(route, state)| {
+                    serde_json::json!({
+                        "route": route.as_str(),
+                        "state": route_state_json(state),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = serde_json::json!({ "ladder": ladder, "routes": routes }).to_string();
+    let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
+}
+
+fn route_state_json(state: RouteState) -> serde_json::Value {
+    match state {
+        RouteState::Available => serde_json::json!({"status": "available"}),
+        RouteState::Cooling { remaining, reason } => serde_json::json!({
+            "status": "cooling",
+            "reason": reason,
+            "retry_in_seconds": remaining.as_secs(),
+        }),
+        RouteState::Down { reason } => serde_json::json!({
+            "status": "down",
+            "reason": reason,
+        }),
+    }
+}
+
+/// `POST /_clud/route/clear` -- forget one route's health.
+///
+/// The escape hatch for a wedged session: a route marked drained has no clock,
+/// so after the operator tops up a balance or replaces a key nothing else can
+/// bring it back.
+fn serve_route_clear(stream: &mut TcpStream, unified: &UnifiedGatewayConfig, body: &[u8]) {
+    let requested = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("route")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    let route = match requested.as_deref() {
+        Some("claude") => Some(ConversationRoute::Claude),
+        Some("codex") => Some(ConversationRoute::Codex),
+        Some("deepseek") => Some(ConversationRoute::DeepSeek),
+        Some("openrouter") => Some(ConversationRoute::OpenRouter),
+        _ => None,
+    };
+    let Some(route) = route else {
+        let _ = write_response(
+            stream,
+            400,
+            "application/json",
+            br#"{"error":{"type":"invalid_request_error","message":"route must be one of claude, codex, deepseek, openrouter"}}"#,
+            false,
+        );
+        return;
+    };
+    if let Ok(mut ledger) = unified.route_ledger.lock() {
+        ledger.clear(route);
+    }
+    let body = serde_json::json!({"cleared": route.as_str()}).to_string();
+    let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
 }
 
 fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
@@ -3739,6 +3869,113 @@ Connection: close
             !rescued.contains("openrouter-vault-canary"),
             "credentials must not cross a provider boundary: {rescued}"
         );
+    }
+
+    /// The operator surface: what the ladder is, what each route's health is,
+    /// and the escape hatch for a clock-less failure.
+    #[test]
+    fn route_status_reports_health_and_clear_restores_a_drained_route() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![Some(raw_response(
+            402,
+            "Payment Required",
+            r#"{"error":{"message":"This request requires more credits"}}"#,
+        ))]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(
+                    FailoverLadder::parse("claude-opus-4-1,deepseek-v4-flash", false).unwrap(),
+                ),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        let status_request = || {
+            request(
+                addr,
+                &authorized_with_headers(
+                    "GET",
+                    "/_clud/route/status",
+                    "native-claude-oauth-canary",
+                    "",
+                    &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+                ),
+            )
+        };
+
+        let before = status_request();
+        assert_eq!(status(&before), 200, "{before}");
+        assert!(
+            before.contains("\"cost\":\"subscription\""),
+            "the ladder must name who pays: {before}"
+        );
+        assert!(
+            before.contains("\"withheld_for_consent\":true"),
+            "a metered rung without consent must say so: {before}"
+        );
+
+        // Drain DeepSeek, then confirm the ledger reports it with no clock.
+        let drained = request(
+            addr,
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-v4-flash",
+                "status-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(
+            status(&drained),
+            200,
+            "the Claude rung serves it: {drained}"
+        );
+
+        let after = status_request();
+        assert!(
+            after.contains("\"status\":\"down\"") && after.contains("\"reason\":\"drained\""),
+            "a spent balance must be reported as down, not cooling: {after}"
+        );
+
+        let cleared = request(
+            addr,
+            &authorized_with_headers(
+                "POST",
+                "/_clud/route/clear",
+                "native-claude-oauth-canary",
+                r#"{"route":"deepseek"}"#,
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+            ),
+        );
+        assert_eq!(status(&cleared), 200, "{cleared}");
+        let restored = status_request();
+        assert!(
+            !restored.contains("\"reason\":\"drained\""),
+            "clearing must restore the route a top-up fixed: {restored}"
+        );
+    }
+
+    /// The control surface is gateway-token gated exactly like `/v1/messages`.
+    #[test]
+    fn route_status_requires_the_gateway_token() {
+        let claude = FakeResponses::start();
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(None, false)
+                .with_upstreams(claude.base_url.clone(), String::new()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let denied = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "GET",
+                "/_clud/route/status",
+                "native-claude-oauth-canary",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, "wrong-token")],
+            ),
+        );
+        assert_eq!(status(&denied), 401, "{denied}");
     }
 
     /// A malformed request fails identically everywhere, so replaying it would
