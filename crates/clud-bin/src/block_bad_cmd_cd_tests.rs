@@ -48,6 +48,15 @@ fn targets(command: &str, dialect: ShellDialect) -> Vec<CdTarget> {
         .collect()
 }
 
+/// The `cd` operands as written, for assertions that must not depend on how
+/// the host resolves a path spelling.
+fn raw_targets(command: &str, dialect: ShellDialect) -> Vec<Option<String>> {
+    scan_session_cd(command, dialect, &root(), Some(&home()))
+        .into_iter()
+        .map(|occurrence| occurrence.raw_target)
+        .collect()
+}
+
 // -----------------------------------------------------------------
 // Scanner: only a `cd` that moves the *session* counts.
 // -----------------------------------------------------------------
@@ -168,21 +177,26 @@ fn a_bare_cd_differs_by_dialect() {
 
 #[test]
 fn flags_are_skipped_to_find_the_operand() {
-    // Spelled for the host: `resolve_against` joins a POSIX-absolute path
-    // against the cwd on Windows, which would make this assert about path
-    // spelling rather than about flag skipping.
-    let elsewhere = if cfg!(windows) { r"C:\tmp" } else { "/tmp" };
+    // Asserted on the operand *as written*, because what it resolves to is
+    // host-dependent: `C:\tmp` is absolute on Windows but a relative name on
+    // Linux, and `/tmp` the reverse. Resolution itself is covered above.
     assert_eq!(
-        targets(&format!("cd -P {elsewhere}"), ShellDialect::Posix),
-        vec![CdTarget::Path(PathBuf::from(elsewhere))]
+        raw_targets("cd -P /tmp", ShellDialect::Posix),
+        vec![Some("/tmp".to_string())]
     );
     assert_eq!(
-        targets("cd /d C:\\tmp", ShellDialect::Cmd),
-        vec![CdTarget::Path(PathBuf::from("C:\\tmp"))]
+        raw_targets("cd /d C:\\tmp", ShellDialect::Cmd),
+        vec![Some("C:\\tmp".to_string())]
     );
     assert_eq!(
-        targets("Set-Location -Path C:\\tmp", ShellDialect::PowerShell),
-        vec![CdTarget::Path(PathBuf::from("C:\\tmp"))]
+        raw_targets("Set-Location -Path C:\\tmp", ShellDialect::PowerShell),
+        vec![Some("C:\\tmp".to_string())]
+    );
+    // A cmd `/d` flag must not be mistaken for a POSIX absolute operand.
+    assert_eq!(
+        raw_targets("cd /d", ShellDialect::Cmd),
+        vec![None],
+        "`/d` alone leaves no operand"
     );
 }
 
