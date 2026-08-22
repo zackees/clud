@@ -24,7 +24,7 @@ re-explaining.
 | [architecture/crash-reports.md](architecture/crash-reports.md) | ~110 | Panic-hook + native crash handler + `clud symbols` verifier: JSON schema, embed-line-tables-everywhere choice, opportunistic-verify model (#374) |
 | [architecture/process-reaping.md](architecture/process-reaping.md) | ~200 | The two disjoint reapers, the `(pid, creation_time)` keyspace and its single purge sweep, daemon-sparing by OS signal (marker second, whitelist last), the cooperative-marker caveat, and which test tier a reaper change belongs in |
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
-| [architecture/provider-failover.md](architecture/provider-failover.md) | ~190 | **Design proposal (#968, not yet implemented):** surviving provider exhaustion mid-session — routing OpenRouter through the gateway, the route-health failure taxonomy, the cost-labeled failover ladder, pre-commit request replay versus post-commit degradation, and cooldown recovery |
+| [architecture/provider-failover.md](architecture/provider-failover.md) | ~200 | Surviving provider exhaustion mid-session (#968): routing OpenRouter through the gateway, the route-health failure taxonomy, the cost-labeled failover ladder, pre-commit request replay versus post-commit degradation, and cooldown recovery |
 | [architecture/test-runtime-memory.md](architecture/test-runtime-memory.md) | ~220 | **Design proposal (#405, not yet implemented):** `.clud/`-local test-runtime histogram — append-only JSONL over redb/SQLite and why, raw `(duration, cpu_load)` with query-time normalization, count-based compaction, and the run-all-vs-targeted recommendation policy |
 | [architecture/web-terminal.md](architecture/web-terminal.md) | ~30 | Desktop web-terminal preference, companion launch/recursion guard, tab PTYs, and wheel packaging |
 
@@ -48,7 +48,7 @@ re-explaining.
 - **"How does Codex run through Claude, and how do I roll it back?"** -> [codex-via-claude.md](architecture/codex-via-claude.md)
 - **"Why did a project hook stop working after the agent `cd`'d, and who runs hooks now?"** -> [hook-dispatch.md](architecture/hook-dispatch.md)
 - **"What happens when clud crashes, and how do I read the report?"** -> [crash-reports.md](architecture/crash-reports.md)
-- **"What happens when my provider runs out of quota mid-session?"** -> [provider-failover.md](architecture/provider-failover.md) *(design proposal, #968)*
+- **"What happens when my provider runs out of quota mid-session?"** -> [provider-failover.md](architecture/provider-failover.md)
 - **"Should I run all the tests or just some?"** -> [test-runtime-memory.md](architecture/test-runtime-memory.md) *(design proposal, #405)*
 - **"How does `clud --web-term` launch and avoid recursion?"** -> [web-terminal.md](architecture/web-terminal.md)
 
