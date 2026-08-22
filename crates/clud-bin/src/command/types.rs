@@ -51,6 +51,14 @@ pub struct LaunchPlan {
     /// Additive normalized selection. Older daemon payloads retain `codex_model`.
     #[serde(default)]
     pub model_selection: Option<ResolvedModelSelection>,
+    /// Ordered fallback routes for a unified launch, exactly as written on the
+    /// command line. Resolved when the gateway is constructed so an unroutable
+    /// rung fails the launch rather than a turn (#968).
+    #[serde(default)]
+    pub failover: Option<String>,
+    /// Consent to descend onto a rung billed per token.
+    #[serde(default)]
+    pub failover_allow_metered: bool,
 }
 
 impl LaunchPlan {
@@ -94,6 +102,8 @@ mod tests {
             stream_json_progress: false,
             codex_model: None,
             model_selection: None,
+            failover: None,
+            failover_allow_metered: false,
         }
     }
 

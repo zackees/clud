@@ -70,6 +70,18 @@ pub struct Args {
     #[arg(long = "mode", value_parser = ["unified"], conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "openrouter", "provider", "unified"])]
     pub mode: Option<String>,
 
+    /// Ordered fallback routes for `--unified`, tried when the active route is
+    /// exhausted, drained, or rejects its credential. Comma-separated, in
+    /// descent order, e.g. `--failover claude-opus-4-1,codex-terra`.
+    #[arg(long = "failover", value_name = "ROUTES")]
+    pub failover: Option<String>,
+
+    /// Allow descending onto a rung billed per token. Without it, metered rungs
+    /// are listed but never taken, so automatic recovery cannot become an
+    /// automatic charge.
+    #[arg(long = "failover-allow-metered")]
+    pub failover_allow_metered: bool,
+
     /// Select the agent harness independently from the model provider.
     #[arg(long = "harness", value_enum)]
     pub harness: Option<HarnessSelection>,
@@ -1046,6 +1058,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--model",
         "--provider",
         "--mode",
+        "--failover",
         "--effort",
         "--context-window",
         "--harness",
@@ -1076,6 +1089,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--kimi",
         "--openrouter",
         "--unified",
+        "--failover-allow-metered",
         "--subprocess",
         "--pty",
         "--safe",

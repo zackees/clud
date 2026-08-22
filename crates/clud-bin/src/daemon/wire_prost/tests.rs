@@ -31,6 +31,8 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             stream_json_progress: false,
             codex_model: None,
             model_selection: None,
+            failover: None,
+            failover_allow_metered: false,
         },
         kind: SessionKind::Subprocess,
         name: Some("sample".to_string()),

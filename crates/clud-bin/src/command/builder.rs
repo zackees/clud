@@ -536,6 +536,8 @@ fn build_launch_plan_for_target_at(
         stream_json_progress,
         codex_model,
         model_selection,
+        failover: args.failover.clone(),
+        failover_allow_metered: args.failover_allow_metered,
     }
 }
 

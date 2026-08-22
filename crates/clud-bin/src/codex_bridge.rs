@@ -11,7 +11,9 @@ use crate::codex_upstream::{
     ApiKeyCredentials, FailureClass, ResolvedCredentials, UpstreamClient, UpstreamConfig,
     UpstreamError, UpstreamFailure,
 };
+use crate::failover::{FailoverLadder, FailoverRung};
 use crate::provider_catalog;
+use crate::route_health::{RouteLedger, RouteState, RouteVerdict};
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::fmt;
@@ -92,6 +94,14 @@ pub struct UnifiedGatewayConfig {
     codex_available: bool,
     anthropic_base_url: String,
     deepseek_base_url: String,
+    /// Ordered fallback routes. Empty by default, so a launch that did not ask
+    /// for failover keeps exactly today's behavior and today's spend.
+    failover: FailoverLadder,
+    /// Which routes can serve right now. Shared across connections because a
+    /// route drained on one turn must stay drained for the next one, and
+    /// launch-scoped because a wedged account in this session must never
+    /// suppress a route in another.
+    route_ledger: Arc<Mutex<RouteLedger>>,
 }
 
 impl UnifiedGatewayConfig {
@@ -101,7 +111,14 @@ impl UnifiedGatewayConfig {
             codex_available,
             anthropic_base_url: ANTHROPIC_MESSAGES_BASE_URL.to_string(),
             deepseek_base_url: DEEPSEEK_ANTHROPIC_BASE_URL.to_string(),
+            failover: FailoverLadder::default(),
+            route_ledger: Arc::new(Mutex::new(RouteLedger::new())),
         }
+    }
+
+    pub fn with_failover(mut self, failover: FailoverLadder) -> Self {
+        self.failover = failover;
+        self
     }
 
     #[cfg(test)]
@@ -109,6 +126,29 @@ impl UnifiedGatewayConfig {
         self.anthropic_base_url = anthropic_base_url;
         self.deepseek_base_url = deepseek_base_url;
         self
+    }
+
+    /// Record a verdict against a route and report the state it leaves behind.
+    /// A poisoned ledger degrades to "no health known" rather than killing the
+    /// turn: failover is a recovery mechanism and must not become a new way to
+    /// fail.
+    fn record_route(&self, route: ConversationRoute, verdict: RouteVerdict) -> Option<RouteState> {
+        let mut ledger = self.route_ledger.lock().ok()?;
+        Some(ledger.record(route, verdict, Instant::now()))
+    }
+
+    fn record_route_success(&self, route: ConversationRoute) {
+        if let Ok(mut ledger) = self.route_ledger.lock() {
+            ledger.record_success(route);
+        }
+    }
+
+    /// The next rung below `after` that the ledger says can serve.
+    fn next_rung(&self, after: Option<&str>) -> Option<FailoverRung> {
+        let ledger = self.route_ledger.lock().ok()?;
+        self.failover
+            .next_available(after, &ledger, Instant::now())
+            .cloned()
     }
 }
 
@@ -118,6 +158,7 @@ impl fmt::Debug for UnifiedGatewayConfig {
             .debug_struct("UnifiedGatewayConfig")
             .field("deepseek_configured", &self.deepseek_api_key.is_some())
             .field("codex_available", &self.codex_available)
+            .field("failover_rungs", &self.failover.rungs().len())
             .finish()
     }
 }
@@ -288,6 +329,9 @@ pub enum BridgeError {
     /// The caller has explicitly disabled the discovery request unified mode
     /// needs, so launching would silently present a misleading picker.
     DiscoveryDisabled,
+    /// The launch declared a failover rung the gateway cannot route. Carries
+    /// the ladder's own message, which names the offending rung.
+    Failover(String),
 }
 
 impl fmt::Display for BridgeError {
@@ -307,6 +351,7 @@ impl fmt::Display for BridgeError {
             Self::DiscoveryDisabled => formatter.write_str(
                 "this Claude gateway requires model discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled",
             ),
+            Self::Failover(error) => write!(formatter, "--failover: {error}"),
         }
     }
 }
@@ -1206,74 +1251,220 @@ fn serve_unified_messages(
         let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
         return;
     }
-    let Some(entry) = catalog else {
-        // Ordinary Claude model IDs remain byte-for-byte caller owned.
-        serve_unified_anthropic_proxy(
-            stream,
-            conversations,
-            conversation_key,
-            ConversationRoute::Claude,
-            &unified.anthropic_base_url,
-            "/v1/messages",
-            body,
-            headers,
-            None,
-            config.stream_idle_timeout,
-            shutdown,
-        );
-        return;
-    };
-    match entry.provider {
-        ModelProvider::Codex if unified.codex_available => {
-            let model = codex_effort_suffix.map_or_else(
+    // What one descent step will send. `model` is `None` only for an ordinary
+    // Claude ID, which stays byte-for-byte caller owned.
+    struct Attempt {
+        provider: ModelProvider,
+        route: ConversationRoute,
+        model: Option<String>,
+        spec: Option<String>,
+    }
+
+    let mut attempt = match catalog {
+        None => Attempt {
+            provider: ModelProvider::Claude,
+            route: ConversationRoute::Claude,
+            model: None,
+            spec: None,
+        },
+        Some(entry) => Attempt {
+            provider: entry.provider,
+            route: match entry.provider {
+                ModelProvider::Codex => ConversationRoute::Codex,
+                ModelProvider::DeepSeek => ConversationRoute::DeepSeek,
+                _ => ConversationRoute::Claude,
+            },
+            model: Some(codex_effort_suffix.map_or_else(
                 || entry.wire_id.to_string(),
                 |effort| format!("{}@{effort}", entry.wire_id),
-            );
-            request["model"] = serde_json::Value::String(model);
-            let rewritten = serde_json::to_vec(&request).unwrap_or_default();
-            serve_messages(
+            )),
+            spec: None,
+        },
+    };
+
+    // Descend the ladder. Probing is enabled only while a further rung exists,
+    // so a launch that configured no failover takes exactly today's path and
+    // never buffers a byte it would not have buffered before.
+    loop {
+        let payload = match &attempt.model {
+            Some(model) => {
+                request["model"] = serde_json::Value::String(model.clone());
+                serde_json::to_vec(&request).unwrap_or_default()
+            }
+            None => body.to_vec(),
+        };
+        let fallback = unified.next_rung(attempt.spec.as_deref());
+        let probe = fallback.is_some();
+
+        let outcome = match attempt.provider {
+            ModelProvider::Claude => serve_unified_anthropic_proxy(
                 stream,
-                config,
-                shutdown,
-                conversations,
-                &rewritten,
-                streaming,
-                conversation_key,
-                Some(ConversationRoute::Codex),
-                log,
-            );
-        }
-        ModelProvider::DeepSeek if unified.deepseek_api_key.is_some() => {
-            request["model"] = serde_json::Value::String(entry.wire_id.to_string());
-            let rewritten = serde_json::to_vec(&request).unwrap_or_default();
-            serve_unified_anthropic_proxy(
-                stream,
                 conversations,
                 conversation_key,
-                ConversationRoute::DeepSeek,
-                &unified.deepseek_base_url,
+                ConversationRoute::Claude,
+                &unified.anthropic_base_url,
                 "/v1/messages",
-                &rewritten,
+                &payload,
                 headers,
-                unified.deepseek_api_key.as_deref(),
+                None,
                 config.stream_idle_timeout,
                 shutdown,
-            );
-        }
-        _ => {
-            // This is a defense-in-depth check: unavailable routes are omitted
-            // from discovery, but a stale picker must not reach any paid model.
-            let body = serde_json::json!({
-                "type": "error",
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": "the selected provider is not configured; run `clud auth status`",
-                }
-            })
-            .to_string();
-            let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+                probe,
+            ),
+            ModelProvider::DeepSeek if unified.deepseek_api_key.is_some() => {
+                serve_unified_anthropic_proxy(
+                    stream,
+                    conversations,
+                    conversation_key,
+                    ConversationRoute::DeepSeek,
+                    &unified.deepseek_base_url,
+                    "/v1/messages",
+                    &payload,
+                    headers,
+                    unified.deepseek_api_key.as_deref(),
+                    config.stream_idle_timeout,
+                    shutdown,
+                    probe,
+                )
+            }
+            ModelProvider::Codex if unified.codex_available => {
+                // Codex is a valid destination but never a probe source: its
+                // pipeline commits through a different path, so a descent that
+                // lands here stops here.
+                serve_messages(
+                    stream,
+                    config,
+                    shutdown,
+                    conversations,
+                    &payload,
+                    streaming,
+                    conversation_key,
+                    Some(ConversationRoute::Codex),
+                    log,
+                );
+                ProxyOutcome::Committed
+            }
+            _ => {
+                // Defense in depth: unavailable routes are omitted from
+                // discovery, but a stale picker must not reach any paid model.
+                let body = serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "the selected provider is not configured; run `clud auth status`",
+                    }
+                })
+                .to_string();
+                let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+                ProxyOutcome::Committed
+            }
+        };
+
+        match outcome {
+            ProxyOutcome::Committed => {
+                unified.record_route_success(attempt.route);
+                return;
+            }
+            ProxyOutcome::Declined(verdict) => {
+                let state = unified.record_route(attempt.route, verdict);
+                // Recomputed after recording, so the route that just declined
+                // is skipped on its own merits rather than by position.
+                let Some(rung) = unified.next_rung(attempt.spec.as_deref()) else {
+                    // Nothing left to try. Re-issue against the same route with
+                    // probing off so the client receives the real upstream
+                    // status instead of a silent hang.
+                    warn_route_exhausted(attempt.route, verdict, state, None);
+                    attempt.spec = None;
+                    return finish_without_failover(
+                        stream,
+                        config,
+                        unified,
+                        conversations,
+                        conversation_key,
+                        headers,
+                        &payload,
+                        attempt.route,
+                        shutdown,
+                    );
+                };
+                warn_route_exhausted(attempt.route, verdict, state, Some(&rung));
+                attempt = Attempt {
+                    provider: rung.provider,
+                    route: rung.route,
+                    model: Some(rung.wire_id.clone()),
+                    spec: Some(rung.spec.clone()),
+                };
+            }
         }
     }
+}
+
+/// One sanitized line per transition. Names the route, the reason, and the
+/// rung taken -- never a credential, prompt, or response body.
+fn warn_route_exhausted(
+    route: ConversationRoute,
+    verdict: RouteVerdict,
+    state: Option<RouteState>,
+    taken: Option<&FailoverRung>,
+) {
+    let clock = match state {
+        Some(RouteState::Cooling { remaining, .. }) => {
+            format!(" (retry in {}s)", remaining.as_secs())
+        }
+        _ => String::new(),
+    };
+    match taken {
+        Some(rung) => eprintln!(
+            "[clud] route: {} {}{} -> continuing on {}",
+            route.as_str(),
+            verdict.reason(),
+            clock,
+            rung.label(),
+        ),
+        None => eprintln!(
+            "[clud] route: {} {}{}; no configured fallback is available",
+            route.as_str(),
+            verdict.reason(),
+            clock,
+        ),
+    }
+}
+
+/// Replay the last attempt with probing disabled so the client sees the real
+/// upstream response. Only reached once the ladder is spent.
+#[allow(clippy::too_many_arguments)]
+fn finish_without_failover(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    unified: &UnifiedGatewayConfig,
+    conversations: &ConversationStore,
+    conversation_key: &ConversationKey,
+    headers: &[(String, String)],
+    payload: &[u8],
+    route: ConversationRoute,
+    shutdown: &AtomicBool,
+) {
+    let (base_url, key) = match route {
+        ConversationRoute::DeepSeek => (
+            unified.deepseek_base_url.as_str(),
+            unified.deepseek_api_key.as_deref(),
+        ),
+        _ => (unified.anthropic_base_url.as_str(), None),
+    };
+    serve_unified_anthropic_proxy(
+        stream,
+        conversations,
+        conversation_key,
+        route,
+        base_url,
+        "/v1/messages",
+        payload,
+        headers,
+        key,
+        config.stream_idle_timeout,
+        shutdown,
+        false,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1289,10 +1480,14 @@ fn serve_unified_anthropic_proxy(
     injected_api_key: Option<&str>,
     idle_timeout: Duration,
     shutdown: &AtomicBool,
-) {
+    probe: bool,
+) -> ProxyOutcome {
+    let mut outcome = ProxyOutcome::Committed;
     let routed = conversations.with_history(&conversation_key.id, |history| {
+        // Crossing a provider boundary starts a new route epoch, which is
+        // exactly what a failover is: a provider switch nobody typed.
         history.enter_route(route);
-        serve_anthropic_proxy(
+        outcome = serve_anthropic_proxy(
             stream,
             AnthropicProxyTarget {
                 base_url,
@@ -1303,6 +1498,7 @@ fn serve_unified_anthropic_proxy(
             headers,
             idle_timeout,
             shutdown,
+            probe,
         );
         Ok(())
     });
@@ -1311,7 +1507,9 @@ fn serve_unified_anthropic_proxy(
             error.to_string(),
         ));
         let _ = write_pipeline_error(stream, &failure, None);
+        return ProxyOutcome::Committed;
     }
+    outcome
 }
 
 /// Unified token counting has one Anthropic-compatible contract: ordinary
@@ -1352,6 +1550,9 @@ fn serve_unified_count_tokens(
         let _ = write_response(stream, 404, "application/json", response, false);
         return;
     }
+    // Token counting is never failed over: it is a cheap advisory call whose
+    // answer is provider-specific, so a count from a fallback route would be
+    // wrong rather than merely late.
     serve_unified_anthropic_proxy(
         stream,
         conversations,
@@ -1364,6 +1565,7 @@ fn serve_unified_count_tokens(
         None,
         config.stream_idle_timeout,
         shutdown,
+        false,
     );
 }
 
@@ -1391,6 +1593,35 @@ struct AnthropicProxyTarget<'a> {
     injected_api_key: Option<&'a str>,
 }
 
+/// What one proxy attempt did to the client connection.
+///
+/// The distinction is the whole basis of failover: until a byte has been
+/// written the status is still ours to choose, so a route-terminal failure can
+/// be replayed elsewhere and the client never learns a provider declined.
+/// Afterwards the status is committed and the only honest move is to finish
+/// the turn.
+#[derive(Debug)]
+enum ProxyOutcome {
+    /// Bytes reached the client. Nothing may be retried.
+    Committed,
+    /// Nothing was written. The route declined with this verdict.
+    Declined(RouteVerdict),
+}
+
+/// Bounded prefix read from a failing upstream so it can be classified.
+///
+/// Large enough for any provider error envelope, small enough that a
+/// misbehaving upstream cannot make the gateway buffer a response — the
+/// success path still streams without buffering.
+const FAILURE_PREFIX_BYTES: usize = 8 * 1024;
+
+/// Statuses worth reading a body for before committing. Everything else is
+/// either a success or a failure whose meaning the status already fixes, and
+/// buffering those would only delay the client.
+fn may_be_route_terminal(status: u16) -> bool {
+    matches!(status, 401 | 402 | 403 | 429)
+}
+
 fn serve_anthropic_proxy(
     stream: &mut TcpStream,
     target: AnthropicProxyTarget<'_>,
@@ -1398,7 +1629,8 @@ fn serve_anthropic_proxy(
     headers: &[(String, String)],
     idle_timeout: Duration,
     shutdown: &AtomicBool,
-) {
+    probe: bool,
+) -> ProxyOutcome {
     let mut request = ureq::post(&format!(
         "{}{}",
         target.base_url.trim_end_matches('/'),
@@ -1435,7 +1667,7 @@ fn serve_anthropic_proxy(
                 br#"{"error":{"type":"api_error","message":"gateway upstream unavailable"}}"#,
                 false,
             );
-            return;
+            return ProxyOutcome::Committed;
         }
     };
     let status = response.status();
@@ -1445,7 +1677,54 @@ fn serve_anthropic_proxy(
         .to_string();
     let retry_after = response.header("retry-after").map(str::to_string);
     let request_id = response.header("request-id").map(str::to_string);
+    // Captured before `into_reader` consumes the response, so a probe can
+    // classify without a second round trip.
+    let probe_headers: Vec<(String, String)> = if probe && may_be_route_terminal(status) {
+        ["retry-after", "x-request-id", "cf-ray"]
+            .into_iter()
+            .filter_map(|name| {
+                response
+                    .header(name)
+                    .map(|value| (name.to_string(), value.to_string()))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut reader = response.into_reader();
+
+    // Pre-commit probe. Nothing has been written yet, so if this route is spent
+    // the caller can replay the identical body elsewhere and the client never
+    // sees that a provider declined. A prefix that does not read as
+    // route-terminal falls through and is re-emitted below, so the probe costs
+    // the client nothing.
+    let mut prefix = Vec::new();
+    if probe && may_be_route_terminal(status) {
+        let mut window = [0_u8; 1024];
+        while prefix.len() < FAILURE_PREFIX_BYTES {
+            match reader.read(&mut window) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => prefix.extend_from_slice(&window[..count]),
+            }
+        }
+        let text = String::from_utf8_lossy(&prefix);
+        let failure = UpstreamFailure::from_parts(
+            status,
+            |name| {
+                probe_headers
+                    .iter()
+                    .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.clone())
+            },
+            &text,
+            crate::route_health::MAX_COOLDOWN,
+        );
+        let verdict = RouteVerdict::from_failure(&failure);
+        if verdict.fails_over() {
+            return ProxyOutcome::Declined(verdict);
+        }
+    }
+
     let _ = stream.set_write_timeout(Some(idle_timeout));
     let _ = write!(
         stream,
@@ -1458,7 +1737,18 @@ fn serve_anthropic_proxy(
         let _ = write!(stream, "request-id: {request_id}\r\n");
     }
     if stream.write_all(b"\r\n").is_err() || stream.flush().is_err() {
-        return;
+        return ProxyOutcome::Committed;
+    }
+    // Anything the probe already consumed has to go out first, or the client
+    // would receive a truncated error envelope.
+    if !prefix.is_empty()
+        && (write!(stream, "{:x}\r\n", prefix.len())
+            .and_then(|()| stream.write_all(&prefix))
+            .and_then(|()| stream.write_all(b"\r\n"))
+            .and_then(|()| stream.flush()))
+        .is_err()
+    {
+        return ProxyOutcome::Committed;
     }
     let mut chunk = [0_u8; 8192];
     loop {
@@ -1482,6 +1772,7 @@ fn serve_anthropic_proxy(
     let _ = stream.write_all(b"0\r\n\r\n");
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Both);
+    ProxyOutcome::Committed
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3283,6 +3574,142 @@ Connection: close
             codex.requests().len() + claude.requests().len() + deepseek.requests().len(),
             before,
             "reserved unknown IDs must fail before any upstream request"
+        );
+    }
+
+    /// Build a raw upstream HTTP response for a canary to replay verbatim.
+    fn raw_response(status: u16, reason: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// The whole point of #968: a spent route is replayed onto the next rung
+    /// *before* a byte reaches the client, so the client sees one ordinary 200
+    /// and never learns a provider declined.
+    #[test]
+    fn an_exhausted_route_is_replayed_onto_the_next_rung_before_the_client_sees_anything() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![Some(raw_response(
+            429,
+            "Too Many Requests",
+            r#"{"error":{"message":"Rate limit exceeded: free-models-per-day-stealth"}}"#,
+        ))]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-v4-flash",
+                "failover-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        assert_eq!(
+            status(&response),
+            200,
+            "the client must never see the exhausted route's 429: {response}"
+        );
+        assert!(
+            !response.contains("free-models-per-day"),
+            "no part of the declined response may reach the client: {response}"
+        );
+
+        let deepseek_requests = deepseek.requests();
+        assert_eq!(
+            deepseek_requests.len(),
+            1,
+            "the spent route must be tried exactly once"
+        );
+
+        let replayed = claude.requests().pop().expect("the rung was taken");
+        assert!(
+            replayed.contains("claude-opus-4-1"),
+            "the replay must carry the rung's model: {replayed}"
+        );
+        assert!(
+            replayed.contains("route clud-claude-deepseek-v4-flash"),
+            "the replay must carry the caller's original transcript: {replayed}"
+        );
+        assert!(
+            !replayed.contains("deepseek-vault-canary"),
+            "credentials must not cross a provider boundary: {replayed}"
+        );
+    }
+
+    /// A malformed request fails identically everywhere, so replaying it would
+    /// only spend a second account to reproduce the same error.
+    #[test]
+    fn a_request_fatal_failure_never_descends_the_ladder() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![Some(raw_response(
+            400,
+            "Bad Request",
+            r#"{"error":{"type":"invalid_request_error","message":"bad shape"}}"#,
+        ))]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-v4-flash",
+                "fatal-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        assert_eq!(status(&response), 400, "{response}");
+        assert!(
+            claude.requests().is_empty(),
+            "a 400 must not be replayed onto a second account"
+        );
+    }
+
+    /// With no ladder configured the gateway takes exactly today's path: the
+    /// upstream status reaches the client unchanged and nothing is buffered.
+    #[test]
+    fn without_a_ladder_the_upstream_status_reaches_the_client_unchanged() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![Some(raw_response(
+            429,
+            "Too Many Requests",
+            r#"{"error":{"message":"Rate limit exceeded: free-models-per-day-stealth"}}"#,
+        ))]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-v4-flash",
+                "no-ladder-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        assert_eq!(status(&response), 429, "{response}");
+        assert!(
+            claude.requests().is_empty(),
+            "an unconfigured ladder must never reach another provider"
         );
     }
 

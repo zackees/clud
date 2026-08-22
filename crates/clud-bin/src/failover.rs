@@ -82,7 +82,10 @@ impl FailoverRung {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LadderError {
     /// The spec named a provider the gateway cannot route.
-    Unroutable { spec: String, provider: &'static str },
+    Unroutable {
+        spec: String,
+        provider: &'static str,
+    },
     /// The spec was empty or whitespace.
     Empty,
 }
@@ -213,10 +216,12 @@ impl FailoverLadder {
                 .map_or(0, |index| index + 1),
             None => 0,
         };
-        self.rungs[start.min(self.rungs.len())..].iter().find(|rung| {
-            (self.allow_metered || rung.cost == CostOwner::Subscription)
-                && ledger.is_available(rung.route, now)
-        })
+        self.rungs[start.min(self.rungs.len())..]
+            .iter()
+            .find(|rung| {
+                (self.allow_metered || rung.cost == CostOwner::Subscription)
+                    && ledger.is_available(rung.route, now)
+            })
     }
 
     /// Rungs that exist but are withheld for want of consent. Reported once so

@@ -1,10 +1,18 @@
 # Provider failover (design proposal — issue #968)
 
-**Status: proposal.** No failover, route-health, or fallback machinery exists in
-the tree today. This document is the deliverable of #968; implementation must
-not merge until the design is accepted. It builds on the unified gateway
-([unified-gateway.md](unified-gateway.md)) and the provider catalog
-([provider-selection.md](provider-selection.md)).
+**Status: partly implemented (#968).** Sections 2-4 have landed: the failure
+taxonomy and route ledger (`route_health.rs`), the cost-labeled ladder
+(`failover.rs`), and pre-commit replay in the unified gateway, reachable with
+`--failover <routes>` and `--failover-allow-metered`. Section 1 (routing
+OpenRouter through the gateway) and section 5's `clud route status` and
+`/_clud/route/*` surfaces are still proposals. This document builds on the
+unified gateway ([unified-gateway.md](unified-gateway.md)) and the provider
+catalog ([provider-selection.md](provider-selection.md)).
+
+Current limits, stated plainly: failover triggers only on the
+Anthropic-compatible proxy routes (Claude, DeepSeek). Codex is a valid
+*destination* rung but never a probe source, because its pipeline commits
+through a different path, so a descent that lands on Codex stops there.
 
 ## The problem
 

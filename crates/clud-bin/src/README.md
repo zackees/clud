@@ -128,6 +128,13 @@ Entry and orchestration:
   streaming state machine. Owns the downstream status policy — since #764,
   `502` means only a genuine gateway failure, and `TooLarge`/`Cancelled`/
   `Downstream` map to `413`/`499`/`499` instead of borrowing it.
+- `failover.rs` - #968: the ordered, cost-labeled failover ladder. A rung is
+  either a catalog model (resolved to its provider wire ID) or an ordinary
+  Claude model ID forwarded verbatim, because clud owns the synthetic
+  provider namespaces while Anthropic owns its own inventory. Descent
+  consults `route_health::RouteLedger` and withholds `CostOwner::Metered`
+  rungs until consent is recorded. Design:
+  `docs/architecture/provider-failover.md`.
 - `route_health.rs` - #968: reads an `UpstreamFailure` as a statement about
   its *route* rather than its attempt (`RouteVerdict`: healthy /
   throttled / exhausted / drained / unauthenticated / request-fatal) and

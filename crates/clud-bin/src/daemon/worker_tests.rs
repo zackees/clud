@@ -31,6 +31,8 @@ fn cross_route_plan() -> LaunchPlan {
         stream_json_progress: false,
         codex_model: None,
         model_selection: None,
+        failover: None,
+        failover_allow_metered: false,
     }
 }
 
