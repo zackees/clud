@@ -165,10 +165,10 @@ impl UnifiedGatewayConfig {
     }
 
     /// The next rung below `after` that the ledger says can serve.
-    fn next_rung(&self, after: Option<&str>) -> Option<FailoverRung> {
+    fn next_rung(&self, after: Option<&str>, current: ConversationRoute) -> Option<FailoverRung> {
         let ledger = self.route_ledger.lock().ok()?;
         self.failover
-            .next_available(after, &ledger, Instant::now())
+            .next_available_excluding(after, Some(current), &ledger, Instant::now())
             .cloned()
     }
 }
@@ -824,6 +824,36 @@ fn handle_connection(
             GatewayMode::Codex => serve_codex_catalog(&mut stream),
             GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config),
         },
+        ("GET", "/_clud/route/status") => match &config.gateway_mode {
+            GatewayMode::Unified(unified) => serve_route_status(&mut stream, unified),
+            GatewayMode::Codex => {
+                record_rejection(log, 404, "route_status_unsupported");
+                let _ = write_error(&mut stream, 404);
+            }
+        },
+        ("POST", "/_clud/route/clear") => {
+            let body_deadline = Instant::now() + config.body_timeout;
+            match read_body(
+                &mut stream,
+                parsed.body_prefix,
+                parsed.content_length,
+                body_deadline,
+                shutdown,
+            ) {
+                Ok(body) => match &config.gateway_mode {
+                    GatewayMode::Unified(unified) => serve_route_clear(&mut stream, unified, &body),
+                    GatewayMode::Codex => {
+                        record_rejection(log, 404, "route_clear_unsupported");
+                        let _ = write_error(&mut stream, 404);
+                    }
+                },
+                Err(ABANDON) => {}
+                Err(status) => {
+                    record_rejection(log, status, "route_control_body");
+                    let _ = write_error(&mut stream, status);
+                }
+            }
+        }
         ("HEAD", "/v1/messages") => {
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
@@ -927,6 +957,106 @@ fn handle_connection(
             let _ = write_error(&mut stream, 404);
         }
     }
+}
+
+/// `GET /_clud/route/status` -- the configured ladder and each route's health.
+///
+/// Sits beside `/_clud/context/*` and carries the same gateway-token
+/// requirement. Deliberately names only the public route, its cost owner, and a
+/// reset clock: never a credential, base URL, prompt, or response body.
+fn serve_route_status(stream: &mut TcpStream, unified: &UnifiedGatewayConfig) {
+    let now = Instant::now();
+    let ladder: Vec<serde_json::Value> = unified
+        .failover
+        .rungs()
+        .iter()
+        .map(|rung| {
+            let state = unified
+                .route_ledger
+                .lock()
+                .map(|ledger| ledger.state(rung.route, now))
+                .unwrap_or(RouteState::Available);
+            serde_json::json!({
+                "spec": rung.spec,
+                "route": rung.route.as_str(),
+                "cost": rung.cost.as_str(),
+                "withheld_for_consent": !unified.failover.allows_metered()
+                    && rung.cost == crate::failover::CostOwner::Metered,
+                "state": route_state_json(state),
+            })
+        })
+        .collect();
+    let routes: Vec<serde_json::Value> = unified
+        .route_ledger
+        .lock()
+        .map(|ledger| {
+            ledger
+                .snapshot(now)
+                .into_iter()
+                .map(|(route, state)| {
+                    serde_json::json!({
+                        "route": route.as_str(),
+                        "state": route_state_json(state),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = serde_json::json!({ "ladder": ladder, "routes": routes }).to_string();
+    let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
+}
+
+fn route_state_json(state: RouteState) -> serde_json::Value {
+    match state {
+        RouteState::Available => serde_json::json!({"status": "available"}),
+        RouteState::Cooling { remaining, reason } => serde_json::json!({
+            "status": "cooling",
+            "reason": reason,
+            "retry_in_seconds": remaining.as_secs(),
+        }),
+        RouteState::Down { reason } => serde_json::json!({
+            "status": "down",
+            "reason": reason,
+        }),
+    }
+}
+
+/// `POST /_clud/route/clear` -- forget one route's health.
+///
+/// The escape hatch for a wedged session: a route marked drained has no clock,
+/// so after the operator tops up a balance or replaces a key nothing else can
+/// bring it back.
+fn serve_route_clear(stream: &mut TcpStream, unified: &UnifiedGatewayConfig, body: &[u8]) {
+    let requested = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("route")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    let route = match requested.as_deref() {
+        Some("claude") => Some(ConversationRoute::Claude),
+        Some("codex") => Some(ConversationRoute::Codex),
+        Some("deepseek") => Some(ConversationRoute::DeepSeek),
+        Some("openrouter") => Some(ConversationRoute::OpenRouter),
+        _ => None,
+    };
+    let Some(route) = route else {
+        let _ = write_response(
+            stream,
+            400,
+            "application/json",
+            br#"{"error":{"type":"invalid_request_error","message":"route must be one of claude, codex, deepseek, openrouter"}}"#,
+            false,
+        );
+        return;
+    };
+    if let Ok(mut ledger) = unified.route_ledger.lock() {
+        ledger.clear(route);
+    }
+    let body = serde_json::json!({"cleared": route.as_str()}).to_string();
+    let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
 }
 
 fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
@@ -1316,7 +1446,7 @@ fn serve_unified_messages(
             }
             None => body.to_vec(),
         };
-        let fallback = unified.next_rung(attempt.spec.as_deref());
+        let fallback = unified.next_rung(attempt.spec.as_deref(), attempt.route);
         let probe = fallback.is_some();
 
         let outcome = match attempt.provider {
@@ -1381,7 +1511,7 @@ fn serve_unified_messages(
                     Some(ConversationRoute::Codex),
                     log,
                 );
-                ProxyOutcome::Committed
+                ProxyOutcome::local(200)
             }
             _ => {
                 // Defense in depth: unavailable routes are omitted from
@@ -1395,20 +1525,26 @@ fn serve_unified_messages(
                 })
                 .to_string();
                 let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
-                ProxyOutcome::Committed
+                ProxyOutcome::local(400)
             }
         };
 
         match outcome {
-            ProxyOutcome::Committed => {
-                unified.record_route_success(attempt.route);
+            ProxyOutcome::Committed { status } => {
+                // Only a served turn is evidence the route recovered. A
+                // committed *failure* -- a malformed request, an upstream
+                // outage -- says nothing about the route, so it must not clear
+                // a cooldown the ledger is still serving.
+                if status < 400 {
+                    unified.record_route_success(attempt.route);
+                }
                 return;
             }
             ProxyOutcome::Declined(verdict) => {
                 let state = unified.record_route(attempt.route, verdict);
                 // Recomputed after recording, so the route that just declined
                 // is skipped on its own merits rather than by position.
-                let Some(rung) = unified.next_rung(attempt.spec.as_deref()) else {
+                let Some(rung) = unified.next_rung(attempt.spec.as_deref(), attempt.route) else {
                     // Nothing left to try. Re-issue against the same route with
                     // probing off so the client receives the real upstream
                     // status instead of a silent hang.
@@ -1525,7 +1661,7 @@ fn serve_unified_anthropic_proxy(
     shutdown: &AtomicBool,
     probe: bool,
 ) -> ProxyOutcome {
-    let mut outcome = ProxyOutcome::Committed;
+    let mut outcome = ProxyOutcome::local(500);
     let routed = conversations.with_history(&conversation_key.id, |history| {
         // Crossing a provider boundary starts a new route epoch, which is
         // exactly what a failover is: a provider switch nobody typed.
@@ -1550,7 +1686,7 @@ fn serve_unified_anthropic_proxy(
             error.to_string(),
         ));
         let _ = write_pipeline_error(stream, &failure, None);
-        return ProxyOutcome::Committed;
+        return ProxyOutcome::local(500);
     }
     outcome
 }
@@ -1645,10 +1781,20 @@ struct AnthropicProxyTarget<'a> {
 /// the turn.
 #[derive(Debug)]
 enum ProxyOutcome {
-    /// Bytes reached the client. Nothing may be retried.
-    Committed,
+    /// Bytes reached the client. Nothing may be retried. Carries the status so
+    /// the caller can tell a served turn from a committed failure: only the
+    /// former is evidence that the route recovered.
+    Committed { status: u16 },
     /// Nothing was written. The route declined with this verdict.
     Declined(RouteVerdict),
+}
+
+impl ProxyOutcome {
+    /// A status the gateway produced itself, with no upstream verdict behind
+    /// it. Treated as a committed failure so it never clears a cooldown.
+    const fn local(status: u16) -> Self {
+        Self::Committed { status }
+    }
 }
 
 /// Bounded prefix read from a failing upstream so it can be classified.
@@ -1710,7 +1856,7 @@ fn serve_anthropic_proxy(
                 br#"{"error":{"type":"api_error","message":"gateway upstream unavailable"}}"#,
                 false,
             );
-            return ProxyOutcome::Committed;
+            return ProxyOutcome::local(502);
         }
     };
     let status = response.status();
@@ -1780,7 +1926,7 @@ fn serve_anthropic_proxy(
         let _ = write!(stream, "request-id: {request_id}\r\n");
     }
     if stream.write_all(b"\r\n").is_err() || stream.flush().is_err() {
-        return ProxyOutcome::Committed;
+        return ProxyOutcome::Committed { status };
     }
     // Anything the probe already consumed has to go out first, or the client
     // would receive a truncated error envelope.
@@ -1791,7 +1937,7 @@ fn serve_anthropic_proxy(
             .and_then(|()| stream.flush()))
         .is_err()
     {
-        return ProxyOutcome::Committed;
+        return ProxyOutcome::Committed { status };
     }
     let mut chunk = [0_u8; 8192];
     loop {
@@ -1815,7 +1961,7 @@ fn serve_anthropic_proxy(
     let _ = stream.write_all(b"0\r\n\r\n");
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Both);
-    ProxyOutcome::Committed
+    ProxyOutcome::Committed { status }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3739,6 +3885,170 @@ Connection: close
             !rescued.contains("openrouter-vault-canary"),
             "credentials must not cross a provider boundary: {rescued}"
         );
+    }
+
+    /// The operator surface: what the ladder is, what each route's health is,
+    /// and the escape hatch for a clock-less failure.
+    #[test]
+    fn route_status_reports_health_and_clear_restores_a_drained_route() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![Some(raw_response(
+            402,
+            "Payment Required",
+            r#"{"error":{"message":"This request requires more credits"}}"#,
+        ))]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(
+                    FailoverLadder::parse("claude-opus-4-1,deepseek-v4-flash", false).unwrap(),
+                ),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        let status_request = || {
+            request(
+                addr,
+                &authorized_with_headers(
+                    "GET",
+                    "/_clud/route/status",
+                    "native-claude-oauth-canary",
+                    "",
+                    &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+                ),
+            )
+        };
+
+        let before = status_request();
+        assert_eq!(status(&before), 200, "{before}");
+        assert!(
+            before.contains("\"cost\":\"subscription\""),
+            "the ladder must name who pays: {before}"
+        );
+        assert!(
+            before.contains("\"withheld_for_consent\":true"),
+            "a metered rung without consent must say so: {before}"
+        );
+
+        // Drain DeepSeek, then confirm the ledger reports it with no clock.
+        let drained = request(
+            addr,
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-v4-flash",
+                "status-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(
+            status(&drained),
+            200,
+            "the Claude rung serves it: {drained}"
+        );
+
+        let after = status_request();
+        assert!(
+            after.contains("\"status\":\"down\"") && after.contains("\"reason\":\"drained\""),
+            "a spent balance must be reported as down, not cooling: {after}"
+        );
+
+        let cleared = request(
+            addr,
+            &authorized_with_headers(
+                "POST",
+                "/_clud/route/clear",
+                "native-claude-oauth-canary",
+                r#"{"route":"deepseek"}"#,
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+            ),
+        );
+        assert_eq!(status(&cleared), 200, "{cleared}");
+        let restored = status_request();
+        assert!(
+            !restored.contains("\"reason\":\"drained\""),
+            "clearing must restore the route a top-up fixed: {restored}"
+        );
+    }
+
+    /// `route_health` asserts this at the unit level; this pins the gateway
+    /// wiring to the same contract. A committed *failure* says nothing about
+    /// the route, so it must not clear a cooldown the ledger is still serving.
+    #[test]
+    fn a_committed_failure_does_not_clear_a_cooling_route() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![
+            // First: drains the route and is failed over.
+            Some(raw_response(
+                402,
+                "Payment Required",
+                r#"{"error":{"message":"This request requires more credits"}}"#,
+            )),
+            // Second: a malformed request, committed straight through.
+            Some(raw_response(
+                400,
+                "Bad Request",
+                r#"{"error":{"type":"invalid_request_error","message":"bad shape"}}"#,
+            )),
+        ]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        for session in ["drain", "fatal"] {
+            let _ = request(
+                addr,
+                &unified_message_request(
+                    &bridge,
+                    "clud-claude-deepseek-v4-flash",
+                    session,
+                    "native-claude-oauth-canary",
+                ),
+            );
+        }
+
+        let status_body = request(
+            addr,
+            &authorized_with_headers(
+                "GET",
+                "/_clud/route/status",
+                "native-claude-oauth-canary",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+            ),
+        );
+        assert!(
+            status_body.contains("\"reason\":\"drained\""),
+            "the 400 must not have resurrected the drained route: {status_body}"
+        );
+    }
+
+    /// The control surface is gateway-token gated exactly like `/v1/messages`.
+    #[test]
+    fn route_status_requires_the_gateway_token() {
+        let claude = FakeResponses::start();
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(None, false)
+                .with_upstreams(claude.base_url.clone(), String::new()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let denied = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "GET",
+                "/_clud/route/status",
+                "native-claude-oauth-canary",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, "wrong-token")],
+            ),
+        );
+        assert_eq!(status(&denied), 401, "{denied}");
     }
 
     /// A malformed request fails identically everywhere, so replaying it would

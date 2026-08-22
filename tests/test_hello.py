@@ -464,6 +464,37 @@ def test_dry_run_openrouter_is_keyless_and_uses_stable_provider_identity() -> No
     assert "sk-or-" not in result.stderr
 
 
+def test_dry_run_exposes_the_failover_ladder() -> None:
+    """Routing must be auditable without a paid request, and a ladder is
+    routing: it decides which account serves the turn after the first declines.
+    """
+    result = _run(
+        "--dry-run", "--unified", "--failover", "claude-opus-4-1,codex-terra", "-p", "hello"
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["routing_mode"] == "unified"
+    assert data["failover"] == "claude-opus-4-1,codex-terra"
+    assert data["failover_allow_metered"] is False
+
+
+def test_dry_run_rejects_a_rung_the_gateway_cannot_route() -> None:
+    """An unroutable rung must fail the launch, not the turn that needed it."""
+    result = _run("--dry-run", "--unified", "--failover", "kimi-k3", "-p", "hello")
+    assert result.returncode == 2
+    output = (result.stdout or "") + (result.stderr or "")
+    assert "kimi-k3" in output
+    assert "does not route" in output
+
+
+def test_failover_on_a_direct_launch_warns_that_it_does_nothing() -> None:
+    """A direct launch has no gateway to fail over inside; say so rather than
+    silently accepting a flag that cannot take effect."""
+    result = _run("--dry-run", "--claude", "--failover", "claude-opus-4-1", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    assert "--failover only applies to `--unified`" in result.stderr
+
+
 def test_dry_run_openrouter_rejects_codex_harness() -> None:
     result = _run("--dry-run", "--openrouter", "--harness", "codex", "-p", "hello")
     assert result.returncode == 2

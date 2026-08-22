@@ -1,7 +1,7 @@
 use clud::{
     args, auth, backend, backend_bootstrap, clud_settings, codex_auth, command, config,
-    console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics,
-    grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
+    console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover, gc,
+    graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
     launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth,
     runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli,
     tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm,
@@ -823,6 +823,22 @@ fn run(mut args: args::Args) {
         ));
     }
 
+    // Validate the ladder before either path continues, so `--dry-run` catches
+    // a bad rung instead of leaving it for the launch that actually costs
+    // something. The gateway re-parses it later; this is the early gate, not
+    // the authority.
+    if let Some(spec) = plan.failover.as_deref() {
+        if let Err(error) = failover::FailoverLadder::parse(spec, plan.failover_allow_metered) {
+            eprintln!("[clud] --failover: {error}");
+            std::process::exit(2);
+        }
+        if launch_target.routing_mode != backend::RoutingMode::Unified {
+            eprintln!(
+                "[clud] warning: --failover only applies to `--unified`; a direct launch has no gateway to fail over inside"
+            );
+        }
+    }
+
     if args.dry_run {
         let json = serde_json::json!({
             "command": plan.command,
@@ -844,6 +860,11 @@ fn run(mut args: args::Args) {
             // was typed, so a dry run shows what will actually be billed.
             "codex_model": plan.codex_model,
             "model_selection": plan.model_selection,
+            // Routing must be auditable without a paid request, and a ladder
+            // is routing: it decides which account serves the turn after the
+            // first one declines.
+            "failover": plan.failover,
+            "failover_allow_metered": plan.failover_allow_metered,
             "transcript": args.transcript.as_ref().map(|p| p.to_string_lossy().to_string()),
             "loop_markers": plan.loop_markers.as_ref().map(|m| serde_json::json!({
                 "done_path": m.done_path,
