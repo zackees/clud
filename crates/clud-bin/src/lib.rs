@@ -62,6 +62,7 @@ pub mod provider_registry;
 pub mod reap_log;
 pub mod reaper_facts;
 pub mod repo_clud_config;
+pub mod route_health;
 pub mod runner;
 pub mod runtime_cache;
 pub mod session;
