@@ -123,3 +123,7 @@ Claude, Codex, and DeepSeek canary upstreams, assert the exact wire model and
 credential boundary, exercise native token counting, reject unknown reserved
 IDs before any upstream request, and switch Claude -> Codex -> DeepSeek ->
 Claude in one conversation before verifying Codex is freshly seeded.
+
+A design for surviving provider exhaustion mid-session — route health, a
+configured failover ladder, and pre-commit request replay — is proposed in
+[provider-failover.md](provider-failover.md) (#968, not yet implemented).
