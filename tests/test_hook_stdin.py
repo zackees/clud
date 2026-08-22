@@ -128,6 +128,47 @@ def test_block_bad_cmd_allows_malformed_json(tmp_path: Path) -> None:
     assert "permissionDecision" not in result.stdout
 
 
+def test_rm_literal_assignment_rewrites_before_backend_prompt(tmp_path: Path) -> None:
+    """#963: resolve a preceding literal assignment before Claude can ask."""
+    scratchpad = "C:/Users/test/.clud/tmp/claude/session/scratchpad"
+    command = (
+        'git status --porcelain; '
+        f'SP="{scratchpad}"; '
+        'rm -f "$SP"/*.txt "$SP"/*.json "$SP"/*.md 2>/dev/null; '
+        'ls "$SP"'
+    )
+    tool_input = {
+        "command": command,
+        "description": "clear scratchpad",
+        "timeout": 120_000,
+        "run_in_background": False,
+        "future_field": {"preserve": True},
+    }
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+            "cwd": str(tmp_path),
+        }
+    )
+
+    result = _run_hook_with_open_stdin(tmp_path, payload)
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    hook_output = output["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "PreToolUse"
+    assert hook_output["permissionDecision"] == "allow"
+    updated = hook_output["updatedInput"]
+    assert updated.keys() == tool_input.keys()
+    assert updated["description"] == "clear scratchpad"
+    assert updated["timeout"] == 120_000
+    assert updated["run_in_background"] is False
+    assert updated["future_field"] == {"preserve": True}
+    assert "$SP" not in updated["command"].split("rm -f", 1)[1].split(";", 1)[0]
+    assert updated["command"].count(scratchpad) == 4
+
+
 def test_telemetry_hook_reads_payload_without_waiting_for_stdin_eof(
     tmp_path: Path,
 ) -> None:
