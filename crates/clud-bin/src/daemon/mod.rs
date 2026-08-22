@@ -1,6 +1,7 @@
 mod activity;
 mod attach;
 mod client;
+mod client_compat;
 mod client_leases;
 mod commands;
 mod cpu_alert_publish;
@@ -32,8 +33,8 @@ pub use client::try_register_gc_watch;
 pub use client::{
     acquire_foreground_client_lease, daemon_client_metrics, ensure_daemon, gc_client_insert,
     gc_client_list, gc_client_list_repo_visits, gc_client_purge, gc_client_reconcile,
-    gc_client_record_repo_visit, try_handoff_kill_to_daemon, try_request_orphan_reap,
-    ForegroundClientLease, GcPurgeOutcome,
+    gc_client_record_repo_visit, is_incompatible_daemon_error, print_incompatible_daemon_error,
+    try_handoff_kill_to_daemon, try_request_orphan_reap, ForegroundClientLease, GcPurgeOutcome,
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
 pub use http::{
@@ -54,4 +55,4 @@ pub use http::{
 };
 pub use paths::{default_state_dir, default_trash_dir};
 pub use types::GcWatchRoot;
-pub use types::{ListRow, RepoVisit, ENV_NO_DAEMON};
+pub use types::{ListRow, RepoVisit, ENV_ALLOW_DAEMON_SPAWN};

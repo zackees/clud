@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering as VersionOrdering;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -17,6 +18,7 @@ use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::activity::{should_idle_shutdown, DaemonActivity};
 use super::client::cleanup_stale_state;
+use super::client_compat::compare_versions;
 use super::client_leases::ClientLeaseRegistry;
 use super::daemon_events;
 use super::gc_service::{
@@ -641,10 +643,49 @@ fn dispatch_daemon_request_with_id(
             let reply = dispatch_gc_op(state_dir, gc_tx, request_id, payload);
             DaemonResponse::Gc { reply }
         }
-        DaemonRequest::Shutdown => DaemonResponse::ShutdownAck {
-            pid: std::process::id(),
-        },
+        DaemonRequest::Shutdown {
+            client_version,
+            expected_daemon,
+        } => shutdown_response(client_version.as_deref(), expected_daemon),
     }
+}
+
+fn shutdown_response(
+    client_version: Option<&str>,
+    expected_daemon: Option<crate::process_identity::ProcessIdentity>,
+) -> DaemonResponse {
+    let daemon_version = env!("CARGO_PKG_VERSION");
+    let Some(client_version) = client_version else {
+        return DaemonResponse::Error {
+            message: format!(
+                "refusing unversioned shutdown request; daemon version {daemon_version} must be stopped by clud {daemon_version} or newer"
+            ),
+        };
+    };
+    match compare_versions(client_version, daemon_version) {
+        Some(VersionOrdering::Equal | VersionOrdering::Greater) => {}
+        Some(VersionOrdering::Less) | None => {
+            return DaemonResponse::Error {
+                message: format!(
+                    "refusing shutdown from clud {client_version}; daemon version {daemon_version} is newer"
+                ),
+            };
+        }
+    }
+
+    let actual = crate::process_identity::ProcessIdentity::new(
+        std::process::id(),
+        crate::process_identity::self_start_time(),
+    );
+    if expected_daemon != Some(actual) {
+        return DaemonResponse::Error {
+            message: format!(
+                "refusing shutdown for a different daemon generation; running daemon is pid {} started at {}",
+                actual.pid, actual.start_time
+            ),
+        };
+    }
+    DaemonResponse::ShutdownAck { pid: actual.pid }
 }
 
 fn write_daemon_response(
@@ -677,7 +718,7 @@ fn request_op(request: &DaemonRequest) -> &'static str {
         DaemonRequest::Interrupt { .. } => "interrupt",
         DaemonRequest::AdoptKill { .. } => "adopt_kill",
         DaemonRequest::Gc { .. } => "gc",
-        DaemonRequest::Shutdown => "shutdown",
+        DaemonRequest::Shutdown { .. } => "shutdown",
         DaemonRequest::ReapOrphans => "reap_orphans",
         DaemonRequest::Metrics => "metrics",
         DaemonRequest::ProcSnapshot { .. } => "proc_snapshot",
@@ -1866,7 +1907,10 @@ mod tests {
 
         let (prost_response, prost_line) = send_daemon_request_line(
             &state_dir,
-            &DaemonRequest::Shutdown,
+            &DaemonRequest::Shutdown {
+                client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                expected_daemon: Some(info.identity()),
+            },
             DaemonWireFormat::Prost,
         );
         assert!(matches!(
@@ -1905,11 +1949,12 @@ mod tests {
         );
     }
 
-    /// Previous-release clients defaulted to JSON lines and did not know
-    /// about the current prost encoder. Keep this fixture raw so it cannot
-    /// accidentally track current client helper behavior.
+    /// Previous-release clients may still use non-destructive JSON requests,
+    /// but their unversioned shutdown must not terminate a newer daemon.
+    /// Keep this fixture raw so it cannot accidentally acquire current-client
+    /// credentials through a helper.
     #[test]
-    fn daemon_accepts_previous_release_raw_json_client_lines() {
+    fn daemon_rejects_previous_release_raw_json_shutdown() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -1934,16 +1979,27 @@ mod tests {
             "raw legacy JSON shutdown must receive a legacy JSON reply: {shutdown_line:?}"
         );
         let shutdown_json: serde_json::Value = serde_json::from_str(&shutdown_line).unwrap();
-        assert_eq!(shutdown_json["op"], "shutdown_ack");
-        assert_eq!(
-            shutdown_json["pid"].as_u64(),
-            Some(u64::from(info.pid)),
-            "shutdown ack should identify the running daemon pid"
+        assert_eq!(shutdown_json["op"], "error");
+        assert!(
+            shutdown_json["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("unversioned shutdown")),
+            "legacy shutdown should explain why it was refused: {shutdown_line:?}"
         );
+
+        let (authorized, _) = send_daemon_request_line(
+            &state_dir,
+            &DaemonRequest::Shutdown {
+                client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                expected_daemon: Some(info.identity()),
+            },
+            DaemonWireFormat::Prost,
+        );
+        assert!(matches!(authorized, DaemonResponse::ShutdownAck { .. }));
         assert_eq!(daemon_thread.join().unwrap(), 0);
         assert!(
             !daemon_info_path(&state_dir).exists(),
-            "daemon should remove daemon.json during raw JSON shutdown"
+            "daemon should remove daemon.json during authorized shutdown"
         );
     }
 
@@ -1954,7 +2010,7 @@ mod tests {
         let daemon_state_dir = state_dir.clone();
         let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
 
-        wait_for_daemon_ready(&state_dir);
+        let info = wait_for_daemon_ready(&state_dir);
         for _ in 0..DAEMON_WIRE_PERF_WARMUP_SAMPLES {
             let (json_response, _) = send_daemon_request_line(
                 &state_dir,
@@ -2022,7 +2078,10 @@ mod tests {
 
         let (shutdown_response, shutdown_line) = send_daemon_request_line(
             &state_dir,
-            &DaemonRequest::Shutdown,
+            &DaemonRequest::Shutdown {
+                client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                expected_daemon: Some(info.identity()),
+            },
             DaemonWireFormat::Prost,
         );
         assert!(matches!(

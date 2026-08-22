@@ -52,7 +52,7 @@ const RUNNING_PROCESS_BROKER_ENV: &str = "CLUD_RUNNING_PROCESS_BROKER";
 /// | `--transcript <path>`                    | **forced on** |
 /// | `--experimental-daemon-centralized`      | **forced on** (legacy alias) |
 /// | `CLUD_EXPERIMENTAL_DAEMON=1`             | **forced on** (legacy alias) |
-/// | `--no-daemon` / `CLUD_NO_DAEMON=1`       | off (no-ops here, kept for explicitness) |
+/// | `--no-daemon`                             | off (kept for explicitness) |
 /// | Everything else                          | off (direct runner) |
 ///
 /// The function name `experimental_enabled` is preserved for back-compat
@@ -101,6 +101,10 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
                 0
             }
             Err(err) => {
+                if super::client::is_incompatible_daemon_error(&err) {
+                    super::client::print_incompatible_daemon_error(&err);
+                    return 1;
+                }
                 eprintln!("[clud] daemon restart failed: {err}");
                 1
             }
@@ -115,6 +119,10 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
                 0
             }
             Err(err) => {
+                if super::client::is_incompatible_daemon_error(&err) {
+                    super::client::print_incompatible_daemon_error(&err);
+                    return 1;
+                }
                 eprintln!("[clud] daemon stop failed: {err}");
                 1
             }
@@ -705,6 +713,10 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         ));
     }
     if let Err(err) = ensure_daemon(&state_dir) {
+        if super::client::is_incompatible_daemon_error(&err) {
+            super::client::print_incompatible_daemon_error(&err);
+            return 1;
+        }
         eprintln!("[clud] failed to start daemon: {}", err);
         if args.verbose {
             verbose_log::log(format_args!("[clud] daemon: ensure failed: {err}"));

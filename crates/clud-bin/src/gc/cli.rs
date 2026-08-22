@@ -67,8 +67,8 @@ const MANAGED_KINDS: &[GcKindSpec] = &[
 // Issue #135: the CLI no longer opens the redb directly. Every subcommand
 // is a thin IPC client against the always-on session daemon, which now
 // owns the redb handle and serializes all reads/writes through a single
-// registry worker thread (see `daemon/gc_service.rs`). `--no-daemon` (or
-// `CLUD_NO_DAEMON=1`) on any `clud gc` op is an error — there is no
+// registry worker thread (see `daemon/gc_service.rs`). `--no-daemon` on any
+// `clud gc` op is an error — there is no
 // read-only fallback.
 
 /// Issue #506: pseudo-kind accepted by `prune`/`purge` (positionally or
@@ -189,7 +189,7 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
         } if k == UV_CACHE_KIND => return cmd_prune_uv_cache(*dry_run),
         _ => {}
     }
-    if args.no_daemon || daemon_disabled_via_env() {
+    if args.no_daemon {
         eprintln!("error: gc operations require the clud daemon; remove --no-daemon");
         return 2;
     }
@@ -444,12 +444,6 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
-}
-
-fn daemon_disabled_via_env() -> bool {
-    std::env::var_os(crate::daemon::ENV_NO_DAEMON)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 fn print_help_and_exit_zero() -> i32 {

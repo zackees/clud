@@ -955,17 +955,17 @@ fn resolved_uv_cache_dir_from(env_value: Option<OsString>) -> PathBuf {
 /// `PATH`, terminal colors, etc. propagate), then unconditionally pin
 /// `UV_CACHE_DIR` to `cache_dir`. Listed explicitly in code so a forgotten
 /// Layer-3 parent set never leaks the user's global uv cache into a
-/// bundled-tool invocation. Also force `CLUD_NO_DAEMON=1` so tool scripts
-/// that shell out to `clud` do not spawn the always-on daemon from hook paths.
+/// bundled-tool invocation. Strip `CLUD_ALLOW_DAEMON_SPAWN` so tool scripts
+/// that shell out to clud cannot inherit authority to create or replace the
+/// shared daemon.
 fn build_child_env(cache_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k != "UV_CACHE_DIR" && k != crate::daemon::ENV_NO_DAEMON)
+        .filter(|(k, _)| k != "UV_CACHE_DIR" && k != crate::daemon::ENV_ALLOW_DAEMON_SPAWN)
         .collect();
     env.push((
         "UV_CACHE_DIR".to_string(),
         cache_dir.to_string_lossy().into_owned(),
     ));
-    env.push((crate::daemon::ENV_NO_DAEMON.to_string(), "1".to_string()));
     env
 }
 

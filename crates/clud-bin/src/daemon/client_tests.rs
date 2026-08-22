@@ -52,6 +52,61 @@ fn daemon_version_mismatch_when_field_absent() {
     assert!(!daemon_version_matches(&info));
 }
 
+fn version_newer_than_current() -> String {
+    let major = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    format!("{}.0.0", major + 1)
+}
+
+#[test]
+fn newer_daemon_is_refused_and_rendered_yellow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let info = DaemonInfo {
+        pid: std::process::id(),
+        pid_start: crate::process_identity::self_start_time(),
+        port,
+        dashboard_port: None,
+        dashboard_token: None,
+        version: Some(version_newer_than_current()),
+    };
+    super::super::io_helpers::write_json_file(&daemon_info_path(tmp.path()), &info).unwrap();
+
+    let error = ensure_daemon(tmp.path()).expect_err("older clud must refuse a newer daemon");
+    assert!(is_incompatible_daemon_error(&error));
+    let rendered = incompatible_daemon_error_line(&error);
+    assert!(rendered.starts_with("\x1b[33m[clud] error:"));
+    assert!(rendered.ends_with("\x1b[0m"));
+    assert!(daemon_info_path(tmp.path()).exists());
+}
+
+#[test]
+fn daemon_stop_preflight_refuses_newer_daemon_without_signaling_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let info = DaemonInfo {
+        pid: std::process::id(),
+        pid_start: crate::process_identity::self_start_time(),
+        port,
+        dashboard_port: None,
+        dashboard_token: None,
+        version: Some(version_newer_than_current()),
+    };
+    super::super::io_helpers::write_json_file(&daemon_info_path(tmp.path()), &info).unwrap();
+
+    let error = request_daemon_shutdown(tmp.path())
+        .expect_err("older clud must not send shutdown to a newer daemon");
+    assert!(is_incompatible_daemon_error(&error));
+    assert!(identity_is_alive(&info.identity()));
+    assert!(daemon_info_path(tmp.path()).exists());
+}
+
 fn write_daemon_info(state_dir: &Path, pid: u32, port: u16) {
     fs::create_dir_all(state_dir).unwrap();
     let info = DaemonInfo {
@@ -158,7 +213,13 @@ fn send_daemon_request_translates_silent_peer_to_unexpected_eof() {
     let (port, saw_request) = spawn_silent_peer();
     write_daemon_info(tmp.path(), std::process::id(), port);
 
-    let err = send_daemon_request(tmp.path(), &DaemonRequest::Shutdown)
+    let err = send_daemon_request(
+        tmp.path(),
+        &DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        },
+    )
         .expect_err("silent peer must not produce a daemon response");
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     assert!(
@@ -202,7 +263,14 @@ fn send_daemon_request_defaults_to_prost_wire() {
     let (port, line_rx) = spawn_shutdown_ack_peer();
     write_daemon_info(tmp.path(), std::process::id(), port);
 
-    let response = send_daemon_request(tmp.path(), &DaemonRequest::Shutdown).unwrap();
+    let response = send_daemon_request(
+        tmp.path(),
+        &DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        },
+    )
+    .unwrap();
     assert!(matches!(
         response,
         DaemonResponse::ShutdownAck { pid: 4242 }
@@ -218,7 +286,14 @@ fn send_daemon_request_uses_legacy_json_wire_when_requested() {
     let (port, line_rx) = spawn_shutdown_ack_peer();
     write_daemon_info(tmp.path(), std::process::id(), port);
 
-    let response = send_daemon_request(tmp.path(), &DaemonRequest::Shutdown).unwrap();
+    let response = send_daemon_request(
+        tmp.path(),
+        &DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        },
+    )
+    .unwrap();
     assert!(matches!(
         response,
         DaemonResponse::ShutdownAck { pid: 4242 }

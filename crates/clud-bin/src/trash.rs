@@ -68,7 +68,7 @@ impl std::error::Error for TrashError {}
 
 /// Dispatch a `clud trash` invocation. Returns the process exit code.
 pub fn run(args: &Args, paths: &[PathBuf], cross_volume: bool) -> i32 {
-    if args.no_daemon || daemon_disabled_via_env() {
+    if args.no_daemon {
         eprintln!("error: trash operations require the clud daemon; remove --no-daemon");
         return 2;
     }
@@ -211,12 +211,6 @@ pub fn trash_one_path(
         quarantine_dir,
         quarantined_path,
     })
-}
-
-fn daemon_disabled_via_env() -> bool {
-    std::env::var_os(crate::daemon::ENV_NO_DAEMON)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 fn absolute_path(path: &Path) -> io::Result<PathBuf> {

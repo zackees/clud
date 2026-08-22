@@ -128,8 +128,8 @@ time, and every counter so an unexpected exit can be diagnosed from the event lo
 
 ## GC subcommands
 
-The tracked-entry subcommands are thin IPC clients against the daemon. `--no-daemon` (or
-`CLUD_NO_DAEMON=1`) is **an error**, not a fallback — there is no read-only path in v1
+The tracked-entry subcommands are thin IPC clients against the daemon. `--no-daemon`
+is **an error**, not a fallback — there is no read-only path in v1
 (`crates/clud-bin/src/gc/cli.rs`).
 
 - **`clud gc list [--json]`** — `cmd_list` (`crates/clud-bin/src/gc/cli.rs`) calls
@@ -378,7 +378,7 @@ GC store / daemon:
   cannot clobber a sibling that happened to inherit its PID via POSIX PID reuse. `unregister`
   clears the flag too, for the same reason.
 
-- **`CLUD_NO_DAEMON=1` or `--no-daemon`.** All `clud gc *` subcommands exit 2 with "gc
+- **`--no-daemon`.** All `clud gc *` subcommands exit 2 with "gc
   operations require the clud daemon; remove --no-daemon". The scanner's IPC fails silently
   and the thread idles for the rest of the session. The session cap is unaffected (it doesn't
   use the daemon). The always-on auto-spawn from `main.rs` is also skipped.

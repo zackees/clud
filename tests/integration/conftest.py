@@ -311,7 +311,6 @@ def mock_env_codex_cmd(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
     env.pop("VIRTUAL_ENV", None)
     env["RUNNING_PROCESS_CHILD_PID_LOG_PATH"] = str(tmp_path / "child_pids.log")
-    env["CLUD_NO_DAEMON"] = "1"
     env["CLUD_NO_UNLOCK"] = "1"
     return env
 
@@ -337,7 +336,6 @@ def mock_env_cmd_wrappers(mock_agent_binary: Path, tmp_path: Path) -> dict[str, 
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
     env.pop("VIRTUAL_ENV", None)
     env["RUNNING_PROCESS_CHILD_PID_LOG_PATH"] = str(tmp_path / "child_pids.log")
-    env["CLUD_NO_DAEMON"] = "1"
     env["CLUD_NO_UNLOCK"] = "1"
     return env
 

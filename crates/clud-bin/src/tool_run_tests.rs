@@ -281,16 +281,15 @@ fn build_child_env_pins_tool_environment_and_strips_inherited_values() {
         "must pin exactly one UV_CACHE_DIR entry"
     );
     assert_eq!(uv_entries[0].1, "/some/clud/cache");
-    let no_daemon_entries: Vec<_> = env
+    let daemon_spawn_entries: Vec<_> = env
         .iter()
-        .filter(|(k, _)| k == crate::daemon::ENV_NO_DAEMON)
+        .filter(|(k, _)| k == crate::daemon::ENV_ALLOW_DAEMON_SPAWN)
         .collect();
     assert_eq!(
-        no_daemon_entries.len(),
-        1,
-        "must pin exactly one CLUD_NO_DAEMON entry"
+        daemon_spawn_entries.len(),
+        0,
+        "tool children must not inherit CLUD_ALLOW_DAEMON_SPAWN"
     );
-    assert_eq!(no_daemon_entries[0].1, "1");
     // Sanity: at least one non-UV entry made it through (PATH on any host).
     // We don't insist on PATH specifically because some test runners may strip
     // it; we just confirm the env isn't only the pinned UV_CACHE_DIR entry.
