@@ -128,6 +128,12 @@ Entry and orchestration:
   streaming state machine. Owns the downstream status policy — since #764,
   `502` means only a genuine gateway failure, and `TooLarge`/`Cancelled`/
   `Downstream` map to `413`/`499`/`499` instead of borrowing it.
+- `route_health.rs` - #968: reads an `UpstreamFailure` as a statement about
+  its *route* rather than its attempt (`RouteVerdict`: healthy /
+  throttled / exhausted / drained / unauthenticated / request-fatal) and
+  keeps a launch-scoped `RouteLedger` of which routes can serve and until
+  when. Clocks are passed in, never read, so every rule is testable
+  without sleeping. Design: `docs/architecture/provider-failover.md`.
 - `codex_history.rs` - bounded, in-memory canonical Responses transcript for
   the foreground bridge. It commits only newly pending input plus opaque
   upstream output, evicts at bridge shutdown, performs the two-phase harness

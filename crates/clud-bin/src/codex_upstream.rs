@@ -277,6 +277,13 @@ const EXHAUSTED_SIGNATURES: &[&str] = &[
     "out of credits",
     "credit balance",
     "billing_hard_limit_reached",
+    // A period-scoped allowance reads as an ordinary throttle by status and by
+    // code; only the period word separates "slow down" from "come back
+    // tomorrow" (#968).
+    "free-models-per-day",
+    "daily limit",
+    "daily quota",
+    "requires more credits",
 ];
 
 /// Body signatures that positively mark a 5xx as an outage rather than a
@@ -1810,6 +1817,38 @@ mod tests {
                 "{spelling}"
             );
         }
+    }
+
+    /// A period-scoped quota is exhaustion, not a throttle (#968).
+    ///
+    /// OpenRouter reports a spent daily allowance as
+    /// `429 free-models-per-day-...` and a spent balance as
+    /// `402 requires more credits`. Neither carries any of the signatures this
+    /// list already knew, so both classified as ordinary throttles and were
+    /// retried against an account that could not serve them for hours.
+    #[test]
+    fn a_spent_period_allowance_is_exhaustion_not_a_throttle() {
+        for body in [
+            r#"{"error":{"message":"Rate limit exceeded: free-models-per-day-stealth"}}"#,
+            r#"{"error":{"message":"You have hit your daily limit"}}"#,
+            r#"{"error":{"message":"daily quota reached for this key"}}"#,
+        ] {
+            assert_eq!(
+                failure_from(429, body).class(),
+                FailureClass::Exhausted,
+                "{body}"
+            );
+        }
+        let drained = failure_from(
+            402,
+            r#"{"error":{"message":"This request requires more credits, or fewer max_tokens"}}"#,
+        );
+        assert_eq!(drained.class(), FailureClass::Exhausted);
+        assert_eq!(
+            drained.max_attempts(&UpstreamConfig::default()),
+            1,
+            "a spent balance must be attempted exactly once"
+        );
     }
 
     /// A 429 with no exhaustion signature stays retryable.

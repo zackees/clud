@@ -25,11 +25,22 @@ pub const BRIDGE_SESSION_CONVERSATION: &str = "bridge-session";
 /// every request. Codex additionally retains opaque Responses items, so that
 /// canonical history is valid only while consecutive requests stay on the
 /// Codex route. Crossing any provider boundary starts a new route epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConversationRoute {
     Claude,
     Codex,
     DeepSeek,
+}
+
+impl ConversationRoute {
+    /// Stable, non-sensitive name for logs, notices, and `clud route status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::DeepSeek => "deepseek",
+        }
+    }
 }
 
 /// A bounded, non-sensitive key for one Claude session and (when present) one
