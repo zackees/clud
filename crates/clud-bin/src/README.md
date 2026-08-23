@@ -310,6 +310,16 @@ which test tier a change belongs in — lives in
   an uncompilable one falls back to equality so a declaration clud cannot parse
   under-matches rather than firing someone's guard against tools they never
   named. Parsing is lenient per entry, like `repo_clud_config`.
+- `clud_hooks_compile.rs` - compiles declarations into a frontend's native
+  registration (#977, #967 Phase 2b). One dispatcher line per declared event,
+  matcher `*` — the per-hook matcher is applied by clud at dispatch time, so
+  narrowing here would silently drop declarations an installed `Bash`-scoped
+  line could never deliver. `merge_hook_settings` concatenates per event rather
+  than replacing, mirroring how the harness layers hooks, so clud's
+  registration cannot displace the bridge's lifecycle hooks or a user's own
+  `--settings` document. Codex has no argument surface for hooks at all (`-c`
+  overrides `config.toml`; hooks live in a separate `hooks.json`), so the
+  compiler is Claude-only by construction.
 - `clud_hooks_run.rs` - Tier-B execution. Runs each declared hook with cwd and
   `CLUD_PROJECT_DIR` set to the declaring repo's root, the harness payload
   forwarded on stdin (pipe closed, so a hook blocking in `json.load(sys.stdin)`

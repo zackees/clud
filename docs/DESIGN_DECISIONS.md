@@ -2139,10 +2139,18 @@ state left behind when a session is killed. Argument injection has none of
 those: there is nothing on disk to converge, and the tempfile dies with the
 session.
 
-**Consequences:** The Claude path becomes file-free. Codex still has no
-`--settings` equivalent, so its hook surface stays file-based and bounded by
-what codex supports (apparently `PreToolUse` only) — the asymmetry is
-documented rather than papered over. One route deliberately left open: Claude's
+**Consequences:** The Claude path becomes file-free.
+
+*Update, verified while implementing (#967 Phase 2b):* the codex half of this
+is worse than "no `--settings` equivalent" — codex has **no argument surface
+for hooks at all**. `-c key=value` overrides values that would otherwise load
+from `config.toml`, and codex hooks live in a separate `hooks.json` with no
+flag pointing at an alternate one; `CODEX_HOME` would relocate auth and config
+along with it. So the choice for codex was to write `~/.codex/hooks.json` or to
+accept what the already-installed `clud-cmd-scan` PreToolUse line gives. clud
+takes the second: codex keeps PreToolUse coverage (which runs declared hooks
+since #980) and gets nothing for other events, matching codex's own apparent
+single-event support. No second codex writer exists. One route deliberately left open: Claude's
 `--setting-sources` can *exclude* a settings source outright (verified on the
 shipped CLI — a project `SessionStart` hook fires under
 `--setting-sources user,project` and does not under `--setting-sources user`),
