@@ -55,9 +55,12 @@ debug = "line-tables-only"
 # depending on DWARF version, `.debug_ranges`) out of the binary -- 72-91 MB of
 # the 2.7.4 `clud`'s 137 MB, projecting the wheel from 105 MB to ~40-44 MB.
 # `.debug_line` stays embedded, so a panic in a production wheel still
-# resolves file:line without fetching anything; the `.dwp` is attached to the
-# GitHub release (ci/xbuild.py::collect_debuginfo) for the richer
-# symbolication tracked by #1016.
+# resolves file:line without fetching anything, and function names still come
+# from `.symtab`. What moves to the sidecar is the inlined-subroutine DIEs:
+# without the `.dwp` a backtrace gives one file:line per *physical* frame
+# instead of the expanded inline caller chain, so the sidecar is not optional
+# for full-fidelity traces. It is attached to the GitHub release
+# (ci/xbuild.py::collect_debuginfo) for the fetch path tracked by #1016.
 # [profile.dev] deliberately keeps everything embedded: a developer's crash
 # must symbolicate with no sidecar at all.
 split-debuginfo = "packed"

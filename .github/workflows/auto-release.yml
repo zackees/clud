@@ -209,8 +209,22 @@ jobs:
           # .dwp, so assert the load-bearing half of it here instead: a release
           # with no wheels is always a bug.
           ls dist/*.whl > /dev/null
-          cd dist
-          find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          # Spans `debuginfo/` as well as `dist/`: a `.dwp` is fetched over the
+          # network and fed to a symbolizer, which is exactly the asset that
+          # wants a checksum, and #1016 builds on SHA256SUMS covering every
+          # attached file. Hashing happens inside each directory so the entries
+          # stay bare `./<name>` -- assets attach flat to the release, so a
+          # `dist/` or `debuginfo/` prefix would break `sha256sum -c` for
+          # anyone who downloads them into one directory. `! -name SHA256SUMS`
+          # because the shell creates the redirect target before `find` scans,
+          # so without it the file hashes its own partial content.
+          for dir in dist debuginfo; do
+            [ -d "$dir" ] || continue
+            ( cd "$dir" && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 |
+                sort -z | xargs -0 -r sha256sum )
+          done > SHA256SUMS
+          mv SHA256SUMS dist/SHA256SUMS
+          cat dist/SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:

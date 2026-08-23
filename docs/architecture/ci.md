@@ -376,7 +376,10 @@ broken for three tags.
 and drops `.debug_info` / `.debug_str` from the binary. Measured against the
 2.7.4 artifact: 72–91 MB of the 137 MB `clud` binary moves out, projecting the
 wheel from 105 MB to ~40 MB.
-`.debug_line` stays embedded, so a panic still resolves file:line unaided.
+`.debug_line` stays embedded, so a panic still resolves file:line unaided (and
+function names still come from `.symtab`). The inlined-subroutine DIEs are what
+move, so without the `.dwp` a backtrace collapses to one file:line per physical
+frame -- the sidecar is not optional for full-fidelity traces.
 
 Only Linux changes. `packed` is already MSVC's default. On Apple it would select
 the `.dSYM` bundle, which means rustc runs `dsymutil` at link time -- the one
