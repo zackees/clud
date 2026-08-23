@@ -372,11 +372,23 @@ Because `publish-pypi` failed, the dependent `publish-release` job was skipped,
 so those tags produced no GitHub release either — the pipeline was silently
 broken for three tags.
 
-`split-debuginfo = "packed"` fixes it at the source: a no-op on MSVC and Apple
-(already their default), it emits a `.dwp` on ELF and drops `.debug_info` /
-`.debug_str` from the binary. Measured against the 2.7.4 artifact: 72–91 MB of
-the 137 MB `clud` binary moves out, projecting the wheel from 105 MB to ~40 MB.
+`split-debuginfo = "packed"` fixes it at the source: it emits a `.dwp` on ELF
+and drops `.debug_info` / `.debug_str` from the binary. Measured against the
+2.7.4 artifact: 72–91 MB of the 137 MB `clud` binary moves out, projecting the
+wheel from 105 MB to ~40 MB.
 `.debug_line` stays embedded, so a panic still resolves file:line unaided.
+
+Only Linux changes. `packed` is already MSVC's default. On Apple it would select
+the `.dSYM` bundle, which means rustc runs `dsymutil` at link time -- the one
+way this setting could plausibly break a cross lane. It cannot: `soldr prepare`
+probes for dsymutil and, when it is missing, exports `-Csplit-debuginfo=off` in
+both `CARGO_TARGET_<T>_RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` for Apple
+triples, which outranks the profile key. Verified by inspecting `soldr prepare
+--github-env` output per triple: the override is emitted for
+`aarch64-apple-darwin` and for neither `x86_64-unknown-linux-gnu` nor
+`x86_64-pc-windows-msvc`. That asymmetry is load-bearing -- if soldr ever
+emitted it for linux-gnu, this fix would silently stop working and the wheel
+would grow back.
 
 The `.dwp` is attached to the GitHub release, and the routing is the part to not
 break:

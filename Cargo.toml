@@ -47,10 +47,13 @@ debug = "line-tables-only"
 # On ELF that debug info is embedded, which is why the manylinux wheel was
 # ~7x the Windows/macOS ones (those always wrote a `.pdb` / `.dSYM` sidecar)
 # and why 2.7.2/2.7.3/2.7.4 all died on PyPI's 100 MB project limit.
-# `packed` is a no-op on MSVC and Apple, where it is already the default; on
-# ELF it emits a `.dwp` and moves `.debug_info` / `.debug_str` (and, depending
-# on DWARF version, `.debug_ranges`) out of the binary -- 72-91 MB of the
-# 2.7.4 `clud`'s 137 MB, projecting the wheel from 105 MB to ~40-44 MB.
+# Only Linux actually changes. `packed` is already MSVC's default, and on
+# Apple it selects the `.dSYM` bundle -- but `soldr prepare` exports
+# `-Csplit-debuginfo=off` for Apple triples whenever dsymutil is unavailable,
+# which outranks this profile key, so the Apple cross lanes cannot break on it.
+# On ELF it emits a `.dwp` and moves `.debug_info` / `.debug_str` (and,
+# depending on DWARF version, `.debug_ranges`) out of the binary -- 72-91 MB of
+# the 2.7.4 `clud`'s 137 MB, projecting the wheel from 105 MB to ~40-44 MB.
 # `.debug_line` stays embedded, so a panic in a production wheel still
 # resolves file:line without fetching anything; the `.dwp` is attached to the
 # GitHub release (ci/xbuild.py::collect_debuginfo) for the richer
