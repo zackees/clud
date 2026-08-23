@@ -10,6 +10,23 @@ with different ownership models — they have nothing to do with each other besi
 both, plus the worktree scanner that feeds the GC store and the unrelated `--clean-worktrees`
 subcommand.
 
+
+## Where extern checkouts live
+
+Since #986 a repo's foreign checkouts live **beside** it — `~/dev/myrepo` keeps
+them in `~/dev/myrepo-extern/` — rather than in an in-tree `.extern-repos/`.
+The GC watches both: a fourth `EXTERN_REPO_KIND` watch root points at the
+sibling, alongside the legacy in-tree one, so checkouts users already have keep
+being tracked while they move.
+
+The sibling needed its own watch root rather than a widening of the
+sibling-clone one, because that scanner inserts immediate children of the
+repo's *parent* directory, and a checkout at `<repo>-extern/dep` is a
+grandchild of it. Registry rows were already keyed on absolute paths, so
+nothing about tracking, sweeping, or reclaiming changed.
+
+`extern_root.rs` owns the location; see DD-053 for why it moved.
+
 ## Two redb databases
 
 | File | Concern | Ownership | Lifetime |

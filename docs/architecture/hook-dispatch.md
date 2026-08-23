@@ -169,7 +169,7 @@ geometry:
 | kind | how it is registered | parent hooks fire there? |
 | --- | --- | --- |
 | `parent` | the session root | yes |
-| `extern` | immediate children of `.extern-repos/` | **never** |
+| `extern` | immediate children of the repo's extern directory | **never** |
 | `child` | declared in `.clud/settings.json` | yes |
 | unregistered | — | no |
 
@@ -177,6 +177,12 @@ geometry:
 business running against a repo it does not own and will not keep, and firing
 them there is the #841 ENOENT wedge. A declared `child` is the opposite — part
 of the parent's world, so the parent's guards apply to it.
+
+Since #986 those checkouts live **beside** the repo — `~/dev/myrepo` keeps them
+in `~/dev/myrepo-extern/` — which makes containment a disjoint question rather
+than a nested one: a path is under the repo or under its extern sibling, never
+both. The legacy in-tree `.extern-repos/` is still recognized so existing
+checkouts keep working. See `extern_root.rs` and DD-053.
 
 Nested git repos are **not** auto-detected as children. Declaration is the
 consent that makes the child tier's no-prompt trust sound, and that reasoning

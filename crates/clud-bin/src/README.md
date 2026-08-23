@@ -310,6 +310,16 @@ which test tier a change belongs in — lives in
   an uncompilable one falls back to equality so a declaration clud cannot parse
   under-matches rather than firing someone's guard against tools they never
   named. Parsing is lenient per entry, like `repo_clud_config`.
+- `extern_root.rs` - where a repo's foreign checkouts live (#986). Beside the
+  repo (`~/dev/myrepo` -> `~/dev/myrepo-extern/`), not inside it, so no tool
+  pointed at the repo can reach them and no exclusion has to be maintained.
+  Derives from the **main** repo root, so worktrees share one directory rather
+  than cloning a dependency each. `sibling_for` is fallible (a repo at a
+  filesystem root has no parent), and `known_roots` keeps returning the legacy
+  in-tree `.extern-repos/` so existing checkouts stay discoverable and clonable
+  during migration. Claiming (`claim_state`/`claim`) refuses a non-empty
+  directory clud did not create, because the name is guessed from the repo's
+  own and guessing wrong must not scatter clones through somebody's project.
 - `clud_hook_roots.rs` - the typed hook-root registry (#966 §5-6, #967 Phase
   3). `parent` (session root), `extern` (immediate children of
   `.extern-repos/`, implicit), `child` (declared in `.clud/settings.json`;

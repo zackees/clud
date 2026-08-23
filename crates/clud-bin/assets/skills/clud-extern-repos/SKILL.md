@@ -1,9 +1,9 @@
 ---
 name: clud-extern-repos
-description: Coordinate dependent cross-repo changes under a repo-local .extern-repos/ checkout convention.
+description: Coordinate dependent cross-repo changes using a sister checkout directory beside the repo.
 triggers:
   - When a task needs a dependent change in another repository
-  - When the user asks to use .extern-repos for cross-repo work
+  - When the user asks to use extern repos or sister checkouts for cross-repo work
 ---
 <!-- managed-by: clud -->
 
@@ -17,9 +17,21 @@ If any parent or dependent repository change is a bug fix or feature implementat
 
 ## Convention
 
-Place each dependent checkout at `<current-repo>/.extern-repos/<repo-name>/`. Only immediate children of `.extern-repos/` are tracked by clud GC.
+Place each dependent checkout **beside** the repo, not inside it:
 
-Before cloning, verify `.extern-repos/` is ignored by the current repo. If it is not ignored, ask before adding the ignore entry and refuse to create an unignored clone.
+```
+~/dev/myrepo            <- the repo you are working in
+~/dev/myrepo-extern/    <- dependent checkouts go here
+    running-process/
+```
+
+So from `~/dev/myrepo`, clone to `../myrepo-extern/<repo-name>`. Only immediate children of that directory are tracked by clud GC.
+
+The directory is derived from the repo's own name, and for a worktree it derives from the **main** repo — `~/dev/myrepo-wt-123` also uses `~/dev/myrepo-extern`, so a dependency is cloned once rather than once per worktree.
+
+You do not need to add an ignore entry for it, and you should not: it is outside the repo, so nothing that walks the repo can reach it. That is the point. A checkout inside the repo has to be excluded by every linter, formatter, test collector, and build script pointed at the root, and a wrong exclusion fails silently — `ci/banned_imports.py` in clud carried one for its whole life without anybody noticing.
+
+Checkouts still under the older `<repo>/.extern-repos/` location keep working and are still tracked, but put new ones beside the repo.
 
 Create feature branches in the dependent repo using the `feat/<short-name>` convention.
 

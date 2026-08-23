@@ -2320,3 +2320,74 @@ its own containment lookup regardless of registration order. `bash.block_cd`
 pinning now targets the whole registered set, so moving between the parent and
 a registered sub-repo is allowed while wandering into an unregistered
 directory is not.
+
+## DD-053: foreign checkouts live beside the repo, not inside it
+
+**Context:** clud cloned dependent repositories into `<repo>/.extern-repos/`.
+Anything under the repo root has to be excluded by every tool pointed at that
+root — linters, formatters, test collectors, IDE indexers, file watchers, build
+scripts — and the list is unbounded, per-repo, and manual.
+
+Measured on one developer machine: 23 repos carried the directory, 16 of them
+empty husks left after GC removed their contents. The largest held **27,712
+files** inside a repo. It had also stopped being a clone location and become a
+dumping ground — scraped `.html` files in one repo, a `codex.tar.gz` in
+another — and every worktree got its own copy of the same dependency.
+
+The decisive evidence was in this repo's own lint script. `ci/banned_imports.py`
+listed `extern-repos` among the directories it skips, but the directory is
+`.extern-repos`; `Path.parts` yields the component verbatim, so the membership
+test never matched. **The exclusion had never fired.** Every `bash lint` run
+walked into every cloned dependency and scanned its Python. Nothing went red —
+the symptom was only a slow lint and the occasional finding in somebody else's
+code — which is exactly why it survived. Fixed separately in #987.
+
+A probe across three layouts made the boundary precise. With the `.gitignore`
+entry present, `git`, `ripgrep`, `ruff` and `pytest` all skip an in-tree
+checkout — because `.extern-repos` is dot-prefixed *and* gitignored, two
+coincidences rather than a design. Remove the entry and `ruff` walks in. And a
+plain `Path('.').rglob('*.py')` walks in **either way**: it respects no ignore
+file, and it is what repo CI scripts and build systems do.
+
+**Decision:** Checkouts live in a sibling directory derived from the repo's own
+name — `~/dev/myrepo` keeps them in `~/dev/myrepo-extern/`. No tool pointed at
+the repo can reach them, so there is no exclusion to maintain and none to get
+silently wrong.
+
+Three details:
+
+1. **Derived from the main repo root**, so `~/dev/myrepo` and a worktree at
+   `~/dev/myrepo-wt-123` share `~/dev/myrepo-extern` instead of cloning the
+   same dependency once per worktree.
+2. **Claimed with a marker.** The name is guessed from the repo's own, so it
+   might already be somebody's real project. clud writes a marker naming the
+   owner and refuses to adopt a non-empty directory without one.
+3. **The legacy location stays readable.** Discovery and the clone guard both
+   still accept `<repo>/.extern-repos/`, so existing checkouts keep working
+   while users move them.
+
+**Consequences:** Containment becomes a **disjoint** question instead of a
+nested one. DD-052's firing rule needed most-specific-first root matching and a
+"parent hooks never fire in an extern root" rule stated as an exception,
+precisely because the checkout sat inside the parent's tree. A sibling is
+outside it, so the two sets never overlap and the rule follows from the layout.
+
+Two costs are real. The location is now **fallible** — a repo at a filesystem
+root has no parent to hold a sibling — where `repo_root.join(...)` never was;
+callers get `Option` and the clone guard falls back to the legacy path rather
+than becoming permissive. And a sibling is outside the project directory, so
+the agent needs `--add-dir` to read what it just cloned; clud already harvests
+and injects add-dirs (#967 Phase 3b), so that composes rather than adding a
+mechanism.
+
+GC needed a fourth watch root rather than a widening of the existing
+sibling-clone one: that scanner inserts immediate children of the repo's
+*parent*, while `<repo>-extern/dep` is a grandchild of it. Registry rows were
+already keyed on absolute paths, so tracking and sweeping were unaffected.
+
+**Alternative rejected:** a central cache at `~/.clud/extern/<repo-key>/`. It
+solves the tooling problem equally well and avoids name collisions entirely,
+but the path stops being self-describing — a user looking for what the agent
+cloned has to know the hashing scheme instead of looking next to their repo.
+For a directory users are expected to inspect and delete by hand, adjacency is
+worth more than collision-freedom.
