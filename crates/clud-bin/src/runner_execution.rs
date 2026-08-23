@@ -348,6 +348,7 @@ pub fn run_plan_pty(
                 "[clud] iteration {} failed with exit code {}",
                 iter_num, last_exit
             );
+            note_silent_bridge(&runtime, last_exit);
             return last_exit;
         }
 
@@ -360,6 +361,10 @@ pub fn run_plan_pty(
         return code;
     }
 
+    // The PTY stream is the backend's rendered TUI, not a log, so there is
+    // nothing quotable to lift from it. What clud can still say is whether the
+    // harness ever asked the bridge for a turn (#998).
+    note_silent_bridge(&runtime, last_exit);
     last_exit
 }
 
