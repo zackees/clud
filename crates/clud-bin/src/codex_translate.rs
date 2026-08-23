@@ -740,7 +740,10 @@ fn effort_for(request: &MessagesRequest, spec: &ModelSpec) -> Result<Effort, Tra
 /// a `<model>[@<effort>]` selection -- that is how a user pins a specific
 /// Codex model and effort from `/model`, and it works because a custom
 /// `ANTHROPIC_BASE_URL` makes the gateway the owner of the model namespace,
-/// so the harness forwards the string unvalidated.
+/// so the harness forwards the string without validating it itself. The
+/// gateway does validate: `codex_bridge::serve_codex_discovery_messages`
+/// refuses a non-`claude*` id it cannot resolve in clud's catalog, so what
+/// reaches here over HTTP is a catalog-known id it already rewrote.
 ///
 /// A selection that does not parse is a **400, not a fallback**. Silently
 /// substituting the default for `/model tera` would bill a model the user did

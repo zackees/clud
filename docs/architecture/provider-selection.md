@@ -180,14 +180,19 @@ Enabling `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` does not replace Claude
 Code's built-in model list; the harness *merges* the gateway's `/v1/models`
 rows into it. Only the main turn routes through the selected gateway row.
 Claude Code's side queries -- session-title generation and advisor ranking --
-resolve against the built-in catalog alone, so a synthetic `clud-claude-*` ID
-is reported as `unrecognized_model` there (and disables the advisor) even on a
-healthy session. That is upstream behaviour clud does not own from the gateway.
+do not resolve against the gateway's advertised rows, so a synthetic
+`clud-claude-*` ID is reported as `unrecognized_model` there (and disables the
+advisor) even on a healthy session. That is upstream behaviour clud does not
+own from the gateway.
 
 Because the merge also means Claude Code can send IDs the gateway never
 advertised, the Codex discovery route refuses any model it cannot resolve
-instead of forwarding it. Only an ordinary `claude*` ID passes unresolved: the
-translator maps those onto the reviewed default.
+instead of forwarding it, and it distinguishes the two reasons: an ID clud has
+no catalog row for, versus a row clud does know that this gateway does not
+serve (another provider's route, or simply not advertised here). Only an
+ordinary `claude*` ID passes unresolved: the translator maps those onto the
+launch-time selection when `--model` was given, falling back to the catalog
+default.
 
 ### OpenRouter model-selection contract
 
