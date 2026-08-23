@@ -180,6 +180,17 @@ fn run(mut args: args::Args) {
     // backend resolution and before any session registry / dnd work
     // so a registry-less host can still run `clud gc reconcile`.
     if let Some(args::Command::Gc { subcommand }) = &args.command {
+        // The one subcommand that is granted daemon-creation authority. `gc`
+        // exists to operate on the registry, so it is not a utility mode that
+        // merely happens to touch it: with no daemon there is nothing to
+        // prune, and reporting success would tell the caller garbage was
+        // collected when none was. `--no-daemon` still withholds the grant,
+        // which is the documented `clud gc *` precondition.
+        if !args.no_daemon && !args.dry_run {
+            unsafe {
+                std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
+            }
+        }
         std::process::exit(gc::run(&args, subcommand.clone()));
     }
 

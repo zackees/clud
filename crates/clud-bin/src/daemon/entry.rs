@@ -273,11 +273,6 @@ struct TopRunOptions<'a> {
 }
 
 fn run_top(state_dir: &Path, opts: TopRunOptions<'_>) -> i32 {
-    if let Err(err) = ensure_daemon(state_dir) {
-        eprintln!("error: daemon unavailable: {err}");
-        return 1;
-    }
-
     let since_ms = match super::top::parse_since_ms(opts.since) {
         Ok(value) => value,
         Err(err) => {
@@ -287,6 +282,24 @@ fn run_top(state_dir: &Path, opts: TopRunOptions<'_>) -> i32 {
     };
     let once = opts.once || (opts.json && !opts.watch);
     let flat = opts.flat && !opts.tree;
+
+    // `top` is a utility mode, so it never starts a daemon. With none running
+    // there is simply nothing being sampled, which is an empty snapshot rather
+    // than an error -- a caller parsing `--json` gets a well-formed answer
+    // instead of a failure it has to special-case. Watch mode still fails,
+    // because there is nothing to watch.
+    if let Err(err) = ensure_daemon(state_dir) {
+        eprintln!("[clud] note: daemon unavailable: {err}");
+        if !once {
+            return 1;
+        }
+        return render_top_snapshot(
+            super::types::ProcTreeSnapshot::empty(super::proc_sampler::DEFAULT_SAMPLE_INTERVAL_MS),
+            &opts,
+            flat,
+        );
+    }
+
     if once {
         return run_top_once(state_dir, since_ms, &opts, flat);
     }
@@ -301,6 +314,17 @@ fn run_top_once(state_dir: &Path, since_ms: u64, opts: &TopRunOptions<'_>, flat:
             return 1;
         }
     };
+    render_top_snapshot(snapshot, opts, flat)
+}
+
+/// Render one snapshot in whichever shape the caller asked for. Shared so the
+/// no-daemon empty snapshot goes through exactly the same formatting as a real
+/// one, rather than growing a second, drifting JSON shape.
+fn render_top_snapshot(
+    snapshot: super::types::ProcTreeSnapshot,
+    opts: &TopRunOptions<'_>,
+    flat: bool,
+) -> i32 {
     if opts.json {
         let prepared =
             super::top::prepare_snapshot(snapshot, opts.sort, flat, opts.limit, opts.originator);

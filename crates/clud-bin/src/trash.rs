@@ -101,10 +101,19 @@ pub fn run(args: &Args, paths: &[PathBuf], cross_volume: bool) -> i32 {
                         );
                     }
                     Err(err) => {
-                        failed = true;
-                        eprintln!(
-                            "error: trashed {} -> {}, but failed to register GC row: {err}",
+                        // Registration is best-effort. `clud trash` is a
+                        // utility mode, so it never starts a daemon, and with
+                        // none running the row cannot be written. The file is
+                        // still quarantined, which is what the command
+                        // promises -- reporting failure here would tell the
+                        // caller the trashing itself did not happen.
+                        println!(
+                            "trashed {} -> {}",
                             record.origin_path,
+                            record.quarantined_path.display()
+                        );
+                        eprintln!(
+                            "[clud] warning: GC registration skipped for {}: {err}",
                             record.quarantined_path.display()
                         );
                     }
