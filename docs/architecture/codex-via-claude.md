@@ -20,9 +20,11 @@ longer emits a compound wire ID to Claude Code.
 
 Discovery **adds** these three rows to Claude Code's `/model` picker; it does
 not replace the picker's built-in Anthropic rows, and no gateway response can.
-Because this route advertises no Claude model, selecting a built-in row wedges
-the session until the model is changed back. clud cannot prevent that from the
-gateway side — see
+Selecting a built-in Anthropic row therefore stays possible, and it does not
+fail loudly: `resolve_selection` (`codex_translate.rs:748`) maps any `claude*`
+ID onto this route's configured default — the launch-time `--model` selection
+when one was given, otherwise the catalog default — so the turn silently runs
+on a Codex model. clud cannot constrain the picker from the gateway side — see
 [provider-selection.md](provider-selection.md#gateway-discovery-adds-picker-rows-it-does-not-constrain-them)
 and [DD-054](../DESIGN_DECISIONS.md#dd-054-the-model-picker-belongs-to-the-harness-and-discovery-only-adds-rows).
 

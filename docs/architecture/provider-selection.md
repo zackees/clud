@@ -277,13 +277,21 @@ rows `serve_codex_catalog` serves, keyed by that launch's loopback base URL.
 Because the cache is keyed by base URL and each launch binds a fresh ephemeral
 port, a new session starts with no cached rows until its own refetch lands.
 
-The consequence is real and clud cannot close it. On a **provider-scoped**
-bridge (`--codex --harness claude`), whose advertised catalog contains no Claude
-route, a user can select a built-in Anthropic row the bridge cannot serve, and
-every turn then fails with *There's an issue with the selected model*. Unified
-mode does not fail the same way, because ordinary `claude-*` IDs there proxy to
-native Claude. Clud's available remedy is to detect and report that state
-(zackees/clud#998, #999, #1000), not to constrain the picker. Full rationale:
+What the bridge does with an ID it never advertised is owned by
+[Claude Code merges discovery with its built-in
+catalog](#claude-code-merges-discovery-with-its-built-in-catalog) above. One
+point belongs here because it is what this investigation could *not* establish:
+a built-in Anthropic pick on the direct Codex route does **not** fail loudly —
+`resolve_selection` (`codex_translate.rs:748`) maps any `claude*` ID onto the
+launch-time selection, so the turn quietly runs on a Codex model, the
+substitution [DD-038](../DESIGN_DECISIONS.md#dd-038-the-codex-picker-gets-one-honest-row-always-carrying-the-catalog)
+already recorded. **The mechanism of the `claude-opus-5[1m]` session wedge in
+zackees/clud#995 is therefore unrecorded**: that launch left nothing on disk but
+`"exit_code": 1`. Making it observable is the point of zackees/clud#998 and
+#999. Do not infer a cause from this document.
+
+Clud's available remedy is to detect and report, not to constrain the picker.
+Full rationale:
 [DD-054](../DESIGN_DECISIONS.md#dd-054-the-model-picker-belongs-to-the-harness-and-discovery-only-adds-rows).
 
 ## Tests

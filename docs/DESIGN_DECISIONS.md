@@ -2472,11 +2472,17 @@ handshake), and #1000 (distinguish "not in the catalog" from "in the catalog but
 not advertised"). No picker-constraining work is available to schedule, and this
 record exists so that conclusion is not re-derived.
 
-The exposure is specific to **provider-scoped** routing. A direct
-`--codex --harness claude` bridge advertises no Claude route, so a built-in
-Anthropic pick reaches a gateway that cannot serve it. Unified mode proxies
-ordinary `claude-*` IDs to native Claude ([DD-043](#dd-043-unified-launch-guards-token-counting-and-optional-provider-notices)),
-so the same pick is servable there.
+**Correction (same day, after zackees/clud#1005).** The first draft of this
+record claimed a built-in Anthropic pick "reaches a gateway that cannot serve
+it" on the direct route. That is wrong. `resolve_selection`
+(`codex_translate.rs:748`) maps any requested ID starting with `claude` onto the
+route's configured default, so such a pick is *served* on a Codex model — the
+silent substitution [DD-038](#dd-038-the-codex-picker-gets-one-honest-row-always-carrying-the-catalog)
+already recorded. Unresolvable non-`claude*` IDs are refused with a 400 before
+the translator. **The mechanism of the `claude-opus-5[1m]` wedge reported in
+#995 is therefore still unestablished**, because nothing logged it; that is what
+#998 and #999 exist to fix. The decision above is unaffected — it concerns
+whether the picker can be constrained, which it cannot.
 
 This narrows, but does not overturn, [DD-045](#dd-045-direct-codex-through-claude-uses-provider-scoped-gateway-discovery).
 Its decision stands: the direct bridge exposes exactly the registered Codex
