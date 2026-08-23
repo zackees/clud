@@ -135,6 +135,11 @@ pub fn run_plan_pty(
     ) {
         Ok(runtime) => runtime,
         Err(error) => {
+            // #998: see the subprocess runner -- same named failure, same
+            // record.
+            crate::launch_log::record_failure_reason(format_args!(
+                "failed to start provider bridge: {error}"
+            ));
             eprintln!("[clud] failed to start provider bridge: {error}");
             if verbose {
                 verbose_log::log("[clud] provider bridge startup failed (pty)");
