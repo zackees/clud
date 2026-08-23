@@ -235,9 +235,9 @@ client will not retry, preventing duplicate text or tool calls.
 
 Failure diagnostics are synthesized from allowlisted facts and scrubbed before
 they reach stderr or the bounded bridge log. A healthy turn records nothing;
-since #999 a catalog fetch does write an entry, but only a failure, refusal, or
-truncation makes the launch print the log's path on shutdown. The opt-in local
-benchmark is documented at
+since #999 a catalog fetch on the direct Codex route does write an entry, but
+only a failure, refusal, or truncation makes the launch print the log's path on
+shutdown. The opt-in local benchmark is documented at
 [`bench/codex_bridge`](../../bench/codex_bridge/README.md); it measures the
 full local request path and reports RSS growth without a flaky normal-CI
 timing threshold.
@@ -339,12 +339,16 @@ attempts, buffered across workers, capped at 1 MiB with a visible
 exposed by `UpstreamFailure` (status, class, correlation IDs, retry hints, and
 scrubbed detail); request/response bodies, credentials, bearers, authorization
 headers, and upstream URLs are never inputs to the logger. Issue #999 adds the
-model-discovery handshake to that floor — a `catalog_advertised` entry per
-`GET /v1/models` and the requested model ID on a model refusal — so a session
-wedged by a model selection is diagnosable; a launch that fetches the catalog
-therefore does create a file. The advertisement is recorded as ambient context,
-so the shutdown print of the log's path still fires only for a launch that
-recorded a failure, a refusal, or a truncation.
+model-discovery handshake to that floor **on the direct Codex route only** — a
+`catalog_advertised` entry per `GET /v1/models` served by `serve_codex_catalog`,
+and the requested model ID on a refusal from `serve_codex_discovery_messages` —
+so a session wedged by a model selection is diagnosable; a direct-Codex launch
+that fetches the catalog therefore does create a file. Unified mode is not
+covered: `serve_unified_catalog` is not given the log, and
+`serve_unified_messages`' own unknown-model refusal is not recorded, so a
+unified launch still logs failures and retries only. The advertisement is
+recorded as ambient context, so the shutdown print of the log's path still fires
+only for a launch that recorded a failure, a refusal, or a truncation.
 `CLUD_CODEX_BRIDGE_DEBUG=1` remains the richer interactive stderr tier.
 Unit-test builds and processes marked `CLUD_INTEGRATION_TESTS=1` use the sibling
 `~/.clud/state/test-sessions/` tree so synthetic failures never enter the
