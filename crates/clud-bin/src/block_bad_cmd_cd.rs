@@ -169,6 +169,26 @@ pub(super) fn scan_session_cd(
     found
 }
 
+/// The concrete directories a command's session-level `cd`s would move to.
+///
+/// Containment needs these because a `cd` relocates where the rest of the
+/// command acts: `cd .extern-repos/dep && make` touches the sub-repo even
+/// though the payload cwd still says otherwise (#967 Phase 3).
+pub(super) fn session_cd_targets(
+    command_text: &str,
+    dialect: ShellDialect,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    scan_session_cd(command_text, dialect, cwd, home)
+        .into_iter()
+        .filter_map(|occurrence| match occurrence.target {
+            CdTarget::Path(path) => Some(path),
+            CdTarget::Unresolvable | CdTarget::NoOp => None,
+        })
+        .collect()
+}
+
 /// Split a command into the segments that run in the session's own shell.
 ///
 /// Everything inside `(...)` — which covers `$(...)` substitutions too,

@@ -160,11 +160,56 @@ at all. Deliberately not done yet: excluding a source drops everything it
 contributes, so a bug there costs the user `permissions`, not just hooks. See
 #977.
 
+## Which repo's hooks fire
+
+A session can touch files in more than one repo, and which repo's hooks apply
+is decided by what the containing repo *is* to the session, not by path
+geometry:
+
+| kind | how it is registered | parent hooks fire there? |
+| --- | --- | --- |
+| `parent` | the session root | yes |
+| `extern` | immediate children of `.extern-repos/` | **never** |
+| `child` | declared in `.clud/settings.json` | yes |
+| unregistered | — | no |
+
+`extern` roots are temporary, foreign visits: the parent's guards have no
+business running against a repo it does not own and will not keep, and firing
+them there is the #841 ENOENT wedge. A declared `child` is the opposite — part
+of the parent's world, so the parent's guards apply to it.
+
+Nested git repos are **not** auto-detected as children. Declaration is the
+consent that makes the child tier's no-prompt trust sound, and that reasoning
+collapses if nothing was declared.
+
+### Containment comes from what the call names
+
+Never from the payload cwd alone: a subagent editing
+`.extern-repos/<sub>/src/lib.rs` usually still has the session cwd at the
+parent root, so keying on cwd would answer "parent" for a file that is plainly
+not the parent's. The resolution order is:
+
+1. paths the tool names (`file_path`, `notebook_path`, `path`)
+2. otherwise, for Bash, wherever the command would `cd` to — `cd
+   .extern-repos/dep && make` does its work in the sub-repo, and cwd is only
+   where it started
+3. otherwise, cwd
+
+A call that spans repos still gets the parent's guards for the parent's own
+files: any touched path the parent owns is enough.
+
+Roots clud resolves at launch that a hook cannot rediscover — `--add-dir`
+targets and `permissions.additionalDirectories`, neither of which appears in a
+hook payload — cross the process boundary in `CLUD_HOOK_ROOTS`, as JSON,
+because a path-separated list is ambiguous on Windows where paths contain
+`:`.
+
 ## Where the code is
 
 | file | role |
 | --- | --- |
 | `clud_hooks.rs` | `.clud/hooks.json` schema, discovery, matcher semantics |
+| `clud_hook_roots.rs` | the typed root registry, containment, and the firing rule |
 | `clud_hooks_compile.rs` | compiling declarations into a frontend's native registration, and the merge that keeps it from displacing anything |
 | `foreground_runtime.rs` | composing the launch-scoped `--settings` document and injecting it into argv |
 | `clud_hooks_run.rs` | Tier-B execution: rooting, stdin payload, exit-code contract |
