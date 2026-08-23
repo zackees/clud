@@ -188,12 +188,43 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Sidecar debug info for the released binaries (Linux `.dwp`; see
+      # Cargo.toml [profile.release]). Downloaded into its own directory --
+      # never dist/ -- and only here, so it can never reach publish-pypi's
+      # packages-dir. Non-fatal: symbols are a nice-to-have, the release is not
+      # allowed to fail because a target produced none.
+      - name: Download debug info
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: debuginfo-*
+          path: debuginfo
+          merge-multiple: true
+
       - name: Generate checksums
         shell: bash
         run: |
           set -euo pipefail
-          cd dist
-          find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          # `fail_on_unmatched_files` below had to relax to tolerate a missing
+          # .dwp, so assert the load-bearing half of it here instead: a release
+          # with no wheels is always a bug.
+          ls dist/*.whl > /dev/null
+          # Spans `debuginfo/` as well as `dist/`: a `.dwp` is fetched over the
+          # network and fed to a symbolizer, which is exactly the asset that
+          # wants a checksum, and #1016 builds on SHA256SUMS covering every
+          # attached file. Hashing happens inside each directory so the entries
+          # stay bare `./<name>` -- assets attach flat to the release, so a
+          # `dist/` or `debuginfo/` prefix would break `sha256sum -c` for
+          # anyone who downloads them into one directory. `! -name SHA256SUMS`
+          # because the shell creates the redirect target before `find` scans,
+          # so without it the file hashes its own partial content.
+          for dir in dist debuginfo; do
+            [ -d "$dir" ] || continue
+            ( cd "$dir" && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 |
+                sort -z | xargs -0 -r sha256sum )
+          done > SHA256SUMS
+          mv SHA256SUMS dist/SHA256SUMS
+          cat dist/SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -226,5 +257,10 @@ jobs:
             ```
 
             Pre-built wheels for Linux (x86/ARM), Windows (x86/ARM), and macOS (x86/ARM) are attached below and available on PyPI.
-          files: dist/*
-          fail_on_unmatched_files: true
+          files: |
+            dist/*
+            debuginfo/*
+          # False only because `debuginfo/*` is legitimately allowed to be
+          # empty. The "dist must not be empty" guard it used to provide is
+          # asserted explicitly by the checksums step above.
+          fail_on_unmatched_files: false
