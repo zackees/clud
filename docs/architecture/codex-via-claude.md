@@ -18,6 +18,14 @@ Provider wire IDs and the legacy `<model>@<effort>` spelling remain accepted
 for continued sessions and forward-compatible explicit IDs, but clud no
 longer emits a compound wire ID to Claude Code.
 
+Discovery **adds** these three rows to Claude Code's `/model` picker; it does
+not replace the picker's built-in Anthropic rows, and no gateway response can.
+Because this route advertises no Claude model, selecting a built-in row wedges
+the session until the model is changed back. clud cannot prevent that from the
+gateway side — see
+[provider-selection.md](provider-selection.md#gateway-discovery-adds-picker-rows-it-does-not-constrain-them)
+and [DD-054](../DESIGN_DECISIONS.md#dd-054-the-model-picker-belongs-to-the-harness-and-discovery-only-adds-rows).
+
 Ordinary effort travels through Claude Code's session effort field and reaches
 the translator as `output_config.effort`. The provider-native `none` value,
 which Claude Code's CLI does not accept, remains a suffix on the synthetic ID.

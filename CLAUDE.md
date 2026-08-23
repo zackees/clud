@@ -91,8 +91,11 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 - **Test-first** — every feature has both Rust `#[test]` and Python subprocess tests.
 - **OpenRouter model selection** — OpenRouter is a gateway while Claude Code
   remains the frontend. `clud --openrouter` uses the reviewed Sonnet alias,
-  `--model <wire-id>` pins startup, and Claude Code's `/model` uses live gateway
-  discovery. Do not add a second clud-side picker or fold changing OpenRouter
+  `--model <wire-id>` pins startup, and Claude Code's `/model` shows the live
+  gateway-discovered rows **alongside** its own built-in ones — discovery adds
+  rows and cannot subtract them, so the picker is not constrainable from clud
+  ([DD-054](docs/DESIGN_DECISIONS.md#dd-054-the-model-picker-belongs-to-the-harness-and-discovery-only-adds-rows)).
+  Do not add a second clud-side picker or fold changing OpenRouter
   inventory into the static catalog. Preserve independent role-model mappings
   and treat non-Claude models as best-effort; see
   [`provider-selection.md`](docs/architecture/provider-selection.md#openrouter-model-selection-contract).

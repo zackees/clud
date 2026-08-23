@@ -200,9 +200,10 @@ remains the frontend and receives the resolved main-model wire ID through its
 2. `clud --openrouter --model <wire-id>` pins any explicit OpenRouter alias or
    catalog slug before launch. Unknown full IDs pass through losslessly because
    OpenRouter owns that namespace.
-3. Claude Code's `/model` command consumes the gateway-discovered live
-   inventory after launch. Clud enables discovery but does not implement a
-   separate pre-launch OpenRouter picker.
+3. Claude Code's `/model` command offers the gateway-discovered live
+   inventory after launch, alongside its own built-in rows. Clud enables
+   discovery but does not implement a separate pre-launch OpenRouter picker,
+   and cannot restrict the picker to the discovered set.
 
 An explicit main-model selection replaces `ANTHROPIC_MODEL`; it does not
 rewrite the provider descriptor's independent Fable, Opus, Sonnet, Haiku, or
@@ -232,6 +233,53 @@ without a restart -- and can be failed over automatically. See
 
 No normalized field may contain credentials. Dry-run output exposes the
 selection and its sources so routing can be audited without a paid request.
+
+## Gateway discovery adds picker rows, it does not constrain them
+
+Claude Code's `/model` picker belongs to the harness. Gateway discovery is one
+**additive** source among several, and no gateway response can remove a row the
+harness already has. Established against the Claude Code 2.1.233 binary for
+zackees/clud#997, which asked whether discovery is ignored, merged, or simply
+not arriving; the answer is merged:
+
+- The picker's option list starts as Claude Code's built-in Anthropic lineup and
+  is only ever appended to. Discovered rows are pushed in, labeled
+  `From gateway`, when an equivalent row is not already present. The built-in
+  rows are never filtered against the advertised set.
+- Discovery runs only in the `firstParty` deployment mode, meaning no
+  `CLAUDE_CODE_USE_*` provider variable is set. That is the same condition that
+  populates the built-in lineup, so the two cannot be separated: declaring a
+  different provider mode to shed the built-in rows also turns discovery off.
+- The `availableModels` managed setting bounds what *discovery* may add and
+  otherwise only adds `claude-*` and `anthropic.*` IDs of its own. It does not
+  bound the built-in lineup, and setting it additionally makes the harness
+  rewrite its alias rows (`opus[1m]`) into explicit first-party IDs
+  (`claude-opus-5[1m]`).
+- `additionalModelOptionsCache` and `modelAccessCache` in the user's global
+  config are harness-owned caches of Anthropic's own bootstrap response,
+  refreshed independently of clud. They are not extension points.
+
+Anthropic's own [gateway protocol
+reference](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery)
+says the same from the other side: discovery "add[s] the returned models to the
+`/model` picker", and when it fails "the picker falls back to the cached list
+from the previous startup or to the built-in model list". The built-in list is
+the floor, not something a gateway negotiates.
+
+The advertised set does reach the client. After a `clud --codex --harness
+claude` session, `~/.claude/cache/gateway-models.json` holds exactly the three
+rows `serve_codex_catalog` serves, keyed by that launch's loopback base URL.
+Because the cache is keyed by base URL and each launch binds a fresh ephemeral
+port, a new session starts with no cached rows until its own refetch lands.
+
+The consequence is real and clud cannot close it. On a **provider-scoped**
+bridge (`--codex --harness claude`), whose advertised catalog contains no Claude
+route, a user can select a built-in Anthropic row the bridge cannot serve, and
+every turn then fails with *There's an issue with the selected model*. Unified
+mode does not fail the same way, because ordinary `claude-*` IDs there proxy to
+native Claude. Clud's available remedy is to detect and report that state
+(zackees/clud#998, #999, #1000), not to constrain the picker. Full rationale:
+[DD-054](../DESIGN_DECISIONS.md#dd-054-the-model-picker-belongs-to-the-harness-and-discovery-only-adds-rows).
 
 ## Tests
 
