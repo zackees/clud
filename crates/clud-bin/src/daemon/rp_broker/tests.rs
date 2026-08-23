@@ -219,10 +219,19 @@ fn disable_env_skips_frame_lane_entirely() {
         "disabled lane must not write an identity sidecar"
     );
 
-    // TCP wire still works and shuts the daemon down.
+    // TCP wire still works and shuts the daemon down. The request has to be
+    // versioned and generation-scoped: this test is about the frame lane being
+    // disabled, not about shutdown authority, and an unversioned request is now
+    // refused on purpose.
     let mut stream = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
     use std::io::{BufRead, BufReader, Write as _};
-    stream.write_all(b"{\"op\":\"shutdown\"}\n").unwrap();
+    let request = serde_json::to_string(&super::super::types::DaemonRequest::Shutdown {
+        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        expected_daemon: Some(info.identity()),
+    })
+    .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
     let mut reader = BufReader::new(stream);
     let mut line = String::new();

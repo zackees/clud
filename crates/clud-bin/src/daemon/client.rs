@@ -2,10 +2,10 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
-use std::{cmp::Ordering, fmt};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::{cmp::Ordering, fmt};
 
 use fs4::fs_std::FileExt;
 use sysinfo::Signal;

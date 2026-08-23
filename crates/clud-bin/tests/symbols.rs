@@ -40,9 +40,7 @@ fn run_clud(args: &[&str], state_dir: &std::path::Path) -> (i32, String) {
     argv.extend(args.iter().map(|s| s.to_string()));
 
     let mut env: Vec<(String, String)> = std::env::vars().collect();
-    env.retain(|(k, _)| {
-        k != "CLUD_DAEMON_STATE_DIR" && k != "CLUD_ALLOW_DAEMON_SPAWN"
-    });
+    env.retain(|(k, _)| k != "CLUD_DAEMON_STATE_DIR" && k != "CLUD_ALLOW_DAEMON_SPAWN");
     env.push((
         "CLUD_DAEMON_STATE_DIR".to_string(),
         state_dir.to_string_lossy().into_owned(),

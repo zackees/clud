@@ -21,9 +21,10 @@ struct ParsedVersion {
 fn parse_version(version: &str) -> Option<ParsedVersion> {
     let without_build = version.split_once('+').map_or(version, |(head, _)| head);
     let (core, prerelease) = match without_build.split_once('-') {
-        Some((core, prerelease)) if !prerelease.is_empty() => {
-            (core, Some(prerelease.split('.').map(str::to_owned).collect()))
-        }
+        Some((core, prerelease)) if !prerelease.is_empty() => (
+            core,
+            Some(prerelease.split('.').map(str::to_owned).collect()),
+        ),
         Some(_) => return None,
         None => (without_build, None),
     };

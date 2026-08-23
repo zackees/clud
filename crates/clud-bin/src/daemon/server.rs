@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering as VersionOrdering;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};

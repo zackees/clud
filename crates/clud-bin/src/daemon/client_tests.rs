@@ -220,7 +220,7 @@ fn send_daemon_request_translates_silent_peer_to_unexpected_eof() {
             expected_daemon: None,
         },
     )
-        .expect_err("silent peer must not produce a daemon response");
+    .expect_err("silent peer must not produce a daemon response");
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     assert!(
         !err.to_string().contains("EOF while parsing a value"),
