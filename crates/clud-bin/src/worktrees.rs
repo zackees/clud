@@ -574,6 +574,13 @@ where
 {
     ensure_no_live_process_refs(path, process_refs)?;
     if path_try_exists(path)? {
+        // Audit before acting (#893): this fallback physically removes a
+        // worktree after the git-level removal failed.
+        crate::gc::delete_audit::record(
+            "worktree.fallback-remove",
+            path,
+            "git-worktree fallback prune",
+        );
         match std::fs::remove_dir_all(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

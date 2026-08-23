@@ -26,6 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use super::delete_audit;
 use crate::tools::clud_uv_cache_dir;
 
 /// Subdirectory under `~/.clud/cache/uv/` that holds per-script venvs.
@@ -159,6 +160,8 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
             report.stale_envs_removed += 1;
             continue;
         }
+        // Audit before acting (#893).
+        delete_audit::record("gc.uv-cache", &path, "uv-cache env stale>7d");
         match fs::remove_dir_all(&path) {
             Ok(()) => report.stale_envs_removed += 1,
             Err(e) if is_locked(&e) => {
@@ -188,6 +191,8 @@ pub fn purge_all_at(root: &Path) -> std::io::Result<()> {
     if !root.exists() {
         return Ok(());
     }
+    // Audit before acting (#893).
+    delete_audit::record("gc.uv-cache-purge", root, "uv-cache purge-all --yes");
     match fs::remove_dir_all(root) {
         Ok(()) => Ok(()),
         Err(e) if is_locked(&e) => {

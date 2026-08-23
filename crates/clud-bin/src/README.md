@@ -274,7 +274,9 @@ which test tier a change belongs in — lives in
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and
   daemon-watch root derivation. The GC registry and its shared watcher live inside
-  the daemon.
+  the daemon. `delete_audit.rs` is the pre-deletion JSONL audit trail
+  (`<state>/gc-audit.jsonl`, issue #893) written by every deletion path that can
+  touch user data, plus the target-sweep over-match guard.
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
   `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone,
   removes safe ones; `--dry-run` faithful.

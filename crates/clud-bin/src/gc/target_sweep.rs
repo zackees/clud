@@ -22,6 +22,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use super::delete_audit;
+
 /// Default staleness gate. Longer than the 48h session-temp / worktree
 /// policies because rebuilding `target/` is genuinely expensive, so we err
 /// toward keeping it.
@@ -81,6 +83,28 @@ fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// Defense-in-depth over-match guard (issue #893): refuse to remove anything
+/// that is not verifiably Rust build output — a directory named exactly
+/// `target` with a sibling `Cargo.toml`. The discovery walk already enforces
+/// both conditions, so this re-checks them independently at the deletion
+/// boundary: a future edit to [`walk`] that loosens matching must also get
+/// past this guard before it can delete something that is not build output.
+pub fn ensure_removable_build_output(path: &Path) -> Result<(), String> {
+    if path.file_name() != Some(std::ffi::OsStr::new("target")) {
+        return Err(format!(
+            "refusing non-build-output path: final component is not `target`: {}",
+            path.display()
+        ));
+    }
+    if !path.with_file_name("Cargo.toml").is_file() {
+        return Err(format!(
+            "refusing `target/` without a sibling Cargo.toml: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Sweep every configured root, removing stale `target/` dirs. `threshold`
 /// is the age gate; `now` is injectable for tests. No roots ⇒ empty report.
 pub fn sweep_roots_at(
@@ -93,6 +117,7 @@ pub fn sweep_roots_at(
         dry_run,
         ..Default::default()
     };
+    let rule = format!("target-sweep stale>{}d", threshold.as_secs() / 86_400);
     for root in roots {
         for target in find_target_dirs(root) {
             let Ok(meta) = fs::metadata(&target) else {
@@ -106,12 +131,20 @@ pub fn sweep_roots_at(
             if age <= threshold {
                 continue;
             }
+            if let Err(reason) = ensure_removable_build_output(&target) {
+                eprintln!("[clud] target sweep: {reason}");
+                report.skipped += 1;
+                continue;
+            }
             let bytes = dir_size(&target);
             if dry_run {
                 report.targets_removed += 1;
                 report.bytes_freed = report.bytes_freed.saturating_add(bytes);
                 continue;
             }
+            // Audit *before* acting (#893) so even a crash mid-deletion
+            // leaves the line that explains it.
+            delete_audit::record("gc.target-sweep", &target, &rule);
             match fs::remove_dir_all(&target) {
                 Ok(()) => {
                     report.targets_removed += 1;
@@ -250,5 +283,71 @@ mod tests {
     #[test]
     fn default_stale_days_is_14() {
         assert_eq!(DEFAULT_STALE_DAYS, 14);
+    }
+
+    // ---- #893 defense-in-depth guard ----
+
+    #[test]
+    fn guard_accepts_a_qualified_target_dir() {
+        let tmp = tempdir().unwrap();
+        let target = make_crate_with_target(tmp.path(), "c");
+        ensure_removable_build_output(&target).unwrap();
+    }
+
+    #[test]
+    fn guard_refuses_a_directory_not_named_target() {
+        let tmp = tempdir().unwrap();
+        // A live repo root: named like a repo, has a Cargo.toml. Exactly the
+        // shape #893 reported vanishing — the guard must refuse it even if a
+        // future discovery-walk regression ever hands it to the sweeper.
+        let repo = tmp.path().join("text2infographic");
+        fs::create_dir_all(&repo).unwrap();
+        File::create(repo.join("Cargo.toml")).unwrap();
+        let err = ensure_removable_build_output(&repo).unwrap_err();
+        assert!(err.contains("not `target`"), "{err}");
+    }
+
+    #[test]
+    fn guard_refuses_target_without_sibling_cargo_toml() {
+        let tmp = tempdir().unwrap();
+        let bare = tmp.path().join("weird").join("target");
+        fs::create_dir_all(&bare).unwrap();
+        let err = ensure_removable_build_output(&bare).unwrap_err();
+        assert!(err.contains("Cargo.toml"), "{err}");
+    }
+
+    /// End-to-end: a real sweep writes exactly one pre-deletion JSONL line
+    /// naming site, path, and rule into the injected state dir (#893).
+    /// Tolerates unrelated concurrent deletions landing in the same file by
+    /// matching our line rather than asserting an exact count.
+    #[test]
+    fn sweep_writes_pre_deletion_audit_line() {
+        use crate::gc::delete_audit::{StateDirGuard, AUDIT_LOG_FILE};
+
+        let tmp = tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::set(state.path());
+        let target = make_crate_with_target(tmp.path(), "c");
+        let future_now = SystemTime::now() + StdDuration::from_secs(15 * 24 * 60 * 60);
+        let report = sweep_roots_at(
+            &[tmp.path().to_path_buf()],
+            future_now,
+            Duration::from_secs(14 * 24 * 60 * 60),
+            false,
+        );
+        assert_eq!(report.targets_removed, 1);
+        assert!(!target.exists(), "the stale target was actually removed");
+        let body = fs::read_to_string(state.path().join(AUDIT_LOG_FILE)).unwrap();
+        let ours = body
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|v| v["site"] == "gc.target-sweep")
+            .expect("a gc.target-sweep line must exist");
+        assert_eq!(ours["rule"], "target-sweep stale>14d");
+        assert!(
+            ours["path"].as_str().unwrap().ends_with("target"),
+            "audit line names the exact path: {:?}",
+            ours["path"]
+        );
     }
 }

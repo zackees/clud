@@ -18,6 +18,7 @@
 //! fallback reconciliation schedule; it inserts only previously unseen rows.
 
 mod cli;
+pub mod delete_audit;
 mod reconcile;
 mod registry;
 mod scanner;

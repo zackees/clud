@@ -41,6 +41,9 @@ pub(super) fn collect_live_lock_paths() -> HashSet<String> {
 /// the synchronous path (`DeleteById`) and the parallel purge pool
 /// (`PurgeJob`). Safe to call from any thread — does not touch redb.
 pub(super) fn remove_entry_filesystem(entry: &TrackedEntry) -> Result<(), String> {
+    // Audit before acting (#893): the entry path is user data by definition
+    // (it is in the registry), so the line names the kind that authorized it.
+    crate::gc::delete_audit::record("gc.entry-delete", Path::new(&entry.path), &entry.kind);
     if entry.kind == "worktree" {
         let main_root = entry.repo_root.clone().unwrap_or_else(|| ".".to_string());
         let _ =
@@ -77,6 +80,8 @@ pub(super) fn reap_trash_entries(registry: &Registry) -> Result<(usize, usize), 
     let mut removed = 0usize;
     let mut failed = 0usize;
     for entry in entries {
+        // Audit before acting (#893).
+        crate::gc::delete_audit::record("gc.trash-reap", Path::new(&entry.path), "trash");
         match std::fs::remove_dir_all(&entry.path) {
             Ok(()) => {
                 registry.delete(entry.id).map_err(|err| err.to_string())?;

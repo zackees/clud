@@ -18,7 +18,10 @@ use crate::process_identity::ProcessIdentity;
 use super::process_utils::signal_process_tree;
 
 pub(super) const ENV_FEATURE_FLAG: &str = "CLUD_EXPERIMENTAL_DAEMON";
-pub(super) const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
+/// Widened to `pub(crate)` for `gc::delete_audit` (#893): the audit log
+/// resolves the same state dir the daemon uses, so the variable's name has
+/// exactly one definition.
+pub(crate) const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
 pub(super) const ENV_BACKLOG_BYTES: &str = "CLUD_BACKLOG_BYTES";
 /// Issue #135: opt out of the always-on daemon auto-spawn. Used by both
 /// the CLI flag `--no-daemon` and the `clud gc *` precondition check.
