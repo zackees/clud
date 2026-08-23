@@ -12,7 +12,7 @@ use std::fmt;
 use std::io::Write;
 #[cfg(test)]
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_API_TIMEOUT_MS: &str = "3000000";
 
@@ -182,6 +182,12 @@ impl ForegroundRuntime {
                 crate::clud_hooks_compile::DISPATCH_ENV.to_string(),
                 "1".to_string(),
             ));
+        }
+        // #967 Phase 3b: carry roots the hook cannot rediscover -- `--add-dir`
+        // targets and `permissions.additionalDirectories` appear in no hook
+        // payload.
+        if let Some(entry) = hook_roots_env_value(plan) {
+            env.push(entry);
         }
         Ok(Self {
             env,
@@ -649,6 +655,137 @@ fn merged_context_lifecycle_settings_with(
             .map_err(BridgeError::Settings)?;
     }
     compose_launch_settings(plan, settings)
+}
+
+/// Directories the user granted this session that no hook payload mentions.
+///
+/// `--add-dir` reaches the harness as passthrough argv, and
+/// `permissions.additionalDirectories` lives in a settings file the hook has
+/// no reason to read. Both widen what the session may touch, so containment
+/// has to know about them — and the only place that knows is the launch.
+fn harvested_roots(plan: &LaunchPlan, repo_root: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = add_dir_arguments(&plan.command)
+        .into_iter()
+        .map(|raw| resolve_against_cwd(&raw, plan.cwd.as_deref()))
+        .collect();
+    found.extend(additional_directories(repo_root));
+    found
+}
+
+/// Every `--add-dir` value in `command`, in both spellings.
+///
+/// The flag takes one or more directories, so values are consumed until the
+/// next flag. Scanning stops at `--`, past which the tokens belong to whatever
+/// the user is invoking rather than to the harness.
+fn add_dir_arguments(command: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut index = 1;
+    while index < command.len() {
+        let argument = &command[index];
+        if argument == "--" {
+            break;
+        }
+        if let Some(value) = argument.strip_prefix("--add-dir=") {
+            if !value.is_empty() {
+                found.push(value.to_string());
+            }
+            index += 1;
+            continue;
+        }
+        if argument == "--add-dir" {
+            index += 1;
+            while index < command.len() {
+                let value = &command[index];
+                if value.starts_with('-') || value == "--" {
+                    break;
+                }
+                found.push(value.clone());
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    found
+}
+
+/// `permissions.additionalDirectories` from the repo's own Claude settings.
+///
+/// Read directly rather than through `hook_health`, which parses only hook
+/// entries. Both the shared and the gitignored local file count, since either
+/// can widen the session.
+fn additional_directories(repo_root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for name in ["settings.json", "settings.local.json"] {
+        let path = repo_root.join(".claude").join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let entries = document
+            .get("permissions")
+            .and_then(|permissions| permissions.get("additionalDirectories"))
+            .and_then(serde_json::Value::as_array);
+        for entry in entries.into_iter().flatten() {
+            if let Some(raw) = entry.as_str().map(str::trim).filter(|raw| !raw.is_empty()) {
+                found.push(resolve_against(repo_root, raw));
+            }
+        }
+    }
+    found
+}
+
+fn resolve_against_cwd(raw: &str, cwd: Option<&str>) -> PathBuf {
+    let base = cwd.map_or_else(
+        || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        PathBuf::from,
+    );
+    resolve_against(&base, raw)
+}
+
+fn resolve_against(base: &Path, raw: &str) -> PathBuf {
+    let candidate = Path::new(raw);
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        base.join(candidate)
+    }
+}
+
+/// The registry this session's hooks should see, encoded for the child.
+///
+/// Harvested directories are registered as `extern`: the parent's own
+/// project guards have no more business running against a granted sibling
+/// directory than against a checkout clud cloned, and misfiring there is the
+/// #841 ENOENT class. They differ from `.extern-repos/` clones in *trust* —
+/// the user named these at launch — which Phase 4 has to distinguish when it
+/// gates running a foreign repo's own hooks.
+fn hook_roots_env_value(plan: &LaunchPlan) -> Option<(String, String)> {
+    let cwd = plan
+        .cwd
+        .as_deref()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let repo_root = crate::block_bad_cmd::nearest_repo_root_public(&cwd)?;
+    let harvested = harvested_roots(plan, &repo_root);
+    if harvested.is_empty() {
+        // Nothing the hook cannot work out for itself; leave the env alone.
+        return None;
+    }
+    let encoded: Vec<serde_json::Value> = harvested
+        .iter()
+        .map(|path| {
+            serde_json::json!({
+                "kind": crate::clud_hook_roots::RootKind::Extern.as_str(),
+                "path": path.to_string_lossy(),
+            })
+        })
+        .collect();
+    Some((
+        crate::clud_hook_roots::HOOK_ROOTS_ENV.to_string(),
+        serde_json::Value::Array(encoded).to_string(),
+    ))
 }
 
 /// Compose `--settings` for a launch with no bridge, when the repo declares
@@ -2310,6 +2447,167 @@ mod tests {
         assert!(
             commands.contains(&"clud-cmd-scan --event Stop"),
             "{commands:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // #967 Phase 3b: roots harvested at launch.
+    // -----------------------------------------------------------------
+
+    fn hook_roots_env(runtime: &ForegroundRuntime) -> Option<String> {
+        lookup(runtime.env(), crate::clud_hook_roots::HOOK_ROOTS_ENV).map(ToOwned::to_owned)
+    }
+
+    fn roots_in(encoded: &str) -> Vec<String> {
+        serde_json::from_str::<serde_json::Value>(encoded)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn add_dir_targets_are_harvested_into_the_registry() {
+        // `--add-dir` reaches the harness as passthrough argv and appears in
+        // no hook payload, so the launch is the only place that can see it.
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let extra = tempfile::TempDir::new().unwrap();
+
+        let mut launch = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        launch.command = vec![
+            "claude".to_string(),
+            "--add-dir".to_string(),
+            extra.path().to_string_lossy().into_owned(),
+        ];
+        let runtime = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+
+        let encoded = hook_roots_env(&runtime).expect("roots carried to the hook");
+        assert!(
+            roots_in(&encoded)
+                .iter()
+                .any(|path| path.contains(extra.path().file_name().unwrap().to_str().unwrap())),
+            "{encoded}"
+        );
+    }
+
+    #[test]
+    fn add_dir_accepts_both_spellings_and_several_directories() {
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let first = tempfile::TempDir::new().unwrap();
+        let second = tempfile::TempDir::new().unwrap();
+
+        let mut launch = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        launch.command = vec![
+            "claude".to_string(),
+            "--add-dir".to_string(),
+            first.path().to_string_lossy().into_owned(),
+            second.path().to_string_lossy().into_owned(),
+            "--verbose".to_string(),
+        ];
+        let runtime = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+        assert_eq!(
+            roots_in(&hook_roots_env(&runtime).expect("roots")).len(),
+            2,
+            "the flag takes directories until the next flag"
+        );
+
+        launch.command = vec![
+            "claude".to_string(),
+            format!("--add-dir={}", first.path().to_string_lossy()),
+        ];
+        let joined = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+        assert_eq!(roots_in(&hook_roots_env(&joined).expect("roots")).len(), 1);
+    }
+
+    #[test]
+    fn tokens_after_a_bare_separator_are_not_harness_flags() {
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let extra = tempfile::TempDir::new().unwrap();
+
+        let mut launch = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        launch.command = vec![
+            "claude".to_string(),
+            "--".to_string(),
+            "--add-dir".to_string(),
+            extra.path().to_string_lossy().into_owned(),
+        ];
+        let runtime = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+
+        assert_eq!(hook_roots_env(&runtime), None);
+    }
+
+    #[test]
+    fn additional_directories_from_claude_settings_are_harvested_too() {
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
+        std::fs::write(
+            repo.path().join(".claude").join("settings.json"),
+            r#"{"permissions":{"additionalDirectories":["../sibling"]}}"#,
+        )
+        .unwrap();
+
+        let runtime = ForegroundRuntime::start(
+            &plan_in(ModelProvider::Claude, Backend::Claude, repo.path()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let encoded = hook_roots_env(&runtime).expect("roots");
+        assert!(
+            roots_in(&encoded)
+                .iter()
+                .any(|path| path.contains("sibling")),
+            "{encoded}"
+        );
+    }
+
+    #[test]
+    fn a_launch_that_grants_nothing_leaves_the_env_alone() {
+        // The hook can work the rest out for itself; an empty registry would
+        // be noise the child has to parse on every tool call.
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+
+        let runtime = ForegroundRuntime::start(
+            &plan_in(ModelProvider::Claude, Backend::Claude, repo.path()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(hook_roots_env(&runtime), None);
+    }
+
+    #[test]
+    fn harvested_directories_are_registered_as_extern() {
+        // A granted sibling is no more the parent's business than a checkout
+        // clud cloned: its project guards would misfire there (#841). The two
+        // differ in trust, not in firing, which Phase 4 has to separate.
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let extra = tempfile::TempDir::new().unwrap();
+
+        let mut launch = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        launch.command = vec![
+            "claude".to_string(),
+            "--add-dir".to_string(),
+            extra.path().to_string_lossy().into_owned(),
+        ];
+        let runtime = ForegroundRuntime::start(&launch, Vec::new()).unwrap();
+
+        let encoded = hook_roots_env(&runtime).expect("roots");
+        let document: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(document[0]["kind"], "extern");
+
+        let roots = crate::clud_hook_roots::HookRoots::resolve(repo.path(), &[], Some(&encoded));
+        assert!(
+            !roots.parent_hooks_apply_to(&extra.path().join("file.rs")),
+            "the parent's guards must not follow the agent into a granted directory"
         );
     }
 
