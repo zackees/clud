@@ -80,6 +80,38 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a `clud daemon <subcommand>` may start a daemon.
+///
+/// #983 made daemon creation a positive capability, granted in `main.rs` only
+/// for a command-less launch so that utility and special modes cannot spawn
+/// one. `restart` is the exception the rule missed: starting a replacement is
+/// the whole point of the command, and without the grant it fails with
+/// `PermissionDenied` — reported as "failed to start replacement daemon" and,
+/// when none was running, "no running daemon; starting one" followed by an
+/// exit 1.
+///
+/// `stop` deliberately does not get it: refusing to start one is precisely
+/// what it promises, and granting the capability there would let a race turn a
+/// stop into a spawn.
+fn daemon_subcommand_may_spawn(subcommand: &DaemonSubcommand) -> bool {
+    match subcommand {
+        DaemonSubcommand::Restart => true,
+        DaemonSubcommand::Stop
+        | DaemonSubcommand::RunningProcess { .. }
+        | DaemonSubcommand::OrphanStatus { .. } => false,
+    }
+}
+
+fn grant_spawn_for_daemon_subcommand(subcommand: &DaemonSubcommand) {
+    if daemon_subcommand_may_spawn(subcommand) {
+        // SAFETY: single-threaded startup, before any worker exists -- the
+        // same point at which `main.rs` grants it for a normal launch.
+        unsafe {
+            std::env::set_var(crate::daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
+        }
+    }
+}
+
 fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32 {
     match subcommand {
         DaemonSubcommand::Restart => match request_daemon_shutdown(state_dir) {
@@ -683,6 +715,7 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
         }
         Some(Command::Daemon { subcommand }) => {
             let state_dir = state_dir(args);
+            grant_spawn_for_daemon_subcommand(subcommand);
             Some(run_daemon_subcommand(&state_dir, subcommand))
         }
         Some(Command::InternalDaemon { state_dir }) => Some(run_daemon(state_dir)),
@@ -972,3 +1005,34 @@ fn build_repeat_once_command(args: &Args, plan: &LaunchPlan) -> io::Result<Vec<S
 #[cfg(test)]
 #[path = "entry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod daemon_spawn_capability_tests {
+    use super::*;
+
+    /// #983 made daemon creation a positive capability and granted it only for
+    /// a command-less launch, which left `clud daemon restart` unable to start
+    /// the replacement that is its entire purpose. Every daemon integration
+    /// lane went red on main.
+    #[test]
+    fn restart_may_spawn_because_starting_a_replacement_is_the_point() {
+        assert!(daemon_subcommand_may_spawn(&DaemonSubcommand::Restart));
+    }
+
+    #[test]
+    fn stop_may_not_spawn_because_not_spawning_is_what_it_promises() {
+        // Granting the capability here would let a race turn a stop into a
+        // spawn, which is exactly what `daemon stop` guarantees against.
+        assert!(!daemon_subcommand_may_spawn(&DaemonSubcommand::Stop));
+    }
+
+    #[test]
+    fn read_only_subcommands_may_not_spawn() {
+        assert!(!daemon_subcommand_may_spawn(
+            &DaemonSubcommand::RunningProcess { json: false }
+        ));
+        assert!(!daemon_subcommand_may_spawn(
+            &DaemonSubcommand::OrphanStatus { json: false }
+        ));
+    }
+}
