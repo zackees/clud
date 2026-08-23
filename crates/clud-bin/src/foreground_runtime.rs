@@ -170,10 +170,19 @@ impl ForegroundRuntime {
                 descriptor,
                 plan.model_selection.as_ref(),
             );
-            (None, None, Vec::new())
+            (None, declared_hooks_settings(plan)?, Vec::new())
         } else {
-            (None, None, Vec::new())
+            (None, declared_hooks_settings(plan)?, Vec::new())
         };
+        // #967 Phase 2b: tell the hook binary that compiled dispatcher lines
+        // are registered for this session, so the bare `clud-cmd-scan` line
+        // stops running declared hooks itself and each one fires exactly once.
+        if claude_settings.is_some() && declared_hook_fragment(plan).is_some() {
+            env.push((
+                crate::clud_hooks_compile::DISPATCH_ENV.to_string(),
+                "1".to_string(),
+            ));
+        }
         Ok(Self {
             env,
             bridge,
@@ -635,6 +644,54 @@ fn merged_context_lifecycle_settings_with(
     allowed_env: &str,
 ) -> Result<ClaudeSettings, BridgeError> {
     let mut settings = context_lifecycle_settings(bridge, header_name, header_value, allowed_env);
+    if let Some(fragment) = declared_hook_fragment(plan) {
+        crate::clud_hooks_compile::merge_hook_settings(&mut settings, &fragment)
+            .map_err(BridgeError::Settings)?;
+    }
+    compose_launch_settings(plan, settings)
+}
+
+/// Compose `--settings` for a launch with no bridge, when the repo declares
+/// hooks and the frontend can accept them.
+///
+/// Claude only: codex has no argument surface for hooks — `-c` overrides
+/// `config.toml` values and hooks live in a separate `hooks.json` with no
+/// flag pointing at an alternate one. Codex keeps the PreToolUse coverage its
+/// already-installed `clud-cmd-scan` line gives it.
+fn declared_hooks_settings(plan: &LaunchPlan) -> Result<Option<ClaudeSettings>, BridgeError> {
+    if plan.effective_harness() != Backend::Claude {
+        return Ok(None);
+    }
+    let Some(fragment) = declared_hook_fragment(plan) else {
+        return Ok(None);
+    };
+    compose_launch_settings(plan, fragment).map(Some)
+}
+
+/// The registration for whatever the repo declares in `.clud/hooks.json`, or
+/// `None` when it declares nothing (#967 Phase 2b).
+///
+/// `None` is the signal to leave the launch alone entirely: a repo that has
+/// not opted in should see the argv it saw before this feature existed.
+fn declared_hook_fragment(plan: &LaunchPlan) -> Option<serde_json::Value> {
+    let cwd = plan
+        .cwd
+        .as_deref()
+        .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+    let repo_root = crate::block_bad_cmd::nearest_repo_root_public(&cwd)?;
+    let hooks = crate::clud_hooks::discover(&repo_root)?;
+    crate::clud_hooks_compile::claude_settings_fragment(&hooks)
+}
+
+/// Hand `generated` to Claude as a launch-scoped `--settings` source.
+///
+/// When the user supplied their own `--settings`, clud merges into *their*
+/// document and replaces the argument, because Claude accepts only one such
+/// source and whichever came second would otherwise shadow the other.
+fn compose_launch_settings(
+    plan: &LaunchPlan,
+    settings: serde_json::Value,
+) -> Result<ClaudeSettings, BridgeError> {
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
         return write_launch_scoped_settings(settings, false);
     };
@@ -649,9 +706,10 @@ fn merged_context_lifecycle_settings_with(
         .ok_or_else(|| {
             BridgeError::Settings("Claude --settings hooks must be a JSON object".to_string())
         })?;
+    let mut settings = settings;
     let generated_hooks = settings["hooks"]
         .as_object_mut()
-        .expect("generated lifecycle hooks are an object");
+        .expect("generated hooks are an object");
     for (event, generated_entries) in generated_hooks {
         let user_entries = user_hooks
             .entry(event)
@@ -665,7 +723,7 @@ fn merged_context_lifecycle_settings_with(
         user_entries.extend(
             generated_entries
                 .as_array()
-                .expect("generated lifecycle hook event is an array")
+                .expect("generated hook event is an array")
                 .iter()
                 .cloned(),
         );
@@ -2094,5 +2152,179 @@ mod tests {
             crate::provider_auth::PreflightError::Cancelled.describe(descriptor),
             "Kimi credential entry was cancelled"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #967 Phase 2b: declared hooks compiled into `--settings`.
+    // -----------------------------------------------------------------
+
+    fn repo_declaring(hooks: &str) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".clud")).unwrap();
+        std::fs::write(tmp.path().join(".clud").join("hooks.json"), hooks).unwrap();
+        tmp
+    }
+
+    fn plan_in(provider: ModelProvider, harness: Backend, cwd: &std::path::Path) -> LaunchPlan {
+        let mut plan = plan(provider, harness);
+        plan.cwd = Some(cwd.to_string_lossy().into_owned());
+        plan
+    }
+
+    /// Every file under `root`, with its bytes — for proving a launch wrote
+    /// nothing (DD-049).
+    fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    out.insert(path, bytes);
+                }
+            }
+        }
+        out
+    }
+
+    /// The argv clud would actually spawn, via the recording adapter.
+    fn composed_command(runtime: &ForegroundRuntime, command: Vec<String>) -> Vec<String> {
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Subprocess, command, None)
+            .unwrap();
+        let calls = adapter.calls.borrow();
+        calls[0].1.clone()
+    }
+
+    fn settings_argument(runtime: &ForegroundRuntime) -> Option<String> {
+        let command = composed_command(runtime, vec!["claude".to_string()]);
+        let index = command
+            .iter()
+            .position(|argument| argument == "--settings")?;
+        command.get(index + 1).cloned()
+    }
+
+    #[test]
+    fn a_plain_claude_launch_carries_declared_hooks_as_settings() {
+        // The ungating: before Phase 2b only bridge routes composed settings,
+        // so a plain launch registered nothing.
+        let repo = repo_declaring(r#"{"hooks":{"Stop":[{"command":"guard"}]}}"#);
+        let runtime = ForegroundRuntime::start(
+            &plan_in(ModelProvider::Claude, Backend::Claude, repo.path()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let path = settings_argument(&runtime).expect("--settings injected");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            document["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "clud-cmd-scan --event Stop"
+        );
+        assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_some());
+    }
+
+    #[test]
+    fn a_repo_that_declares_nothing_gets_an_untouched_launch() {
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+
+        let runtime = ForegroundRuntime::start(
+            &plan_in(ModelProvider::Claude, Backend::Claude, repo.path()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(settings_argument(&runtime), None);
+        assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
+    }
+
+    #[test]
+    fn a_launch_modifies_no_file_in_the_repo() {
+        // DD-049: settings reach the harness as arguments, never as writes.
+        let repo = repo_declaring(r#"{"hooks":{"Stop":[{"command":"guard"}]}}"#);
+        let before = snapshot(repo.path());
+
+        let runtime = ForegroundRuntime::start(
+            &plan_in(ModelProvider::Claude, Backend::Claude, repo.path()),
+            Vec::new(),
+        )
+        .unwrap();
+        let _ = settings_argument(&runtime);
+
+        assert_eq!(
+            snapshot(repo.path()),
+            before,
+            "the launch wrote to the repo"
+        );
+    }
+
+    #[test]
+    fn a_user_supplied_settings_argument_is_merged_not_shadowed() {
+        // Claude accepts one `--settings`; a second would shadow the first.
+        let repo = repo_declaring(r#"{"hooks":{"Stop":[{"command":"guard"}]}}"#);
+        let user = repo.path().join("mine.json");
+        std::fs::write(
+            &user,
+            r#"{"model":"theirs","hooks":{"Stop":[{"hooks":[{"command":"user-hook"}]}]}}"#,
+        )
+        .unwrap();
+
+        let mut launch_plan = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        launch_plan.command = vec![
+            "claude".to_string(),
+            "--settings".to_string(),
+            user.to_string_lossy().into_owned(),
+        ];
+        let runtime = ForegroundRuntime::start(&launch_plan, Vec::new()).unwrap();
+
+        let composed = composed_command(&runtime, launch_plan.command.clone());
+        let occurrences = composed
+            .iter()
+            .filter(|argument| *argument == "--settings")
+            .count();
+        assert_eq!(occurrences, 1, "exactly one source survives: {composed:?}");
+
+        let index = composed
+            .iter()
+            .position(|argument| argument == "--settings")
+            .unwrap();
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&composed[index + 1]).unwrap()).unwrap();
+        assert_eq!(document["model"], "theirs", "user keys survive");
+        let commands: Vec<&str> = document["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|group| group["hooks"][0]["command"].as_str())
+            .collect();
+        assert!(commands.contains(&"user-hook"), "{commands:?}");
+        assert!(
+            commands.contains(&"clud-cmd-scan --event Stop"),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
+    fn a_codex_harness_launch_gets_no_settings_because_codex_cannot_take_them() {
+        // `-c` overrides config.toml; codex hooks live in a separate
+        // hooks.json with no flag pointing at an alternate one.
+        let repo = repo_declaring(r#"{"hooks":{"Stop":[{"command":"guard"}]}}"#);
+        let runtime = ForegroundRuntime::start(
+            &plan_in(ModelProvider::Codex, Backend::Codex, repo.path()),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(settings_argument(&runtime), None);
+        assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
     }
 }

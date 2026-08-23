@@ -211,33 +211,56 @@ pub fn run() -> i32 {
     run_for_event(&hook_event_from_args(std::env::args().skip(1)))
 }
 
+/// Which hook event this invocation serves, and whether it said so.
+///
+/// The distinction matters: a bare `clud-cmd-scan` and a compiled
+/// `clud-cmd-scan --event PreToolUse` name the same event but play different
+/// roles, and only one of them should run the repo's declared hooks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookInvocation {
+    pub event: String,
+    /// `--event` was passed, so this is one of the lines clud compiled into
+    /// the frontend rather than a hand-installed guard.
+    pub explicit: bool,
+}
+
 /// Which hook event this invocation is serving.
 ///
 /// A bare `clud-cmd-scan` stays `PreToolUse`, because that is what every
 /// already-installed hook line means and those lines must keep working
 /// untouched. `--event <Event>` is how the compiled dispatcher lines name
 /// the other events (#967 Phase 2).
-pub fn hook_event_from_args<I: IntoIterator<Item = String>>(args: I) -> String {
+pub fn hook_event_from_args<I: IntoIterator<Item = String>>(args: I) -> HookInvocation {
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         if let Some(event) = argument.strip_prefix("--event=") {
             if !event.is_empty() {
-                return event.to_string();
+                return HookInvocation {
+                    event: event.to_string(),
+                    explicit: true,
+                };
             }
         }
         if argument == "--event" {
             if let Some(event) = args.next().filter(|event| !event.is_empty()) {
-                return event;
+                return HookInvocation {
+                    event,
+                    explicit: true,
+                };
             }
         }
     }
-    PRE_TOOL_USE_EVENT.to_string()
+    HookInvocation {
+        event: PRE_TOOL_USE_EVENT.to_string(),
+        explicit: false,
+    }
 }
 
 /// The event a bare invocation serves.
 pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 
-pub fn run_for_event(event: &str) -> i32 {
+pub fn run_for_event(invocation: &HookInvocation) -> i32 {
+    let event = invocation.event.as_str();
     let stdin = read_stdin_bounded();
     for message in &stdin.log_messages {
         append_log(message);
@@ -315,7 +338,7 @@ pub fn run_for_event(event: &str) -> i32 {
     // #967 Phase 2: the repo's own declared hooks ("Tier B"). clud's policy
     // has already had its say; a project guard runs last so its message is
     // not buried under one clud would have produced anyway.
-    if evaluation.reason.is_none() {
+    if evaluation.reason.is_none() && serves_declared_hooks(invocation) {
         if let Some(denial) = declared_hook_denial(event, &payload, &stdin.text) {
             for message in &denial.log_messages {
                 append_log(message);
@@ -403,6 +426,25 @@ pub fn run_for_event(event: &str) -> i32 {
 
     append_log("allowed");
     0
+}
+
+/// Whether *this* invocation is the one that should run declared hooks.
+///
+/// Each declared hook must run exactly once per tool call. Two things can
+/// invoke it: the bare `clud-cmd-scan` line users already have installed, and
+/// the `--event` lines clud compiles into the frontend at launch (#967 Phase
+/// 2b). When the compiled lines are registered — which clud signals with
+/// `CLUD_HOOK_DISPATCH` — they own dispatch, and the bare line sticks to
+/// policy. Without the marker the bare line keeps running declared hooks
+/// itself, because in a session clud did not launch it is the only thing that
+/// can.
+fn serves_declared_hooks(invocation: &HookInvocation) -> bool {
+    if invocation.explicit {
+        // A compiled line exists only because clud put it there, so it is
+        // unambiguously the dispatch path for its event.
+        return true;
+    }
+    std::env::var_os(crate::clud_hooks_compile::DISPATCH_ENV).is_none()
 }
 
 struct DeclaredHookDenial {
@@ -4324,34 +4366,46 @@ mod tests {
     fn a_bare_invocation_still_means_pretooluse() {
         // Every already-installed hook line is bare. Changing what those mean
         // would silently repoint every existing user's guard.
-        assert_eq!(hook_event_from_args(Vec::<String>::new()), "PreToolUse");
-        assert_eq!(
-            hook_event_from_args(vec!["--unrelated".to_string()]),
-            "PreToolUse"
-        );
+        for args in [Vec::<String>::new(), vec!["--unrelated".to_string()]] {
+            let invocation = hook_event_from_args(args.clone());
+            assert_eq!(invocation.event, "PreToolUse", "{args:?}");
+            assert!(!invocation.explicit, "{args:?}");
+        }
     }
 
     #[test]
     fn the_event_flag_names_the_event_in_both_spellings() {
-        assert_eq!(
-            hook_event_from_args(vec!["--event".to_string(), "Stop".to_string()]),
-            "Stop"
-        );
-        assert_eq!(
-            hook_event_from_args(vec!["--event=PostToolUse".to_string()]),
-            "PostToolUse"
-        );
+        let spaced = hook_event_from_args(vec!["--event".to_string(), "Stop".to_string()]);
+        assert_eq!(spaced.event, "Stop");
+        assert!(spaced.explicit);
+
+        let joined = hook_event_from_args(vec!["--event=PostToolUse".to_string()]);
+        assert_eq!(joined.event, "PostToolUse");
+        assert!(joined.explicit);
+    }
+
+    /// #967 Phase 2b: a compiled `--event PreToolUse` line and a bare
+    /// invocation name the same event but must not both run declared hooks.
+    #[test]
+    fn an_explicit_pretooluse_is_distinguishable_from_a_bare_invocation() {
+        let compiled = hook_event_from_args(vec!["--event=PreToolUse".to_string()]);
+        let bare = hook_event_from_args(Vec::<String>::new());
+        assert_eq!(compiled.event, bare.event);
+        assert!(compiled.explicit && !bare.explicit);
+
+        assert!(serves_declared_hooks(&compiled));
+        temp_env(crate::clud_hooks_compile::DISPATCH_ENV, "1", || {
+            assert!(serves_declared_hooks(&compiled));
+            assert!(!serves_declared_hooks(&bare));
+        });
     }
 
     #[test]
     fn a_valueless_event_flag_falls_back_rather_than_dispatching_nothing() {
-        assert_eq!(
-            hook_event_from_args(vec!["--event".to_string()]),
-            "PreToolUse"
-        );
-        assert_eq!(
-            hook_event_from_args(vec!["--event=".to_string()]),
-            "PreToolUse"
-        );
+        for args in [vec!["--event".to_string()], vec!["--event=".to_string()]] {
+            let invocation = hook_event_from_args(args.clone());
+            assert_eq!(invocation.event, "PreToolUse", "{args:?}");
+            assert!(!invocation.explicit, "{args:?}");
+        }
     }
 }

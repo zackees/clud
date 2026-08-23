@@ -107,11 +107,27 @@ wedges, which is the outcome this whole subsystem exists to prevent. A blocking
 hook's stdout is relayed verbatim rather than re-wrapped, since it may be
 speaking the harness's own JSON protocol.
 
-## Which event an invocation serves
+## Which event an invocation serves, and who dispatches
 
 A bare `clud-cmd-scan` means `PreToolUse`. That is what every already-installed
 hook line means, and those lines keep working untouched. Other events are named
 explicitly: `clud-cmd-scan --event Stop`.
+
+Two things can therefore invoke the dispatcher for PreToolUse — the bare line a
+user installed, and the `--event PreToolUse` line clud compiles — and a declared
+hook must run exactly once. The tie is broken by `CLUD_HOOK_DISPATCH`, which
+clud sets in the session env whenever it registered compiled lines:
+
+| invocation | Tier A | Tier B |
+| --- | --- | --- |
+| bare, no marker | yes | yes — nothing else can |
+| bare, marker set | yes | no — the compiled line owns it |
+| `--event <E>` | — | yes |
+
+Sessions clud did not launch never see the marker and keep the old behavior.
+This is why the invocation carries an `explicit` flag rather than just an event
+name: a bare call and a compiled `--event PreToolUse` call name the same event
+but play different roles.
 
 ## Delivery: compiled into CLI args, not written to files
 
@@ -124,9 +140,14 @@ into each frontend's native surface and passes it at launch:
   document into a session-lifetime tempfile and injects `--settings`, and
   already merges into a user-supplied `--settings` so neither shadows the
   other.
-- **Codex** takes repeated `-c key=value` overrides, compiled in
-  `command/builder.rs`. Codex appears to support only `PreToolUse`, so hooks
-  for other events have no codex target.
+- **Codex has no argument surface for hooks at all.** Its `-c key=value`
+  overrides values that would otherwise come from `config.toml`, and codex
+  hooks live in a separate `hooks.json`; no flag points at an alternate one,
+  and `CODEX_HOME` would relocate auth and config along with it. So codex keeps
+  the PreToolUse coverage its already-installed `clud-cmd-scan` line gives it —
+  which runs declared hooks too — and gets nothing for other events, matching
+  codex's own apparent single-event support. clud does **not** write
+  `~/.codex/hooks.json` to close the gap.
 
 This removes a whole hazard class that writing files would carry: idempotence,
 read-modify-write lost updates, two writers fighting over one file (the #847
@@ -144,6 +165,8 @@ contributes, so a bug there costs the user `permissions`, not just hooks. See
 | file | role |
 | --- | --- |
 | `clud_hooks.rs` | `.clud/hooks.json` schema, discovery, matcher semantics |
+| `clud_hooks_compile.rs` | compiling declarations into a frontend's native registration, and the merge that keeps it from displacing anything |
+| `foreground_runtime.rs` | composing the launch-scoped `--settings` document and injecting it into argv |
 | `clud_hooks_run.rs` | Tier-B execution: rooting, stdin payload, exit-code contract |
 | `block_bad_cmd.rs` | the hook binary: event arg, Tier A, then Tier B |
 | `block_bad_cmd_cd.rs` | `bash.block_cd` cwd pinning, and the hook-command scanner both it and `hook_health` use |
