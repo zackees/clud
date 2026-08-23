@@ -57,11 +57,11 @@ Entry and orchestration:
   prevents launch recursion with `CLUD_WEBTERM`, and forwards the original
   clud argv to the separately packaged Tauri companion. See
   [`docs/architecture/web-terminal.md`](../../../docs/architecture/web-terminal.md).
-- `bridge_log.rs` - issue #772's always-on, failure-only, bounded JSONL writer
+- `bridge_log.rs` - issue #772's always-on, bounded JSONL writer
   for `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`; test-mode logs use
   the isolated sibling tree `~/.clud/state/test-sessions/`. Buffers complete
   lines across concurrent bridge workers, emits one visible truncation marker,
-  and creates no file for a healthy launch.
+  and records failures plus (since #999) the model-discovery handshake.
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell and
   #898/#899's unified Claude/Codex/DeepSeek multiplexer: ephemeral listener +
   per-launch bearer, deterministic `/v1/models`, provider catalog routing,

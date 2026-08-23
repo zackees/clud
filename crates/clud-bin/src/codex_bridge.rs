@@ -491,7 +491,7 @@ impl BridgeHandle {
             if let Some(log) = &self.log {
                 let mut log = lock_log(log);
                 log.flush();
-                if log.has_records() {
+                if log.has_notable_records() {
                     eprintln!("[clud] codex bridge log: {}", log.path().display());
                 }
             }
@@ -821,7 +821,7 @@ fn handle_connection(
             }
         }
         ("GET", "/v1/models") => match &config.gateway_mode {
-            GatewayMode::Codex => serve_codex_catalog(&mut stream),
+            GatewayMode::Codex => serve_codex_catalog(&mut stream, log),
             GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config),
         },
         ("GET", "/_clud/route/status") => match &config.gateway_mode {
@@ -1088,17 +1088,23 @@ fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
     let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
 }
 
-fn serve_codex_catalog(stream: &mut TcpStream) {
-    let data = provider_catalog::MODELS
+fn serve_codex_catalog(stream: &mut TcpStream, log: Option<&SharedBridgeLog>) {
+    let advertised = provider_catalog::MODELS
         .iter()
         .filter(|entry| entry.provider == ModelProvider::Codex)
-        .filter_map(|entry| {
-            entry.discovery_id.map(|id| {
-                serde_json::json!({
-                    "id": id,
-                    "display_name": entry.display_name,
-                    "type": "model",
-                })
+        .filter_map(|entry| entry.discovery_id.map(|id| (id, entry.display_name)))
+        .collect::<Vec<_>>();
+    record_catalog_advertised(
+        log,
+        &advertised.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    );
+    let data = advertised
+        .iter()
+        .map(|(id, display_name)| {
+            serde_json::json!({
+                "id": id,
+                "display_name": display_name,
+                "type": "model",
             })
         })
         .collect::<Vec<_>>();
@@ -2011,14 +2017,24 @@ fn serve_codex_discovery_messages(
         // while a model clud does know but this bridge does not serve is a
         // clud-side limit -- saying so stops the user debugging their own
         // model choice.
-        let message = if known.is_some() {
-            format!(
-                "clud knows the model '{base}', but this Codex gateway is not \
-                 serving it; available IDs: {ids}"
+        let (message, reason) = if known.is_some() {
+            (
+                format!(
+                    "clud knows the model '{base}', but this Codex gateway is not \
+                     serving it; available IDs: {ids}"
+                ),
+                "model_not_served_here",
             )
         } else {
-            format!("unknown clud Codex model '{base}'; available IDs: {ids}")
+            (
+                format!("unknown clud Codex model '{base}'; available IDs: {ids}"),
+                "unknown_model",
+            )
         };
+        // #999: the terminal names the rejected model and the log did not, so a
+        // session wedged by a model selection left no evidence behind. The two
+        // cases stay as distinguishable here as they are to the user.
+        record_model_rejection(log, 400, reason, base);
         let body = serde_json::json!({
             "type": "error",
             "error": {
@@ -2436,6 +2452,53 @@ fn record_rejection(log: Option<&SharedBridgeLog>, status: u16, reason: &'static
             "event": "request_rejected",
             "downstream_status": status,
             "reason": reason,
+        }));
+    }
+}
+
+/// Longest model ID persisted. The field comes from a request body capped only
+/// at `DEFAULT_MAX_BODY_BYTES`, and a single ~1 MiB value would exhaust the
+/// log's budget and silence every failure after it -- the incident the log
+/// exists for. No real ID is close to this.
+const MAX_LOGGED_MODEL_CHARS: usize = 128;
+
+/// A rejection whose cause is the model the caller asked for, recorded with
+/// that ID (#999). `reason` alone cannot say *which* selection wedged the
+/// session, and the model ID is the one request-body field worth persisting.
+fn record_model_rejection(
+    log: Option<&SharedBridgeLog>,
+    status: u16,
+    reason: &'static str,
+    model: &str,
+) {
+    if let Some(log) = log {
+        let model = model
+            .chars()
+            .take(MAX_LOGGED_MODEL_CHARS)
+            .collect::<String>();
+        lock_log(log).record(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "request_rejected",
+            "downstream_status": status,
+            "reason": reason,
+            "model": model,
+        }));
+    }
+}
+
+/// The model IDs a `GET /v1/models` advertised (#999).
+///
+/// Not a failure, so it widens the log's contract deliberately: when a model
+/// selection wedges a session this is often the only surviving evidence of
+/// what the bridge offered, and a refusal is only readable against it. Recorded
+/// as ambient context so it does not, on its own, claim an operator's attention
+/// through the shutdown hint.
+fn record_catalog_advertised(log: Option<&SharedBridgeLog>, model_ids: &[&str]) {
+    if let Some(log) = log {
+        lock_log(log).record_ambient(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "catalog_advertised",
+            "model_ids": model_ids,
         }));
     }
 }
@@ -3609,6 +3672,76 @@ Connection: close
             upstream.requests().is_empty(),
             "a refused model must not reach the Codex upstream"
         );
+    }
+
+    /// Issue #999: a session wedged by a model selection left nothing in the
+    /// bridge log. The advertised set is the evidence that survives when
+    /// nothing else does.
+    #[test]
+    fn a_catalog_fetch_records_the_advertised_model_ids() {
+        let upstream = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models?limit=1000", &bearer, ""),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(log_path).unwrap();
+        assert!(text.contains(r#""event":"catalog_advertised""#), "{text}");
+        assert!(text.contains("clud-claude-codex-terra"), "{text}");
+        assert!(!text.contains(&bearer), "{text}");
+        // Ambient context only: the shutdown hint stays a signal that this
+        // launch left something worth reading, not a footer on every session.
+        let log = bridge.log.as_ref().expect("configured log");
+        assert!(!lock_log(log).has_notable_records());
+    }
+
+    /// Issue #999: the refusal added by #1005 named the model to the user but
+    /// not to the log, and #1009's two cases must stay distinguishable there.
+    #[test]
+    fn a_refused_model_is_recorded_with_its_id_and_case() {
+        let upstream = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        let oversized = "x".repeat(5000);
+        for model in ["gpt-6-nonexistent", "clud-claude-kimi-k3", &oversized] {
+            let body = PROBE_BODY.replace("claude-x", model);
+            let refused = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", &bearer, &body),
+            );
+            assert_eq!(status(&refused), 400, "{refused}");
+        }
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(log_path).unwrap();
+        // Serialized field order is serde_json's (sorted): model, then reason.
+        assert!(
+            text.contains(r#""model":"gpt-6-nonexistent","reason":"unknown_model""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""model":"clud-claude-kimi-k3","reason":"model_not_served_here""#),
+            "{text}"
+        );
+        // The model field comes from a 32 MiB-capped body: one oversized value
+        // would otherwise exhaust the 1 MiB budget and silence every later
+        // failure, so it is truncated before it reaches the log.
+        assert!(text.contains(&"x".repeat(MAX_LOGGED_MODEL_CHARS)), "{text}");
+        assert!(
+            !text.contains(&"x".repeat(MAX_LOGGED_MODEL_CHARS + 1)),
+            "{text}"
+        );
+        assert!(!text.contains(&bearer), "{text}");
     }
 
     #[test]

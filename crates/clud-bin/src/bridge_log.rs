@@ -1,8 +1,16 @@
 //! Always-on, bounded forensic log for the Codex bridge (#772).
 //!
-//! Only failures and retry decisions are recorded. Request/response bodies,
+//! Failures and retry decisions are recorded. Request/response bodies,
 //! credentials, bearer tokens, and upstream URLs are deliberately absent from
 //! this API so callers cannot persist them accidentally.
+//!
+//! #999 widened that in two narrow ways, both about model discovery, because a
+//! selection that wedges a session otherwise leaves nothing behind: the Codex
+//! catalog records the model IDs it advertised (via [`BridgeLog::record_ambient`],
+//! since an advertisement is not a failure), and a model refusal records the
+//! model ID it was asked for -- effort suffix stripped and length-capped by the
+//! caller. Nothing else from a body is recorded, and credentials remain out of
+//! the API entirely.
 //! Unit tests and binaries marked with `CLUD_INTEGRATION_TESTS=1` write under
 //! `test-sessions/`, keeping fixture failures out of production diagnostics.
 
@@ -30,6 +38,7 @@ pub struct BridgeLog {
     disabled: bool,
     truncated: bool,
     recorded: bool,
+    notable: bool,
 }
 
 impl BridgeLog {
@@ -48,6 +57,7 @@ impl BridgeLog {
             disabled: false,
             truncated: false,
             recorded: false,
+            notable: false,
         }
     }
 
@@ -59,7 +69,26 @@ impl BridgeLog {
         self.recorded
     }
 
+    /// Whether anything worth an operator's attention was recorded -- a
+    /// failure, a retry decision, a refusal, or a truncation. Ambient context
+    /// (#999's catalog advertisement) does not qualify: it is worth having on
+    /// disk when something else fails, but on its own it is not a reason to
+    /// look, and a shutdown hint that fires every session stops being read.
+    pub fn has_notable_records(&self) -> bool {
+        self.notable
+    }
+
     pub fn record(&mut self, event: serde_json::Value) {
+        self.record_with(event, true);
+    }
+
+    /// Record context that is not itself a problem. Same file, same cap; only
+    /// [`Self::has_notable_records`] tells the two apart.
+    pub fn record_ambient(&mut self, event: serde_json::Value) {
+        self.record_with(event, false);
+    }
+
+    fn record_with(&mut self, event: serde_json::Value, notable: bool) {
         if self.disabled || self.truncated {
             return;
         }
@@ -70,6 +99,7 @@ impl BridgeLog {
             return;
         }
         self.recorded = true;
+        self.notable |= notable;
         self.buffered_bytes += line_bytes;
         self.buffered.push(line);
         if self.buffered.len() >= FLUSH_LINES || self.last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -80,6 +110,8 @@ impl BridgeLog {
     fn record_truncation(&mut self) {
         self.truncated = true;
         self.recorded = true;
+        // A log that stopped recording is itself worth surfacing.
+        self.notable = true;
         let line = serde_json::json!({
             "ts_ms": unix_ms(),
             "event": "truncated",
