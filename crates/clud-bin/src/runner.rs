@@ -289,6 +289,12 @@ pub fn run_plan_subprocess(
     ) {
         Ok(runtime) => runtime,
         Err(error) => {
+            // #998: this is one of the failures clud names itself, and until
+            // now the launch record kept only the bare exit code. Same text
+            // the user just saw, so record and terminal agree.
+            crate::launch_log::record_failure_reason(format_args!(
+                "failed to start provider bridge: {error}"
+            ));
             eprintln!("[clud] failed to start provider bridge: {error}");
             if verbose {
                 verbose_log::log("[clud] provider bridge startup failed");

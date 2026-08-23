@@ -229,6 +229,7 @@ fn build_state_surfaces_completed_foreground_launch_records() {
         launched_at_ms: 1_700_000_000_000,
         exited_at_ms: Some(1_700_000_010_000),
         exit_code: Some(42),
+        failure_reason: None,
     };
     std::fs::write(
         launches_dir.join("1700000000000-4242.json"),
