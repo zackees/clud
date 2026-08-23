@@ -656,7 +656,20 @@ fn run(mut args: args::Args) {
     // locked when tempdir cleanup runs. Never blocks a launch on
     // spawn failure.
     let mut foreground_client_lease = None;
-    if args.command.is_none() && !args.no_daemon && !args.dry_run {
+    // A centralized session runs its work *through* the daemon, so it needs one
+    // just as much as a command-less launch does -- and it needs it started
+    // **here**, before the job tracker below, or on Windows the daemon joins
+    // this process's Job Object and dies with the CLI (#569). #983 narrowed
+    // this to `command.is_none()`, which pushed the centralized path's daemon
+    // start after the tracker and left `clud loop --repeat` with a daemon that
+    // did not outlive the launch.
+    let needs_early_daemon = args.command.is_none() || daemon::experimental_enabled(&args);
+    if needs_early_daemon && !args.no_daemon && !args.dry_run {
+        // The capability is granted for the same launches that need the
+        // daemon; `run_centralized_session` re-grants it harmlessly.
+        unsafe {
+            std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
+        }
         if args.verbose {
             verbose_log::log("[clud] daemon: ensure running");
         }
