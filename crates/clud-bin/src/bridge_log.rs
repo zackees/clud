@@ -1,8 +1,15 @@
 //! Always-on, bounded forensic log for the Codex bridge (#772).
 //!
-//! Only failures and retry decisions are recorded. Request/response bodies,
+//! Failures and retry decisions are recorded. Request/response bodies,
 //! credentials, bearer tokens, and upstream URLs are deliberately absent from
 //! this API so callers cannot persist them accidentally.
+//!
+//! #999 widened that in two narrow ways, both about model discovery, because a
+//! selection that wedges a session otherwise leaves nothing behind: the Codex
+//! catalog records the model IDs it advertised (an advertisement, not a
+//! failure), and a model refusal records the requested model ID (the one
+//! request-body field worth persisting). Nothing else from a body is recorded,
+//! and credentials remain out of the API entirely.
 //! Unit tests and binaries marked with `CLUD_INTEGRATION_TESTS=1` write under
 //! `test-sessions/`, keeping fixture failures out of production diagnostics.
 

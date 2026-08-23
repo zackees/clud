@@ -332,12 +332,16 @@ reset, an oversized response and a genuine outage indistinguishable in a log.
 supplied one, and a rate-limit reset hint when the body had one — never the
 body itself. Issue #772 adds an always-on forensic floor at
 `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`: failures and retry
-attempts only, buffered across workers, capped at 1 MiB with a visible
+attempts, buffered across workers, capped at 1 MiB with a visible
 `truncated` marker. Records contain only fixed bridge reasons and fields already
 exposed by `UpstreamFailure` (status, class, correlation IDs, retry hints, and
 scrubbed detail); request/response bodies, credentials, bearers, authorization
-headers, and upstream URLs are never inputs to the logger. A healthy launch
-creates no file. On shutdown, a launch that recorded failures prints the path.
+headers, and upstream URLs are never inputs to the logger. Issue #999 adds the
+model-discovery handshake to that floor — a `catalog_advertised` entry per
+`GET /v1/models` and the requested model ID on a model refusal — so a session
+wedged by a model selection is diagnosable; a launch that fetches the catalog
+therefore does create a file. On shutdown, a launch that recorded anything
+prints the path.
 `CLUD_CODEX_BRIDGE_DEBUG=1` remains the richer interactive stderr tier.
 Unit-test builds and processes marked `CLUD_INTEGRATION_TESTS=1` use the sibling
 `~/.clud/state/test-sessions/` tree so synthetic failures never enter the
