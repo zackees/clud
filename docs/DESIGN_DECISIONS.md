@@ -2391,3 +2391,90 @@ but the path stops being self-describing — a user looking for what the agent
 cloned has to know the hashing scheme instead of looking next to their repo.
 For a directory users are expected to inspect and delete by hand, adjacency is
 worth more than collision-freedom.
+
+## DD-054: The model picker belongs to the harness, and discovery only adds rows
+
+**Status:** Accepted
+
+**Context:** zackees/clud#995 reported a bridge-routed session wedged by an
+ordinary `/model` selection: every turn failed with *There's an issue with the
+selected model (`claude-opus-5[1m]`)* until the model was changed back.
+zackees/clud#997 asked which of three things was true — discovery is not
+consulted by the picker, it is consulted and merged with Claude Code's built-in
+list, or the advertised set never reaches the picker.
+
+The bridge's served set was already correct and constrained. `serve_codex_catalog`
+and `serve_unified_catalog` (`codex_bridge.rs:1091`, `:1062`) answer
+`GET /v1/models` from `provider_catalog::MODELS` filtered to rows carrying a
+`discovery_id`, and `serve_unified_catalog` maps `ModelProvider::Claude => false`
+outright. `claude-opus-5[1m]` is not a catalog row at all. So the ID did not come
+from clud.
+
+**The mechanism, read out of the Claude Code 2.1.233 binary.** The picker's
+option list is assembled by one function that seeds a list from Claude Code's
+built-in Anthropic lineup and then appends to it, once per source:
+`ANTHROPIC_CUSTOM_MODEL_OPTION`, the gateway-discovered rows, the
+`additionalModelOptionsCache` entries from Anthropic's bootstrap response, the
+`availableModels` settings allowlist, and finally the currently selected model.
+Every source pushes. **None filters the seed list.** The discovery helper returns
+its rows for appending and drops any whose equivalent is already present; the
+official gateway protocol documents the same behavior, that Claude Code will
+"add the returned models to the `/model` picker".
+
+Discovery is additionally gated on the deployment mode being `firstParty`, which
+is what a bare custom `ANTHROPIC_BASE_URL` yields — no `CLAUDE_CODE_USE_*`
+provider variable is set. That is the same condition under which the built-in
+lineup is emitted. **The precondition for discovery running at all is the
+precondition for the built-in rows existing**, so they cannot be separated from
+the gateway side.
+
+The observed ID follows from the same reading. The built-in extended-context row
+carries the alias value `opus[1m]`; a separate pass rewrites alias rows to
+explicit first-party IDs whenever the user's `modelAccessCache` is non-empty or
+an `availableModels` setting exists, turning `opus[1m]` into `claude-opus-5[1m]`.
+Both inputs are the harness's, persisted in the user's global config from
+ordinary Anthropic-authenticated sessions and refreshed behind clud's back.
+
+Hypothesis 3 is ruled out empirically, not merely structurally: after a bridge
+session, `~/.claude/cache/gateway-models.json` on the reporting machine held
+exactly `clud-claude-codex-sol`, `-terra`, and `-luna` — the three rows
+`serve_codex_catalog` serves, validated and cached under the bridge's loopback
+base URL. The advertised set arrived intact and was still merged with the
+built-ins rather than replacing them.
+
+**Decision:** Record that the `/model` picker cannot be constrained from clud's
+side, and stop documenting the opposite. Discovery is enabled and correct; its
+contract is to *add* honest rows, not to bound the list. clud does not own the
+picker and has no supported lever that subtracts from it.
+
+The workarounds were each checked and each fails:
+
+- **Declare a non-`firstParty` provider mode** to shed the built-in lineup. This
+  disables discovery outright, so clud's own rows disappear with them.
+- **`availableModels`.** An allowlist that only ever adds `claude-*` and
+  `anthropic.*` IDs. It cannot subtract, and setting it forces the alias-to-
+  explicit rewrite described above, which makes the reported ID *more* likely to
+  appear, not less.
+- **Writing `additionalModelOptionsCache` or `modelAccessCache`.** Harness-owned
+  caches that the harness overwrites on its next bootstrap. Already rejected for
+  the same reason in [DD-038](#dd-038-the-codex-picker-gets-one-honest-row-always-carrying-the-catalog).
+- **Tier hijacking** via `ANTHROPIC_DEFAULT_*_MODEL`. Rejected in DD-035 and
+  DD-038 because it burns the Anthropic names and lies about what is running.
+
+**Consequences:** #995's remedy is entirely detection and reporting —
+zackees/clud#998 (a `failure_reason` on `LaunchRecord`), #999 (log the discovery
+handshake), and #1000 (distinguish "not in the catalog" from "in the catalog but
+not advertised"). No picker-constraining work is available to schedule, and this
+record exists so that conclusion is not re-derived.
+
+The exposure is specific to **provider-scoped** routing. A direct
+`--codex --harness claude` bridge advertises no Claude route, so a built-in
+Anthropic pick reaches a gateway that cannot serve it. Unified mode proxies
+ordinary `claude-*` IDs to native Claude ([DD-043](#dd-043-unified-launch-guards-token-counting-and-optional-provider-notices)),
+so the same pick is servable there.
+
+This narrows, but does not overturn, [DD-045](#dd-045-direct-codex-through-claude-uses-provider-scoped-gateway-discovery).
+Its decision stands: the direct bridge exposes exactly the registered Codex
+discovery rows, and `/model` presents Sol, Terra, and Luna honestly. What DD-045
+left implicit is that the picker presents them *in addition to* Claude Code's own
+rows, not instead of them.
