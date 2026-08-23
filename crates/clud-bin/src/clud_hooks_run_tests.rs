@@ -40,7 +40,7 @@ fn python_exe() -> String {
 /// they keep Windows separators from being read as escapes by either the
 /// shell or the Python literal they end up inside.
 fn slashed(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    crate::path_norm::display_slash(path)
 }
 
 fn same_dir(left: &Path, right: &Path) -> bool {
