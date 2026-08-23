@@ -202,7 +202,13 @@ Roots clud resolves at launch that a hook cannot rediscover — `--add-dir`
 targets and `permissions.additionalDirectories`, neither of which appears in a
 hook payload — cross the process boundary in `CLUD_HOOK_ROOTS`, as JSON,
 because a path-separated list is ambiguous on Windows where paths contain
-`:`.
+`:`. The launch harvests them from its own argv and from the repo's
+`.claude/settings*.json`, and registers them as `extern`: a granted sibling
+directory is no more the parent's business than a checkout clud cloned, and
+its project guards would misfire there. The two differ in *trust* — the user
+named these at launch — which Phase 4 has to distinguish when it gates running
+a foreign repo's own hooks. A launch that grants nothing sets no variable at
+all.
 
 ## Where the code is
 
