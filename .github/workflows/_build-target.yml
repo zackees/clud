@@ -176,6 +176,21 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+      # Sidecar debug info (`.dwp`), staged by ci/xbuild.py::collect_debuginfo
+      # into dist-debuginfo/ rather than dist/. That separation is what keeps
+      # it off PyPI: only dist/* becomes a `wheels-*` artifact, and `wheels-*`
+      # is the only pattern publish-pypi downloads into its packages-dir.
+      # `ignore` rather than `error`: a target that produces no .dwp (MSVC,
+      # Apple) must not fail the release. The collector logs each file's path
+      # and size, so an unexpected absence is visible in this job's log.
+      - name: Upload debug info
+        if: ${{ inputs.wheel-artifact != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debuginfo-${{ inputs.target }}
+          path: dist-debuginfo/*
+          if-no-files-found: ignore
+
       - name: Diagnose Linux build failure
         if: ${{ failure() && runner.os == 'Linux' }}
         shell: bash

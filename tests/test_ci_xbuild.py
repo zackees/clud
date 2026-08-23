@@ -271,3 +271,42 @@ def test_msvc_exceptions_are_enabled_only_for_windows_soldr() -> None:
     for target, strategy in other_strategies:
         env = xbuild.whisper_env(target, strategy, {"CXXFLAGS": "-g0"})
         assert env["CXXFLAGS"] == "-g0"
+
+
+def test_debuginfo_is_staged_outside_dist_so_it_cannot_reach_pypi(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The `.dwp` must never enter `dist/`.
+
+    `_build-target.yml` uploads `dist/*` as the `wheels-*` artifact and
+    `publish-pypi` hands that straight to twine, which rejects a non-package
+    file -- the exact 400 that killed 2.7.2-2.7.4.
+    """
+    target = "x86_64-unknown-linux-gnu"
+    release = tmp_path / "target" / target / "release"
+    release.mkdir(parents=True)
+    (release / "clud.dwp").write_bytes(b"dwarf")
+    # Neither shim installs the crash reporter and each .dwp is ~91 MB of the
+    # same DWARF, so only the main binary's symbols are published.
+    (release / "clud-shim.dwp").write_bytes(b"dwarf")
+    (release / "mock-agent.dwp").write_bytes(b"dwarf")
+    monkeypatch.setattr(xbuild, "ROOT", tmp_path)
+    monkeypatch.setattr(xbuild, "DEBUGINFO_DIR", tmp_path / "dist-debuginfo")
+
+    staged = xbuild.collect_debuginfo(target, "release")
+
+    assert [path.name for path in staged] == [f"clud-{target}.dwp"]
+    assert all(path.parent == tmp_path / "dist-debuginfo" for path in staged)
+    assert not (tmp_path / "dist").exists()
+    assert f"clud-{target}.dwp (5 bytes)" in capsys.readouterr().out
+
+
+def test_missing_debuginfo_is_reported_but_never_fatal(tmp_path, monkeypatch) -> None:
+    """Targets where `packed` writes no `.dwp` must not block a release."""
+    target = "aarch64-pc-windows-msvc"
+    (tmp_path / "target" / target / "release").mkdir(parents=True)
+    monkeypatch.setattr(xbuild, "ROOT", tmp_path)
+    monkeypatch.setattr(xbuild, "DEBUGINFO_DIR", tmp_path / "dist-debuginfo")
+
+    assert xbuild.collect_debuginfo(target, "release") == []
+    assert not (tmp_path / "dist-debuginfo").exists()

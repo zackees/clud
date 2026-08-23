@@ -361,6 +361,42 @@ Requirement: nothing builds `--release` except the release pipeline.
 - `--zig --compatibility manylinux2014` (`ci/build_wheel.py:48-51`) stays on the
   release path only; CI dev wheels are plain `--profile dev`.
 
+### Debug info goes to a sidecar, not into the wheel
+
+PyPI caps a project's individual files at 100 MB. `[profile.release]` set
+`debug = "line-tables-only"` with no `split-debuginfo`, and on ELF that DWARF is
+embedded in the binary while Windows/macOS write it to a `.pdb` / `.dSYM` the
+wheel never sees. That asymmetry made the manylinux wheel ~7x the others; it
+crossed 100 MB at 2.7.2 and killed the PyPI upload for 2.7.2, 2.7.3 and 2.7.4.
+Because `publish-pypi` failed, the dependent `publish-release` job was skipped,
+so those tags produced no GitHub release either — the pipeline was silently
+broken for three tags.
+
+`split-debuginfo = "packed"` fixes it at the source: a no-op on MSVC and Apple
+(already their default), it emits a `.dwp` on ELF and drops `.debug_info` /
+`.debug_str` from the binary. Measured against the 2.7.4 artifact: 72–91 MB of
+the 137 MB `clud` binary moves out, projecting the wheel from 105 MB to ~40 MB.
+`.debug_line` stays embedded, so a panic still resolves file:line unaided.
+
+The `.dwp` is attached to the GitHub release, and the routing is the part to not
+break:
+
+- `ci/xbuild.py::collect_debuginfo` stages it under `dist-debuginfo/`,
+  **never** `dist/`. `_build-target.yml` uploads `dist/*` as the `wheels-*`
+  artifact and `publish-pypi` hands that to twine as `packages-dir`; a
+  non-package file there is the exact 400 this change removes.
+- It ships as its own `debuginfo-<triple>` artifact, which `wheels-*` cannot
+  match. Only `publish-release` downloads that pattern.
+- Every hop is non-fatal (`if-no-files-found: ignore`, `continue-on-error`,
+  `fail_on_unmatched_files: false`), because targets where `packed` writes no
+  `.dwp` must not block a release. The guarantee `fail_on_unmatched_files` used
+  to give is asserted explicitly instead: the checksums step runs
+  `ls dist/*.whl`.
+
+Only `clud` itself gets a `.dwp`. It is the sole binary that installs the crash
+reporter, and the shims currently share its whole dep tree, so publishing all
+five would put ~900 MB of near-duplicate DWARF on every release page.
+
 ### The manylinux glibc floor is `--compatibility`, not `--target`
 
 `ci/xbuild.py::manylinux_wheel_env` owns this and is the only place that should.

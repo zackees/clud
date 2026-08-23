@@ -1,11 +1,19 @@
 //! `clud symbols` — inspect or verify crash-report symbolication.
 //!
-//! Background: clud builds with `debug = "line-tables-only"` embed every
-//! line table in the binary itself (#374 PR 1, see
-//! [`crate::crash_report`]). There are no sidecar `.pdb` / `.dSYM` /
-//! `.dwp` files to fetch and the proposed "fetch sidecars on first
-//! unsymbolicated report" path from the original issue becomes a no-op
-//! in practice. The subcommand is kept as an opportunistic verifier:
+//! Background: clud builds with `debug = "line-tables-only"` keep the
+//! line tables in the binary itself (#374 PR 1, see
+//! [`crate::crash_report`]), so a backtrace resolves to file:line with
+//! nothing to fetch. Local dev builds stop there — everything is
+//! embedded. Release builds no longer do: `[profile.release]` sets
+//! `split-debuginfo = "packed"`, which moves the rest of the DWARF into
+//! a sidecar (a `.dwp` on Linux, the `.pdb` / `.dSYM` Windows and macOS
+//! always produced) so the manylinux wheel fits under PyPI's 100 MB
+//! project limit. CI attaches the `.dwp` to the GitHub release, so the
+//! "fetch sidecars on first unsymbolicated report" path from the
+//! original issue is now implementable rather than a no-op; #1016 tracks
+//! it. This module does not fetch anything today — it is kept as an
+//! opportunistic verifier over what the running binary can already
+//! resolve on its own:
 //!
 //! - `clud symbols` (bare) prints a five-line summary of the crash-
 //!   reports directory.

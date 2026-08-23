@@ -382,6 +382,51 @@ def static_cxx_runtime_env(target: str, env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+#: Where `cmd_wheel` stages sidecar debug info. Deliberately NOT `dist/`:
+#: `_build-target.yml` uploads `dist/*` as the `wheels-*` artifact, which
+#: `publish-pypi` feeds straight to twine as `packages-dir`. A non-package file
+#: there fails the upload, which is the exact blocker split-debuginfo fixes.
+DEBUGINFO_DIR = ROOT / "dist-debuginfo"
+
+
+def collect_debuginfo(target: str, profile: str) -> list[Path]:
+    """Stage this triple's sidecar debug info for the release job.
+
+    `[profile.release] split-debuginfo = "packed"` (Cargo.toml) writes the bulk
+    of the DWARF beside each binary instead of inside it. On ELF that is a
+    `.dwp`; on MSVC/Apple `packed` is already the default and the sidecar is a
+    `.pdb` / `.dSYM`, neither of which this collects -- only the `.dwp` is a
+    single file that is not already produced today, and only ELF embedded its
+    debug info in the shipped wheel.
+
+    Only `clud` itself, not the shipped shims. `crates/clud-bin/src/main.rs` is
+    the sole binary that installs the crash reporter, and each shim currently
+    shares clud-bin's whole dep tree, so their `.dwp`s are ~91 MB of duplicate
+    DWARF apiece -- five per Linux triple would put ~900 MB on every release
+    page to symbolicate crashes nothing reports. Their line tables stay
+    embedded regardless, so a shim panic still resolves file:line unaided.
+
+    Best-effort by contract: a target that produces no `.dwp` returns an empty
+    list and logs it. Missing symbols must never block a release -- the wheel
+    shrinking is the hard requirement, attaching symbols the secondary one.
+    """
+    source = ROOT / "target" / target / profile
+    found = [path for path in (source / "clud.dwp",) if path.is_file()]
+    if not found:
+        print(f"no clud.dwp under {source} (expected off ELF targets)", flush=True)
+        return []
+    DEBUGINFO_DIR.mkdir(parents=True, exist_ok=True)
+    staged: list[Path] = []
+    for dwp in found:
+        # Suffix the triple so `merge-multiple: true` cannot collide the
+        # per-target artifacts on top of each other in the release job.
+        dest = DEBUGINFO_DIR / f"{dwp.stem}-{target}.dwp"
+        dest.write_bytes(dwp.read_bytes())
+        print(f"debug info: {dest} ({dest.stat().st_size:,} bytes)", flush=True)
+        staged.append(dest)
+    return staged
+
+
 def cmd_wheel(args: argparse.Namespace) -> int:
     """Build the wheel into dist/ for this triple.
 
@@ -427,6 +472,7 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             return 1
         add_companion(wheel, companion, args.target)
         print(f"packaged soldr-built Windows wheel: {wheel}")
+        collect_debuginfo(args.target, profile)
         return 0
     if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
         # Bundle the C++ runtime so the manylinux_2_17 audit sees only glibc.
@@ -478,6 +524,7 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         repair_windows_gnu_wheel(wheel)
         if verify_wheel_scripts(wheel) != 0:
             return 1
+    collect_debuginfo(args.target, profile)
     return 0
 
 
