@@ -227,6 +227,34 @@ pub fn tool_input_paths(tool_input: Option<&Value>, cwd: &Path) -> Vec<PathBuf> 
     found
 }
 
+/// The paths containment should judge, given what a call named and where it
+/// would `cd` to.
+///
+/// The order is load-bearing, and the tempting shape is wrong. Adding
+/// `cd_targets` *alongside* `cwd` and asking whether **any** of them is
+/// parent-owned keeps answering "yes" for `cd .extern-repos/dep && make`,
+/// because cwd is still the parent — so the parent's guards fire inside the
+/// sub-repo, which is the failure this whole tier exists to prevent. cwd is
+/// only where a command *starts*; when it relocates, the destination is what
+/// it touches, so the targets **replace** cwd rather than joining it.
+///
+/// Named paths win over both: a tool that says which file it is editing has
+/// already answered the question.
+#[must_use]
+pub fn containment_paths(
+    named: Vec<PathBuf>,
+    cd_targets: Vec<PathBuf>,
+    cwd: &Path,
+) -> Vec<PathBuf> {
+    if !named.is_empty() {
+        return named;
+    }
+    if !cd_targets.is_empty() {
+        return cd_targets;
+    }
+    vec![lexical_normalize(cwd)]
+}
+
 /// Immediate children of `<parent>/.extern-repos/`, which are `extern` roots
 /// by the GC-tracked convention.
 fn extern_children(parent: &Path) -> Vec<PathBuf> {

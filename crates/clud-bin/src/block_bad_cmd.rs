@@ -462,16 +462,7 @@ fn parent_hooks_apply(repo_root: &Path, payload: &HookPayloadView) -> bool {
         )
     };
 
-    let touched = if !named.is_empty() {
-        named
-    } else if !cd_targets.is_empty() {
-        // `cd .extern-repos/dep && make` does its work in the sub-repo. cwd
-        // is only where the command started, so the destination is what it
-        // actually touches.
-        cd_targets
-    } else {
-        vec![payload.cwd.clone()]
-    };
+    let touched = crate::clud_hook_roots::containment_paths(named, cd_targets, &payload.cwd);
 
     // Any touched path the parent owns is enough: a call that spans repos
     // still deserves the parent's guards for the parent's own files.

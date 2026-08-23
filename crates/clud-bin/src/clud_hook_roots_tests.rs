@@ -269,3 +269,53 @@ fn notebook_and_generic_path_fields_are_recognized_too() {
         1
     );
 }
+
+// -----------------------------------------------------------------
+// The containment resolution order.
+// -----------------------------------------------------------------
+
+#[test]
+fn a_cd_target_replaces_cwd_rather_than_joining_it() {
+    // The regression this locks: adding cd targets *alongside* cwd and asking
+    // whether any path is parent-owned keeps answering "yes" for
+    // `cd .extern-repos/dep && make`, because cwd is still the parent. The
+    // parent's guards then fire inside the sub-repo -- the exact failure this
+    // tier exists to prevent.
+    let tmp = TempDir::new().unwrap();
+    let extern_root = make_repo(tmp.path(), &[EXTERN_REPOS_DIR, "dep"]);
+    let roots = HookRoots::parent_only(tmp.path());
+
+    let touched = containment_paths(Vec::new(), vec![extern_root.clone()], tmp.path());
+
+    assert_eq!(touched, vec![extern_root]);
+    assert!(
+        !touched.iter().any(|path| roots.parent_hooks_apply_to(path)),
+        "cwd must not sneak back in and re-arm the parent's hooks"
+    );
+}
+
+#[test]
+fn a_named_path_wins_over_a_cd_target() {
+    // A tool that says which file it is editing has already answered the
+    // question; where the shell would have moved is irrelevant.
+    let named = PathBuf::from("/repo/src/lib.rs");
+    let cd_target = PathBuf::from("/elsewhere");
+
+    let touched = containment_paths(vec![named.clone()], vec![cd_target], Path::new("/repo"));
+
+    assert_eq!(touched, vec![named]);
+}
+
+#[test]
+fn cwd_is_the_fallback_when_a_call_names_nothing_and_goes_nowhere() {
+    let cwd = if cfg!(windows) {
+        PathBuf::from(r"C:\repo")
+    } else {
+        PathBuf::from("/repo")
+    };
+
+    assert_eq!(
+        containment_paths(Vec::new(), Vec::new(), &cwd),
+        vec![lexical_normalize(&cwd)]
+    );
+}

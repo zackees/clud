@@ -2302,6 +2302,15 @@ the difference between a visitor and a child, and those need opposite
 parent-hook behavior. Auto-detecting nested git repos as children, which is
 convenient and unsound for the reason above.
 
+Also rejected, and worth naming because it is the shape one reaches for first:
+treating `cd` targets as *additional* touched paths alongside cwd, then asking
+whether **any** touched path is parent-owned. That keeps answering "yes" for
+`cd .extern-repos/dep && make`, because cwd is still the parent — so the
+parent's guards fire inside the sub-repo, which is exactly the failure this
+tier exists to prevent. The targets have to **replace** cwd, not join it. This
+was written, caught by an end-to-end test, and is now locked by
+`a_cd_target_replaces_cwd_rather_than_joining_it`.
+
 **Consequences:** The registry has to reach the hook process, and two of its
 inputs — `--add-dir` targets and `permissions.additionalDirectories` — appear
 in no hook payload, so clud carries them in `CLUD_HOOK_ROOTS` as JSON (a
