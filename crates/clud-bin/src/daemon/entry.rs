@@ -104,11 +104,17 @@ fn daemon_subcommand_may_spawn(subcommand: &DaemonSubcommand) -> bool {
 
 fn grant_spawn_for_daemon_subcommand(subcommand: &DaemonSubcommand) {
     if daemon_subcommand_may_spawn(subcommand) {
-        // SAFETY: single-threaded startup, before any worker exists -- the
-        // same point at which `main.rs` grants it for a normal launch.
-        unsafe {
-            std::env::set_var(crate::daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
-        }
+        grant_daemon_spawn();
+    }
+}
+
+/// Hand this process the daemon-creation capability.
+///
+/// SAFETY: single-threaded startup, before any worker exists -- the same point
+/// at which `main.rs` grants it for a command-less launch.
+fn grant_daemon_spawn() {
+    unsafe {
+        std::env::set_var(crate::daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
     }
 }
 
@@ -769,6 +775,12 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             verbose_log::display_path(&state_dir)
         ));
     }
+    // #983 made daemon creation a positive capability granted only for a
+    // command-less launch. A centralized session is the other legitimate
+    // starter: running the work *through* the daemon is the entire meaning of
+    // this path, so `clud loop --repeat ...` under an experimental-daemon
+    // launch was failing here with PermissionDenied.
+    grant_daemon_spawn();
     if let Err(err) = ensure_daemon(&state_dir) {
         if super::client::is_incompatible_daemon_error(&err) {
             super::client::print_incompatible_daemon_error(&err);

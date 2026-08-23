@@ -123,7 +123,6 @@ class TestBackendSelection:
             "--no-daemon",
             "--codex",
             "--subprocess",
-            "--no-daemon",
             "--mock-tool-shell-probe",
             str(report_path),
             env=mock_env,
