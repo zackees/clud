@@ -2256,3 +2256,58 @@ talk to an already-running compatible daemon but gets a local permission error
 if its operation would need to create or replace one. An older client that
 encounters a newer daemon leaves it untouched, emits the yellow compatibility
 error, and exits 1.
+
+## DD-052: hook applicability is decided by a root's relationship to the session, not by path geometry
+
+**Context:** A session touches files in more than one repo — the repo it was
+launched in, temporary checkouts clud clones under `.extern-repos/`, and
+organizational sub-repos a project declares. "Which hooks apply here" needs an
+answer that does not reduce to "which directory is this under", because every
+one of those lives *inside* the parent's tree.
+
+**Decision:** Roots are registered with a **kind**, and the kind decides the
+firing rule:
+
+| kind | registered by | parent hooks fire there |
+| --- | --- | --- |
+| `parent` | the session root | yes |
+| `extern` | immediate children of `.extern-repos/` (implicit) | **never** |
+| `child` | declaration in `.clud/settings.json` | yes |
+| unregistered | — | no |
+
+An `extern` root is a temporary, foreign visit: the parent's guards are
+meaningless against a repo it does not own and will not keep, and firing them
+there is precisely the #841 ENOENT wedge. A declared `child` is the opposite —
+part of the parent's world, so the parent's guards apply to it and its own
+hooks run rooted at it.
+
+Nested git repos are **not** auto-detected as children. Declaration is the
+consent that makes the child tier's no-prompt trust sound (D8), and that
+reasoning collapses when nothing was declared; a vendored dependency or a
+stray clone would otherwise become a trusted root by accident.
+
+**Containment comes from what a call names, never from cwd alone.** A subagent
+editing `.extern-repos/<sub>/src/lib.rs` typically still has the session cwd at
+the parent root, so a cwd-keyed rule would answer "parent" for a file that is
+plainly not the parent's. Resolution order: the paths a tool names
+(`file_path`, `notebook_path`, `path`); otherwise, for Bash, wherever the
+command would `cd` to, because `cd .extern-repos/dep && make` does its work in
+the sub-repo and cwd is only where it started; otherwise cwd. A call that spans
+repos still earns the parent's guards for the parent's own files — any touched
+path the parent owns is enough.
+
+**Alternatives rejected:** A symmetric path-scoped rule ("a repo's hooks fire
+for its own files, full stop"), which was the earlier draft. It cannot express
+the difference between a visitor and a child, and those need opposite
+parent-hook behavior. Auto-detecting nested git repos as children, which is
+convenient and unsound for the reason above.
+
+**Consequences:** The registry has to reach the hook process, and two of its
+inputs — `--add-dir` targets and `permissions.additionalDirectories` — appear
+in no hook payload, so clud carries them in `CLUD_HOOK_ROOTS` as JSON (a
+path-separated list is ambiguous on Windows, where paths contain `:`). Roots
+are matched most-specific-first, so a sub-repo nested inside the parent wins
+its own containment lookup regardless of registration order. `bash.block_cd`
+pinning now targets the whole registered set, so moving between the parent and
+a registered sub-repo is allowed while wandering into an unregistered
+directory is not.

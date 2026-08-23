@@ -16,6 +16,10 @@ from pathlib import Path
 
 from tests import process
 
+#: A hook that blocks the call and says nothing, for tests that only care
+#: whether it ran at all.
+BLOCKING_HOOK = "import sys\nsys.exit(2)\n"
+
 
 def _binary_name(name: str) -> str:
     return f"{name}.exe" if sys.platform == "win32" else name
@@ -272,6 +276,116 @@ def test_a_broken_hook_fails_open_rather_than_wedging_the_session(
     result = _run(
         tmp_path,
         payload={"tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": "ls"}},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+# ---------------------------------------------------------------------
+# #967 Phase 3: containment decides whose hooks fire.
+# ---------------------------------------------------------------------
+
+
+def test_parent_hooks_do_not_fire_for_an_extern_repo_path(tmp_path: Path) -> None:
+    # A parent guard pointed at a foreign checkout can only misfire or error --
+    # that is the #841 ENOENT wedge. Note the payload cwd still says the parent
+    # root, which is exactly how a subagent reports an edit in a sub-repo.
+    repo = _make_repo(
+        tmp_path,
+        {
+            "PreToolUse": [
+                {
+                    "command": _python_hook(
+                        tmp_path / "guard.py", BLOCKING_HOOK
+                    )
+                }
+            ]
+        },
+    )
+    extern = repo / ".extern-repos" / "dep"
+    (extern / ".git").mkdir(parents=True)
+
+    in_parent = _run(
+        tmp_path,
+        payload={
+            "tool_name": "Edit",
+            "cwd": str(repo),
+            "tool_input": {"file_path": str(repo / "src.rs")},
+        },
+    )
+    assert in_parent.returncode == 2, "the parent's own files still get its guards"
+
+    in_extern = _run(
+        tmp_path,
+        payload={
+            "tool_name": "Edit",
+            "cwd": str(repo),
+            "tool_input": {"file_path": str(extern / "src.rs")},
+        },
+    )
+    assert in_extern.returncode == 0, in_extern.stdout + in_extern.stderr
+
+
+def test_parent_hooks_do_fire_for_a_declared_child_path(tmp_path: Path) -> None:
+    # A declared child is part of the parent's world, unlike a visitor.
+    repo = _make_repo(
+        tmp_path,
+        {
+            "PreToolUse": [
+                {
+                    "command": _python_hook(
+                        tmp_path / "child_guard.py", BLOCKING_HOOK
+                    )
+                }
+            ]
+        },
+    )
+    child = repo / "packages" / "core"
+    (child / ".git").mkdir(parents=True)
+    (repo / ".clud" / "settings.json").write_text(
+        json.dumps({"hook_roots": {"children": ["packages/core"]}}), encoding="utf-8"
+    )
+
+    result = _run(
+        tmp_path,
+        payload={
+            "tool_name": "Edit",
+            "cwd": str(repo),
+            "tool_input": {"file_path": str(child / "lib.rs")},
+        },
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_a_cd_into_an_extern_repo_moves_containment_with_it(tmp_path: Path) -> None:
+    # `cd` relocates where the rest of the command acts, so containment has to
+    # follow it -- the payload cwd alone would still say "parent".
+    repo = _make_repo(
+        tmp_path,
+        {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "command": _python_hook(
+                        tmp_path / "bash_guard.py", BLOCKING_HOOK
+                    ),
+                }
+            ]
+        },
+    )
+    extern = repo / ".extern-repos" / "dep"
+    (extern / ".git").mkdir(parents=True)
+    (repo / ".clud" / "settings.json").write_text(
+        json.dumps({"bash": {"block_cd": False}}), encoding="utf-8"
+    )
+
+    result = _run(
+        tmp_path,
+        payload={
+            "tool_name": "Bash",
+            "cwd": str(repo),
+            "tool_input": {"command": "cd .extern-repos/dep && make"},
+        },
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

@@ -428,6 +428,56 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     0
 }
 
+/// Whether the parent repo's hooks apply to what this call touches
+/// (zackees/clud#967 Phase 3).
+///
+/// Containment is resolved from the tool's *inputs*, never from the payload
+/// cwd alone: a subagent editing `.extern-repos/<sub>/src/lib.rs` usually
+/// still has cwd at the parent root, so keying on cwd would answer "parent"
+/// for a file that is plainly not the parent's. For `Bash`, the inputs are
+/// cwd plus wherever the command would `cd` to.
+///
+/// A call that touches an `extern` root is the case this exists for: the
+/// parent's guards have no business running against a foreign checkout, and
+/// firing them there is the #841 ENOENT wedge.
+fn parent_hooks_apply(repo_root: &Path, payload: &HookPayloadView) -> bool {
+    let config =
+        crate::repo_clud_config::discover_effective_clud_config(repo_root).unwrap_or_default();
+    let env_roots = std::env::var(crate::clud_hook_roots::HOOK_ROOTS_ENV).ok();
+    let roots = crate::clud_hook_roots::HookRoots::resolve(
+        repo_root,
+        &config.hook_roots.children,
+        env_roots.as_deref(),
+    );
+
+    let named = crate::clud_hook_roots::tool_input_paths(payload.tool_input.as_ref(), &payload.cwd);
+    let cd_targets = if payload.command.is_empty() {
+        Vec::new()
+    } else {
+        block_bad_cmd_cd::session_cd_targets(
+            &payload.command,
+            shell_dialect_for_tool(&payload.tool_name),
+            &payload.cwd,
+            home_dir().as_deref(),
+        )
+    };
+
+    let touched = if !named.is_empty() {
+        named
+    } else if !cd_targets.is_empty() {
+        // `cd .extern-repos/dep && make` does its work in the sub-repo. cwd
+        // is only where the command started, so the destination is what it
+        // actually touches.
+        cd_targets
+    } else {
+        vec![payload.cwd.clone()]
+    };
+
+    // Any touched path the parent owns is enough: a call that spans repos
+    // still deserves the parent's guards for the parent's own files.
+    touched.iter().any(|path| roots.parent_hooks_apply_to(path))
+}
+
 /// Whether *this* invocation is the one that should run declared hooks.
 ///
 /// Each declared hook must run exactly once per tool call. Two things can
@@ -463,6 +513,9 @@ fn declared_hook_denial(
     raw_payload: &str,
 ) -> Option<DeclaredHookDenial> {
     let repo_root = crate::clud_hooks_run::resolve_root(&payload.cwd)?;
+    if !parent_hooks_apply(&repo_root, payload) {
+        return None;
+    }
     let hooks = crate::clud_hooks::discover(&repo_root)?;
     let tool_name = (!payload.tool_name.is_empty() && payload.tool_name != "?")
         .then_some(payload.tool_name.as_str());
@@ -513,7 +566,21 @@ fn block_cd_denial(
     if policy == CdPolicy::Off {
         return None;
     }
-    let roots = repo_root.into_iter().collect::<Vec<_>>();
+    // #967 Phase 3: pinning targets the whole registered-root set, so moving
+    // between the parent and a registered sub-repo is allowed while wandering
+    // off to an unregistered directory is not.
+    let roots = match &repo_root {
+        Some(root) => {
+            let env_roots = std::env::var(crate::clud_hook_roots::HOOK_ROOTS_ENV).ok();
+            crate::clud_hook_roots::HookRoots::resolve(
+                root,
+                &config.hook_roots.children,
+                env_roots.as_deref(),
+            )
+            .paths()
+        }
+        None => Vec::new(),
+    };
     let hint = scan.hint();
     let reason = cd_denial_reason(
         &payload.command,

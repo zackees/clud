@@ -12,6 +12,7 @@ pub mod block_bad_cmd;
 pub mod block_bad_cmd_rollout;
 pub mod bridge_log;
 pub mod capture;
+pub mod clud_hook_roots;
 pub mod clud_hooks;
 pub mod clud_hooks_compile;
 pub mod clud_hooks_run;

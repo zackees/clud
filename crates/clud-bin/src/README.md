@@ -310,6 +310,17 @@ which test tier a change belongs in — lives in
   an uncompilable one falls back to equality so a declaration clud cannot parse
   under-matches rather than firing someone's guard against tools they never
   named. Parsing is lenient per entry, like `repo_clud_config`.
+- `clud_hook_roots.rs` - the typed hook-root registry (#966 §5-6, #967 Phase
+  3). `parent` (session root), `extern` (immediate children of
+  `.extern-repos/`, implicit), `child` (declared in `.clud/settings.json`;
+  nested git repos are deliberately **not** auto-detected, because declaration
+  is the consent the child tier's no-prompt trust rests on). The kind decides
+  whether the *parent's* hooks fire: never in an `extern` root, always in a
+  `child`. Containment resolves from what a call names (`tool_input_paths`),
+  falling back to `cd` targets and only then to cwd — keying on cwd alone
+  would answer "parent" for a subagent's edit inside a sub-repo. Roots clud
+  resolves at launch that a hook cannot rediscover travel in `CLUD_HOOK_ROOTS`
+  as JSON.
 - `clud_hooks_compile.rs` - compiles declarations into a frontend's native
   registration (#977, #967 Phase 2b). One dispatcher line per declared event,
   matcher `*` — the per-hook matcher is applied by clud at dispatch time, so

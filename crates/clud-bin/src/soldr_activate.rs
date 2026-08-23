@@ -475,6 +475,7 @@ mod tests {
         RepoCludConfig {
             rust: r,
             bash: crate::repo_clud_config::BashConfig::default(),
+            hook_roots: crate::repo_clud_config::HookRootsConfig::default(),
             bad_commands: Vec::new(),
             bad_pipelines: Vec::new(),
         }

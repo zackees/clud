@@ -69,6 +69,7 @@ pub struct RawRepoCludConfig {
     pub rust: RawRustConfig,
     pub optimize: RawOptimizeConfig,
     pub bash: RawBashConfig,
+    pub hook_roots: RawHookRootsConfig,
     #[serde(deserialize_with = "deserialize_bad_commands")]
     pub bad_commands: Vec<BadCommandRule>,
     #[serde(deserialize_with = "deserialize_bad_pipelines")]
@@ -93,6 +94,19 @@ pub struct RawRustConfig {
 #[serde(default)]
 pub struct RawBashConfig {
     pub block_cd: Option<Value>,
+}
+
+/// The `hook_roots` section — which other repos this session's hooks know
+/// about (#966 §5, #967 Phase 3).
+///
+/// Only `children` is declarable: `extern` roots are the implicit
+/// `.extern-repos/` convention, and a nested git repo is deliberately *not*
+/// auto-detected as a child, because declaration is the consent that makes
+/// the child tier's no-prompt trust sound (#966 D8).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RawHookRootsConfig {
+    pub children: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -691,8 +705,16 @@ fn concat_dedupe_bad_pipelines(
 pub struct RepoCludConfig {
     pub rust: RustConfig,
     pub bash: BashConfig,
+    pub hook_roots: HookRootsConfig,
     pub bad_commands: Vec<BadCommandRule>,
     pub bad_pipelines: Vec<BadPipelineRule>,
+}
+
+/// The `hook_roots` section of `.clud/settings.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookRootsConfig {
+    /// Declared organizational children of this repo.
+    pub children: Vec<String>,
 }
 
 /// The `bash` section of `.clud/settings.json`.
@@ -835,6 +857,7 @@ fn has_directive(raw: &RawRepoCludConfig) -> bool {
         || raw.optimize.rust.install_soldr.is_some()
         || raw.optimize.rust.soldr_version.is_some()
         || raw.bash.block_cd.is_some()
+        || raw.hook_roots.children.is_some()
         || !raw.bad_commands.is_empty()
         || !raw.bad_pipelines.is_empty()
 }
@@ -988,6 +1011,8 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
     let lower_bad_pipelines = lower.bad_pipelines.clone();
     let upper_bash = upper.bash.clone();
     let lower_bash = lower.bash.clone();
+    let upper_hook_roots = upper.hook_roots.clone();
+    let lower_hook_roots = lower.hook_roots.clone();
     let upper_rust = normalize_raw_rust(upper);
     let lower_rust = normalize_raw_rust(lower);
     RawRepoCludConfig {
@@ -1000,6 +1025,9 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
         bash: RawBashConfig {
             block_cd: upper_bash.block_cd.or(lower_bash.block_cd),
         },
+        hook_roots: RawHookRootsConfig {
+            children: upper_hook_roots.children.or(lower_hook_roots.children),
+        },
         bad_commands: concat_dedupe_bad_commands(upper_bad_commands, lower_bad_commands),
         bad_pipelines: concat_dedupe_bad_pipelines(upper_bad_pipelines, lower_bad_pipelines),
     }
@@ -1010,6 +1038,7 @@ fn normalize_raw_rust(raw: RawRepoCludConfig) -> RawRustConfig {
         rust,
         optimize,
         bash: _,
+        hook_roots: _,
         bad_commands: _,
         bad_pipelines: _,
     } = raw;
@@ -1040,6 +1069,9 @@ pub fn resolve(raw: RawRepoCludConfig) -> RepoCludConfig {
                 .as_ref()
                 .and_then(BlockCd::from_json)
                 .unwrap_or_default(),
+        },
+        hook_roots: HookRootsConfig {
+            children: raw.hook_roots.children.clone().unwrap_or_default(),
         },
         bad_commands: raw.bad_commands,
         bad_pipelines: raw.bad_pipelines,
