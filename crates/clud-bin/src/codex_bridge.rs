@@ -211,6 +211,10 @@ pub struct BridgeConfig {
     log_path: Option<std::path::PathBuf>,
     log_max_bytes: usize,
     test_upstream_url: Option<String>,
+    /// How many `POST /v1/messages` turns the harness has asked this bridge to
+    /// serve. Shared with [`BridgeHandle`] so a launch that exits without ever
+    /// asking can be told apart from one that asked and was refused (#998).
+    turn_requests: Arc<AtomicUsize>,
     #[cfg(test)]
     request_hold: Duration,
     #[cfg(test)]
@@ -236,6 +240,7 @@ impl Default for BridgeConfig {
             log_path: default_bridge_log_path(),
             log_max_bytes: crate::bridge_log::DEFAULT_MAX_BYTES,
             test_upstream_url: test_upstream_override_from_process(),
+            turn_requests: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             request_hold: Duration::ZERO,
             #[cfg(test)]
@@ -393,6 +398,7 @@ pub struct BridgeHandle {
     conversations: ConversationStore,
     connections: ActiveConnections,
     log: Option<SharedBridgeLog>,
+    turn_requests: Arc<AtomicUsize>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -419,6 +425,7 @@ impl BridgeHandle {
             )))
         });
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let turn_requests = Arc::clone(&config.turn_requests);
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_active = Arc::clone(&active);
         let thread_conversations = conversations.clone();
@@ -453,6 +460,7 @@ impl BridgeHandle {
             conversations,
             connections,
             log,
+            turn_requests,
             join: Some(join),
         })
     }
@@ -468,6 +476,13 @@ impl BridgeHandle {
 
     pub(crate) fn bearer_token(&self) -> &str {
         &self.bearer_token
+    }
+
+    /// How many `POST /v1/messages` turns the harness asked this bridge for.
+    /// Zero on a launch that never reached the gateway -- see
+    /// `launch_log::silent_bridge_reason`.
+    pub(crate) fn turn_requests(&self) -> usize {
+        self.turn_requests.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -896,6 +911,9 @@ fn handle_connection(
             );
         }
         ("POST", "/v1/messages") => {
+            // Counted before the body is read, so a turn the bridge later
+            // refuses still counts as "the harness talked to us" (#998).
+            config.turn_requests.fetch_add(1, Ordering::Release);
             let body_deadline = Instant::now() + config.body_timeout;
             let body = match read_body(
                 &mut stream,

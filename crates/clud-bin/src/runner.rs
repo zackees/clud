@@ -14,6 +14,7 @@ use crate::clud_settings;
 use crate::command;
 use crate::console_setup::enable_console_vt_input;
 use crate::cpu_banner;
+use crate::launch_log;
 use crate::loop_artifacts;
 use crate::loop_check::{
     check_loop_markers, check_loop_markers_with_output, loop_unconverged_exit,
@@ -276,6 +277,7 @@ pub fn run_plan_subprocess(
     interrupted: &AtomicBool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
     cpu_banner_cfg: cpu_banner::CpuBannerCfg,
+    failure_reason: &mut Option<String>,
 ) -> i32 {
     use std::path::PathBuf;
 
@@ -293,6 +295,7 @@ pub fn run_plan_subprocess(
             if verbose {
                 verbose_log::log("[clud] provider bridge startup failed");
             }
+            *failure_reason = Some(format!("provider bridge startup failed: {error}"));
             return 1;
         }
     };
@@ -346,6 +349,7 @@ pub fn run_plan_subprocess(
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, 1, Some(format!("failed to start: {e}")));
                 }
+                *failure_reason = Some(format!("failed to execute {}: {e}", plan.command[0]));
                 return 1;
             }
         };
@@ -389,11 +393,20 @@ pub fn run_plan_subprocess(
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, code, None);
                 }
+                // Stream-json is the one subprocess shape where clud sees the
+                // child's own words: capture merges stderr into stdout, so the
+                // rendered tail is the backend's last complaint. The inherited
+                // path never sees those bytes -- `note_bridge_silence` below
+                // is what speaks for it.
+                if code != 0 {
+                    *failure_reason = launch_log::sanitize_failure_reason(&captured_output);
+                }
                 if last_exit != 0 && plan.iterations > 1 {
                     eprintln!(
                         "[clud] iteration {} failed with exit code {}",
                         iter_num, last_exit
                     );
+                    note_bridge_silence(failure_reason, &runtime, last_exit);
                     return last_exit;
                 }
             }
@@ -404,6 +417,7 @@ pub fn run_plan_subprocess(
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, 130, Some("Interrupted by user".to_string()));
                 }
+                *failure_reason = Some("interrupted by the user (Ctrl+C)".to_string());
                 return 130;
             }
             ProcessOutcome::Error => {
@@ -413,6 +427,7 @@ pub fn run_plan_subprocess(
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, 1, Some("runner error".to_string()));
                 }
+                *failure_reason = Some("runner error while waiting for the backend".to_string());
                 return 1;
             }
         }
@@ -426,7 +441,21 @@ pub fn run_plan_subprocess(
         return code;
     }
 
+    note_bridge_silence(failure_reason, &runtime, last_exit);
     last_exit
+}
+
+/// Fill in `slot` with the bridge-silence classification when nothing closer to
+/// the failure has claimed it. First writer wins: a message the backend
+/// actually produced always beats an inference drawn from the bridge.
+pub(crate) fn note_bridge_silence(
+    slot: &mut Option<String>,
+    runtime: &crate::foreground_runtime::ForegroundRuntime,
+    exit_code: i32,
+) {
+    if slot.is_none() {
+        *slot = launch_log::silent_bridge_reason(runtime.bridge_turn_requests(), exit_code);
+    }
 }
 
 /// Outcome of one subprocess-mode iteration. Threaded through both the

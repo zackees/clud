@@ -98,6 +98,10 @@ fn emit_rendered_line(bytes: &[u8], captured_output: &mut String) {
     }
 }
 
+// One more parameter than clippy's default: the launch-mode wiring was
+// already at the threshold, and #998's `failure_reason` out-param is a
+// diagnostic sink, not another knob to group into a struct.
+#[allow(clippy::too_many_arguments)]
 pub fn run_plan_pty(
     plan: &command::LaunchPlan,
     job_tracker: Option<&crate::job_orphan_reaper::ForegroundJobTracker>,
@@ -106,6 +110,7 @@ pub fn run_plan_pty(
     dnd_enabled: bool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
     cpu_banner_cfg: cpu_banner::CpuBannerCfg,
+    failure_reason: &mut Option<String>,
 ) -> i32 {
     // Issue #466: CPU-burn banner. Same shape as the subprocess runner —
     // background thread joins on drop at function exit. Inert when
@@ -139,6 +144,7 @@ pub fn run_plan_pty(
             if verbose {
                 verbose_log::log("[clud] provider bridge startup failed (pty)");
             }
+            *failure_reason = Some(format!("provider bridge startup failed: {error}"));
             return 1;
         }
     };
@@ -223,6 +229,7 @@ pub fn run_plan_pty(
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, 1, Some(format!("pty create failed: {e}")));
                 }
+                *failure_reason = Some(format!("pty create failed: {e}"));
                 return 1;
             }
         };
@@ -243,6 +250,7 @@ pub fn run_plan_pty(
             if let Some(s) = loop_session.as_deref_mut() {
                 s.on_iteration_end(iter_num, 1, Some(format!("pty start failed: {e}")));
             }
+            *failure_reason = Some(format!("failed to execute {}: {e}", plan.command[0]));
             return 1;
         }
         if verbose {
@@ -343,6 +351,7 @@ pub fn run_plan_pty(
                 "[clud] iteration {} failed with exit code {}",
                 iter_num, last_exit
             );
+            note_bridge_silence(failure_reason, &runtime, last_exit);
             return last_exit;
         }
 
@@ -355,6 +364,10 @@ pub fn run_plan_pty(
         return code;
     }
 
+    // The PTY stream is the backend's rendered TUI, not a stderr log, so there
+    // is no "last stderr line" to lift from it. What clud can still say is
+    // whether the harness ever asked the bridge for a turn (#998).
+    note_bridge_silence(failure_reason, &runtime, last_exit);
     last_exit
 }
 

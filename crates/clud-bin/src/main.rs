@@ -1050,6 +1050,10 @@ fn run(mut args: args::Args) {
     // inert cfg in any of those cases so `BannerWatcher::spawn` is a no-op.
     let cpu_banner_cfg = build_cpu_banner_cfg(&args, &plan);
 
+    // Issue #998: why a launch died, when clud can tell. Filled in by the
+    // runner on the failure path only; the centralized path leaves it empty
+    // because the daemon owns that child's diagnostics.
+    let mut failure_reason: Option<String> = None;
     let exit_code = if centralized {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
     } else {
@@ -1061,6 +1065,7 @@ fn run(mut args: args::Args) {
                 interrupted.as_ref(),
                 loop_session.as_mut(),
                 cpu_banner_cfg,
+                &mut failure_reason,
             ),
             backend::LaunchMode::Pty => runner::run_plan_pty(
                 &plan,
@@ -1070,11 +1075,12 @@ fn run(mut args: args::Args) {
                 startup::should_register_drop_target(&args),
                 loop_session.as_mut(),
                 cpu_banner_cfg,
+                &mut failure_reason,
             ),
         }
     };
     if let Some(handle) = &launch_log {
-        handle.finish(exit_code);
+        handle.finish(exit_code, failure_reason);
     }
     if let Some(session) = loop_session.as_mut() {
         let (summary, err) = runner::summarize_loop_outcome(exit_code);
