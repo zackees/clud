@@ -6,7 +6,9 @@ import pytest
 
 from ci.banned_imports import (
     COMMAND_BUILDER_MARKER,
+    EXCLUDED_PYTHON_PARTS,
     is_allowed,
+    is_excluded_python_path,
     scan_file,
     scan_python_file,
 )
@@ -114,3 +116,27 @@ def test_python_subprocess_is_banned_in_product_tools(
     path.write_text(source, encoding="utf-8")
     violations = scan_python_file(path)
     assert violations
+
+
+def test_every_exclusion_actually_excludes_something() -> None:
+    """A misspelled entry is an exclusion that silently does nothing.
+
+    `.extern-repos` was listed as `extern-repos` for its whole life, so the
+    membership test never matched and every lint run walked into checkouts of
+    other people's repositories. Nothing failed -- it was just slow and noisy.
+    This asserts each entry matches a path built from that very entry, which a
+    typo cannot survive.
+    """
+    for part in EXCLUDED_PYTHON_PARTS:
+        assert is_excluded_python_path(Path(part) / "inner" / "mod.py"), part
+
+
+def test_third_party_checkouts_are_not_this_repos_business() -> None:
+    assert is_excluded_python_path(Path(".extern-repos/dep/setup.py"))
+    assert is_excluded_python_path(Path("crates/x/.venv/lib/mod.py"))
+    assert is_excluded_python_path(Path(".claude/worktrees/wt/tool.py"))
+
+
+def test_the_repos_own_python_is_still_scanned() -> None:
+    for path in ["tests/test_hello.py", "ci/lint.py", "src/clud/__init__.py"]:
+        assert not is_excluded_python_path(Path(path)), path
