@@ -235,13 +235,21 @@ not arriving; the answer is merged:
   `CLAUDE_CODE_USE_*` provider variable is set. That is the same condition that
   populates the built-in lineup, so the two cannot be separated: declaring a
   different provider mode to shed the built-in rows also turns discovery off.
-- The `availableModels` setting is an allowlist that only *adds* `claude-*` and
-  `anthropic.*` IDs. It cannot subtract, and setting it additionally makes the
-  harness rewrite its alias rows (`opus[1m]`) into explicit first-party IDs
+- The `availableModels` managed setting bounds what *discovery* may add and
+  otherwise only adds `claude-*` and `anthropic.*` IDs of its own. It does not
+  bound the built-in lineup, and setting it additionally makes the harness
+  rewrite its alias rows (`opus[1m]`) into explicit first-party IDs
   (`claude-opus-5[1m]`).
 - `additionalModelOptionsCache` and `modelAccessCache` in the user's global
   config are harness-owned caches of Anthropic's own bootstrap response,
   refreshed independently of clud. They are not extension points.
+
+Anthropic's own [gateway protocol
+reference](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery)
+says the same from the other side: discovery "add[s] the returned models to the
+`/model` picker", and when it fails "the picker falls back to the cached list
+from the previous startup or to the built-in model list". The built-in list is
+the floor, not something a gateway negotiates.
 
 The advertised set does reach the client. After a `clud --codex --harness
 claude` session, `~/.claude/cache/gateway-models.json` holds exactly the three

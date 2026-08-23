@@ -2417,9 +2417,13 @@ built-in Anthropic lineup and then appends to it, once per source:
 `additionalModelOptionsCache` entries from Anthropic's bootstrap response, the
 `availableModels` settings allowlist, and finally the currently selected model.
 Every source pushes. **None filters the seed list.** The discovery helper returns
-its rows for appending and drops any whose equivalent is already present; the
-official gateway protocol documents the same behavior, that Claude Code will
-"add the returned models to the `/model` picker".
+its rows for appending and drops any whose equivalent is already present.
+
+Anthropic's [gateway protocol
+reference](https://code.claude.com/docs/en/llm-gateway-protocol#model-discovery)
+states the same contract: discovery "add[s] the returned models to the `/model`
+picker", and if it fails "the picker falls back to the cached list from the
+previous startup or to the built-in model list".
 
 Discovery is additionally gated on the deployment mode being `firstParty`, which
 is what a bare custom `ANTHROPIC_BASE_URL` yields — no `CLAUDE_CODE_USE_*`
@@ -2451,10 +2455,11 @@ The workarounds were each checked and each fails:
 
 - **Declare a non-`firstParty` provider mode** to shed the built-in lineup. This
   disables discovery outright, so clud's own rows disappear with them.
-- **`availableModels`.** An allowlist that only ever adds `claude-*` and
-  `anthropic.*` IDs. It cannot subtract, and setting it forces the alias-to-
-  explicit rewrite described above, which makes the reported ID *more* likely to
-  appear, not less.
+- **`availableModels`.** Upstream documents it as bounding what *discovery* may
+  add; it does not bound the built-in lineup, and on its own it only ever adds
+  `claude-*` and `anthropic.*` IDs. Setting it also forces the alias-to-explicit
+  rewrite described above, which makes the reported ID *more* likely to appear,
+  not less.
 - **Writing `additionalModelOptionsCache` or `modelAccessCache`.** Harness-owned
   caches that the harness overwrites on its next bootstrap. Already rejected for
   the same reason in [DD-038](#dd-038-the-codex-picker-gets-one-honest-row-always-carrying-the-catalog).
