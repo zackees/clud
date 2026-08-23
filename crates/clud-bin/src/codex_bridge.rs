@@ -1989,9 +1989,19 @@ fn serve_codex_discovery_messages(
     let (base, effort) = model
         .rsplit_once('@')
         .map_or((model, None), |(base, effort)| (base, Some(effort)));
+    // A persisted or continued session can name a Codex row by wire ID or CLI
+    // alias instead of its discovery ID, exactly as on the unified route.
     let discovered = provider_catalog::model_by_discovery_id(base)
+        .or_else(|| provider_catalog::non_claude_model_by_any_id(base))
         .filter(|entry| entry.provider == ModelProvider::Codex);
-    if base.starts_with("clud-claude-") && discovered.is_none() {
+    // Claude Code merges this gateway's rows with its own built-in catalog, so
+    // IDs the gateway never advertised do arrive here. Only a `claude*` ID is
+    // caller-owned -- `codex_translate::resolve_selection` maps those onto the
+    // reviewed default. Anything else the bridge cannot resolve is refused
+    // here: forwarding it unrewritten would translate an unknown ID to the
+    // Codex upstream, which answers with an error about a model the user never
+    // knowingly sent there (#997).
+    if discovered.is_none() && !base.to_ascii_lowercase().starts_with("claude") {
         let ids = provider_catalog::models_for_provider(ModelProvider::Codex)
             .filter_map(|entry| entry.discovery_id)
             .collect::<Vec<_>>()
@@ -3539,6 +3549,27 @@ Connection: close
         );
         assert_eq!(status(&response), 400, "{response}");
         assert_eq!(upstream.requests().len(), registered.len());
+    }
+
+    /// Issue #997: only a `claude*` ID is caller-owned on this route. Any
+    /// other ID the bridge cannot resolve must be refused here rather than
+    /// translated to the Codex upstream, which would answer with an error
+    /// about a model the user never knowingly sent there.
+    #[test]
+    fn an_unresolvable_non_claude_model_is_refused_before_the_translator() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let body = PROBE_BODY.replace("claude-x", "gpt-6-nonexistent");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+        );
+        assert_eq!(status(&response), 400, "{response}");
+        assert!(response.contains("invalid_request_error"), "{response}");
+        assert!(
+            upstream.requests().is_empty(),
+            "a refused model must not reach the Codex upstream"
+        );
     }
 
     #[test]

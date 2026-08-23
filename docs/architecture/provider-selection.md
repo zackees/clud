@@ -174,6 +174,21 @@ accepted work.
   provider-qualified clud model ID. OpenRouter's live `/v1/models` response,
   rather than clud's static catalog, owns additional picker inventory.
 
+### Claude Code merges discovery with its built-in catalog
+
+Enabling `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` does not replace Claude
+Code's built-in model list; the harness *merges* the gateway's `/v1/models`
+rows into it. Only the main turn routes through the selected gateway row.
+Claude Code's side queries -- session-title generation and advisor ranking --
+resolve against the built-in catalog alone, so a synthetic `clud-claude-*` ID
+is reported as `unrecognized_model` there (and disables the advisor) even on a
+healthy session. That is upstream behaviour clud does not own from the gateway.
+
+Because the merge also means Claude Code can send IDs the gateway never
+advertised, the Codex discovery route refuses any model it cannot resolve
+instead of forwarding it. Only an ordinary `claude*` ID passes unresolved: the
+translator maps those onto the reviewed default.
+
 ### OpenRouter model-selection contract
 
 OpenRouter is the routing gateway, not the interactive harness. Claude Code
