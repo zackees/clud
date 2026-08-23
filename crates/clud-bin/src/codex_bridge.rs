@@ -491,7 +491,7 @@ impl BridgeHandle {
             if let Some(log) = &self.log {
                 let mut log = lock_log(log);
                 log.flush();
-                if log.has_records() {
+                if log.has_notable_records() {
                     eprintln!("[clud] codex bridge log: {}", log.path().display());
                 }
             }
@@ -2456,6 +2456,12 @@ fn record_rejection(log: Option<&SharedBridgeLog>, status: u16, reason: &'static
     }
 }
 
+/// Longest model ID persisted. The field comes from a request body capped only
+/// at `DEFAULT_MAX_BODY_BYTES`, and a single ~1 MiB value would exhaust the
+/// log's budget and silence every failure after it -- the incident the log
+/// exists for. No real ID is close to this.
+const MAX_LOGGED_MODEL_CHARS: usize = 128;
+
 /// A rejection whose cause is the model the caller asked for, recorded with
 /// that ID (#999). `reason` alone cannot say *which* selection wedged the
 /// session, and the model ID is the one request-body field worth persisting.
@@ -2466,6 +2472,10 @@ fn record_model_rejection(
     model: &str,
 ) {
     if let Some(log) = log {
+        let model = model
+            .chars()
+            .take(MAX_LOGGED_MODEL_CHARS)
+            .collect::<String>();
         lock_log(log).record(serde_json::json!({
             "ts_ms": unix_ms(),
             "event": "request_rejected",
@@ -2480,10 +2490,12 @@ fn record_model_rejection(
 ///
 /// Not a failure, so it widens the log's contract deliberately: when a model
 /// selection wedges a session this is often the only surviving evidence of
-/// what the bridge offered, and a refusal is only readable against it.
+/// what the bridge offered, and a refusal is only readable against it. Recorded
+/// as ambient context so it does not, on its own, claim an operator's attention
+/// through the shutdown hint.
 fn record_catalog_advertised(log: Option<&SharedBridgeLog>, model_ids: &[&str]) {
     if let Some(log) = log {
-        lock_log(log).record(serde_json::json!({
+        lock_log(log).record_ambient(serde_json::json!({
             "ts_ms": unix_ms(),
             "event": "catalog_advertised",
             "model_ids": model_ids,
@@ -3684,6 +3696,10 @@ Connection: close
         assert!(text.contains(r#""event":"catalog_advertised""#), "{text}");
         assert!(text.contains("clud-claude-codex-terra"), "{text}");
         assert!(!text.contains(&bearer), "{text}");
+        // Ambient context only: the shutdown hint stays a signal that this
+        // launch left something worth reading, not a footer on every session.
+        let log = bridge.log.as_ref().expect("configured log");
+        assert!(!lock_log(log).has_notable_records());
     }
 
     /// Issue #999: the refusal added by #1005 named the model to the user but
@@ -3696,7 +3712,8 @@ Connection: close
         let mut bridge =
             BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
         let bearer = bridge.bearer_token().to_string();
-        for model in ["gpt-6-nonexistent", "clud-claude-kimi-k3"] {
+        let oversized = "x".repeat(5000);
+        for model in ["gpt-6-nonexistent", "clud-claude-kimi-k3", &oversized] {
             let body = PROBE_BODY.replace("claude-x", model);
             let refused = request(
                 bridge.socket_addr(),
@@ -3714,6 +3731,14 @@ Connection: close
         );
         assert!(
             text.contains(r#""model":"clud-claude-kimi-k3","reason":"model_not_served_here""#),
+            "{text}"
+        );
+        // The model field comes from a 32 MiB-capped body: one oversized value
+        // would otherwise exhaust the 1 MiB budget and silence every later
+        // failure, so it is truncated before it reaches the log.
+        assert!(text.contains(&"x".repeat(MAX_LOGGED_MODEL_CHARS)), "{text}");
+        assert!(
+            !text.contains(&"x".repeat(MAX_LOGGED_MODEL_CHARS + 1)),
             "{text}"
         );
         assert!(!text.contains(&bearer), "{text}");
