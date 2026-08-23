@@ -97,7 +97,10 @@ message GcRequest {
   bytes payload_json = 1;
 }
 
-message ShutdownRequest {}
+message ShutdownRequest {
+  optional string client_version = 1;
+  optional ProcessIdentity expected_daemon = 2;
+}
 
 // Issue: have-the-daemon-do-the-orphan-sweep. Fire-and-forget from the
 // foreground CLI's exit hook: the daemon walks every CLUD-tagged process

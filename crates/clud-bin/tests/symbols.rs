@@ -40,12 +40,11 @@ fn run_clud(args: &[&str], state_dir: &std::path::Path) -> (i32, String) {
     argv.extend(args.iter().map(|s| s.to_string()));
 
     let mut env: Vec<(String, String)> = std::env::vars().collect();
-    env.retain(|(k, _)| k != "CLUD_DAEMON_STATE_DIR" && k != "CLUD_NO_DAEMON");
+    env.retain(|(k, _)| k != "CLUD_DAEMON_STATE_DIR" && k != "CLUD_ALLOW_DAEMON_SPAWN");
     env.push((
         "CLUD_DAEMON_STATE_DIR".to_string(),
         state_dir.to_string_lossy().into_owned(),
     ));
-    env.push(("CLUD_NO_DAEMON".to_string(), "1".to_string()));
 
     let process = NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(argv),

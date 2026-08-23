@@ -309,6 +309,18 @@ def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
         victim = home / "victim.txt"
         victim.parent.mkdir(parents=True, exist_ok=True)
         victim.write_text("trash me\n", encoding="utf-8")
+        # This test is about pruning *registered* trash, so a daemon has to be
+        # up before the trash happens: `clud trash` is a utility mode and never
+        # starts one, so with no daemon the row is skipped and there is nothing
+        # to prune later. `gc list` is the non-destructive way to bring one up.
+        warmup = process.run(
+            [str(launch), "gc", "list"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        assert warmup.returncode == 0, warmup.stderr
         trash = process.run(
             [str(launch), "trash", "--cross-volume", str(victim)],
             capture_output=True,

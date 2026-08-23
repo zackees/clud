@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::{cmp::Ordering, fmt};
 
 use fs4::fs_std::FileExt;
 use sysinfo::Signal;
@@ -19,7 +20,7 @@ use super::paths::{
 use super::process_utils::{identity_is_alive, signal_process_tree_as};
 use super::types::{
     CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, GcWatchRoot, ListRow,
-    ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
+    ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage, ENV_ALLOW_DAEMON_SPAWN,
 };
 use super::wire_prost::{
     daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,
@@ -27,9 +28,96 @@ use super::wire_prost::{
 };
 use crate::process_identity::ProcessIdentity;
 
-#[path = "client_compat.rs"]
-mod client_compat;
-use client_compat::is_old_daemon_signature;
+use super::client_compat::{compare_versions, is_old_daemon_signature};
+
+#[derive(Debug)]
+struct IncompatibleDaemonVersion {
+    running: String,
+    client: &'static str,
+}
+
+impl fmt::Display for IncompatibleDaemonVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "refusing to stop daemon version {} with older clud {}; upgrade clud or stop the daemon from version {}",
+            self.running, self.client, self.running
+        )
+    }
+}
+
+impl std::error::Error for IncompatibleDaemonVersion {}
+
+#[derive(Debug)]
+struct ProtectedDaemonShutdown(String);
+
+impl fmt::Display for ProtectedDaemonShutdown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProtectedDaemonShutdown {}
+
+fn incompatible_daemon_error(info: &DaemonInfo) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        IncompatibleDaemonVersion {
+            running: info.version.as_deref().unwrap_or("<unknown>").to_string(),
+            client: env!("CARGO_PKG_VERSION"),
+        },
+    )
+}
+
+pub fn is_incompatible_daemon_error(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|source| {
+        source.downcast_ref::<IncompatibleDaemonVersion>().is_some()
+            || source.downcast_ref::<ProtectedDaemonShutdown>().is_some()
+    })
+}
+
+pub fn print_incompatible_daemon_error(error: &io::Error) {
+    eprintln!("{}", incompatible_daemon_error_line(error));
+}
+
+fn incompatible_daemon_error_line(error: &io::Error) -> String {
+    format!("\x1b[33m[clud] error: {error}\x1b[0m")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonVersionDisposition {
+    Match,
+    ReplaceOlder,
+    RefuseNewerOrUnknown,
+}
+
+fn daemon_spawn_allowed() -> bool {
+    std::env::var_os(ENV_ALLOW_DAEMON_SPAWN).is_some_and(|value| value == "1")
+}
+
+fn require_daemon_spawn_permission(action: &str) -> io::Result<()> {
+    if daemon_spawn_allowed() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "daemon {action} is not allowed from this clud mode; only a normal clud launch may set {ENV_ALLOW_DAEMON_SPAWN}=1"
+            ),
+        ))
+    }
+}
+
+fn daemon_version_disposition(info: &DaemonInfo) -> DaemonVersionDisposition {
+    let Some(running) = info.version.as_deref() else {
+        return DaemonVersionDisposition::ReplaceOlder;
+    };
+    match compare_versions(running, env!("CARGO_PKG_VERSION")) {
+        Some(Ordering::Equal) => DaemonVersionDisposition::Match,
+        Some(Ordering::Less) => DaemonVersionDisposition::ReplaceOlder,
+        Some(Ordering::Greater) | None => DaemonVersionDisposition::RefuseNewerOrUnknown,
+    }
+}
 
 pub struct ForegroundClientLease {
     state_dir: PathBuf,
@@ -102,18 +190,27 @@ pub fn acquire_foreground_client_lease(state_dir: &Path) -> io::Result<Foregroun
 pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(state_dir)?;
     if let Some(info) = probe_existing(state_dir) {
-        if daemon_version_matches(&info) {
-            return Ok(());
+        match daemon_version_disposition(&info) {
+            DaemonVersionDisposition::Match => return Ok(()),
+            DaemonVersionDisposition::RefuseNewerOrUnknown => {
+                return Err(incompatible_daemon_error(&info));
+            }
+            DaemonVersionDisposition::ReplaceOlder => {}
         }
+        require_daemon_spawn_permission("replacement")?;
         // Issue #192: stale daemon from a prior clud version. Kill it
         // under the bringup lock so a fresh `__daemon` (with the current
         // binary's dashboard + registry-merge code) takes over.
         let _bringup_lock = acquire_bringup_lock(state_dir)?;
         if let Some(info) = probe_existing(state_dir) {
-            if !daemon_version_matches(&info) {
-                replace_stale_daemon(state_dir, &info)?;
-            } else {
-                return Ok(());
+            match daemon_version_disposition(&info) {
+                DaemonVersionDisposition::Match => return Ok(()),
+                DaemonVersionDisposition::ReplaceOlder => {
+                    replace_stale_daemon(state_dir, &info)?;
+                }
+                DaemonVersionDisposition::RefuseNewerOrUnknown => {
+                    return Err(incompatible_daemon_error(&info));
+                }
             }
         }
         return spawn_and_await_daemon(state_dir);
@@ -123,11 +220,15 @@ pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     cleanup_stale_state(state_dir);
     // Re-probe under the lock: a sibling may have spawned while we waited.
     if let Some(info) = probe_existing(state_dir) {
-        if daemon_version_matches(&info) {
-            return Ok(());
+        match daemon_version_disposition(&info) {
+            DaemonVersionDisposition::Match => return Ok(()),
+            DaemonVersionDisposition::ReplaceOlder => replace_stale_daemon(state_dir, &info)?,
+            DaemonVersionDisposition::RefuseNewerOrUnknown => {
+                return Err(incompatible_daemon_error(&info));
+            }
         }
-        replace_stale_daemon(state_dir, &info)?;
     }
+    require_daemon_spawn_permission("spawn")?;
     spawn_and_await_daemon(state_dir)
 }
 
@@ -185,6 +286,10 @@ fn daemon_version_matches(info: &DaemonInfo) -> bool {
 /// gone. Held by the caller under `acquire_bringup_lock` so only one
 /// upgrade attempt runs at a time.
 fn replace_stale_daemon(state_dir: &Path, info: &DaemonInfo) -> io::Result<()> {
+    require_daemon_spawn_permission("replacement")?;
+    if daemon_version_disposition(info) != DaemonVersionDisposition::ReplaceOlder {
+        return Err(incompatible_daemon_error(info));
+    }
     eprintln!(
         "[clud] restarting daemon: running {} != binary {}",
         info.version.as_deref().unwrap_or("<pre-2.0.15>"),
@@ -420,9 +525,24 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
         ));
     }
 
-    let pid = match send_daemon_request(state_dir, &DaemonRequest::Shutdown) {
+    if daemon_version_disposition(&info) == DaemonVersionDisposition::RefuseNewerOrUnknown {
+        return Err(incompatible_daemon_error(&info));
+    }
+
+    let pid = match send_daemon_request(
+        state_dir,
+        &DaemonRequest::Shutdown {
+            client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            expected_daemon: Some(recorded),
+        },
+    ) {
         Ok(DaemonResponse::ShutdownAck { pid }) => pid,
-        Ok(DaemonResponse::Error { message }) => return Err(io::Error::other(message)),
+        Ok(DaemonResponse::Error { message }) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                ProtectedDaemonShutdown(message),
+            ));
+        }
         Ok(response) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

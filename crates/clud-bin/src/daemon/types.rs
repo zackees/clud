@@ -22,7 +22,10 @@ pub(super) const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
 pub(super) const ENV_BACKLOG_BYTES: &str = "CLUD_BACKLOG_BYTES";
 /// Issue #135: opt out of the always-on daemon auto-spawn. Used by both
 /// the CLI flag `--no-daemon` and the `clud gc *` precondition check.
-pub const ENV_NO_DAEMON: &str = "CLUD_NO_DAEMON";
+/// Positive capability required before a client may create or replace the
+/// shared daemon. Normal backend launches set it deliberately; utility,
+/// tool, hook, auth, and internal modes leave it absent.
+pub const ENV_ALLOW_DAEMON_SPAWN: &str = "CLUD_ALLOW_DAEMON_SPAWN";
 pub(super) const DEFAULT_BACKLOG_LIMIT_BYTES: usize = 256 * 1024;
 pub(super) const BACKGROUND_PROMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -254,8 +257,15 @@ pub(super) enum DaemonRequest {
     Gc {
         payload: GcOp,
     },
-    /// Ask the daemon to exit after replying. Used by `clud daemon restart`.
-    Shutdown,
+    /// Ask the daemon to exit after replying. The caller identifies both
+    /// itself and the exact daemon generation it intends to stop. A newer
+    /// daemon rejects legacy/unversioned and older-client requests.
+    Shutdown {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_daemon: Option<ProcessIdentity>,
+    },
     /// Fire-and-forget: ask the daemon to sweep every CLUD-tagged process
     /// whose originator is no longer alive and `kill_tree` each. Sent from
     /// the foreground clud's exit hook so the daemon catches descendants
@@ -768,15 +778,23 @@ mod tests {
 
     #[test]
     fn shutdown_request_serializes_as_tagged_op() {
-        let wire = serde_json::to_string(&DaemonRequest::Shutdown).unwrap();
+        let wire = serde_json::to_string(&DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        })
+        .unwrap();
         assert_eq!(wire, r#"{"op":"shutdown"}"#);
     }
 
     #[test]
     fn shutdown_request_roundtrips() {
-        let wire = serde_json::to_string(&DaemonRequest::Shutdown).unwrap();
+        let wire = serde_json::to_string(&DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        })
+        .unwrap();
         let parsed: DaemonRequest = serde_json::from_str(&wire).unwrap();
-        assert!(matches!(parsed, DaemonRequest::Shutdown));
+        assert!(matches!(parsed, DaemonRequest::Shutdown { .. }));
     }
 
     #[test]

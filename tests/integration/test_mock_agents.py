@@ -120,6 +120,7 @@ class TestBackendSelection:
         report_path = tmp_path / "tool-shell-probe.json"
         result = _run(
             clud_binary,
+            "--no-daemon",
             "--codex",
             "--subprocess",
             "--no-daemon",
@@ -144,6 +145,7 @@ class TestBackendSelection:
     ) -> None:
         result = _run(
             clud_binary,
+            "--no-daemon",
             "--codex",
             "-p",
             "hello from codex.cmd",
@@ -740,6 +742,7 @@ class TestLoopMode:
         """`clud --codex loop ...` drives the codex backend for N iterations."""
         result = _run(
             clud_binary,
+            "--no-daemon",
             "--codex",
             "loop",
             "--loop-count",
@@ -837,6 +840,7 @@ class TestInterruptReporting:
         proc = process.Popen(
             [
                 str(clud_binary),
+                "--no-daemon",
                 *backend_args,
                 "-p",
                 f"{backend_name} clean interrupt",

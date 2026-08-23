@@ -2221,3 +2221,38 @@ to fit is the obvious-looking fix and the wrong one: it converts a billing
 failure into a silently truncated answer.
 
 See [`architecture/provider-failover.md`](architecture/provider-failover.md).
+---
+
+## DD-051: Daemon creation is granted by a positive launch capability
+
+**Status:** Accepted
+
+**Context:** The old `CLUD_NO_DAEMON=1` convention made daemon creation the
+default for every newly added command path. A tool or hook invocation only
+remained safe if every dispatcher and every child environment remembered to
+set the negative flag. Version skew made that default dangerous: an older clud
+reached through `ensure_daemon`, classified a newer daemon as merely
+"different", and could terminate it while trying to replace it.
+
+**Decision:** Daemon creation and replacement require the process-local
+capability `CLUD_ALLOW_DAEMON_SPAWN=1`. Every clud process clears inherited
+copies immediately after argument normalization. Only the normal command-less
+backend launch path (including the normalized `clud run` spelling) sets it,
+after utility, tool, auth, maintenance, daemon-control, and internal modes have
+already dispatched. Tool children also strip the capability from their
+materialized environment. Existing compatible daemons remain usable without
+the capability; only daemon-state mutation is gated. `--no-daemon` remains the
+explicit CLI opt-out. This supersedes the `CLUD_NO_DAEMON` portions of DD-011
+and DD-012.
+
+Daemon shutdown is independently generation- and version-guarded. A shutdown
+request carries the caller version and the expected daemon PID plus start time;
+the daemon rejects legacy/unversioned callers, older callers, and requests for
+a different generation.
+
+**Consequences:** Adding a new subcommand cannot accidentally gain daemon-spawn
+authority. `clud tool` and hook chains cannot inherit it. A utility mode may
+talk to an already-running compatible daemon but gets a local permission error
+if its operation would need to create or replace one. An older client that
+encounters a newer daemon leaves it untouched, emits the yellow compatibility
+error, and exits 1.

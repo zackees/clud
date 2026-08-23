@@ -42,6 +42,12 @@ fn run(mut args: args::Args) {
     if let Some(exit_code) = webterm::handle(&args) {
         std::process::exit(exit_code);
     }
+    // Daemon-spawn authority is process-local and never trusted from the
+    // parent environment. The normal launch path grants it later, after all
+    // utility and internal dispatch has returned.
+    unsafe {
+        std::env::remove_var(daemon::ENV_ALLOW_DAEMON_SPAWN);
+    }
     // Fast tool path. Detect `clud tool ...` before
     // normal clud startup so hook/tool invocations do not connect to the
     // daemon, touch runtime-cache, start title keepers, or register as
@@ -49,7 +55,7 @@ fn run(mut args: args::Args) {
     if let Some(args::Command::Tool { subcommand }) = &args.command {
         unsafe {
             std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
-            std::env::set_var(daemon::ENV_NO_DAEMON, "1");
+            std::env::remove_var(daemon::ENV_ALLOW_DAEMON_SPAWN);
         }
         std::process::exit(tool_cli::run(subcommand));
     }
@@ -174,6 +180,17 @@ fn run(mut args: args::Args) {
     // backend resolution and before any session registry / dnd work
     // so a registry-less host can still run `clud gc reconcile`.
     if let Some(args::Command::Gc { subcommand }) = &args.command {
+        // The one subcommand that is granted daemon-creation authority. `gc`
+        // exists to operate on the registry, so it is not a utility mode that
+        // merely happens to touch it: with no daemon there is nothing to
+        // prune, and reporting success would tell the caller garbage was
+        // collected when none was. `--no-daemon` still withholds the grant,
+        // which is the documented `clud gc *` precondition.
+        if !args.no_daemon && !args.dry_run {
+            unsafe {
+                std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
+            }
+        }
         std::process::exit(gc::run(&args, subcommand.clone()));
     }
 
@@ -615,24 +632,41 @@ fn run(mut args: args::Args) {
         large_file_guard::run(&root);
     }
 
+    // Grant daemon-mutation authority only after every utility/special mode
+    // has exited and only for the command-less normal launch shape (`clud run`
+    // was normalized to this above). Non-launch modes never inherit it.
+    if args.command.is_none() && !args.no_daemon && !args.dry_run {
+        unsafe {
+            std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
+        }
+    } else {
+        unsafe {
+            std::env::remove_var(daemon::ENV_ALLOW_DAEMON_SPAWN);
+        }
+    }
+
     // Issue #135: always-on clud daemon. One background process per user
     // hosts the GC registry (redb owner + worker thread) and is the
     // execution target for `--detach` / `--detachable` / repeat jobs /
     // `--experimental-daemon-centralized`. Foreground interactive
     // launches still use the direct runner by default (PR #152 reverted
-    // the attach-pump default). Skip on `--no-daemon` /
-    // `CLUD_NO_DAEMON=1` and on `--dry-run` so unit tests that copy
+    // the attach-pump default). Only a normal launch receives the positive
+    // spawn capability. Skip on `--no-daemon` and `--dry-run` so tests that copy
     // the binary into a tempdir don't leave the daemon's `.old` exe
     // locked when tempdir cleanup runs. Never blocks a launch on
     // spawn failure.
     let mut foreground_client_lease = None;
-    if !args.no_daemon && !args.dry_run {
+    if args.command.is_none() && !args.no_daemon && !args.dry_run {
         if args.verbose {
             verbose_log::log("[clud] daemon: ensure running");
         }
         match daemon::default_state_dir() {
             Ok(state_dir) => {
                 if let Err(e) = daemon::ensure_daemon(&state_dir) {
+                    if daemon::is_incompatible_daemon_error(&e) {
+                        daemon::print_incompatible_daemon_error(&e);
+                        std::process::exit(1);
+                    }
                     eprintln!("[clud] note: daemon unavailable: {}", e);
                     if args.verbose {
                         verbose_log::log(format_args!("[clud] daemon: unavailable: {e}"));

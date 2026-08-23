@@ -158,7 +158,10 @@ fn daemon_wire_format_env_values_default_to_prost() {
 
 #[test]
 fn daemon_request_line_json_preserves_legacy_shape() {
-    let request = DaemonRequest::Shutdown;
+    let request = DaemonRequest::Shutdown {
+        client_version: None,
+        expected_daemon: None,
+    };
     let line = encode_daemon_request_line(&request, DaemonWireFormat::Json).unwrap();
     assert!(line.starts_with(br#"{"op":"shutdown"}"#));
 
@@ -170,7 +173,10 @@ fn daemon_request_line_json_preserves_legacy_shape() {
 
 #[test]
 fn daemon_request_line_prost_carries_frame_envelope() {
-    let request = DaemonRequest::Shutdown;
+    let request = DaemonRequest::Shutdown {
+        client_version: None,
+        expected_daemon: None,
+    };
     let line = encode_daemon_request_line(&request, DaemonWireFormat::Prost).unwrap();
     let line = String::from_utf8(line).unwrap();
     assert!(line.starts_with("CLUD-FRAME/1 434c5544 "));
@@ -338,7 +344,10 @@ fn daemon_request_prost_roundtrips_json_shapes() {
                 kind: Some("worktree".to_string()),
             },
         },
-        DaemonRequest::Shutdown,
+        DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        },
         DaemonRequest::ReapOrphans,
         DaemonRequest::Metrics,
         DaemonRequest::ProcSnapshot {
@@ -608,7 +617,10 @@ fn worker_line_dispatch_preserves_json_and_prost_formats() {
 
 #[test]
 fn dispatcher_accepts_legacy_json_frames() {
-    let request = DaemonRequest::Shutdown;
+    let request = DaemonRequest::Shutdown {
+        client_version: None,
+        expected_daemon: None,
+    };
     let frame = encode_legacy_json_frame(&request).unwrap();
     let decoded = decode_daemon_request(&frame).unwrap();
     assert_json_parity(&request, &decoded);

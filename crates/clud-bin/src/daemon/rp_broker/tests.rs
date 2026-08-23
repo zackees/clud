@@ -115,8 +115,14 @@ fn wait_for_identity_sidecar(state_dir: &Path) -> DaemonProcess {
 /// the constant.
 #[test]
 fn golden_bytes_pin_clud_frame_v1_request_wire() {
-    let payload = encode_frame_lane_request(&DaemonRequest::Shutdown, "golden")
-        .expect("encode shutdown payload");
+    let payload = encode_frame_lane_request(
+        &DaemonRequest::Shutdown {
+            client_version: None,
+            expected_daemon: None,
+        },
+        "golden",
+    )
+    .expect("encode shutdown payload");
     let frame = Frame::request(CLUD_PAYLOAD_PROTOCOL, payload).with_request_id(1);
     let wire = encode_framed(&frame).expect("encode framed");
 
@@ -169,8 +175,17 @@ fn frame_lane_serves_probe_and_clud_requests_end_to_end() {
     let response = decode_frame_lane_response(&response_frame.payload).expect("decode response");
     assert!(matches!(response, DaemonResponse::LiveCwds { .. }));
 
-    let payload =
-        encode_frame_lane_request(&DaemonRequest::Shutdown, "rt-2").expect("encode shutdown");
+    let payload = encode_frame_lane_request(
+        &DaemonRequest::Shutdown {
+            client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            expected_daemon: Some(crate::process_identity::ProcessIdentity::new(
+                std::process::id(),
+                crate::process_identity::self_start_time(),
+            )),
+        },
+        "rt-2",
+    )
+    .expect("encode shutdown");
     let response_frame = client
         .request(CLUD_PAYLOAD_PROTOCOL, payload)
         .expect("shutdown round trip");
@@ -204,10 +219,19 @@ fn disable_env_skips_frame_lane_entirely() {
         "disabled lane must not write an identity sidecar"
     );
 
-    // TCP wire still works and shuts the daemon down.
+    // TCP wire still works and shuts the daemon down. The request has to be
+    // versioned and generation-scoped: this test is about the frame lane being
+    // disabled, not about shutdown authority, and an unversioned request is now
+    // refused on purpose.
     let mut stream = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
     use std::io::{BufRead, BufReader, Write as _};
-    stream.write_all(b"{\"op\":\"shutdown\"}\n").unwrap();
+    let request = serde_json::to_string(&super::super::types::DaemonRequest::Shutdown {
+        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        expected_daemon: Some(info.identity()),
+    })
+    .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -265,8 +289,17 @@ fn client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
         try_send_via_frame_lane(&state_dir, &DaemonRequest::ListLiveCwds).is_none(),
         "missing sidecar must miss the frame lane"
     );
-    let response = super::super::client::send_daemon_request(&state_dir, &DaemonRequest::Shutdown)
-        .expect("shutdown via TCP fallback");
+    let response = super::super::client::send_daemon_request(
+        &state_dir,
+        &DaemonRequest::Shutdown {
+            client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            expected_daemon: Some(crate::process_identity::ProcessIdentity::new(
+                std::process::id(),
+                crate::process_identity::self_start_time(),
+            )),
+        },
+    )
+    .expect("shutdown via TCP fallback");
     assert!(matches!(response, DaemonResponse::ShutdownAck { .. }));
     assert_eq!(daemon_thread.join().unwrap(), 0);
 }
@@ -302,8 +335,17 @@ fn fake_backend_seam_overrides_cached_endpoint() {
         let response = try_send_via_frame_lane(&state_dir, &DaemonRequest::ListLiveCwds)
             .expect("seam must route around the poisoned cached endpoint");
         assert!(matches!(response, DaemonResponse::LiveCwds { .. }));
-        let response = try_send_via_frame_lane(&state_dir, &DaemonRequest::Shutdown)
-            .expect("shutdown via seam");
+        let response = try_send_via_frame_lane(
+            &state_dir,
+            &DaemonRequest::Shutdown {
+                client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                expected_daemon: Some(crate::process_identity::ProcessIdentity::new(
+                    std::process::id(),
+                    crate::process_identity::self_start_time(),
+                )),
+            },
+        )
+        .expect("shutdown via seam");
         assert!(matches!(response, DaemonResponse::ShutdownAck { .. }));
     }
     assert_eq!(daemon_thread.join().unwrap(), 0);

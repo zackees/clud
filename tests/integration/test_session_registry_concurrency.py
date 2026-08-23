@@ -54,7 +54,7 @@ def _launch_clud(
         # `test_mock_agents.py::_run`).
         launch = Path(temp_dir) / clud.name
         copy_launcher(clud, launch)
-        args = [str(launch), "-p", "hello"]
+        args = [str(launch), "--no-daemon", "-p", "hello"]
         if extra_args:
             args.extend(extra_args)
         args.extend(["--", "--mock-sleep-ms", str(sleep_ms)])
@@ -75,14 +75,13 @@ def _registry_env(base: dict[str, str], tmp_path: Path, max_instances: int = 8) 
     user's real `%LOCALAPPDATA%\\clud\\sessions.redb`. The lockfile lives
     next to the redb file anyway, but pinning both is explicit.
 
-    Also disables the always-on clud daemon (`CLUD_NO_DAEMON=1`) so the
-    test doesn't leave a long-lived `clud __daemon` child wedged behind it.
+    Callers pass `--no-daemon` so the test doesn't leave a long-lived
+    `clud __daemon` child wedged behind it.
     """
     env = dict(base)
     env["CLUD_SESSION_DB"] = str(tmp_path / "sessions.redb")
     env["CLUD_SESSION_LOCK"] = str(tmp_path / "sessions.lock")
     env["CLUD_MAX_INSTANCES"] = str(max_instances)
-    env["CLUD_NO_DAEMON"] = "1"
     return env
 
 

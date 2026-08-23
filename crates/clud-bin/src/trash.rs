@@ -68,7 +68,7 @@ impl std::error::Error for TrashError {}
 
 /// Dispatch a `clud trash` invocation. Returns the process exit code.
 pub fn run(args: &Args, paths: &[PathBuf], cross_volume: bool) -> i32 {
-    if args.no_daemon || daemon_disabled_via_env() {
+    if args.no_daemon {
         eprintln!("error: trash operations require the clud daemon; remove --no-daemon");
         return 2;
     }
@@ -101,10 +101,19 @@ pub fn run(args: &Args, paths: &[PathBuf], cross_volume: bool) -> i32 {
                         );
                     }
                     Err(err) => {
-                        failed = true;
-                        eprintln!(
-                            "error: trashed {} -> {}, but failed to register GC row: {err}",
+                        // Registration is best-effort. `clud trash` is a
+                        // utility mode, so it never starts a daemon, and with
+                        // none running the row cannot be written. The file is
+                        // still quarantined, which is what the command
+                        // promises -- reporting failure here would tell the
+                        // caller the trashing itself did not happen.
+                        println!(
+                            "trashed {} -> {}",
                             record.origin_path,
+                            record.quarantined_path.display()
+                        );
+                        eprintln!(
+                            "[clud] warning: GC registration skipped for {}: {err}",
                             record.quarantined_path.display()
                         );
                     }
@@ -211,12 +220,6 @@ pub fn trash_one_path(
         quarantine_dir,
         quarantined_path,
     })
-}
-
-fn daemon_disabled_via_env() -> bool {
-    std::env::var_os(crate::daemon::ENV_NO_DAEMON)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 fn absolute_path(path: &Path) -> io::Result<PathBuf> {

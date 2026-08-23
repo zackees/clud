@@ -86,7 +86,13 @@ fn daemon_request_to_proto(
         DaemonRequest::Gc { payload } => Request::Gc(proto::GcRequest {
             payload_json: to_json_vec(payload)?,
         }),
-        DaemonRequest::Shutdown => Request::Shutdown(proto::ShutdownRequest {}),
+        DaemonRequest::Shutdown {
+            client_version,
+            expected_daemon,
+        } => Request::Shutdown(proto::ShutdownRequest {
+            client_version: client_version.clone(),
+            expected_daemon: expected_daemon.map(process_identity_to_proto),
+        }),
         DaemonRequest::ReapOrphans => Request::ReapOrphans(proto::ReapOrphansRequest {}),
         DaemonRequest::Metrics => Request::Metrics(proto::MetricsRequest {}),
         DaemonRequest::ProcSnapshot {
@@ -142,7 +148,10 @@ fn daemon_request_from_proto(proto: proto::ClientToDaemon) -> Result<DaemonReque
         Request::Gc(gc) => Ok(DaemonRequest::Gc {
             payload: from_json_slice::<GcOp>(&gc.payload_json)?,
         }),
-        Request::Shutdown(_) => Ok(DaemonRequest::Shutdown),
+        Request::Shutdown(request) => Ok(DaemonRequest::Shutdown {
+            client_version: request.client_version,
+            expected_daemon: request.expected_daemon.map(process_identity_from_proto),
+        }),
         Request::ReapOrphans(_) => Ok(DaemonRequest::ReapOrphans),
         Request::Metrics(_) => Ok(DaemonRequest::Metrics),
         Request::ProcSnapshot(request) => Ok(DaemonRequest::ProcSnapshot {
