@@ -206,6 +206,13 @@ impl ForegroundRuntime {
         self.bridge.is_some()
     }
 
+    /// How many turns the harness asked this launch's bridge to serve, or
+    /// `None` when the launch is not bridge-routed. Feeds
+    /// [`crate::launch_log::silent_bridge_reason`] (#998).
+    pub fn bridge_turn_requests(&self) -> Option<usize> {
+        self.bridge.as_ref().map(BridgeHandle::turn_requests)
+    }
+
     #[cfg(test)]
     pub fn socket_addr(&self) -> Option<SocketAddr> {
         self.bridge.as_ref().map(BridgeHandle::socket_addr)

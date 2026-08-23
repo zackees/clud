@@ -14,6 +14,7 @@ use crate::clud_settings;
 use crate::command;
 use crate::console_setup::enable_console_vt_input;
 use crate::cpu_banner;
+use crate::launch_log;
 use crate::loop_artifacts;
 use crate::loop_check::{
     check_loop_markers, check_loop_markers_with_output, loop_unconverged_exit,
@@ -400,6 +401,7 @@ pub fn run_plan_subprocess(
                         "[clud] iteration {} failed with exit code {}",
                         iter_num, last_exit
                     );
+                    note_silent_bridge(&runtime, last_exit);
                     return last_exit;
                 }
             }
@@ -432,7 +434,20 @@ pub fn run_plan_subprocess(
         return code;
     }
 
+    note_silent_bridge(&runtime, last_exit);
     last_exit
+}
+
+/// Classify a launch that is exiting non-zero having never asked the bridge for
+/// a turn (#998). No-op otherwise, so a reason a nearer failure already raised
+/// is never overwritten with silence -- the failures that call
+/// `record_failure_reason` today all `return` before reaching these sites.
+fn note_silent_bridge(runtime: &crate::foreground_runtime::ForegroundRuntime, exit_code: i32) {
+    if let Some(reason) =
+        launch_log::silent_bridge_reason(runtime.bridge_turn_requests(), exit_code)
+    {
+        launch_log::record_failure_reason(reason);
+    }
 }
 
 /// Outcome of one subprocess-mode iteration. Threaded through both the

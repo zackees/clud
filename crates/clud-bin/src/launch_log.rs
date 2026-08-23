@@ -73,6 +73,29 @@ pub fn record_failure_reason(reason: impl std::fmt::Display) {
     }
 }
 
+/// The reason for the #995 failure class: a bridge-routed launch that exited
+/// non-zero without ever asking the bridge for a turn.
+///
+/// #998 gave the record a reason for the failures clud raises itself, which
+/// leaves `None` for a child that died on its own. The wedge that motivated
+/// the issue is exactly that shape -- the bridge starts cleanly and the harness
+/// exits at model resolution -- so the record still explained nothing for the
+/// launch it was built for. clud cannot see that child's stderr, but the bridge
+/// can answer a narrower question: did the harness ever ask us for a turn? A
+/// launch that exits non-zero having asked for none failed before reaching the
+/// gateway, which is the fact #995 took a multi-log hunt to establish.
+///
+/// `None` on a clean exit, on a launch that is not bridge-routed, and when the
+/// harness did reach the bridge -- `bridge.jsonl` owns that story.
+pub fn silent_bridge_reason(turn_requests: Option<usize>, exit_code: i32) -> Option<String> {
+    if exit_code == 0 || turn_requests != Some(0) {
+        return None;
+    }
+    Some(format!(
+        "backend exited {exit_code} without sending the clud bridge a message request; it failed before reaching the gateway"
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchRecord {
     pub id: String,
@@ -324,6 +347,24 @@ mod tests {
         }"#;
         let record: LaunchRecord = serde_json::from_str(json).expect("legacy record");
         assert_eq!(record.failure_reason, None);
+    }
+
+    /// #995's launch: bridge-routed `claude --model clud-claude-codex-sol`,
+    /// exit 1 in 934 ms, no `bridge.jsonl` at all -- which is zero turn
+    /// requests. The failures clud raises itself never fired for it, so
+    /// without this classification the record is still a bare exit code.
+    #[test]
+    fn a_bridge_routed_exit_that_never_asked_for_a_turn_is_classified() {
+        let reason = silent_bridge_reason(Some(0), 1).expect("silence must be classified");
+        assert!(
+            reason.contains("without sending the clud bridge"),
+            "{reason}"
+        );
+        // A launch that did reach the bridge, one with no bridge at all, and a
+        // clean exit are each somebody else's story.
+        assert_eq!(silent_bridge_reason(Some(3), 1), None);
+        assert_eq!(silent_bridge_reason(None, 1), None);
+        assert_eq!(silent_bridge_reason(Some(0), 0), None);
     }
 
     /// The whole point of #998: an exit that clud caused carries the reason,
