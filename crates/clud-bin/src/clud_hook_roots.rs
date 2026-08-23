@@ -87,8 +87,10 @@ pub struct HookRoot {
     pub kind: RootKind,
 }
 
-/// The directory whose immediate children are `extern` roots by convention.
-pub const EXTERN_REPOS_DIR: &str = ".extern-repos";
+/// The legacy in-tree extern directory, re-exported for tests and callers that
+/// still name it. #986 moved checkouts beside the repo; `extern_root` owns
+/// where they actually live.
+pub const EXTERN_REPOS_DIR: &str = crate::extern_root::LEGACY_DIR_NAME;
 
 /// Env var carrying roots clud resolved at launch that the hook cannot
 /// rediscover on its own — `--add-dir` targets and
@@ -258,15 +260,20 @@ pub fn containment_paths(
 /// Immediate children of `<parent>/.extern-repos/`, which are `extern` roots
 /// by the GC-tracked convention.
 fn extern_children(parent: &Path) -> Vec<PathBuf> {
-    let dir = parent.join(EXTERN_REPOS_DIR);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| lexical_normalize(&entry.path()))
-        .collect();
+    let mut found = Vec::new();
+    // #986: beside the repo first, then the legacy in-tree location so
+    // checkouts users already have keep being recognized.
+    for dir in crate::extern_root::known_roots(parent) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        found.extend(
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| lexical_normalize(&entry.path())),
+        );
+    }
     found.sort();
     found
 }

@@ -152,7 +152,6 @@ const CLONE_EXTERN_REPOS_GUARD_RULE_ID: &str = "git-clone-outside-extern-repos";
 /// leaks handles until the whole host stops being able to start
 /// processes. See `find_filesystem_root_reason`.
 const FIND_FS_ROOT_RULE_ID: &str = "find-filesystem-root";
-const EXTERN_REPOS_DIR_NAME: &str = ".extern-repos";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandEvaluation {
@@ -1584,8 +1583,12 @@ fn extern_repos_violation_reason(
         return None;
     }
     let repo_root = repo_root?;
-    let extern_repos_dir = repo_root.join(EXTERN_REPOS_DIR_NAME);
-    if capture.path.starts_with(&extern_repos_dir) {
+    // #986: checkouts live beside the repo, not inside it. The legacy in-tree
+    // location stays allowed while users move existing ones. Compared on
+    // normalized keys rather than `starts_with`, which is component-wise and
+    // answers `false` for `C:\repo` versus `c:\Repo`.
+    let allowed = crate::extern_root::allowed_clone_roots(repo_root);
+    if crate::extern_root::is_within_any(&capture.path, &allowed) {
         return None;
     }
     if let Some(override_reason) = accepted_override_reason(CLONE_EXTERN_REPOS_GUARD_RULE_ID) {
@@ -1595,8 +1598,13 @@ fn extern_repos_violation_reason(
         ));
         return None;
     }
+    // #986: name the destination that would have been allowed, rather than a
+    // convention the agent has to translate into a path.
+    let destination = allowed
+        .first()
+        .map_or_else(String::new, |root| crate::path_norm::display_slash(root));
     Some(format!(
-        "git clone outside of .extern-repos is discouraged. Set {BAD_CMD_OVERRIDE_ENV}=\"{CLONE_EXTERN_REPOS_GUARD_RULE_ID}:<your reason for needing the raw command>\" to do it anyway, otherwise use .extern-repos/**."
+        "git clone outside this repo's extern directory is discouraged: cross-repo checkouts belong beside the repo, at {destination}/<name>, so clud can reclaim them and so linters and build scripts pointed at the repo never walk into them. Set {BAD_CMD_OVERRIDE_ENV}=\"{CLONE_EXTERN_REPOS_GUARD_RULE_ID}:<your reason for needing the raw command>\" to clone elsewhere anyway."
     ))
 }
 
@@ -4064,8 +4072,11 @@ mod tests {
             );
             let reason = evaluation
                 .reason
-                .expect("clone outside .extern-repos should be denied");
-            assert!(reason.contains(".extern-repos"));
+                .expect("a clone outside the extern directory should be denied");
+            // #986: the message names the destination that would have been
+            // allowed, rather than a convention the agent has to translate.
+            assert!(reason.contains("repo-extern"), "{reason}");
+            assert!(reason.contains("beside the repo"), "{reason}");
             assert!(reason.contains(BAD_CMD_OVERRIDE_ENV));
             assert!(reason.contains(CLONE_EXTERN_REPOS_GUARD_RULE_ID));
             assert!(

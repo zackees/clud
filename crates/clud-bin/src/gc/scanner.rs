@@ -100,10 +100,23 @@ pub(crate) fn watch_roots_for_repo(root: &Path) -> Vec<GcWatchRoot> {
         },
         GcWatchRoot {
             kind: EXTERN_REPO_KIND.to_string(),
-            watch_dir: root.join(".extern-repos").to_string_lossy().to_string(),
+            watch_dir: crate::extern_root::legacy_for(root)
+                .to_string_lossy()
+                .to_string(),
             repo_root: Some(repo_root.clone()),
         },
     ];
+    // #986: checkouts now live beside the repo. This is a separate watch root
+    // rather than a widening of the sibling-clone one below, because that
+    // scanner inserts immediate children of the *parent* directory, while a
+    // checkout at `<repo>-extern/dep` is a grandchild of it.
+    if let Some(sibling) = crate::extern_root::sibling_for(root) {
+        roots.push(GcWatchRoot {
+            kind: EXTERN_REPO_KIND.to_string(),
+            watch_dir: sibling.to_string_lossy().to_string(),
+            repo_root: Some(repo_root.clone()),
+        });
+    }
     if let Some(parent) = root.parent() {
         roots.push(GcWatchRoot {
             kind: SIBLING_CLONE_KIND.to_string(),
@@ -119,10 +132,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn watch_roots_derivation_matches_legacy_scanner_roots() {
+    fn watch_roots_cover_worktrees_both_extern_locations_and_siblings() {
         let root = std::path::Path::new("C:/repo");
         let roots = watch_roots_for_repo(root);
-        assert_eq!(roots.len(), 3);
+        assert_eq!(roots.len(), 4);
         assert_eq!(roots[0].kind, WORKTREE_KIND);
         assert_eq!(
             std::path::Path::new(&roots[0].watch_dir),
@@ -131,12 +144,36 @@ mod tests {
         assert_eq!(roots[1].kind, EXTERN_REPO_KIND);
         assert_eq!(
             std::path::Path::new(&roots[1].watch_dir),
-            root.join(".extern-repos")
+            crate::extern_root::legacy_for(root),
+            "the in-tree location stays watched while users move checkouts"
         );
-        assert_eq!(roots[2].kind, SIBLING_CLONE_KIND);
+        assert_eq!(roots[2].kind, EXTERN_REPO_KIND);
         assert_eq!(
             std::path::Path::new(&roots[2].watch_dir),
+            crate::extern_root::sibling_for(root).expect("derivable"),
+            "#986: checkouts beside the repo are tracked too"
+        );
+        assert_eq!(roots[3].kind, SIBLING_CLONE_KIND);
+        assert_eq!(
+            std::path::Path::new(&roots[3].watch_dir),
             root.parent().expect("test repository has a parent")
+        );
+    }
+
+    #[test]
+    fn a_repo_with_no_parent_still_yields_its_in_tree_roots() {
+        // No parent means no sibling to watch and no sibling-clone root, but
+        // the worktree and legacy extern roots are still derivable.
+        let root = std::path::Path::new("/");
+        let roots = watch_roots_for_repo(root);
+        assert!(roots.iter().all(|entry| entry.kind != SIBLING_CLONE_KIND));
+        assert_eq!(
+            roots
+                .iter()
+                .filter(|entry| entry.kind == EXTERN_REPO_KIND)
+                .count(),
+            1,
+            "only the in-tree location survives"
         );
     }
 }

@@ -38,8 +38,11 @@ pub fn run_reconcile(registry: &Registry) -> Result<usize, GcError> {
 pub fn reconcile_repo_root(registry: &Registry, main_root: &Path) -> Result<usize, GcError> {
     let watch_dir = main_root.join(".claude").join("worktrees");
     let worktree_res = reconcile_dir(registry, &watch_dir, Some(main_root))?;
-    let extern_res =
-        reconcile_extern_repos_dir(registry, &main_root.join(".extern-repos"), Some(main_root))?;
+    let extern_res = reconcile_extern_repos_dir(
+        registry,
+        &crate::extern_root::legacy_for(main_root),
+        Some(main_root),
+    )?;
     let sibling_res = reconcile_sibling_clones_dir(registry, main_root)?;
     Ok(worktree_res.inserted + extern_res.inserted + sibling_res.inserted)
 }
