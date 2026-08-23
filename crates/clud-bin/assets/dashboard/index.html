@@ -97,6 +97,8 @@
     .badge.gone { background: color-mix(in srgb, var(--gone) 18%, transparent); color: var(--gone); }
     .badge.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
     .badge.kind { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); margin-right: 6px; }
+    /* #998: why clud ended the launch, when it knows. Clamped -- the field is capped at 300 chars and the column is narrow. */
+    .reason { margin-top: 4px; font-size: 11px; color: var(--gone); max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .button {
       background: var(--accent);
       color: var(--accent-fg);
@@ -382,7 +384,7 @@
           <td><span class="badge kind">${esc(s.kind)}</span>${s.launch_mode ? `<span class="badge kind">${esc(s.launch_mode)}</span>` : ''}</td>
           <td>${s.live
             ? '<span class="badge live">live</span>'
-            : `<span class="badge gone">exit ${esc(s.exit_code ?? '?')}</span>`}</td>
+            : `<span class="badge gone">exit ${esc(s.exit_code ?? '?')}</span>${s.failure_reason ? `<div class="reason" title="${esc(s.failure_reason)}">${esc(s.failure_reason)}</div>` : ''}`}</td>
           <td class="metric" title="${esc(fmtDateTime(s.created_at))}">${esc(fmtAge(s.created_at))}</td>
           <td class="metric">${esc(fmtDateTime(s.exited_at))}</td>
           <td class="metric">${esc(fmtMs(s.duration_ms))}</td>

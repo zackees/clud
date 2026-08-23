@@ -451,6 +451,11 @@ pub struct SessionView {
     pub repeat_next_run_at: Option<u64>,
     pub repeat_running: bool,
     pub exit_code: Option<i32>,
+    /// Mirrors `LaunchRecord::failure_reason` (#998): why clud itself ended the
+    /// launch, so the dashboard can say more than `exit 1`. Always `None` for
+    /// daemon-hosted sessions, which do not carry one.
+    #[serde(default)]
+    pub failure_reason: Option<String>,
     pub worker_port: u16,
     pub live: bool,
     pub ctrl_c: Option<CtrlCProfileView>,

@@ -24,24 +24,52 @@ const MAX_RECORDS: usize = 200;
 /// dashboard reads for every launch.
 const MAX_FAILURE_REASON_CHARS: usize = 300;
 
-/// Why the launch this process owns is failing, set before the exit code is
-/// known and consumed by [`finish_launch`].
+/// The launch whose failures this process is currently recording, plus the
+/// reason if one has been raised.
 ///
-/// A process-global slot rather than a threaded-through return value: the
-/// runners hand `main` an `i32` and nothing else, and the failure is raised
-/// several frames below the one holding the [`LaunchLogHandle`]. Mirrors
-/// `ctrl_c_track`'s `HANDOFF_OUTCOME`, which records an outcome for the same
-/// reason.
-static FAILURE_REASON: Mutex<Option<String>> = Mutex::new(None);
+/// A process-global slot rather than a threaded-through return value for one
+/// narrow reason: the runners return a bare `i32`, so carrying the reason out
+/// of them means changing two public signatures and every call site of each.
+/// That is the whole argument -- the raise is only one frame below the frame
+/// holding the [`LaunchLogHandle`], since `main` calls `run_plan_*` directly.
+/// It is a weaker case than `ctrl_c_track`'s `HANDOFF_OUTCOME`, which is a
+/// global because a signal handler genuinely has no call path back. Do not
+/// cite this as precedent for a global reaching across a deep or re-entrant
+/// call graph.
+///
+/// Keyed by launch id, which is what keeps the convenience safe: a reason left
+/// behind by an aborted [`finish_launch`] -- a missing or corrupt record file
+/// returns early, before the take -- cannot attach to some later record. One
+/// launch per process makes that unreachable today, but the invariant is
+/// implicit and the daemon is the obvious future second caller.
+static FAILURE_REASON: Mutex<Option<PendingFailure>> = Mutex::new(None);
+
+#[derive(Debug)]
+struct PendingFailure {
+    launch_id: String,
+    reason: Option<String>,
+}
+
+fn failure_slot() -> std::sync::MutexGuard<'static, Option<PendingFailure>> {
+    // The payload is a `String` with no invariant to protect, and a poisoned
+    // lock would otherwise discard the reason in exactly the case -- another
+    // thread panicked -- where it is most worth having.
+    FAILURE_REASON
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Record why the current launch is about to fail.
 ///
-/// Callers pass the same text the user sees on stderr, so the record and the
-/// terminal agree. Bounding and scrubbing happen in [`finish_launch`], not
-/// here, so neither can be bypassed by a future caller.
+/// Callers pass the text the user sees on stderr, so the record and the
+/// terminal agree -- modulo the whitespace collapse in
+/// [`sanitize_failure_reason`], which folds a multi-line error onto one line.
+/// Bounding and scrubbing happen in [`finish_launch`], not here, so neither
+/// can be bypassed by a future caller. A no-op when no launch is being
+/// recorded: clud still runs when the state directory is unavailable.
 pub fn record_failure_reason(reason: impl std::fmt::Display) {
-    if let Ok(mut slot) = FAILURE_REASON.lock() {
-        *slot = Some(reason.to_string());
+    if let Some(pending) = failure_slot().as_mut() {
+        pending.reason = Some(reason.to_string());
     }
 }
 
@@ -115,6 +143,10 @@ pub fn start_launch(
         failure_reason: None,
     };
     write_record(state_dir, &record)?;
+    *failure_slot() = Some(PendingFailure {
+        launch_id: id.clone(),
+        reason: None,
+    });
     prune_old_records(state_dir);
     Ok(LaunchLogHandle {
         state_dir: state_dir.to_path_buf(),
@@ -129,27 +161,41 @@ pub fn finish_launch(state_dir: &Path, id: &str, exit_code: i32) -> io::Result<(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     record.exited_at_ms = Some(unix_millis_now());
     record.exit_code = Some(exit_code);
-    record.failure_reason = FAILURE_REASON
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-        .map(|reason| sanitize_failure_reason(&reason));
+    record.failure_reason = take_failure_reason(id).map(|reason| sanitize_failure_reason(&reason));
     write_record(state_dir, &record)
+}
+
+/// Consume the pending reason, but only if it was raised for `id`.
+fn take_failure_reason(id: &str) -> Option<String> {
+    let mut slot = failure_slot();
+    if slot.as_ref().is_some_and(|pending| pending.launch_id == id) {
+        slot.take().and_then(|pending| pending.reason)
+    } else {
+        None
+    }
 }
 
 /// Scrub then bound, in that order -- bounding first could bisect a word and
 /// hide a marker from the scrub.
 ///
 /// The reasons recorded today come from `BridgeError`'s `Display`, which is
-/// documented to carry no endpoint or token text, so the scrub is a backstop
-/// against a future message that interpolates one. It covers exactly the two
-/// values #995 named: a bridge bearer token and an `ANTHROPIC_*` value.
+/// documented to carry no endpoint or token text, so this is a backstop
+/// against a future message that interpolates one, not the primary control.
+/// It covers the *spellings* #995 named -- a bearer token and an
+/// `ANTHROPIC_*` value -- and makes no claim to catch every shape those two
+/// values could take.
 fn sanitize_failure_reason(reason: &str) -> String {
     let mut words: Vec<String> = Vec::new();
     let mut after_bearer = false;
     for word in reason.split_whitespace() {
-        let secret = after_bearer || word.starts_with("sk-") || word.contains("ANTHROPIC_");
-        after_bearer = word.trim_end_matches(':').eq_ignore_ascii_case("bearer");
+        let lower = word.to_ascii_lowercase();
+        let core = lower.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        // A bare `bearer` flags the *next* word; `bearer=tok` carries the
+        // token in the same word, so that word goes whole.
+        let glued_bearer = core != "bearer" && core.contains("bearer");
+        let secret =
+            after_bearer || word.starts_with("sk-") || lower.contains("anthropic_") || glued_bearer;
+        after_bearer = core == "bearer";
         words.push(if secret {
             "[redacted]".to_string()
         } else {
@@ -304,6 +350,10 @@ mod tests {
             failure_reason: None,
         };
         write_record(dir.path(), &record).unwrap();
+        *failure_slot() = Some(PendingFailure {
+            launch_id: record.id.clone(),
+            reason: None,
+        });
 
         record_failure_reason(format_args!(
             "failed to start provider bridge: Bearer tok-1234 ANTHROPIC_API_KEY=secret sk-ant-abc {}",
@@ -324,5 +374,17 @@ mod tests {
         // A later launch that exits cleanly must not inherit the reason.
         finish_launch(dir.path(), &record.id, 0).unwrap();
         assert_eq!(read_recent(dir.path()).remove(0).failure_reason, None);
+    }
+
+    /// Scrub edges, exercised through the pure function so nothing races the
+    /// global slot the test above owns.
+    #[test]
+    fn sanitize_redacts_glued_and_lowercased_secret_spellings() {
+        assert_eq!(
+            sanitize_failure_reason("bearer=tok-1234 anthropic_api_key=v ok"),
+            "[redacted] [redacted] ok"
+        );
+        // A word that merely contains a marker substring survives.
+        assert_eq!(sanitize_failure_reason("task-list risk"), "task-list risk");
     }
 }

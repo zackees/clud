@@ -151,6 +151,7 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
             repeat_next_run_at: snap.repeat_next_run_at,
             repeat_running: snap.repeat_running,
             exit_code: snap.exit_code,
+            failure_reason: None,
             worker_port: snap.worker_port,
             live,
             ctrl_c: snap.ctrl_c.map(ctrl_c_profile_view),
@@ -206,6 +207,7 @@ fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<L
             repeat_next_run_at: None,
             repeat_running: false,
             exit_code: None,
+            failure_reason: None,
             worker_port: 0,
             // The registry already filtered by OS PID liveness probe.
             live: true,
@@ -248,6 +250,7 @@ fn merge_launch_records(sessions: &mut Vec<SessionView>, records: Vec<LaunchReco
             repeat_next_run_at: None,
             repeat_running: false,
             exit_code: record.exit_code,
+            failure_reason: record.failure_reason,
             worker_port: 0,
             live,
             ctrl_c: None,
