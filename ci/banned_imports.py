@@ -212,6 +212,31 @@ def scan_platform_tree_kills(path: Path) -> list[tuple[int, str]]:
     return violations
 
 
+#: Directory components whose Python files are none of this repo's business:
+#: virtualenvs, build output, caches, agent worktrees, and checkouts of other
+#: people's repositories.
+#:
+#: Spell these exactly as they appear on disk. `Path.parts` yields each
+#: component verbatim, so a leading dot is part of the name -- `extern-repos`
+#: does not match `.extern-repos`, and an entry that never matches is an
+#: exclusion that silently does nothing.
+EXCLUDED_PYTHON_PARTS = frozenset(
+    {
+        ".git",
+        ".venv",
+        ".extern-repos",
+        "target",
+        "__pycache__",
+        "worktrees",
+    }
+)
+
+
+def is_excluded_python_path(relative: Path) -> bool:
+    """Whether a repo-relative path lies under an excluded directory."""
+    return any(part in EXCLUDED_PYTHON_PARTS for part in relative.parts)
+
+
 def scan_python_file(path: Path) -> list[tuple[int, str, str]]:
     """Reject Python's raw subprocess module in product tooling."""
     try:
@@ -338,11 +363,10 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
             total_violations += 1
 
-    excluded_python_parts = {".git", ".venv", "target", "__pycache__", "worktrees", "extern-repos"}
     python_files = sorted(
         path
         for path in ROOT.rglob("*.py")
-        if not any(part in excluded_python_parts for part in path.relative_to(ROOT).parts)
+        if not is_excluded_python_path(path.relative_to(ROOT))
     )
     for path in python_files:
         for line_num, line, reason in scan_python_file(path):
