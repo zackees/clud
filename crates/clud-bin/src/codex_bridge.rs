@@ -1991,9 +1991,9 @@ fn serve_codex_discovery_messages(
         .map_or((model, None), |(base, effort)| (base, Some(effort)));
     // A persisted or continued session can name a Codex row by wire ID or CLI
     // alias instead of its discovery ID, exactly as on the unified route.
-    let discovered = provider_catalog::model_by_discovery_id(base)
-        .or_else(|| provider_catalog::non_claude_model_by_any_id(base))
-        .filter(|entry| entry.provider == ModelProvider::Codex);
+    let known = provider_catalog::model_by_discovery_id(base)
+        .or_else(|| provider_catalog::non_claude_model_by_any_id(base));
+    let discovered = known.filter(|entry| entry.provider == ModelProvider::Codex);
     // Claude Code merges this gateway's rows with its own built-in catalog, so
     // IDs the gateway never advertised do arrive here. Only a `claude*` ID is
     // caller-owned -- `codex_translate::resolve_selection` maps those onto the
@@ -2006,11 +2006,24 @@ fn serve_codex_discovery_messages(
             .filter_map(|entry| entry.discovery_id)
             .collect::<Vec<_>>()
             .join(", ");
+        // Two different failures land here and they need different answers
+        // (#1000): a model clud has never heard of is the caller's to fix,
+        // while a model clud does know but this bridge does not serve is a
+        // clud-side limit -- saying so stops the user debugging their own
+        // model choice.
+        let message = if known.is_some() {
+            format!(
+                "clud knows the model '{base}', but this Codex gateway is not \
+                 serving it; available IDs: {ids}"
+            )
+        } else {
+            format!("unknown clud Codex model '{base}'; available IDs: {ids}")
+        };
         let body = serde_json::json!({
             "type": "error",
             "error": {
                 "type": "invalid_request_error",
-                "message": format!("unknown clud Codex model; available IDs: {ids}"),
+                "message": message,
             }
         })
         .to_string();
@@ -3555,6 +3568,10 @@ Connection: close
     /// other ID the bridge cannot resolve must be refused here rather than
     /// translated to the Codex upstream, which would answer with an error
     /// about a model the user never knowingly sent there.
+    ///
+    /// Issue #1000: the two refusals must not read alike. A model clud has
+    /// never heard of is the caller's to fix; a model clud does know but this
+    /// gateway does not serve is a clud-side limit and must say so.
     #[test]
     fn an_unresolvable_non_claude_model_is_refused_before_the_translator() {
         let upstream = FakeResponses::start();
@@ -3566,6 +3583,28 @@ Connection: close
         );
         assert_eq!(status(&response), 400, "{response}");
         assert!(response.contains("invalid_request_error"), "{response}");
+        assert!(
+            response.contains("unknown clud Codex model 'gpt-6-nonexistent'"),
+            "{response}"
+        );
+        assert!(!response.contains("clud knows the model"), "{response}");
+
+        // Case 2: a real catalog row, served by another provider's route.
+        let known = PROBE_BODY.replace("claude-x", "clud-claude-kimi-k3");
+        let refused = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &known),
+        );
+        assert_eq!(status(&refused), 400, "{refused}");
+        assert!(
+            refused.contains("clud knows the model 'clud-claude-kimi-k3'"),
+            "{refused}"
+        );
+        assert!(!refused.contains("unknown clud Codex model"), "{refused}");
+        // Both refusals still say what this gateway can serve.
+        for body in [&response, &refused] {
+            assert!(body.contains("clud-claude-codex-terra"), "{body}");
+        }
         assert!(
             upstream.requests().is_empty(),
             "a refused model must not reach the Codex upstream"
@@ -5730,9 +5769,9 @@ Connection: close
     ///
     /// The premise this rests on is that the harness forwards the model
     /// string unvalidated behind a custom `ANTHROPIC_BASE_URL`; this test
-    /// pins our half of that contract — whatever arrives in the request is
-    /// parsed, expanded, and sent, with the suffix landing in
-    /// `reasoning.effort` rather than in the model id.
+    /// pins our half of that contract — a catalog-known id (anything else is
+    /// refused up front since #1005) is parsed, expanded, and sent, with the
+    /// suffix landing in `reasoning.effort` rather than in the model id.
     #[test]
     fn a_request_selecting_a_model_and_effort_reaches_upstream_expanded() {
         let upstream = FakeResponses::start();
@@ -6932,8 +6971,14 @@ Connection: close
     }
 
     /// A typo must not be silently billed as the default model.
+    ///
+    /// Since #1005 the bridge refuses `tera` itself, so the translator's
+    /// `SelectionError::UnknownAlias` text is no longer reachable from this
+    /// route -- `codex_model::tests::an_unknown_alias_names_the_valid_ones`
+    /// keeps that assertion. What this test pins is the bridge's own case-1
+    /// wording: the typo is named, and the servable IDs are listed.
     #[test]
-    fn an_unknown_alias_in_a_request_is_a_400_naming_the_valid_names() {
+    fn a_typo_of_a_model_alias_is_a_400_naming_the_servable_ids() {
         let upstream = FakeResponses::start();
         let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
         let response = request(
@@ -6946,7 +6991,12 @@ Connection: close
             ),
         );
         assert_eq!(status(&response), 400);
-        assert!(response.contains("terra"), "{response}");
+        assert!(
+            response.contains("unknown clud Codex model 'tera'"),
+            "{response}"
+        );
+        assert!(response.contains("clud-claude-codex-terra"), "{response}");
+        assert!(!response.contains("clud knows the model"), "{response}");
         assert!(
             upstream.requests().is_empty(),
             "a rejected selection must not reach upstream"
