@@ -81,10 +81,49 @@ impl RootKind {
     }
 }
 
+/// Whether running a root's *own* hooks needs an explicit grant.
+///
+/// Deliberately a separate axis from [`RootKind`], which answers a different
+/// question. Phase 3b registers user-granted `--add-dir` directories as
+/// `Extern` because the parent's guards must not follow the agent into them —
+/// but the user named those at launch, while an `.extern-repos/` checkout was
+/// created by the agent. Collapsing the two would either prompt for
+/// directories the user already granted, or run arbitrary cloned code without
+/// asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootTrust {
+    /// The parent itself, or a root whose existence *is* the consent: a
+    /// declared child, or a directory named on the command line.
+    Implicit,
+    /// A checkout the agent created. Running its hooks is executing code
+    /// nobody vetted, so it waits for an explicit allow.
+    RequiresGrant,
+}
+
+impl RootTrust {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Implicit => "implicit",
+            Self::RequiresGrant => "requires-grant",
+        }
+    }
+
+    #[must_use]
+    pub fn from_label(raw: &str) -> Option<Self> {
+        match raw {
+            "implicit" => Some(Self::Implicit),
+            "requires-grant" => Some(Self::RequiresGrant),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookRoot {
     pub path: PathBuf,
     pub kind: RootKind,
+    pub trust: RootTrust,
 }
 
 /// The directory whose immediate children are `extern` roots by convention.
@@ -113,12 +152,15 @@ impl HookRoots {
         let mut roots = vec![HookRoot {
             path: lexical_normalize(parent),
             kind: RootKind::Parent,
+            trust: RootTrust::Implicit,
         }];
 
         for path in extern_children(parent) {
             roots.push(HookRoot {
                 path,
                 kind: RootKind::Extern,
+                // The agent cloned these; nobody vetted what is in them.
+                trust: RootTrust::RequiresGrant,
             });
         }
 
@@ -127,6 +169,8 @@ impl HookRoots {
             roots.push(HookRoot {
                 path,
                 kind: RootKind::Child,
+                // Declaring it in a versioned settings file is the consent.
+                trust: RootTrust::Implicit,
             });
         }
 
@@ -191,6 +235,7 @@ impl HookRoots {
             .map(|root| {
                 serde_json::json!({
                     "kind": root.kind.as_str(),
+                    "trust": root.trust.as_str(),
                     "path": root.path.to_string_lossy(),
                 })
             })
@@ -284,9 +329,17 @@ fn parse_env_roots(encoded: &str) -> Vec<HookRoot> {
                 .get("kind")
                 .and_then(Value::as_str)
                 .and_then(RootKind::from_label)?;
+            // An entry that omits trust predates the field; treat it as
+            // needing a grant, which is the safe direction.
+            let trust = entry
+                .get("trust")
+                .and_then(Value::as_str)
+                .and_then(RootTrust::from_label)
+                .unwrap_or(RootTrust::RequiresGrant);
             Some(HookRoot {
                 path: lexical_normalize(Path::new(path)),
                 kind,
+                trust,
             })
         })
         .collect()

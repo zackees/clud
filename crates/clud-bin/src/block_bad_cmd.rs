@@ -440,16 +440,19 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
 /// A call that touches an `extern` root is the case this exists for: the
 /// parent's guards have no business running against a foreign checkout, and
 /// firing them there is the #841 ENOENT wedge.
-fn parent_hooks_apply(repo_root: &Path, payload: &HookPayloadView) -> bool {
+fn registered_roots(repo_root: &Path) -> crate::clud_hook_roots::HookRoots {
     let config =
         crate::repo_clud_config::discover_effective_clud_config(repo_root).unwrap_or_default();
     let env_roots = std::env::var(crate::clud_hook_roots::HOOK_ROOTS_ENV).ok();
-    let roots = crate::clud_hook_roots::HookRoots::resolve(
+    crate::clud_hook_roots::HookRoots::resolve(
         repo_root,
         &config.hook_roots.children,
         env_roots.as_deref(),
-    );
+    )
+}
 
+/// What this call touches, resolved from its inputs rather than its cwd.
+fn touched_paths(payload: &HookPayloadView) -> Vec<PathBuf> {
     let named = crate::clud_hook_roots::tool_input_paths(payload.tool_input.as_ref(), &payload.cwd);
     let cd_targets = if payload.command.is_empty() {
         Vec::new()
@@ -461,12 +464,7 @@ fn parent_hooks_apply(repo_root: &Path, payload: &HookPayloadView) -> bool {
             home_dir().as_deref(),
         )
     };
-
-    let touched = crate::clud_hook_roots::containment_paths(named, cd_targets, &payload.cwd);
-
-    // Any touched path the parent owns is enough: a call that spans repos
-    // still deserves the parent's guards for the parent's own files.
-    touched.iter().any(|path| roots.parent_hooks_apply_to(path))
+    crate::clud_hook_roots::containment_paths(named, cd_targets, &payload.cwd)
 }
 
 /// Whether *this* invocation is the one that should run declared hooks.
@@ -494,6 +492,15 @@ struct DeclaredHookDenial {
     log_messages: Vec<String>,
 }
 
+impl DeclaredHookDenial {
+    /// Carry forward what earlier layers logged before this one denied.
+    fn with_log(mut self, mut earlier: Vec<String>) -> Self {
+        earlier.append(&mut self.log_messages);
+        self.log_messages = earlier;
+        self
+    }
+}
+
 /// Run the repo's `.clud/hooks.json` hooks for `event` and report a block.
 ///
 /// Costs one `is_file` probe when a repo declares nothing, which is every
@@ -503,24 +510,109 @@ fn declared_hook_denial(
     payload: &HookPayloadView,
     raw_payload: &str,
 ) -> Option<DeclaredHookDenial> {
-    let repo_root = crate::clud_hooks_run::resolve_root(&payload.cwd)?;
-    if !parent_hooks_apply(&repo_root, payload) {
-        return None;
-    }
-    let hooks = crate::clud_hooks::discover(&repo_root)?;
+    let parent_root = crate::clud_hooks_run::resolve_root(&payload.cwd)?;
+    let roots = registered_roots(&parent_root);
+    let touched = touched_paths(payload);
     let tool_name = (!payload.tool_name.is_empty() && payload.tool_name != "?")
         .then_some(payload.tool_name.as_str());
+
+    let mut log_messages = Vec::new();
+
+    // #966 §6 layering: clud policy has already run; then the parent's hooks
+    // for anything it owns; then the contained repo's own. A deny from any
+    // layer denies, and the first one wins so its message is the one the
+    // model sees.
+    if touched
+        .iter()
+        .any(|path| roots.parent_hooks_apply_to(path))
+    {
+        if let Some(hooks) = crate::clud_hooks::discover(&parent_root) {
+            match run_root_hooks(&hooks, event, tool_name, &parent_root, raw_payload) {
+                RootHookOutcome::Denied(denial) => return Some(denial.with_log(log_messages)),
+                RootHookOutcome::Ran(messages) => log_messages.extend(messages),
+            }
+        }
+    }
+
+    for root in contained_roots(&roots, &touched) {
+        if root.kind == crate::clud_hook_roots::RootKind::Parent {
+            continue;
+        }
+        match crate::clud_hook_trust::decide(&parent_root, &root) {
+            crate::clud_hook_trust::TrustDecision::NeedsGrant => {
+                // Only worth mentioning if it actually has hooks to hold back.
+                if root_hooks(&root.path).is_some() {
+                    crate::clud_hook_trust::notify_once(&parent_root, &root);
+                    log_messages.push(format!(
+                        "clud_hook_root_untrusted path={:?}",
+                        root.path
+                    ));
+                }
+                continue;
+            }
+            crate::clud_hook_trust::TrustDecision::Allowed => {}
+        }
+        let Some(hooks) = root_hooks(&root.path) else {
+            continue;
+        };
+        match run_root_hooks(&hooks, event, tool_name, &root.path, raw_payload) {
+            RootHookOutcome::Denied(denial) => return Some(denial.with_log(log_messages)),
+            RootHookOutcome::Ran(messages) => log_messages.extend(messages),
+        }
+    }
+
+    None
+}
+
+/// A repo's hooks: its own declaration if it has opted in, otherwise whatever
+/// it declared to the harness — which the harness itself never loads for a
+/// nested repo, so clud is the only thing that can run them.
+fn root_hooks(root: &Path) -> Option<crate::clud_hooks::CludHooks> {
+    crate::clud_hooks::discover(root).or_else(|| crate::clud_hooks::discover_frontend(root))
+}
+
+enum RootHookOutcome {
+    Denied(DeclaredHookDenial),
+    Ran(Vec<String>),
+}
+
+fn run_root_hooks(
+    hooks: &crate::clud_hooks::CludHooks,
+    event: &str,
+    tool_name: Option<&str>,
+    root: &Path,
+    raw_payload: &str,
+) -> RootHookOutcome {
     let entries = hooks.matching(event, tool_name);
     if entries.is_empty() {
-        return None;
+        return RootHookOutcome::Ran(Vec::new());
     }
-    let outcome = crate::clud_hooks_run::run_hooks(&entries, &repo_root, raw_payload);
-    let reason = outcome.deny_reason?;
-    Some(DeclaredHookDenial {
-        reason,
-        stdout: outcome.deny_stdout,
-        log_messages: outcome.log_messages,
-    })
+    let outcome = crate::clud_hooks_run::run_hooks(&entries, root, raw_payload);
+    match outcome.deny_reason {
+        Some(reason) => RootHookOutcome::Denied(DeclaredHookDenial {
+            reason,
+            stdout: outcome.deny_stdout,
+            log_messages: outcome.log_messages,
+        }),
+        None => RootHookOutcome::Ran(outcome.log_messages),
+    }
+}
+
+/// Every registered root containing one of `touched`, most specific first and
+/// without repeats.
+fn contained_roots(
+    roots: &crate::clud_hook_roots::HookRoots,
+    touched: &[PathBuf],
+) -> Vec<crate::clud_hook_roots::HookRoot> {
+    let mut found: Vec<crate::clud_hook_roots::HookRoot> = Vec::new();
+    for path in touched {
+        if let Some(root) = roots.containing(path) {
+            if !found.iter().any(|seen| seen.path == root.path) {
+                found.push(root.clone());
+            }
+        }
+    }
+    found
 }
 
 /// Resolve `bash.block_cd` and decide whether this command's

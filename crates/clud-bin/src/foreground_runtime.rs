@@ -778,6 +778,9 @@ fn hook_roots_env_value(plan: &LaunchPlan) -> Option<(String, String)> {
         .map(|path| {
             serde_json::json!({
                 "kind": crate::clud_hook_roots::RootKind::Extern.as_str(),
+                // The user named these on the command line or in their own
+                // settings; that is the consent an agent-made clone lacks.
+                "trust": crate::clud_hook_roots::RootTrust::Implicit.as_str(),
                 "path": path.to_string_lossy(),
             })
         })

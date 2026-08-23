@@ -179,6 +179,98 @@ pub fn discover(repo_root: &Path) -> Option<CludHooks> {
     }
 }
 
+/// The hooks a repo declares to the *harness*, read as if they had been
+/// declared to clud.
+///
+/// Sub-repos have not opted into `.clud/hooks.json` — they are somebody
+/// else's repo, and asking them to migrate before clud will run their guards
+/// would mean the feature does nothing for the case it was built for. The
+/// harness never loads a nested repo's settings at all, so there is no
+/// double-fire risk here: clud is the only thing that can run these.
+#[must_use]
+pub fn discover_frontend(repo_root: &Path) -> Option<CludHooks> {
+    for relative in [
+        [".claude", "settings.json"],
+        [".claude", "settings.local.json"],
+    ] {
+        let mut path = repo_root.to_path_buf();
+        for segment in relative {
+            path.push(segment);
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(hooks) = from_frontend_document(&document) else {
+            continue;
+        };
+        if !hooks.is_empty() {
+            let mut hooks = hooks;
+            hooks.source = Some(path);
+            return Some(hooks);
+        }
+    }
+    None
+}
+
+/// Convert a frontend settings document's `hooks` section.
+///
+/// The frontend nests one level deeper than clud's own schema — each matcher
+/// group holds a list of handlers — and only `type: "command"` handlers are
+/// runnable here; an `http` handler is the harness's own business.
+#[must_use]
+pub fn from_frontend_document(document: &Value) -> Option<CludHooks> {
+    let events = document.get("hooks")?.as_object()?;
+    let mut parsed = CludHooks::default();
+    for (event, groups) in events {
+        let Some(groups) = groups.as_array() else {
+            continue;
+        };
+        let mut collected = Vec::new();
+        for group in groups {
+            let matcher = group
+                .get("matcher")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|matcher| !matcher.is_empty())
+                .map(ToOwned::to_owned);
+            let Some(handlers) = group.get("hooks").and_then(Value::as_array) else {
+                continue;
+            };
+            for handler in handlers {
+                let is_command = handler
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_none_or(|kind| kind == "command");
+                if !is_command {
+                    continue;
+                }
+                let Some(command) = handler
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|command| !command.is_empty())
+                else {
+                    continue;
+                };
+                collected.push(HookEntry {
+                    matcher: matcher.clone(),
+                    command: command.to_string(),
+                    timeout_secs: handler
+                        .get("timeout")
+                        .and_then(Value::as_u64)
+                        .filter(|seconds| *seconds > 0)
+                        .unwrap_or(DEFAULT_TIMEOUT_SECS),
+                });
+            }
+        }
+        parsed.events.insert(event.clone(), collected);
+    }
+    Some(parsed)
+}
+
 /// Parse the declaration text. Returns `Err` only when the document itself is
 /// not usable JSON; individual bad entries are skipped with a warning.
 pub fn parse(text: &str) -> Result<CludHooks, String> {
