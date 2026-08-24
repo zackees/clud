@@ -301,6 +301,33 @@ def test_debuginfo_is_staged_outside_dist_so_it_cannot_reach_pypi(
     assert f"clud-{target}.dwp (5 bytes)" in capsys.readouterr().out
 
 
+def test_debuginfo_is_found_in_deps_when_cargo_does_not_uplift_it(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """2.7.5 shipped with no sidecar because only the uplifted path was checked.
+
+    The wheel shrank 101 MB -> 47 MB, proving the DWARF left the ELF, yet
+    `release/clud.dwp` did not exist: under maturin's `cargo rustc --bin`,
+    cargo uplifts the binary out of `deps/` but not reliably its `.dwp`. The
+    hash suffix is matched exactly so a sibling bin is never mistaken for
+    clud's own.
+    """
+    target = "x86_64-unknown-linux-gnu"
+    deps = tmp_path / "target" / target / "release" / "deps"
+    deps.mkdir(parents=True)
+    (deps / "clud-2f8a1c9d4e6b7a05.dwp").write_bytes(b"dwarf")
+    (deps / "clud_shim-9b3c7e1a2d4f6508.dwp").write_bytes(b"other")
+    monkeypatch.setattr(xbuild, "ROOT", tmp_path)
+    monkeypatch.setattr(xbuild, "DEBUGINFO_DIR", tmp_path / "dist-debuginfo")
+
+    staged = xbuild.collect_debuginfo(target, "release")
+
+    assert [path.name for path in staged] == [f"clud-{target}.dwp"]
+    assert staged[0].read_bytes() == b"dwarf"
+    assert not (tmp_path / "dist").exists()
+    assert f"clud-{target}.dwp (5 bytes)" in capsys.readouterr().out
+
+
 def test_missing_debuginfo_is_reported_but_never_fatal(tmp_path, monkeypatch) -> None:
     """Targets where `packed` writes no `.dwp` must not block a release."""
     target = "aarch64-pc-windows-msvc"
