@@ -27,14 +27,6 @@ inputs:
     description: Rust toolchain version (must match rust-toolchain.toml).
     required: false
     default: "1.94.1"
-  soldr-version:
-    description: >
-      Must exactly match pyproject.toml's soldr build-backend pin and every
-      other setup-soldr version. The backend and these shims share one daemon
-      socket, and mixing protocol versions resets the connection (#580).
-    required: false
-    default: "0.8.44"
-
 runs:
   using: composite
   steps:
@@ -88,7 +80,6 @@ runs:
         SOLDR_GITHUB_TOKEN: ${{ inputs.soldr-token }}
       with:
         toolchain: ${{ inputs.toolchain }}
-        version: ${{ inputs.soldr-version }}
         cache: true
         build-cache-mode: thin
         shims: true

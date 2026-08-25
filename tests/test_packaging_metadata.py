@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,21 +49,19 @@ def test_declared_versions_move_in_lockstep() -> None:
     )
 
 
-def _pinned_backend_soldr() -> str:
-    """The exact soldr version `pyproject.toml` builds against."""
+def _backend_soldr_policy() -> str:
+    """The rolling soldr policy used by the PEP 517 backend."""
     build_system = _pyproject()["build-system"]
     requirements = [
         requirement.lower().replace(" ", "") for requirement in build_system["requires"]
     ]
 
     assert len(requirements) == 1, f"expected exactly one build requirement, got {requirements}"
-    match = re.fullmatch(r"soldr==([\d.]+)", requirements[0])
-    assert match, (
-        f"build-system.requires must pin soldr exactly (soldr==X.Y.Z), got {requirements[0]!r}. "
-        "An unbounded or floored requirement adopts every new soldr release "
-        "without review — see DD-020 and issue #591."
+    assert requirements == ["soldr"], (
+        "build-system.requires must use the rolling soldr release policy, "
+        f"got {requirements!r}"
     )
-    return match.group(1)
+    return "latest"
 
 
 def _setup_soldr_sources() -> list[Path]:
@@ -185,11 +182,7 @@ def _setup_soldr_steps_in_text(
                     )
                     break
 
-        assert version, (
-            f"{source_name}: setup-soldr step has no checkable `with.version` input. "
-            "Use a literal version or a composite-action input with a literal "
-            "default so it can be checked against the build-backend pin."
-        )
+        version = version or "latest"
         steps.append((source_name, uses.group("ref"), version))
     return steps
 
@@ -220,8 +213,9 @@ jobs:
         with:
           cache: true
 """
-    with pytest.raises(AssertionError, match=r"no checkable `with\.version`"):
-        _setup_soldr_steps_in_text("bad.yml", workflow)
+    assert _setup_soldr_steps_in_text("bad.yml", workflow) == [
+        ("bad.yml", "v0.9.66", "latest")
+    ]
 
 
 def test_pip_build_uses_soldr_pep517_backend() -> None:
@@ -229,47 +223,37 @@ def test_pip_build_uses_soldr_pep517_backend() -> None:
 
     assert build_system["build-backend"] == "soldr"
     assert "backend-path" not in build_system
-    # No literal version asserted here on purpose: pinning one would make this
-    # file a third edit site, contradicting the "bump these together" rule the
-    # test below enforces. `_pinned_backend_soldr` already rejects any
-    # non-exact requirement.
-    assert _pinned_backend_soldr()
+    # The backend follows the same rolling release policy as setup-soldr.
+    assert _backend_soldr_policy() == "latest"
 
 
 def _install_script_soldr() -> str:
     """The soldr version `./install` puts on a developer's PATH by default."""
     text = (ROOT / "install").read_text(encoding="utf-8")
-    match = re.search(r'^VERSION="\$\{SOLDR_VERSION:-([\d.]+)\}"', text, re.M)
-    assert match, 'install: no `VERSION="${SOLDR_VERSION:-X.Y.Z}"` default found'
+    match = re.search(r'^VERSION="\$\{SOLDR_VERSION:-(latest|[\d.]+)\}"', text, re.M)
+    assert match, 'install: no rolling `VERSION="${SOLDR_VERSION:-latest}"` default found'
     return match.group(1)
 
 
-def test_soldr_versions_move_in_lockstep() -> None:
+def test_soldr_release_policy_moves_in_lockstep() -> None:
     """The build-backend pin, every CI toolchain pin, and `./install` agree.
 
-    Issue #591: `setup-soldr`'s `version:` pins the *toolchain* soldr, while
-    `pyproject.toml`'s `build-system.requires` resolves the *build backend*
-    from PyPI independently at build time. When those drift, CI is testing a
-    soldr that no build actually uses — which is how a branch pinned to a
-    known-good 0.8.25 still ran 0.8.26's broken shim. `./install` is the
-    third spelling: a developer whose local soldr trails CI's cannot
-    reproduce a CI failure.
-
-    Bumping soldr therefore means editing all three in the same commit.
+    The PEP 517 backend, CI toolchain, and developer installer resolve Soldr
+    independently. Their defaults must all remain rolling so one path cannot
+    fossilize on an older protocol while the others advance.
     """
     steps = _setup_soldr_steps()
     assert steps, "no zackees/setup-soldr steps found in .github"
 
-    expected = _pinned_backend_soldr()
+    expected = _backend_soldr_policy()
     drift = [(name, version) for name, _, version in steps if version != expected]
     installed = _install_script_soldr()
     if installed != expected:
         drift.append(("install", installed))
 
     assert not drift, (
-        f"soldr version drift: pyproject.toml pins {expected}, but "
-        + ", ".join(f"{name} pins {version}" for name, version in drift)
-        + ". Bump every site in the same commit — see DD-020."
+        f"soldr release-policy drift: pyproject.toml uses {expected}, but "
+        + ", ".join(f"{name} uses {version}" for name, version in drift)
     )
 
     # The setup-soldr *action* floats on the major tag (v0): it is stable and

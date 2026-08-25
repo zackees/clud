@@ -62,7 +62,6 @@ jobs:
         env:
           SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          version: 0.8.44
           cache: true
           build-cache-mode: thin
           shims: true
