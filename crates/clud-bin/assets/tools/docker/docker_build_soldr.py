@@ -91,10 +91,15 @@ RUN mkdir -p /target /cargo-home /rustup-home /cargo-chef /root/.soldr /src \
 # Bake soldr into the helper image instead of installing it during the
 # first command. Keep its persistent daemon/cache state in /root/.soldr,
 # which cmd_up mounts as a named volume.
-ARG SOLDR_VERSION=0.8.44
+ARG SOLDR_VERSION=latest
 RUN mkdir -p /opt/soldr-bin \
+ && resolved_version="${SOLDR_VERSION}" \
+ && if [ "$resolved_version" = latest ]; then \
+        latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/zackees/soldr/releases/latest)"; \
+        resolved_version="${latest_url##*/}"; resolved_version="${resolved_version#v}"; \
+    fi \
  && curl -fsSL \
-        "https://github.com/zackees/soldr/releases/download/v${SOLDR_VERSION}/soldr-v${SOLDR_VERSION}-x86_64-unknown-linux-gnu.tar.zst" \
+        "https://github.com/zackees/soldr/releases/download/v${resolved_version}/soldr-v${resolved_version}-x86_64-unknown-linux-gnu.tar.zst" \
     | zstd -d --stdout \
     | tar -xf - -C /opt/soldr-bin \
  && for bin in soldr soldr-clang-shim cargo-chef crgx; do \
