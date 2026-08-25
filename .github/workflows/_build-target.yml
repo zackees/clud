@@ -53,8 +53,6 @@ jobs:
     timeout-minutes: 60
     env:
       RUST_BACKTRACE: "1"
-      # GitHub Pages serves the index but not the catalogue JSON payload.
-      SOLDR_TOOLCHAIN_ORIGIN: https://raw.githubusercontent.com/zackees/soldr-toolchain/assets
       # Incremental buys nothing on a fresh-checkout CI job -- there is no prior
       # incremental state to reuse -- while costing compile time and inflating
       # target/ by gigabytes, which directly worsens cache eviction pressure.
