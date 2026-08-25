@@ -317,6 +317,19 @@ def test_ci_setup_soldr_never_cooks_before_the_toolchain_is_prepared() -> None:
         assert "prebuild-deps: soldr-cook" not in text
 
 
+def test_soldr_workflows_can_quarantine_yanked_dependency_caches() -> None:
+    """Every entrypoint that reaches setup-soldr grants exact-cache deletion."""
+    for relative in (
+        ".github/workflows/ci.yml",
+        ".github/workflows/_dylint.yml",
+        ".github/workflows/auto-release.yml",
+    ):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        permissions = text.split("permissions:", 1)[1].split("\njobs:", 1)[0]
+        assert "contents: read" in permissions, relative
+        assert "actions: write" in permissions, relative
+
+
 def test_ci_setup_soldr_cook_profile_matches_the_real_build() -> None:
     setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
     build = ROOT / ".github" / "workflows" / "_build-target.yml"

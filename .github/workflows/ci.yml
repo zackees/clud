@@ -39,6 +39,9 @@ concurrency:
 
 permissions:
   contents: read
+  # setup-soldr's yank audit deletes only the exact poisoned cache keys it
+  # restored; without this permission it must fail closed.
+  actions: write
 
 jobs:
   # ---------------------------------------------------------------- static --
