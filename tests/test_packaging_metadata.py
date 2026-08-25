@@ -281,6 +281,19 @@ def test_soldr_versions_move_in_lockstep() -> None:
     )
 
 
+def test_pinned_soldr_supports_the_live_catalogue_transport() -> None:
+    """Clud's pinned Soldr must understand the catalogue v2 cutover.
+
+    Soldr 0.9.9 is the first published Clud pin with the validated v2
+    multipart consumer. Older pins request the retired catalogue.v1.json and
+    make every catalogue-backed GNU/Apple prepare lane fail before compilation.
+    """
+    version = tuple(int(part) for part in _pinned_backend_soldr().split("."))
+    assert version >= (0, 9, 9), (
+        "soldr 0.9.9+ is required for the live catalogue v2 transport"
+    )
+
+
 def test_install_script_uses_wheel_with_legacy_fallback() -> None:
     """`./install` must handle the asset format the pinned release ships.
 
