@@ -26,6 +26,13 @@ from ci.ci_matrix import (
 )
 
 CI_YML = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+BUILD_YML = CI_YML.with_name("_build-target.yml")
+
+
+def test_build_workflow_caps_compile_parallelism_for_hosted_runner_memory() -> None:
+    workflow = BUILD_YML.read_text(encoding="utf-8")
+    assert 'CARGO_BUILD_JOBS: "2"' in workflow
+    assert 'SOLDR_JOBS: "2"' in workflow
 
 
 def test_every_target_is_unique():
