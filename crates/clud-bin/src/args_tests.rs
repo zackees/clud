@@ -736,7 +736,7 @@ fn test_optimize_defaults_to_rust_global_soldr() {
             assert!(!repo);
             assert!(install_soldr);
             assert!(use_soldr_shims);
-            assert_eq!(soldr_version, "0.7.11");
+            assert_eq!(soldr_version, "latest");
         }
         other => panic!("expected Optimize subcommand, got {other:?}"),
     }

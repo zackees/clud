@@ -97,7 +97,7 @@ impl Default for RustOptimizeSettings {
         Self {
             use_soldr_shims: true,
             install_soldr: true,
-            soldr_version: "0.7.11".to_string(),
+            soldr_version: "latest".to_string(),
         }
     }
 }
@@ -891,14 +891,14 @@ pub fn save_rust_optimize_settings_at(
 ) -> Result<(), SettingsError> {
     with_settings_document(home, |document| {
         let optimize = object_entry(document, "optimize");
-        optimize.insert(
-            "rust".to_string(),
-            json!({
-                "use_soldr_shims": settings.use_soldr_shims,
-                "install_soldr": settings.install_soldr,
-                "soldr_version": settings.soldr_version.clone(),
-            }),
-        );
+        let mut rust = json!({
+            "use_soldr_shims": settings.use_soldr_shims,
+            "install_soldr": settings.install_soldr,
+        });
+        if !settings.soldr_version.eq_ignore_ascii_case("latest") {
+            rust["soldr_version"] = json!(settings.soldr_version.clone());
+        }
+        optimize.insert("rust".to_string(), rust);
     })
 }
 

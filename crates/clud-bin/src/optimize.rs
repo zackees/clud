@@ -252,11 +252,14 @@ fn write_repo_directive_at(path: &Path, settings: &RustOptimizeSettings) -> io::
     if !root.is_object() {
         root = serde_json::json!({});
     }
-    root["optimize"]["rust"] = serde_json::json!({
+    let mut rust = serde_json::json!({
         "use_soldr_shims": settings.use_soldr_shims,
         "install_soldr": settings.install_soldr,
-        "soldr_version": settings.soldr_version,
     });
+    if !settings.soldr_version.eq_ignore_ascii_case("latest") {
+        rust["soldr_version"] = serde_json::json!(settings.soldr_version);
+    }
+    root["optimize"]["rust"] = rust;
     let mut body = serde_json::to_string_pretty(&root).map_err(io::Error::other)?;
     body.push('\n');
     fs::write(path, body)
@@ -385,6 +388,22 @@ fn display_repo_path(path: &Path) -> String {
 }
 
 fn ensure_soldr_installed(version: &str) -> Result<String, String> {
+    if version.eq_ignore_ascii_case("latest") {
+        let code = run_status(
+            vec![
+                "uv".to_string(),
+                "tool".to_string(),
+                "install".to_string(),
+                "--force".to_string(),
+                "soldr".to_string(),
+            ],
+            None,
+        )
+        .map_err(|error| format!("run rolling-latest soldr install: {error}"))?;
+        return (code == 0)
+            .then(|| "installed rolling-latest soldr via uv".to_string())
+            .ok_or_else(|| format!("rolling-latest soldr install exited with code {code}"));
+    }
     if let Ok(path) = which::which("soldr") {
         return Ok(format!("soldr already installed at {}", path.display()));
     }
@@ -710,6 +729,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(parsed["other"], true);
         assert_eq!(parsed["optimize"]["rust"]["use_soldr_shims"], true);
+        assert!(parsed["optimize"]["rust"].get("soldr_version").is_none());
     }
 
     #[test]

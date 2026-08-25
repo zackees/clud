@@ -273,6 +273,24 @@ fn optimize_rust_object_parses_as_activation_config() {
 }
 
 #[test]
+fn omitted_and_latest_soldr_versions_are_the_same_rolling_policy() {
+    let omitted = parse_repo_clud_config(r#"{"rust":{"use_soldr":true,"install":true}}"#)
+        .expect("omitted version config");
+    let latest =
+        parse_repo_clud_config(r#"{"rust":{"use_soldr":true,"install":true,"version":"latest"}}"#)
+            .expect("latest version config");
+    assert_eq!(omitted.rust.version, None);
+    assert_eq!(latest.rust.version, omitted.rust.version);
+}
+
+#[test]
+fn optimize_latest_alias_normalizes_to_rolling_policy() {
+    let config = parse_repo_clud_config(r#"{"optimize":{"rust":{"soldr_version":"LATEST"}}}"#)
+        .expect("optimize latest version config");
+    assert_eq!(config.rust.version, None);
+}
+
+#[test]
 fn direct_rust_keys_win_over_optimize_rust_keys_in_same_file() {
     let cfg = parse_repo_clud_config(
             r#"{"rust":{"use_soldr":false,"version":"2.0.0"},"optimize":{"rust":{"use_soldr_shims":true,"soldr_version":"1.0.0"}}}"#,
@@ -337,6 +355,26 @@ fn merge_repo_overrides_user_per_field() {
     assert!(!merged.rust.use_soldr, "repo wins");
     assert!(merged.rust.install, "repo unset → user wins");
     assert_eq!(merged.rust.version.as_deref(), Some("2.0.0"), "repo wins");
+}
+
+#[test]
+fn repo_omission_overrides_a_user_pin_with_rolling_latest() {
+    let user = parse_raw_repo_clud_config(
+        r#"{"rust":{"use_soldr":true,"install":true,"version":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let repo = parse_raw_repo_clud_config(r#"{"rust":{"use_soldr":true,"install":true}}"#).unwrap();
+    let merged = resolve(merge(repo, user));
+    assert_eq!(merged.rust.version, None);
+}
+
+#[test]
+fn unrelated_repo_settings_do_not_override_a_user_pin() {
+    let user =
+        parse_raw_repo_clud_config(r#"{"rust":{"use_soldr":true,"version":"1.0.0"}}"#).unwrap();
+    let repo = parse_raw_repo_clud_config(r#"{"bash":{"block_cd":true}}"#).unwrap();
+    let merged = resolve(merge(repo, user));
+    assert_eq!(merged.rust.version.as_deref(), Some("1.0.0"));
 }
 
 #[test]

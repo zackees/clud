@@ -575,7 +575,7 @@ pub enum Command {
         )]
         use_soldr_shims: bool,
         /// soldr release version to install and persist.
-        #[arg(long = "soldr-version", default_value = "0.7.11")]
+        #[arg(long = "soldr-version", default_value = "latest")]
         soldr_version: String,
     },
     /// Control the always-on clud daemon.

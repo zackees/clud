@@ -656,6 +656,7 @@ fn rust_optimize_settings_preserve_existing_settings() {
     let json: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(json["unrelated"]["value"], "kept");
     assert!(json["optimize"]["rust"].is_object());
+    assert!(json["optimize"]["rust"].get("soldr_version").is_none());
 }
 
 #[test]
