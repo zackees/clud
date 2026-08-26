@@ -16,8 +16,8 @@ from pathlib import Path
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
-DYLINT_VERSION = "6.0.4"
-DYLINT_NIGHTLY = "nightly-2026-04-16"
+DYLINT_VERSION = "6.0.3"
+DYLINT_NIGHTLY = "nightly-2026-05-28"
 LINT_DIR = ROOT / "dylints" / "ban_manual_slash_normalize"
 WORKFLOW = ROOT / ".github" / "workflows" / "_dylint.yml"
 
@@ -32,16 +32,17 @@ def _workflow_text() -> str:
 
 
 def test_dylint_stack_versions_stay_in_lockstep() -> None:
+    assert not (LINT_DIR / "rust-toolchain.toml").exists()
+    assert (LINT_DIR / "rust-toolchain").exists()
     lint_manifest = _toml(LINT_DIR / "Cargo.toml")
-    toolchain = _toml(LINT_DIR / "rust-toolchain.toml")
+    toolchain = _toml(LINT_DIR / "rust-toolchain")
     workflow = _workflow_text()
 
     assert lint_manifest["dependencies"]["dylint_linting"] == DYLINT_VERSION
     assert toolchain["toolchain"]["channel"] == DYLINT_NIGHTLY
-    assert (
-        f"cargo install cargo-dylint dylint-link --version {DYLINT_VERSION} --locked"
-        in workflow
-    )
+    assert re.search(r"(?m)^\s*- name: Install Dylint\s*$", workflow) is None
+    assert "cargo install cargo-dylint dylint-link" not in workflow
+    assert 'SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS: "1"' in workflow
     # Every nightly the workflow names must be the one the lint crate pins;
     # a stray second date means the driver and the lints disagree.
     assert set(re.findall(r"nightly-\d{4}-\d{2}-\d{2}", workflow)) == {DYLINT_NIGHTLY}
@@ -50,10 +51,7 @@ def test_dylint_stack_versions_stay_in_lockstep() -> None:
     # the lockstep is how you get a green suite that hands people a
     # mismatched cargo-dylint — the tool/library skew #911 was about.
     readme = (ROOT / "dylints" / "README.md").read_text(encoding="utf-8")
-    assert (
-        f"cargo install cargo-dylint dylint-link --version {DYLINT_VERSION} --locked"
-        in readme
-    )
+    assert f"Soldr 0.9.10's blessed {DYLINT_VERSION}" in readme
     assert set(re.findall(r"nightly-\d{4}-\d{2}-\d{2}", readme)) == {DYLINT_NIGHTLY}
 
 
@@ -68,12 +66,12 @@ def test_dylint_workflow_runs_one_plain_invocation() -> None:
     workflow = _workflow_text()
 
     # Exactly one `cargo dylint` run — the recovery path ran it twice.
-    direct_invocations = re.findall(
-        r"(?m)^\s*(?:RUSTUP_TOOLCHAIN=\S+\s+)?cargo-dylint\s+dylint\b",
+    managed_invocations = re.findall(
+        r"(?m)^\s*(?:run:\s*)?(?:RUSTUP_TOOLCHAIN=\S+\s+)?soldr\s+--no-cache\s+cargo\s+dylint\b",
         workflow,
     )
-    assert len(direct_invocations) == 1
-    assert re.search(r"\bcargo\s+dylint\b", workflow) is None
+    assert len(managed_invocations) == 1
+    assert "cargo-dylint dylint" not in workflow
 
     # The specific scaffolding that was removed. Each of these appearing again
     # means someone restored the workaround instead of moving the version pin.
@@ -105,7 +103,7 @@ def test_lint_crate_links_through_dylint_link() -> None:
     filename `cargo dylint` looks up. Without this config the build succeeds
     and emits a plain `lib<name>.so`, and Dylint fails with "Could not find
     ... despite successful build" — the failure CI used to paper over by
-    copying the artifact and retrying. Verified against Dylint 6.0.4, so this
+    copying the artifact and retrying. Verified against Dylint 6.0.3, so this
     is not something a version bump makes redundant.
     """
     config = LINT_DIR / ".cargo" / "config.toml"

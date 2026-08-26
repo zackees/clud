@@ -35,7 +35,7 @@ mod exe;
 /// and runs them on native macOS/Windows runners, so `CLUD_TEST_BIN_DIR` takes
 /// precedence when set — see `common/exe.rs`.
 fn clud_exe() -> PathBuf {
-    exe::bin_path("clud", env!("CARGO_BIN_EXE_clud"))
+    exe::bin_path("clud", option_env!("CARGO_BIN_EXE_clud"))
 }
 
 #[test]

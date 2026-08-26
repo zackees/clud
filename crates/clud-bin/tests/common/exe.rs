@@ -21,13 +21,16 @@
 
 use std::path::PathBuf;
 
-/// Resolve `name` against `CLUD_TEST_BIN_DIR`, falling back to the
-/// compile-time `CARGO_BIN_EXE_*` value passed as `compiled`.
+/// Resolve `name` against `CLUD_TEST_BIN_DIR`, then the optional compile-time
+/// `CARGO_BIN_EXE_*` value, then the sibling target-directory layout.
 ///
-/// Callers pass the `env!` themselves because `CARGO_BIN_EXE_*` is only
-/// expanded inside the integration-test crate that Cargo built the binary for.
-pub fn bin_path(name: &str, compiled: &str) -> PathBuf {
-    bundled(name).unwrap_or_else(|| PathBuf::from(compiled))
+/// Callers pass `option_env!` themselves because `CARGO_BIN_EXE_*` is only
+/// expanded inside the integration-test crate that built the binary. Static
+/// checks do not always define it, while actual test builds normally do.
+pub fn bin_path(name: &str, compiled: Option<&str>) -> PathBuf {
+    bundled(name)
+        .or_else(|| compiled.map(PathBuf::from))
+        .unwrap_or_else(|| sibling_bin_path(name))
 }
 
 /// Resolve a workspace binary that this test crate has **no**

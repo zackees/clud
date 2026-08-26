@@ -25,6 +25,9 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   ZCCACHE_DISABLE: "1"
+  # Ignore stale developer/runner PATH installs and select Soldr's blessed
+  # precompiled cargo-dylint, dylint-link, and matching driver as one unit.
+  SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS: "1"
   # See zackees/soldr#1879 -- authenticates soldr's cross-repo managed-tool
   # lookups so they are not rate-limited to 60 req/hr per runner IP.
   SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -46,17 +49,10 @@ jobs:
           cache-payload-warn-bytes: 2GiB
       - name: Install Dylint nightly toolchain
         timeout-minutes: 10
-        run: rustup toolchain install nightly-2026-04-16 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
-      - name: Install Dylint
-        timeout-minutes: 10
-        run: soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.4 --locked
+        run: rustup toolchain install nightly-2026-05-28 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
       - name: Check dylint formatting
         run: soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
       - name: Test dylint crate
-        run: RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
+        run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
       - name: Run dylint over workspace
-        run: |
-          export PATH="${CARGO_HOME}/bin:${PATH}"
-          # Dylint 6.0.4 must own driver selection. Soldr 0.9.10's managed
-          # cargo-dylint lane pins 6.0.3 and rejects this source-built driver.
-          RUSTUP_TOOLCHAIN=nightly-2026-04-16 cargo-dylint dylint --all -- --workspace --all-targets
+        run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo dylint --all -- --workspace --all-targets
