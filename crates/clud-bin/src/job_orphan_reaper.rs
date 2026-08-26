@@ -1112,7 +1112,9 @@ mod imp {
     use windows::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, TerminateProcess, PROCESS_TERMINATE,
     };
-    use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
+    use windows::Win32::System::IO::{
+        CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus,
+    };
 
     use super::{
         DecisionAction, FactsSnapshot, ProcessMeta, ReapDecision, RegisteredBackend, Signal,
@@ -1278,6 +1280,35 @@ mod imp {
     struct ListenerHandles {
         port: HANDLE,
         job_value: usize,
+        wait: ListenerWait,
+    }
+
+    enum ListenerWait {
+        Standard,
+        #[cfg(test)]
+        Instrumented {
+            timeout_ms: u32,
+            before_wait: Option<std::sync::mpsc::SyncSender<()>>,
+        },
+    }
+
+    impl ListenerWait {
+        fn timeout_ms(&self) -> u32 {
+            match self {
+                Self::Standard => 200,
+                #[cfg(test)]
+                Self::Instrumented { timeout_ms, .. } => *timeout_ms,
+            }
+        }
+
+        fn notify_before_wait(&mut self) {
+            #[cfg(test)]
+            if let Self::Instrumented { before_wait, .. } = self {
+                if let Some(before_wait) = before_wait.take() {
+                    let _ = before_wait.send(());
+                }
+            }
+        }
     }
 
     pub struct ForegroundJobTracker {
@@ -1295,6 +1326,10 @@ mod imp {
         /// Installs after daemon startup. Failure is intentionally non-fatal:
         /// existing originator-tag exit cleanup remains the fallback.
         pub fn install() -> Option<Self> {
+            Self::install_with_options(ListenerWait::Standard, true)
+        }
+
+        fn install_with_options(wait: ListenerWait, assign_current_process: bool) -> Option<Self> {
             unsafe {
                 let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
                 let port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1).ok()?;
@@ -1309,7 +1344,8 @@ mod imp {
                     size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
                 )
                 .is_err()
-                    || AssignProcessToJobObject(job, GetCurrentProcess()).is_err()
+                    || (assign_current_process
+                        && AssignProcessToJobObject(job, GetCurrentProcess()).is_err())
                 {
                     let _ = CloseHandle(port);
                     let _ = CloseHandle(job);
@@ -1355,6 +1391,7 @@ mod imp {
                                 ListenerHandles {
                                     port: HANDLE(port_value as *mut c_void),
                                     job_value,
+                                    wait,
                                 },
                                 stop,
                                 backends,
@@ -1684,6 +1721,14 @@ mod imp {
     impl Drop for ForegroundJobTracker {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Release);
+            // Wake the listener instead of waiting for its 200 ms poll. More
+            // importantly, the matching stop check after the wait prevents a
+            // shutdown-time timeout from entering one final host scan and
+            // reconciliation pass. Under Windows CI process churn that pass
+            // can outlive the caller's entire command timeout (#594).
+            unsafe {
+                let _ = PostQueuedCompletionStatus(self.port, 0, 0, None);
+            }
             if let Some(listener) = self.listener.take() {
                 let _ = listener.join();
             }
@@ -1699,7 +1744,7 @@ mod imp {
     }
 
     fn listen(
-        handles: ListenerHandles,
+        mut handles: ListenerHandles,
         stop: Arc<AtomicBool>,
         backends: Arc<Mutex<Vec<RegisteredBackend>>>,
         processes: Arc<Mutex<TrackerProcesses>>,
@@ -1712,12 +1757,24 @@ mod imp {
                 t.epoch.ticks += 1;
                 t.checkpoint();
             });
+            handles.wait.notify_before_wait();
             let (mut message, mut key, mut payload) = (0u32, 0usize, null_mut());
-            if unsafe {
-                GetQueuedCompletionStatus(handles.port, &mut message, &mut key, &mut payload, 200)
+            let wait_result = unsafe {
+                GetQueuedCompletionStatus(
+                    handles.port,
+                    &mut message,
+                    &mut key,
+                    &mut payload,
+                    handles.wait.timeout_ms(),
+                )
+            };
+            // `Drop` posts a wake packet after setting `stop`. Check it before
+            // interpreting either that packet or a simultaneous timeout/job
+            // notification, so shutdown never starts another expensive pass.
+            if stop.load(Ordering::Acquire) {
+                break;
             }
-            .is_err()
-            {
+            if wait_result.is_err() {
                 if unsafe { GetLastError().0 } == WAIT_TIMEOUT.0 {
                     let metadata_complete =
                         retry_unresolved_new_processes(&processes, &telemetry, &scan_backoff);
@@ -1781,6 +1838,40 @@ mod imp {
                 &telemetry,
                 &scan_backoff,
                 handles.job_value,
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod shutdown_tests {
+        use super::*;
+
+        #[test]
+        fn dropping_idle_tracker_wakes_listener_without_poll_delay() {
+            let (before_wait, entered_wait) = std::sync::mpsc::sync_channel(0);
+            let tracker = ForegroundJobTracker::install_with_options(
+                ListenerWait::Instrumented {
+                    timeout_ms: 10_000,
+                    before_wait: Some(before_wait),
+                },
+                false,
+            )
+            .expect("install empty foreground Job tracker");
+
+            // This empty test Job cannot produce a notification. The
+            // rendezvous occurs immediately before a deliberately long wait,
+            // so a passive shutdown must pay the full timeout while an active
+            // completion-port wake returns promptly.
+            entered_wait
+                .recv_timeout(Duration::from_secs(5))
+                .expect("listener never reached its completion-port wait");
+
+            let started = Instant::now();
+            drop(tracker);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "tracker shutdown waited for the injected completion-port timeout: {elapsed:?}"
             );
         }
     }
