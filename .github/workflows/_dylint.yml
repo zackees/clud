@@ -57,4 +57,6 @@ jobs:
       - name: Run dylint over workspace
         run: |
           export PATH="${CARGO_HOME}/bin:${PATH}"
-          RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr --no-cache cargo dylint --all -- --workspace --all-targets
+          # Dylint 6.0.4 must own driver selection. Soldr 0.9.10's managed
+          # cargo-dylint lane pins 6.0.3 and rejects this source-built driver.
+          RUSTUP_TOOLCHAIN=nightly-2026-04-16 cargo-dylint dylint --all -- --workspace --all-targets

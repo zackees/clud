@@ -68,7 +68,12 @@ def test_dylint_workflow_runs_one_plain_invocation() -> None:
     workflow = _workflow_text()
 
     # Exactly one `cargo dylint` run — the recovery path ran it twice.
-    assert workflow.count("cargo dylint --all") == 1
+    direct_invocations = re.findall(
+        r"(?m)^\s*(?:RUSTUP_TOOLCHAIN=\S+\s+)?cargo-dylint\s+dylint\b",
+        workflow,
+    )
+    assert len(direct_invocations) == 1
+    assert re.search(r"\bcargo\s+dylint\b", workflow) is None
 
     # The specific scaffolding that was removed. Each of these appearing again
     # means someone restored the workaround instead of moving the version pin.
