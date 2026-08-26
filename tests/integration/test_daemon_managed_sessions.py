@@ -164,7 +164,9 @@ class TestDaemonManagedSessionFlags:
         state_dir = tmp_path / "daemon-state"
         env = managed_env(mock_env, state_dir)
         launch_cwd = tmp_path / "workspace"
+        launch_cwd_2 = tmp_path / "workspace-2"
         launch_cwd.mkdir()
+        launch_cwd_2.mkdir()
         # Create two sessions so attach (no args) lists instead of auto-attaching
         proc1, session_id = launch_detached(
             clud_binary,
@@ -174,10 +176,10 @@ class TestDaemonManagedSessionFlags:
             "list-attachable",
             "--",
             "--mock-sleep-ms",
-            "5000",
+            "60000",
             cwd=launch_cwd,
         )
-        _proc2, _session_id_2 = launch_detached(
+        proc2, session_id_2 = launch_detached(
             clud_binary,
             env,
             "--codex",
@@ -185,10 +187,12 @@ class TestDaemonManagedSessionFlags:
             "list-attachable-2",
             "--",
             "--mock-sleep-ms",
-            "5000",
+            "60000",
+            cwd=launch_cwd_2,
         )
         try:
             assert wait_for_exit(proc1, timeout=DETACH_EXIT_TIMEOUT) == 0
+            assert wait_for_exit(proc2, timeout=DETACH_EXIT_TIMEOUT) == 0
 
             listed = process.run(
                 [str(clud_binary), "attach"],
@@ -202,6 +206,7 @@ class TestDaemonManagedSessionFlags:
             assert str(launch_cwd) in listed.stdout
         finally:
             kill_daemon_for_session(state_dir, session_id)
+            kill_daemon_for_session(state_dir, session_id_2)
 
     def test_list_shows_attachable_pid_and_cwd(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
