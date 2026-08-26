@@ -273,14 +273,37 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
         )
         return 1
 
+    if target is not None:
+        webterm = _installed_script(companion_name(target).removesuffix(".exe"))
+        startup = process.run(
+            [str(webterm), "--startup-check"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+            env=env,
+        )
+        if startup.returncode != 0:
+            print(
+                "installed clud-webterm startup smoke failed: "
+                f"rc={startup.returncode} stdout={startup.stdout!r} stderr={startup.stderr!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+
     return 0
 
 
 def verify_wheel_scripts(wheel: Path) -> int:
     with zipfile.ZipFile(wheel) as archive:
         members = {name.replace("\\", "/") for name in archive.namelist()}
+    required = list(REQUIRED_SCRIPTS)
+    platform_tag = wheel.stem.rsplit("-", 1)[-1].lower()
+    if any(tag.startswith(("win", "macosx")) for tag in platform_tag.split(".")):
+        required.append("clud-webterm")
     missing = []
-    for name in REQUIRED_SCRIPTS:
+    for name in required:
         script = _wheel_script_name(wheel, name)
         if not any(member.endswith(f".data/scripts/{script}") for member in members):
             missing.append(script)
