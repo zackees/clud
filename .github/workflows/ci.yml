@@ -39,6 +39,9 @@ concurrency:
 
 permissions:
   contents: read
+  # setup-soldr's yank audit deletes only the exact poisoned cache keys it
+  # restored; without this permission it must fail closed.
+  actions: write
 
 jobs:
   # ---------------------------------------------------------------- static --
@@ -62,7 +65,6 @@ jobs:
         env:
           SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          version: 0.8.44
           cache: true
           build-cache-mode: thin
           shims: true

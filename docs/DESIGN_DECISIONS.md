@@ -426,8 +426,7 @@ Schema (v1 activation shape):
   "optimize": {
     "rust": {
       "use_soldr_shims": true,
-      "install_soldr": true,
-      "soldr_version": "0.7.11"
+      "install_soldr": true
     }
   }
 }
@@ -435,7 +434,8 @@ Schema (v1 activation shape):
 
 The parser accepts both forms. Direct `rust` keys win over `optimize.rust`
 keys inside the same file; repo-level values still win over user-level values
-per field.
+per field. Omitting the version is the rolling-latest policy; `"latest"` is an
+equivalent case-insensitive alias. A numeric version remains an exact pin.
 
 **Rationale:**
 

@@ -29,7 +29,7 @@ import pytest
 
 from tests import process
 
-from ._daemon_helpers import copy_launcher
+from ._daemon_helpers import copy_launcher, wait_for_file
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +42,9 @@ def _launch_clud(
     clud: Path,
     env: dict[str, str],
     extra_args: list[str] | None = None,
+    agent_args: list[str] | None = None,
     sleep_ms: int = 300,
+    timeout: float = 30,
 ) -> process.CompletedProcess[str]:
     """Run clud once with the mock backend; default workload is a short sleep
     so the session registry row is held in the DB while the test inspects
@@ -57,13 +59,22 @@ def _launch_clud(
         args = [str(launch), "--no-daemon", "-p", "hello"]
         if extra_args:
             args.extend(extra_args)
-        args.extend(["--", "--mock-sleep-ms", str(sleep_ms)])
+        args.append("--")
+        if agent_args:
+            args.extend(agent_args)
+        args.extend(["--mock-sleep-ms", str(sleep_ms)])
         return process.run(
             args,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
             env=env,
+            # This suite exercises the session registry, not the repository
+            # configuration of the clud checkout running pytest. Keeping the
+            # launch in its private temp directory prevents tracked settings
+            # (for example Rust/Soldr setup) from adding unrelated work before
+            # the process reaches registry registration.
+            cwd=temp_dir,
         )
 
 
@@ -168,19 +179,31 @@ class TestCapActuallyRefuses:
     ) -> None:
         env = _registry_env(mock_env, tmp_path, max_instances=1)
 
-        first_started = threading.Event()
+        first_ready = tmp_path / "first-ready"
         first_result_box: list[process.CompletedProcess[str]] = []
 
         def first_target() -> None:
-            first_started.set()
-            r = _launch_clud(clud_binary, env, sleep_ms=2500)
+            r = _launch_clud(
+                clud_binary,
+                env,
+                agent_args=[
+                    "--mock-write-done",
+                    str(first_ready),
+                    "--mock-write-marker-on-iter",
+                    "1",
+                ],
+                sleep_ms=20_000,
+                timeout=45,
+            )
             first_result_box.append(r)
 
         t = threading.Thread(target=first_target)
         t.start()
-        first_started.wait(timeout=5)
-        # Give the first launch a moment to register before we probe.
-        time.sleep(0.8)
+        # The mock writes this marker immediately before its long sleep. By
+        # then clud has completed registry registration and launched the
+        # backend, so this synchronizes on the actual live session rather than
+        # a fixed startup delay (which raced on loaded Linux/Windows runners).
+        wait_for_file(first_ready, timeout=30.0)
 
         second = _launch_clud(clud_binary, env, sleep_ms=100)
         t.join(timeout=30)

@@ -12,7 +12,7 @@ set -euo pipefail
 # `setup-soldr` versions under .github/ — a developer whose
 # local soldr trails CI's cannot reproduce a CI failure. All three are one
 # decision; `tests/test_packaging_metadata.py` asserts they agree. See DD-020.
-VERSION="${SOLDR_VERSION:-0.8.44}"
+VERSION="${SOLDR_VERSION:-latest}"
 GLOBAL=0
 
 usage() {
@@ -43,6 +43,17 @@ for arg in "$@"; do
         *) echo "unknown arg: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+if [[ "$VERSION" == "latest" ]]; then
+    latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+        https://github.com/zackees/soldr/releases/latest)
+    VERSION="${latest_url##*/}"
+    VERSION="${VERSION#v}"
+    if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "could not resolve latest soldr release from: $latest_url" >&2
+        exit 1
+    fi
+fi
 
 uname_s=$(uname -s)
 uname_m=$(uname -m)

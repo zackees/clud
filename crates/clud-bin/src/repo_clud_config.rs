@@ -20,11 +20,14 @@
 //!   start but never actually read until #525, so rules placed there were
 //!   silently ignored.
 //!
-//! Merge semantics: **repo-local > repo > user**, per field. A field unset
-//! at one level falls through to the next; unset everywhere uses the
-//! baked-in default. `bad_commands` and `bad_pipelines` instead concatenate
-//! across layers, deduplicated by `id` with the higher layer winning, so a
-//! local override can replace one shared rule without restating the rest.
+//! Merge semantics: **repo-local > repo > user**, per field. Most fields unset
+//! at one level fall through to the next; unset everywhere uses the baked-in
+//! default. The exception is Soldr's version policy: once an upper layer has
+//! any Rust directive, omitting its version explicitly selects rolling latest
+//! instead of inheriting a lower layer's numeric pin. `bad_commands` and
+//! `bad_pipelines` instead concatenate across layers, deduplicated by `id` with
+//! the higher layer winning, so a local override can replace one shared rule
+//! without restating the rest.
 //! This mirrors how `.claude/settings.json` layers with
 //! `~/.claude/settings.json` in Claude Code.
 //!
@@ -958,7 +961,9 @@ fn read_and_parse_raw(path: &Path, scope: &str) -> Option<RawRepoCludConfig> {
 /// Parse a `.clud/settings.json` body into the raw (Option-shaped) form.
 ///
 /// Empty file = all-None (= all-defaults at resolve time).
-/// Empty / whitespace-only `version` is normalized to `None`.
+/// Empty / whitespace-only `version` is normalized to `None`. The
+/// case-insensitive `latest` alias is canonicalized so merge can distinguish an
+/// explicit rolling policy from a field that was not specified.
 pub fn parse_raw_repo_clud_config(text: &str) -> Result<RawRepoCludConfig, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -969,11 +974,15 @@ pub fn parse_raw_repo_clud_config(text: &str) -> Result<RawRepoCludConfig, Strin
     if let Some(v) = parsed.rust.version.as_deref() {
         if v.trim().is_empty() {
             parsed.rust.version = None;
+        } else if v.eq_ignore_ascii_case("latest") {
+            parsed.rust.version = Some("latest".to_string());
         }
     }
     if let Some(v) = parsed.optimize.rust.soldr_version.as_deref() {
         if v.trim().is_empty() {
             parsed.optimize.rust.soldr_version = None;
+        } else if v.eq_ignore_ascii_case("latest") {
+            parsed.optimize.rust.soldr_version = Some("latest".to_string());
         }
     }
     // An unrecognized `bash.block_cd` is dropped with a warning rather than
@@ -1002,9 +1011,12 @@ pub fn parse_repo_clud_config(text: &str) -> Result<RepoCludConfig, String> {
 // ---------------------------------------------------------------------
 
 /// Layer `lower` (e.g. user-level) under `upper` (e.g. repo-level).
-/// `upper` wins per-field where set for the scalar rust fields;
+/// `upper` wins per-field where set for the scalar rust fields. Any Rust
+/// directive in `upper` makes an omitted version mean rolling latest rather
+/// than allowing a lower numeric pin to leak through;
 /// `bad_commands` concatenates instead (see `concat_dedupe_bad_commands`).
 pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludConfig {
+    let upper_has_rust_directive = has_rust_directive(&upper);
     let upper_bad_commands = upper.bad_commands.clone();
     let lower_bad_commands = lower.bad_commands.clone();
     let upper_bad_pipelines = upper.bad_pipelines.clone();
@@ -1019,7 +1031,11 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
         rust: RawRustConfig {
             use_soldr: upper_rust.use_soldr.or(lower_rust.use_soldr),
             install: upper_rust.install.or(lower_rust.install),
-            version: upper_rust.version.or(lower_rust.version),
+            version: if upper_has_rust_directive {
+                upper_rust.version.or_else(|| Some("latest".to_string()))
+            } else {
+                lower_rust.version
+            },
         },
         optimize: RawOptimizeConfig::default(),
         bash: RawBashConfig {
@@ -1031,6 +1047,15 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
         bad_commands: concat_dedupe_bad_commands(upper_bad_commands, lower_bad_commands),
         bad_pipelines: concat_dedupe_bad_pipelines(upper_bad_pipelines, lower_bad_pipelines),
     }
+}
+
+fn has_rust_directive(raw: &RawRepoCludConfig) -> bool {
+    raw.rust.use_soldr.is_some()
+        || raw.rust.install.is_some()
+        || raw.rust.version.is_some()
+        || raw.optimize.rust.use_soldr_shims.is_some()
+        || raw.optimize.rust.install_soldr.is_some()
+        || raw.optimize.rust.soldr_version.is_some()
 }
 
 fn normalize_raw_rust(raw: RawRepoCludConfig) -> RawRustConfig {
@@ -1060,7 +1085,7 @@ pub fn resolve(raw: RawRepoCludConfig) -> RepoCludConfig {
         rust: RustConfig {
             use_soldr: use_soldr.unwrap_or(true),
             install: install.unwrap_or(true),
-            version,
+            version: version.filter(|value| !value.eq_ignore_ascii_case("latest")),
         },
         bash: BashConfig {
             block_cd: raw

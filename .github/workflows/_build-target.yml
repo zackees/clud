@@ -57,6 +57,11 @@ jobs:
       # incremental state to reuse -- while costing compile time and inflating
       # target/ by gigabytes, which directly worsens cache eviction pressure.
       CARGO_INCREMENTAL: "0"
+      # Clud's full feature graph has several high-RSS rustc/clippy processes.
+      # Even two concurrent compiles exceed the hosted runner memory ceiling and
+      # are killed by the kernel; keep both schedulers on the same safe cap.
+      CARGO_BUILD_JOBS: "1"
+      SOLDR_JOBS: "1"
       # See zackees/soldr#1879. Set at job level so every step, including the
       # composite's setup-soldr and the maturin-spawned cargo, sees it.
       SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

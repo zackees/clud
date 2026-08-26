@@ -7,9 +7,11 @@
 //! 1. [`crate::repo_clud_config::discover_effective_clud_config`] merges
 //!    user-level `~/.clud/settings.json` under repo-level
 //!    `<repo-root>/.clud/settings.json` (repo wins per-field).
-//! 2. If `rust.use_soldr` is `true`, spawn `soldr shims --json` and
+//! 2. If `rust.install` is `true`, install a missing soldr, reconcile an
+//!    explicit version pin, or periodically refresh the rolling latest policy.
+//! 3. If `rust.use_soldr` is `true`, spawn `soldr shims --json` and
 //!    capture the JSON.
-//! 3. Prepend the JSON's `path_entry` to `PATH` in-process. Every
+//! 4. Prepend the JSON's `path_entry` to `PATH` in-process. Every
 //!    subsequent subprocess inherits the modified PATH and routes its
 //!    `cargo` / `rustc` calls through soldr.
 //!
@@ -33,11 +35,12 @@ use crate::win_creation_flags::invisible_helper_creationflags;
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 const SOLDR_SHIMS_TIMEOUT: Duration = Duration::from_secs(15);
 const SOLDR_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const SOLDR_INSTALL_TIMEOUT: Duration = Duration::from_secs(60);
+const SOLDR_LATEST_FRESHNESS: Duration = Duration::from_secs(24 * 60 * 60);
 const MIN_SOLDR_SHIMS_VERSION: VersionTriple = VersionTriple(0, 7, 55);
 
 /// Env-var that opts into chatty activation logging. Default is silent
@@ -103,9 +106,10 @@ pub fn activate_soldr_shims_if_requested() {
 /// directly so tests can stub discovery.
 fn activate_with_config(cfg: &RepoCludConfig) {
     // First probe: does `soldr` exist on PATH?
-    if which::which("soldr").is_err() {
+    let soldr_was_present = which::which("soldr").is_ok();
+    if !soldr_was_present {
         if cfg.rust.install {
-            match install_soldr_on_demand(cfg.rust.version.as_deref()) {
+            match install_soldr_on_demand(cfg.rust.version.as_deref(), false) {
                 Ok(()) => {
                     // Install succeeded; fall through to the shims invocation.
                 }
@@ -121,6 +125,24 @@ fn activate_with_config(cfg: &RepoCludConfig) {
                 "clud: soldr not found on PATH and install is disabled; .clud/settings.json directive ignored"
             );
             return;
+        }
+    } else if cfg.rust.install {
+        if let Some(version) = cfg.rust.version.as_deref() {
+            let requested = parse_first_version_triple(version);
+            let installed = installed_soldr_version().ok();
+            if requested.is_none() || requested != installed {
+                if let Err(reason) = install_soldr_on_demand(Some(version), true) {
+                    verbose_eprintln!(
+                        "clud: failed to reconcile soldr {version}: {reason}; continuing with the installed soldr"
+                    );
+                }
+            }
+        } else if claim_latest_refresh(SystemTime::now()) {
+            if let Err(reason) = upgrade_soldr_to_latest() {
+                verbose_eprintln!(
+                    "clud: failed to refresh rolling-latest soldr: {reason}; continuing with the installed soldr"
+                );
+            }
         }
     }
 
@@ -226,6 +248,22 @@ fn run_soldr_shims_json() -> Result<ShimInfo, String> {
 struct VersionTriple(u64, u64, u64);
 
 fn ensure_soldr_supports_shims() -> Result<(), String> {
+    let version = installed_soldr_version()?;
+    if version < MIN_SOLDR_SHIMS_VERSION {
+        return Err(format!(
+            "this soldr is too old (v{}.{}.{}; needs v{}.{}.{}+ for 'shims')",
+            version.0,
+            version.1,
+            version.2,
+            MIN_SOLDR_SHIMS_VERSION.0,
+            MIN_SOLDR_SHIMS_VERSION.1,
+            MIN_SOLDR_SHIMS_VERSION.2
+        ));
+    }
+    Ok(())
+}
+
+fn installed_soldr_version() -> Result<VersionTriple, String> {
     let argv = vec!["soldr".to_string(), "--version".to_string()];
     let (exit_code, combined) = match run_capturing(argv, SOLDR_VERSION_TIMEOUT) {
         Ok(t) => t,
@@ -257,19 +295,7 @@ fn ensure_soldr_supports_shims() -> Result<(), String> {
         ));
     };
 
-    if version < MIN_SOLDR_SHIMS_VERSION {
-        return Err(format!(
-            "this soldr is too old (v{}.{}.{}; needs v{}.{}.{}+ for 'shims')",
-            version.0,
-            version.1,
-            version.2,
-            MIN_SOLDR_SHIMS_VERSION.0,
-            MIN_SOLDR_SHIMS_VERSION.1,
-            MIN_SOLDR_SHIMS_VERSION.2
-        ));
-    }
-
-    Ok(())
+    Ok(version)
 }
 
 fn parse_first_version_triple(text: &str) -> Option<VersionTriple> {
@@ -334,16 +360,30 @@ fn prepend_path_entry(path_entry: &Path) {
 ///
 /// Returns `Ok(())` only if a `which::which("soldr")` succeeds after
 /// the install attempt. Returns `Err(<reason>)` otherwise.
-fn install_soldr_on_demand(version: Option<&str>) -> Result<(), String> {
-    let pinned = version.map(|v| format!("soldr=={v}"));
-    let pkg = pinned.as_deref().unwrap_or("soldr");
+fn install_soldr_on_demand(version: Option<&str>, force: bool) -> Result<(), String> {
+    let pkg = soldr_package_spec(version);
+    let uv_args = if force {
+        vec!["tool", "install", "--force", pkg.as_str()]
+    } else {
+        vec!["tool", "install", pkg.as_str()]
+    };
+    let pip_args = ["install", "--user", "--upgrade", pkg.as_str()];
 
-    let attempted = try_install(&[("uv", &["tool", "install", pkg])])
-        .or_else(|_| try_install(&[("pip", &["install", "--user", pkg])]));
+    let attempted = try_install(&[("uv", uv_args.as_slice())])
+        .or_else(|_| try_install(&[("pip", pip_args.as_slice())]));
 
     match attempted {
         Ok(via) => {
             if which::which("soldr").is_ok() {
+                if let Some(expected) = version.and_then(parse_first_version_triple) {
+                    let actual = installed_soldr_version()?;
+                    if actual != expected {
+                        return Err(format!(
+                            "`{via}` completed but soldr remained at v{}.{}.{} instead of requested v{}.{}.{}",
+                            actual.0, actual.1, actual.2, expected.0, expected.1, expected.2
+                        ));
+                    }
+                }
                 verbose_eprintln!("clud: installed soldr via `{via}`");
                 Ok(())
             } else {
@@ -354,6 +394,71 @@ fn install_soldr_on_demand(version: Option<&str>) -> Result<(), String> {
         }
         Err(reason) => Err(reason),
     }
+}
+
+fn soldr_package_spec(version: Option<&str>) -> String {
+    match version.map(str::trim) {
+        None | Some("") => "soldr".to_string(),
+        Some(version) if version.eq_ignore_ascii_case("latest") => "soldr".to_string(),
+        Some(version) => format!("soldr=={version}"),
+    }
+}
+
+fn upgrade_soldr_to_latest() -> Result<(), String> {
+    try_install(&[("uv", &["tool", "upgrade", "soldr"])])
+        .or_else(|_| try_install(&[("pip", &["install", "--user", "--upgrade", "soldr"])]))
+        .and_then(|_| {
+            which::which("soldr")
+                .map(|_| ())
+                .map_err(|_| "installer succeeded but soldr is not on PATH".to_string())
+        })
+}
+
+fn latest_refresh_stamp() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CLUD_SOLDR_LATEST_STAMP") {
+        return Some(PathBuf::from(path));
+    }
+    dirs::home_dir().map(|home| home.join(".clud/cache/soldr/latest-check"))
+}
+
+fn claim_latest_refresh(now: SystemTime) -> bool {
+    let Some(stamp) = latest_refresh_stamp() else {
+        return false;
+    };
+    if std::fs::metadata(&stamp)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age < SOLDR_LATEST_FRESHNESS)
+    {
+        return false;
+    }
+    let Some(parent) = stamp.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let lock = stamp.with_extension("lock");
+    if std::fs::metadata(&lock)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age >= SOLDR_LATEST_FRESHNESS)
+    {
+        let _ = std::fs::remove_file(&lock);
+    }
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+        .is_err()
+    {
+        return false;
+    }
+    let claimed = std::fs::write(&stamp, b"rolling-latest\n").is_ok();
+    let _ = std::fs::remove_file(lock);
+    claimed
 }
 
 /// Try a series of `(installer, args)` candidates. Returns the first
@@ -613,19 +718,29 @@ mod tests {
 
     #[test]
     fn install_pkg_spec_uses_double_equals_for_pinned_version() {
-        // We don't actually run uv/pip here, just check the spec we'd
-        // build. The internal `pinned.as_deref().unwrap_or("soldr")`
-        // logic in `install_soldr_on_demand` is the contract; replicate
-        // it locally.
-        let version = Some("0.7.55");
-        let pinned = version.map(|v| format!("soldr=={v}"));
-        let pkg = pinned.as_deref().unwrap_or("soldr");
-        assert_eq!(pkg, "soldr==0.7.55");
+        assert_eq!(soldr_package_spec(Some("0.7.55")), "soldr==0.7.55");
+        assert_eq!(soldr_package_spec(None), "soldr");
+        assert_eq!(soldr_package_spec(Some("latest")), "soldr");
+        assert_eq!(soldr_package_spec(Some("LATEST")), "soldr");
+    }
 
-        let version: Option<&str> = None;
-        let pinned = version.map(|v| format!("soldr=={v}"));
-        let pkg = pinned.as_deref().unwrap_or("soldr");
-        assert_eq!(pkg, "soldr");
+    #[test]
+    fn rolling_refresh_claim_is_freshness_bounded() {
+        let _g = isolate_path_env();
+        let temp = tempfile::tempdir().expect("temporary stamp directory");
+        let stamp = temp.path().join("latest-check");
+        unsafe {
+            std::env::set_var("CLUD_SOLDR_LATEST_STAMP", &stamp);
+        }
+        let now = SystemTime::now();
+        assert!(claim_latest_refresh(now));
+        assert!(!claim_latest_refresh(now + Duration::from_secs(60)));
+        assert!(claim_latest_refresh(
+            now + SOLDR_LATEST_FRESHNESS + Duration::from_secs(1)
+        ));
+        unsafe {
+            std::env::remove_var("CLUD_SOLDR_LATEST_STAMP");
+        }
     }
 
     #[test]
