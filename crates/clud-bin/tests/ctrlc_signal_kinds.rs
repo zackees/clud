@@ -17,7 +17,10 @@ use std::process::{Command, Stdio};
 mod exe;
 
 fn probe_reports(signal: libc::c_int, expected_kind: &str) {
-    let probe = exe::bin_path("clud-ctrlc-probe", env!("CARGO_BIN_EXE_clud-ctrlc-probe"));
+    let probe = exe::bin_path(
+        "clud-ctrlc-probe",
+        option_env!("CARGO_BIN_EXE_clud-ctrlc-probe"),
+    );
     let mut child = Command::new(&probe)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

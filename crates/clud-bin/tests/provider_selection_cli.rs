@@ -8,7 +8,7 @@ use running_process::{
 };
 
 fn clud() -> std::path::PathBuf {
-    exe::bin_path("clud", env!("CARGO_BIN_EXE_clud"))
+    exe::bin_path("clud", option_env!("CARGO_BIN_EXE_clud"))
 }
 
 fn run_isolated(home: &std::path::Path, args: &[&str]) -> (i32, Vec<u8>) {

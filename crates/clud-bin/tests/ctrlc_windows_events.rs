@@ -30,7 +30,10 @@ mod exe;
 
 #[test]
 fn ctrl_break_event_is_reported_as_ctrl_break() {
-    let probe = exe::bin_path("clud-ctrlc-probe", env!("CARGO_BIN_EXE_clud-ctrlc-probe"));
+    let probe = exe::bin_path(
+        "clud-ctrlc-probe",
+        option_env!("CARGO_BIN_EXE_clud-ctrlc-probe"),
+    );
     let mut child = Command::new(&probe)
         .creation_flags(CREATE_NEW_PROCESS_GROUP)
         .stdin(Stdio::null())

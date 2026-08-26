@@ -35,7 +35,7 @@ fn write_report(dir: &std::path::Path, name: &str, backtrace: &str) {
 /// Spawn `clud <args>` via running_process::NativeProcess, drain its
 /// merged stdout+stderr into a `String`, and return `(exit_code, output)`.
 fn run_clud(args: &[&str], state_dir: &std::path::Path) -> (i32, String) {
-    let clud = exe::bin_path("clud", env!("CARGO_BIN_EXE_clud"));
+    let clud = exe::bin_path("clud", option_env!("CARGO_BIN_EXE_clud"));
     let mut argv = vec![clud.to_string_lossy().into_owned()];
     argv.extend(args.iter().map(|s| s.to_string()));
 
