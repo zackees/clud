@@ -1394,10 +1394,11 @@ mod tests {
         let client = client(
             &base_url,
             UpstreamConfig {
-                // Keep ample scheduler/socket setup margin on macOS arm
-                // runners; the fake server still responds after only 80 ms.
-                first_frame_timeout: Some(Duration::from_secs(1)),
-                read_timeout: Duration::from_secs(1),
+                // Keep ample scheduler/socket setup margin on shared macOS
+                // runners (#994); the fake server still responds after only
+                // 80 ms, so this continues to exercise the success path.
+                first_frame_timeout: Some(Duration::from_secs(5)),
+                read_timeout: Duration::from_secs(5),
                 ..fast_config()
             },
         );
