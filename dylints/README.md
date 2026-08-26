@@ -11,8 +11,12 @@ Run locally:
 ```bash
 rustup toolchain install nightly-2026-04-16 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
 soldr cargo install cargo-dylint dylint-link --version 6.0.4 --locked
-RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr cargo dylint --all -- --workspace --all-targets
+RUSTUP_TOOLCHAIN=nightly-2026-04-16 cargo-dylint dylint --all -- --workspace --all-targets
 ```
+
+Invoke `cargo-dylint` directly for the final command. Soldr 0.9.10's managed
+`cargo dylint` lane is pinned independently to 6.0.3 and prepares that older
+driver before dispatch, while this lint crate requires 6.0.4.
 
 Version pins (issue #911). `cargo-dylint`, `dylint-link` and `dylint_linting`
 all move together at **6.0.4**, and the nightly above must match
