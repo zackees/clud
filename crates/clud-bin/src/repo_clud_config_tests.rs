@@ -50,23 +50,21 @@ fn local_settings_win_over_shared_for_scalars() {
 }
 
 #[test]
-fn shared_settings_still_apply_where_local_is_silent() {
-    // The layer is an override, not a replacement: a local file that
-    // mentions one field must not discard the rest of the shared config.
+fn shared_rust_fields_fall_through_except_the_rolling_version_policy() {
+    // Most fields still fall through from the shared layer. Version is the
+    // deliberate exception: any local Rust directive with no version selects
+    // rolling latest instead of reviving a lower layer's numeric pin.
     let tmp = TempDir::new().unwrap();
     mark_repo_root(tmp.path());
     write_settings(
         tmp.path(),
-        r#"{"rust":{"use_soldr":false,"version":"1.90.0"}}"#,
+        r#"{"rust":{"use_soldr":false,"install":false,"version":"1.90.0"}}"#,
     );
     write_local_settings(tmp.path(), r#"{"rust":{"use_soldr":true}}"#);
     let cfg = discover_repo_clud_config(tmp.path()).expect("config");
     assert!(cfg.rust.use_soldr, "local override applies");
-    assert_eq!(
-        cfg.rust.version.as_deref(),
-        Some("1.90.0"),
-        "untouched shared field must survive"
-    );
+    assert!(!cfg.rust.install, "untouched shared field must survive");
+    assert_eq!(cfg.rust.version, None, "local omission selects latest");
 }
 
 #[test]

@@ -20,11 +20,14 @@
 //!   start but never actually read until #525, so rules placed there were
 //!   silently ignored.
 //!
-//! Merge semantics: **repo-local > repo > user**, per field. A field unset
-//! at one level falls through to the next; unset everywhere uses the
-//! baked-in default. `bad_commands` and `bad_pipelines` instead concatenate
-//! across layers, deduplicated by `id` with the higher layer winning, so a
-//! local override can replace one shared rule without restating the rest.
+//! Merge semantics: **repo-local > repo > user**, per field. Most fields unset
+//! at one level fall through to the next; unset everywhere uses the baked-in
+//! default. The exception is Soldr's version policy: once an upper layer has
+//! any Rust directive, omitting its version explicitly selects rolling latest
+//! instead of inheriting a lower layer's numeric pin. `bad_commands` and
+//! `bad_pipelines` instead concatenate across layers, deduplicated by `id` with
+//! the higher layer winning, so a local override can replace one shared rule
+//! without restating the rest.
 //! This mirrors how `.claude/settings.json` layers with
 //! `~/.claude/settings.json` in Claude Code.
 //!
@@ -1008,7 +1011,9 @@ pub fn parse_repo_clud_config(text: &str) -> Result<RepoCludConfig, String> {
 // ---------------------------------------------------------------------
 
 /// Layer `lower` (e.g. user-level) under `upper` (e.g. repo-level).
-/// `upper` wins per-field where set for the scalar rust fields;
+/// `upper` wins per-field where set for the scalar rust fields. Any Rust
+/// directive in `upper` makes an omitted version mean rolling latest rather
+/// than allowing a lower numeric pin to leak through;
 /// `bad_commands` concatenates instead (see `concat_dedupe_bad_commands`).
 pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludConfig {
     let upper_has_rust_directive = has_rust_directive(&upper);
