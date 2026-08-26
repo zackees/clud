@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -411,16 +412,38 @@ def collect_debuginfo(target: str, profile: str) -> list[Path]:
     shrinking is the hard requirement, attaching symbols the secondary one.
     """
     source = ROOT / "target" / target / profile
-    found = [path for path in (source / "clud.dwp",) if path.is_file()]
+    # Cargo uplifts the *binary* from `deps/clud-<hash>` to `release/clud`, but
+    # 2.7.5 shipped with no sidecar because it does not reliably uplift the
+    # `.dwp` alongside it under maturin's `cargo rustc --bin` invocation: the
+    # wheel shrank 101 MB -> 47 MB, so the DWARF did leave the ELF, yet
+    # `release/clud.dwp` did not exist. Look in `deps/` too, and match the
+    # hash suffix exactly so a differently-named bin cannot be mistaken for
+    # clud's own.
+    deps = sorted(
+        path
+        for path in source.glob("deps/clud-*.dwp")
+        if re.fullmatch(r"clud-[0-9a-f]{8,}", path.stem)
+    )
+    found = [path for path in (source / "clud.dwp", *deps) if path.is_file()][:1]
     if not found:
-        print(f"no clud.dwp under {source} (expected off ELF targets)", flush=True)
+        # Self-diagnosing: name whatever split DWARF does exist so the next
+        # release says where it went instead of repeating this silence.
+        strays = [str(path.relative_to(source)) for path in sorted(source.rglob("*.dw[po]"))[:10]]
+        print(
+            f"no clud .dwp under {source}; split DWARF present: {strays or 'none'}",
+            flush=True,
+        )
         return []
     DEBUGINFO_DIR.mkdir(parents=True, exist_ok=True)
     staged: list[Path] = []
     for dwp in found:
         # Suffix the triple so `merge-multiple: true` cannot collide the
         # per-target artifacts on top of each other in the release job.
-        dest = DEBUGINFO_DIR / f"{dwp.stem}-{target}.dwp"
+        # Fixed stem, not `dwp.stem`: the deps/ copy is named `clud-<hash>`,
+        # and a release asset whose name carries a build hash is one #1016's
+        # fetcher could not predict. The triple suffix keeps `merge-multiple`
+        # from colliding the per-target artifacts.
+        dest = DEBUGINFO_DIR / f"clud-{target}.dwp"
         dest.write_bytes(dwp.read_bytes())
         print(f"debug info: {dest} ({dest.stat().st_size:,} bytes)", flush=True)
         staged.append(dest)
