@@ -89,8 +89,29 @@ def test_verify_windows_wheel_scripts_uses_target_not_host(monkeypatch, tmp_path
     with zipfile.ZipFile(wheel, "w") as archive:
         for name in build_wheel.REQUIRED_SCRIPTS:
             archive.writestr(f"clud-2.3.0.data/scripts/{name}.exe", b"")
+        archive.writestr("clud-2.3.0.data/scripts/clud-webterm.exe", b"")
 
     assert build_wheel.verify_wheel_scripts(wheel) == 0
+
+
+def test_verify_windows_wheel_scripts_requires_the_webterm_companion(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
+    wheel = tmp_path / "clud-2.3.0-py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in build_wheel.REQUIRED_SCRIPTS:
+            archive.writestr(f"clud-2.3.0.data/scripts/{name}.exe", b"")
+
+    assert build_wheel.verify_wheel_scripts(wheel) == 1
+
+
+def test_verify_macos_wheel_scripts_requires_the_webterm_companion(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
+    wheel = tmp_path / "clud-2.3.0-py3-none-macosx_11_0_arm64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in build_wheel.REQUIRED_SCRIPTS:
+            archive.writestr(f"clud-2.3.0.data/scripts/{name}", b"")
+
+    assert build_wheel.verify_wheel_scripts(wheel) == 1
 
 
 def test_verify_windows_wheel_scripts_rejects_missing_native_helper(monkeypatch, tmp_path):

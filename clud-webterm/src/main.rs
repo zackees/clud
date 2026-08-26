@@ -172,6 +172,12 @@ fn close_tab(state: State<PtyState>, tab_id: u64) -> Result<(), String> {
 }
 
 fn main() {
+    // This must run before Tauri initializes so installed-wheel CI can prove
+    // that Windows loaded the companion (including its manifest) without
+    // opening a desktop window. See #1033.
+    if std::env::args().skip(1).eq(["--startup-check".to_string()]) {
+        return;
+    }
     tauri::Builder::default()
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![

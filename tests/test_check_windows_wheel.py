@@ -15,6 +15,7 @@ from ci.check_windows_wheel import (
     _is_clud_script_exe,
     check_wheel,
     forbidden_imports,
+    has_common_controls_v6_manifest,
     iter_imported_dll_names,
 )
 
@@ -125,6 +126,51 @@ def _make_pe_with_imports(dll_names: list[str]) -> bytes:
     return bytes(pe)
 
 
+def _make_pe_with_manifest(manifest: bytes) -> bytes:
+    """Build a tiny PE32+ executable with RT_MANIFEST resource id 1."""
+    section_rva = 0x1000
+    root_dir = 0
+    type_dir = 24
+    name_dir = 48
+    data_entry = 72
+    payload = 88
+    section = bytearray(payload) + bytearray(manifest)
+    # IMAGE_RESOURCE_DIRECTORY headers: one integer-ID child at each level.
+    for offset in (root_dir, type_dir, name_dir):
+        struct.pack_into("<IIHHHH", section, offset, 0, 0, 0, 0, 0, 1)
+    struct.pack_into("<II", section, root_dir + 16, 24, 0x80000000 | type_dir)
+    struct.pack_into("<II", section, type_dir + 16, 1, 0x80000000 | name_dir)
+    struct.pack_into("<II", section, name_dir + 16, 0x409, data_entry)
+    struct.pack_into(
+        "<IIII", section, data_entry, section_rva + payload, len(manifest), 0, 0
+    )
+
+    pe_header_offset = 0x40
+    coff_offset = pe_header_offset + 4
+    optional_header_size = 240
+    opt_offset = coff_offset + 20
+    section_header_offset = opt_offset + optional_header_size
+    section_raw_offset = 0x200
+    pe = bytearray(section_raw_offset + len(section))
+    pe[0:2] = b"MZ"
+    struct.pack_into("<I", pe, 0x3C, pe_header_offset)
+    pe[pe_header_offset : pe_header_offset + 4] = PE_SIG
+    struct.pack_into(
+        "<HHIIIHH", pe, coff_offset, 0x8664, 1, 0, 0, 0, optional_header_size, 0
+    )
+    struct.pack_into("<H", pe, opt_offset, 0x20B)
+    struct.pack_into("<I", pe, opt_offset + 108, 16)
+    data_dirs_start = opt_offset + 112
+    struct.pack_into("<II", pe, data_dirs_start + 16, section_rva, len(section))
+    pe[section_header_offset : section_header_offset + 8] = b".rsrc\x00\x00\x00"
+    struct.pack_into("<I", pe, section_header_offset + 8, len(section))
+    struct.pack_into("<I", pe, section_header_offset + 12, section_rva)
+    struct.pack_into("<I", pe, section_header_offset + 16, len(section))
+    struct.pack_into("<I", pe, section_header_offset + 20, section_raw_offset)
+    pe[section_raw_offset:] = section
+    return bytes(pe)
+
+
 def _make_wheel(
     tmp_path: Path,
     wheel_name: str,
@@ -209,3 +255,34 @@ def test_forbidden_imports_is_case_insensitive():
     assert forbidden_imports(["libgcc_s_dw2-1.dll"]) == ["libgcc_s_dw2-1.dll"]
     assert forbidden_imports(["libgcc_s_sjlj-1.dll"]) == ["libgcc_s_sjlj-1.dll"]
     assert forbidden_imports(["MSVCP140.dll"]) == []
+
+
+def test_webterm_manifest_requires_common_controls_v6(tmp_path: Path):
+    manifest = b'''<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+      <dependency><dependentAssembly><assemblyIdentity
+        type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
+        processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />
+      </dependentAssembly></dependency></assembly>'''
+    assert has_common_controls_v6_manifest(_make_pe_with_manifest(manifest))
+
+    wheel = tmp_path / "clud-2.0.0-py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "clud-2.0.0.data/scripts/clud-webterm.exe", _make_pe_with_manifest(manifest)
+        )
+        archive.writestr("clud-2.0.0.dist-info/RECORD", "")
+    assert check_wheel(wheel) == []
+
+
+def test_webterm_without_a_common_controls_manifest_fails(tmp_path: Path):
+    wheel = _make_wheel(
+        tmp_path,
+        "clud-2.0.0-py3-none-win_amd64.whl",
+        ["KERNEL32.dll"],
+        scripts=["clud-webterm.exe"],
+    )
+
+    errors = check_wheel(wheel)
+
+    assert len(errors) == 1
+    assert "Common Controls v6" in errors[0]

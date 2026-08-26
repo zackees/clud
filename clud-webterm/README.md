@@ -16,6 +16,15 @@ Deliberately **excluded from the root workspace** (see root `Cargo.toml`
 `exclude`) so its heavy dep tree and process spawning don't touch the shipped
 `clud` build, CI, or `bash lint`.
 
+## Windows cross-build manifest
+
+`windows-app-manifest.xml` is a Windows-only loader resource. Linux-hosted
+Windows builds cannot run Tauri's usual host-side resource compiler, so
+`build.rs` writes its compact `.res` representation directly and links it into
+the Windows companion. It activates the operating system's Common Controls v6
+implementation before Tauri resolves `TaskDialogIndirect`; it is not packaged
+for Linux or macOS and does not add a DLL dependency.
+
 ## Run
 
 ```bash
