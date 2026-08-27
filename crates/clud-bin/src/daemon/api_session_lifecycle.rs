@@ -80,11 +80,18 @@ impl ApiSessionLifecycle {
                 return Err(LifecycleError::Launch(error.to_string()));
             }
         };
-        if let Some(activity) = self.activity.as_ref() {
-            let guard = activity.start_job(); let observed = Arc::clone(&process);
-            thread::spawn(move || { let _guard = guard; let _ = observed.wait(None); });
-        }
-        self.active.lock().unwrap_or_else(|p| p.into_inner()).insert(session_id.to_string(), process);
+        self.active.lock().unwrap_or_else(|p| p.into_inner()).insert(session_id.to_string(), Arc::clone(&process));
+        // The controller owns durable sealing. This observer only releases
+        // transient ownership/idle state; pointer equality prevents an old
+        // generation from removing a newer one for the same logical ID.
+        let active = Arc::clone(&self.active); let observed = Arc::clone(&process); let observed_id = session_id.to_string();
+        let activity = self.activity.as_ref().map(DaemonActivity::start_job);
+        thread::spawn(move || {
+            let _activity = activity;
+            while observed.returncode().is_none() { thread::sleep(Duration::from_millis(25)); }
+            let mut active = active.lock().unwrap_or_else(|p| p.into_inner());
+            if active.get(&observed_id).is_some_and(|current| Arc::ptr_eq(current, &observed)) { active.remove(&observed_id); }
+        });
         Ok(LifecycleReply::Started { generation: turn.generation, turn_id: turn.id })
     }
     pub fn interrupt(&self, session_id: &str) -> Result<LifecycleReply, LifecycleError> { let gate = self.gate_for(session_id); let _gate = gate.lock().unwrap_or_else(|p| p.into_inner()); let process = self.active.lock().unwrap_or_else(|p| p.into_inner()).remove(session_id).ok_or(LifecycleError::NotFound)?; Ok(LifecycleReply::Interrupted { forced: self.stop(session_id, &process) }) }
