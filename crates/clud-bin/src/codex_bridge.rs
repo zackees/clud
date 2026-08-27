@@ -548,15 +548,17 @@ fn serve(
         if active.load(Ordering::Acquire) >= limit {
             if full_since.is_none() {
                 full_since = Some(Instant::now());
-                record_admission_queued(log.as_ref());
             }
             thread::sleep(ACCEPT_POLL);
             continue;
         } else {
-            // This is intentionally an aggregate queue interval, rather than
-            // per-request metadata: sockets are not accepted until their slot
-            // exists, so no user-space queue or request-body retention exists.
-            let queue_wait = full_since.take().map(|started| started.elapsed());
+            // Reserve before accepting.  The check above is only a hint: an
+            // old worker can exit (or a new worker can reserve) between it and
+            // this point. Reserving first means no accepted socket is ever
+            // discarded because admission raced after `accept`.
+            if !reserve_worker(&active, limit) {
+                continue;
+            }
             match listener.accept() {
                 Ok((stream, _peer)) => {
                     // The listener is non-blocking so the accept loop can poll for
@@ -568,15 +570,16 @@ fn serve(
                     // separate segment from its headers. Restore blocking mode per
                     // connection so the read deadlines are the real bound.
                     if stream.set_nonblocking(false).is_err() {
+                        active.fetch_sub(1, Ordering::AcqRel);
                         continue;
                     }
-                    if !reserve_worker(&active, limit) {
-                        // A worker occupied the slot after the load above. Leave
-                        // this socket untouched by continuing to use the kernel
-                        // backlog; no local overload reply is ever synthesized.
-                        continue;
-                    }
-                    if let Some(wait) = queue_wait {
+                    // `full_since` begins at saturation, before the OS exposes
+                    // a readable pending socket, so `wait_ms` is a secret-free
+                    // aggregate upper bound rather than a per-client identity.
+                    // Only emit events now that an actual queued socket has
+                    // been accepted; a lone occupied worker produces neither.
+                    if let Some(wait) = full_since.take().map(|started| started.elapsed()) {
+                        record_admission_queued(log.as_ref());
                         record_admission_acquired(log.as_ref(), wait);
                     }
                     let shutdown_stream = match stream.try_clone() {
@@ -629,9 +632,16 @@ fn serve(
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    // There was no pending socket, so any saturation interval
+                    // was not an admission queue and must not reach the log.
+                    full_since = None;
                     thread::sleep(ACCEPT_POLL);
                 }
-                Err(_) => break,
+                Err(_) => {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    break;
+                }
             }
         }
     }
@@ -5912,6 +5922,30 @@ Connection: close
         assert!(log.contains("admission_queued"), "{log}");
         assert!(log.contains("admission_acquired"), "{log}");
         assert!(log.contains("wait_ms"), "{log}");
+    }
+
+    /// Saturation alone is not an admission queue.  The listener must have an
+    /// actual later socket before the aggregate queue observability is emitted.
+    #[test]
+    fn a_lone_held_request_emits_no_admission_events() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("bridge.jsonl");
+        let upstream = FakeResponses::start();
+        let mut bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_request_hold(Duration::from_millis(250))
+                .with_log_path(log_path.clone()),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        bridge.shutdown().unwrap();
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        assert!(!log.contains("admission_queued"), "{log}");
+        assert!(!log.contains("admission_acquired"), "{log}");
     }
 
     /// Regression guard: Claude Code sends `POST /v1/messages?beta=true`.

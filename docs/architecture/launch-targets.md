@@ -387,7 +387,8 @@ reason rather than a guess:
   never accepts them to buffer a body or synthesize `503 bridge busy`; the
   active worker's five-minute first-frame and stream-idle timeouts still bound a
   silent upstream wedge. Queue wait is recorded separately from upstream retry
-  events, without request content or secrets.
+  events, with an aggregate upper-bound duration and without request content or
+  secrets.
 
 The representative request is *constructed*, not captured production traffic.
 That distinction is deliberate and is stated in the test: it is evidence about

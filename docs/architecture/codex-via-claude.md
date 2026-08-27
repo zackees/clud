@@ -14,15 +14,16 @@ occupied, later TCP connections remain in the operating system listener
 backlog until the slot opens or the foreground bridge shuts down. clud does not
 accept those sockets early, buffer their request bodies, create waiter threads,
 or return a local `503 bridge busy` for ordinary contention. The original socket
-is admitted once and its turn makes one normal upstream attempt, so contention
-cannot duplicate a model request or canonical-history commit.
+is admitted once into the normal pipeline, so local contention cannot duplicate
+a model request or canonical-history commit. The upstream client may still make
+its existing classified retries after that admission.
 
 The occupied worker retains the existing five-minute first-frame and
 stream-idle protections; a healthy stream may run longer and its backlog age is
 not itself a failure. Shutdown closes active connections and the listener, so
 both an active worker and queued clients are released promptly. Bridge forensic
 logs record secret-free `admission_queued` and `admission_acquired` events with
-aggregate `wait_ms`; these are local scheduling observability and are distinct
+aggregate upper-bound `wait_ms`; these are local scheduling observability and are distinct
 from `upstream_attempt` retry records. Claude Code's own retry loop remains a
 defence for transport or upstream failures that reach the harness. The bridge
 does not set Claude retry environment variables to compensate for local
