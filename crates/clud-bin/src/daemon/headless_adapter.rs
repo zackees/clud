@@ -151,7 +151,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             initial.command,
-            ["codex", "-m", "gpt-test", "exec", "--json", "hello"]
+            ["codex", "exec", "--json", "-m", "gpt-test", "hello"]
         );
         let resumed = build_turn_plan(
             // This is the CLI-shaped resume input the HTTP/lifecycle slice
