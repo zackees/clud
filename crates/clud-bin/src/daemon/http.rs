@@ -796,17 +796,24 @@ fn openapi_document() -> serde_json::Value {
         "session_id":{"type":"string"}, "turn_id":{"type":"string"}, "generation":{"type":"integer"}, "status":{"type":"string","enum":["started","replayed","busy"]}
     });
     schemas["InterruptResponse"]["properties"] = serde_json::json!({"status":{"type":"string","enum":["interrupted"]},"forced":{"type":"boolean"}});
-    schemas["Error"]["properties"] = serde_json::json!({"code":{"type":"string"},"message":{"type":"string"}});
-    for item in document["paths"].as_object_mut().into_iter().flat_map(|paths| paths.values_mut()) {
+    schemas["Error"]["properties"] =
+        serde_json::json!({"code":{"type":"string"},"message":{"type":"string"}});
+    for item in document["paths"]
+        .as_object_mut()
+        .into_iter()
+        .flat_map(|paths| paths.values_mut())
+    {
         for operation in ["get", "post", "delete"] {
-            if let Some(responses) = item.get_mut(operation).and_then(|value| value.get_mut("responses")) {
+            if let Some(responses) = item
+                .get_mut(operation)
+                .and_then(|value| value.get_mut("responses"))
+            {
                 responses["401"] = serde_json::json!({"$ref":"#/components/responses/Error"});
             }
         }
     }
     for path in ["/v1/sessions/{id}", "/v1/sessions/{id}/events"] {
-        document["paths"][path]["get"]["responses"]["409"] =
-            serde_json::json!({"$ref":"#/components/responses/Error","description":"corrupt_session"});
+        document["paths"][path]["get"]["responses"]["409"] = serde_json::json!({"$ref":"#/components/responses/Error","description":"corrupt_session"});
     }
     document
 }
