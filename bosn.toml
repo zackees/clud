@@ -36,6 +36,8 @@ destination = "/root/.rustup"
 
 [stack.clud_1044_validation.env]
 CARGO_TARGET_DIR = "/workspace/target"
+CARGO_BUILD_JOBS = "1"
+SOLDR_JOBS = "1"
 UV_CACHE_DIR = "/root/.cache/uv"
 RUFF_CACHE_DIR = "/root/.cache/ruff"
 # This repository pins Soldr through its packaging/CI flow rather than a
