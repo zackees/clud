@@ -299,6 +299,32 @@ fn run(mut args: args::Args) {
         std::process::exit(worktrees::run(&opts));
     }
 
+    // `do` accepts an optional URL/free-form target. Resolve it before any
+    // harness selection, credential preflight, setup write, or backend spawn.
+    // Never consume piped stdin: in non-interactive/dry-run/background modes a
+    // missing target is a deterministic usage error instead of a hidden block.
+    if matches!(args.command, Some(args::Command::Do { .. })) {
+        let stdin_is_terminal = io::stdin().is_terminal();
+        let stderr_is_terminal = io::stderr().is_terminal();
+        let resolved = {
+            let stdin = io::stdin();
+            let stderr = io::stderr();
+            let mut input = stdin.lock();
+            let mut output = stderr.lock();
+            command::resolve_do_command_target(
+                &mut args,
+                stdin_is_terminal,
+                stderr_is_terminal,
+                &mut input,
+                &mut output,
+            )
+        };
+        if let Err(error) = resolved {
+            eprintln!("[clud] error: {error}");
+            std::process::exit(2);
+        }
+    }
+
     let auto_selected_harness = if harness_picker::should_select(
         &args,
         io::stdin().is_terminal(),
@@ -394,6 +420,12 @@ fn run(mut args: args::Args) {
     }
     if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
         eprintln!("{error}");
+        std::process::exit(2);
+    }
+    if let Some(error) =
+        command::interactive_builtin_resume_error(&args, launch_target.effective_harness)
+    {
+        eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
     if launch_target.effective_harness == backend::Backend::DeepSeek {
@@ -563,6 +595,7 @@ fn run(mut args: args::Args) {
         {
             let interactive = provider_auth::launch_is_interactive(
                 &args,
+                launch_target.effective_harness,
                 io::stdin().is_terminal(),
                 io::stderr().is_terminal(),
             );

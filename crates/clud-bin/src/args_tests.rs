@@ -822,12 +822,67 @@ fn test_fix_with_url() {
 }
 
 #[test]
+fn bare_resume_gives_registered_builtins_precedence_over_optional_session_value() {
+    for (verb, target) in [
+        ("do", Some("README.md")),
+        ("up", None),
+        ("rebase", None),
+        ("fix", None),
+    ] {
+        let mut raw = vec!["clud", "--codex", "--resume", verb];
+        if let Some(target) = target {
+            raw.push(target);
+        }
+        let args = Args::parse_from_raw(raw.iter().map(|value| (*value).to_string()).collect());
+        assert_eq!(args.resume, Some(None), "verb={verb}");
+        let parsed_verb = match args.command {
+            Some(Command::Do { .. }) => "do",
+            Some(Command::Up { .. }) => "up",
+            Some(Command::Rebase) => "rebase",
+            Some(Command::Fix { .. }) => "fix",
+            other => panic!("expected {verb} command, got {other:?}"),
+        };
+        assert_eq!(parsed_verb, verb);
+        assert!(args.passthrough.is_empty());
+    }
+
+    let short = parse(&["clud", "--codex", "-r", "do", "README.md"]);
+    assert_eq!(short.resume, Some(None));
+    assert!(matches!(short.command, Some(Command::Do { .. })));
+}
+
+#[test]
+fn resume_session_named_like_subcommand_requires_unambiguous_equals_form() {
+    let args = parse(&["clud", "--codex", "--resume=do"]);
+    assert_eq!(
+        args.resume.as_ref().and_then(|value| value.as_deref()),
+        Some("do")
+    );
+    assert!(args.command.is_none());
+
+    let passthrough = parse(&["clud", "--", "--resume", "do"]);
+    assert_eq!(passthrough.passthrough, ["--resume", "do"]);
+}
+
+#[test]
 fn test_do_subcommand() {
     let args = parse(&["clud", "do", "https://github.com/zackees/clud/issues/866"]);
     match args.command {
-        Some(Command::Do { ref url }) => {
-            assert_eq!(url, "https://github.com/zackees/clud/issues/866");
+        Some(Command::Do { ref target }) => {
+            assert_eq!(
+                target.as_deref(),
+                Some("https://github.com/zackees/clud/issues/866")
+            );
         }
+        _ => panic!("expected Do subcommand"),
+    }
+}
+
+#[test]
+fn test_do_subcommand_without_target() {
+    let args = parse(&["clud", "do"]);
+    match args.command {
+        Some(Command::Do { ref target }) => assert!(target.is_none()),
         _ => panic!("expected Do subcommand"),
     }
 }

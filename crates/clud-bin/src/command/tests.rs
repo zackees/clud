@@ -1,6 +1,7 @@
 use super::builder::{
-    build_launch_plan, build_launch_plan_at, build_launch_plan_for_target, next_run_at_millis,
-    parse_repeat_interval, plan_mode_suppression_notice, repeat_implies_no_done_warning,
+    build_launch_plan, build_launch_plan_at, build_launch_plan_for_target,
+    interactive_builtin_resume_error, next_run_at_millis, parse_repeat_interval,
+    plan_mode_suppression_notice, repeat_implies_no_done_warning,
 };
 use super::prompts::{
     build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, is_github_url,
@@ -228,6 +229,32 @@ fn deepseek_harness_prompt_uses_headless_profile_without_yolo_flags() {
     let args = parse(&["clud", "--harness", "deepseek", "-p", "hello"]);
     let plan = build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh");
     assert_eq!(plan.command, vec!["dsh", "--profile", "headless", "hello"]);
+}
+
+#[test]
+fn deepseek_harness_one_shot_builtins_keep_headless_profile() {
+    for argv in [
+        vec!["clud", "--harness", "deepseek", "up"],
+        vec!["clud", "--harness", "deepseek", "rebase"],
+        vec!["clud", "--harness", "deepseek", "fix"],
+        vec![
+            "clud",
+            "--harness",
+            "deepseek",
+            "do",
+            "https://github.com/zackees/clud/issues/1036",
+        ],
+    ] {
+        let args = parse(&argv);
+        let plan = build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh");
+        assert_eq!(
+            &plan.command[..3],
+            ["dsh", "--profile", "headless"],
+            "argv={argv:?}, cmd={:?}",
+            plan.command
+        );
+        assert_eq!(plan.launch_mode, LaunchMode::Subprocess);
+    }
 }
 
 #[test]
@@ -808,14 +835,123 @@ fn test_codex_model_uses_short_m() {
 }
 
 #[test]
-fn test_codex_up_routes_through_exec() {
-    let p = plan(&["clud", "--codex", "up"]);
-    assert_eq!(p.command[0], "codex");
-    assert!(codex_exec_index(&p) > 0);
-    // Prompt is positional (last arg), not behind `-p`.
-    assert!(p.command.iter().all(|a| a != "-p"));
-    assert!(last_arg(&p).contains("codeup"));
-    assert_eq!(p.launch_mode, LaunchMode::Subprocess);
+fn test_codex_one_shot_builtin_verbs_seed_interactive_sessions() {
+    for argv in [
+        vec!["clud", "--codex", "up"],
+        vec!["clud", "--codex", "rebase"],
+        vec!["clud", "--codex", "fix"],
+        vec![
+            "clud",
+            "--codex",
+            "do",
+            "https://github.com/zackees/clud/issues/1036",
+        ],
+    ] {
+        let p = plan(&argv);
+        assert_eq!(p.command[0], "codex", "argv={argv:?}");
+        assert!(
+            !p.command.iter().any(|arg| arg == "exec"),
+            "one-shot built-in must not use codex exec; argv={argv:?}, cmd={:?}",
+            p.command
+        );
+        assert!(
+            p.command.iter().all(|arg| arg != "-p"),
+            "Codex prompt must stay positional; argv={argv:?}, cmd={:?}",
+            p.command
+        );
+        assert_eq!(
+            p.launch_mode,
+            LaunchMode::Pty,
+            "headless tests have no parent TTY, so an interactive Codex TUI needs a PTY; argv={argv:?}"
+        );
+    }
+}
+
+#[test]
+fn codex_resumed_builtins_put_the_session_selector_before_the_prompt() {
+    for mut argv in [
+        vec!["clud", "--codex", "--resume=sess-123", "up"],
+        vec!["clud", "--codex", "--resume=sess-123", "rebase"],
+        vec!["clud", "--codex", "--resume=sess-123", "fix"],
+        vec![
+            "clud",
+            "--codex",
+            "--resume=sess-123",
+            "do",
+            "https://github.com/zackees/clud/issues/1036",
+        ],
+    ] {
+        let resumed_plan = plan(&argv);
+        let resume = resumed_plan
+            .command
+            .iter()
+            .position(|arg| arg == "resume")
+            .unwrap();
+        let session = resumed_plan
+            .command
+            .iter()
+            .position(|arg| arg == "sess-123")
+            .unwrap();
+        assert!(resume < session && session + 1 == resumed_plan.command.len() - 1);
+        assert!(!resumed_plan.command.iter().any(|arg| arg == "exec"));
+
+        argv.retain(|arg| *arg != "--resume=sess-123");
+        argv.insert(2, "--continue");
+        let continued_plan = plan(&argv);
+        let resume = continued_plan
+            .command
+            .iter()
+            .position(|arg| arg == "resume")
+            .unwrap();
+        let last = continued_plan
+            .command
+            .iter()
+            .position(|arg| arg == "--last")
+            .unwrap();
+        assert!(resume < last && last + 1 == continued_plan.command.len() - 1);
+        assert!(!continued_plan.command.iter().any(|arg| arg == "exec"));
+    }
+}
+
+#[test]
+fn bare_resume_with_interactive_codex_builtin_is_rejected_and_plan_safe() {
+    let args = parse(&[
+        "clud",
+        "--codex",
+        "--resume",
+        "do",
+        "https://github.com/zackees/clud/issues/1036",
+    ]);
+    assert!(interactive_builtin_resume_error(&args, Backend::Codex)
+        .unwrap()
+        .contains("--resume=<session>"));
+    assert!(interactive_builtin_resume_error(&args, Backend::Claude).is_none());
+
+    let plan = build_launch_plan(&args, Backend::Codex, "codex");
+    assert!(plan.command.iter().any(|arg| arg == "resume"));
+    assert!(!plan.command.iter().any(|arg| arg.starts_with("/goal")));
+}
+
+#[test]
+fn unresolved_do_target_has_a_safe_interactive_plan_fallback() {
+    for (argv, expected_backend_token) in [
+        (vec!["clud", "--codex", "do"], "codex"),
+        (vec!["clud", "do"], "claude"),
+        (vec!["clud", "--harness", "deepseek", "do"], "dsh"),
+    ] {
+        let plan = if expected_backend_token == "dsh" {
+            let args = parse(&argv);
+            build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh")
+        } else {
+            plan(&argv)
+        };
+        assert_eq!(plan.command[0], expected_backend_token, "argv={argv:?}");
+        assert!(
+            !plan.command.iter().any(|arg| arg == "exec" || arg == "headless"),
+            "an unresolved target must fall back to the harness's interactive entry; argv={argv:?}, cmd={:?}",
+            plan.command
+        );
+    }
 }
 
 #[test]
@@ -935,9 +1071,32 @@ fn test_do_command_resolves_goal_prompt() {
 #[test]
 fn test_build_do_prompt_substitutes_url() {
     let prompt = build_do_prompt("https://example.com/thing");
-    assert!(prompt.starts_with("/goal "));
-    assert!(prompt.contains("https://example.com/thing"));
+    assert!(prompt.starts_with("/goal read https://example.com/thing"));
     assert!(!prompt.contains("{url}"));
+}
+
+#[test]
+fn test_build_do_prompt_accepts_bare_domain_url() {
+    let prompt = build_do_prompt("github.com/zackees/clud/issues/1036");
+    assert!(prompt.starts_with("/goal read github.com/zackees/clud/issues/1036"));
+}
+
+#[test]
+fn test_build_do_prompt_treats_free_form_input_as_a_goal_not_a_url() {
+    for input in [
+        "refactor the launch mode classifier",
+        "README.md",
+        "v2.8.0",
+        "foo.rs",
+    ] {
+        let prompt = build_do_prompt(input);
+        assert!(
+            prompt.starts_with(&format!("/goal {input}")),
+            "prompt={prompt}"
+        );
+        assert!(!prompt.starts_with("/goal read "), "prompt={prompt}");
+        assert!(prompt.contains("validated, tested, pushed and merged"));
+    }
 }
 
 #[test]

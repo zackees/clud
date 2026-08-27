@@ -21,19 +21,44 @@ const CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG: &str = r#"project_doc_fallback_filen
 const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
     r#"project_doc_fallback_filenames=["CLAUDE.md"]"#;
 
-/// Returns true if `args` carries a prompt that should run non-interactively
-/// (via `codex exec <prompt>` on the codex backend).
-pub fn has_noninteractive_prompt(args: &Args) -> bool {
-    args.prompt.is_some()
-        || matches!(
-            args.command,
-            Some(Command::Loop { .. })
-                | Some(Command::Up { .. })
-                | Some(Command::Rebase)
-                | Some(Command::Fix { .. })
-                | Some(Command::Do { .. })
-                | Some(Command::Grind { .. })
+/// Returns true when this harness consumes the launch prompt headlessly.
+///
+/// `loop`, `grind`, and explicit `-p` prompts are orchestrated/unattended for
+/// every harness. The one-shot built-in verbs seed Codex's interactive TUI;
+/// Claude keeps its existing behavior (`do` interactive, the others `-p`) and
+/// DeepSeek keeps its existing headless profile for every generated prompt.
+pub fn interactive_builtin_resume_error(args: &Args, backend: Backend) -> Option<&'static str> {
+    let is_builtin = matches!(
+        args.command,
+        Some(Command::Up { .. })
+            | Some(Command::Rebase)
+            | Some(Command::Fix { .. })
+            | Some(Command::Do { .. })
+    );
+    (matches!(backend, Backend::Codex) && is_builtin && matches!(args.resume, Some(None)))
+        .then_some(
+            "`--resume` without a session cannot seed an interactive Codex built-in; \
+         use `--continue`, pass `--resume=<session>`, or omit `--resume`",
         )
+}
+
+pub fn has_noninteractive_prompt(args: &Args, backend: Backend) -> bool {
+    if args.prompt.is_some() {
+        return true;
+    }
+    match &args.command {
+        Some(Command::Loop { .. }) | Some(Command::Grind { .. }) => true,
+        Some(Command::Do { target }) => {
+            target
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && matches!(backend, Backend::DeepSeek)
+        }
+        Some(Command::Up { .. }) | Some(Command::Rebase) | Some(Command::Fix { .. }) => {
+            !matches!(backend, Backend::Codex)
+        }
+        _ => false,
+    }
 }
 
 /// True when this launch routes a non-Claude model provider through the Claude
@@ -160,13 +185,19 @@ fn build_launch_plan_for_target_at(
         .flatten()
     });
 
-    let codex_uses_exec = matches!(backend, Backend::Codex) && has_noninteractive_prompt(args);
+    let codex_uses_exec =
+        matches!(backend, Backend::Codex) && has_noninteractive_prompt(args, backend);
     let codex_uses_resume = matches!(backend, Backend::Codex)
         && !codex_uses_exec
         && (args.continue_session || args.resume.is_some());
+    // A bare `--resume` opens Codex's session picker. It cannot also carry a
+    // generated prompt because Codex would parse that first positional as the
+    // session id. `main` rejects the combination; this guard keeps direct plan
+    // callers safe by preserving the picker and withholding the prompt.
+    let seed_interactive_builtin = !(codex_uses_resume && matches!(args.resume, Some(None)));
 
     if matches!(backend, Backend::DeepSeek) {
-        if has_noninteractive_prompt(args) {
+        if has_noninteractive_prompt(args, backend) {
             cmd.extend(["--profile".to_string(), "headless".to_string()]);
         } else if args.passthrough.is_empty() {
             cmd.push("web".to_string());
@@ -305,9 +336,15 @@ fn build_launch_plan_for_target_at(
         }
     }
 
-    // Codex `resume` subcommand: emit `--last` when the user passed `-c` (continue).
-    if codex_uses_resume && args.continue_session {
-        cmd.push("--last".to_string());
+    // Codex `resume` selection must precede a generated built-in prompt:
+    // `resume [SESSION_ID] [PROMPT]`. Otherwise Codex mistakes the prompt for
+    // the session id. `-c` uses the explicit `--last` selector.
+    if codex_uses_resume {
+        if args.continue_session {
+            cmd.push("--last".to_string());
+        } else if let Some(Some(session_id)) = &args.resume {
+            cmd.push(session_id.clone());
+        }
     }
 
     let mut loop_markers: Option<LoopMarkers> = None;
@@ -363,23 +400,33 @@ fn build_launch_plan_for_target_at(
             }
         }
         Some(Command::Up { message, publish }) => {
-            let prompt = build_up_prompt(message.as_deref(), *publish);
-            push_prompt(&mut cmd, backend, prompt);
+            if seed_interactive_builtin {
+                let prompt = build_up_prompt(message.as_deref(), *publish);
+                push_prompt(&mut cmd, backend, prompt);
+            }
         }
         Some(Command::Rebase) => {
-            push_prompt(&mut cmd, backend, REBASE_PROMPT.to_string());
+            if seed_interactive_builtin {
+                push_prompt(&mut cmd, backend, REBASE_PROMPT.to_string());
+            }
         }
         Some(Command::Fix { url }) => {
-            let prompt = build_fix_prompt(url.as_deref());
-            push_prompt(&mut cmd, backend, prompt);
+            if seed_interactive_builtin {
+                let prompt = build_fix_prompt(url.as_deref());
+                push_prompt(&mut cmd, backend, prompt);
+            }
         }
-        Some(Command::Do { url }) => {
+        Some(Command::Do { target }) => {
             // `do` runs the `/goal` contract, which drives a long interactive
-            // Stop-hook loop. Headless `-p` mode buffers its single final
-            // response and shows nothing until the whole goal completes, so the
-            // terminal looks halted. Seed an interactive session instead.
-            let prompt = build_do_prompt(url);
-            push_prompt_interactive(&mut cmd, prompt);
+            // Stop-hook loop. Headless execution hides progress and prevents
+            // follow-up input, so both Claude and Codex seed an interactive
+            // session. `main` resolves the optional target before plan building.
+            if seed_interactive_builtin {
+                if let Some(target) = target.as_deref() {
+                    let prompt = build_do_prompt(target);
+                    push_prompt_interactive(&mut cmd, prompt);
+                }
+            }
         }
         Some(Command::Wasm { .. }) => {
             unreachable!("wasm execution is handled directly in main")
@@ -450,13 +497,9 @@ fn build_launch_plan_for_target_at(
                             cmd.push(term.clone());
                         }
                     }
-                    Backend::Codex => {
-                        // `resume` subcommand was emitted above; the session id
-                        // (if any) goes as a positional argument.
-                        if let Some(ref term) = resume {
-                            cmd.push(term.clone());
-                        }
-                    }
+                    // Codex's session selector was emitted before the command
+                    // arm so generated built-in prompts follow it in argv.
+                    Backend::Codex => {}
                     Backend::DeepSeek => {}
                 }
             }

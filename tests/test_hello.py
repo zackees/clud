@@ -442,6 +442,65 @@ def test_dry_run_codex() -> None:
     assert data["harness_source"] == "built_in_default"
 
 
+@pytest.mark.parametrize(
+    ("verb", "target", "prompt_fragment"),
+    [
+        ("do", "https://github.com/zackees/clud/issues/1036", "/goal read https://"),
+        ("up", None, "codeup"),
+        ("rebase", None, "git fetch"),
+        ("fix", None, "linting"),
+    ],
+)
+def test_codex_one_shot_builtins_seed_interactive_dry_run(
+    verb: str,
+    target: str | None,
+    prompt_fragment: str,
+) -> None:
+    argv = ["--dry-run", "--codex", verb]
+    if target is not None:
+        argv.append(target)
+    result = _run(*argv)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["backend"] == "codex"
+    assert data["launch_mode"] == "pty"
+    assert "exec" not in data["command"]
+    assert prompt_fragment in data["command"][-1]
+
+
+def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:
+    for argv in [
+        ("--dry-run", "--codex", "do"),
+        ("--codex", "do"),
+    ]:
+        result = _run(*argv, input_data="must remain unread\n")
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert "requires a URL or goal in non-interactive mode" in result.stderr
+        assert "Enter an issue URL or goal" not in result.stderr
+
+
+def test_codex_builtin_rejects_bare_resume_without_a_session() -> None:
+    result = _run(
+        "--dry-run",
+        "--codex",
+        "--resume",
+        "do",
+        "https://github.com/zackees/clud/issues/1036",
+    )
+    assert result.returncode == 2
+    assert "--resume=<session>" in result.stderr
+    assert result.stdout == ""
+
+
+def test_do_dotted_free_form_goal_is_not_misclassified_as_a_url() -> None:
+    result = _run("--dry-run", "--codex", "do", "README.md")
+    assert result.returncode == 0, result.stderr
+    prompt = json.loads(result.stdout)["command"][-1]
+    assert prompt.startswith("/goal README.md")
+    assert not prompt.startswith("/goal read ")
+
+
 def test_dry_run_deepseek() -> None:
     result = _run("--dry-run", "--deepseek", "-p", "hello")
     assert result.returncode == 0, result.stderr
