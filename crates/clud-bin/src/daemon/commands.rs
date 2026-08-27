@@ -21,6 +21,12 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
 
     if all {
         let sessions = list_background_sessions(state_dir);
+        let api_sessions: Vec<_> = ApiSessionStore::new(state_dir)
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| session.state != super::api_sessions::ApiSessionState::Terminated)
+            .collect();
         let mut failed = 0;
         for session in &sessions {
             match request_session_termination(state_dir, &session.id) {
@@ -32,13 +38,23 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
             }
         }
 
+        for session in &api_sessions {
+            match request_api_session_kill(state_dir, &session.id) {
+                Ok(()) => eprintln!("[clud] killed API session {}", session.id),
+                Err(err) => {
+                    eprintln!("[clud] failed to kill API session {}: {}", session.id, err);
+                    failed += 1;
+                }
+            }
+        }
+
         // Also reap CLUD-tagged orphans whose originator clud is gone. The
         // session registry only covers `--detach` / `--detachable` work; a
         // foreground clud that died via SIGKILL leaves its env-tagged
         // descendants behind, and they would otherwise live forever.
         let outcome = reap_orphans(&ReapOpts::default());
 
-        if sessions.is_empty() && outcome.found == 0 {
+        if sessions.is_empty() && api_sessions.is_empty() && outcome.found == 0 {
             println!("No active sessions or orphans to kill.");
             return 0;
         }

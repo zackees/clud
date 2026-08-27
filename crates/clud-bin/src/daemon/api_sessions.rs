@@ -510,6 +510,12 @@ fn lock_file(path: &Path) -> Result<File, ApiSessionStoreError> {
 }
 
 fn canonical_api_cwd(path: &Path) -> Result<PathBuf, ApiSessionStoreError> {
+    if !path.is_absolute() {
+        return Err(ApiSessionStoreError::InvalidCwd {
+            path: path.to_path_buf(),
+            message: "cwd must be an absolute path".to_string(),
+        });
+    }
     fs::canonicalize(path).map_err(|error| ApiSessionStoreError::InvalidCwd { path: path.to_path_buf(), message: error.to_string() }).and_then(|path| {
         if !path.is_absolute() { return Err(ApiSessionStoreError::InvalidCwd { path, message: "canonical path was not absolute".to_string() }); }
         if !path.is_dir() { return Err(ApiSessionStoreError::InvalidCwd { path, message: "canonical path is not a directory".to_string() }); }
@@ -544,6 +550,15 @@ mod tests {
         let error = ApiSessionStore::new(temp.path()).create(request(&temp.path().join("missing"))).unwrap_err();
         assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
         assert!(ApiSessionStore::new(temp.path()).list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_relative_cwd_before_canonicalization() {
+        let temp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
+        let cwd = temp.path().join("cwd"); fs::create_dir(&cwd).unwrap();
+        let relative = cwd.strip_prefix(std::env::current_dir().unwrap()).unwrap();
+        let error = ApiSessionStore::new(temp.path()).create(request(relative)).unwrap_err();
+        assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
     }
 
     #[test]
