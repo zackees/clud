@@ -578,6 +578,46 @@ fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
 }
 
 #[test]
+fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("cwd");
+    std::fs::create_dir(&cwd).unwrap();
+    // A controlled test-only slow child keeps the turn live long enough to
+    // exercise request serialization; production still resolves installed
+    // Claude/Codex executables through the typed launcher.
+    let _mock_guard = super::super::api_session_http::set_test_headless_executable(
+        http_test_mock_agent().to_string_lossy().into_owned(),
+        vec!["--mock-sleep-ms".to_string(), "5000".to_string()],
+    );
+    let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
+    let lifecycle = std::sync::Arc::new(
+        super::super::api_session_lifecycle::ApiSessionLifecycle::new(store.clone()),
+    );
+    let port = spawn_dashboard_with_activity_and_lifecycle(
+        temp.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(),
+        ToolTelemetryStore::new(), "dashboard-token".to_string(), "api-token".to_string(),
+        None, None, lifecycle,
+    ).unwrap();
+    let create = format!(r#"{{"backend":"claude","cwd":"{}"}}"#, cwd.to_string_lossy().replace('\\', "\\\\"));
+    let (_, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "127.0.0.1", Some("Bearer api-token"), None, Some(&create)).unwrap();
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+    let path = format!("/v1/sessions/{id}/turns");
+    let headers = [("Idempotency-Key", "replay-key")];
+    let (first, _, first_body) = fetch_api_request_with_headers(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, &headers, Some(r#"{"message":"first"}"#)).unwrap();
+    assert!(first.contains("202"));
+    let (replayed, _, replay_body) = fetch_api_request_with_headers(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, &headers, Some(r#"{"message":"first"}"#)).unwrap();
+    assert!(replayed.contains("200"));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&first_body).unwrap()["turn_id"], serde_json::from_str::<serde_json::Value>(&replay_body).unwrap()["turn_id"]);
+    let (conflict, _, _) = fetch_api_request_with_headers(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, &headers, Some(r#"{"message":"different"}"#)).unwrap();
+    assert!(conflict.contains("409"));
+    let (replaced, _, _) = fetch_api_request(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, Some(r#"{"message":"replacement","interrupt_running":true}"#)).unwrap();
+    assert!(replaced.contains("202"));
+    let (interrupted, _, interrupt_body) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/interrupt"), "127.0.0.1", Some("Bearer api-token"), None, None).unwrap();
+    assert!(interrupted.contains("200"));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&interrupt_body).unwrap()["status"], "interrupted");
+}
+
+#[test]
 fn purge_request_defaults_when_body_is_empty() {
     let parsed: PurgeRequest = serde_json::from_str("{}").unwrap();
     assert!(parsed.id.is_none());
@@ -1176,6 +1216,23 @@ fn fetch_api_request(
     cookie: Option<&str>,
     body: Option<&str>,
 ) -> io::Result<(String, String, String)> {
+    fetch_api_request_with_headers(port, method, path, host, authorization, cookie, &[], body)
+}
+
+/// Request-level helper for headers whose semantics are part of the API
+/// contract (notably Idempotency-Key). It deliberately remains test-only: the
+/// production boundary accepts typed DTOs and never exposes arbitrary launch
+/// arguments or environment.
+fn fetch_api_request_with_headers(
+    port: u16,
+    method: &str,
+    path: &str,
+    host: &str,
+    authorization: Option<&str>,
+    cookie: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> io::Result<(String, String, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -1186,6 +1243,9 @@ fn fetch_api_request(
     }
     if let Some(value) = cookie {
         request.push_str(&format!("Cookie: {value}\r\n"));
+    }
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
     }
     if let Some(value) = body {
         request.push_str(&format!(
