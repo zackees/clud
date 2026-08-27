@@ -104,12 +104,15 @@ impl ApiSessionLifecycle {
                 };
             }
         }
-        if let Some(process) = self
-            .active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id)
-        {
+        // Keep this guard in a statement-local scope. In an `if let`
+        // scrutinee Rust retains temporary values for the whole branch, so
+        // restoring the handle below would re-lock `active` on the same
+        // thread before returning SessionBusy.
+        let active_process = {
+            let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+            active.remove(session_id)
+        };
+        if let Some(process) = active_process {
             // The active-map entry is the admission proof. Do not call into
             // `NativeProcess::returncode` while holding this session gate:
             // on a loaded Windows runner that probe can block the duplicate
