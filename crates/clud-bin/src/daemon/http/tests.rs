@@ -107,6 +107,35 @@ fn api_discovery_routes_require_bearer_and_return_json() {
 }
 
 #[test]
+fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = spawn_dashboard_with_activity(
+        dir.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(), ToolTelemetryStore::new(),
+        "dashboard-canary".to_string(), "api-canary".to_string(), None, None,
+    ).unwrap();
+    let cwd = dir.path().to_string_lossy().replace('\\', "\\\\");
+    let create = format!(r#"{{"backend":"claude","cwd":"{cwd}","name":"request-level"}}"#);
+    let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "localhost", Some("Bearer api-canary"), None, Some(&create)).unwrap();
+    assert!(status.contains("201"));
+    let record: serde_json::Value = serde_json::from_str(&body).unwrap(); let id = record["id"].as_str().unwrap();
+    assert!(record["cwd"].as_str().unwrap().contains(dir.path().file_name().unwrap().to_str().unwrap()));
+    let (status, _, list) = fetch_api_request(port, "GET", "/v1/sessions", "localhost", Some("Bearer api-canary"), None, None).unwrap();
+    assert!(status.contains("200")); assert!(list.contains(id));
+    let (status, headers, body) = fetch_api_request(port, "GET", &format!("/v1/sessions/{id}"), "localhost", Some("Bearer api-canary"), None, None).unwrap();
+    assert!(status.contains("200")); assert!(!headers.to_ascii_lowercase().contains("access-control-allow-origin")); assert!(!body.contains("api-canary"));
+    for (host, authorization, cookie) in [("attacker.invalid", Some("Bearer api-canary"), None), ("localhost", Some("Bearer wrong"), None), ("localhost", None, Some("clud_dashboard_token=dashboard-canary"))] {
+        let (status, _, body) = fetch_api_request(port, "GET", "/v1/sessions", host, authorization, cookie, None).unwrap();
+        assert!(status.contains("401")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "unauthorized"); assert!(!body.contains("api-canary"));
+    }
+    let file = dir.path().join("not-a-directory"); std::fs::write(&file, "x").unwrap();
+    for cwd in ["relative".to_string(), dir.path().join("missing").to_string_lossy().into_owned(), file.to_string_lossy().into_owned()] {
+        let body = serde_json::json!({"backend":"codex", "cwd": cwd}).to_string();
+        let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "localhost", Some("Bearer api-canary"), None, Some(&body)).unwrap();
+        assert!(status.contains("400")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "invalid_request");
+    }
+}
+
+#[test]
 fn api_openapi_contract_covers_each_implemented_session_route() {
     let schema: serde_json::Value = serde_json::from_str(OPENAPI_JSON).unwrap();
     let paths = schema["paths"].as_object().unwrap();
@@ -705,4 +734,25 @@ fn fetch_api_path(port: u16, path: &str, authorization: Option<&str>) -> io::Res
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
     String::from_utf8(buf[body_start..].to_vec())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+}
+
+/// Request-level API helper retaining status and headers so auth/CORS/token
+/// redaction assertions do not accidentally test only a parsed JSON body.
+fn fetch_api_request(
+    port: u16, method: &str, path: &str, host: &str, authorization: Option<&str>, cookie: Option<&str>, body: Option<&str>,
+) -> io::Result<(String, String, String)> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut request = format!("{method} {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n");
+    if let Some(value) = authorization { request.push_str(&format!("Authorization: {value}\r\n")); }
+    if let Some(value) = cookie { request.push_str(&format!("Cookie: {value}\r\n")); }
+    if let Some(value) = body { request.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{value}", value.len())); } else { request.push_str("\r\n"); }
+    stream.write_all(request.as_bytes())?; stream.flush()?;
+    let mut raw = Vec::new(); stream.read_to_end(&mut raw)?;
+    let body_start = find_body_start(&raw).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
+    let head = String::from_utf8_lossy(&raw[..body_start]).to_string();
+    let status = head.lines().next().unwrap_or_default().to_string();
+    let body = String::from_utf8(raw[body_start..].to_vec()).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    Ok((status, head, body))
 }

@@ -511,7 +511,9 @@ fn lock_file(path: &Path) -> Result<File, ApiSessionStoreError> {
 
 fn canonical_api_cwd(path: &Path) -> Result<PathBuf, ApiSessionStoreError> {
     fs::canonicalize(path).map_err(|error| ApiSessionStoreError::InvalidCwd { path: path.to_path_buf(), message: error.to_string() }).and_then(|path| {
-        if path.is_absolute() { Ok(path) } else { Err(ApiSessionStoreError::InvalidCwd { path, message: "canonical path was not absolute".to_string() }) }
+        if !path.is_absolute() { return Err(ApiSessionStoreError::InvalidCwd { path, message: "canonical path was not absolute".to_string() }); }
+        if !path.is_dir() { return Err(ApiSessionStoreError::InvalidCwd { path, message: "canonical path is not a directory".to_string() }); }
+        Ok(path)
     })
 }
 
@@ -540,6 +542,14 @@ mod tests {
     fn rejects_nonexistent_cwd_before_any_record_is_written() {
         let temp = TempDir::new().unwrap();
         let error = ApiSessionStore::new(temp.path()).create(request(&temp.path().join("missing"))).unwrap_err();
+        assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
+        assert!(ApiSessionStore::new(temp.path()).list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_file_cwd_before_any_record_is_written() {
+        let temp = TempDir::new().unwrap(); let file = temp.path().join("not-a-directory"); fs::write(&file, "x").unwrap();
+        let error = ApiSessionStore::new(temp.path()).create(request(&file)).unwrap_err();
         assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
         assert!(ApiSessionStore::new(temp.path()).list().unwrap().is_empty());
     }

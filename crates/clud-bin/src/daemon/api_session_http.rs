@@ -145,6 +145,16 @@ pub(super) fn handle(mut request: Request, method: Method, path: &str, state_dir
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn record(temp: &TempDir, backend: ApiSessionBackend) -> ApiSessionRecord {
+        ApiSessionStore::new(temp.path()).create(CreateApiSession {
+            backend,
+            cwd: temp.path().to_path_buf(),
+            name: Some("api-test".to_string()),
+            resolved_settings: ResolvedApiSessionSettings { model: Some("test-model".to_string()), safe: true, model_provider: None, harness: None, routing_mode: None },
+        }).unwrap()
+    }
 
     #[test]
     fn events_query_is_bounded_and_reports_retention_gap() {
@@ -152,5 +162,43 @@ mod tests {
         assert!(events_query("/v1/sessions/a/events?after=no", 1).is_err());
         assert!(events_query("/v1/sessions/a/events?limit=129", 1).is_err());
         assert!(events_query("/v1/sessions/a/events?cursor=1", 1).is_err());
+    }
+
+    #[test]
+    fn stored_cwd_is_the_only_plan_cwd_and_initial_backends_are_typed() {
+        let temp = TempDir::new().unwrap();
+        let claude = record(&temp, ApiSessionBackend::Claude);
+        let claude_plan = turn_plan(&claude, "hello".to_string()).unwrap();
+        assert_eq!(claude_plan.cwd.as_deref(), Some(claude.cwd.to_string_lossy().as_ref()));
+        assert_eq!(claude_plan.backend, Backend::Claude);
+        assert!(claude_plan.command.windows(2).any(|pair| pair[0] == "--session-id"));
+        let codex = record(&temp, ApiSessionBackend::Codex);
+        let codex_plan = turn_plan(&codex, "hello".to_string()).unwrap();
+        assert_eq!(codex_plan.backend, Backend::Codex);
+        assert!(codex_plan.command.iter().any(|part| part == "exec"));
+        assert!(turn_plan(&claude, " ".to_string()).is_err());
+    }
+
+    #[test]
+    fn provider_identity_is_required_only_after_initial_generation() {
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = record(&temp, ApiSessionBackend::Claude);
+        let turn = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
+        store.finish_turn(&record.id, &turn.id, super::super::api_sessions::ApiTurnState::Completed, Some("exit_0".to_string())).unwrap();
+        assert!(turn_plan(&store.get(&record.id).unwrap(), "resume".to_string()).is_err());
+        store.set_provider_session_id(&record.id, "provider-1".to_string()).unwrap();
+        let plan = turn_plan(&store.get(&record.id).unwrap(), "resume".to_string()).unwrap();
+        assert!(plan.command.windows(2).any(|pair| pair[0] == "--resume" && pair[1] == "provider-1"));
+    }
+
+    #[test]
+    fn event_page_reports_a_gap_and_never_exceeds_the_contract_limit() {
+        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = record(&temp, ApiSessionBackend::Claude);
+        for cursor in 0..3 { store.append_event(&record.id, None, "opaque".to_string(), serde_json::json!({"cursor": cursor})).unwrap(); }
+        let loaded = store.get(&record.id).unwrap();
+        let first = loaded.events.front().unwrap().cursor;
+        assert_eq!(events_query("/v1/sessions/a/events?after=0&limit=128", first).unwrap().2, first > 1);
+        assert!(events_query("/v1/sessions/a/events?after=1&limit=0", first).is_err());
     }
 }
