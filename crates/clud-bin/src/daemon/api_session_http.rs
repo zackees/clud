@@ -29,13 +29,15 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_EVENTS_PAGE: usize = 128;
 
 #[cfg(test)]
-static TEST_HEADLESS_EXECUTABLE: OnceLock<Mutex<Option<(String, Vec<String>)>>> = OnceLock::new();
+type TestHeadlessCommand = (String, Vec<String>);
+#[cfg(test)]
+static TEST_HEADLESS_EXECUTABLE: OnceLock<Mutex<Option<TestHeadlessCommand>>> = OnceLock::new();
 #[cfg(test)]
 static TEST_HEADLESS_EXECUTABLE_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(test)]
 pub(super) struct TestHeadlessExecutableGuard {
-    previous: Option<(String, Vec<String>)>,
+    previous: Option<TestHeadlessCommand>,
     _serial: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -74,13 +76,11 @@ pub(super) fn set_test_headless_executable(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let previous = std::mem::replace(
-        &mut *TEST_HEADLESS_EXECUTABLE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()),
-        Some((path, arguments)),
-    );
+    let previous = (*TEST_HEADLESS_EXECUTABLE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()))
+    .replace((path, arguments));
     TestHeadlessExecutableGuard {
         previous,
         _serial: serial,
@@ -308,7 +308,7 @@ fn turn_plan(record: &ApiSessionRecord, message: String) -> Result<LaunchPlan, S
     {
         let mut plan = plan;
         plan.command.splice(1..1, _test_arguments);
-        return Ok(plan);
+        Ok(plan)
     }
     #[cfg(not(test))]
     Ok(plan)

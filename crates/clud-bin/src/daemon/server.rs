@@ -527,6 +527,7 @@ pub(super) fn dispatch_daemon_request(
     dispatch_daemon_request_with_sampler(state_dir, workers, gc_tx, None, &client_leases, request)
 }
 
+#[allow(dead_code)]
 pub(super) fn dispatch_daemon_request_with_sampler(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
@@ -571,6 +572,7 @@ pub(super) fn dispatch_daemon_request_with_sampler_and_lifecycle(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_daemon_request_with_id(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,

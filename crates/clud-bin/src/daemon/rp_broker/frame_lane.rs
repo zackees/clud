@@ -59,6 +59,7 @@ impl FrameLane {
 /// Returns `None` (after at most one stderr note) when the lane is
 /// disabled via `RUNNING_PROCESS_DISABLE=1` or fails to come up; the
 /// daemon's TCP wire keeps working either way.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::daemon) fn spawn_frame_lane(
     state_dir: &Path,
     workers: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
@@ -165,6 +166,7 @@ pub(in crate::daemon) fn publish_cache_manifest(state_dir: &Path) -> io::Result<
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_frame_lane(
     state_dir: &Path,
     workers: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,

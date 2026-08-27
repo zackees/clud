@@ -727,6 +727,7 @@ fn lock_file(path: &Path) -> Result<File, ApiSessionStoreError> {
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)?;
