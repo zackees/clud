@@ -523,7 +523,6 @@ pub(super) fn spawn_dashboard(
     telemetry: TelemetryStore,
     tool_telemetry: ToolTelemetryStore,
     dashboard_token: String,
-    api_token: String,
 ) -> Option<u16> {
     spawn_dashboard_with_activity(
         state_dir,
@@ -534,6 +533,7 @@ pub(super) fn spawn_dashboard(
         telemetry,
         tool_telemetry,
         dashboard_token,
+        crate::dashboard_auth::generate_token(),
         None,
         None,
     )
@@ -549,6 +549,7 @@ pub(super) fn spawn_dashboard_with_activity(
     telemetry: TelemetryStore,
     tool_telemetry: ToolTelemetryStore,
     dashboard_token: String,
+    api_token: String,
     test_activity: Option<TestRuntimeActivity>,
     activity: Option<DaemonActivity>,
 ) -> Option<u16> {
@@ -702,7 +703,7 @@ fn run_dashboard_loop(
     }
 }
 
-const OPENAPI_JSON: &str = r#"{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"clud daemon API\",\"version\":\"v1\"},\"paths\":{\"/v1/health\":{\"get\":{\"responses\":{\"200\":{\"description\":\"healthy\"},\"401\":{\"description\":\"bearer required\"}}}},\"/v1/openapi.json\":{\"get\":{\"responses\":{\"200\":{\"description\":\"schema\"},\"401\":{\"description\":\"bearer required\"}}}}}}"#;
+const OPENAPI_JSON: &str = r#"{"openapi":"3.1.0","info":{"title":"clud daemon API","version":"v1"},"paths":{"/v1/health":{"get":{"responses":{"200":{"description":"healthy"},"401":{"description":"bearer required"}}}},"/v1/openapi.json":{"get":{"responses":{"200":{"description":"schema"},"401":{"description":"bearer required"}}}}},"components":{"schemas":{"Error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"}}}}}}"#;
 
 // ---------- route handlers ----------
 
