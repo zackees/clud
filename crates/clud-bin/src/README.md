@@ -521,7 +521,9 @@ Quick lookup, which file owns a given subcommand:
   rewrites to `Do`). `command/builder.rs` then builds the `/loop` prompt via
   `build_grind_prompt` and arms the loop subsystem's DONE/BLOCKED markers, so
   grinding iterates one issue at a time instead of running `/goal`'s
-  single-shot flow. An explicit URL is passed through verbatim.
+  single-shot flow. Native Codex seeds this contract into the interactive TUI;
+  Claude and DeepSeek keep their existing headless prompt paths. An explicit URL
+  is passed through verbatim.
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.

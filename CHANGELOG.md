@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-- Native Codex one-shot built-ins (`do`, `up`, `rebase`, and `fix`) now seed the
+- Native Codex built-ins (`do`, `up`, `rebase`, `fix`, and `grind`) now seed the
   interactive TUI instead of routing through `codex exec`, keeping progress and
   follow-up input live. `clud do` also accepts an optional URL or free-form goal:
   a foreground TTY prompts when it is omitted, while dry-run, piped, and
-  background invocations fail clearly rather than blocking. Explicit `-p`,
-  `loop`, and `grind` remain non-interactive. See zackees/clud#1036.
+  background invocations fail clearly rather than blocking. Explicit `-p` and
+  `loop` remain non-interactive. See zackees/clud#1036.
 - The Windows wheel now ships `clud-cmd-scan.exe`. 2.5.5's hook rollout
   migrated `~/.claude/settings.json` PreToolUse configs to the renamed
   `clud-cmd-scan` binary, but the hand-packed win_amd64 wheel only carried the

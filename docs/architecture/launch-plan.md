@@ -64,9 +64,9 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
 2. **Adds Codex configuration before its subcommand.** Every configured `-c`
    override is emitted first, followed by the project-document fallback when
    the caller did not override it.
-3. **Selects the Codex subcommand.** Explicit `-p` prompts and clud-owned
-   orchestration (`loop`/`grind`) use `exec`; the one-shot built-ins (`do`,
-   `up`, `rebase`, `fix`) seed the interactive TUI without a subcommand.
+3. **Selects the Codex subcommand.** Explicit `-p` prompts and `loop` use
+   `exec`; the built-ins (`do`, `up`, `rebase`, `fix`, and `grind`) seed the
+   interactive TUI without a subcommand.
    Continuation requests use `resume`; for interactive built-ins, `--last` or
    the explicit session ID is emitted before the generated prompt. Bare
    `--resume` is rejected for those built-ins because its session picker cannot
@@ -123,7 +123,7 @@ construction. Model-provider selection is carried separately by
 
 | Concern | Claude harness | Codex harness | DeepSeek harness |
 |---|---|---|---|
-| Subcommand keyword | (none) | `exec` for `-p`/`loop`/`grind`; none for interactive one-shot built-ins; `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
+| Subcommand keyword | (none) | `exec` for `-p`/`loop`; none for interactive built-ins; `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
 | YOLO flag | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | none; DSH owns permissions |
 | Model flag | `--model <id>` | `-m <id>` | unsupported; DSH owns provider/model profiles |
 | Prompt delivery | `-p <prompt>` | bare positional | bare positional after the headless profile |

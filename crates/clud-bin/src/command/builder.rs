@@ -23,8 +23,8 @@ const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
 
 /// Returns true when this harness consumes the launch prompt headlessly.
 ///
-/// `loop`, `grind`, and explicit `-p` prompts are orchestrated/unattended for
-/// every harness. The one-shot built-in verbs seed Codex's interactive TUI;
+/// `loop` and explicit `-p` prompts are orchestrated/unattended for every
+/// harness. The built-in verbs (including `grind`) seed Codex's interactive TUI;
 /// Claude keeps its existing behavior (`do` interactive, the others `-p`) and
 /// DeepSeek keeps its existing headless profile for every generated prompt.
 pub fn interactive_builtin_resume_error(args: &Args, backend: Backend) -> Option<&'static str> {
@@ -34,6 +34,7 @@ pub fn interactive_builtin_resume_error(args: &Args, backend: Backend) -> Option
             | Some(Command::Rebase)
             | Some(Command::Fix { .. })
             | Some(Command::Do { .. })
+            | Some(Command::Grind { .. })
     );
     (matches!(backend, Backend::Codex) && is_builtin && matches!(args.resume, Some(None)))
         .then_some(
@@ -47,7 +48,8 @@ pub fn has_noninteractive_prompt(args: &Args, backend: Backend) -> bool {
         return true;
     }
     match &args.command {
-        Some(Command::Loop { .. }) | Some(Command::Grind { .. }) => true,
+        Some(Command::Loop { .. }) => true,
+        Some(Command::Grind { .. }) => !matches!(backend, Backend::Codex),
         Some(Command::Do { target }) => {
             target
                 .as_deref()
@@ -432,25 +434,28 @@ fn build_launch_plan_for_target_at(
             unreachable!("wasm execution is handled directly in main")
         }
         Some(Command::Grind { url }) => {
-            // `grind` uses the `/loop` contract with DONE/BLOCKED markers so
-            // each completed issue triggers re-invocation. When all issues are
-            // done the agent writes BLOCKED and the loop terminates.
-            let url = url.as_deref().unwrap_or("");
-            let git_root = git_root_from(cwd);
-            let marker_paths = resolve_marker_paths(cwd, &git_root, None);
-            let prompt_text = build_grind_prompt(url);
-            let final_prompt = format!(
-                "{}{}",
-                prompt_text,
-                done_marker_contract(&marker_paths.done, &marker_paths.blocked)
-            );
-            task_summary = Some(format!("grind {url}"));
-            loop_markers = Some(LoopMarkers {
-                done_path: marker_paths.done.to_string_lossy().to_string(),
-                blocked_path: marker_paths.blocked.to_string_lossy().to_string(),
-            });
-            iterations = 200; // high ceiling — loop terminates via BLOCKED
-            push_prompt(&mut cmd, backend, final_prompt);
+            // `grind` uses the `/loop` contract with DONE/BLOCKED markers.
+            // Native Codex hosts that contract in its interactive TUI; the
+            // existing Claude/DeepSeek headless paths keep clud's re-invocation.
+            // When all issues are done the agent writes DONE and terminates.
+            if seed_interactive_builtin {
+                let url = url.as_deref().unwrap_or("");
+                let git_root = git_root_from(cwd);
+                let marker_paths = resolve_marker_paths(cwd, &git_root, None);
+                let prompt_text = build_grind_prompt(url);
+                let final_prompt = format!(
+                    "{}{}",
+                    prompt_text,
+                    done_marker_contract(&marker_paths.done, &marker_paths.blocked)
+                );
+                task_summary = Some(format!("grind {url}"));
+                loop_markers = Some(LoopMarkers {
+                    done_path: marker_paths.done.to_string_lossy().to_string(),
+                    blocked_path: marker_paths.blocked.to_string_lossy().to_string(),
+                });
+                iterations = 200; // high ceiling — terminates via DONE/BLOCKED
+                push_prompt(&mut cmd, backend, final_prompt);
+            }
         }
         Some(Command::Auth { .. })
         | Some(Command::CodexAuth { .. })

@@ -503,8 +503,8 @@ unit-tested predicates decide the shape of that check:
   true only for a genuine interactive foreground launch: both streams are a
   real tty, the effective harness classifies the prompt as interactive, not
   `--detach`/`--detachable`, and not a `--repeat` loop. Prompt classification is
-  backend-aware: Codex one-shot built-ins are interactive, while `-p`, `loop`,
-  and `grind` remain headless and DeepSeek retains its headless prompt profile.
+  backend-aware: Codex built-ins (including `grind`) are interactive, while
+  `-p` and `loop` remain headless and DeepSeek retains its headless prompt profile.
 
 A missing key may be entered via hidden terminal input only when
 `launch_is_interactive` is true. Every other case — noninteractive,

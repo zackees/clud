@@ -748,11 +748,11 @@ clud --codex do                 # prompts: Enter an issue URL or goal
 clud do --dry-run https://github.com/zackees/clud/issues/866
 ```
 
-On the native Codex harness, the one-shot built-ins `do`, `up`, `rebase`, and
-`fix` seed the interactive TUI rather than `codex exec`, so progress and follow-up
+On the native Codex harness, the built-ins `do`, `up`, `rebase`, `fix`, and
+`grind` seed the interactive TUI rather than `codex exec`, so progress and follow-up
 input stay live. They can resume `--continue` or `--resume=<session>`; bare
 `--resume` is rejected because Codex would mistake the generated prompt for a
-session ID. Explicit `-p`, `loop`, and `grind` runs remain non-interactive.
+session ID. Explicit `-p` and `loop` runs remain non-interactive.
 
 ## `clud up` — Ship It
 
