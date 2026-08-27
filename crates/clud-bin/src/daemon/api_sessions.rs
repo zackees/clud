@@ -324,8 +324,10 @@ impl ApiSessionStore {
             turn.state = state;
             turn.disposition = disposition;
             turn.completed_at_ms = Some(unix_millis_now());
-            if record.current_turn_id.as_deref() == Some(turn_id) { record.current_turn_id = None; }
-            record.state = match state { ApiTurnState::Completed | ApiTurnState::Interrupted => ApiSessionState::Idle, ApiTurnState::Failed => ApiSessionState::Failed, ApiTurnState::Killed => ApiSessionState::Terminated, ApiTurnState::Starting | ApiTurnState::Running => ApiSessionState::Running };
+            if record.current_turn_id.as_deref() == Some(turn_id) {
+                record.current_turn_id = None;
+                record.state = match state { ApiTurnState::Completed | ApiTurnState::Interrupted => ApiSessionState::Idle, ApiTurnState::Failed => ApiSessionState::Failed, ApiTurnState::Killed => ApiSessionState::Terminated, ApiTurnState::Starting | ApiTurnState::Running => ApiSessionState::Running };
+            }
             Ok(record.clone())
         })
     }
@@ -510,6 +512,18 @@ mod tests {
         store.set_provider_session_id(&record.id, "provider-1".to_string()).unwrap();
         let final_record = store.finish_turn(&record.id, &turn.id, ApiTurnState::Completed, Some("completed".to_string())).unwrap();
         assert_eq!(final_record.state, ApiSessionState::Idle); assert_eq!(final_record.provider_session_id.as_deref(), Some("provider-1")); assert_eq!(final_record.generation, 1);
+    }
+
+    #[test]
+    fn stale_turn_completion_cannot_change_the_current_generation_state() {
+        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let first = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
+        store.finish_turn(&record.id, &first.id, ApiTurnState::Completed, Some("exit_0".to_string())).unwrap();
+        let second = store.begin_turn(&record.id, "turn-2".to_string()).unwrap();
+        let loaded = store.finish_turn(&record.id, &first.id, ApiTurnState::Failed, Some("late_exit_1".to_string())).unwrap();
+        assert_eq!(loaded.current_turn_id.as_deref(), Some(second.id.as_str()));
+        assert_eq!(loaded.state, ApiSessionState::Running);
+        assert_eq!(loaded.turns[1].state, ApiTurnState::Starting);
     }
 
     #[test]
