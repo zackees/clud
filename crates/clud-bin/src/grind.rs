@@ -11,7 +11,9 @@
 //! grinding an issues page is iterative: one issue per iteration, ending only
 //! when every issue is done. So `grind` builds its own prompt
 //! (`command::prompts::build_grind_prompt`) and terminates via the loop
-//! subsystem's DONE/BLOCKED markers rather than a Stop hook.
+//! subsystem's DONE/BLOCKED markers rather than a Stop hook. Native Codex
+//! seeds that contract into its interactive TUI; Claude and DeepSeek keep their
+//! existing headless prompt paths.
 
 use std::path::Path;
 use std::time::Duration;

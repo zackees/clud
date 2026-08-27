@@ -835,7 +835,7 @@ fn test_codex_model_uses_short_m() {
 }
 
 #[test]
-fn test_codex_one_shot_builtin_verbs_seed_interactive_sessions() {
+fn test_codex_builtin_verbs_seed_interactive_sessions() {
     for argv in [
         vec!["clud", "--codex", "up"],
         vec!["clud", "--codex", "rebase"],
@@ -845,6 +845,12 @@ fn test_codex_one_shot_builtin_verbs_seed_interactive_sessions() {
             "--codex",
             "do",
             "https://github.com/zackees/clud/issues/1036",
+        ],
+        vec![
+            "clud",
+            "--codex",
+            "grind",
+            "https://github.com/zackees/clud/issues",
         ],
     ] {
         let p = plan(&argv);
@@ -879,6 +885,13 @@ fn codex_resumed_builtins_put_the_session_selector_before_the_prompt() {
             "--resume=sess-123",
             "do",
             "https://github.com/zackees/clud/issues/1036",
+        ],
+        vec![
+            "clud",
+            "--codex",
+            "--resume=sess-123",
+            "grind",
+            "https://github.com/zackees/clud/issues",
         ],
     ] {
         let resumed_plan = plan(&argv);
@@ -930,6 +943,24 @@ fn bare_resume_with_interactive_codex_builtin_is_rejected_and_plan_safe() {
     let plan = build_launch_plan(&args, Backend::Codex, "codex");
     assert!(plan.command.iter().any(|arg| arg == "resume"));
     assert!(!plan.command.iter().any(|arg| arg.starts_with("/goal")));
+}
+
+#[test]
+fn bare_resume_with_codex_grind_is_rejected_and_withholds_prompt() {
+    let args = parse(&[
+        "clud",
+        "--codex",
+        "--resume",
+        "grind",
+        "https://github.com/zackees/clud/issues",
+    ]);
+    assert!(interactive_builtin_resume_error(&args, Backend::Codex).is_some());
+    let plan = build_launch_plan(&args, Backend::Codex, "codex");
+    assert!(plan.command.iter().any(|arg| arg == "resume"));
+    assert!(!plan.command.iter().any(|arg| arg.starts_with("/loop")));
+    assert_eq!(plan.iterations, 1);
+    assert!(plan.loop_markers.is_none());
+    assert!(plan.task_summary.is_none());
 }
 
 #[test]
@@ -1131,6 +1162,27 @@ fn test_grind_command_uses_loop_contract() {
         p.loop_markers.is_some(),
         "grind must set loop_markers (DONE/BLOCKED paths)"
     );
+}
+
+#[test]
+fn test_codex_grind_seeds_interactive_session_and_keeps_loop_contract() {
+    let plan = plan(&[
+        "clud",
+        "--codex",
+        "grind",
+        "https://github.com/zackees/clud/issues",
+    ]);
+    assert!(
+        !plan.command.iter().any(|arg| arg == "exec"),
+        "Codex grind must seed the interactive TUI; cmd={:?}",
+        plan.command
+    );
+    assert_eq!(plan.launch_mode, LaunchMode::Pty);
+    assert_eq!(plan.iterations, 200);
+    assert!(plan.loop_markers.is_some());
+    assert!(plan.command.last().is_some_and(|prompt| {
+        prompt.starts_with("/loop ") && prompt.contains("zackees/clud/issues")
+    }));
 }
 
 #[test]

@@ -449,9 +449,10 @@ def test_dry_run_codex() -> None:
         ("up", None, "codeup"),
         ("rebase", None, "git fetch"),
         ("fix", None, "linting"),
+        ("grind", "https://github.com/zackees/clud/issues", "/loop look at https://"),
     ],
 )
-def test_codex_one_shot_builtins_seed_interactive_dry_run(
+def test_codex_builtins_seed_interactive_dry_run(
     verb: str,
     target: str | None,
     prompt_fragment: str,

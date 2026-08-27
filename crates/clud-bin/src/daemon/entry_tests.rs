@@ -165,6 +165,21 @@ fn backend_prompt_classification_drives_centralized_session_kind() {
             true,
         ),
         (
+            vec![
+                "clud",
+                "--codex",
+                "grind",
+                "https://github.com/zackees/clud/issues",
+            ],
+            crate::backend::Backend::Codex,
+            true,
+        ),
+        (
+            vec!["clud", "grind", "https://github.com/zackees/clud/issues"],
+            crate::backend::Backend::Claude,
+            false,
+        ),
+        (
             vec!["clud", "do", "https://github.com/zackees/clud/issues/1036"],
             crate::backend::Backend::Claude,
             true,
