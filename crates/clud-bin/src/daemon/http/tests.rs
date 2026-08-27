@@ -123,6 +123,10 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
     assert!(status.contains("200")); assert!(list.contains(id));
     let (status, headers, body) = fetch_api_request(port, "GET", &format!("/v1/sessions/{id}"), "localhost", Some("Bearer api-canary"), None, None).unwrap();
     assert!(status.contains("200")); assert!(!headers.to_ascii_lowercase().contains("access-control-allow-origin")); assert!(!body.contains("api-canary"));
+    let (status, _, body) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/interrupt"), "localhost", Some("Bearer api-canary"), None, None).unwrap();
+    assert!(status.contains("409")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "session_not_running");
+    let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions/missing/interrupt", "localhost", Some("Bearer api-canary"), None, None).unwrap();
+    assert!(status.contains("404")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "not_found");
     for (host, authorization, cookie) in [("attacker.invalid", Some("Bearer api-canary"), None), ("localhost", Some("Bearer wrong"), None), ("localhost", None, Some("clud_dashboard_token=dashboard-canary"))] {
         let (status, _, body) = fetch_api_request(port, "GET", "/v1/sessions", host, authorization, cookie, None).unwrap();
         assert!(status.contains("401")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "unauthorized"); assert!(!body.contains("api-canary"));
@@ -137,12 +141,17 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
 
 #[test]
 fn api_openapi_contract_covers_each_implemented_session_route() {
-    let schema: serde_json::Value = serde_json::from_str(OPENAPI_JSON).unwrap();
+    let schema = openapi_document();
     let paths = schema["paths"].as_object().unwrap();
     for path in ["/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/turns", "/v1/sessions/{id}/interrupt", "/v1/sessions/{id}/events"] {
         assert!(paths.contains_key(path), "missing route {path}");
     }
     assert_eq!(paths["/v1/sessions/{id}/events"]["get"]["parameters"][1]["name"], "limit");
+    for path in ["/v1/sessions/{id}/interrupt", "/v1/sessions/{id}/turns", "/v1/sessions/{id}/events"] {
+        assert_eq!(paths[path]["parameters"][0]["name"], "id");
+    }
+    assert_eq!(schema["components"]["securitySchemes"]["bearerAuth"]["scheme"], "bearer");
+    assert_eq!(schema["security"][0]["bearerAuth"], serde_json::json!([]));
     assert!(schema["components"]["schemas"].get("EventsResponse").is_some());
     assert!(schema["components"]["schemas"].get("TurnResponse").is_some());
 }

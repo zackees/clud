@@ -70,6 +70,13 @@ durable record.
 Bearer capabilities are returned only by `clud daemon api-info --json`, never
 by dashboard state, logs, error payloads, or OpenAPI output.
 
+Captured API children do not inherit the daemon dashboard/API capability
+environment, so those capabilities cannot be reflected into raw turn output.
+Provider JSONL itself is retained verbatim in the per-turn raw log and bounded
+event stream for diagnostics; it is sensitive provider output, not a generic
+secret-redaction service. API callers must therefore treat events and logs as
+sensitive data and avoid emitting credentials through their provider tooling.
+
 ## Lifecycle serialization
 
 The #1043 lifecycle controller keeps one in-memory captured-process handle per

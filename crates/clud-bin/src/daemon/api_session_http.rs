@@ -163,7 +163,14 @@ pub(super) fn handle(mut request: Request, method: Method, path: &str, state_dir
             let next_cursor = events.last().map(|event| event.cursor).unwrap_or(after);
             respond_json(request, 200, &serde_json::to_vec(&EventsResponse { events, next_cursor, retention_gap }).unwrap_or_else(|_| b"{}".to_vec()))
         }
-        (Method::Post, Some("interrupt")) => match lifecycle.interrupt(id) { Ok(LifecycleReply::Interrupted { forced }) => respond_json(request, 200, &serde_json::to_vec(&InterruptResponse { status: "interrupted", forced }).unwrap()), Ok(_) => error(request, 409, "session_not_running", "no active API turn"), Err(LifecycleError::NotFound) => error(request, 404, "not_found", "session not found"), Err(_) => error(request, 409, "session_not_running", "no active API turn") },
+        (Method::Post, Some("interrupt")) => {
+            if let Err(value) = store.get(id) { return store_error(request, value); }
+            match lifecycle.interrupt(id) {
+                Ok(LifecycleReply::Interrupted { forced }) => respond_json(request, 200, &serde_json::to_vec(&InterruptResponse { status: "interrupted", forced }).unwrap()),
+                Ok(_) | Err(LifecycleError::NotFound) => error(request, 409, "session_not_running", "no active API turn"),
+                Err(value) => lifecycle_error(request, value),
+            }
+        }
         (Method::Delete, None) => match lifecycle.kill(id) { Ok(_) => respond_json(request, 200, br#"{"status":"terminated"}"#), Err(value) => lifecycle_error(request, value) },
         (Method::Post, Some("turns")) => {
             let key = header(&request, "Idempotency-Key");
