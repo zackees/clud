@@ -70,7 +70,10 @@ fn running_submit_is_busy_while_duplicate_replays_after_controller_restart() {
     let slow = plan(
         mock_agent_path(),
         temp.path(),
-        vec!["--mock-sleep-ms".to_string(), "5000".to_string()],
+        // Keep the child alive through replay/conflict assertions so `kill`
+        // exercises terminal process cleanup rather than accepting a natural
+        // completion race.
+        vec!["--mock-sleep-ms".to_string(), "30000".to_string()],
     );
     let started = lifecycle
         .submit(
@@ -85,6 +88,12 @@ fn running_submit_is_busy_while_duplicate_replays_after_controller_restart() {
         LifecycleReply::Started { turn_id, .. } => turn_id,
         other => panic!("expected start, got {other:?}"),
     };
+    assert!(wait_until(Duration::from_secs(3), || {
+        store
+            .get(&id)
+            .map(|record| record.state == ApiSessionState::Running)
+            .unwrap_or(false)
+    }));
     assert_eq!(
         {
             let (sent, received) = std::sync::mpsc::sync_channel(1);
