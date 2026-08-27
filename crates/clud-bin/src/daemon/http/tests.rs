@@ -68,6 +68,45 @@ fn dashboard_access_requires_loopback_host_and_capability_token() {
 }
 
 #[test]
+fn api_discovery_routes_require_bearer_and_return_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = spawn_dashboard_with_activity(
+        dir.path().to_path_buf(),
+        None,
+        9999,
+        100,
+        empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
+        "test-capability".to_string(),
+        "test-api-token".to_string(),
+        None,
+        None,
+    )
+    .expect("dashboard spawned");
+
+    let unauthorized: serde_json::Value =
+        serde_json::from_str(&fetch_api_path(port, "/v1/health", None).expect("fetch"))
+            .expect("unauthorized JSON");
+    assert_eq!(unauthorized["code"], "unauthorized");
+
+    let health: serde_json::Value = serde_json::from_str(
+        &fetch_api_path(port, "/v1/health", Some("Bearer test-api-token")).expect("fetch"),
+    )
+    .expect("health JSON");
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["api_version"], "v1");
+
+    let schema: serde_json::Value = serde_json::from_str(
+        &fetch_api_path(port, "/v1/openapi.json", Some("Bearer test-api-token"))
+            .expect("fetch"),
+    )
+    .expect("OpenAPI JSON");
+    assert_eq!(schema["openapi"], "3.1.0");
+    assert!(schema["paths"].get("/v1/health").is_some());
+}
+
+#[test]
 fn purge_request_defaults_when_body_is_empty() {
     let parsed: PurgeRequest = serde_json::from_str("{}").unwrap();
     assert!(parsed.id.is_none());
@@ -633,4 +672,25 @@ fn fetch_path(port: u16, method: &str, path: &str, body: Option<String>) -> io::
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
     String::from_utf8(buf[body_start..].to_vec())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+fn fetch_api_path(port: u16, path: &str, authorization: Option<&str>) -> io::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut request = format!(
+        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n"
+    );
+    if let Some(authorization) = authorization {
+        request.push_str(&format!("Authorization: {authorization}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+    let mut buf = Vec::with_capacity(4096);
+    stream.read_to_end(&mut buf)?;
+    let body_start = find_body_start(&buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
+    String::from_utf8(buf[body_start..].to_vec())
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }

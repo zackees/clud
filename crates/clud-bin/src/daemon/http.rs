@@ -629,13 +629,25 @@ fn run_dashboard_loop(
                     request_header(&request, "Authorization").as_deref(),
                 );
             if !authorized {
-                respond_json(request, 401, br#"{\"code\":\"unauthorized\",\"message\":\"bearer authentication required\"}"#);
+                respond_json(
+                    request,
+                    401,
+                    br#"{"code":"unauthorized","message":"bearer authentication required"}"#,
+                );
                 continue;
             }
             match (method, path.as_str()) {
-                (Method::Get, "/v1/health") => respond_json(request, 200, br#"{\"status\":\"ok\",\"api_version\":\"v1\"}"#),
+                (Method::Get, "/v1/health") => respond_json(
+                    request,
+                    200,
+                    br#"{"status":"ok","api_version":"v1"}"#,
+                ),
                 (Method::Get, "/v1/openapi.json") => respond_json(request, 200, OPENAPI_JSON.as_bytes()),
-                _ => respond_json(request, 404, br#"{\"code\":\"not_found\",\"message\":\"API route not found\"}"#),
+                _ => respond_json(
+                    request,
+                    404,
+                    br#"{"code":"not_found","message":"API route not found"}"#,
+                ),
             }
             continue;
         }

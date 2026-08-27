@@ -45,6 +45,10 @@ cmd = "cd /workspace && bash lint"
 stack = "linux"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::headless_adapter"
 
+[task.api-discovery-test]
+stack = "linux"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::http::tests::api_discovery_routes_require_bearer_and_return_json"
+
 [task.test]
 stack = "linux"
 cmd = "cd /workspace && bash test"
