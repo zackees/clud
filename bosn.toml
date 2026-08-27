@@ -18,6 +18,10 @@ destination = "/workspace/target"
 scope = "stack"
 destination = "/workspace/.venv"
 
+[stack.clud_1044_final_retry.volumes.dist]
+scope = "stack"
+destination = "/workspace/dist"
+
 [stack.clud_1044_final_retry.volumes.uv-cache]
 scope = "machine"
 destination = "/root/.cache/uv"
@@ -112,4 +116,4 @@ cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv
 
 [task.ci-pytest-integration]
 stack = "clud_1044_final_retry"
-cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && CLUD_INTEGRATION_TESTS=1 CLUD_NO_UNLOCK=1 CLUD_TEST_BINARY=/workspace/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/workspace/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/workspace/target/debug/mock-agent .venv/bin/python -m pytest -m integration -v"
+cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && .venv/bin/python -m ci.build_wheel --dev && CLUD_INTEGRATION_TESTS=1 CLUD_NO_UNLOCK=1 CLUD_TEST_BINARY=/workspace/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/workspace/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/workspace/target/debug/mock-agent .venv/bin/python -m pytest -m integration -v"
