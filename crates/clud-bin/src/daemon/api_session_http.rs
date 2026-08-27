@@ -305,7 +305,12 @@ fn turn_plan(record: &ApiSessionRecord, message: String) -> Result<LaunchPlan, S
         },
     )?;
     #[cfg(test)]
-    plan.command.splice(1..1, _test_arguments);
+    {
+        let mut plan = plan;
+        plan.command.splice(1..1, _test_arguments);
+        return Ok(plan);
+    }
+    #[cfg(not(test))]
     Ok(plan)
 }
 
