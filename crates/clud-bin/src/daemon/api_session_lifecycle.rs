@@ -230,11 +230,24 @@ impl ApiSessionLifecycle {
             }
             let timed_out = root_kill_timed_out || process.returncode().is_none();
             if let Some(turn) = record.current_turn_id.as_deref() {
-                let disposition = if timed_out { "terminal_kill_timeout" } else { "terminal_kill" };
-                let _ = self.store.finish_turn(session_id, turn, ApiTurnState::Killed, Some(disposition.to_string()));
+                let disposition = if timed_out {
+                    "terminal_kill_timeout"
+                } else {
+                    "terminal_kill"
+                };
+                let _ = self.store.finish_turn(
+                    session_id,
+                    turn,
+                    ApiTurnState::Killed,
+                    Some(disposition.to_string()),
+                );
             }
             let _ = self.store.terminate(session_id);
-            return if timed_out { Err(LifecycleError::KillTimeout) } else { Ok(LifecycleReply::Terminated) };
+            return if timed_out {
+                Err(LifecycleError::KillTimeout)
+            } else {
+                Ok(LifecycleReply::Terminated)
+            };
         }
         if let Some(turn) = record.current_turn_id {
             let _ = self.store.finish_turn(
