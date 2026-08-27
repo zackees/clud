@@ -34,6 +34,14 @@ before sealing the turn, so the last identity/output event cannot race normal
 completion into `idle`. Unknown provider records are opaque events and
 malformed records become diagnostics.
 
+## HTTP contract
+
+`/v1/*` is loopback, Host-validated, and bearer-only; dashboard query-token
+and cookie bootstrap never authorize it. Typed session routes create/list/get
+durable records, expose bounded `after` cursor events, and map invalid input,
+missing IDs, and active conflicts to stable JSON errors. No route accepts raw
+argv, environment injection, or a per-turn CWD override.
+
 ## Lifecycle serialization
 
 The #1043 lifecycle controller keeps one in-memory captured-process handle per

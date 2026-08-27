@@ -40,7 +40,7 @@ use crate::launch_log::{self, LaunchRecord};
 use crate::session_registry::LiveSession;
 
 #[path = "http_response.rs"]
-mod http_response;
+pub(crate) mod http_response;
 use http_response::{
     find_body_start, json_error_bytes, read_body, respond_capability_bootstrap, respond_html,
     respond_json, respond_text,
@@ -613,6 +613,7 @@ fn run_dashboard_loop(
     test_activity: Option<TestRuntimeActivity>,
     activity: Option<DaemonActivity>,
 ) {
+    let api_lifecycle = super::api_session_lifecycle::ApiSessionLifecycle::new(super::api_sessions::ApiSessionStore::new(state_dir.clone()));
     for request in server.incoming_requests() {
         let _connection_guard = activity.as_ref().map(DaemonActivity::start_connection);
         let _activity_guard = test_activity
@@ -636,18 +637,14 @@ fn run_dashboard_loop(
                 );
                 continue;
             }
-            match (method, path.as_str()) {
+            match (method.clone(), path.as_str()) {
                 (Method::Get, "/v1/health") => respond_json(
                     request,
                     200,
                     br#"{"status":"ok","api_version":"v1"}"#,
                 ),
                 (Method::Get, "/v1/openapi.json") => respond_json(request, 200, OPENAPI_JSON.as_bytes()),
-                _ => respond_json(
-                    request,
-                    404,
-                    br#"{"code":"not_found","message":"API route not found"}"#,
-                ),
+                _ => super::api_session_http::handle(request, method, &path, state_dir.clone(), &api_lifecycle),
             }
             continue;
         }
@@ -715,7 +712,7 @@ fn run_dashboard_loop(
     }
 }
 
-const OPENAPI_JSON: &str = r#"{"openapi":"3.1.0","info":{"title":"clud daemon API","version":"v1"},"paths":{"/v1/health":{"get":{"responses":{"200":{"description":"healthy"},"401":{"description":"bearer required"}}}},"/v1/openapi.json":{"get":{"responses":{"200":{"description":"schema"},"401":{"description":"bearer required"}}}}},"components":{"schemas":{"Error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"}}}}}}"#;
+const OPENAPI_JSON: &str = r#"{"openapi":"3.1.0","info":{"title":"clud daemon API","version":"v1"},"paths":{"/v1/health":{"get":{"responses":{"200":{"description":"healthy"}}}},"/v1/openapi.json":{"get":{"responses":{"200":{"description":"schema"}}}},"/v1/sessions":{"get":{"responses":{"200":{"description":"sessions"}}},"post":{"responses":{"201":{"description":"created"},"400":{"description":"invalid_request"}}}},"/v1/sessions/{id}":{"get":{"responses":{"200":{"description":"session"},"404":{"description":"not_found"}}},"delete":{"responses":{"200":{"description":"terminated"}}}},"/v1/sessions/{id}/interrupt":{"post":{"responses":{"200":{"description":"interrupted"},"409":{"description":"session_busy"}}}},"/v1/sessions/{id}/turns":{"post":{"responses":{"409":{"description":"session_busy or resume_unavailable"}}}},"/v1/sessions/{id}/events":{"get":{"responses":{"200":{"description":"cursor events"}}}}},"components":{"schemas":{"Error":{"type":"object","required":["code","message"]}}}}"#;
 
 // ---------- route handlers ----------
 
