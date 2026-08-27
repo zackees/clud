@@ -336,6 +336,32 @@ fn api_openapi_contract_covers_each_implemented_session_route() {
     }
 }
 
+#[test]
+fn dashboard_state_surfaces_api_sessions_as_nonattachable_rows() {
+    use crate::daemon::api_sessions::{ApiSessionBackend, CreateApiSession, ResolvedApiSessionSettings};
+
+    let temp = tempfile::tempdir().unwrap();
+    let record = super::super::api_sessions::ApiSessionStore::new(temp.path())
+        .create(CreateApiSession {
+            backend: ApiSessionBackend::Codex,
+            cwd: temp.path().to_path_buf(),
+            name: Some("dashboard-api".to_string()),
+            resolved_settings: ResolvedApiSessionSettings {
+                model: None, safe: false, model_provider: Some("codex".to_string()),
+                harness: Some("codex".to_string()), routing_mode: None,
+            },
+        }).unwrap();
+    let state = super::super::http_dashboard_state::build_dashboard_state(
+        temp.path(), None, 0, 0, Vec::new(),
+    ).unwrap();
+    let row = state.sessions.iter().find(|session| session.id == record.id).unwrap();
+    assert_eq!(row.kind, "api");
+    assert_eq!(row.source, "api");
+    assert!(!row.attachable);
+    assert!(!row.detachable);
+    assert!(row.command.is_empty());
+}
+
 fn http_test_mock_agent() -> std::path::PathBuf {
     let extension = if cfg!(windows) { ".exe" } else { "" };
     let target = std::env::var_os("CARGO_TARGET_DIR")
