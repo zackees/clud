@@ -413,6 +413,14 @@ fn http_test_mock_agent() -> std::path::PathBuf {
                 .join("target")
         });
     let candidates = [
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.parent()?
+                    .parent()
+                    .map(|path| path.join(format!("mock-agent{extension}")))
+            })
+            .unwrap_or_default(),
         target.join("debug").join(format!("mock-agent{extension}")),
         target
             .join("x86_64-pc-windows-msvc")

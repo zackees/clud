@@ -45,7 +45,7 @@ pub fn mock_agent_path() -> PathBuf {
     let by_triple = |triple: &str| target_dir.join(triple).join("debug").join(&file_name);
     let default = target_dir.join("debug").join(&file_name);
 
-    let candidates: Vec<PathBuf> = if cfg!(windows) {
+    let mut candidates: Vec<PathBuf> = if cfg!(windows) {
         vec![
             by_triple("x86_64-pc-windows-msvc"),
             by_triple("aarch64-pc-windows-msvc"),
@@ -64,6 +64,12 @@ pub fn mock_agent_path() -> PathBuf {
             default.clone(),
         ]
     };
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(debug_dir) = exe.parent().and_then(|path| path.parent()) {
+            candidates.push(debug_dir.join(&file_name));
+        }
+    }
 
     let freshest = candidates
         .iter()
