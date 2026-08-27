@@ -7,6 +7,27 @@ credential route. Native Claude launches and every non-bridge route remain
 unchanged; stopping the foreground runtime stops the listener and is the
 rollback boundary.
 
+## Admission and retries
+
+The bridge admits exactly one request worker at a time. When that worker is
+occupied, later TCP connections remain in the operating system listener
+backlog until the slot opens or the foreground bridge shuts down. clud does not
+accept those sockets early, buffer their request bodies, create waiter threads,
+or return a local `503 bridge busy` for ordinary contention. The original socket
+is admitted once and its turn makes one normal upstream attempt, so contention
+cannot duplicate a model request or canonical-history commit.
+
+The occupied worker retains the existing five-minute first-frame and
+stream-idle protections; a healthy stream may run longer and its backlog age is
+not itself a failure. Shutdown closes active connections and the listener, so
+both an active worker and queued clients are released promptly. Bridge forensic
+logs record secret-free `admission_queued` and `admission_acquired` events with
+aggregate `wait_ms`; these are local scheduling observability and are distinct
+from `upstream_attempt` retry records. Claude Code's own retry loop remains a
+defence for transport or upstream failures that reach the harness. The bridge
+does not set Claude retry environment variables to compensate for local
+admission contention.
+
 ## Model discovery and context
 
 Claude Code 2.1.223 or newer discovers a Codex-only catalog from the bridge's

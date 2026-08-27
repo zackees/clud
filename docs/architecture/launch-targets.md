@@ -379,14 +379,15 @@ reason rather than a guess:
   `a_representative_request_fits_the_body_cap` builds a request from the parts
   a real turn always carries and asserts it clears the old cap and fits the new
   one.
-- **Concurrency: 16** (was 4), and exceeding it now **queues** instead of
+- **Concurrency: 1**, preserving #778's host-footprint cap. Exceeding it queues
   failing. Claude Code issues several requests at once — the foreground turn
   plus background side-model calls and any subagents. While every slot is busy
   the accept loop simply declines to accept, so pending connections wait in the
-  kernel's listen backlog; a short wait is invisible, whereas a `503` reaches
-  the user as a hard API error. `admission_wait` (10 s) bounds that wait: past
-  it the bridge accepts and answers `503` anyway, so a wedged worker cannot
-  hang a client forever.
+  kernel's listen backlog until a slot opens or the bridge shuts down. clud
+  never accepts them to buffer a body or synthesize `503 bridge busy`; the
+  active worker's five-minute first-frame and stream-idle timeouts still bound a
+  silent upstream wedge. Queue wait is recorded separately from upstream retry
+  events, without request content or secrets.
 
 The representative request is *constructed*, not captured production traffic.
 That distinction is deliberate and is stated in the test: it is evidence about
