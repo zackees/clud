@@ -49,6 +49,10 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::headless_adapter"
 stack = "clud_validation"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::http::tests::api_discovery_routes_require_bearer_and_return_json"
 
+[task.api-session-test]
+stack = "clud_validation"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions"
+
 [task.test]
 stack = "clud_validation"
 cmd = "cd /workspace && bash test"
