@@ -103,7 +103,13 @@ impl ApiSessionLifecycle {
         let _ = self.store.append_event(session_id, Some(turn_id.clone()), "interrupt_requested".to_string(), serde_json::json!({"grace_ms": self.grace.as_millis()}));
         if let Some(identity) = record.turns.iter().find(|turn| turn.id == turn_id).and_then(|turn| turn.root_identity) { signal_process_tree_as(&identity, Signal::Interrupt); }
         let started = Instant::now(); while process.returncode().is_none() && started.elapsed() < self.grace { thread::sleep(Duration::from_millis(25)); }
-        let forced = process.returncode().is_none(); if forced { let _ = process.kill(); }
+        let forced = process.returncode().is_none();
+        if forced {
+            if let Some(identity) = record.turns.iter().find(|turn| turn.id == turn_id).and_then(|turn| turn.root_identity) {
+                signal_process_tree_as(&identity, Signal::Kill);
+            }
+            let _ = process.kill();
+        }
         let disposition = if forced { "forced_interrupt" } else { "graceful_interrupt" }; let _ = self.store.finish_turn(session_id, &turn_id, ApiTurnState::Interrupted, Some(disposition.to_string()));
         forced
     }
