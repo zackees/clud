@@ -62,14 +62,10 @@ const DEFAULT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(300);
 /// constructed inside one millisecond in a single pid, each advertising a
 /// 16-worker ceiling; the ceilings are lazy, but the advertised total is the
 /// number an operator has to reason about when the host is already saturated.
-/// Excess connections wait in the listen backlog for up to
-/// `DEFAULT_ADMISSION_WAIT` rather than being rejected.
+/// Excess connections wait in the listen backlog until a worker becomes
+/// available or the bridge shuts down. This keeps local contention out of the
+/// harness-visible API surface without accepting or buffering their bodies.
 const DEFAULT_MAX_CONCURRENCY: usize = 1;
-/// How long a connection may wait in the kernel's listen backlog for a worker
-/// slot before the bridge accepts it only to answer 503. Queueing beats
-/// rejecting -- a 503 surfaces to the user as a hard API error, whereas a short
-/// wait is invisible -- but an unbounded wait would hang the client instead.
-const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(10);
 const ACCEPT_POLL: Duration = Duration::from_millis(5);
 /// Upper bound on a single blocking read. Reads are resumed until their phase
 /// deadline expires; the cap exists so a worker parked on a quiet socket still
@@ -201,7 +197,6 @@ pub struct BridgeConfig {
     pub stream_idle_timeout: Duration,
     pub first_frame_timeout: Duration,
     pub max_concurrency: usize,
-    pub admission_wait: Duration,
     /// Default model+effort selection, from `--model` on the launch. `None`
     /// keeps the built-in default. A request that names its own model still
     /// wins over this.
@@ -233,7 +228,6 @@ impl Default for BridgeConfig {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             first_frame_timeout: DEFAULT_FIRST_FRAME_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
-            admission_wait: DEFAULT_ADMISSION_WAIT,
             default_model: None,
             gateway_mode: GatewayMode::Codex,
             history_limits: HistoryLimits::default(),
@@ -322,7 +316,6 @@ impl fmt::Debug for BridgeConfig {
             .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("first_frame_timeout", &self.first_frame_timeout)
             .field("max_concurrency", &self.max_concurrency)
-            .field("admission_wait", &self.admission_wait)
             .field(
                 "default_model",
                 &self.default_model.as_ref().map(ModelSpec::display),
@@ -545,94 +538,111 @@ fn serve(
     let mut workers = Vec::<JoinHandle<()>>::new();
     let mut next_worker_id = 0_usize;
     // When every slot is busy, decline to *accept*: pending connections wait in
-    // the kernel's listen backlog instead of being answered 503. A short wait is
-    // invisible to the user; a 503 is a hard API error. `full_since` bounds that
-    // wait so a wedged worker cannot hang a client indefinitely.
+    // the kernel's listen backlog instead of being answered 503. The active
+    // worker still has first-frame and stream-idle timeouts; healthy streaming
+    // work can run for hours, so queue age must not be a local failure policy.
     let mut full_since: Option<Instant> = None;
     while !shutdown.load(Ordering::Acquire) {
         workers.retain(|worker| !worker.is_finished());
         let limit = config.max_concurrency.max(1);
         if active.load(Ordering::Acquire) >= limit {
-            let waiting_since = *full_since.get_or_insert_with(Instant::now);
-            if waiting_since.elapsed() < config.admission_wait {
-                thread::sleep(ACCEPT_POLL);
+            if full_since.is_none() {
+                full_since = Some(Instant::now());
+            }
+            thread::sleep(ACCEPT_POLL);
+            continue;
+        } else {
+            // Reserve before accepting.  The check above is only a hint: an
+            // old worker can exit (or a new worker can reserve) between it and
+            // this point. Reserving first means no accepted socket is ever
+            // discarded because admission raced after `accept`.
+            if !reserve_worker(&active, limit) {
                 continue;
             }
-        } else {
-            full_since = None;
-        }
-        match listener.accept() {
-            Ok((stream, _peer)) => {
-                // The listener is non-blocking so the accept loop can poll for
-                // shutdown. On Windows an accepted socket inherits that mode,
-                // and a non-blocking socket ignores SO_RCVTIMEO: every read
-                // that outruns the client's next segment returns WouldBlock,
-                // which the readers below classify as a timeout. The result is
-                // an instant 408 for any request whose body lands in a
-                // separate segment from its headers. Restore blocking mode per
-                // connection so the read deadlines are the real bound.
-                if stream.set_nonblocking(false).is_err() {
-                    continue;
-                }
-                if !reserve_worker(&active, limit) {
-                    // Only reachable once `admission_wait` has elapsed: the
-                    // backstop that keeps a client from waiting forever.
-                    reject_busy(stream, config.header_timeout, &shutdown, log.as_ref());
-                    continue;
-                }
-                let shutdown_stream = match stream.try_clone() {
-                    Ok(stream) => stream,
-                    Err(_) => {
+            match listener.accept() {
+                Ok((stream, _peer)) => {
+                    // The listener is non-blocking so the accept loop can poll for
+                    // shutdown. On Windows an accepted socket inherits that mode,
+                    // and a non-blocking socket ignores SO_RCVTIMEO: every read
+                    // that outruns the client's next segment returns WouldBlock,
+                    // which the readers below classify as a timeout. The result is
+                    // an instant 408 for any request whose body lands in a
+                    // separate segment from its headers. Restore blocking mode per
+                    // connection so the read deadlines are the real bound.
+                    if stream.set_nonblocking(false).is_err() {
                         active.fetch_sub(1, Ordering::AcqRel);
                         continue;
                     }
-                };
-                let worker_id = next_worker_id;
-                next_worker_id = next_worker_id.wrapping_add(1);
-                {
-                    let mut registered = lock_connections(&connections);
-                    registered.insert(worker_id, shutdown_stream);
-                    if shutdown.load(Ordering::Acquire) {
-                        if let Some(stream) = registered.get(&worker_id) {
-                            let _ = stream.shutdown(Shutdown::Both);
+                    // `full_since` begins at saturation, before the OS exposes
+                    // a readable pending socket, so `wait_ms` is a secret-free
+                    // aggregate upper bound rather than a per-client identity.
+                    // Only emit events now that an actual queued socket has
+                    // been accepted; a lone occupied worker produces neither.
+                    if let Some(wait) = full_since.take().map(|started| started.elapsed()) {
+                        record_admission_queued(log.as_ref());
+                        record_admission_acquired(log.as_ref(), wait);
+                    }
+                    let shutdown_stream = match stream.try_clone() {
+                        Ok(stream) => stream,
+                        Err(_) => {
+                            active.fetch_sub(1, Ordering::AcqRel);
+                            continue;
+                        }
+                    };
+                    let worker_id = next_worker_id;
+                    next_worker_id = next_worker_id.wrapping_add(1);
+                    {
+                        let mut registered = lock_connections(&connections);
+                        registered.insert(worker_id, shutdown_stream);
+                        if shutdown.load(Ordering::Acquire) {
+                            if let Some(stream) = registered.get(&worker_id) {
+                                let _ = stream.shutdown(Shutdown::Both);
+                            }
+                        }
+                    }
+                    let worker_active = Arc::clone(&active);
+                    let worker_conversations = conversations.clone();
+                    let worker_connections = Arc::clone(&connections);
+                    let worker_shutdown = Arc::clone(&shutdown);
+                    let worker_config = config.clone();
+                    let worker_token = bearer_token.clone();
+                    let worker_log = log.clone();
+                    match thread::Builder::new()
+                        .name("clud-codex-bridge-request".to_string())
+                        .spawn(move || {
+                            let _guard = ActiveWorker {
+                                active: worker_active,
+                                connections: worker_connections,
+                                worker_id,
+                            };
+                            handle_connection(
+                                stream,
+                                &worker_config,
+                                &worker_token,
+                                &worker_shutdown,
+                                &worker_conversations,
+                                worker_log.as_ref(),
+                            );
+                        }) {
+                        Ok(worker) => workers.push(worker),
+                        Err(_) => {
+                            active.fetch_sub(1, Ordering::AcqRel);
+                            lock_connections(&connections).remove(&worker_id);
                         }
                     }
                 }
-                let worker_active = Arc::clone(&active);
-                let worker_conversations = conversations.clone();
-                let worker_connections = Arc::clone(&connections);
-                let worker_shutdown = Arc::clone(&shutdown);
-                let worker_config = config.clone();
-                let worker_token = bearer_token.clone();
-                let worker_log = log.clone();
-                match thread::Builder::new()
-                    .name("clud-codex-bridge-request".to_string())
-                    .spawn(move || {
-                        let _guard = ActiveWorker {
-                            active: worker_active,
-                            connections: worker_connections,
-                            worker_id,
-                        };
-                        handle_connection(
-                            stream,
-                            &worker_config,
-                            &worker_token,
-                            &worker_shutdown,
-                            &worker_conversations,
-                            worker_log.as_ref(),
-                        );
-                    }) {
-                    Ok(worker) => workers.push(worker),
-                    Err(_) => {
-                        active.fetch_sub(1, Ordering::AcqRel);
-                        lock_connections(&connections).remove(&worker_id);
-                    }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    // There was no pending socket, so any saturation interval
+                    // was not an admission queue and must not reach the log.
+                    full_since = None;
+                    thread::sleep(ACCEPT_POLL);
+                }
+                Err(_) => {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    break;
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(ACCEPT_POLL);
-            }
-            Err(_) => break,
         }
     }
     drop(listener);
@@ -668,31 +678,6 @@ impl Drop for ActiveWorker {
         lock_connections(&self.connections).remove(&self.worker_id);
         self.active.fetch_sub(1, Ordering::AcqRel);
     }
-}
-
-fn reject_busy(
-    mut stream: TcpStream,
-    timeout: Duration,
-    shutdown: &AtomicBool,
-    log: Option<&SharedBridgeLog>,
-) {
-    record_rejection(log, 503, "admission_cap");
-    // Consume the already-buffered request headers before closing. On Windows,
-    // closing a TCP socket with unread inbound bytes sends RST and can discard
-    // the 503 that was just written.
-    let drain_timeout = timeout.min(Duration::from_millis(100));
-    let deadline = Instant::now() + drain_timeout;
-    let _ = read_headers(&mut stream, DEFAULT_MAX_HEADER_BYTES, deadline, shutdown);
-    if stream.set_write_timeout(Some(timeout)).is_err() {
-        return;
-    }
-    let _ = write_response(
-        &mut stream,
-        503,
-        "application/json",
-        br#"{"error":{"type":"overloaded_error","message":"bridge busy"}}"#,
-        false,
-    );
 }
 
 fn handle_connection(
@@ -2472,6 +2457,31 @@ fn record_rejection(log: Option<&SharedBridgeLog>, status: u16, reason: &'static
             "event": "request_rejected",
             "downstream_status": status,
             "reason": reason,
+        }));
+    }
+}
+
+/// Record one contiguous interval in which new sockets remain in the kernel
+/// listener backlog. No request-derived field enters this event.
+fn record_admission_queued(log: Option<&SharedBridgeLog>) {
+    if let Some(log) = log {
+        lock_log(log).record_ambient(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "admission_queued",
+        }));
+    }
+}
+
+/// The matching admission event is deliberately distinct from
+/// `upstream_attempt`: queue time is local scheduling, not a retried provider
+/// request. `wait_ms` is an aggregate backlog interval and contains no client
+/// identity, header, token, or request content.
+fn record_admission_acquired(log: Option<&SharedBridgeLog>, wait: Duration) {
+    if let Some(log) = log {
+        lock_log(log).record_ambient(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "admission_acquired",
+            "wait_ms": wait.as_millis() as u64,
         }));
     }
 }
@@ -5396,9 +5406,34 @@ Connection: close
             .recv_timeout(Duration::from_secs(30))
             .expect("request worker admission signal");
         assert_eq!(bridge.active_requests(), 1);
+        // This connection remains in the kernel backlog: the sole worker is
+        // blocked on the slow header above and must not create a second worker.
+        let mut queued = TcpStream::connect(addr).unwrap();
+        queued
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        queued
+            .write_all(b"GET / HTTP/1.1\r\nHost: queued\r\n\r\n")
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(bridge.active_requests(), 1);
         let shutdown_started = Instant::now();
         bridge.shutdown().unwrap();
         assert!(shutdown_started.elapsed() < Duration::from_secs(5));
+        let mut byte = [0_u8; 1];
+        let queued_result = queued.read(&mut byte);
+        assert!(
+            matches!(queued_result, Ok(0))
+                || queued_result.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::NotConnected
+                    )
+                }),
+            "listener shutdown must tear down a queued socket: {queued_result:?}"
+        );
         bridge.shutdown().unwrap();
         assert!(TcpStream::connect(addr).is_err());
 
@@ -5736,11 +5771,13 @@ Connection: close
     #[test]
     fn concurrent_requests_beyond_the_bound_queue_rather_than_fail() {
         let upstream = FakeResponses::start();
-        let bridge = BridgeHandle::start(BridgeConfig {
-            max_concurrency: 1,
-            admission_wait: Duration::from_secs(20),
-            ..bridged_config(&upstream)
-        })
+        let bridge = BridgeHandle::start(
+            BridgeConfig {
+                max_concurrency: 1,
+                ..bridged_config(&upstream)
+            }
+            .with_request_hold(Duration::from_millis(100)),
+        )
         .unwrap();
         let addr = bridge.socket_addr();
         let token = bridge.bearer_token().to_owned();
@@ -5766,6 +5803,15 @@ Connection: close
             );
             assert!(response.contains("bridged reply"));
         }
+        assert_eq!(
+            upstream
+                .requests()
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            4,
+            "each queued original must reach upstream once"
+        );
     }
 
     /// Opt-in, repeatable bridge overhead report for #630. Run this locally
@@ -5811,26 +5857,27 @@ Connection: close
         );
     }
 
-    /// The backstop still exists: once `admission_wait` elapses, a client gets
-    /// a definite answer rather than waiting forever behind a wedged worker.
+    /// #1054 RED: local admission saturation is not an API error.  A second
+    /// socket stays in the kernel backlog past the old finite budget, then its
+    /// original request is admitted exactly once when the sole worker exits.
     #[test]
-    fn a_saturated_bridge_still_answers_after_the_admission_wait() {
+    fn a_saturated_bridge_admits_the_original_request_after_the_old_budget() {
         let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
-        // `admission_wait` is measured by the accept loop from the moment it
-        // *notices* saturation, which happens slightly before the notifier
-        // below is observed here. The second client therefore waits
-        // `admission_wait` minus that skew, so the budget has to be large
-        // enough that CI scheduling noise cannot eat the margin: a 50ms budget
-        // failed on loaded Linux and macOS runners at exactly this assertion.
+        let upstream = FakeResponses::start();
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("bridge.jsonl");
+        // Keep the first worker alive past the former admission deadline.
+        // The second request must remain unaccepted rather than collecting a
+        // synthetic 503, then make one normal upstream call after admission.
         let bridge = BridgeHandle::start(
             BridgeConfig {
                 max_concurrency: 1,
-                admission_wait: Duration::from_millis(500),
                 header_timeout: Duration::from_secs(5),
-                ..BridgeConfig::default()
+                ..bridged_config(&upstream)
             }
-            .with_request_hold(Duration::from_secs(5))
-            .with_admission_notifier(admitted_tx),
+            .with_request_hold(Duration::from_secs(2))
+            .with_admission_notifier(admitted_tx)
+            .with_log_path(log_path.clone()),
         )
         .unwrap();
         let addr = bridge.socket_addr();
@@ -5844,16 +5891,61 @@ Connection: close
             .recv_timeout(Duration::from_secs(30))
             .expect("first request admitted");
 
-        let started = Instant::now();
-        let saturated = request(addr, &authorized("HEAD", "/v1/messages", &token, ""));
-        assert_eq!(status(&saturated), 503);
-        // Half the budget: proves the backstop waited rather than answering
-        // immediately, while leaving room for the accept-loop skew above.
+        let queued_token = token.clone();
+        let queued = thread::spawn(move || {
+            request(
+                addr,
+                &authorized("POST", "/v1/messages", &queued_token, PROBE_BODY),
+            )
+        });
+        thread::sleep(Duration::from_millis(500));
         assert!(
-            started.elapsed() >= Duration::from_millis(250),
-            "the 503 must come only after the admission wait, not immediately"
+            !queued.is_finished(),
+            "the queued socket must outlive the old admission budget"
+        );
+        let response = queued.join().expect("queued request thread");
+        assert_eq!(status(&response), 200, "queued request: {response}");
+        assert!(!response.contains("bridge busy"));
+        assert_eq!(
+            upstream
+                .requests()
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            1,
+            "the queued original must make exactly one upstream request"
         );
         drop(occupied);
+        let mut bridge = bridge;
+        bridge.shutdown().unwrap();
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        assert!(log.contains("admission_queued"), "{log}");
+        assert!(log.contains("admission_acquired"), "{log}");
+        assert!(log.contains("wait_ms"), "{log}");
+    }
+
+    /// Saturation alone is not an admission queue.  The listener must have an
+    /// actual later socket before the aggregate queue observability is emitted.
+    #[test]
+    fn a_lone_held_request_emits_no_admission_events() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("bridge.jsonl");
+        let upstream = FakeResponses::start();
+        let mut bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_request_hold(Duration::from_millis(250))
+                .with_log_path(log_path.clone()),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        bridge.shutdown().unwrap();
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        assert!(!log.contains("admission_queued"), "{log}");
+        assert!(!log.contains("admission_acquired"), "{log}");
     }
 
     /// Regression guard: Claude Code sends `POST /v1/messages?beta=true`.
