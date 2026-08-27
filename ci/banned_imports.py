@@ -8,6 +8,7 @@ is used.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import sys
 from pathlib import Path
@@ -238,6 +239,19 @@ def is_excluded_python_path(relative: Path) -> bool:
     return any(part in EXCLUDED_PYTHON_PARTS for part in relative.parts)
 
 
+def iter_python_files() -> list[Path]:
+    """Yield Python source without descending into ignored runtime trees."""
+    paths: list[Path] = []
+    for root, directories, files in os.walk(ROOT):
+        directories[:] = [
+            directory
+            for directory in directories
+            if directory not in EXCLUDED_PYTHON_PARTS
+        ]
+        paths.extend(Path(root, filename) for filename in files if filename.endswith(".py"))
+    return sorted(paths)
+
+
 def scan_python_file(path: Path) -> list[tuple[int, str, str]]:
     """Reject Python's raw subprocess module in product tooling."""
     try:
@@ -364,11 +378,7 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
             total_violations += 1
 
-    python_files = sorted(
-        path
-        for path in ROOT.rglob("*.py")
-        if not is_excluded_python_path(path.relative_to(ROOT))
-    )
+    python_files = iter_python_files()
     for path in python_files:
         for line_num, line, reason in scan_python_file(path):
             rel = path.relative_to(ROOT)
