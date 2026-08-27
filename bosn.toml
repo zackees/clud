@@ -70,11 +70,11 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && s
 
 [task.api-session-integration-test]
 stack = "clud_1044_validation_retry"
-cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && soldr cargo test -p clud --lib daemon::api_turn_controller && soldr cargo test -p clud --lib daemon::api_session_lifecycle && soldr cargo test -p clud --lib daemon::http::tests && soldr cargo test -p clud --lib daemon::wire_prost && soldr cargo test -p clud --lib command:: && soldr cargo test -p clud --test api_turn_controller && soldr cargo test -p clud --test api_session_lifecycle"
+cmd = "cd /workspace && soldr cargo build -p mock-agent && soldr cargo test -p clud --lib daemon::api_sessions && soldr cargo test -p clud --lib daemon::api_turn_controller && soldr cargo test -p clud --lib daemon::api_session_lifecycle && soldr cargo test -p clud --lib daemon::http::tests && soldr cargo test -p clud --lib daemon::wire_prost && soldr cargo test -p clud --lib command:: && soldr cargo test -p clud --test api_turn_controller && soldr cargo test -p clud --test api_session_lifecycle"
 
 [task.test]
 stack = "clud_1044_validation_retry"
-cmd = "cd /workspace && bash test"
+cmd = "cd /workspace && soldr cargo build -p mock-agent && bash test"
 
 [task.api-session-storage-test]
 stack = "clud_1044_validation_retry"
@@ -90,7 +90,7 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_session_lifec
 
 [task.api-http-single-test]
 stack = "clud_1044_validation_retry"
-cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::http::tests"
+cmd = "cd /workspace && soldr cargo build -p mock-agent && soldr cargo test -p clud --lib daemon::http::tests"
 
 [task.api-wire-single-test]
 stack = "clud_1044_validation_retry"
