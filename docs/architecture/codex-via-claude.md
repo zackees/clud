@@ -23,11 +23,11 @@ stream-idle protections; a healthy stream may run longer and its backlog age is
 not itself a failure. Shutdown closes active connections and the listener, so
 both an active worker and queued clients are released promptly. Bridge forensic
 logs record secret-free `admission_queued` and `admission_acquired` events with
-aggregate upper-bound `wait_ms`; these are local scheduling observability and are distinct
-from `upstream_attempt` retry records. Claude Code's own retry loop remains a
-defence for transport or upstream failures that reach the harness. The bridge
-does not set Claude retry environment variables to compensate for local
-admission contention.
+aggregate upper-bound `wait_ms`; these are local scheduling observability and
+are distinct from `upstream_attempt` retry records. Claude Code's own retry loop
+remains a defence for transport or upstream failures that reach the harness.
+The bridge does not set Claude retry environment variables to compensate for
+local admission contention.
 
 ## Model discovery and context
 

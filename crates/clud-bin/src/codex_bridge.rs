@@ -5424,7 +5424,7 @@ Connection: close
         let queued_result = queued.read(&mut byte);
         assert!(
             matches!(queued_result, Ok(0))
-                || queued_result.is_err_and(|error| {
+                || queued_result.as_ref().is_err_and(|error| {
                     matches!(
                         error.kind(),
                         io::ErrorKind::ConnectionAborted
