@@ -1,4 +1,5 @@
 mod activity;
+pub(crate) mod api_sessions;
 mod attach;
 mod client;
 mod client_compat;

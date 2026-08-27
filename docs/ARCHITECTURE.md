@@ -10,6 +10,7 @@ re-explaining.
 |---|---|---|
 | [architecture/loop-subsystem.md](architecture/loop-subsystem.md) | ~250 | `clud loop`: task resolution, plan synthesis, iteration run, DONE/BLOCKED marker contract, artifact rollover, repeat scheduling |
 | [architecture/daemon-ipc.md](architecture/daemon-ipc.md) | ~250 | Always-on clud daemon hosting session ops + GC: TCP JSON IPC, daemon/worker re-entry model, snapshot persistence, attach broker |
+| [architecture/api-session-storage.md](architecture/api-session-storage.md) | ~160 | Durable API logical sessions above provider turns: immutable CWD, bounded events/idempotency, atomic persistence, restart recovery |
 | [architecture/session-lifecycle.md](architecture/session-lifecycle.md) | ~300 | PTY session pump, console mode setup, OSC title keeper, capture for attach, drag-drop and voice injection points |
 | [architecture/skill-system.md](architecture/skill-system.md) | ~200 | Skill bundling (`include_str!`), the single `skills.rs` installer over `assets/skills/`, the four-state install contract, selected-backend global setup |
 | [architecture/launch-setup.md](architecture/launch-setup.md) | ~70 | Session-only vs global launch setup, persistent setup actions, selected-backend gating |
@@ -34,6 +35,7 @@ re-explaining.
 
 - **"How does `clud loop` decide when to stop?"** -> [loop-subsystem.md](architecture/loop-subsystem.md)
 - **"How do `attach` / `list` / `kill` talk to the daemon?"** -> [daemon-ipc.md](architecture/daemon-ipc.md)
+- **"How are API conversation IDs, turns, and polling cursors persisted?"** -> [api-session-storage.md](architecture/api-session-storage.md)
 - **"What happens between Ctrl-D and process exit in a PTY session?"** -> [session-lifecycle.md](architecture/session-lifecycle.md)
 - **"When does a bundled skill get written into my home?"** -> [skill-system.md](architecture/skill-system.md)
 - **"When does clud write agent setup files?"** -> [launch-setup.md](architecture/launch-setup.md)

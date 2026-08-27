@@ -2489,3 +2489,27 @@ Its decision stands: the direct bridge exposes exactly the registered Codex
 discovery rows, and `/model` presents Sol, Terra, and Luna honestly. What DD-045
 left implicit is that the picker presents them *in addition to* Claude Code's own
 rows, not instead of them.
+
+## DD-055: API logical sessions are durable records above worker generations
+
+**Status:** Accepted
+
+**Context:** A daemon `SessionSnapshot` represents one worker process. Its PID,
+attach socket, and exit code are intentionally worker-lifetime fields, and
+existing reconciliation retires crash-leftover worker records. The API session
+surface needs a provider conversation to survive normal turn completion and
+daemon restart.
+
+**Decision:** Persist `ApiSessionRecord`s separately under `api-sessions/`.
+They own immutable canonical CWD, resolved settings, provider identity, logical
+state, turn generations, bounded cursor events, and bounded idempotency. A
+worker/process identity, when later recorded on a turn, is diagnostic only
+after restart: the restarted daemon marks an active turn failed and never
+signals a PID recovered from disk.
+
+**Consequences:** Normal completion becomes `idle`, not a terminal worker exit,
+and later lifecycle work can resume only a captured provider identity. The
+existing attach/list/kill worker machinery remains compatible because it does
+not accidentally classify logical API sessions as attachable workers. Bounded
+event and idempotency retention prevents durable session metadata from becoming
+an unbounded prompt/transcript store.
