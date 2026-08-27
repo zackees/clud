@@ -224,6 +224,7 @@ EXCLUDED_PYTHON_PARTS = frozenset(
     {
         ".git",
         ".venv",
+        ".clud",
         ".extern-repos",
         "target",
         "__pycache__",
