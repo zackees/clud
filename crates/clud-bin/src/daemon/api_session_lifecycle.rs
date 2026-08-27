@@ -13,6 +13,7 @@ use crate::command::LaunchPlan;
 
 use super::api_sessions::{ApiSessionState, ApiSessionStore, ApiTurnState, BeginApiTurn};
 use super::api_turn_controller::launch_claimed_turn;
+use super::activity::DaemonActivity;
 use super::process_utils::signal_process_tree_as;
 
 pub const DEFAULT_INTERRUPT_GRACE: Duration = Duration::from_secs(5);
@@ -30,11 +31,15 @@ pub struct ApiSessionLifecycle {
     /// long enough to find/create a session's own mutation gate.
     gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     grace: Duration,
+    activity: Option<DaemonActivity>,
 }
 
 impl ApiSessionLifecycle {
     pub fn new(store: ApiSessionStore) -> Self {
-        Self { store, active: Arc::new(Mutex::new(HashMap::new())), gates: Arc::new(Mutex::new(HashMap::new())), grace: DEFAULT_INTERRUPT_GRACE }
+        Self { store, active: Arc::new(Mutex::new(HashMap::new())), gates: Arc::new(Mutex::new(HashMap::new())), grace: DEFAULT_INTERRUPT_GRACE, activity: None }
+    }
+    pub(super) fn with_activity(store: ApiSessionStore, activity: DaemonActivity) -> Self {
+        Self { activity: Some(activity), ..Self::new(store) }
     }
     fn gate_for(&self, session_id: &str) -> Arc<Mutex<()>> {
         self.gates.lock().unwrap_or_else(|p| p.into_inner()).entry(session_id.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
@@ -75,6 +80,10 @@ impl ApiSessionLifecycle {
                 return Err(LifecycleError::Launch(error.to_string()));
             }
         };
+        if let Some(activity) = self.activity.as_ref() {
+            let guard = activity.start_job(); let observed = Arc::clone(&process);
+            thread::spawn(move || { let _guard = guard; let _ = observed.wait(None); });
+        }
         self.active.lock().unwrap_or_else(|p| p.into_inner()).insert(session_id.to_string(), process);
         Ok(LifecycleReply::Started { generation: turn.generation, turn_id: turn.id })
     }
@@ -96,6 +105,7 @@ impl ApiSessionLifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     #[test]
@@ -104,5 +114,13 @@ mod tests {
         let lifecycle = ApiSessionLifecycle::new(ApiSessionStore::new(temp.path()));
         assert!(Arc::ptr_eq(&lifecycle.gate_for("one"), &lifecycle.gate_for("one")));
         assert!(!Arc::ptr_eq(&lifecycle.gate_for("one"), &lifecycle.gate_for("two")));
+    }
+
+    #[test]
+    fn activity_enabled_lifecycle_keeps_the_daemon_job_tracker_available() {
+        let temp = TempDir::new().unwrap(); let activity = DaemonActivity::new(Instant::now());
+        let lifecycle = ApiSessionLifecycle::with_activity(ApiSessionStore::new(temp.path()), activity.clone());
+        assert!(lifecycle.activity.is_some());
+        assert_eq!(activity.snapshot(Instant::now()).active_jobs, 0);
     }
 }

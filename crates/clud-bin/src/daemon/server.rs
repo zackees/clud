@@ -113,8 +113,8 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     cleanup_stale_state(state_dir);
     // A new daemon never adopts a persisted provider PID. Seal active turns
     // before accepting either HTTP or RPC lifecycle mutations.
-    let api_lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::new(
-        super::api_sessions::ApiSessionStore::new(state_dir),
+    let api_lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::with_activity(
+        super::api_sessions::ApiSessionStore::new(state_dir), activity.clone(),
     ));
     if let Err(error) = super::api_sessions::ApiSessionStore::new(state_dir).reconcile_after_restart() {
         daemon_events::log_event(state_dir, "api_session_recovery_failed", [("error", json!(error.to_string()))]);

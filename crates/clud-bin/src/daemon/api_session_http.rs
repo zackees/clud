@@ -4,6 +4,8 @@
 //! per-turn cwd values never cross it.
 
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,23 @@ use super::http_response::{read_body, respond_json};
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_EVENTS_PAGE: usize = 128;
+
+#[cfg(test)]
+static TEST_HEADLESS_EXECUTABLE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+/// The HTTP DTO never chooses a command line. Production always resolves the
+/// installed backend executable; unit request tests may substitute one
+/// already-built mock executable without widening the HTTP contract.
+fn headless_executable(backend: Backend) -> String {
+    #[cfg(test)]
+    if let Some(path) = TEST_HEADLESS_EXECUTABLE.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|poison| poison.into_inner()).clone() { return path; }
+    backend.executable_name().to_string()
+}
+
+#[cfg(test)]
+pub(super) fn set_test_headless_executable(path: Option<String>) {
+    *TEST_HEADLESS_EXECUTABLE.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|poison| poison.into_inner()) = path;
+}
 
 #[derive(Deserialize)]
 struct CreateDto { backend: ApiSessionBackend, cwd: PathBuf, #[serde(default)] name: Option<String>, #[serde(default)] model: Option<String>, #[serde(default)] safe: bool }
@@ -98,7 +117,7 @@ fn turn_plan(record: &ApiSessionRecord, message: String) -> Result<LaunchPlan, S
         (_, Some(id)) => HeadlessSession::Resume { provider_session_id: id.clone() },
         (_, None) => return Err("provider identity is required to resume".to_string()),
     };
-    build_turn_plan(&args, target, backend.executable_name(), &HeadlessTurnRequest { message, cwd: record.cwd.clone(), session })
+    build_turn_plan(&args, target, &headless_executable(backend), &HeadlessTurnRequest { message, cwd: record.cwd.clone(), session })
 }
 
 fn fingerprint(message: &str, interrupt_running: bool) -> String { format!("v1:{}:{message}", interrupt_running as u8) }
