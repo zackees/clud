@@ -137,6 +137,7 @@ pub enum BeginApiTurn {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiSessionRecord {
+    #[serde(default)]
     pub schema_version: u32,
     pub id: String,
     pub backend: ApiSessionBackend,

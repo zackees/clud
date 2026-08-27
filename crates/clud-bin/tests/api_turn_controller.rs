@@ -44,7 +44,7 @@ fn plan(
         provider_source: None,
         harness_source: None,
         launch_mode: LaunchMode::Subprocess,
-        cwd: Some(cwd.to_string_lossy().into_owned()),
+        cwd: Some(cwd.canonicalize().unwrap().to_string_lossy().into_owned()),
         graphics: GraphicsConfig::default(),
         repeat_schedule: None,
         task_summary: None,
