@@ -251,6 +251,7 @@ impl ApiSessionStore {
     }
 
     pub fn get(&self, session_id: &str) -> Result<ApiSessionRecord, ApiSessionStoreError> {
+        validate_session_id(session_id)?;
         self.read(session_id)
     }
 
@@ -368,6 +369,7 @@ impl ApiSessionStore {
     }
 
     fn mutate<T>(&self, session_id: &str, action: impl FnOnce(&mut ApiSessionRecord) -> Result<T, ApiSessionStoreError>) -> Result<T, ApiSessionStoreError> {
+        validate_session_id(session_id)?;
         let _lock = self.lock_session(session_id)?;
         let mut record = self.read(session_id)?;
         let result = action(&mut record)?;
@@ -377,6 +379,7 @@ impl ApiSessionStore {
     }
 
     fn read(&self, session_id: &str) -> Result<ApiSessionRecord, ApiSessionStoreError> {
+        validate_session_id(session_id)?;
         let path = api_session_path(&self.state_dir, session_id);
         let mut record = match read_json_file(&path) {
             Ok(record) => record,
@@ -400,6 +403,17 @@ impl ApiSessionStore {
 
     fn lock_create(&self) -> Result<File, ApiSessionStoreError> { lock_file(&api_sessions_create_lock_path(&self.state_dir)) }
     fn lock_session(&self, session_id: &str) -> Result<File, ApiSessionStoreError> { lock_file(&api_session_lock_path(&self.state_dir, session_id)) }
+}
+
+fn validate_session_id(session_id: &str) -> Result<(), ApiSessionStoreError> {
+    if session_id.is_empty()
+        || session_id.contains(['/', '\\'])
+        || session_id == "."
+        || session_id == ".."
+    {
+        return Err(ApiSessionStoreError::NotFound(session_id.to_string()));
+    }
+    Ok(())
 }
 
 fn lock_file(path: &Path) -> Result<File, ApiSessionStoreError> {
@@ -442,6 +456,14 @@ mod tests {
         let error = ApiSessionStore::new(temp.path()).create(request(&temp.path().join("missing"))).unwrap_err();
         assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
         assert!(ApiSessionStore::new(temp.path()).list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_session_id_path_traversal_before_touching_storage() {
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        assert!(matches!(store.get("../daemon"), Err(ApiSessionStoreError::NotFound(_))));
+        assert!(matches!(store.begin_turn("..\\daemon", "turn".to_string()), Err(ApiSessionStoreError::NotFound(_))));
     }
 
     #[test]
