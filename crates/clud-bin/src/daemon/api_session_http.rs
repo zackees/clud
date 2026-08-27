@@ -24,20 +24,37 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_EVENTS_PAGE: usize = 128;
 
 #[cfg(test)]
-static TEST_HEADLESS_EXECUTABLE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static TEST_HEADLESS_EXECUTABLE: OnceLock<Mutex<Option<(String, Vec<String>)>>> = OnceLock::new();
+#[cfg(test)]
+static TEST_HEADLESS_EXECUTABLE_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
+pub(super) struct TestHeadlessExecutableGuard {
+    previous: Option<(String, Vec<String>)>,
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestHeadlessExecutableGuard {
+    fn drop(&mut self) {
+        *TEST_HEADLESS_EXECUTABLE.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
+    }
+}
 
 /// The HTTP DTO never chooses a command line. Production always resolves the
 /// installed backend executable; unit request tests may substitute one
 /// already-built mock executable without widening the HTTP contract.
-fn headless_executable(backend: Backend) -> String {
+fn headless_command(backend: Backend) -> (String, Vec<String>) {
     #[cfg(test)]
-    if let Some(path) = TEST_HEADLESS_EXECUTABLE.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|poison| poison.into_inner()).clone() { return path; }
-    backend.executable_name().to_string()
+    if let Some(command) = TEST_HEADLESS_EXECUTABLE.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|poison| poison.into_inner()).clone() { return command; }
+    (backend.executable_name().to_string(), Vec::new())
 }
 
 #[cfg(test)]
-pub(super) fn set_test_headless_executable(path: Option<String>) {
-    *TEST_HEADLESS_EXECUTABLE.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|poison| poison.into_inner()) = path;
+pub(super) fn set_test_headless_executable(path: String, arguments: Vec<String>) -> TestHeadlessExecutableGuard {
+    let serial = TEST_HEADLESS_EXECUTABLE_SERIAL.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|poison| poison.into_inner());
+    let previous = std::mem::replace(&mut *TEST_HEADLESS_EXECUTABLE.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|poison| poison.into_inner()), Some((path, arguments)));
+    TestHeadlessExecutableGuard { previous, _serial: serial }
 }
 
 #[derive(Deserialize)]
@@ -117,7 +134,11 @@ fn turn_plan(record: &ApiSessionRecord, message: String) -> Result<LaunchPlan, S
         (_, Some(id)) => HeadlessSession::Resume { provider_session_id: id.clone() },
         (_, None) => return Err("provider identity is required to resume".to_string()),
     };
-    build_turn_plan(&args, target, &headless_executable(backend), &HeadlessTurnRequest { message, cwd: record.cwd.clone(), session })
+    let (executable, _test_arguments) = headless_command(backend);
+    let mut plan = build_turn_plan(&args, target, &executable, &HeadlessTurnRequest { message, cwd: record.cwd.clone(), session })?;
+    #[cfg(test)]
+    plan.command.splice(1..1, _test_arguments);
+    Ok(plan)
 }
 
 fn fingerprint(message: &str, interrupt_running: bool) -> String { format!("v1:{}:{message}", interrupt_running as u8) }

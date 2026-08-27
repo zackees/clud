@@ -147,6 +147,64 @@ fn api_openapi_contract_covers_each_implemented_session_route() {
     assert!(schema["components"]["schemas"].get("TurnResponse").is_some());
 }
 
+fn http_test_mock_agent() -> std::path::PathBuf {
+    let extension = if cfg!(windows) { ".exe" } else { "" };
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().and_then(|path| path.parent()).unwrap().join("target"));
+    let candidates = [
+        target.join("debug").join(format!("mock-agent{extension}")),
+        target.join("x86_64-pc-windows-msvc").join("debug").join(format!("mock-agent{extension}")),
+        target.join("x86_64-unknown-linux-gnu").join("debug").join(format!("mock-agent{extension}")),
+        target.join("aarch64-unknown-linux-gnu").join("debug").join(format!("mock-agent{extension}")),
+        target.join("aarch64-apple-darwin").join("debug").join(format!("mock-agent{extension}")),
+        target.join("x86_64-apple-darwin").join("debug").join(format!("mock-agent{extension}")),
+    ];
+    candidates.into_iter().find(|path| path.is_file()).expect("mock-agent is built by the test bundle")
+}
+
+fn wait_for_api_state(store: &super::super::api_sessions::ApiSessionStore, id: &str, state: super::super::api_sessions::ApiSessionState) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if store.get(id).map(|record| record.state == state).unwrap_or(false) { return; }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("API session {id} did not reach {state:?}");
+}
+
+#[test]
+fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("cwd"); std::fs::create_dir(&cwd).unwrap();
+    let script = temp.path().join("claude.jsonl");
+    std::fs::write(&script, "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"provider-http\"}\n{\"type\":\"future.event\"}\nnot json\n").unwrap();
+    let _mock_guard = super::super::api_session_http::set_test_headless_executable(http_test_mock_agent().to_string_lossy().into_owned(), vec!["--mock-stream-json".to_string(), script.to_string_lossy().into_owned(), "--mock-stream-delay-ms".to_string(), "250".to_string()]);
+    let activity = super::super::activity::DaemonActivity::new(std::time::Instant::now());
+    let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
+    let lifecycle = std::sync::Arc::new(super::super::api_session_lifecycle::ApiSessionLifecycle::with_activity(store.clone(), activity.clone()));
+    let port = spawn_dashboard_with_activity_and_lifecycle(temp.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(), ToolTelemetryStore::new(), "dashboard-token".to_string(), "api-token".to_string(), None, Some(activity.clone()), lifecycle);
+    let port = port.expect("dashboard spawned");
+    let create = format!(r#"{{"backend":"claude","cwd":"{}","safe":true}}"#, cwd.to_string_lossy().replace('\\', "\\\\"));
+    let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "127.0.0.1", Some("Bearer api-token"), None, Some(&create)).unwrap();
+    assert!(status.contains("201"));
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(created["cwd"], cwd.canonicalize().unwrap().to_string_lossy().as_ref());
+    let id = created["id"].as_str().unwrap().to_string();
+    let (status, _, _) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/turns"), "127.0.0.1", Some("Bearer api-token"), None, Some(r#"{"message":"first"}"#)).unwrap();
+    assert!(status.contains("202"));
+    assert!(activity.snapshot(std::time::Instant::now()).active_jobs > 0);
+    wait_for_api_state(&store, &id, super::super::api_sessions::ApiSessionState::Idle);
+    assert_eq!(activity.snapshot(std::time::Instant::now()).active_jobs, 0);
+    let record = store.get(&id).unwrap();
+    assert_eq!(record.provider_session_id.as_deref(), Some("provider-http"));
+    assert!(record.events.iter().any(|event| event.kind == "backend_event"));
+    assert!(record.events.iter().any(|event| event.kind == "backend_malformed"));
+    let raw = temp.path().join("logs").join("api").join(&id).join("1.jsonl"); assert!(std::fs::read_to_string(raw).unwrap().contains("provider-http"));
+    let (status, _, _) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/turns"), "127.0.0.1", Some("Bearer api-token"), None, Some(r#"{"message":"resume"}"#)).unwrap();
+    assert!(status.contains("202"));
+    wait_for_api_state(&store, &id, super::super::api_sessions::ApiSessionState::Idle);
+    let resumed_raw = std::fs::read_to_string(temp.path().join("logs").join("api").join(&id).join("2.jsonl")).unwrap();
+    assert!(resumed_raw.contains("provider-http"));
+}
+
 #[test]
 fn purge_request_defaults_when_body_is_empty() {
     let parsed: PurgeRequest = serde_json::from_str("{}").unwrap();
