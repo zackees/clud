@@ -23,7 +23,7 @@ use super::api_sessions::{
     CreateApiSession, ResolvedApiSessionSettings, DEFAULT_EVENT_LIMIT,
 };
 use super::headless_adapter::build_turn_plan;
-use super::http_response::{read_body, respond_json};
+use super::http::http_response::{read_body, respond_json};
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_EVENTS_PAGE: usize = 128;
@@ -294,7 +294,7 @@ fn turn_plan(record: &ApiSessionRecord, message: String) -> Result<LaunchPlan, S
         (_, None) => return Err("provider identity is required to resume".to_string()),
     };
     let (executable, _test_arguments) = headless_command(backend);
-    let mut plan = build_turn_plan(
+    let plan = build_turn_plan(
         &args,
         target,
         &executable,

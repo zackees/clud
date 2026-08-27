@@ -1021,7 +1021,7 @@ mod http_dashboard_state;
 use http_dashboard_state::{build_dashboard_state, send_gc_op};
 #[path = "http_info.rs"]
 mod http_info;
-pub use http_info::{read_dashboard_info, read_dashboard_port};
+pub use http_info::{read_api_info, read_dashboard_info, read_dashboard_port};
 
 /// Public view of `daemon.json` used by the `clud ui` CLI.
 #[derive(Debug, Clone)]

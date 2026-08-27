@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::api_sessions::{ApiSessionBackend, ApiSessionState, ApiSessionStore};
 
 pub(super) fn build_dashboard_state(
     state_dir: &Path,
@@ -167,15 +168,10 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
 }
 
 fn merge_api_sessions(sessions: &mut Vec<SessionView>, state_dir: &Path) {
-    for record in super::api_sessions::ApiSessionStore::new(state_dir)
-        .list()
-        .unwrap_or_default()
-    {
+    for record in ApiSessionStore::new(state_dir).list().unwrap_or_default() {
         let live = matches!(
             record.state,
-            super::api_sessions::ApiSessionState::Running
-                | super::api_sessions::ApiSessionState::Interrupting
-                | super::api_sessions::ApiSessionState::Starting
+            ApiSessionState::Running | ApiSessionState::Interrupting | ApiSessionState::Starting
         );
         sessions.push(SessionView {
             id: record.id,
@@ -183,8 +179,8 @@ fn merge_api_sessions(sessions: &mut Vec<SessionView>, state_dir: &Path) {
             source: "api".to_string(),
             backend: Some(
                 match record.backend {
-                    super::api_sessions::ApiSessionBackend::Claude => "claude",
-                    super::api_sessions::ApiSessionBackend::Codex => "codex",
+                    ApiSessionBackend::Claude => "claude",
+                    ApiSessionBackend::Codex => "codex",
                 }
                 .to_string(),
             ),

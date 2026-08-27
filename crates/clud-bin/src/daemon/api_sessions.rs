@@ -670,7 +670,7 @@ impl ApiSessionStore {
     fn read(&self, session_id: &str) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         validate_session_id(session_id)?;
         let path = api_session_path(&self.state_dir, session_id);
-        let mut record = match read_json_file(&path) {
+        let mut record: ApiSessionRecord = match read_json_file(&path) {
             Ok(record) => record,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(ApiSessionStoreError::NotFound(session_id.to_string()))

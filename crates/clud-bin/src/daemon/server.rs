@@ -620,7 +620,7 @@ fn dispatch_daemon_request_with_id(
         DaemonRequest::ApiSessionKill { session_id } => match api_lifecycle.kill(&session_id) {
             Ok(_) => DaemonResponse::ApiSessionKilled { session_id },
             Err(error) => DaemonResponse::Error {
-                message: error.to_string(),
+                message: format!("{error:?}"),
             },
         },
         DaemonRequest::AdoptKill { pids, reason } => {

@@ -134,6 +134,7 @@ pub(super) fn run_list(state_dir: &Path) -> i32 {
         return 0;
     }
 
+    let has_background_sessions = !sessions.is_empty();
     let (repeat_jobs, attachable_sessions): (Vec<_>, Vec<_>) = sessions
         .into_iter()
         .partition(|session| session.repeat_interval_secs.is_some());
@@ -183,7 +184,7 @@ pub(super) fn run_list(state_dir: &Path) -> i32 {
     }
 
     if !api_sessions.is_empty() {
-        if !sessions.is_empty() {
+        if has_background_sessions {
             println!();
         }
         println!("{:<30} {:<12} CWD", "API SESSION", "STATUS");
