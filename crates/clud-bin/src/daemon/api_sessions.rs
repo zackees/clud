@@ -815,10 +815,11 @@ mod tests {
 
     #[test]
     fn rejects_relative_cwd_before_canonicalization() {
-        let temp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
-        let cwd = temp.path().join("cwd");
-        fs::create_dir(&cwd).unwrap();
-        let relative = cwd.strip_prefix(std::env::current_dir().unwrap()).unwrap();
+        let temp = TempDir::new().unwrap();
+        // A relative path is rejected before existence or canonicalization is
+        // considered, so the fixture must not create anything under the
+        // checkout (which is read-only in the Linux validation stack).
+        let relative = Path::new("relative-cwd");
         let error = ApiSessionStore::new(temp.path())
             .create(request(relative))
             .unwrap_err();
