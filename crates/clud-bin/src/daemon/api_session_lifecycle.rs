@@ -119,14 +119,21 @@ impl ApiSessionLifecycle {
             // request indefinitely. The observer owns stale-handle removal;
             // a just-completed handle may therefore produce one short busy
             // retry, never a synchronous liveness probe.
-            if !replace {
+            if !replace
+                && matches!(
+                    session.state,
+                    ApiSessionState::Running | ApiSessionState::Interrupting
+                )
+            {
                 self.active
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .insert(session_id.to_string(), process);
                 return Ok(LifecycleReply::SessionBusy);
             }
-            self.stop(session_id, &process);
+            if replace {
+                self.stop(session_id, &process);
+            }
         } else if matches!(
             session.state,
             ApiSessionState::Running | ApiSessionState::Interrupting

@@ -706,7 +706,7 @@ fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
         .to_string();
     for message in ["first", "resume"] {
         let request = format!(r#"{{"message":"{message}"}}"#);
-        let (status, _, _) = fetch_api_request(
+        let (status, _, response_body) = fetch_api_request(
             port,
             "POST",
             &format!("/v1/sessions/{id}/turns"),
@@ -716,7 +716,11 @@ fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
             Some(&request),
         )
         .unwrap();
-        assert!(status.contains("202"));
+        assert!(
+            status.contains("202"),
+            "unexpected Codex {message} response: {status}; body: {response_body}; record: {:?}",
+            store.get(&id)
+        );
         wait_for_api_state(
             &store,
             &id,
