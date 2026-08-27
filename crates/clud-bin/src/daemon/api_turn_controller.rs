@@ -26,6 +26,19 @@ use super::types::unix_millis_now;
 const RAW_LOG_MAX_BYTES: u64 = 1024 * 1024;
 const EVENT_LINE_MAX_BYTES: usize = 8 * 1024;
 
+/// Captured API turns do not post dashboard telemetry. Never pass the
+/// dashboard capability to a subprocess whose complete output is persisted
+/// in an API-readable raw log.
+fn api_turn_env() -> Vec<(String, String)> {
+    super::io_helpers::child_env()
+        .into_iter()
+        .filter(|(key, _)| {
+            key != crate::log_event::ENV_DAEMON_HTTP_TOKEN
+                && key != crate::log_event::ENV_DAEMON_HTTP_SERVER
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub enum ApiTurnLaunchError {
     Store(ApiSessionStoreError),
@@ -63,7 +76,7 @@ pub fn launch_claimed_turn(store: ApiSessionStore, session_id: &str, plan: Launc
     if plan.backend != backend { return Err(ApiTurnLaunchError::InvalidPlan("headless turn backend differs from logical session backend".to_string())); }
     if session.current_turn_id.as_deref() != Some(turn.id.as_str()) { return Err(ApiTurnLaunchError::InvalidPlan("claimed API turn is no longer current".to_string())); }
     let process = Arc::new(NativeProcess::new(ProcessConfig {
-        command: crate::subprocess::command_spec_for_subprocess(plan.command), cwd: Some(session.cwd.clone()), env: Some(super::io_helpers::child_env()), capture: true,
+        command: crate::subprocess::command_spec_for_subprocess(plan.command), cwd: Some(session.cwd.clone()), env: Some(api_turn_env()), capture: true,
         stderr_mode: StderrMode::Stdout, creationflags: invisible_helper_creationflags(), create_process_group: false, stdin_mode: StdinMode::Null, nice: None,
     }));
     if let Err(error) = process.start() { let _ = store.finish_turn(session_id, &turn.id, ApiTurnState::Failed, Some("spawn_failed".to_string())); return Err(ApiTurnLaunchError::Io(io::Error::other(error.to_string()))); }
@@ -107,4 +120,6 @@ mod tests {
     #[test] fn codex_identity_is_persisted_before_turn_completion() { let (temp, store, id) = store(); let turn = store.begin_turn(&id, "turn-codex".to_string()).unwrap(); let log = api_turn_log_path(temp.path(), &id, turn.generation); observe_line(&store, &id, &turn.id, crate::backend::Backend::Codex, br#"{"type":"thread.started","thread_id":"thread-a"}"#, &log); let record = store.get(&id).unwrap(); assert_eq!(record.provider_session_id.as_deref(), Some("thread-a")); assert_eq!(record.current_turn_id.as_deref(), Some(turn.id.as_str())); }
 
     #[test] fn raw_log_rotates_before_appending_next_line() { let (temp, store, id) = store(); let turn = store.begin_turn(&id, "turn-log".to_string()).unwrap(); let log = api_turn_log_path(temp.path(), &id, turn.generation); fs::create_dir_all(log.parent().unwrap()).unwrap(); fs::write(&log, vec![b'x'; RAW_LOG_MAX_BYTES as usize]).unwrap(); observe_line(&store, &id, &turn.id, crate::backend::Backend::Claude, br#"{"type":"future"}"#, &log); assert!(log.with_extension("jsonl.1").exists()); assert_eq!(fs::read_to_string(&log).unwrap(), "{\"type\":\"future\"}\n"); }
+
+    #[test] fn captured_api_turn_environment_excludes_dashboard_capabilities() { assert!(!api_turn_env().iter().any(|(key, _)| key == crate::log_event::ENV_DAEMON_HTTP_TOKEN || key == crate::log_event::ENV_DAEMON_HTTP_SERVER)); }
 }
