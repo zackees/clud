@@ -83,6 +83,25 @@ pub(super) fn sessions_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions")
 }
 
+/// Durable, API-managed logical sessions. This deliberately differs from
+/// `sessions_dir`: entries there are snapshots of one worker process, whereas
+/// these records survive multiple provider-turn generations.
+pub(super) fn api_sessions_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("api-sessions")
+}
+
+pub(super) fn api_session_path(state_dir: &Path, session_id: &str) -> PathBuf {
+    api_sessions_dir(state_dir).join(format!("{session_id}.json"))
+}
+
+pub(super) fn api_session_lock_path(state_dir: &Path, session_id: &str) -> PathBuf {
+    api_sessions_dir(state_dir).join(format!("{session_id}.lock"))
+}
+
+pub(super) fn api_sessions_create_lock_path(state_dir: &Path) -> PathBuf {
+    api_sessions_dir(state_dir).join("create.lock")
+}
+
 pub(super) fn specs_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("specs")
 }

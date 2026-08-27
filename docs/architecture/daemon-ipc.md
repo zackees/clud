@@ -217,6 +217,11 @@ security boundary.
 
 ## Snapshot and log persistence
 
+API-managed logical conversations use a separate durable record family. See
+[api-session-storage.md](api-session-storage.md): `api-sessions/<id>.json`
+survives provider-turn completion as `idle` and must not be interpreted as a
+worker `SessionSnapshot` or attach target.
+
 Under `state_dir` (resolved by `paths.rs:7` — CLI flag > `CLUD_DAEMON_STATE_DIR` env > `temp_dir()/clud-daemon`):
 
 ```
