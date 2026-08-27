@@ -153,6 +153,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     let telemetry = TelemetryStore::new();
     let tool_telemetry = ToolTelemetryStore::new();
     let dashboard_token = crate::dashboard_auth::generate_token();
+    let api_token = crate::dashboard_auth::generate_token();
     let dashboard_port = spawn_dashboard_with_activity(
         state_dir.to_path_buf(),
         gc_tx.clone(),
@@ -162,6 +163,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         telemetry,
         tool_telemetry,
         dashboard_token.clone(),
+        api_token.clone(),
         test_activity.clone(),
         Some(activity.clone()),
     );
@@ -190,6 +192,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         port,
         dashboard_port,
         dashboard_token: dashboard_port.map(|_| dashboard_token),
+        api_token: dashboard_port.map(|_| api_token),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {

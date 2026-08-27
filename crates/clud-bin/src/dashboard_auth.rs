@@ -15,6 +15,18 @@ pub fn generate_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Constant-time comparison for the programmatic loopback API bearer.
+pub fn allows_bearer(expected: &str, authorization: Option<&str>) -> bool {
+    let Some(actual) = authorization.and_then(|value| value.strip_prefix("Bearer ")) else {
+        return false;
+    };
+    let mut different = expected.len() ^ actual.len();
+    for (left, right) in expected.bytes().zip(actual.bytes()) {
+        different |= usize::from(left ^ right);
+    }
+    different == 0
+}
+
 #[derive(Debug, Clone)]
 pub struct DashboardAccess {
     token: String,

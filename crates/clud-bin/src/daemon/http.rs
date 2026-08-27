@@ -523,6 +523,7 @@ pub(super) fn spawn_dashboard(
     telemetry: TelemetryStore,
     tool_telemetry: ToolTelemetryStore,
     dashboard_token: String,
+    api_token: String,
 ) -> Option<u16> {
     spawn_dashboard_with_activity(
         state_dir,
@@ -573,6 +574,7 @@ pub(super) fn spawn_dashboard_with_activity(
                 server,
                 port,
                 access,
+                api_token,
                 state_dir,
                 gc_tx,
                 ipc_port,
@@ -600,6 +602,7 @@ fn run_dashboard_loop(
     server: Server,
     port: u16,
     access: DashboardAccess,
+    api_token: String,
     state_dir: PathBuf,
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     ipc_port: u16,
@@ -618,6 +621,23 @@ fn run_dashboard_loop(
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or(&url).to_string();
         let host = request_header(&request, "Host");
+        if path.starts_with("/v1/") {
+            let authorized = access.allows_host(host.as_deref(), port)
+                && crate::dashboard_auth::allows_bearer(
+                    &api_token,
+                    request_header(&request, "Authorization").as_deref(),
+                );
+            if !authorized {
+                respond_json(request, 401, br#"{\"code\":\"unauthorized\",\"message\":\"bearer authentication required\"}"#);
+                continue;
+            }
+            match (method, path.as_str()) {
+                (Method::Get, "/v1/health") => respond_json(request, 200, br#"{\"status\":\"ok\",\"api_version\":\"v1\"}"#),
+                (Method::Get, "/v1/openapi.json") => respond_json(request, 200, OPENAPI_JSON.as_bytes()),
+                _ => respond_json(request, 404, br#"{\"code\":\"not_found\",\"message\":\"API route not found\"}"#),
+            }
+            continue;
+        }
         let cookie = request_header(&request, "Cookie");
         let query_token = query_parameter(&url, "token");
         if !access.allows_host(host.as_deref(), port)
@@ -681,6 +701,8 @@ fn run_dashboard_loop(
         }
     }
 }
+
+const OPENAPI_JSON: &str = r#"{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"clud daemon API\",\"version\":\"v1\"},\"paths\":{\"/v1/health\":{\"get\":{\"responses\":{\"200\":{\"description\":\"healthy\"},\"401\":{\"description\":\"bearer required\"}}}},\"/v1/openapi.json\":{\"get\":{\"responses\":{\"200\":{\"description\":\"schema\"},\"401\":{\"description\":\"bearer required\"}}}}}}"#;
 
 // ---------- route handlers ----------
 

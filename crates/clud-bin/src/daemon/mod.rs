@@ -39,7 +39,7 @@ pub use client::{
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
 pub use http::{
-    dashboard_url_from_info, fetch_state_json, read_dashboard_info, read_dashboard_port,
+    dashboard_url_from_info, fetch_state_json, read_api_info, read_dashboard_info, read_dashboard_port,
     DashboardInfo,
 };
 // Issue #469: re-exports for the telemetry integration test under
