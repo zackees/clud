@@ -53,6 +53,10 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::http::tests::api_
 stack = "clud_1041_validation"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions"
 
+[task.api-turn-controller-test]
+stack = "clud_1041_validation"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && soldr cargo test -p clud --lib daemon::api_turn_controller && soldr cargo test -p clud --test api_turn_controller"
+
 [task.test]
 stack = "clud_1041_validation"
 cmd = "cd /workspace && bash test"
