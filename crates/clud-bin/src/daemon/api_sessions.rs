@@ -320,6 +320,9 @@ impl ApiSessionStore {
 
     pub fn finish_turn(&self, session_id: &str, turn_id: &str, state: ApiTurnState, disposition: Option<String>) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| {
+            if record.current_turn_id.as_deref() != Some(turn_id) {
+                if record.turns.iter().any(|turn| turn.id == turn_id && matches!(turn.state, ApiTurnState::Completed | ApiTurnState::Interrupted | ApiTurnState::Failed | ApiTurnState::Killed)) { return Ok(record.clone()); }
+            }
             let Some(turn) = record.turns.iter_mut().find(|turn| turn.id == turn_id) else { return Err(ApiSessionStoreError::NotFound(turn_id.to_string())); };
             turn.state = state;
             turn.disposition = disposition;
@@ -330,6 +333,10 @@ impl ApiSessionStore {
             }
             Ok(record.clone())
         })
+    }
+
+    pub fn terminate(&self, session_id: &str) -> Result<ApiSessionRecord, ApiSessionStoreError> {
+        self.mutate(session_id, |record| { record.state = ApiSessionState::Terminated; record.current_turn_id = None; Ok(record.clone()) })
     }
 
     pub fn remember_idempotency(&self, session_id: &str, key: String, turn_id: String, request_fingerprint: String) -> Result<IdempotencyRecord, ApiSessionStoreError> {

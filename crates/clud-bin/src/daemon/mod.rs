@@ -1,6 +1,7 @@
 mod activity;
 pub mod api_sessions;
 pub mod api_turn_controller;
+pub mod api_session_lifecycle;
 mod attach;
 mod client;
 mod client_compat;
