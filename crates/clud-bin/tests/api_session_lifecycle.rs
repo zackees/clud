@@ -119,7 +119,19 @@ fn running_submit_is_busy_while_duplicate_replays_after_controller_restart() {
         ),
         Err(LifecycleError::IdempotencyConflict)
     );
-    lifecycle.kill(&id).unwrap();
+    let kill_started = std::time::Instant::now();
+    let killed = lifecycle.kill(&id);
+    assert!(
+        matches!(killed, Ok(LifecycleReply::Terminated) | Err(LifecycleError::KillTimeout)),
+        "terminal cleanup must be bounded, got {killed:?}"
+    );
+    assert!(kill_started.elapsed() < std::time::Duration::from_secs(5));
+    let terminal = store.get(&id).unwrap();
+    assert_eq!(terminal.state, ApiSessionState::Terminated);
+    assert!(terminal.turns.iter().any(|turn| {
+        turn.id == turn_id
+            && matches!(turn.disposition.as_deref(), Some("terminal_kill") | Some("terminal_kill_timeout"))
+    }));
 }
 
 #[test]

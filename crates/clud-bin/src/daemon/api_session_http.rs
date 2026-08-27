@@ -223,6 +223,12 @@ fn lifecycle_error(request: Request, value: LifecycleError) {
             "idempotency_conflict",
             "Idempotency-Key was reused with a different request",
         ),
+        LifecycleError::KillTimeout => error(
+            request,
+            409,
+            "terminal_kill_timeout",
+            "terminal kill was sealed but process exit confirmation timed out",
+        ),
         LifecycleError::Launch(_) => error(
             request,
             422,

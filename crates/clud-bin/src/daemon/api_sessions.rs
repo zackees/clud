@@ -530,6 +530,17 @@ impl ApiSessionStore {
     ) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| {
             if record.current_turn_id.as_deref() != Some(turn_id) {
+                // A terminal lifecycle seal wins over the asynchronous
+                // waiter. It may observe the child exit after `kill()`
+                // returned, but must never turn a terminal record back into
+                // a failed/resumable one.
+                if record
+                    .turns
+                    .iter()
+                    .any(|turn| turn.id == turn_id && turn.state == ApiTurnState::Killed)
+                {
+                    return Ok(record.clone());
+                }
                 if let Some(turn) = record.turns.iter_mut().find(|turn| {
                     turn.id == turn_id
                         && matches!(

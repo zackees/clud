@@ -17,6 +17,11 @@ use super::api_turn_controller::launch_claimed_turn;
 use super::process_utils::signal_process_tree_as;
 
 pub const DEFAULT_INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+/// A terminal request must never inherit an unbounded process-table scan or
+/// controller wait. The process may be slow to disappear, but the API caller
+/// receives a durable terminal result within this bound.
+pub const TERMINAL_KILL_TIMEOUT: Duration = Duration::from_secs(2);
+pub const TREE_SIGNAL_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleReply {
@@ -32,6 +37,7 @@ pub enum LifecycleError {
     Terminated,
     ResumeUnavailable,
     IdempotencyConflict,
+    KillTimeout,
     Launch(String),
 }
 
@@ -215,9 +221,20 @@ impl ApiSessionLifecycle {
                 .and_then(|id| record.turns.iter().find(|turn| &turn.id == id))
                 .and_then(|turn| turn.root_identity)
             {
-                signal_process_tree_as(&identity, Signal::Kill);
+                signal_tree_bounded(identity, Signal::Kill);
             }
-            let _ = process.kill();
+            let root_kill_timed_out = kill_root_bounded(Arc::clone(&process));
+            let started = Instant::now();
+            while process.returncode().is_none() && started.elapsed() < TERMINAL_KILL_TIMEOUT {
+                thread::sleep(Duration::from_millis(25));
+            }
+            let timed_out = root_kill_timed_out || process.returncode().is_none();
+            if let Some(turn) = record.current_turn_id.as_deref() {
+                let disposition = if timed_out { "terminal_kill_timeout" } else { "terminal_kill" };
+                let _ = self.store.finish_turn(session_id, turn, ApiTurnState::Killed, Some(disposition.to_string()));
+            }
+            let _ = self.store.terminate(session_id);
+            return if timed_out { Err(LifecycleError::KillTimeout) } else { Ok(LifecycleReply::Terminated) };
         }
         if let Some(turn) = record.current_turn_id {
             let _ = self.store.finish_turn(
@@ -282,6 +299,27 @@ impl ApiSessionLifecycle {
         );
         forced
     }
+}
+
+/// `sysinfo` process enumeration is OS-owned and has no cancellation API.
+/// Move it off the serialized API mutation path; callers continue with the
+/// root-process kill even when tree enumeration exceeds its diagnostic budget.
+fn signal_tree_bounded(identity: crate::process_identity::ProcessIdentity, signal: Signal) {
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        signal_process_tree_as(&identity, signal);
+        let _ = sent.send(());
+    });
+    let _ = received.recv_timeout(TREE_SIGNAL_TIMEOUT);
+}
+
+fn kill_root_bounded(process: Arc<NativeProcess>) -> bool {
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = process.kill();
+        let _ = sent.send(());
+    });
+    received.recv_timeout(TREE_SIGNAL_TIMEOUT).is_err()
 }
 
 #[cfg(test)]
