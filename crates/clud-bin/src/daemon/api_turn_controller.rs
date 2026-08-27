@@ -18,7 +18,7 @@ use crate::command::LaunchPlan;
 use crate::process_identity::ProcessIdentity;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
-use super::api_sessions::{ApiSessionBackend, ApiSessionStore, ApiSessionStoreError, ApiTurnState};
+use super::api_sessions::{ApiSessionBackend, ApiSessionStore, ApiSessionStoreError, ApiTurnRecord, ApiTurnState};
 use super::headless_adapter::{parse_backend_event, BackendEvent};
 use super::paths::api_turn_log_path;
 use super::types::unix_millis_now;
@@ -49,6 +49,19 @@ pub fn launch_captured_turn(store: ApiSessionStore, session_id: &str, plan: Laun
     if plan.backend != backend { return Err(ApiTurnLaunchError::InvalidPlan("headless turn backend differs from logical session backend".to_string())); }
     let turn_id = format!("turn-{}-{}", session.generation.saturating_add(1), unix_millis_now());
     let turn = store.begin_turn(session_id, turn_id)?;
+    launch_claimed_turn(store, session_id, plan, turn)
+}
+
+/// Starts an already-durably-claimed generation.  Lifecycle admission must
+/// claim before process creation so duplicate concurrent requests cannot spawn
+/// two children between an idempotency check and ledger write.
+pub fn launch_claimed_turn(store: ApiSessionStore, session_id: &str, plan: LaunchPlan, turn: ApiTurnRecord) -> Result<Arc<NativeProcess>, ApiTurnLaunchError> {
+    let session = store.get(session_id)?;
+    let plan_cwd = plan.cwd.as_ref().map(Path::new).ok_or_else(|| ApiTurnLaunchError::InvalidPlan("headless turn plan omitted cwd".to_string()))?;
+    if plan_cwd != session.cwd.as_path() { return Err(ApiTurnLaunchError::InvalidPlan("headless turn plan cwd differs from persisted API session cwd".to_string())); }
+    let backend = match session.backend { ApiSessionBackend::Claude => crate::backend::Backend::Claude, ApiSessionBackend::Codex => crate::backend::Backend::Codex };
+    if plan.backend != backend { return Err(ApiTurnLaunchError::InvalidPlan("headless turn backend differs from logical session backend".to_string())); }
+    if session.current_turn_id.as_deref() != Some(turn.id.as_str()) { return Err(ApiTurnLaunchError::InvalidPlan("claimed API turn is no longer current".to_string())); }
     let process = Arc::new(NativeProcess::new(ProcessConfig {
         command: crate::subprocess::command_spec_for_subprocess(plan.command), cwd: Some(session.cwd.clone()), env: Some(super::io_helpers::child_env()), capture: true,
         stderr_mode: StderrMode::Stdout, creationflags: invisible_helper_creationflags(), create_process_group: false, stdin_mode: StdinMode::Null, nice: None,

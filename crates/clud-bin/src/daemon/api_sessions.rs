@@ -122,6 +122,19 @@ pub struct IdempotencyRecord {
     pub created_at_ms: u64,
 }
 
+/// The durable, lock-protected result of claiming a next logical turn.
+///
+/// Keeping the idempotency ledger update in this transition means a retry
+/// after a daemon restart can replay the original turn without ever creating
+/// another provider subprocess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginApiTurn {
+    Started(ApiTurnRecord),
+    Replayed(String),
+    Busy,
+    Terminated,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiSessionRecord {
     pub schema_version: u32,
@@ -288,6 +301,46 @@ impl ApiSessionStore {
         })
     }
 
+    /// Atomically checks a request key and claims the next generation.  This
+    /// is the lifecycle controller's only admission path for a new process.
+    pub fn begin_idempotent_turn(&self, session_id: &str, turn_id: String, key: Option<String>, fingerprint: String) -> Result<BeginApiTurn, ApiSessionStoreError> {
+        let limit = self.idempotency_limit;
+        self.mutate(session_id, |record| {
+            if let Some(key) = key.as_ref() {
+                if let Some(existing) = record.idempotency.iter().find(|entry| entry.key == *key) {
+                    return if existing.request_fingerprint == fingerprint {
+                        Ok(BeginApiTurn::Replayed(existing.turn_id.clone()))
+                    } else {
+                        Err(ApiSessionStoreError::IdempotencyConflict { key: key.clone() })
+                    };
+                }
+            }
+            if record.state == ApiSessionState::Terminated { return Ok(BeginApiTurn::Terminated); }
+            if !record.state.accepts_turns() { return Ok(BeginApiTurn::Busy); }
+            record.generation = record.generation.saturating_add(1);
+            let turn = ApiTurnRecord { id: turn_id, generation: record.generation, state: ApiTurnState::Starting, created_at_ms: unix_millis_now(), completed_at_ms: None, disposition: None, root_identity: None };
+            record.current_turn_id = Some(turn.id.clone());
+            record.turns.push(turn.clone());
+            record.state = ApiSessionState::Running;
+            if let Some(key) = key {
+                record.idempotency.push_back(IdempotencyRecord { key, turn_id: turn.id.clone(), request_fingerprint: fingerprint, created_at_ms: unix_millis_now() });
+                while record.idempotency.len() > limit { record.idempotency.pop_front(); }
+            }
+            Ok(BeginApiTurn::Started(turn))
+        })
+    }
+
+    /// Records the durable side of a graceful-interrupt request before the
+    /// process signal is sent.  A late waiter may then only seal this exact
+    /// turn; it cannot make a later generation idle.
+    pub fn begin_interrupt(&self, session_id: &str, turn_id: &str) -> Result<(), ApiSessionStoreError> {
+        self.mutate(session_id, |record| {
+            if record.current_turn_id.as_deref() != Some(turn_id) { return Ok(()); }
+            record.state = ApiSessionState::Interrupting;
+            Ok(())
+        })
+    }
+
     pub fn set_provider_session_id(&self, session_id: &str, provider_session_id: String) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| { record.provider_session_id = Some(provider_session_id); Ok(record.clone()) })
     }
@@ -321,7 +374,18 @@ impl ApiSessionStore {
     pub fn finish_turn(&self, session_id: &str, turn_id: &str, state: ApiTurnState, disposition: Option<String>) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| {
             if record.current_turn_id.as_deref() != Some(turn_id) {
-                if record.turns.iter().any(|turn| turn.id == turn_id && matches!(turn.state, ApiTurnState::Completed | ApiTurnState::Interrupted | ApiTurnState::Failed | ApiTurnState::Killed)) { return Ok(record.clone()); }
+                if let Some(turn) = record.turns.iter_mut().find(|turn| turn.id == turn_id && matches!(turn.state, ApiTurnState::Completed | ApiTurnState::Interrupted | ApiTurnState::Failed | ApiTurnState::Killed)) {
+                    // An interrupt signal may make the waiter observe a
+                    // nonzero exit first.  Preserve the lifecycle-requested
+                    // disposition without ever changing a newer session's
+                    // current-generation state.
+                    if state == ApiTurnState::Interrupted {
+                        turn.state = state;
+                        turn.disposition = disposition;
+                        turn.completed_at_ms = Some(unix_millis_now());
+                    }
+                    return Ok(record.clone());
+                }
             }
             let Some(turn) = record.turns.iter_mut().find(|turn| turn.id == turn_id) else { return Err(ApiSessionStoreError::NotFound(turn_id.to_string())); };
             turn.state = state;
@@ -539,6 +603,41 @@ mod tests {
         let first = store.remember_idempotency(&record.id, "same".to_string(), "turn-1".to_string(), "digest-a".to_string()).unwrap();
         assert_eq!(store.remember_idempotency(&record.id, "same".to_string(), "turn-ignored".to_string(), "digest-a".to_string()).unwrap(), first);
         assert!(matches!(store.remember_idempotency(&record.id, "same".to_string(), "turn-2".to_string(), "digest-b".to_string()), Err(ApiSessionStoreError::IdempotencyConflict { .. })));
+    }
+
+    #[test]
+    fn atomic_turn_claim_replays_after_restart_and_never_overlaps_a_generation() {
+        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let started = store.begin_idempotent_turn(&record.id, "turn-1".to_string(), Some("retry".to_string()), "body-a".to_string()).unwrap();
+        assert!(matches!(started, BeginApiTurn::Started(ref turn) if turn.generation == 1));
+        let restarted_store = ApiSessionStore::new(temp.path());
+        assert_eq!(restarted_store.begin_idempotent_turn(&record.id, "turn-ignored".to_string(), Some("retry".to_string()), "body-a".to_string()).unwrap(), BeginApiTurn::Replayed("turn-1".to_string()));
+        assert_eq!(restarted_store.begin_idempotent_turn(&record.id, "turn-2".to_string(), None, "body-b".to_string()).unwrap(), BeginApiTurn::Busy);
+        assert!(matches!(restarted_store.begin_idempotent_turn(&record.id, "turn-conflict".to_string(), Some("retry".to_string()), "body-b".to_string()), Err(ApiSessionStoreError::IdempotencyConflict { .. })));
+    }
+
+    #[test]
+    fn interrupt_transition_precedes_signal_and_terminal_sessions_refuse_claims() {
+        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let turn = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
+        store.begin_interrupt(&record.id, &turn.id).unwrap();
+        assert_eq!(store.get(&record.id).unwrap().state, ApiSessionState::Interrupting);
+        store.finish_turn(&record.id, &turn.id, ApiTurnState::Interrupted, Some("graceful_interrupt".to_string())).unwrap();
+        store.terminate(&record.id).unwrap();
+        assert_eq!(store.begin_idempotent_turn(&record.id, "turn-2".to_string(), None, "body".to_string()).unwrap(), BeginApiTurn::Terminated);
+    }
+
+    #[test]
+    fn interrupt_disposition_wins_a_racing_waiter_without_touching_a_new_generation() {
+        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let first = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
+        store.begin_interrupt(&record.id, &first.id).unwrap();
+        store.finish_turn(&record.id, &first.id, ApiTurnState::Failed, Some("exit_130".to_string())).unwrap();
+        store.finish_turn(&record.id, &first.id, ApiTurnState::Interrupted, Some("graceful_interrupt".to_string())).unwrap();
+        let second = store.begin_turn(&record.id, "turn-2".to_string()).unwrap();
+        let record = store.get(&record.id).unwrap();
+        assert_eq!(record.turns[0].state, ApiTurnState::Interrupted); assert_eq!(record.turns[0].disposition.as_deref(), Some("graceful_interrupt"));
+        assert_eq!(record.current_turn_id.as_deref(), Some(second.id.as_str())); assert_eq!(record.state, ApiSessionState::Running);
     }
 
     #[test]
