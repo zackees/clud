@@ -408,6 +408,14 @@ pub(super) fn request_session_termination(
     }
 }
 
+pub(super) fn request_api_session_kill(state_dir: &Path, session_id: &str) -> io::Result<()> {
+    match send_daemon_request(state_dir, &DaemonRequest::ApiSessionKill { session_id: session_id.to_string() })? {
+        DaemonResponse::ApiSessionKilled { .. } => Ok(()),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::other(format!("unexpected API-session kill response: {response:?}"))),
+    }
+}
+
 /// Fire-and-forget handoff: ask the daemon to kill these process trees
 /// on a background thread so the CLI can return from a Ctrl+C teardown
 /// immediately. Returns `true` if the daemon acked the handoff. On

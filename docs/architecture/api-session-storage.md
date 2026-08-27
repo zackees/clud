@@ -42,6 +42,12 @@ durable records, expose bounded `after` cursor events, and map invalid input,
 missing IDs, and active conflicts to stable JSON errors. No route accepts raw
 argv, environment injection, or a per-turn CWD override.
 
+CLI `clud kill <logical-id>` uses the additive daemon `api_session_kill` RPC.
+It is distinct from `terminate`, which remains exclusively the worker
+`SessionSnapshot` termination contract. `clud list` and `clud logs` continue
+to read their respective local bounded stores; no API session is projected as
+an attachable worker snapshot.
+
 `POST /v1/sessions/{id}/turns` accepts `{ "message": string,
 "interrupt_running": boolean }` and an optional `Idempotency-Key` header.
 It reconstructs a subprocess-only `LaunchPlan` from the record's persisted

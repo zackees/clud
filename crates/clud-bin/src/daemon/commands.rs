@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::client::{ensure_daemon, request_session_termination};
+use super::client::{ensure_daemon, request_api_session_kill, request_session_termination};
 use super::api_sessions::ApiSessionStore;
-use super::http::read_api_info;
 use super::io_helpers::read_json_file;
 use super::paths::{logs_dir, session_log_path, session_snapshot_path};
 use super::sessions::{list_background_sessions, resolve_session_id};
@@ -58,7 +57,7 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
     // through the attach/worker termination RPC.
     let api_store = ApiSessionStore::new(state_dir);
     if api_store.get(input).is_ok() {
-        return match request_api_termination(state_dir, input) {
+        return match request_api_session_kill(state_dir, input) {
             Ok(()) => { eprintln!("[clud] killed API session {input}"); 0 }
             Err(err) => { eprintln!("[clud] failed to kill API session {input}: {err}"); 1 }
         };
@@ -72,7 +71,9 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
         }
     };
 
-    match request_session_termination(state_dir, &resolved) {
+    let api = ApiSessionStore::new(state_dir).get(&resolved).is_ok();
+    let result = if api { request_api_session_kill(state_dir, &resolved).map(|_| ()) } else { request_session_termination(state_dir, &resolved).map(|_| ()) };
+    match result {
         Ok(_) => {
             eprintln!("[clud] killed session {}", resolved);
             0
@@ -82,22 +83,6 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
             1
         }
     }
-}
-
-/// Lifecycle process handles live in the daemon's HTTP thread, not a short
-/// lived CLI process. Route logical-ID termination back to that owner.
-fn request_api_termination(state_dir: &Path, session_id: &str) -> io::Result<()> {
-    let (_, Some(port), Some(token), _) = read_api_info(state_dir)? else { return Err(io::Error::new(io::ErrorKind::NotConnected, "daemon API discovery unavailable")); };
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let request = format!("DELETE /v1/sessions/{session_id} HTTP/1.0\r\nHost: localhost:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes())?;
-    stream.flush()?;
-    let mut response = String::new();
-    use std::io::Read;
-    stream.read_to_string(&mut response)?;
-    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") { Ok(()) } else { Err(io::Error::new(io::ErrorKind::Other, "daemon rejected API session termination")) }
 }
 
 fn format_duration_short(millis: u64) -> String {

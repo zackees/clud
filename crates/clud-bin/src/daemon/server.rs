@@ -569,6 +569,13 @@ fn dispatch_daemon_request_with_id(
                 message: err.to_string(),
             },
         },
+        DaemonRequest::ApiSessionKill { session_id } => {
+            let lifecycle = super::api_session_lifecycle::ApiSessionLifecycle::new(super::api_sessions::ApiSessionStore::new(state_dir));
+            match lifecycle.kill(&session_id) {
+                Ok(_) => DaemonResponse::ApiSessionKilled { session_id },
+                Err(error) => DaemonResponse::Error { message: error.to_string() },
+            }
+        }
         DaemonRequest::AdoptKill { pids, reason } => {
             daemon_events::log_event(
                 state_dir,
@@ -718,6 +725,7 @@ fn request_op(request: &DaemonRequest) -> &'static str {
         DaemonRequest::Session { .. } => "session",
         DaemonRequest::ListLiveCwds => "list_live_cwds",
         DaemonRequest::Terminate { .. } => "terminate",
+        DaemonRequest::ApiSessionKill { .. } => "api_session_kill",
         DaemonRequest::Interrupt { .. } => "interrupt",
         DaemonRequest::AdoptKill { .. } => "adopt_kill",
         DaemonRequest::Gc { .. } => "gc",
@@ -736,6 +744,7 @@ fn response_op(response: &DaemonResponse) -> &'static str {
         DaemonResponse::Session { .. } => "session",
         DaemonResponse::LiveCwds { .. } => "live_cwds",
         DaemonResponse::Terminated { .. } => "terminated",
+        DaemonResponse::ApiSessionKilled { .. } => "api_session_killed",
         DaemonResponse::Interrupted { .. } => "interrupted",
         DaemonResponse::AdoptKillAck { .. } => "adopt_kill_ack",
         DaemonResponse::Gc { .. } => "gc",

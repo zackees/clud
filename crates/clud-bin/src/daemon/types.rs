@@ -236,6 +236,11 @@ pub(super) enum DaemonRequest {
     Terminate {
         session_id: String,
     },
+    /// Terminal kill for a durable API logical session. This never targets a
+    /// worker `SessionSnapshot`; it is dispatched to the API lifecycle owner.
+    ApiSessionKill {
+        session_id: String,
+    },
     Interrupt {
         session_id: String,
         profile: CtrlCProfile,
@@ -309,6 +314,9 @@ pub(super) enum DaemonResponse {
     },
     Terminated {
         session: SessionSnapshot,
+    },
+    ApiSessionKilled {
+        session_id: String,
     },
     Interrupted {
         session: SessionSnapshot,

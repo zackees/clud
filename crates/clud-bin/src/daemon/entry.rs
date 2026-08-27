@@ -923,6 +923,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         }
         DaemonResponse::Session { .. }
         | DaemonResponse::Terminated { .. }
+        | DaemonResponse::ApiSessionKilled { .. }
         | DaemonResponse::Interrupted { .. }
         | DaemonResponse::AdoptKillAck { .. }
         | DaemonResponse::Gc { .. }

@@ -72,6 +72,7 @@ fn daemon_request_to_proto(
         DaemonRequest::Terminate { session_id } => Request::Terminate(proto::TerminateRequest {
             session_id: session_id.clone(),
         }),
+        DaemonRequest::ApiSessionKill { session_id } => Request::ApiSessionKill(proto::ApiSessionKillRequest { session_id: session_id.clone() }),
         DaemonRequest::Interrupt {
             session_id,
             profile,
@@ -133,6 +134,7 @@ fn daemon_request_from_proto(proto: proto::ClientToDaemon) -> Result<DaemonReque
         Request::Terminate(terminate) => Ok(DaemonRequest::Terminate {
             session_id: terminate.session_id,
         }),
+        Request::ApiSessionKill(request) => Ok(DaemonRequest::ApiSessionKill { session_id: request.session_id }),
         Request::Interrupt(interrupt) => Ok(DaemonRequest::Interrupt {
             session_id: interrupt.session_id,
             profile: profile_from_proto(
@@ -205,6 +207,7 @@ fn daemon_response_to_proto(
             session_json: Vec::new(),
             session: Some(session_to_proto(session)),
         }),
+        DaemonResponse::ApiSessionKilled { session_id } => Response::ApiSessionKilled(proto::ApiSessionKilledResponse { session_id: session_id.clone() }),
         DaemonResponse::Interrupted { session } => {
             Response::Interrupted(proto::InterruptedResponse {
                 session_json: Vec::new(),
@@ -275,6 +278,7 @@ fn daemon_response_from_proto(proto: proto::DaemonToClient) -> Result<DaemonResp
         Response::Terminated(terminated) => Ok(DaemonResponse::Terminated {
             session: session_from_proto_or_json(terminated.session, &terminated.session_json)?,
         }),
+        Response::ApiSessionKilled(response) => Ok(DaemonResponse::ApiSessionKilled { session_id: response.session_id }),
         Response::Interrupted(interrupted) => Ok(DaemonResponse::Interrupted {
             session: session_from_proto_or_json(interrupted.session, &interrupted.session_json)?,
         }),
