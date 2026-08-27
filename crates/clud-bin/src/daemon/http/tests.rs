@@ -1398,6 +1398,7 @@ fn fetch_api_request(
 /// contract (notably Idempotency-Key). It deliberately remains test-only: the
 /// production boundary accepts typed DTOs and never exposes arbitrary launch
 /// arguments or environment.
+#[allow(clippy::too_many_arguments)]
 fn fetch_api_request_with_headers(
     port: u16,
     method: &str,
