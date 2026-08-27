@@ -63,7 +63,7 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && s
 
 [task.api-session-integration-test]
 stack = "clud_1044_validation"
-cmd = "cd /workspace && cargo test -p clud --lib daemon::api_sessions && cargo test -p clud --lib daemon::api_turn_controller && cargo test -p clud --lib daemon::api_session_lifecycle && cargo test -p clud --lib daemon::http::tests && cargo test -p clud --lib daemon::wire_prost && cargo test -p clud --lib command:: && cargo test -p clud --test api_turn_controller && cargo test -p clud --test api_session_lifecycle"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && soldr cargo test -p clud --lib daemon::api_turn_controller && soldr cargo test -p clud --lib daemon::api_session_lifecycle && soldr cargo test -p clud --lib daemon::http::tests && soldr cargo test -p clud --lib daemon::wire_prost && soldr cargo test -p clud --lib command:: && soldr cargo test -p clud --test api_turn_controller && soldr cargo test -p clud --test api_session_lifecycle"
 
 [task.test]
 stack = "clud_1044_validation"
