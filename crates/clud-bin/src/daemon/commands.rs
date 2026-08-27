@@ -6,6 +6,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::client::{ensure_daemon, request_session_termination};
+use super::api_sessions::ApiSessionStore;
+use super::http::read_api_info;
 use super::io_helpers::read_json_file;
 use super::paths::{logs_dir, session_log_path, session_snapshot_path};
 use super::sessions::{list_background_sessions, resolve_session_id};
@@ -52,6 +54,16 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
         return 1;
     };
 
+    // API logical IDs are separate from worker snapshots and are never sent
+    // through the attach/worker termination RPC.
+    let api_store = ApiSessionStore::new(state_dir);
+    if api_store.get(input).is_ok() {
+        return match request_api_termination(state_dir, input) {
+            Ok(()) => { eprintln!("[clud] killed API session {input}"); 0 }
+            Err(err) => { eprintln!("[clud] failed to kill API session {input}: {err}"); 1 }
+        };
+    }
+
     let resolved = match resolve_session_id(state_dir, input) {
         Ok(id) => id,
         Err(err) => {
@@ -72,6 +84,22 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
     }
 }
 
+/// Lifecycle process handles live in the daemon's HTTP thread, not a short
+/// lived CLI process. Route logical-ID termination back to that owner.
+fn request_api_termination(state_dir: &Path, session_id: &str) -> io::Result<()> {
+    let (_, Some(port), Some(token), _) = read_api_info(state_dir)? else { return Err(io::Error::new(io::ErrorKind::NotConnected, "daemon API discovery unavailable")); };
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = format!("DELETE /v1/sessions/{session_id} HTTP/1.0\r\nHost: localhost:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+    let mut response = String::new();
+    use std::io::Read;
+    stream.read_to_string(&mut response)?;
+    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") { Ok(()) } else { Err(io::Error::new(io::ErrorKind::Other, "daemon rejected API session termination")) }
+}
+
 fn format_duration_short(millis: u64) -> String {
     let now_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -89,7 +117,8 @@ fn format_duration_short(millis: u64) -> String {
 
 pub(super) fn run_list(state_dir: &Path) -> i32 {
     let sessions = list_background_sessions(state_dir);
-    if sessions.is_empty() {
+    let api_sessions = ApiSessionStore::new(state_dir).list().unwrap_or_default();
+    if sessions.is_empty() && api_sessions.is_empty() {
         println!("No background sessions.");
         return 0;
     }
@@ -141,6 +170,14 @@ pub(super) fn run_list(state_dir: &Path) -> i32 {
             println!("{:<30} {:<8} {:<8} {}", display_name, pid, uptime, cwd);
         }
     }
+
+    if !api_sessions.is_empty() {
+        if !sessions.is_empty() { println!(); }
+        println!("{:<30} {:<12} CWD", "API SESSION", "STATUS");
+        for session in api_sessions {
+            println!("{:<30} {:<12} {}", session.id, format!("{:?}", session.state).to_ascii_lowercase(), session.cwd.display());
+        }
+    }
     0
 }
 
@@ -174,6 +211,9 @@ pub(super) fn run_logs(
     let Some(input) = session_id else {
         return run_logs_summary(state_dir);
     };
+    if let Ok(session) = ApiSessionStore::new(state_dir).get(input) {
+        return run_api_logs(state_dir, &session, follow, lines, interrupted);
+    }
     let resolved = match resolve_session_id(state_dir, input) {
         Ok(id) => id,
         Err(_) => {
@@ -256,6 +296,27 @@ pub(super) fn run_logs(
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// API turns write JSONL under their logical ID and are intentionally not
+/// routed through worker snapshot logging or attach semantics.
+fn run_api_logs(
+    state_dir: &Path,
+    session: &super::api_sessions::ApiSessionRecord,
+    follow: bool,
+    lines: Option<usize>,
+    interrupted: &AtomicBool,
+) -> i32 {
+    let Some(turn) = session.turns.last() else { eprintln!("[clud] API session {} has no turn log", session.id); return 1; };
+    let path = super::paths::api_turn_log_path(state_dir, &session.id, turn.generation);
+    let mut offset = match print_log_tail(&path, lines) { Ok(offset) => offset, Err(err) => { eprintln!("[clud] failed to read API log {}: {err}", path.display()); return 1; } };
+    if !follow { return 0; }
+    while matches!(ApiSessionStore::new(state_dir).get(&session.id).map(|value| value.state), Ok(super::api_sessions::ApiSessionState::Starting | super::api_sessions::ApiSessionState::Running | super::api_sessions::ApiSessionState::Interrupting)) {
+        if interrupted.load(Ordering::SeqCst) { super::attach::log_observed_interrupt_reason("api_logs_follow"); return 130; }
+        if let Ok((new_offset, bytes)) = follow_read(&path, offset) { if !bytes.is_empty() { let _ = io::stdout().write_all(&bytes); let _ = io::stdout().flush(); } offset = new_offset; }
+        thread::sleep(Duration::from_millis(200));
+    }
+    0
 }
 
 /// Read the on-disk snapshot for `session_id` and return its `exit_code`

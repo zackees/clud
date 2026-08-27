@@ -42,6 +42,22 @@ durable records, expose bounded `after` cursor events, and map invalid input,
 missing IDs, and active conflicts to stable JSON errors. No route accepts raw
 argv, environment injection, or a per-turn CWD override.
 
+`POST /v1/sessions/{id}/turns` accepts `{ "message": string,
+"interrupt_running": boolean }` and an optional `Idempotency-Key` header.
+It reconstructs a subprocess-only `LaunchPlan` from the record's persisted
+settings and immutable canonical CWD. Generation zero creates a provider
+conversation; later generations require the captured provider identity. The
+only successful responses are `202 started` and `200 replayed`; active,
+terminated, missing-identity, and conflicting retry cases are stable JSON
+errors (`409`). No request can supply a CWD, raw argv, or environment.
+
+The existing `clud list`, `clud logs <logical-id>`, and `clud kill
+<logical-id>` commands recognize logical API IDs separately from worker
+snapshots. Dashboard rows have `source: "api"`, `kind: "api"`, and
+`attachable: false`; an API session is never eligible for the attach transport.
+Bearer capabilities are returned only by `clud daemon api-info --json`, never
+by dashboard state, logs, error payloads, or OpenAPI output.
+
 ## Lifecycle serialization
 
 The #1043 lifecycle controller keeps one in-memory captured-process handle per
