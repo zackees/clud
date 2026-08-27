@@ -1,5 +1,6 @@
 mod activity;
-pub(crate) mod api_sessions;
+pub mod api_sessions;
+pub mod api_turn_controller;
 mod attach;
 mod client;
 mod client_compat;

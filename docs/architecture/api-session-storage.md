@@ -21,3 +21,15 @@ Events receive monotonically increasing cursors; only the newest 512 are retaine
 After daemon restart, persisted PIDs are never trusted as ownership. `starting`, `running`, and `interrupting` records become `failed`; their active turns seal with `daemon_restart`, while a captured provider ID remains available for a later explicit resume. The store never probes, signals, or kills a stale identity.
 
 Unreadable records return a corrupt-state error, are skipped by ordinary listing, and can be moved aside with `quarantine_corrupt`; evidence is renamed, never overwritten. Later lifecycle and HTTP slices own user-facing recovery and execution.
+
+## Captured turn execution
+
+The #1042 controller accepts a canonical headless `LaunchPlan` only when its
+backend and CWD exactly match the durable record. It uses a captured,
+subprocess-only `NativeProcess` and the invisible daemon-helper flags on
+Windows. A dedicated drain appends raw JSONL to
+`logs/api/<session-id>/<generation>.jsonl`, emits bounded raw/normalized
+events, and persists a recognized provider ID. The waiter joins this drain
+before sealing the turn, so the last identity/output event cannot race normal
+completion into `idle`. Unknown provider records are opaque events and
+malformed records become diagnostics.

@@ -214,6 +214,10 @@ impl ApiSessionStore {
         Self { state_dir: state_dir.into(), event_limit: DEFAULT_EVENT_LIMIT, idempotency_limit: DEFAULT_IDEMPOTENCY_LIMIT }
     }
 
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     #[cfg(test)]
     fn with_limits(state_dir: impl Into<PathBuf>, event_limit: usize, idempotency_limit: usize) -> Self {
         Self { state_dir: state_dir.into(), event_limit, idempotency_limit }
@@ -288,6 +292,15 @@ impl ApiSessionStore {
         self.mutate(session_id, |record| { record.provider_session_id = Some(provider_session_id); Ok(record.clone()) })
     }
 
+    pub fn set_turn_root_identity(&self, session_id: &str, turn_id: &str, identity: ProcessIdentity) -> Result<(), ApiSessionStoreError> {
+        self.mutate(session_id, |record| {
+            let turn = record.turns.iter_mut().find(|turn| turn.id == turn_id).ok_or_else(|| ApiSessionStoreError::NotFound(turn_id.to_string()))?;
+            turn.root_identity = Some(identity);
+            turn.state = ApiTurnState::Running;
+            Ok(())
+        })
+    }
+
     pub fn append_event(&self, session_id: &str, turn_id: Option<String>, kind: String, data: Value) -> Result<ApiSessionEvent, ApiSessionStoreError> {
         let bytes = serde_json::to_vec(&data).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?.len();
         if bytes > MAX_EVENT_DATA_BYTES { return Err(ApiSessionStoreError::EventTooLarge { bytes }); }
@@ -311,8 +324,10 @@ impl ApiSessionStore {
             turn.state = state;
             turn.disposition = disposition;
             turn.completed_at_ms = Some(unix_millis_now());
-            if record.current_turn_id.as_deref() == Some(turn_id) { record.current_turn_id = None; }
-            record.state = match state { ApiTurnState::Completed | ApiTurnState::Interrupted => ApiSessionState::Idle, ApiTurnState::Failed => ApiSessionState::Failed, ApiTurnState::Killed => ApiSessionState::Terminated, ApiTurnState::Starting | ApiTurnState::Running => ApiSessionState::Running };
+            if record.current_turn_id.as_deref() == Some(turn_id) {
+                record.current_turn_id = None;
+                record.state = match state { ApiTurnState::Completed | ApiTurnState::Interrupted => ApiSessionState::Idle, ApiTurnState::Failed => ApiSessionState::Failed, ApiTurnState::Killed => ApiSessionState::Terminated, ApiTurnState::Starting | ApiTurnState::Running => ApiSessionState::Running };
+            }
             Ok(record.clone())
         })
     }
@@ -497,6 +512,18 @@ mod tests {
         store.set_provider_session_id(&record.id, "provider-1".to_string()).unwrap();
         let final_record = store.finish_turn(&record.id, &turn.id, ApiTurnState::Completed, Some("completed".to_string())).unwrap();
         assert_eq!(final_record.state, ApiSessionState::Idle); assert_eq!(final_record.provider_session_id.as_deref(), Some("provider-1")); assert_eq!(final_record.generation, 1);
+    }
+
+    #[test]
+    fn stale_turn_completion_cannot_change_the_current_generation_state() {
+        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let first = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
+        store.finish_turn(&record.id, &first.id, ApiTurnState::Completed, Some("exit_0".to_string())).unwrap();
+        let second = store.begin_turn(&record.id, "turn-2".to_string()).unwrap();
+        let loaded = store.finish_turn(&record.id, &first.id, ApiTurnState::Failed, Some("late_exit_1".to_string())).unwrap();
+        assert_eq!(loaded.current_turn_id.as_deref(), Some(second.id.as_str()));
+        assert_eq!(loaded.state, ApiSessionState::Running);
+        assert_eq!(loaded.turns[1].state, ApiTurnState::Starting);
     }
 
     #[test]

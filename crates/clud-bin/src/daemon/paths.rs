@@ -102,6 +102,14 @@ pub(super) fn api_sessions_create_lock_path(state_dir: &Path) -> PathBuf {
     api_sessions_dir(state_dir).join("create.lock")
 }
 
+pub(super) fn api_turn_logs_dir(state_dir: &Path, session_id: &str) -> PathBuf {
+    state_dir.join("logs").join("api").join(session_id)
+}
+
+pub(super) fn api_turn_log_path(state_dir: &Path, session_id: &str, generation: u64) -> PathBuf {
+    api_turn_logs_dir(state_dir, session_id).join(format!("{generation}.jsonl"))
+}
+
 pub(super) fn specs_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("specs")
 }
