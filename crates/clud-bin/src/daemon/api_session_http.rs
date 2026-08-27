@@ -14,11 +14,12 @@ use crate::backend::{Backend, HarnessSelection, ModelProvider, PreferenceSource,
 use crate::command::{HeadlessSession, HeadlessTurnRequest, LaunchPlan};
 
 use super::api_session_lifecycle::{ApiSessionLifecycle, LifecycleError, LifecycleReply};
-use super::api_sessions::{ApiSessionBackend, ApiSessionRecord, ApiSessionStore, ApiSessionStoreError, CreateApiSession, ResolvedApiSessionSettings};
+use super::api_sessions::{ApiSessionBackend, ApiSessionEvent, ApiSessionRecord, ApiSessionStore, ApiSessionStoreError, CreateApiSession, ResolvedApiSessionSettings, DEFAULT_EVENT_LIMIT};
 use super::headless_adapter::build_turn_plan;
 use super::http_response::{read_body, respond_json};
 
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_EVENTS_PAGE: usize = 128;
 
 #[derive(Deserialize)]
 struct CreateDto { backend: ApiSessionBackend, cwd: PathBuf, #[serde(default)] name: Option<String>, #[serde(default)] model: Option<String>, #[serde(default)] safe: bool }
@@ -30,6 +31,24 @@ struct ErrorDto<'a> { code: &'a str, message: &'a str }
 struct TurnResponse<'a> { session_id: &'a str, turn_id: String, #[serde(skip_serializing_if = "Option::is_none")] generation: Option<u64>, status: &'a str }
 #[derive(Serialize)]
 struct InterruptResponse { status: &'static str, forced: bool }
+#[derive(Serialize)]
+struct EventsResponse { events: Vec<ApiSessionEvent>, next_cursor: u64, retention_gap: bool }
+
+fn events_query(url: &str, first_available: u64) -> Result<(u64, usize, bool), &'static str> {
+    let mut after = 0_u64;
+    let mut limit = MAX_EVENTS_PAGE;
+    if let Some((_, query)) = url.split_once('?') {
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').ok_or("query parameters must use key=value")?;
+            match key {
+                "after" => after = value.parse().map_err(|_| "after must be an unsigned cursor")?,
+                "limit" => { limit = value.parse().map_err(|_| "limit must be an integer")?; if limit == 0 || limit > MAX_EVENTS_PAGE { return Err("limit must be between 1 and 128"); } }
+                _ => return Err("unknown events query parameter"),
+            }
+        }
+    }
+    Ok((after, limit, after.saturating_add(1) < first_available))
+}
 
 fn error(request: Request, status: u16, code: &str, message: &str) { respond_json(request, status, &serde_json::to_vec(&ErrorDto { code, message }).unwrap_or_else(|_| b"{}".to_vec())); }
 fn header(request: &Request, name: &'static str) -> Option<String> { request.headers().iter().find(|value| value.field.equiv(name)).map(|value| value.value.as_str().to_string()) }
@@ -96,7 +115,14 @@ pub(super) fn handle(mut request: Request, method: Method, path: &str, state_dir
     if parts.next().is_some() { return error(request, 404, "not_found", "API route not found"); }
     match (method, action) {
         (Method::Get, None) => match store.get(id) { Ok(record) => respond_json(request, 200, &serde_json::to_vec(&record).unwrap_or_else(|_| b"{}".to_vec())), Err(value) => store_error(request, value) },
-        (Method::Get, Some("events")) => { let after = request.url().split_once('?').and_then(|(_, q)| q.split('&').find_map(|pair| pair.strip_prefix("after=")?.parse::<u64>().ok())).unwrap_or(0); match store.events_after(id, after, 512) { Ok(events) => respond_json(request, 200, &serde_json::to_vec(&events).unwrap_or_else(|_| b"[]".to_vec())), Err(value) => store_error(request, value) } }
+        (Method::Get, Some("events")) => {
+            let record = match store.get(id) { Ok(record) => record, Err(value) => return store_error(request, value) };
+            let first_available = record.events.front().map(|event| event.cursor).unwrap_or(record.next_event_cursor);
+            let (after, limit, retention_gap) = match events_query(request.url(), first_available) { Ok(value) => value, Err(message) => return error(request, 400, "invalid_cursor", message) };
+            let events = record.events.into_iter().filter(|event| event.cursor > after).take(limit.min(DEFAULT_EVENT_LIMIT)).collect::<Vec<_>>();
+            let next_cursor = events.last().map(|event| event.cursor).unwrap_or(after);
+            respond_json(request, 200, &serde_json::to_vec(&EventsResponse { events, next_cursor, retention_gap }).unwrap_or_else(|_| b"{}".to_vec()))
+        }
         (Method::Post, Some("interrupt")) => match lifecycle.interrupt(id) { Ok(LifecycleReply::Interrupted { forced }) => respond_json(request, 200, &serde_json::to_vec(&InterruptResponse { status: "interrupted", forced }).unwrap()), Ok(_) => error(request, 409, "session_not_running", "no active API turn"), Err(LifecycleError::NotFound) => error(request, 404, "not_found", "session not found"), Err(_) => error(request, 409, "session_not_running", "no active API turn") },
         (Method::Delete, None) => match lifecycle.kill(id) { Ok(_) => respond_json(request, 200, br#"{"status":"terminated"}"#), Err(value) => lifecycle_error(request, value) },
         (Method::Post, Some("turns")) => {
@@ -113,5 +139,18 @@ pub(super) fn handle(mut request: Request, method: Method, path: &str, state_dir
             }
         }
         _ => error(request, 404, "not_found", "API route not found"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_query_is_bounded_and_reports_retention_gap() {
+        assert_eq!(events_query("/v1/sessions/a/events?after=2&limit=3", 9).unwrap(), (2, 3, true));
+        assert!(events_query("/v1/sessions/a/events?after=no", 1).is_err());
+        assert!(events_query("/v1/sessions/a/events?limit=129", 1).is_err());
+        assert!(events_query("/v1/sessions/a/events?cursor=1", 1).is_err());
     }
 }

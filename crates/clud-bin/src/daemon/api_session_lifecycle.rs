@@ -23,12 +23,24 @@ pub enum LifecycleReply { Started { generation: u64, turn_id: String }, Replayed
 pub enum LifecycleError { NotFound, Terminated, ResumeUnavailable, IdempotencyConflict, Launch(String) }
 
 #[derive(Clone)]
-pub struct ApiSessionLifecycle { store: ApiSessionStore, active: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>, gate: Arc<Mutex<()>>, grace: Duration }
+pub struct ApiSessionLifecycle {
+    store: ApiSessionStore,
+    active: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    /// Logical sessions do not contend with each other. The map is only held
+    /// long enough to find/create a session's own mutation gate.
+    gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    grace: Duration,
+}
 
 impl ApiSessionLifecycle {
-    pub fn new(store: ApiSessionStore) -> Self { Self { store, active: Arc::new(Mutex::new(HashMap::new())), gate: Arc::new(Mutex::new(())), grace: DEFAULT_INTERRUPT_GRACE } }
+    pub fn new(store: ApiSessionStore) -> Self {
+        Self { store, active: Arc::new(Mutex::new(HashMap::new())), gates: Arc::new(Mutex::new(HashMap::new())), grace: DEFAULT_INTERRUPT_GRACE }
+    }
+    fn gate_for(&self, session_id: &str) -> Arc<Mutex<()>> {
+        self.gates.lock().unwrap_or_else(|p| p.into_inner()).entry(session_id.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    }
     pub fn submit(&self, session_id: &str, plan: LaunchPlan, key: Option<String>, fingerprint: String, replace: bool) -> Result<LifecycleReply, LifecycleError> {
-        let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner());
+        let gate = self.gate_for(session_id); let _gate = gate.lock().unwrap_or_else(|p| p.into_inner());
         let session = self.store.get(session_id).map_err(|_| LifecycleError::NotFound)?;
         if session.state == ApiSessionState::Terminated { return Err(LifecycleError::Terminated); }
         if let Some(key) = key.as_ref() {
@@ -66,8 +78,8 @@ impl ApiSessionLifecycle {
         self.active.lock().unwrap_or_else(|p| p.into_inner()).insert(session_id.to_string(), process);
         Ok(LifecycleReply::Started { generation: turn.generation, turn_id: turn.id })
     }
-    pub fn interrupt(&self, session_id: &str) -> Result<LifecycleReply, LifecycleError> { let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner()); let process = self.active.lock().unwrap_or_else(|p| p.into_inner()).remove(session_id).ok_or(LifecycleError::NotFound)?; Ok(LifecycleReply::Interrupted { forced: self.stop(session_id, &process) }) }
-    pub fn kill(&self, session_id: &str) -> Result<LifecycleReply, LifecycleError> { let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner()); let record = self.store.get(session_id).map_err(|_| LifecycleError::NotFound)?; if let Some(process) = self.active.lock().unwrap_or_else(|p| p.into_inner()).remove(session_id) { if let Some(identity) = record.current_turn_id.as_ref().and_then(|id| record.turns.iter().find(|turn| &turn.id == id)).and_then(|turn| turn.root_identity) { signal_process_tree_as(&identity, Signal::Kill); } let _ = process.kill(); } if let Some(turn) = record.current_turn_id { let _ = self.store.finish_turn(session_id, &turn, ApiTurnState::Killed, Some("terminal_kill".to_string())); } let _ = self.store.terminate(session_id); Ok(LifecycleReply::Terminated) }
+    pub fn interrupt(&self, session_id: &str) -> Result<LifecycleReply, LifecycleError> { let gate = self.gate_for(session_id); let _gate = gate.lock().unwrap_or_else(|p| p.into_inner()); let process = self.active.lock().unwrap_or_else(|p| p.into_inner()).remove(session_id).ok_or(LifecycleError::NotFound)?; Ok(LifecycleReply::Interrupted { forced: self.stop(session_id, &process) }) }
+    pub fn kill(&self, session_id: &str) -> Result<LifecycleReply, LifecycleError> { let gate = self.gate_for(session_id); let _gate = gate.lock().unwrap_or_else(|p| p.into_inner()); let record = self.store.get(session_id).map_err(|_| LifecycleError::NotFound)?; if let Some(process) = self.active.lock().unwrap_or_else(|p| p.into_inner()).remove(session_id) { if let Some(identity) = record.current_turn_id.as_ref().and_then(|id| record.turns.iter().find(|turn| &turn.id == id)).and_then(|turn| turn.root_identity) { signal_process_tree_as(&identity, Signal::Kill); } let _ = process.kill(); } if let Some(turn) = record.current_turn_id { let _ = self.store.finish_turn(session_id, &turn, ApiTurnState::Killed, Some("terminal_kill".to_string())); } let _ = self.store.terminate(session_id); Ok(LifecycleReply::Terminated) }
     fn stop(&self, session_id: &str, process: &Arc<NativeProcess>) -> bool {
         let record = match self.store.get(session_id) { Ok(record) => record, Err(_) => return true };
         let Some(turn_id) = record.current_turn_id.clone() else { return true; };
@@ -78,5 +90,19 @@ impl ApiSessionLifecycle {
         let forced = process.returncode().is_none(); if forced { let _ = process.kill(); }
         let disposition = if forced { "forced_interrupt" } else { "graceful_interrupt" }; let _ = self.store.finish_turn(session_id, &turn_id, ApiTurnState::Interrupted, Some(disposition.to_string()));
         forced
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn mutation_gates_are_shared_per_session_but_not_globally() {
+        let temp = TempDir::new().unwrap();
+        let lifecycle = ApiSessionLifecycle::new(ApiSessionStore::new(temp.path()));
+        assert!(Arc::ptr_eq(&lifecycle.gate_for("one"), &lifecycle.gate_for("one")));
+        assert!(!Arc::ptr_eq(&lifecycle.gate_for("one"), &lifecycle.gate_for("two")));
     }
 }

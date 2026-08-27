@@ -553,6 +553,33 @@ pub(super) fn spawn_dashboard_with_activity(
     test_activity: Option<TestRuntimeActivity>,
     activity: Option<DaemonActivity>,
 ) -> Option<u16> {
+    let api_lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::new(
+        super::api_sessions::ApiSessionStore::new(state_dir.clone()),
+    ));
+    spawn_dashboard_with_activity_and_lifecycle(
+        state_dir, gc_tx, ipc_port, started_at_unix, live_sessions_provider,
+        telemetry, tool_telemetry, dashboard_token, api_token, test_activity,
+        activity, api_lifecycle,
+    )
+}
+
+/// Production passes the same manager to both IPC transports and HTTP. Test
+/// callers use `spawn_dashboard_with_activity`, which owns an isolated one.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_dashboard_with_activity_and_lifecycle(
+    state_dir: PathBuf,
+    gc_tx: Option<mpsc::Sender<RegistryMsg>>,
+    ipc_port: u16,
+    started_at_unix: i64,
+    live_sessions_provider: LiveSessionsProvider,
+    telemetry: TelemetryStore,
+    tool_telemetry: ToolTelemetryStore,
+    dashboard_token: String,
+    api_token: String,
+    test_activity: Option<TestRuntimeActivity>,
+    activity: Option<DaemonActivity>,
+    api_lifecycle: Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
+) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
         Err(err) => {
@@ -587,6 +614,7 @@ pub(super) fn spawn_dashboard_with_activity(
                 },
                 test_activity,
                 activity,
+                api_lifecycle,
             )
         });
     match res {
@@ -612,8 +640,8 @@ fn run_dashboard_loop(
     stores: DashboardTelemetryStores,
     test_activity: Option<TestRuntimeActivity>,
     activity: Option<DaemonActivity>,
+    api_lifecycle: Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
 ) {
-    let api_lifecycle = super::api_session_lifecycle::ApiSessionLifecycle::new(super::api_sessions::ApiSessionStore::new(state_dir.clone()));
     for request in server.incoming_requests() {
         let _connection_guard = activity.as_ref().map(DaemonActivity::start_connection);
         let _activity_guard = test_activity
@@ -712,7 +740,7 @@ fn run_dashboard_loop(
     }
 }
 
-const OPENAPI_JSON: &str = r#"{"openapi":"3.1.0","info":{"title":"clud daemon API","version":"v1"},"paths":{"/v1/health":{"get":{"responses":{"200":{"description":"healthy"},"401":{"$ref":"#/components/responses/Error"}}}},"/v1/openapi.json":{"get":{"responses":{"200":{"description":"schema"},"401":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions":{"get":{"responses":{"200":{"description":"logical sessions"},"401":{"$ref":"#/components/responses/Error"}}},"post":{"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateSession"}}}},"responses":{"201":{"description":"created"},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}":{"get":{"responses":{"200":{"description":"session"},"404":{"$ref":"#/components/responses/Error"}}},"delete":{"responses":{"200":{"description":"terminated"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/interrupt":{"post":{"responses":{"200":{"description":"interrupted"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/turns":{"post":{"parameters":[{"name":"Idempotency-Key","in":"header","required":false,"schema":{"type":"string"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/TurnRequest"}}}},"responses":{"200":{"description":"idempotent replay"},"202":{"description":"started"},"400":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"422":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/events":{"get":{"parameters":[{"name":"after","in":"query","schema":{"type":"integer","minimum":0}}],"responses":{"200":{"description":"bounded cursor events"},"404":{"$ref":"#/components/responses/Error"}}}}},"components":{"schemas":{"CreateSession":{"type":"object","required":["backend","cwd"],"properties":{"backend":{"enum":["claude","codex"]},"cwd":{"type":"string"},"name":{"type":"string"},"model":{"type":"string"},"safe":{"type":"boolean"}}},"TurnRequest":{"type":"object","required":["message"],"properties":{"message":{"type":"string","minLength":1,"maxLength":65536},"interrupt_running":{"type":"boolean"}}},"Error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"}}}},"responses":{"Error":{"description":"stable API error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}}}}}"#;
+const OPENAPI_JSON: &str = r#"{"openapi":"3.1.0","info":{"title":"clud daemon API","version":"v1"},"paths":{"/v1/health":{"get":{"responses":{"200":{"description":"healthy"},"401":{"$ref":"#/components/responses/Error"}}}},"/v1/openapi.json":{"get":{"responses":{"200":{"description":"schema"},"401":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions":{"get":{"responses":{"200":{"description":"logical sessions","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/Session"}}}}},"401":{"$ref":"#/components/responses/Error"}}},"post":{"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateSession"}}}},"responses":{"201":{"description":"created","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Session"}}}},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}":{"parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"get":{"responses":{"200":{"description":"session","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Session"}}}},"404":{"$ref":"#/components/responses/Error"}}},"delete":{"responses":{"200":{"description":"terminated","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TerminalResponse"}}}},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/interrupt":{"post":{"responses":{"200":{"description":"interrupted","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InterruptResponse"}}}},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/turns":{"post":{"parameters":[{"name":"Idempotency-Key","in":"header","required":false,"schema":{"type":"string"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/TurnRequest"}}}},"responses":{"200":{"description":"idempotent replay","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TurnResponse"}}}},"202":{"description":"started","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TurnResponse"}}}},"400":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"422":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/events":{"get":{"parameters":[{"name":"after","in":"query","schema":{"type":"integer","minimum":0}},{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":128}}],"responses":{"200":{"description":"bounded cursor events","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventsResponse"}}}},"400":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"}}}}},"components":{"schemas":{"CreateSession":{"type":"object","required":["backend","cwd"],"properties":{"backend":{"enum":["claude","codex"]},"cwd":{"type":"string","description":"existing directory; stored as canonical absolute path"},"name":{"type":"string"},"model":{"type":"string"},"safe":{"type":"boolean"}}},"Session":{"type":"object","required":["id","backend","cwd","state","generation"]},"TurnRequest":{"type":"object","required":["message"],"properties":{"message":{"type":"string","minLength":1,"maxLength":65536},"interrupt_running":{"type":"boolean"}}},"TurnResponse":{"type":"object","required":["session_id","turn_id","status"]},"InterruptResponse":{"type":"object","required":["status","forced"]},"TerminalResponse":{"type":"object","required":["status"]},"EventsResponse":{"type":"object","required":["events","next_cursor","retention_gap"],"properties":{"events":{"type":"array","items":{"$ref":"#/components/schemas/Event"}},"next_cursor":{"type":"integer"},"retention_gap":{"type":"boolean"}}},"Event":{"type":"object","required":["cursor","at_ms","kind","data"]},"Error":{"type":"object","required":["code","message"]}},"responses":{"Error":{"description":"stable API error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}}}}}"#;
 
 // ---------- route handlers ----------
 

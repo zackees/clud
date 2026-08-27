@@ -25,7 +25,7 @@ use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
 };
 use super::http::{
-    default_live_sessions_provider, spawn_dashboard_with_activity, TelemetryStore,
+    default_live_sessions_provider, spawn_dashboard_with_activity_and_lifecycle, TelemetryStore,
     ToolTelemetryStore,
 };
 use super::io_helpers::{new_session_id, read_json_file, write_json_file};
@@ -111,6 +111,14 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     );
 
     cleanup_stale_state(state_dir);
+    // A new daemon never adopts a persisted provider PID. Seal active turns
+    // before accepting either HTTP or RPC lifecycle mutations.
+    let api_lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::new(
+        super::api_sessions::ApiSessionStore::new(state_dir),
+    ));
+    if let Err(error) = super::api_sessions::ApiSessionStore::new(state_dir).reconcile_after_restart() {
+        daemon_events::log_event(state_dir, "api_session_recovery_failed", [("error", json!(error.to_string()))]);
+    }
 
     let listener = match TcpListener::bind(("127.0.0.1", 0)) {
         Ok(listener) => listener,
@@ -154,7 +162,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     let tool_telemetry = ToolTelemetryStore::new();
     let dashboard_token = crate::dashboard_auth::generate_token();
     let api_token = crate::dashboard_auth::generate_token();
-    let dashboard_port = spawn_dashboard_with_activity(
+    let dashboard_port = spawn_dashboard_with_activity_and_lifecycle(
         state_dir.to_path_buf(),
         gc_tx.clone(),
         port,
@@ -166,6 +174,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         api_token.clone(),
         test_activity.clone(),
         Some(activity.clone()),
+        Arc::clone(&api_lifecycle),
     );
 
     // Workers inherit these private capability values and use them for their
@@ -251,6 +260,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         proc_sampler.clone(),
         client_leases.clone(),
         activity.clone(),
+        Arc::clone(&api_lifecycle),
     );
 
     // Periodic orphan sweep. Catches CLUD-tagged descendants whose
@@ -290,6 +300,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 let proc_sampler = proc_sampler.clone();
                 let client_leases = client_leases.clone();
                 let activity = activity.clone();
+                let api_lifecycle = Arc::clone(&api_lifecycle);
                 thread::spawn(move || {
                     let _connection_guard = activity.start_connection();
                     let _activity_guard = activity_guard;
@@ -303,6 +314,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                             proc_sampler: &proc_sampler,
                             client_leases: &client_leases,
                             activity: &activity,
+                            api_lifecycle: &api_lifecycle,
                         },
                     );
                 });
@@ -428,6 +440,7 @@ struct TcpConnectionServices<'a> {
     proc_sampler: &'a ProcSamplerHandle,
     client_leases: &'a ClientLeaseRegistry,
     activity: &'a DaemonActivity,
+    api_lifecycle: &'a Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
 }
 
 fn handle_daemon_connection(
@@ -462,6 +475,7 @@ fn handle_daemon_connection(
         services.gc_tx,
         Some(services.proc_sampler),
         services.client_leases,
+        services.api_lifecycle,
         request_id,
         request,
     );
@@ -512,6 +526,19 @@ pub(super) fn dispatch_daemon_request_with_sampler(
     client_leases: &ClientLeaseRegistry,
     request: DaemonRequest,
 ) -> DaemonResponse {
+    let lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::new(super::api_sessions::ApiSessionStore::new(state_dir)));
+    dispatch_daemon_request_with_sampler_and_lifecycle(state_dir, workers, gc_tx, proc_sampler, client_leases, &lifecycle, request)
+}
+
+pub(super) fn dispatch_daemon_request_with_sampler_and_lifecycle(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    proc_sampler: Option<&ProcSamplerHandle>,
+    client_leases: &ClientLeaseRegistry,
+    api_lifecycle: &Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
+    request: DaemonRequest,
+) -> DaemonResponse {
     let request_id = daemon_events::request_id();
     dispatch_daemon_request_with_id(
         state_dir,
@@ -519,6 +546,7 @@ pub(super) fn dispatch_daemon_request_with_sampler(
         gc_tx,
         proc_sampler,
         client_leases,
+        api_lifecycle,
         request_id,
         request,
     )
@@ -530,6 +558,7 @@ fn dispatch_daemon_request_with_id(
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     proc_sampler: Option<&ProcSamplerHandle>,
     client_leases: &ClientLeaseRegistry,
+    api_lifecycle: &Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
     request_id: u64,
     request: DaemonRequest,
 ) -> DaemonResponse {
@@ -570,8 +599,7 @@ fn dispatch_daemon_request_with_id(
             },
         },
         DaemonRequest::ApiSessionKill { session_id } => {
-            let lifecycle = super::api_session_lifecycle::ApiSessionLifecycle::new(super::api_sessions::ApiSessionStore::new(state_dir));
-            match lifecycle.kill(&session_id) {
+            match api_lifecycle.kill(&session_id) {
                 Ok(_) => DaemonResponse::ApiSessionKilled { session_id },
                 Err(error) => DaemonResponse::Error { message: error.to_string() },
             }
@@ -1492,6 +1520,22 @@ mod tests {
     use std::net::TcpStream;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn api_kill_dispatch_uses_the_supplied_lifecycle_owner() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
+        let record = store.create(super::super::api_sessions::CreateApiSession {
+            backend: super::super::api_sessions::ApiSessionBackend::Claude,
+            cwd: temp.path().to_path_buf(), name: None,
+            resolved_settings: super::super::api_sessions::ResolvedApiSessionSettings { model: None, safe: false, model_provider: None, harness: None, routing_mode: None },
+        }).unwrap();
+        let lifecycle = Arc::new(super::super::api_session_lifecycle::ApiSessionLifecycle::new(store.clone()));
+        let workers = Arc::new(Mutex::new(HashMap::new()));
+        let reply = dispatch_daemon_request_with_sampler_and_lifecycle(temp.path(), &workers, None, None, &ClientLeaseRegistry::default(), &lifecycle, DaemonRequest::ApiSessionKill { session_id: record.id.clone() });
+        assert!(matches!(reply, DaemonResponse::ApiSessionKilled { .. }));
+        assert_eq!(store.get(&record.id).unwrap().state, super::super::api_sessions::ApiSessionState::Terminated);
+    }
 
     #[test]
     fn production_idle_timeout_is_disabled_until_explicitly_configured() {

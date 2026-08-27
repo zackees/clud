@@ -107,6 +107,18 @@ fn api_discovery_routes_require_bearer_and_return_json() {
 }
 
 #[test]
+fn api_openapi_contract_covers_each_implemented_session_route() {
+    let schema: serde_json::Value = serde_json::from_str(OPENAPI_JSON).unwrap();
+    let paths = schema["paths"].as_object().unwrap();
+    for path in ["/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/turns", "/v1/sessions/{id}/interrupt", "/v1/sessions/{id}/events"] {
+        assert!(paths.contains_key(path), "missing route {path}");
+    }
+    assert_eq!(paths["/v1/sessions/{id}/events"]["get"]["parameters"][1]["name"], "limit");
+    assert!(schema["components"]["schemas"].get("EventsResponse").is_some());
+    assert!(schema["components"]["schemas"].get("TurnResponse").is_some());
+}
+
+#[test]
 fn purge_request_defaults_when_body_is_empty() {
     let parsed: PurgeRequest = serde_json::from_str("{}").unwrap();
     assert!(parsed.id.is_none());

@@ -20,6 +20,7 @@ use running_process::NativeProcess;
 
 use super::super::activity::DaemonActivity;
 use super::super::client_leases::ClientLeaseRegistry;
+use super::super::api_session_lifecycle::ApiSessionLifecycle;
 use super::super::gc_service::RegistryMsg;
 use super::super::proc_sampler::ProcSamplerHandle;
 use super::endpoint::{daemon_identity_path, endpoint_for_state_dir};
@@ -66,6 +67,7 @@ pub(in crate::daemon) fn spawn_frame_lane(
     proc_sampler: ProcSamplerHandle,
     client_leases: ClientLeaseRegistry,
     activity: DaemonActivity,
+    api_lifecycle: Arc<ApiSessionLifecycle>,
 ) -> Option<FrameLane> {
     if running_process_disabled() {
         return None;
@@ -99,6 +101,7 @@ pub(in crate::daemon) fn spawn_frame_lane(
         proc_sampler,
         client_leases,
         activity,
+        api_lifecycle,
     ) {
         Ok(lane) => Some(lane),
         Err(err) => {
@@ -170,6 +173,7 @@ pub(super) fn start_frame_lane(
     proc_sampler: ProcSamplerHandle,
     client_leases: ClientLeaseRegistry,
     activity: DaemonActivity,
+    api_lifecycle: Arc<ApiSessionLifecycle>,
 ) -> io::Result<FrameLane> {
     let endpoint = endpoint_for_state_dir(state_dir)?;
     let endpoint_path = endpoint.path.clone();
@@ -214,6 +218,7 @@ pub(super) fn start_frame_lane(
                     let proc_sampler = proc_sampler.clone();
                     let client_leases = client_leases.clone();
                     let activity = activity.clone();
+                    let api_lifecycle = Arc::clone(&api_lifecycle);
                     thread::spawn(move || {
                         let _connection_guard = activity.start_connection();
                         let mut stream = stream;
@@ -226,6 +231,7 @@ pub(super) fn start_frame_lane(
                                 gc_tx: gc_tx.as_ref(),
                                 proc_sampler: Some(&proc_sampler),
                                 client_leases: &client_leases,
+                                api_lifecycle: &api_lifecycle,
                             },
                             &shutdown_requested,
                         );
@@ -265,6 +271,7 @@ struct ConnectionServices<'a> {
     gc_tx: Option<&'a mpsc::Sender<RegistryMsg>>,
     proc_sampler: Option<&'a ProcSamplerHandle>,
     client_leases: &'a ClientLeaseRegistry,
+    api_lifecycle: &'a Arc<ApiSessionLifecycle>,
 }
 
 fn serve_connection<S, F>(
@@ -308,6 +315,7 @@ where
                     services.gc_tx,
                     services.proc_sampler,
                     services.client_leases,
+                    services.api_lifecycle,
                 );
                 let is_shutdown = response.is_shutdown;
                 let wire = encode_framed(&Frame::response_to(&frame, response.payload))
