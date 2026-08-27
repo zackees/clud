@@ -107,7 +107,9 @@ fn running_submit_is_busy_while_duplicate_replays_after_controller_restart() {
                 false
             )
             .unwrap(),
-        LifecycleReply::Replayed { turn_id }
+        LifecycleReply::Replayed {
+            turn_id: turn_id.clone()
+        }
     );
     assert_eq!(
         lifecycle.submit(
