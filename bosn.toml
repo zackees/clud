@@ -74,7 +74,7 @@ cmd = "cd /workspace && soldr cargo build -p mock-agent && soldr cargo test -p c
 
 [task.test]
 stack = "clud_1044_final_retry"
-cmd = "cd /workspace && soldr cargo build -p mock-agent && bash test"
+cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && .venv/bin/python -m ci.test --full"
 
 [task.api-session-storage-test]
 stack = "clud_1044_final_retry"
