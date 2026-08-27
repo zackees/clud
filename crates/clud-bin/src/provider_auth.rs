@@ -12,7 +12,7 @@ use crossterm::terminal;
 use zeroize::Zeroizing;
 
 use crate::args::{Args, Command, DeepseekAuthSubcommand};
-use crate::backend::ModelProvider;
+use crate::backend::{Backend, ModelProvider};
 use crate::command;
 use crate::provider_registry::{self, AnthropicCompatProvider};
 
@@ -330,6 +330,7 @@ pub fn launch_preflight_target(
 /// decision is unit-testable without a real tty.
 pub fn launch_is_interactive(
     args: &Args,
+    backend: Backend,
     stdin_is_terminal: bool,
     stderr_is_terminal: bool,
 ) -> bool {
@@ -342,7 +343,7 @@ pub fn launch_is_interactive(
     );
     stdin_is_terminal
         && stderr_is_terminal
-        && !command::has_noninteractive_prompt(args)
+        && !command::has_noninteractive_prompt(args, backend)
         && !args.detach
         && !args.detachable
         && !repeat
@@ -731,30 +732,50 @@ mod tests {
     #[test]
     fn interactive_launch_requires_a_real_tty_on_both_streams() {
         let args = parse(&["clud", "--deepseek"]);
-        assert!(launch_is_interactive(&args, true, true));
-        assert!(!launch_is_interactive(&args, false, true));
-        assert!(!launch_is_interactive(&args, true, false));
+        assert!(launch_is_interactive(&args, Backend::DeepSeek, true, true));
+        assert!(!launch_is_interactive(
+            &args,
+            Backend::DeepSeek,
+            false,
+            true
+        ));
+        assert!(!launch_is_interactive(
+            &args,
+            Backend::DeepSeek,
+            true,
+            false
+        ));
     }
 
     #[test]
     fn detached_and_detachable_launches_are_never_interactive() {
         let detach = parse(&["clud", "--deepseek", "--detach"]);
-        assert!(!launch_is_interactive(&detach, true, true));
+        assert!(!launch_is_interactive(
+            &detach,
+            Backend::DeepSeek,
+            true,
+            true
+        ));
 
         let detachable = parse(&["clud", "--deepseek", "--detachable"]);
-        assert!(!launch_is_interactive(&detachable, true, true));
+        assert!(!launch_is_interactive(
+            &detachable,
+            Backend::DeepSeek,
+            true,
+            true
+        ));
     }
 
     #[test]
     fn repeat_loop_launches_are_never_interactive() {
         let args = parse(&["clud", "--deepseek", "loop", "--repeat", "1h", "task"]);
-        assert!(!launch_is_interactive(&args, true, true));
+        assert!(!launch_is_interactive(&args, Backend::DeepSeek, true, true));
     }
 
     #[test]
     fn noninteractive_prompt_flags_disable_interactive_preflight() {
         let args = parse(&["clud", "--deepseek", "-p", "do the thing"]);
-        assert!(!launch_is_interactive(&args, true, true));
+        assert!(!launch_is_interactive(&args, Backend::DeepSeek, true, true));
     }
 
     #[test]

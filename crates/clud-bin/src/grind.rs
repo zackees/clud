@@ -6,7 +6,7 @@
 //! GitLab), prints a green notice, and drives the URL through the `/loop`
 //! contract. An explicit URL argument is used verbatim.
 //!
-//! Issue #897: this deliberately does **not** reuse `clud do <url>`'s `/goal`
+//! Issue #897: this deliberately does **not** reuse `clud do <target>`'s `/goal`
 //! flow. `/goal` is single-shot — it resolves once and stops — whereas
 //! grinding an issues page is iterative: one issue per iteration, ending only
 //! when every issue is done. So `grind` builds its own prompt

@@ -733,15 +733,26 @@ Detects linting and test tools in your repo, runs them, and fixes failures in a 
 clud fix
 ```
 
-## `clud do <url>` — Implement to a Merged PR
+## `clud do [url-or-goal]` — Implement to a Merged PR
 
-Launches the agent with the `/goal` implementation contract after substituting
-the supplied URL into the prompt.
+Launches an interactive agent session with the `/goal` implementation contract.
+URLs retain the issue-oriented contract; free-form text becomes the goal directly.
+With no target, an interactive foreground launch prompts for a URL or goal before
+starting the backend. Scripts, dry-runs, and background launches must provide the
+target explicitly so they never block on input.
 
 ```bash
 clud do https://github.com/zackees/clud/issues/866
+clud --codex do "refactor the launch mode classifier"
+clud --codex do                 # prompts: Enter an issue URL or goal
 clud do --dry-run https://github.com/zackees/clud/issues/866
 ```
+
+On the native Codex harness, the one-shot built-ins `do`, `up`, `rebase`, and
+`fix` seed the interactive TUI rather than `codex exec`, so progress and follow-up
+input stay live. They can resume `--continue` or `--resume=<session>`; bare
+`--resume` is rejected because Codex would mistake the generated prompt for a
+session ID. Explicit `-p`, `loop`, and `grind` runs remain non-interactive.
 
 ## `clud up` — Ship It
 

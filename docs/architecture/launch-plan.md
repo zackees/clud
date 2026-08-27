@@ -64,8 +64,13 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
 2. **Adds Codex configuration before its subcommand.** Every configured `-c`
    override is emitted first, followed by the project-document fallback when
    the caller did not override it.
-3. **Selects the Codex subcommand.** Non-interactive prompts use `exec`;
-   continuation requests use `resume`. Claude has no corresponding
+3. **Selects the Codex subcommand.** Explicit `-p` prompts and clud-owned
+   orchestration (`loop`/`grind`) use `exec`; the one-shot built-ins (`do`,
+   `up`, `rebase`, `fix`) seed the interactive TUI without a subcommand.
+   Continuation requests use `resume`; for interactive built-ins, `--last` or
+   the explicit session ID is emitted before the generated prompt. Bare
+   `--resume` is rejected for those built-ins because its session picker cannot
+   share the first positional with a prompt. Claude has no corresponding
    sub-keyword.
 4. **Adds common launch options.** The builder injects the harness-specific
    YOLO flag unless `--safe`, emits `--model`/`-m`, and appends Codex
@@ -118,7 +123,7 @@ construction. Model-provider selection is carried separately by
 
 | Concern | Claude harness | Codex harness | DeepSeek harness |
 |---|---|---|---|
-| Subcommand keyword | (none) | `exec` for non-interactive prompt; `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
+| Subcommand keyword | (none) | `exec` for `-p`/`loop`/`grind`; none for interactive one-shot built-ins; `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
 | YOLO flag | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | none; DSH owns permissions |
 | Model flag | `--model <id>` | `-m <id>` | unsupported; DSH owns provider/model profiles |
 | Prompt delivery | `-p <prompt>` | bare positional | bare positional after the headless profile |
@@ -183,6 +188,7 @@ bearing reason this invariant holds, and downstream tooling depends on it.
   `build_launch_plan` (native compatibility/test),
   `has_noninteractive_prompt`, `parse_repeat_interval` —
   `crates/clud-bin/src/command/builder.rs`
+- `resolve_do_command_target` — `crates/clud-bin/src/command/do_input.rs`
 - `push_prompt` — `crates/clud-bin/src/command/prompts.rs`
 - `resolve_loop_task` — `crates/clud-bin/src/command/loop_task.rs`
 - `WorkerLaunchSpec` (daemon wire-format wrapper) —

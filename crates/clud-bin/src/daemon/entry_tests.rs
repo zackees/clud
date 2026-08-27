@@ -78,6 +78,10 @@ fn sweep_is_stale_past_two_intervals_or_never() {
     assert!(sweep_is_stale(Some(&fresh), 1_120_001, interval));
 }
 
+fn parse_args(argv: &[&str]) -> Args {
+    Args::parse_from_raw(argv.iter().map(|value| (*value).to_string()).collect())
+}
+
 // Regression for the symptom reported after PR #151:
 //   clud  (no args, interactive terminal)
 //   → [clud] daemon session sess-...
@@ -140,6 +144,57 @@ fn repeat_jobs_always_subprocess() {
         select_session_kind(LaunchMode::Subprocess, true, true),
         SessionKind::Subprocess
     ));
+}
+
+#[test]
+fn backend_prompt_classification_drives_centralized_session_kind() {
+    for (argv, backend, expected) in [
+        (
+            vec![
+                "clud",
+                "--codex",
+                "do",
+                "https://github.com/zackees/clud/issues/1036",
+            ],
+            crate::backend::Backend::Codex,
+            true,
+        ),
+        (
+            vec!["clud", "--codex", "up"],
+            crate::backend::Backend::Codex,
+            true,
+        ),
+        (
+            vec!["clud", "do", "https://github.com/zackees/clud/issues/1036"],
+            crate::backend::Backend::Claude,
+            true,
+        ),
+        (
+            vec![
+                "clud",
+                "--harness",
+                "deepseek",
+                "do",
+                "https://github.com/zackees/clud/issues/1036",
+            ],
+            crate::backend::Backend::DeepSeek,
+            false,
+        ),
+    ] {
+        let args = parse_args(&argv);
+        let mut plan = crate::command::build_launch_plan(&args, backend, backend.executable_name());
+        // A real terminal normally gives interactive Codex/Claude a subprocess
+        // plan that inherits the TTY. Centralization must still upgrade it to a
+        // daemon PTY, while DeepSeek's headless prompt remains a subprocess.
+        plan.launch_mode = LaunchMode::Subprocess;
+        let kind = select_session_kind_for_plan(&args, &plan, false);
+        assert_eq!(
+            matches!(kind, SessionKind::Pty),
+            expected,
+            "argv={argv:?}, command={:?}",
+            plan.command
+        );
+    }
 }
 
 #[test]

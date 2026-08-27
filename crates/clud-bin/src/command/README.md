@@ -12,7 +12,8 @@ routing are documented at
 ## Files
 
 - `mod.rs` — module facade; re-exports the resolved-target production builder, the native compatibility builder, supporting helpers, and the `LaunchPlan` / `LoopMarkers` / `RepeatSchedule` types.
-- `builder.rs` — core `build_launch_plan_for_target` orchestrator, the native `build_launch_plan` compatibility wrapper, and repeat/task helpers. Also owns the `--disallowedTools` policy: `bridge_suppresses_plan_mode` strips `EnterPlanMode` on every Codex-provider / Claude-harness launch (the model can otherwise enter plan mode unprompted — see [DD-033](../../../../docs/DESIGN_DECISIONS.md#dd-033-plan-mode-is-disabled-unconditionally-on-the-codex-to-claude-bridge)), `--unattended` / `clud loop` additionally strip `AskUserQuestion`, and `plan_mode_suppression_notice` emits the green TTY-only override hint.
+- `builder.rs` — core `build_launch_plan_for_target` orchestrator, the native `build_launch_plan` compatibility wrapper, backend-aware interactive/headless prompt classification, and repeat/task helpers. Also owns the `--disallowedTools` policy: `bridge_suppresses_plan_mode` strips `EnterPlanMode` on every Codex-provider / Claude-harness launch (the model can otherwise enter plan mode unprompted — see [DD-033](../../../../docs/DESIGN_DECISIONS.md#dd-033-plan-mode-is-disabled-unconditionally-on-the-codex-to-claude-bridge)), `--unattended` / `clud loop` additionally strip `AskUserQuestion`, and `plan_mode_suppression_notice` emits the green TTY-only override hint.
+- `do_input.rs` — resolves `clud do`'s optional URL/free-form target before backend setup or spawn; prompts only on a foreground TTY and returns deterministic errors for dry-run, pipe, and background modes.
 - `loop_task.rs` — resolves the `clud loop` positional (GH issue/PR URL, `#42` shortform, file path, or literal) into prompt text, with `gh`-backed cache under `.clud/loop/`.
 - `prompts.rs` — static prompt templates (`FIX_PROMPT`, `GITHUB_FIX_TEMPLATE`, `DO_GOAL_TEMPLATE`, `REBASE_PROMPT`, `UP_PROMPT`) and the backend-aware `push_prompt`, `build_up_prompt`, `build_fix_prompt`, `build_do_prompt` builders.
 - `types.rs` — `LaunchPlan`, `LoopMarkers`, `RepeatSchedule` serde structs that flow into `--dry-run` JSON and into daemon job records; the plan carries additive `routing_mode` and normalized `model_selection` fields.
@@ -22,7 +23,9 @@ routing are documented at
 
 - `build_launch_plan_for_target(args, target, backend_path) -> LaunchPlan` — production path
 - `build_launch_plan(args, backend, backend_path) -> LaunchPlan` — native compatibility/test wrapper
-- `has_noninteractive_prompt(args) -> bool`
+- `has_noninteractive_prompt(args, backend) -> bool`
+- `interactive_builtin_resume_error(args, backend) -> Option<&str>`
+- `resolve_do_command_target(args, tty_state, input, output) -> Result<(), String>`
 - `parse_repeat_interval(raw) -> Result<u64, String>`
 - `repeat_implies_no_done_warning(repeat, no_done, done) -> Option<&'static str>`
 - `next_run_at_millis(completed_at_millis, interval_secs) -> u64`
@@ -32,7 +35,7 @@ routing are documented at
 - `push_prompt(cmd, backend, prompt)` — `prompts.rs`
 - `build_up_prompt(message, publish) -> String` — `prompts.rs`
 - `build_fix_prompt(url) -> String` — `prompts.rs`
-- `build_do_prompt(url) -> String` — `prompts.rs`
+- `build_do_prompt(url_or_goal) -> String` — `prompts.rs`
 - `struct LaunchPlan` — executable argv plus provider/harness metadata, launch mode, repeat state, task summary, markers, and stream-json state
 - `struct LoopMarkers { done_path, blocked_path }`
 - `struct RepeatSchedule { interval_secs }`

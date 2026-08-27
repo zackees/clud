@@ -37,8 +37,38 @@ worktrees, no sibling repos. work can only land here. when you are done do a git
 status and make sure it's clean. make sure that the local repo is rebased to the \
 branch we started from. Find out that branch right now.";
 
-pub(super) fn build_do_prompt(url: &str) -> String {
-    DO_GOAL_TEMPLATE.replace("{url}", url)
+pub(super) const DO_GOAL_INPUT_TEMPLATE: &str = "\
+/goal {input}. goal is resolved when the requested work lands in one or more PRs \
+where each is validated, tested, pushed and merged. You must wait for the GHA's \
+with the PR to go green. then merge it. please add a watch. no cheating. no files \
+left behind. all work must be done in this repo. no git worktrees, no sibling \
+repos. work can only land here. when you are done do a git status and make sure \
+it's clean. make sure that the local repo is rebased to the branch we started \
+from. Find out that branch right now.";
+
+pub(super) fn build_do_prompt(target: &str) -> String {
+    let target = target.trim();
+    if is_url_like(target) {
+        DO_GOAL_TEMPLATE.replace("{url}", target)
+    } else {
+        DO_GOAL_INPUT_TEMPLATE.replace("{input}", target)
+    }
+}
+
+fn is_url_like(target: &str) -> bool {
+    if target.is_empty() || target.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let lowercase = target.to_ascii_lowercase();
+    if lowercase.starts_with("https://") || lowercase.starts_with("http://") {
+        return target
+            .split_once("://")
+            .is_some_and(|(_, rest)| !rest.is_empty());
+    }
+    let Some((host, path)) = target.split_once('/') else {
+        return false;
+    };
+    !path.is_empty() && host.contains('.') && !host.starts_with('.') && !host.ends_with('.')
 }
 
 pub(super) const REBASE_PROMPT: &str = "\

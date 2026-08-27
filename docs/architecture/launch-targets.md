@@ -499,10 +499,12 @@ unit-tested predicates decide the shape of that check:
 
 - `launch_needs_preflight(provider, dry_run)` — false for every non-DeepSeek
   provider and for `--dry-run`, which makes zero vault calls.
-- `launch_is_interactive(args, stdin_is_terminal, stderr_is_terminal)` —
+- `launch_is_interactive(args, backend, stdin_is_terminal, stderr_is_terminal)` —
   true only for a genuine interactive foreground launch: both streams are a
-  real tty, no noninteractive-prompt flag (`-p`, `loop`, `up`, `rebase`,
-  `fix`, `do`), not `--detach`/`--detachable`, not a `--repeat` loop.
+  real tty, the effective harness classifies the prompt as interactive, not
+  `--detach`/`--detachable`, and not a `--repeat` loop. Prompt classification is
+  backend-aware: Codex one-shot built-ins are interactive, while `-p`, `loop`,
+  and `grind` remain headless and DeepSeek retains its headless prompt profile.
 
 A missing key may be entered via hidden terminal input only when
 `launch_is_interactive` is true. Every other case — noninteractive,

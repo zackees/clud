@@ -750,6 +750,18 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
 ///
 /// `repeat_enabled` keeps overriding to subprocess — repeat jobs run in
 /// the background, have their own prompt embedded, and never need a TTY.
+fn select_session_kind_for_plan(
+    args: &Args,
+    plan: &LaunchPlan,
+    repeat_enabled: bool,
+) -> SessionKind {
+    select_session_kind(
+        plan.launch_mode,
+        repeat_enabled,
+        has_noninteractive_prompt(args, plan.backend),
+    )
+}
+
 fn select_session_kind(
     plan_mode: LaunchMode,
     repeat_enabled: bool,
@@ -811,11 +823,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         },
         None => None,
     };
-    let kind = select_session_kind(
-        plan.launch_mode,
-        repeat_enabled,
-        has_noninteractive_prompt(args),
-    );
+    let kind = select_session_kind_for_plan(args, plan, repeat_enabled);
     let (rows, cols) = terminal_dimensions();
     let backlog_bytes = resolve_backlog_bytes(args.backlog_size.as_deref());
     let name = args

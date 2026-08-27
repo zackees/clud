@@ -37,6 +37,8 @@ pub struct Args {
     #[arg(short = 'c', long = "continue")]
     pub continue_session: bool,
 
+    /// Resume a session, or open the picker when no value is supplied. Use
+    /// `--resume=<session>` when the session name matches a built-in verb.
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<Option<String>>,
 
@@ -401,16 +403,17 @@ pub enum Command {
     Fix {
         url: Option<String>,
     },
-    /// Read a URL and implement it end-to-end under the `/goal` contract.
+    /// Implement a URL or free-form task end-to-end under the `/goal` contract.
+    /// With no target, prompt for one in an interactive foreground terminal.
     Do {
-        url: String,
+        target: Option<String>,
     },
     /// Grind the current repo's issues page under the `/loop` contract.
     ///
     /// With no argument, resolves the `origin` remote and maps it to the
     /// forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues`
     /// for GitLab); errors if the remote is neither. An explicit URL is
-    /// used verbatim, exactly like `clud do <url>`.
+    /// used verbatim, exactly like a URL passed to `clud do`.
     Grind {
         url: Option<String>,
     },
@@ -1031,6 +1034,39 @@ pub enum GcSubcommand {
     Reconcile,
 }
 
+const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
+    "loop",
+    "up",
+    "rebase",
+    "fix",
+    "do",
+    "grind",
+    "wasm",
+    "attach",
+    "kill",
+    "slay",
+    "list",
+    "top",
+    "logs",
+    "log",
+    "gc",
+    "config",
+    "ui",
+    "trash",
+    "tool",
+    "optimize",
+    "daemon",
+    "symbols",
+    "settings",
+    "test",
+    "auth",
+    "codex-auth",
+    "deepseek-auth",
+    "run",
+    "__daemon",
+    "__worker",
+];
+
 impl Args {
     pub fn parse_with_passthrough() -> Self {
         let raw: Vec<String> = std::env::args().collect();
@@ -1038,12 +1074,44 @@ impl Args {
     }
 
     pub fn parse_from_raw(raw: Vec<String>) -> Self {
-        let (known, unknown) = split_known_unknown(&raw);
+        let normalized = normalize_bare_resume_before_subcommand(&raw);
+        let (known, unknown) = split_known_unknown(&normalized);
         let mut args = Args::parse_from(known);
+        if args
+            .resume
+            .as_ref()
+            .is_some_and(|value| value.as_deref() == Some(""))
+        {
+            args.resume = Some(None);
+        }
         args.passthrough.extend(unknown);
         args.raw_argv = raw;
         args
     }
+}
+
+/// `--resume` has an optional value, so clap would consume a following built-in
+/// name (`--resume do`) as the session id and never parse the subcommand. Give
+/// registered subcommands precedence by spelling a bare resume as an explicit
+/// empty value for clap, then normalize that empty value back to `Some(None)`.
+/// A session actually named like a subcommand remains addressable with
+/// `--resume=<session>`.
+fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
+    let mut normalized = raw.to_vec();
+    for i in 1..raw.len() {
+        let arg = raw[i].as_str();
+        if arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg) {
+            break;
+        }
+        if matches!(arg, "--resume" | "-r")
+            && raw
+                .get(i + 1)
+                .is_some_and(|next| TOP_LEVEL_SUBCOMMANDS.contains(&next.as_str()))
+        {
+            normalized[i] = "--resume=".to_string();
+        }
+    }
+    normalized
 }
 
 fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
@@ -1138,39 +1206,6 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     // sees an empty command vector.
     const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test"];
 
-    let subcommands: &[&str] = &[
-        "loop",
-        "up",
-        "rebase",
-        "fix",
-        "do",
-        "grind",
-        "wasm",
-        "attach",
-        "kill",
-        "slay",
-        "list",
-        "top",
-        "logs",
-        "log",
-        "gc",
-        "config",
-        "ui",
-        "trash",
-        "tool",
-        "optimize",
-        "daemon",
-        "symbols",
-        "settings",
-        "test",
-        "auth",
-        "codex-auth",
-        "deepseek-auth",
-        "run",
-        "__daemon",
-        "__worker",
-    ];
-
     // Which subcommand we are inside, once one has been seen. `None` means the
     // tokens still belong to clud's own top-level flags.
     let mut subcommand: Option<&str> = None;
@@ -1208,7 +1243,10 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
             continue;
         }
 
-        if let Some(name) = subcommands.iter().find(|name| *name == &arg.as_str()) {
+        if let Some(name) = TOP_LEVEL_SUBCOMMANDS
+            .iter()
+            .find(|name| *name == &arg.as_str())
+        {
             known.push(arg.clone());
             subcommand = Some(name);
             i += 1;
