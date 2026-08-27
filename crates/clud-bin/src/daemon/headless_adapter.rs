@@ -105,7 +105,21 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(initial.command, ["claude", "--model", "claude-test", "--output-format", "stream-json", "--verbose", "--session-id", "claude-uuid", "-p", "hello"]);
+        assert_eq!(
+            initial.command,
+            [
+                "claude",
+                "--model",
+                "claude-test",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--session-id",
+                "claude-uuid",
+                "-p",
+                "hello"
+            ]
+        );
         assert_eq!(initial.launch_mode, crate::backend::LaunchMode::Subprocess);
         assert!(!initial.stream_json_progress);
 
@@ -118,7 +132,10 @@ mod tests {
             }),
         )
         .unwrap();
-        assert!(resumed.command.windows(3).any(|window| window == ["--resume", "claude-uuid", "-p"]));
+        assert!(resumed
+            .command
+            .windows(3)
+            .any(|window| window == ["--resume", "claude-uuid", "-p"]));
     }
 
     #[test]
@@ -132,7 +149,10 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(initial.command, ["codex", "-m", "gpt-test", "exec", "--json", "hello"]);
+        assert_eq!(
+            initial.command,
+            ["codex", "-m", "gpt-test", "exec", "--json", "hello"]
+        );
         let resumed = build_turn_plan(
             // This is the CLI-shaped resume input the HTTP/lifecycle slice
             // will translate into a typed request; the adapter must not fall
@@ -153,17 +173,26 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(resumed.command, ["codex", "exec", "resume", "--json", "thread-123", "hello"]);
+        assert_eq!(
+            resumed.command,
+            ["codex", "exec", "resume", "--json", "thread-123", "hello"]
+        );
     }
 
     #[test]
     fn parser_extracts_ids_and_keeps_unknown_and_malformed_records() {
         assert_eq!(
-            parse_backend_event(Backend::Claude, r#"{"type":"system","subtype":"init","session_id":"claude-uuid"}"#),
+            parse_backend_event(
+                Backend::Claude,
+                r#"{"type":"system","subtype":"init","session_id":"claude-uuid"}"#
+            ),
             BackendEvent::ProviderSessionId("claude-uuid".to_string())
         );
         assert_eq!(
-            parse_backend_event(Backend::Codex, r#"{"type":"thread.started","thread_id":"thread-123"}"#),
+            parse_backend_event(
+                Backend::Codex,
+                r#"{"type":"thread.started","thread_id":"thread-123"}"#
+            ),
             BackendEvent::ProviderSessionId("thread-123".to_string())
         );
         assert!(matches!(
@@ -185,6 +214,12 @@ mod tests {
                 claude_session_id: None,
             },
         };
-        assert!(build_turn_plan(&args(&["clud"]), target(Backend::Claude), "claude", &request).is_err());
+        assert!(build_turn_plan(
+            &args(&["clud"]),
+            target(Backend::Claude),
+            "claude",
+            &request
+        )
+        .is_err());
     }
 }

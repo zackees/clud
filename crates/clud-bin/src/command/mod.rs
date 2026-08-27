@@ -4,6 +4,7 @@ mod loop_task;
 mod prompts;
 mod types;
 
+pub(crate) use builder::build_headless_turn_plan;
 #[allow(unused_imports)]
 pub(crate) use builder::parse_repeat_interval;
 pub use builder::{
@@ -12,9 +13,8 @@ pub use builder::{
     plan_mode_suppression_notice, repeat_implies_no_done_warning, summarize_task_name,
 };
 pub use do_input::resolve_do_command_target;
-pub use types::{LaunchPlan, LoopMarkers, RepeatSchedule};
-pub(crate) use builder::build_headless_turn_plan;
 pub(crate) use types::{HeadlessSession, HeadlessTurnRequest};
+pub use types::{LaunchPlan, LoopMarkers, RepeatSchedule};
 
 #[cfg(test)]
 mod tests;

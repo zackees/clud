@@ -409,10 +409,17 @@ pub(super) fn request_session_termination(
 }
 
 pub(super) fn request_api_session_kill(state_dir: &Path, session_id: &str) -> io::Result<()> {
-    match send_daemon_request(state_dir, &DaemonRequest::ApiSessionKill { session_id: session_id.to_string() })? {
+    match send_daemon_request(
+        state_dir,
+        &DaemonRequest::ApiSessionKill {
+            session_id: session_id.to_string(),
+        },
+    )? {
         DaemonResponse::ApiSessionKilled { .. } => Ok(()),
         DaemonResponse::Error { message } => Err(io::Error::other(message)),
-        response => Err(io::Error::other(format!("unexpected API-session kill response: {response:?}"))),
+        response => Err(io::Error::other(format!(
+            "unexpected API-session kill response: {response:?}"
+        ))),
     }
 }
 

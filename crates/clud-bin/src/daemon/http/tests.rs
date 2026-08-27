@@ -98,8 +98,7 @@ fn api_discovery_routes_require_bearer_and_return_json() {
     assert_eq!(health["api_version"], "v1");
 
     let schema: serde_json::Value = serde_json::from_str(
-        &fetch_api_path(port, "/v1/openapi.json", Some("Bearer test-api-token"))
-            .expect("fetch"),
+        &fetch_api_path(port, "/v1/openapi.json", Some("Bearer test-api-token")).expect("fetch"),
     )
     .expect("OpenAPI JSON");
     assert_eq!(schema["openapi"], "3.1.0");
@@ -110,32 +109,144 @@ fn api_discovery_routes_require_bearer_and_return_json() {
 fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
     let dir = tempfile::tempdir().unwrap();
     let port = spawn_dashboard_with_activity(
-        dir.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(), ToolTelemetryStore::new(),
-        "dashboard-canary".to_string(), "api-canary".to_string(), None, None,
-    ).unwrap();
+        dir.path().to_path_buf(),
+        None,
+        9999,
+        100,
+        empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
+        "dashboard-canary".to_string(),
+        "api-canary".to_string(),
+        None,
+        None,
+    )
+    .unwrap();
     let cwd = dir.path().to_string_lossy().replace('\\', "\\\\");
     let create = format!(r#"{{"backend":"claude","cwd":"{cwd}","name":"request-level"}}"#);
-    let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "localhost", Some("Bearer api-canary"), None, Some(&create)).unwrap();
+    let (status, _, body) = fetch_api_request(
+        port,
+        "POST",
+        "/v1/sessions",
+        "localhost",
+        Some("Bearer api-canary"),
+        None,
+        Some(&create),
+    )
+    .unwrap();
     assert!(status.contains("201"));
-    let record: serde_json::Value = serde_json::from_str(&body).unwrap(); let id = record["id"].as_str().unwrap();
-    assert!(record["cwd"].as_str().unwrap().contains(dir.path().file_name().unwrap().to_str().unwrap()));
-    let (status, _, list) = fetch_api_request(port, "GET", "/v1/sessions", "localhost", Some("Bearer api-canary"), None, None).unwrap();
-    assert!(status.contains("200")); assert!(list.contains(id));
-    let (status, headers, body) = fetch_api_request(port, "GET", &format!("/v1/sessions/{id}"), "localhost", Some("Bearer api-canary"), None, None).unwrap();
-    assert!(status.contains("200")); assert!(!headers.to_ascii_lowercase().contains("access-control-allow-origin")); assert!(!body.contains("api-canary"));
-    let (status, _, body) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/interrupt"), "localhost", Some("Bearer api-canary"), None, None).unwrap();
-    assert!(status.contains("409")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "session_not_running");
-    let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions/missing/interrupt", "localhost", Some("Bearer api-canary"), None, None).unwrap();
-    assert!(status.contains("404")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "not_found");
-    for (host, authorization, cookie) in [("attacker.invalid", Some("Bearer api-canary"), None), ("localhost", Some("Bearer wrong"), None), ("localhost", None, Some("clud_dashboard_token=dashboard-canary"))] {
-        let (status, _, body) = fetch_api_request(port, "GET", "/v1/sessions", host, authorization, cookie, None).unwrap();
-        assert!(status.contains("401")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "unauthorized"); assert!(!body.contains("api-canary"));
+    let record: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = record["id"].as_str().unwrap();
+    assert!(record["cwd"]
+        .as_str()
+        .unwrap()
+        .contains(dir.path().file_name().unwrap().to_str().unwrap()));
+    let (status, _, list) = fetch_api_request(
+        port,
+        "GET",
+        "/v1/sessions",
+        "localhost",
+        Some("Bearer api-canary"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(status.contains("200"));
+    assert!(list.contains(id));
+    let (status, headers, body) = fetch_api_request(
+        port,
+        "GET",
+        &format!("/v1/sessions/{id}"),
+        "localhost",
+        Some("Bearer api-canary"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(status.contains("200"));
+    assert!(!headers
+        .to_ascii_lowercase()
+        .contains("access-control-allow-origin"));
+    assert!(!body.contains("api-canary"));
+    let (status, _, body) = fetch_api_request(
+        port,
+        "POST",
+        &format!("/v1/sessions/{id}/interrupt"),
+        "localhost",
+        Some("Bearer api-canary"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(status.contains("409"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
+        "session_not_running"
+    );
+    let (status, _, body) = fetch_api_request(
+        port,
+        "POST",
+        "/v1/sessions/missing/interrupt",
+        "localhost",
+        Some("Bearer api-canary"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(status.contains("404"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
+        "not_found"
+    );
+    for (host, authorization, cookie) in [
+        ("attacker.invalid", Some("Bearer api-canary"), None),
+        ("localhost", Some("Bearer wrong"), None),
+        (
+            "localhost",
+            None,
+            Some("clud_dashboard_token=dashboard-canary"),
+        ),
+    ] {
+        let (status, _, body) = fetch_api_request(
+            port,
+            "GET",
+            "/v1/sessions",
+            host,
+            authorization,
+            cookie,
+            None,
+        )
+        .unwrap();
+        assert!(status.contains("401"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
+            "unauthorized"
+        );
+        assert!(!body.contains("api-canary"));
     }
-    let file = dir.path().join("not-a-directory"); std::fs::write(&file, "x").unwrap();
-    for cwd in ["relative".to_string(), dir.path().join("missing").to_string_lossy().into_owned(), file.to_string_lossy().into_owned()] {
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, "x").unwrap();
+    for cwd in [
+        "relative".to_string(),
+        dir.path().join("missing").to_string_lossy().into_owned(),
+        file.to_string_lossy().into_owned(),
+    ] {
         let body = serde_json::json!({"backend":"codex", "cwd": cwd}).to_string();
-        let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "localhost", Some("Bearer api-canary"), None, Some(&body)).unwrap();
-        assert!(status.contains("400")); assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "invalid_request");
+        let (status, _, body) = fetch_api_request(
+            port,
+            "POST",
+            "/v1/sessions",
+            "localhost",
+            Some("Bearer api-canary"),
+            None,
+            Some(&body),
+        )
+        .unwrap();
+        assert!(status.contains("400"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
+            "invalid_request"
+        );
     }
 }
 
@@ -143,37 +254,93 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
 fn api_openapi_contract_covers_each_implemented_session_route() {
     let schema = openapi_document();
     let paths = schema["paths"].as_object().unwrap();
-    for path in ["/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/turns", "/v1/sessions/{id}/interrupt", "/v1/sessions/{id}/events"] {
+    for path in [
+        "/v1/sessions",
+        "/v1/sessions/{id}",
+        "/v1/sessions/{id}/turns",
+        "/v1/sessions/{id}/interrupt",
+        "/v1/sessions/{id}/events",
+    ] {
         assert!(paths.contains_key(path), "missing route {path}");
     }
-    assert_eq!(paths["/v1/sessions/{id}/events"]["get"]["parameters"][1]["name"], "limit");
-    for path in ["/v1/sessions/{id}/interrupt", "/v1/sessions/{id}/turns", "/v1/sessions/{id}/events"] {
+    assert_eq!(
+        paths["/v1/sessions/{id}/events"]["get"]["parameters"][1]["name"],
+        "limit"
+    );
+    for path in [
+        "/v1/sessions/{id}/interrupt",
+        "/v1/sessions/{id}/turns",
+        "/v1/sessions/{id}/events",
+    ] {
         assert_eq!(paths[path]["parameters"][0]["name"], "id");
     }
-    assert_eq!(schema["components"]["securitySchemes"]["bearerAuth"]["scheme"], "bearer");
+    assert_eq!(
+        schema["components"]["securitySchemes"]["bearerAuth"]["scheme"],
+        "bearer"
+    );
     assert_eq!(schema["security"][0]["bearerAuth"], serde_json::json!([]));
-    assert!(schema["components"]["schemas"].get("EventsResponse").is_some());
-    assert!(schema["components"]["schemas"].get("TurnResponse").is_some());
+    assert!(schema["components"]["schemas"]
+        .get("EventsResponse")
+        .is_some());
+    assert!(schema["components"]["schemas"]
+        .get("TurnResponse")
+        .is_some());
 }
 
 fn http_test_mock_agent() -> std::path::PathBuf {
     let extension = if cfg!(windows) { ".exe" } else { "" };
-    let target = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().and_then(|path| path.parent()).unwrap().join("target"));
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|path| path.parent())
+                .unwrap()
+                .join("target")
+        });
     let candidates = [
         target.join("debug").join(format!("mock-agent{extension}")),
-        target.join("x86_64-pc-windows-msvc").join("debug").join(format!("mock-agent{extension}")),
-        target.join("x86_64-unknown-linux-gnu").join("debug").join(format!("mock-agent{extension}")),
-        target.join("aarch64-unknown-linux-gnu").join("debug").join(format!("mock-agent{extension}")),
-        target.join("aarch64-apple-darwin").join("debug").join(format!("mock-agent{extension}")),
-        target.join("x86_64-apple-darwin").join("debug").join(format!("mock-agent{extension}")),
+        target
+            .join("x86_64-pc-windows-msvc")
+            .join("debug")
+            .join(format!("mock-agent{extension}")),
+        target
+            .join("x86_64-unknown-linux-gnu")
+            .join("debug")
+            .join(format!("mock-agent{extension}")),
+        target
+            .join("aarch64-unknown-linux-gnu")
+            .join("debug")
+            .join(format!("mock-agent{extension}")),
+        target
+            .join("aarch64-apple-darwin")
+            .join("debug")
+            .join(format!("mock-agent{extension}")),
+        target
+            .join("x86_64-apple-darwin")
+            .join("debug")
+            .join(format!("mock-agent{extension}")),
     ];
-    candidates.into_iter().find(|path| path.is_file()).expect("mock-agent is built by the test bundle")
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .expect("mock-agent is built by the test bundle")
 }
 
-fn wait_for_api_state(store: &super::super::api_sessions::ApiSessionStore, id: &str, state: super::super::api_sessions::ApiSessionState) {
+fn wait_for_api_state(
+    store: &super::super::api_sessions::ApiSessionStore,
+    id: &str,
+    state: super::super::api_sessions::ApiSessionState,
+) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
-        if store.get(id).map(|record| record.state == state).unwrap_or(false) { return; }
+        if store
+            .get(id)
+            .map(|record| record.state == state)
+            .unwrap_or(false)
+        {
+            return;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("API session {id} did not reach {state:?}");
@@ -182,35 +349,124 @@ fn wait_for_api_state(store: &super::super::api_sessions::ApiSessionStore, id: &
 #[test]
 fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity() {
     let temp = tempfile::tempdir().unwrap();
-    let cwd = temp.path().join("cwd"); std::fs::create_dir(&cwd).unwrap();
+    let cwd = temp.path().join("cwd");
+    std::fs::create_dir(&cwd).unwrap();
     let script = temp.path().join("claude.jsonl");
     std::fs::write(&script, "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"provider-http\"}\n{\"type\":\"future.event\"}\nnot json\n").unwrap();
-    let _mock_guard = super::super::api_session_http::set_test_headless_executable(http_test_mock_agent().to_string_lossy().into_owned(), vec!["--mock-stream-json".to_string(), script.to_string_lossy().into_owned(), "--mock-stream-delay-ms".to_string(), "250".to_string()]);
+    let _mock_guard = super::super::api_session_http::set_test_headless_executable(
+        http_test_mock_agent().to_string_lossy().into_owned(),
+        vec![
+            "--mock-stream-json".to_string(),
+            script.to_string_lossy().into_owned(),
+            "--mock-stream-delay-ms".to_string(),
+            "250".to_string(),
+        ],
+    );
     let activity = super::super::activity::DaemonActivity::new(std::time::Instant::now());
     let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
-    let lifecycle = std::sync::Arc::new(super::super::api_session_lifecycle::ApiSessionLifecycle::with_activity(store.clone(), activity.clone()));
-    let port = spawn_dashboard_with_activity_and_lifecycle(temp.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(), ToolTelemetryStore::new(), "dashboard-token".to_string(), "api-token".to_string(), None, Some(activity.clone()), lifecycle);
+    let lifecycle = std::sync::Arc::new(
+        super::super::api_session_lifecycle::ApiSessionLifecycle::with_activity(
+            store.clone(),
+            activity.clone(),
+        ),
+    );
+    let port = spawn_dashboard_with_activity_and_lifecycle(
+        temp.path().to_path_buf(),
+        None,
+        9999,
+        100,
+        empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
+        "dashboard-token".to_string(),
+        "api-token".to_string(),
+        None,
+        Some(activity.clone()),
+        lifecycle,
+    );
     let port = port.expect("dashboard spawned");
-    let create = format!(r#"{{"backend":"claude","cwd":"{}","safe":true}}"#, cwd.to_string_lossy().replace('\\', "\\\\"));
-    let (status, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "127.0.0.1", Some("Bearer api-token"), None, Some(&create)).unwrap();
+    let create = format!(
+        r#"{{"backend":"claude","cwd":"{}","safe":true}}"#,
+        cwd.to_string_lossy().replace('\\', "\\\\")
+    );
+    let (status, _, body) = fetch_api_request(
+        port,
+        "POST",
+        "/v1/sessions",
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        Some(&create),
+    )
+    .unwrap();
     assert!(status.contains("201"));
     let created: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(created["cwd"], cwd.canonicalize().unwrap().to_string_lossy().as_ref());
+    assert_eq!(
+        created["cwd"],
+        cwd.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
     let id = created["id"].as_str().unwrap().to_string();
-    let (status, _, _) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/turns"), "127.0.0.1", Some("Bearer api-token"), None, Some(r#"{"message":"first"}"#)).unwrap();
+    let (status, _, _) = fetch_api_request(
+        port,
+        "POST",
+        &format!("/v1/sessions/{id}/turns"),
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        Some(r#"{"message":"first"}"#),
+    )
+    .unwrap();
     assert!(status.contains("202"));
     assert!(activity.snapshot(std::time::Instant::now()).active_jobs > 0);
-    wait_for_api_state(&store, &id, super::super::api_sessions::ApiSessionState::Idle);
+    wait_for_api_state(
+        &store,
+        &id,
+        super::super::api_sessions::ApiSessionState::Idle,
+    );
     assert_eq!(activity.snapshot(std::time::Instant::now()).active_jobs, 0);
     let record = store.get(&id).unwrap();
     assert_eq!(record.provider_session_id.as_deref(), Some("provider-http"));
-    assert!(record.events.iter().any(|event| event.kind == "backend_event"));
-    assert!(record.events.iter().any(|event| event.kind == "backend_malformed"));
-    let raw = temp.path().join("logs").join("api").join(&id).join("1.jsonl"); assert!(std::fs::read_to_string(raw).unwrap().contains("provider-http"));
-    let (status, _, _) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/turns"), "127.0.0.1", Some("Bearer api-token"), None, Some(r#"{"message":"resume"}"#)).unwrap();
+    assert!(record
+        .events
+        .iter()
+        .any(|event| event.kind == "backend_event"));
+    assert!(record
+        .events
+        .iter()
+        .any(|event| event.kind == "backend_malformed"));
+    let raw = temp
+        .path()
+        .join("logs")
+        .join("api")
+        .join(&id)
+        .join("1.jsonl");
+    assert!(std::fs::read_to_string(raw)
+        .unwrap()
+        .contains("provider-http"));
+    let (status, _, _) = fetch_api_request(
+        port,
+        "POST",
+        &format!("/v1/sessions/{id}/turns"),
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        Some(r#"{"message":"resume"}"#),
+    )
+    .unwrap();
     assert!(status.contains("202"));
-    wait_for_api_state(&store, &id, super::super::api_sessions::ApiSessionState::Idle);
-    let resumed_raw = std::fs::read_to_string(temp.path().join("logs").join("api").join(&id).join("2.jsonl")).unwrap();
+    wait_for_api_state(
+        &store,
+        &id,
+        super::super::api_sessions::ApiSessionState::Idle,
+    );
+    let resumed_raw = std::fs::read_to_string(
+        temp.path()
+            .join("logs")
+            .join("api")
+            .join(&id)
+            .join("2.jsonl"),
+    )
+    .unwrap();
     assert!(resumed_raw.contains("provider-http"));
 }
 
@@ -786,9 +1042,8 @@ fn fetch_api_path(port: u16, path: &str, authorization: Option<&str>) -> io::Res
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut request = format!(
-        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n"
-    );
+    let mut request =
+        format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
     if let Some(authorization) = authorization {
         request.push_str(&format!("Authorization: {authorization}\r\n"));
     }
@@ -806,20 +1061,42 @@ fn fetch_api_path(port: u16, path: &str, authorization: Option<&str>) -> io::Res
 /// Request-level API helper retaining status and headers so auth/CORS/token
 /// redaction assertions do not accidentally test only a parsed JSON body.
 fn fetch_api_request(
-    port: u16, method: &str, path: &str, host: &str, authorization: Option<&str>, cookie: Option<&str>, body: Option<&str>,
+    port: u16,
+    method: &str,
+    path: &str,
+    host: &str,
+    authorization: Option<&str>,
+    cookie: Option<&str>,
+    body: Option<&str>,
 ) -> io::Result<(String, String, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut request = format!("{method} {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n");
-    if let Some(value) = authorization { request.push_str(&format!("Authorization: {value}\r\n")); }
-    if let Some(value) = cookie { request.push_str(&format!("Cookie: {value}\r\n")); }
-    if let Some(value) = body { request.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{value}", value.len())); } else { request.push_str("\r\n"); }
-    stream.write_all(request.as_bytes())?; stream.flush()?;
-    let mut raw = Vec::new(); stream.read_to_end(&mut raw)?;
-    let body_start = find_body_start(&raw).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
+    let mut request =
+        format!("{method} {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n");
+    if let Some(value) = authorization {
+        request.push_str(&format!("Authorization: {value}\r\n"));
+    }
+    if let Some(value) = cookie {
+        request.push_str(&format!("Cookie: {value}\r\n"));
+    }
+    if let Some(value) = body {
+        request.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{value}",
+            value.len()
+        ));
+    } else {
+        request.push_str("\r\n");
+    }
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    let body_start = find_body_start(&raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
     let head = String::from_utf8_lossy(&raw[..body_start]).to_string();
     let status = head.lines().next().unwrap_or_default().to_string();
-    let body = String::from_utf8(raw[body_start..].to_vec()).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let body = String::from_utf8(raw[body_start..].to_vec())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     Ok((status, head, body))
 }

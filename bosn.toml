@@ -22,6 +22,10 @@ destination = "/workspace/.venv"
 scope = "machine"
 destination = "/root/.cache/uv"
 
+[stack.clud_1044_validation.volumes.ruff-cache]
+scope = "machine"
+destination = "/root/.cache/ruff"
+
 [stack.clud_1044_validation.volumes.cargo-home]
 scope = "machine"
 destination = "/root/.cargo"
@@ -33,6 +37,7 @@ destination = "/root/.rustup"
 [stack.clud_1044_validation.env]
 CARGO_TARGET_DIR = "/workspace/target"
 UV_CACHE_DIR = "/root/.cache/uv"
+RUFF_CACHE_DIR = "/root/.cache/ruff"
 # This repository pins Soldr through its packaging/CI flow rather than a
 # rust-toolchain.toml; the image itself pins Rust 1.94.
 SOLDR_ALLOW_UNPINNED = "1"

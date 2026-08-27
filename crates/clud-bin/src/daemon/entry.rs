@@ -127,15 +127,24 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
             }
             match super::http::read_api_info(state_dir) {
                 Ok((pid, Some(port), Some(token), version)) if *json => {
-                    println!("{}", serde_json::json!({"base_url": format!("http://127.0.0.1:{port}"), "token": token, "pid": pid, "version": version}));
+                    println!(
+                        "{}",
+                        serde_json::json!({"base_url": format!("http://127.0.0.1:{port}"), "token": token, "pid": pid, "version": version})
+                    );
                     0
                 }
                 Ok((_pid, Some(port), Some(_token), _version)) => {
                     println!("daemon API available on port {port}; use --json for credentials");
                     0
                 }
-                Ok(_) => { eprintln!("[clud] API listener unavailable; restart daemon"); 1 }
-                Err(err) => { eprintln!("[clud] cannot read API info: {err}"); 1 }
+                Ok(_) => {
+                    eprintln!("[clud] API listener unavailable; restart daemon");
+                    1
+                }
+                Err(err) => {
+                    eprintln!("[clud] cannot read API info: {err}");
+                    1
+                }
             }
         }
         DaemonSubcommand::Restart => match request_daemon_shutdown(state_dir) {

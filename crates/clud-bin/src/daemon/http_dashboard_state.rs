@@ -167,13 +167,27 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
 }
 
 fn merge_api_sessions(sessions: &mut Vec<SessionView>, state_dir: &Path) {
-    for record in super::api_sessions::ApiSessionStore::new(state_dir).list().unwrap_or_default() {
-        let live = matches!(record.state, super::api_sessions::ApiSessionState::Running | super::api_sessions::ApiSessionState::Interrupting | super::api_sessions::ApiSessionState::Starting);
+    for record in super::api_sessions::ApiSessionStore::new(state_dir)
+        .list()
+        .unwrap_or_default()
+    {
+        let live = matches!(
+            record.state,
+            super::api_sessions::ApiSessionState::Running
+                | super::api_sessions::ApiSessionState::Interrupting
+                | super::api_sessions::ApiSessionState::Starting
+        );
         sessions.push(SessionView {
             id: record.id,
             kind: "api".to_string(),
             source: "api".to_string(),
-            backend: Some(match record.backend { super::api_sessions::ApiSessionBackend::Claude => "claude", super::api_sessions::ApiSessionBackend::Codex => "codex" }.to_string()),
+            backend: Some(
+                match record.backend {
+                    super::api_sessions::ApiSessionBackend::Claude => "claude",
+                    super::api_sessions::ApiSessionBackend::Codex => "codex",
+                }
+                .to_string(),
+            ),
             launch_mode: Some("subprocess".to_string()),
             name: record.name,
             cwd: Some(record.cwd.display().to_string()),

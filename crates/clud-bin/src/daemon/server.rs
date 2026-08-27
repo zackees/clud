@@ -113,11 +113,20 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     cleanup_stale_state(state_dir);
     // A new daemon never adopts a persisted provider PID. Seal active turns
     // before accepting either HTTP or RPC lifecycle mutations.
-    let api_lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::with_activity(
-        super::api_sessions::ApiSessionStore::new(state_dir), activity.clone(),
-    ));
-    if let Err(error) = super::api_sessions::ApiSessionStore::new(state_dir).reconcile_after_restart() {
-        daemon_events::log_event(state_dir, "api_session_recovery_failed", [("error", json!(error.to_string()))]);
+    let api_lifecycle = Arc::new(
+        super::api_session_lifecycle::ApiSessionLifecycle::with_activity(
+            super::api_sessions::ApiSessionStore::new(state_dir),
+            activity.clone(),
+        ),
+    );
+    if let Err(error) =
+        super::api_sessions::ApiSessionStore::new(state_dir).reconcile_after_restart()
+    {
+        daemon_events::log_event(
+            state_dir,
+            "api_session_recovery_failed",
+            [("error", json!(error.to_string()))],
+        );
     }
 
     let listener = match TcpListener::bind(("127.0.0.1", 0)) {
@@ -526,8 +535,18 @@ pub(super) fn dispatch_daemon_request_with_sampler(
     client_leases: &ClientLeaseRegistry,
     request: DaemonRequest,
 ) -> DaemonResponse {
-    let lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::new(super::api_sessions::ApiSessionStore::new(state_dir)));
-    dispatch_daemon_request_with_sampler_and_lifecycle(state_dir, workers, gc_tx, proc_sampler, client_leases, &lifecycle, request)
+    let lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::new(
+        super::api_sessions::ApiSessionStore::new(state_dir),
+    ));
+    dispatch_daemon_request_with_sampler_and_lifecycle(
+        state_dir,
+        workers,
+        gc_tx,
+        proc_sampler,
+        client_leases,
+        &lifecycle,
+        request,
+    )
 }
 
 pub(super) fn dispatch_daemon_request_with_sampler_and_lifecycle(
@@ -598,12 +617,12 @@ fn dispatch_daemon_request_with_id(
                 message: err.to_string(),
             },
         },
-        DaemonRequest::ApiSessionKill { session_id } => {
-            match api_lifecycle.kill(&session_id) {
-                Ok(_) => DaemonResponse::ApiSessionKilled { session_id },
-                Err(error) => DaemonResponse::Error { message: error.to_string() },
-            }
-        }
+        DaemonRequest::ApiSessionKill { session_id } => match api_lifecycle.kill(&session_id) {
+            Ok(_) => DaemonResponse::ApiSessionKilled { session_id },
+            Err(error) => DaemonResponse::Error {
+                message: error.to_string(),
+            },
+        },
         DaemonRequest::AdoptKill { pids, reason } => {
             daemon_events::log_event(
                 state_dir,
@@ -1525,16 +1544,39 @@ mod tests {
     fn api_kill_dispatch_uses_the_supplied_lifecycle_owner() {
         let temp = tempfile::TempDir::new().unwrap();
         let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
-        let record = store.create(super::super::api_sessions::CreateApiSession {
-            backend: super::super::api_sessions::ApiSessionBackend::Claude,
-            cwd: temp.path().to_path_buf(), name: None,
-            resolved_settings: super::super::api_sessions::ResolvedApiSessionSettings { model: None, safe: false, model_provider: None, harness: None, routing_mode: None },
-        }).unwrap();
-        let lifecycle = Arc::new(super::super::api_session_lifecycle::ApiSessionLifecycle::new(store.clone()));
+        let record = store
+            .create(super::super::api_sessions::CreateApiSession {
+                backend: super::super::api_sessions::ApiSessionBackend::Claude,
+                cwd: temp.path().to_path_buf(),
+                name: None,
+                resolved_settings: super::super::api_sessions::ResolvedApiSessionSettings {
+                    model: None,
+                    safe: false,
+                    model_provider: None,
+                    harness: None,
+                    routing_mode: None,
+                },
+            })
+            .unwrap();
+        let lifecycle =
+            Arc::new(super::super::api_session_lifecycle::ApiSessionLifecycle::new(store.clone()));
         let workers = Arc::new(Mutex::new(HashMap::new()));
-        let reply = dispatch_daemon_request_with_sampler_and_lifecycle(temp.path(), &workers, None, None, &ClientLeaseRegistry::default(), &lifecycle, DaemonRequest::ApiSessionKill { session_id: record.id.clone() });
+        let reply = dispatch_daemon_request_with_sampler_and_lifecycle(
+            temp.path(),
+            &workers,
+            None,
+            None,
+            &ClientLeaseRegistry::default(),
+            &lifecycle,
+            DaemonRequest::ApiSessionKill {
+                session_id: record.id.clone(),
+            },
+        );
         assert!(matches!(reply, DaemonResponse::ApiSessionKilled { .. }));
-        assert_eq!(store.get(&record.id).unwrap().state, super::super::api_sessions::ApiSessionState::Terminated);
+        assert_eq!(
+            store.get(&record.id).unwrap().state,
+            super::super::api_sessions::ApiSessionState::Terminated
+        );
     }
 
     #[test]

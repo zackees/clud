@@ -20,7 +20,13 @@ use clud::graphics::GraphicsConfig;
 
 use common::{mock_agent_path, wait_until};
 
-fn plan(executable: PathBuf, backend: Backend, cwd: &Path, script: &Path, exit_code: i32) -> LaunchPlan {
+fn plan(
+    executable: PathBuf,
+    backend: Backend,
+    cwd: &Path,
+    script: &Path,
+    exit_code: i32,
+) -> LaunchPlan {
     LaunchPlan {
         command: vec![
             executable.to_string_lossy().into_owned(),
@@ -92,22 +98,47 @@ fn mock_claude_capture_persists_identity_raw_unknown_and_malformed_before_idle()
         store.get(&id).unwrap().state == ApiSessionState::Idle
     }));
     let record = store.get(&id).unwrap();
-    assert_eq!(record.provider_session_id.as_deref(), Some("claude-provider"));
+    assert_eq!(
+        record.provider_session_id.as_deref(),
+        Some("claude-provider")
+    );
     assert_eq!(record.turns[0].state, ApiTurnState::Completed);
-    assert!(record.events.iter().any(|event| event.kind == "backend_event"));
-    assert!(record.events.iter().any(|event| event.kind == "backend_malformed"));
-    let raw = temp.path().join("logs").join("api").join(&id).join("1.jsonl");
-    assert!(std::fs::read_to_string(raw).unwrap().contains("claude-provider"));
-    let resumed = store.begin_turn(&id, "resume-after-capture".to_string()).unwrap();
+    assert!(record
+        .events
+        .iter()
+        .any(|event| event.kind == "backend_event"));
+    assert!(record
+        .events
+        .iter()
+        .any(|event| event.kind == "backend_malformed"));
+    let raw = temp
+        .path()
+        .join("logs")
+        .join("api")
+        .join(&id)
+        .join("1.jsonl");
+    assert!(std::fs::read_to_string(raw)
+        .unwrap()
+        .contains("claude-provider"));
+    let resumed = store
+        .begin_turn(&id, "resume-after-capture".to_string())
+        .unwrap();
     assert_eq!(resumed.generation, 2);
-    assert_eq!(store.get(&id).unwrap().provider_session_id.as_deref(), Some("claude-provider"));
+    assert_eq!(
+        store.get(&id).unwrap().provider_session_id.as_deref(),
+        Some("claude-provider")
+    );
 }
 
 #[test]
 fn mock_codex_capture_persists_identity_then_records_nonzero_failure() {
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("codex.jsonl");
-    std::fs::write(&script, "{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n").unwrap();
+    std::fs::write(
+        &script,
+        "{\"type\":\"thread.started\",\"thread_id\":\"codex-thread\"}\n",
+    )
+    .unwrap();
     let store = ApiSessionStore::new(temp.path());
     let id = create_session(&store, ApiSessionBackend::Codex, temp.path());
 

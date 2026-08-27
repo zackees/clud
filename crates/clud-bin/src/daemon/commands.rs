@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::client::{ensure_daemon, request_api_session_kill, request_session_termination};
 use super::api_sessions::ApiSessionStore;
+use super::client::{ensure_daemon, request_api_session_kill, request_session_termination};
 use super::io_helpers::read_json_file;
 use super::paths::{logs_dir, session_log_path, session_snapshot_path};
 use super::sessions::{list_background_sessions, resolve_session_id};
@@ -74,8 +74,14 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
     let api_store = ApiSessionStore::new(state_dir);
     if api_store.get(input).is_ok() {
         return match request_api_session_kill(state_dir, input) {
-            Ok(()) => { eprintln!("[clud] killed API session {input}"); 0 }
-            Err(err) => { eprintln!("[clud] failed to kill API session {input}: {err}"); 1 }
+            Ok(()) => {
+                eprintln!("[clud] killed API session {input}");
+                0
+            }
+            Err(err) => {
+                eprintln!("[clud] failed to kill API session {input}: {err}");
+                1
+            }
         };
     }
 
@@ -88,7 +94,11 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
     };
 
     let api = ApiSessionStore::new(state_dir).get(&resolved).is_ok();
-    let result = if api { request_api_session_kill(state_dir, &resolved).map(|_| ()) } else { request_session_termination(state_dir, &resolved).map(|_| ()) };
+    let result = if api {
+        request_api_session_kill(state_dir, &resolved).map(|_| ())
+    } else {
+        request_session_termination(state_dir, &resolved).map(|_| ())
+    };
     match result {
         Ok(_) => {
             eprintln!("[clud] killed session {}", resolved);
@@ -173,10 +183,17 @@ pub(super) fn run_list(state_dir: &Path) -> i32 {
     }
 
     if !api_sessions.is_empty() {
-        if !sessions.is_empty() { println!(); }
+        if !sessions.is_empty() {
+            println!();
+        }
         println!("{:<30} {:<12} CWD", "API SESSION", "STATUS");
         for session in api_sessions {
-            println!("{:<30} {:<12} {}", session.id, format!("{:?}", session.state).to_ascii_lowercase(), session.cwd.display());
+            println!(
+                "{:<30} {:<12} {}",
+                session.id,
+                format!("{:?}", session.state).to_ascii_lowercase(),
+                session.cwd.display()
+            );
         }
     }
     0
@@ -308,13 +325,40 @@ fn run_api_logs(
     lines: Option<usize>,
     interrupted: &AtomicBool,
 ) -> i32 {
-    let Some(turn) = session.turns.last() else { eprintln!("[clud] API session {} has no turn log", session.id); return 1; };
+    let Some(turn) = session.turns.last() else {
+        eprintln!("[clud] API session {} has no turn log", session.id);
+        return 1;
+    };
     let path = super::paths::api_turn_log_path(state_dir, &session.id, turn.generation);
-    let mut offset = match print_log_tail(&path, lines) { Ok(offset) => offset, Err(err) => { eprintln!("[clud] failed to read API log {}: {err}", path.display()); return 1; } };
-    if !follow { return 0; }
-    while matches!(ApiSessionStore::new(state_dir).get(&session.id).map(|value| value.state), Ok(super::api_sessions::ApiSessionState::Starting | super::api_sessions::ApiSessionState::Running | super::api_sessions::ApiSessionState::Interrupting)) {
-        if interrupted.load(Ordering::SeqCst) { super::attach::log_observed_interrupt_reason("api_logs_follow"); return 130; }
-        if let Ok((new_offset, bytes)) = follow_read(&path, offset) { if !bytes.is_empty() { let _ = io::stdout().write_all(&bytes); let _ = io::stdout().flush(); } offset = new_offset; }
+    let mut offset = match print_log_tail(&path, lines) {
+        Ok(offset) => offset,
+        Err(err) => {
+            eprintln!("[clud] failed to read API log {}: {err}", path.display());
+            return 1;
+        }
+    };
+    if !follow {
+        return 0;
+    }
+    while matches!(
+        ApiSessionStore::new(state_dir)
+            .get(&session.id)
+            .map(|value| value.state),
+        Ok(super::api_sessions::ApiSessionState::Starting
+            | super::api_sessions::ApiSessionState::Running
+            | super::api_sessions::ApiSessionState::Interrupting)
+    ) {
+        if interrupted.load(Ordering::SeqCst) {
+            super::attach::log_observed_interrupt_reason("api_logs_follow");
+            return 130;
+        }
+        if let Ok((new_offset, bytes)) = follow_read(&path, offset) {
+            if !bytes.is_empty() {
+                let _ = io::stdout().write_all(&bytes);
+                let _ = io::stdout().flush();
+            }
+            offset = new_offset;
+        }
         thread::sleep(Duration::from_millis(200));
     }
     0

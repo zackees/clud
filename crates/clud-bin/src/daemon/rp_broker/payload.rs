@@ -5,8 +5,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use running_process::broker::protocol::Frame;
 use running_process::NativeProcess;
 
-use super::super::client_leases::ClientLeaseRegistry;
 use super::super::api_session_lifecycle::ApiSessionLifecycle;
+use super::super::client_leases::ClientLeaseRegistry;
 use super::super::gc_service::RegistryMsg;
 use super::super::proc_sampler::ProcSamplerHandle;
 use super::super::server::dispatch_daemon_request_with_sampler_and_lifecycle;

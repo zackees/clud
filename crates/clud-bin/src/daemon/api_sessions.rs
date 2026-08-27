@@ -184,11 +184,24 @@ impl ApiSessionRecord {
 pub enum ApiSessionStoreError {
     Io(io::Error),
     NotFound(String),
-    Corrupt { session_id: String, message: String },
-    InvalidCwd { path: PathBuf, message: String },
-    InvalidTransition { state: ApiSessionState, operation: &'static str },
-    EventTooLarge { bytes: usize },
-    IdempotencyConflict { key: String },
+    Corrupt {
+        session_id: String,
+        message: String,
+    },
+    InvalidCwd {
+        path: PathBuf,
+        message: String,
+    },
+    InvalidTransition {
+        state: ApiSessionState,
+        operation: &'static str,
+    },
+    EventTooLarge {
+        bytes: usize,
+    },
+    IdempotencyConflict {
+        key: String,
+    },
 }
 
 impl std::fmt::Display for ApiSessionStoreError {
@@ -196,15 +209,26 @@ impl std::fmt::Display for ApiSessionStoreError {
         match self {
             Self::Io(error) => write!(f, "{error}"),
             Self::NotFound(id) => write!(f, "API session '{id}' not found"),
-            Self::Corrupt { session_id, message } => {
+            Self::Corrupt {
+                session_id,
+                message,
+            } => {
                 write!(f, "API session '{session_id}' is corrupt: {message}")
             }
-            Self::InvalidCwd { path, message } => write!(f, "invalid cwd '{}': {message}", path.display()),
+            Self::InvalidCwd { path, message } => {
+                write!(f, "invalid cwd '{}': {message}", path.display())
+            }
             Self::InvalidTransition { state, operation } => {
                 write!(f, "cannot {operation} API session in {state:?} state")
             }
-            Self::EventTooLarge { bytes } => write!(f, "API session event is {bytes} bytes; limit is {MAX_EVENT_DATA_BYTES}"),
-            Self::IdempotencyConflict { key } => write!(f, "idempotency key '{key}' was reused for a different request"),
+            Self::EventTooLarge { bytes } => write!(
+                f,
+                "API session event is {bytes} bytes; limit is {MAX_EVENT_DATA_BYTES}"
+            ),
+            Self::IdempotencyConflict { key } => write!(
+                f,
+                "idempotency key '{key}' was reused for a different request"
+            ),
         }
     }
 }
@@ -212,7 +236,9 @@ impl std::fmt::Display for ApiSessionStoreError {
 impl std::error::Error for ApiSessionStoreError {}
 
 impl From<io::Error> for ApiSessionStoreError {
-    fn from(error: io::Error) -> Self { Self::Io(error) }
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,7 +250,11 @@ pub struct ApiSessionStore {
 
 impl ApiSessionStore {
     pub fn new(state_dir: impl Into<PathBuf>) -> Self {
-        Self { state_dir: state_dir.into(), event_limit: DEFAULT_EVENT_LIMIT, idempotency_limit: DEFAULT_IDEMPOTENCY_LIMIT }
+        Self {
+            state_dir: state_dir.into(),
+            event_limit: DEFAULT_EVENT_LIMIT,
+            idempotency_limit: DEFAULT_IDEMPOTENCY_LIMIT,
+        }
     }
 
     pub fn state_dir(&self) -> &Path {
@@ -232,18 +262,34 @@ impl ApiSessionStore {
     }
 
     #[cfg(test)]
-    fn with_limits(state_dir: impl Into<PathBuf>, event_limit: usize, idempotency_limit: usize) -> Self {
-        Self { state_dir: state_dir.into(), event_limit, idempotency_limit }
+    fn with_limits(
+        state_dir: impl Into<PathBuf>,
+        event_limit: usize,
+        idempotency_limit: usize,
+    ) -> Self {
+        Self {
+            state_dir: state_dir.into(),
+            event_limit,
+            idempotency_limit,
+        }
     }
 
-    pub fn create(&self, request: CreateApiSession) -> Result<ApiSessionRecord, ApiSessionStoreError> {
+    pub fn create(
+        &self,
+        request: CreateApiSession,
+    ) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         let cwd = canonical_api_cwd(&request.cwd)?;
         let _lock = self.lock_create()?;
         let now = unix_millis_now();
         let id = (0..16)
             .map(|_| new_session_id())
             .find(|candidate| !api_session_path(&self.state_dir, candidate).exists())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "could not allocate API session id"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "could not allocate API session id",
+                )
+            })?;
         let record = ApiSessionRecord {
             schema_version: 1,
             id,
@@ -278,22 +324,49 @@ impl ApiSessionStore {
     pub fn list(&self) -> Result<Vec<ApiSessionRecord>, ApiSessionStoreError> {
         let dir = api_sessions_dir(&self.state_dir);
         let mut records = Vec::new();
-        let entries = match fs::read_dir(dir) { Ok(entries) => entries, Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(records), Err(error) => return Err(error.into()) };
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(records),
+            Err(error) => return Err(error.into()),
+        };
         for entry in entries {
             let path = entry?.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
-            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else { continue; };
-            if let Ok(record) = self.read(id) { records.push(record); }
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if let Ok(record) = self.read(id) {
+                records.push(record);
+            }
         }
         records.sort_by_key(|record| record.created_at_ms);
         Ok(records)
     }
 
-    pub fn begin_turn(&self, session_id: &str, turn_id: String) -> Result<ApiTurnRecord, ApiSessionStoreError> {
+    pub fn begin_turn(
+        &self,
+        session_id: &str,
+        turn_id: String,
+    ) -> Result<ApiTurnRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| {
-            if !record.state.accepts_turns() { return Err(ApiSessionStoreError::InvalidTransition { state: record.state, operation: "begin a turn for" }); }
+            if !record.state.accepts_turns() {
+                return Err(ApiSessionStoreError::InvalidTransition {
+                    state: record.state,
+                    operation: "begin a turn for",
+                });
+            }
             record.generation = record.generation.saturating_add(1);
-            let turn = ApiTurnRecord { id: turn_id, generation: record.generation, state: ApiTurnState::Starting, created_at_ms: unix_millis_now(), completed_at_ms: None, disposition: None, root_identity: None };
+            let turn = ApiTurnRecord {
+                id: turn_id,
+                generation: record.generation,
+                state: ApiTurnState::Starting,
+                created_at_ms: unix_millis_now(),
+                completed_at_ms: None,
+                disposition: None,
+                root_identity: None,
+            };
             record.current_turn_id = Some(turn.id.clone());
             record.turns.push(turn.clone());
             record.state = ApiSessionState::Running;
@@ -303,7 +376,13 @@ impl ApiSessionStore {
 
     /// Atomically checks a request key and claims the next generation.  This
     /// is the lifecycle controller's only admission path for a new process.
-    pub fn begin_idempotent_turn(&self, session_id: &str, turn_id: String, key: Option<String>, fingerprint: String) -> Result<BeginApiTurn, ApiSessionStoreError> {
+    pub fn begin_idempotent_turn(
+        &self,
+        session_id: &str,
+        turn_id: String,
+        key: Option<String>,
+        fingerprint: String,
+    ) -> Result<BeginApiTurn, ApiSessionStoreError> {
         let limit = self.idempotency_limit;
         self.mutate(session_id, |record| {
             if let Some(key) = key.as_ref() {
@@ -315,16 +394,35 @@ impl ApiSessionStore {
                     };
                 }
             }
-            if record.state == ApiSessionState::Terminated { return Ok(BeginApiTurn::Terminated); }
-            if !record.state.accepts_turns() { return Ok(BeginApiTurn::Busy); }
+            if record.state == ApiSessionState::Terminated {
+                return Ok(BeginApiTurn::Terminated);
+            }
+            if !record.state.accepts_turns() {
+                return Ok(BeginApiTurn::Busy);
+            }
             record.generation = record.generation.saturating_add(1);
-            let turn = ApiTurnRecord { id: turn_id, generation: record.generation, state: ApiTurnState::Starting, created_at_ms: unix_millis_now(), completed_at_ms: None, disposition: None, root_identity: None };
+            let turn = ApiTurnRecord {
+                id: turn_id,
+                generation: record.generation,
+                state: ApiTurnState::Starting,
+                created_at_ms: unix_millis_now(),
+                completed_at_ms: None,
+                disposition: None,
+                root_identity: None,
+            };
             record.current_turn_id = Some(turn.id.clone());
             record.turns.push(turn.clone());
             record.state = ApiSessionState::Running;
             if let Some(key) = key {
-                record.idempotency.push_back(IdempotencyRecord { key, turn_id: turn.id.clone(), request_fingerprint: fingerprint, created_at_ms: unix_millis_now() });
-                while record.idempotency.len() > limit { record.idempotency.pop_front(); }
+                record.idempotency.push_back(IdempotencyRecord {
+                    key,
+                    turn_id: turn.id.clone(),
+                    request_fingerprint: fingerprint,
+                    created_at_ms: unix_millis_now(),
+                });
+                while record.idempotency.len() > limit {
+                    record.idempotency.pop_front();
+                }
             }
             Ok(BeginApiTurn::Started(turn))
         })
@@ -333,48 +431,114 @@ impl ApiSessionStore {
     /// Records the durable side of a graceful-interrupt request before the
     /// process signal is sent.  A late waiter may then only seal this exact
     /// turn; it cannot make a later generation idle.
-    pub fn begin_interrupt(&self, session_id: &str, turn_id: &str) -> Result<(), ApiSessionStoreError> {
+    pub fn begin_interrupt(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<(), ApiSessionStoreError> {
         self.mutate(session_id, |record| {
-            if record.current_turn_id.as_deref() != Some(turn_id) { return Ok(()); }
+            if record.current_turn_id.as_deref() != Some(turn_id) {
+                return Ok(());
+            }
             record.state = ApiSessionState::Interrupting;
             Ok(())
         })
     }
 
-    pub fn set_provider_session_id(&self, session_id: &str, provider_session_id: String) -> Result<ApiSessionRecord, ApiSessionStoreError> {
-        self.mutate(session_id, |record| { record.provider_session_id = Some(provider_session_id); Ok(record.clone()) })
+    pub fn set_provider_session_id(
+        &self,
+        session_id: &str,
+        provider_session_id: String,
+    ) -> Result<ApiSessionRecord, ApiSessionStoreError> {
+        self.mutate(session_id, |record| {
+            record.provider_session_id = Some(provider_session_id);
+            Ok(record.clone())
+        })
     }
 
-    pub fn set_turn_root_identity(&self, session_id: &str, turn_id: &str, identity: ProcessIdentity) -> Result<(), ApiSessionStoreError> {
+    pub fn set_turn_root_identity(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        identity: ProcessIdentity,
+    ) -> Result<(), ApiSessionStoreError> {
         self.mutate(session_id, |record| {
-            let turn = record.turns.iter_mut().find(|turn| turn.id == turn_id).ok_or_else(|| ApiSessionStoreError::NotFound(turn_id.to_string()))?;
+            let turn = record
+                .turns
+                .iter_mut()
+                .find(|turn| turn.id == turn_id)
+                .ok_or_else(|| ApiSessionStoreError::NotFound(turn_id.to_string()))?;
             turn.root_identity = Some(identity);
             turn.state = ApiTurnState::Running;
             Ok(())
         })
     }
 
-    pub fn append_event(&self, session_id: &str, turn_id: Option<String>, kind: String, data: Value) -> Result<ApiSessionEvent, ApiSessionStoreError> {
-        let bytes = serde_json::to_vec(&data).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?.len();
-        if bytes > MAX_EVENT_DATA_BYTES { return Err(ApiSessionStoreError::EventTooLarge { bytes }); }
+    pub fn append_event(
+        &self,
+        session_id: &str,
+        turn_id: Option<String>,
+        kind: String,
+        data: Value,
+    ) -> Result<ApiSessionEvent, ApiSessionStoreError> {
+        let bytes = serde_json::to_vec(&data)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .len();
+        if bytes > MAX_EVENT_DATA_BYTES {
+            return Err(ApiSessionStoreError::EventTooLarge { bytes });
+        }
         let limit = self.event_limit;
         self.mutate(session_id, |record| {
-            let event = ApiSessionEvent { cursor: record.next_event_cursor, at_ms: unix_millis_now(), turn_id, kind, data };
+            let event = ApiSessionEvent {
+                cursor: record.next_event_cursor,
+                at_ms: unix_millis_now(),
+                turn_id,
+                kind,
+                data,
+            };
             record.next_event_cursor = record.next_event_cursor.saturating_add(1);
             record.events.push_back(event.clone());
-            while record.events.len() > limit { record.events.pop_front(); }
+            while record.events.len() > limit {
+                record.events.pop_front();
+            }
             Ok(event)
         })
     }
 
-    pub fn events_after(&self, session_id: &str, after: u64, limit: usize) -> Result<Vec<ApiSessionEvent>, ApiSessionStoreError> {
-        Ok(self.read(session_id)?.events.into_iter().filter(|event| event.cursor > after).take(limit.min(self.event_limit)).collect())
+    pub fn events_after(
+        &self,
+        session_id: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<ApiSessionEvent>, ApiSessionStoreError> {
+        Ok(self
+            .read(session_id)?
+            .events
+            .into_iter()
+            .filter(|event| event.cursor > after)
+            .take(limit.min(self.event_limit))
+            .collect())
     }
 
-    pub fn finish_turn(&self, session_id: &str, turn_id: &str, state: ApiTurnState, disposition: Option<String>) -> Result<ApiSessionRecord, ApiSessionStoreError> {
+    pub fn finish_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        state: ApiTurnState,
+        disposition: Option<String>,
+    ) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| {
             if record.current_turn_id.as_deref() != Some(turn_id) {
-                if let Some(turn) = record.turns.iter_mut().find(|turn| turn.id == turn_id && matches!(turn.state, ApiTurnState::Completed | ApiTurnState::Interrupted | ApiTurnState::Failed | ApiTurnState::Killed)) {
+                if let Some(turn) = record.turns.iter_mut().find(|turn| {
+                    turn.id == turn_id
+                        && matches!(
+                            turn.state,
+                            ApiTurnState::Completed
+                                | ApiTurnState::Interrupted
+                                | ApiTurnState::Failed
+                                | ApiTurnState::Killed
+                        )
+                }) {
                     // An interrupt signal may make the waiter observe a
                     // nonzero exit first.  Preserve the lifecycle-requested
                     // disposition without ever changing a newer session's
@@ -387,32 +551,58 @@ impl ApiSessionStore {
                     return Ok(record.clone());
                 }
             }
-            let Some(turn) = record.turns.iter_mut().find(|turn| turn.id == turn_id) else { return Err(ApiSessionStoreError::NotFound(turn_id.to_string())); };
+            let Some(turn) = record.turns.iter_mut().find(|turn| turn.id == turn_id) else {
+                return Err(ApiSessionStoreError::NotFound(turn_id.to_string()));
+            };
             turn.state = state;
             turn.disposition = disposition;
             turn.completed_at_ms = Some(unix_millis_now());
             if record.current_turn_id.as_deref() == Some(turn_id) {
                 record.current_turn_id = None;
-                record.state = match state { ApiTurnState::Completed | ApiTurnState::Interrupted => ApiSessionState::Idle, ApiTurnState::Failed => ApiSessionState::Failed, ApiTurnState::Killed => ApiSessionState::Terminated, ApiTurnState::Starting | ApiTurnState::Running => ApiSessionState::Running };
+                record.state = match state {
+                    ApiTurnState::Completed | ApiTurnState::Interrupted => ApiSessionState::Idle,
+                    ApiTurnState::Failed => ApiSessionState::Failed,
+                    ApiTurnState::Killed => ApiSessionState::Terminated,
+                    ApiTurnState::Starting | ApiTurnState::Running => ApiSessionState::Running,
+                };
             }
             Ok(record.clone())
         })
     }
 
     pub fn terminate(&self, session_id: &str) -> Result<ApiSessionRecord, ApiSessionStoreError> {
-        self.mutate(session_id, |record| { record.state = ApiSessionState::Terminated; record.current_turn_id = None; Ok(record.clone()) })
+        self.mutate(session_id, |record| {
+            record.state = ApiSessionState::Terminated;
+            record.current_turn_id = None;
+            Ok(record.clone())
+        })
     }
 
-    pub fn remember_idempotency(&self, session_id: &str, key: String, turn_id: String, request_fingerprint: String) -> Result<IdempotencyRecord, ApiSessionStoreError> {
+    pub fn remember_idempotency(
+        &self,
+        session_id: &str,
+        key: String,
+        turn_id: String,
+        request_fingerprint: String,
+    ) -> Result<IdempotencyRecord, ApiSessionStoreError> {
         let limit = self.idempotency_limit;
         self.mutate(session_id, |record| {
             if let Some(existing) = record.idempotency.iter().find(|entry| entry.key == key) {
-                if existing.request_fingerprint == request_fingerprint { return Ok(existing.clone()); }
+                if existing.request_fingerprint == request_fingerprint {
+                    return Ok(existing.clone());
+                }
                 return Err(ApiSessionStoreError::IdempotencyConflict { key });
             }
-            let entry = IdempotencyRecord { key, turn_id, request_fingerprint, created_at_ms: unix_millis_now() };
+            let entry = IdempotencyRecord {
+                key,
+                turn_id,
+                request_fingerprint,
+                created_at_ms: unix_millis_now(),
+            };
             record.idempotency.push_back(entry.clone());
-            while record.idempotency.len() > limit { record.idempotency.pop_front(); }
+            while record.idempotency.len() > limit {
+                record.idempotency.pop_front();
+            }
             Ok(entry)
         })
     }
@@ -423,7 +613,9 @@ impl ApiSessionStore {
     pub fn reconcile_after_restart(&self) -> Result<Vec<String>, ApiSessionStoreError> {
         let mut recovered = Vec::new();
         for record in self.list()? {
-            if !record.state.is_active() { continue; }
+            if !record.state.is_active() {
+                continue;
+            }
             let id = record.id.clone();
             self.mutate(&id, |record| {
                 record.state = ApiSessionState::Failed;
@@ -445,16 +637,27 @@ impl ApiSessionStore {
 
     /// Moves unreadable state out of the active directory. A corrupt record is
     /// never overwritten, preserving evidence for manual recovery.
-    pub fn quarantine_corrupt(&self, session_id: &str) -> Result<Option<PathBuf>, ApiSessionStoreError> {
+    pub fn quarantine_corrupt(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PathBuf>, ApiSessionStoreError> {
         let path = api_session_path(&self.state_dir, session_id);
-        match self.read(session_id) { Ok(_) => Ok(None), Err(ApiSessionStoreError::Corrupt { .. }) => {
-            let target = path.with_extension(format!("corrupt-{}", unix_millis_now()));
-            fs::rename(path, &target)?;
-            Ok(Some(target))
-        }, Err(error) => Err(error) }
+        match self.read(session_id) {
+            Ok(_) => Ok(None),
+            Err(ApiSessionStoreError::Corrupt { .. }) => {
+                let target = path.with_extension(format!("corrupt-{}", unix_millis_now()));
+                fs::rename(path, &target)?;
+                Ok(Some(target))
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    fn mutate<T>(&self, session_id: &str, action: impl FnOnce(&mut ApiSessionRecord) -> Result<T, ApiSessionStoreError>) -> Result<T, ApiSessionStoreError> {
+    fn mutate<T>(
+        &self,
+        session_id: &str,
+        action: impl FnOnce(&mut ApiSessionRecord) -> Result<T, ApiSessionStoreError>,
+    ) -> Result<T, ApiSessionStoreError> {
         validate_session_id(session_id)?;
         let _lock = self.lock_session(session_id)?;
         let mut record = self.read(session_id)?;
@@ -469,10 +672,22 @@ impl ApiSessionStore {
         let path = api_session_path(&self.state_dir, session_id);
         let mut record = match read_json_file(&path) {
             Ok(record) => record,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(ApiSessionStoreError::NotFound(session_id.to_string())),
-            Err(error) => return Err(ApiSessionStoreError::Corrupt { session_id: session_id.to_string(), message: error.to_string() }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ApiSessionStoreError::NotFound(session_id.to_string()))
+            }
+            Err(error) => {
+                return Err(ApiSessionStoreError::Corrupt {
+                    session_id: session_id.to_string(),
+                    message: error.to_string(),
+                })
+            }
         };
-        if record.id != session_id { return Err(ApiSessionStoreError::Corrupt { session_id: session_id.to_string(), message: "filename and record id differ".to_string() }); }
+        if record.id != session_id {
+            return Err(ApiSessionStoreError::Corrupt {
+                session_id: session_id.to_string(),
+                message: "filename and record id differ".to_string(),
+            });
+        }
         if !record.cwd.is_absolute() {
             return Err(ApiSessionStoreError::Corrupt {
                 session_id: session_id.to_string(),
@@ -487,8 +702,12 @@ impl ApiSessionStore {
         write_json_file(&api_session_path(&self.state_dir, &record.id), record).map_err(Into::into)
     }
 
-    fn lock_create(&self) -> Result<File, ApiSessionStoreError> { lock_file(&api_sessions_create_lock_path(&self.state_dir)) }
-    fn lock_session(&self, session_id: &str) -> Result<File, ApiSessionStoreError> { lock_file(&api_session_lock_path(&self.state_dir, session_id)) }
+    fn lock_create(&self) -> Result<File, ApiSessionStoreError> {
+        lock_file(&api_sessions_create_lock_path(&self.state_dir))
+    }
+    fn lock_session(&self, session_id: &str) -> Result<File, ApiSessionStoreError> {
+        lock_file(&api_session_lock_path(&self.state_dir, session_id))
+    }
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), ApiSessionStoreError> {
@@ -503,8 +722,14 @@ fn validate_session_id(session_id: &str) -> Result<(), ApiSessionStoreError> {
 }
 
 fn lock_file(path: &Path) -> Result<File, ApiSessionStoreError> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
-    let file = OpenOptions::new().create(true).read(true).write(true).open(path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
     FileExt::lock_exclusive(&file)?;
     Ok(file)
 }
@@ -516,11 +741,26 @@ fn canonical_api_cwd(path: &Path) -> Result<PathBuf, ApiSessionStoreError> {
             message: "cwd must be an absolute path".to_string(),
         });
     }
-    fs::canonicalize(path).map_err(|error| ApiSessionStoreError::InvalidCwd { path: path.to_path_buf(), message: error.to_string() }).and_then(|path| {
-        if !path.is_absolute() { return Err(ApiSessionStoreError::InvalidCwd { path, message: "canonical path was not absolute".to_string() }); }
-        if !path.is_dir() { return Err(ApiSessionStoreError::InvalidCwd { path, message: "canonical path is not a directory".to_string() }); }
-        Ok(path)
-    })
+    fs::canonicalize(path)
+        .map_err(|error| ApiSessionStoreError::InvalidCwd {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })
+        .and_then(|path| {
+            if !path.is_absolute() {
+                return Err(ApiSessionStoreError::InvalidCwd {
+                    path,
+                    message: "canonical path was not absolute".to_string(),
+                });
+            }
+            if !path.is_dir() {
+                return Err(ApiSessionStoreError::InvalidCwd {
+                    path,
+                    message: "canonical path is not a directory".to_string(),
+                });
+            }
+            Ok(path)
+        })
 }
 
 #[cfg(test)]
@@ -529,25 +769,44 @@ mod tests {
     use tempfile::TempDir;
 
     fn request(cwd: &Path) -> CreateApiSession {
-        CreateApiSession { backend: ApiSessionBackend::Claude, cwd: cwd.to_path_buf(), name: Some("work".to_string()), resolved_settings: ResolvedApiSessionSettings { model: Some("test".to_string()), safe: true, model_provider: Some("claude".to_string()), harness: Some("claude".to_string()), routing_mode: Some("direct".to_string()) } }
+        CreateApiSession {
+            backend: ApiSessionBackend::Claude,
+            cwd: cwd.to_path_buf(),
+            name: Some("work".to_string()),
+            resolved_settings: ResolvedApiSessionSettings {
+                model: Some("test".to_string()),
+                safe: true,
+                model_provider: Some("claude".to_string()),
+                harness: Some("claude".to_string()),
+                routing_mode: Some("direct".to_string()),
+            },
+        }
     }
 
     #[test]
     fn creates_canonical_immutable_logical_record_separate_from_worker_snapshots() {
         let temp = TempDir::new().unwrap();
-        let cwd = temp.path().join("cwd"); fs::create_dir(&cwd).unwrap();
+        let cwd = temp.path().join("cwd");
+        fs::create_dir(&cwd).unwrap();
         let store = ApiSessionStore::new(temp.path());
         let record = store.create(request(&cwd)).unwrap();
         assert!(record.cwd.is_absolute());
         assert_eq!(record.cwd, fs::canonicalize(&cwd).unwrap());
-        assert!(api_session_path(temp.path(), &record.id).starts_with(temp.path().join("api-sessions")));
-        assert_ne!(api_session_path(temp.path(), &record.id), super::super::paths::session_snapshot_path(temp.path(), &record.id));
+        assert!(
+            api_session_path(temp.path(), &record.id).starts_with(temp.path().join("api-sessions"))
+        );
+        assert_ne!(
+            api_session_path(temp.path(), &record.id),
+            super::super::paths::session_snapshot_path(temp.path(), &record.id)
+        );
     }
 
     #[test]
     fn rejects_nonexistent_cwd_before_any_record_is_written() {
         let temp = TempDir::new().unwrap();
-        let error = ApiSessionStore::new(temp.path()).create(request(&temp.path().join("missing"))).unwrap_err();
+        let error = ApiSessionStore::new(temp.path())
+            .create(request(&temp.path().join("missing")))
+            .unwrap_err();
         assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
         assert!(ApiSessionStore::new(temp.path()).list().unwrap().is_empty());
     }
@@ -555,16 +814,23 @@ mod tests {
     #[test]
     fn rejects_relative_cwd_before_canonicalization() {
         let temp = TempDir::new_in(std::env::current_dir().unwrap()).unwrap();
-        let cwd = temp.path().join("cwd"); fs::create_dir(&cwd).unwrap();
+        let cwd = temp.path().join("cwd");
+        fs::create_dir(&cwd).unwrap();
         let relative = cwd.strip_prefix(std::env::current_dir().unwrap()).unwrap();
-        let error = ApiSessionStore::new(temp.path()).create(request(relative)).unwrap_err();
+        let error = ApiSessionStore::new(temp.path())
+            .create(request(relative))
+            .unwrap_err();
         assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
     }
 
     #[test]
     fn rejects_file_cwd_before_any_record_is_written() {
-        let temp = TempDir::new().unwrap(); let file = temp.path().join("not-a-directory"); fs::write(&file, "x").unwrap();
-        let error = ApiSessionStore::new(temp.path()).create(request(&file)).unwrap_err();
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("not-a-directory");
+        fs::write(&file, "x").unwrap();
+        let error = ApiSessionStore::new(temp.path())
+            .create(request(&file))
+            .unwrap_err();
         assert!(matches!(error, ApiSessionStoreError::InvalidCwd { .. }));
         assert!(ApiSessionStore::new(temp.path()).list().unwrap().is_empty());
     }
@@ -573,50 +839,129 @@ mod tests {
     fn rejects_session_id_path_traversal_before_touching_storage() {
         let temp = TempDir::new().unwrap();
         let store = ApiSessionStore::new(temp.path());
-        assert!(matches!(store.get("../daemon"), Err(ApiSessionStoreError::NotFound(_))));
-        assert!(matches!(store.begin_turn("..\\daemon", "turn".to_string()), Err(ApiSessionStoreError::NotFound(_))));
+        assert!(matches!(
+            store.get("../daemon"),
+            Err(ApiSessionStoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.begin_turn("..\\daemon", "turn".to_string()),
+            Err(ApiSessionStoreError::NotFound(_))
+        ));
     }
 
     #[test]
     fn older_defaulted_record_loads_and_normalizes_cursor() {
-        let temp = TempDir::new().unwrap(); let cwd = temp.path().canonicalize().unwrap();
+        let temp = TempDir::new().unwrap();
+        let cwd = temp.path().canonicalize().unwrap();
         let path = api_session_path(temp.path(), "sess-old");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, serde_json::to_vec(&serde_json::json!({
-            "id": "sess-old", "backend": "claude", "cwd": cwd,
-            "resolved_settings": {}, "state": "idle", "created_at_ms": 1,
-            "updated_at_ms": 1
-        })).unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "id": "sess-old", "backend": "claude", "cwd": cwd,
+                "resolved_settings": {}, "state": "idle", "created_at_ms": 1,
+                "updated_at_ms": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let record = ApiSessionStore::new(temp.path()).get("sess-old").unwrap();
-        assert_eq!(record.schema_version, 1); assert_eq!(record.next_event_cursor, 1); assert!(record.events.is_empty());
+        assert_eq!(record.schema_version, 1);
+        assert_eq!(record.next_event_cursor, 1);
+        assert!(record.events.is_empty());
     }
 
     #[test]
     fn event_and_idempotency_retention_are_bounded_and_cursor_monotonic() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::with_limits(temp.path(), 2, 2); let record = store.create(request(temp.path())).unwrap();
-        for n in 0..3 { store.append_event(&record.id, None, "output".to_string(), Value::String(n.to_string())).unwrap(); store.remember_idempotency(&record.id, format!("key-{n}"), format!("turn-{n}"), format!("hash-{n}")).unwrap(); }
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::with_limits(temp.path(), 2, 2);
+        let record = store.create(request(temp.path())).unwrap();
+        for n in 0..3 {
+            store
+                .append_event(
+                    &record.id,
+                    None,
+                    "output".to_string(),
+                    Value::String(n.to_string()),
+                )
+                .unwrap();
+            store
+                .remember_idempotency(
+                    &record.id,
+                    format!("key-{n}"),
+                    format!("turn-{n}"),
+                    format!("hash-{n}"),
+                )
+                .unwrap();
+        }
         let loaded = store.get(&record.id).unwrap();
-        assert_eq!(loaded.events.iter().map(|event| event.cursor).collect::<Vec<_>>(), vec![2, 3]);
-        assert_eq!(loaded.idempotency.iter().map(|entry| entry.key.as_str()).collect::<Vec<_>>(), vec!["key-1", "key-2"]);
+        assert_eq!(
+            loaded
+                .events
+                .iter()
+                .map(|event| event.cursor)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(
+            loaded
+                .idempotency
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-1", "key-2"]
+        );
         assert_eq!(store.events_after(&record.id, 2, 50).unwrap()[0].cursor, 3);
     }
 
     #[test]
     fn turns_transition_to_idle_without_losing_provider_identity() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
         let turn = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
-        store.set_provider_session_id(&record.id, "provider-1".to_string()).unwrap();
-        let final_record = store.finish_turn(&record.id, &turn.id, ApiTurnState::Completed, Some("completed".to_string())).unwrap();
-        assert_eq!(final_record.state, ApiSessionState::Idle); assert_eq!(final_record.provider_session_id.as_deref(), Some("provider-1")); assert_eq!(final_record.generation, 1);
+        store
+            .set_provider_session_id(&record.id, "provider-1".to_string())
+            .unwrap();
+        let final_record = store
+            .finish_turn(
+                &record.id,
+                &turn.id,
+                ApiTurnState::Completed,
+                Some("completed".to_string()),
+            )
+            .unwrap();
+        assert_eq!(final_record.state, ApiSessionState::Idle);
+        assert_eq!(
+            final_record.provider_session_id.as_deref(),
+            Some("provider-1")
+        );
+        assert_eq!(final_record.generation, 1);
     }
 
     #[test]
     fn stale_turn_completion_cannot_change_the_current_generation_state() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
         let first = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
-        store.finish_turn(&record.id, &first.id, ApiTurnState::Completed, Some("exit_0".to_string())).unwrap();
+        store
+            .finish_turn(
+                &record.id,
+                &first.id,
+                ApiTurnState::Completed,
+                Some("exit_0".to_string()),
+            )
+            .unwrap();
         let second = store.begin_turn(&record.id, "turn-2".to_string()).unwrap();
-        let loaded = store.finish_turn(&record.id, &first.id, ApiTurnState::Failed, Some("late_exit_1".to_string())).unwrap();
+        let loaded = store
+            .finish_turn(
+                &record.id,
+                &first.id,
+                ApiTurnState::Failed,
+                Some("late_exit_1".to_string()),
+            )
+            .unwrap();
         assert_eq!(loaded.current_turn_id.as_deref(), Some(second.id.as_str()));
         assert_eq!(loaded.state, ApiSessionState::Running);
         assert_eq!(loaded.turns[1].state, ApiTurnState::Starting);
@@ -624,59 +969,183 @@ mod tests {
 
     #[test]
     fn idempotency_replay_is_stable_but_conflicting_reuse_fails() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
-        let first = store.remember_idempotency(&record.id, "same".to_string(), "turn-1".to_string(), "digest-a".to_string()).unwrap();
-        assert_eq!(store.remember_idempotency(&record.id, "same".to_string(), "turn-ignored".to_string(), "digest-a".to_string()).unwrap(), first);
-        assert!(matches!(store.remember_idempotency(&record.id, "same".to_string(), "turn-2".to_string(), "digest-b".to_string()), Err(ApiSessionStoreError::IdempotencyConflict { .. })));
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
+        let first = store
+            .remember_idempotency(
+                &record.id,
+                "same".to_string(),
+                "turn-1".to_string(),
+                "digest-a".to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .remember_idempotency(
+                    &record.id,
+                    "same".to_string(),
+                    "turn-ignored".to_string(),
+                    "digest-a".to_string()
+                )
+                .unwrap(),
+            first
+        );
+        assert!(matches!(
+            store.remember_idempotency(
+                &record.id,
+                "same".to_string(),
+                "turn-2".to_string(),
+                "digest-b".to_string()
+            ),
+            Err(ApiSessionStoreError::IdempotencyConflict { .. })
+        ));
     }
 
     #[test]
     fn atomic_turn_claim_replays_after_restart_and_never_overlaps_a_generation() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
-        let started = store.begin_idempotent_turn(&record.id, "turn-1".to_string(), Some("retry".to_string()), "body-a".to_string()).unwrap();
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
+        let started = store
+            .begin_idempotent_turn(
+                &record.id,
+                "turn-1".to_string(),
+                Some("retry".to_string()),
+                "body-a".to_string(),
+            )
+            .unwrap();
         assert!(matches!(started, BeginApiTurn::Started(ref turn) if turn.generation == 1));
         let restarted_store = ApiSessionStore::new(temp.path());
-        assert_eq!(restarted_store.begin_idempotent_turn(&record.id, "turn-ignored".to_string(), Some("retry".to_string()), "body-a".to_string()).unwrap(), BeginApiTurn::Replayed("turn-1".to_string()));
-        assert_eq!(restarted_store.begin_idempotent_turn(&record.id, "turn-2".to_string(), None, "body-b".to_string()).unwrap(), BeginApiTurn::Busy);
-        assert!(matches!(restarted_store.begin_idempotent_turn(&record.id, "turn-conflict".to_string(), Some("retry".to_string()), "body-b".to_string()), Err(ApiSessionStoreError::IdempotencyConflict { .. })));
+        assert_eq!(
+            restarted_store
+                .begin_idempotent_turn(
+                    &record.id,
+                    "turn-ignored".to_string(),
+                    Some("retry".to_string()),
+                    "body-a".to_string()
+                )
+                .unwrap(),
+            BeginApiTurn::Replayed("turn-1".to_string())
+        );
+        assert_eq!(
+            restarted_store
+                .begin_idempotent_turn(&record.id, "turn-2".to_string(), None, "body-b".to_string())
+                .unwrap(),
+            BeginApiTurn::Busy
+        );
+        assert!(matches!(
+            restarted_store.begin_idempotent_turn(
+                &record.id,
+                "turn-conflict".to_string(),
+                Some("retry".to_string()),
+                "body-b".to_string()
+            ),
+            Err(ApiSessionStoreError::IdempotencyConflict { .. })
+        ));
     }
 
     #[test]
     fn interrupt_transition_precedes_signal_and_terminal_sessions_refuse_claims() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
         let turn = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
         store.begin_interrupt(&record.id, &turn.id).unwrap();
-        assert_eq!(store.get(&record.id).unwrap().state, ApiSessionState::Interrupting);
-        store.finish_turn(&record.id, &turn.id, ApiTurnState::Interrupted, Some("graceful_interrupt".to_string())).unwrap();
+        assert_eq!(
+            store.get(&record.id).unwrap().state,
+            ApiSessionState::Interrupting
+        );
+        store
+            .finish_turn(
+                &record.id,
+                &turn.id,
+                ApiTurnState::Interrupted,
+                Some("graceful_interrupt".to_string()),
+            )
+            .unwrap();
         store.terminate(&record.id).unwrap();
-        assert_eq!(store.begin_idempotent_turn(&record.id, "turn-2".to_string(), None, "body".to_string()).unwrap(), BeginApiTurn::Terminated);
+        assert_eq!(
+            store
+                .begin_idempotent_turn(&record.id, "turn-2".to_string(), None, "body".to_string())
+                .unwrap(),
+            BeginApiTurn::Terminated
+        );
     }
 
     #[test]
     fn interrupt_disposition_wins_a_racing_waiter_without_touching_a_new_generation() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap();
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
         let first = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
         store.begin_interrupt(&record.id, &first.id).unwrap();
-        store.finish_turn(&record.id, &first.id, ApiTurnState::Failed, Some("exit_130".to_string())).unwrap();
-        store.finish_turn(&record.id, &first.id, ApiTurnState::Interrupted, Some("graceful_interrupt".to_string())).unwrap();
+        store
+            .finish_turn(
+                &record.id,
+                &first.id,
+                ApiTurnState::Failed,
+                Some("exit_130".to_string()),
+            )
+            .unwrap();
+        store
+            .finish_turn(
+                &record.id,
+                &first.id,
+                ApiTurnState::Interrupted,
+                Some("graceful_interrupt".to_string()),
+            )
+            .unwrap();
         let second = store.begin_turn(&record.id, "turn-2".to_string()).unwrap();
         let record = store.get(&record.id).unwrap();
-        assert_eq!(record.turns[0].state, ApiTurnState::Interrupted); assert_eq!(record.turns[0].disposition.as_deref(), Some("graceful_interrupt"));
-        assert_eq!(record.current_turn_id.as_deref(), Some(second.id.as_str())); assert_eq!(record.state, ApiSessionState::Running);
+        assert_eq!(record.turns[0].state, ApiTurnState::Interrupted);
+        assert_eq!(
+            record.turns[0].disposition.as_deref(),
+            Some("graceful_interrupt")
+        );
+        assert_eq!(record.current_turn_id.as_deref(), Some(second.id.as_str()));
+        assert_eq!(record.state, ApiSessionState::Running);
     }
 
     #[test]
     fn restart_marks_active_turn_failed_without_acting_on_stale_identity() {
-        let temp = TempDir::new().unwrap(); let store = ApiSessionStore::new(temp.path()); let record = store.create(request(temp.path())).unwrap(); let turn = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
-        store.mutate(&record.id, |record| { record.turns[0].root_identity = Some(ProcessIdentity::new(999_999, 42)); Ok(()) }).unwrap();
-        assert_eq!(store.reconcile_after_restart().unwrap(), vec![record.id.clone()]);
-        let recovered = store.get(&record.id).unwrap(); assert_eq!(recovered.state, ApiSessionState::Failed); assert_eq!(recovered.turns[0].state, ApiTurnState::Failed); assert_eq!(recovered.turns[0].root_identity, Some(ProcessIdentity::new(999_999, 42))); assert_eq!(turn.generation, 1);
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
+        let turn = store.begin_turn(&record.id, "turn-1".to_string()).unwrap();
+        store
+            .mutate(&record.id, |record| {
+                record.turns[0].root_identity = Some(ProcessIdentity::new(999_999, 42));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.reconcile_after_restart().unwrap(),
+            vec![record.id.clone()]
+        );
+        let recovered = store.get(&record.id).unwrap();
+        assert_eq!(recovered.state, ApiSessionState::Failed);
+        assert_eq!(recovered.turns[0].state, ApiTurnState::Failed);
+        assert_eq!(
+            recovered.turns[0].root_identity,
+            Some(ProcessIdentity::new(999_999, 42))
+        );
+        assert_eq!(turn.generation, 1);
     }
 
     #[test]
     fn corrupt_record_is_reported_and_can_be_quarantined_without_overwrite() {
-        let temp = TempDir::new().unwrap(); let path = api_session_path(temp.path(), "sess-bad"); fs::create_dir_all(path.parent().unwrap()).unwrap(); fs::write(&path, "not json").unwrap();
-        let store = ApiSessionStore::new(temp.path()); assert!(matches!(store.get("sess-bad"), Err(ApiSessionStoreError::Corrupt { .. })));
-        let quarantined = store.quarantine_corrupt("sess-bad").unwrap().unwrap(); assert!(quarantined.exists()); assert!(!path.exists());
+        let temp = TempDir::new().unwrap();
+        let path = api_session_path(temp.path(), "sess-bad");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "not json").unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        assert!(matches!(
+            store.get("sess-bad"),
+            Err(ApiSessionStoreError::Corrupt { .. })
+        ));
+        let quarantined = store.quarantine_corrupt("sess-bad").unwrap().unwrap();
+        assert!(quarantined.exists());
+        assert!(!path.exists());
     }
 }

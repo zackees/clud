@@ -19,8 +19,8 @@ use running_process::broker::server::local_socket_name;
 use running_process::NativeProcess;
 
 use super::super::activity::DaemonActivity;
-use super::super::client_leases::ClientLeaseRegistry;
 use super::super::api_session_lifecycle::ApiSessionLifecycle;
+use super::super::client_leases::ClientLeaseRegistry;
 use super::super::gc_service::RegistryMsg;
 use super::super::proc_sampler::ProcSamplerHandle;
 use super::endpoint::{daemon_identity_path, endpoint_for_state_dir};
