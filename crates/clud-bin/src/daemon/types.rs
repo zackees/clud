@@ -75,6 +75,9 @@ pub(super) struct DaemonInfo {
     /// the user-private daemon-info file so `clud ui` can bootstrap a browser.
     #[serde(default)]
     pub(super) dashboard_token: Option<String>,
+    /// Per-start bearer capability for `/v1/*`; never inherited by workers.
+    #[serde(default)]
+    pub(super) api_token: Option<String>,
     /// Issue #192: the `CARGO_PKG_VERSION` of the binary that launched
     /// this daemon. `ensure_daemon` uses this to detect a stale daemon
     /// after an in-place upgrade and restart it so bug-fix releases (e.g.

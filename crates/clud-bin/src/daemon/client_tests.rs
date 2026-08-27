@@ -14,6 +14,7 @@ fn daemon_version_matches_current_binary() {
         port: 0,
         dashboard_port: None,
         dashboard_token: None,
+        api_token: None,
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     assert!(daemon_version_matches(&info));
@@ -30,6 +31,7 @@ fn daemon_version_mismatch_when_versions_differ() {
         port: 0,
         dashboard_port: None,
         dashboard_token: None,
+        api_token: None,
         version: Some("0.0.0-not-the-current".to_string()),
     };
     assert!(!daemon_version_matches(&info));
@@ -47,6 +49,7 @@ fn daemon_version_mismatch_when_field_absent() {
         port: 0,
         dashboard_port: None,
         dashboard_token: None,
+        api_token: None,
         version: None,
     };
     assert!(!daemon_version_matches(&info));
@@ -73,6 +76,7 @@ fn newer_daemon_is_refused_and_rendered_yellow() {
         port,
         dashboard_port: None,
         dashboard_token: None,
+        api_token: None,
         version: Some(version_newer_than_current()),
     };
     super::super::io_helpers::write_json_file(&daemon_info_path(tmp.path()), &info).unwrap();
@@ -96,6 +100,7 @@ fn daemon_stop_preflight_refuses_newer_daemon_without_signaling_it() {
         port,
         dashboard_port: None,
         dashboard_token: None,
+        api_token: None,
         version: Some(version_newer_than_current()),
     };
     super::super::io_helpers::write_json_file(&daemon_info_path(tmp.path()), &info).unwrap();
@@ -115,6 +120,7 @@ fn write_daemon_info(state_dir: &Path, pid: u32, port: u16) {
         port,
         dashboard_port: None,
         dashboard_token: None,
+        api_token: None,
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     super::super::io_helpers::write_json_file(&daemon_info_path(state_dir), &info).unwrap();

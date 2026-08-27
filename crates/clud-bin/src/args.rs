@@ -849,6 +849,12 @@ pub enum SymbolsSubcommand {
 /// Subcommands under `clud daemon`. See `crates/clud-bin/src/daemon/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum DaemonSubcommand {
+    /// Print the private loopback API discovery document.
+    #[command(name = "api-info")]
+    ApiInfo {
+        #[arg(long = "json")]
+        json: bool,
+    },
     /// Restart the daemon process so the next CLI call uses the current binary.
     Restart,
     /// Stop the daemon if it is running without starting a replacement.
