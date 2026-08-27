@@ -219,22 +219,19 @@ impl ApiSessionLifecycle {
     pub fn kill(&self, session_id: &str) -> Result<LifecycleReply, LifecycleError> {
         let gate = self.gate_for(session_id);
         let _gate = gate.lock().unwrap_or_else(|p| p.into_inner());
-        let record = self
+        // Seal terminal intent before any OS signal. The controller waiter
+        // may observe the resulting nonzero exit immediately, but its late
+        // `finish_turn(exit_-9)` cannot overwrite this terminal record.
+        let sealed_turn = self
             .store
-            .get(session_id)
+            .begin_terminal_kill(session_id)
             .map_err(|_| LifecycleError::NotFound)?;
-        if let Some(process) = self
-            .active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(session_id)
-        {
-            if let Some(identity) = record
-                .current_turn_id
-                .as_ref()
-                .and_then(|id| record.turns.iter().find(|turn| &turn.id == id))
-                .and_then(|turn| turn.root_identity)
-            {
+        let process = {
+            let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+            active.remove(session_id)
+        };
+        if let Some(process) = process {
+            if let Some(identity) = sealed_turn.as_ref().and_then(|turn| turn.root_identity) {
                 signal_tree_bounded(identity, Signal::Kill);
             }
             let root_kill_timed_out = kill_root_bounded(Arc::clone(&process));
@@ -243,35 +240,27 @@ impl ApiSessionLifecycle {
                 thread::sleep(Duration::from_millis(25));
             }
             let timed_out = root_kill_timed_out || process.returncode().is_none();
-            if let Some(turn) = record.current_turn_id.as_deref() {
+            if let Some(turn) = sealed_turn.as_ref() {
                 let disposition = if timed_out {
                     "terminal_kill_timeout"
                 } else {
                     "terminal_kill"
                 };
-                let _ = self.store.finish_turn(
-                    session_id,
-                    turn,
-                    ApiTurnState::Killed,
-                    Some(disposition.to_string()),
-                );
+                let _ = self
+                    .store
+                    .refine_terminal_kill(session_id, &turn.id, disposition);
             }
-            let _ = self.store.terminate(session_id);
             return if timed_out {
                 Err(LifecycleError::KillTimeout)
             } else {
                 Ok(LifecycleReply::Terminated)
             };
         }
-        if let Some(turn) = record.current_turn_id {
-            let _ = self.store.finish_turn(
-                session_id,
-                &turn,
-                ApiTurnState::Killed,
-                Some("terminal_kill".to_string()),
-            );
+        if let Some(turn) = sealed_turn {
+            let _ = self
+                .store
+                .refine_terminal_kill(session_id, &turn.id, "terminal_kill");
         }
-        let _ = self.store.terminate(session_id);
         Ok(LifecycleReply::Terminated)
     }
     fn stop(&self, session_id: &str, process: &Arc<NativeProcess>) -> bool {

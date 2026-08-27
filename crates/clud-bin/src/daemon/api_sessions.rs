@@ -582,6 +582,53 @@ impl ApiSessionStore {
         })
     }
 
+    /// Atomically makes a logical session terminal before its process is
+    /// signalled.  Returning the sealed generation lets the lifecycle use
+    /// its identity for best-effort tree cleanup without leaving a window for
+    /// the asynchronous controller waiter to record `exit_-9` as a resumable
+    /// failure.
+    pub fn begin_terminal_kill(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ApiTurnRecord>, ApiSessionStoreError> {
+        self.mutate(session_id, |record| {
+            let sealed = record
+                .current_turn_id
+                .as_deref()
+                .and_then(|turn_id| record.turns.iter_mut().find(|turn| turn.id == turn_id))
+                .map(|turn| {
+                    turn.state = ApiTurnState::Killed;
+                    turn.disposition = Some("terminal_kill_pending".to_string());
+                    turn.completed_at_ms = Some(unix_millis_now());
+                    turn.clone()
+                });
+            record.current_turn_id = None;
+            record.state = ApiSessionState::Terminated;
+            Ok(sealed)
+        })
+    }
+
+    /// Refines the durable terminal-kill diagnostic after bounded process
+    /// cleanup.  It deliberately cannot change a sealed turn or session back
+    /// into a resumable state.
+    pub fn refine_terminal_kill(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        disposition: &str,
+    ) -> Result<ApiSessionRecord, ApiSessionStoreError> {
+        self.mutate(session_id, |record| {
+            if let Some(turn) = record.turns.iter_mut().find(|turn| turn.id == turn_id) {
+                if turn.state == ApiTurnState::Killed {
+                    turn.disposition = Some(disposition.to_string());
+                }
+            }
+            record.current_turn_id = None;
+            record.state = ApiSessionState::Terminated;
+            Ok(record.clone())
+        })
+    }
+
     pub fn terminate(&self, session_id: &str) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| {
             record.state = ApiSessionState::Terminated;
@@ -951,6 +998,76 @@ mod tests {
             Some("provider-1")
         );
         assert_eq!(final_record.generation, 1);
+    }
+
+    #[test]
+    fn terminal_kill_seal_wins_over_late_controller_exit() {
+        let temp = TempDir::new().unwrap();
+        let store = ApiSessionStore::new(temp.path());
+        let record = store.create(request(temp.path())).unwrap();
+        let turn = match store
+            .begin_idempotent_turn(
+                &record.id,
+                "turn-1".to_string(),
+                Some("request-1".to_string()),
+                "fingerprint-1".to_string(),
+            )
+            .unwrap()
+        {
+            BeginApiTurn::Started(turn) => turn,
+            other => panic!("expected turn claim, got {other:?}"),
+        };
+
+        let sealed = store.begin_terminal_kill(&record.id).unwrap().unwrap();
+        assert_eq!(sealed.id, turn.id);
+        assert_eq!(sealed.state, ApiTurnState::Killed);
+        let late = store
+            .finish_turn(
+                &record.id,
+                &turn.id,
+                ApiTurnState::Failed,
+                Some("exit_-9".to_string()),
+            )
+            .unwrap();
+        assert_eq!(late.state, ApiSessionState::Terminated);
+        assert_eq!(late.current_turn_id, None);
+        assert_eq!(late.turns[0].state, ApiTurnState::Killed);
+        assert_eq!(
+            late.turns[0].disposition.as_deref(),
+            Some("terminal_kill_pending")
+        );
+
+        let refined = store
+            .refine_terminal_kill(&record.id, &turn.id, "terminal_kill")
+            .unwrap();
+        assert_eq!(refined.state, ApiSessionState::Terminated);
+        assert_eq!(refined.current_turn_id, None);
+        assert_eq!(
+            refined.turns[0].disposition.as_deref(),
+            Some("terminal_kill")
+        );
+        assert!(matches!(
+            store
+                .begin_idempotent_turn(
+                    &record.id,
+                    "turn-ignored".to_string(),
+                    Some("request-1".to_string()),
+                    "fingerprint-1".to_string(),
+                )
+                .unwrap(),
+            BeginApiTurn::Replayed(id) if id == turn.id
+        ));
+        assert!(matches!(
+            store
+                .begin_idempotent_turn(
+                    &record.id,
+                    "turn-2".to_string(),
+                    Some("request-2".to_string()),
+                    "fingerprint-2".to_string(),
+                )
+                .unwrap(),
+            BeginApiTurn::Terminated
+        ));
     }
 
     #[test]

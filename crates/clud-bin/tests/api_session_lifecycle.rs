@@ -151,7 +151,11 @@ fn running_submit_is_busy_while_duplicate_replays_after_controller_restart() {
     );
     assert!(kill_started.elapsed() < std::time::Duration::from_secs(5));
     let terminal = store.get(&id).unwrap();
-    assert_eq!(terminal.state, ApiSessionState::Terminated);
+    assert_eq!(
+        terminal.state,
+        ApiSessionState::Terminated,
+        "terminal kill must be durable before the waiter observes child exit: {terminal:?}"
+    );
     assert!(terminal.turns.iter().any(|turn| {
         turn.id == turn_id
             && matches!(
