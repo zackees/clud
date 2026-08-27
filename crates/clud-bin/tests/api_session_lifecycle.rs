@@ -93,8 +93,11 @@ fn running_submit_is_busy_while_duplicate_replays_after_controller_restart() {
             let busy_plan = slow.clone();
             std::thread::spawn(move || {
                 let _ = sent.send(lifecycle.submit(
-                    &id, busy_plan, Some("request-b".to_string()),
-                    "fingerprint-b".to_string(), false,
+                    &id,
+                    busy_plan,
+                    Some("request-b".to_string()),
+                    "fingerprint-b".to_string(),
+                    false,
                 ));
             });
             received
