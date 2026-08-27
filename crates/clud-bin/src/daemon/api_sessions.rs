@@ -214,6 +214,10 @@ impl ApiSessionStore {
         Self { state_dir: state_dir.into(), event_limit: DEFAULT_EVENT_LIMIT, idempotency_limit: DEFAULT_IDEMPOTENCY_LIMIT }
     }
 
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     #[cfg(test)]
     fn with_limits(state_dir: impl Into<PathBuf>, event_limit: usize, idempotency_limit: usize) -> Self {
         Self { state_dir: state_dir.into(), event_limit, idempotency_limit }
@@ -286,6 +290,15 @@ impl ApiSessionStore {
 
     pub fn set_provider_session_id(&self, session_id: &str, provider_session_id: String) -> Result<ApiSessionRecord, ApiSessionStoreError> {
         self.mutate(session_id, |record| { record.provider_session_id = Some(provider_session_id); Ok(record.clone()) })
+    }
+
+    pub fn set_turn_root_identity(&self, session_id: &str, turn_id: &str, identity: ProcessIdentity) -> Result<(), ApiSessionStoreError> {
+        self.mutate(session_id, |record| {
+            let turn = record.turns.iter_mut().find(|turn| turn.id == turn_id).ok_or_else(|| ApiSessionStoreError::NotFound(turn_id.to_string()))?;
+            turn.root_identity = Some(identity);
+            turn.state = ApiTurnState::Running;
+            Ok(())
+        })
     }
 
     pub fn append_event(&self, session_id: &str, turn_id: Option<String>, kind: String, data: Value) -> Result<ApiSessionEvent, ApiSessionStoreError> {
