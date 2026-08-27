@@ -461,6 +461,29 @@ pub(super) fn handle(
                 Ok(record) => record,
                 Err(value) => return store_error(request, value),
             };
+            // A retry must be answerable from durable idempotency state before
+            // constructing a resume plan: a just-started first turn may not
+            // yet have emitted its provider identity. Lifecycle repeats this
+            // check under its per-session gate for the concurrent case.
+            let request_fingerprint = fingerprint(&body.message, body.interrupt_running);
+            if let Some(key) = key.as_ref() {
+                if let Some(entry) = record.idempotency.iter().find(|entry| entry.key == *key) {
+                    if entry.request_fingerprint != request_fingerprint {
+                        return lifecycle_error(request, LifecycleError::IdempotencyConflict);
+                    }
+                    return respond_json(
+                        request,
+                        200,
+                        &serde_json::to_vec(&TurnResponse {
+                            session_id: id,
+                            turn_id: entry.turn_id.clone(),
+                            generation: None,
+                            status: "replayed",
+                        })
+                        .unwrap(),
+                    );
+                }
+            }
             let plan = match turn_plan(&record, body.message.clone()) {
                 Ok(plan) => plan,
                 Err(message) if message.contains("provider identity") => {
@@ -480,13 +503,7 @@ pub(super) fn handle(
                     )
                 }
             };
-            match lifecycle.submit(
-                id,
-                plan,
-                key,
-                fingerprint(&body.message, body.interrupt_running),
-                body.interrupt_running,
-            ) {
+            match lifecycle.submit(id, plan, key, request_fingerprint, body.interrupt_running) {
                 Ok(LifecycleReply::Started {
                     generation,
                     turn_id,

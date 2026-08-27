@@ -468,6 +468,71 @@ fn wait_for_api_state(
     panic!("API session {id} did not reach {state:?}");
 }
 
+fn wait_for_api_generation_to_finish(
+    store: &super::super::api_sessions::ApiSessionStore,
+    id: &str,
+    generation: u64,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Ok(record) = store.get(id) {
+            if record.generation >= generation
+                && record.state == super::super::api_sessions::ApiSessionState::Idle
+            {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("API session {id} generation {generation} did not finish");
+}
+
+fn wait_for_idempotency_key(
+    store: &super::super::api_sessions::ApiSessionStore,
+    id: &str,
+    key: &str,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if store
+            .get(id)
+            .map(|record| record.idempotency.iter().any(|entry| entry.key == key))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("API session {id} did not record idempotency key {key}");
+}
+
+fn wait_for_provider_session_id(store: &super::super::api_sessions::ApiSessionStore, id: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if store
+            .get(id)
+            .ok()
+            .and_then(|record| record.provider_session_id)
+            .is_some()
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("API session {id} did not capture a provider session identity");
+}
+
+fn wait_for_no_activity(activity: &super::super::activity::DaemonActivity) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if activity.snapshot(std::time::Instant::now()).active_jobs == 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("daemon activity did not return to idle");
+}
+
 #[test]
 fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity() {
     let temp = tempfile::tempdir().unwrap();
@@ -540,12 +605,8 @@ fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity()
     .unwrap();
     assert!(status.contains("202"));
     assert!(activity.snapshot(std::time::Instant::now()).active_jobs > 0);
-    wait_for_api_state(
-        &store,
-        &id,
-        super::super::api_sessions::ApiSessionState::Idle,
-    );
-    assert_eq!(activity.snapshot(std::time::Instant::now()).active_jobs, 0);
+    wait_for_api_generation_to_finish(&store, &id, 1);
+    wait_for_no_activity(&activity);
     let record = store.get(&id).unwrap();
     assert_eq!(record.provider_session_id.as_deref(), Some("provider-http"));
     assert!(record
@@ -576,11 +637,7 @@ fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity()
     )
     .unwrap();
     assert!(status.contains("202"));
-    wait_for_api_state(
-        &store,
-        &id,
-        super::super::api_sessions::ApiSessionState::Idle,
-    );
+    wait_for_api_generation_to_finish(&store, &id, 2);
     let resumed_raw = std::fs::read_to_string(
         temp.path()
             .join("logs")
@@ -689,9 +746,22 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
     // A controlled test-only slow child keeps the turn live long enough to
     // exercise request serialization; production still resolves installed
     // Claude/Codex executables through the typed launcher.
+    let script = temp.path().join("slow-claude.jsonl");
+    let mut stream = String::from(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"provider-replace\"}\n",
+    );
+    for _ in 0..20 {
+        stream.push_str("{\"type\":\"future.event\"}\n");
+    }
+    std::fs::write(&script, stream).unwrap();
     let _mock_guard = super::super::api_session_http::set_test_headless_executable(
         http_test_mock_agent().to_string_lossy().into_owned(),
-        vec!["--mock-sleep-ms".to_string(), "5000".to_string()],
+        vec![
+            "--mock-stream-json".to_string(),
+            script.to_string_lossy().into_owned(),
+            "--mock-stream-delay-ms".to_string(),
+            "250".to_string(),
+        ],
     );
     let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
     let lifecycle = std::sync::Arc::new(
@@ -744,6 +814,8 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
     )
     .unwrap();
     assert!(first.contains("202"));
+    wait_for_idempotency_key(&store, &id, "replay-key");
+    wait_for_provider_session_id(&store, &id);
     let (replayed, _, replay_body) = fetch_api_request_with_headers(
         port,
         "POST",
@@ -771,7 +843,10 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
         Some(r#"{"message":"different"}"#),
     )
     .unwrap();
-    assert!(conflict.contains("409"));
+    assert!(
+        conflict.contains("409"),
+        "unexpected conflict response: {conflict}"
+    );
     let (replaced, _, _) = fetch_api_request(
         port,
         "POST",
@@ -1418,8 +1493,10 @@ fn fetch_api_request_with_headers(
     body: Option<&str>,
 ) -> io::Result<(String, String, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    // Replacement and interruption may intentionally wait through the
+    // lifecycle's five-second graceful-stop window before forcing the tree.
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let mut request =
         format!("{method} {path} HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n");
     if let Some(value) = authorization {
