@@ -215,15 +215,31 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         format!("/v1/sessions/{id}/events?limit=129"),
     ] {
         let (status, _, body) = fetch_api_request(
-            port, "GET", &path, "localhost", Some("Bearer api-canary"), None, None,
-        ).unwrap();
+            port,
+            "GET",
+            &path,
+            "localhost",
+            Some("Bearer api-canary"),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(status.contains("400"));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "invalid_cursor");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
+            "invalid_cursor"
+        );
     }
     let (status, _, body) = fetch_api_request(
-        port, "GET", &format!("/v1/sessions/{id}/events?after=0&limit=1"), "localhost",
-        Some("Bearer api-canary"), None, None,
-    ).unwrap();
+        port,
+        "GET",
+        &format!("/v1/sessions/{id}/events?after=0&limit=1"),
+        "localhost",
+        Some("Bearer api-canary"),
+        None,
+        None,
+    )
+    .unwrap();
     assert!(status.contains("200"));
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["events"].as_array().unwrap().len(), 1);
@@ -315,10 +331,19 @@ fn api_openapi_contract_covers_each_implemented_session_route() {
     assert!(schema["components"]["schemas"]
         .get("TurnResponse")
         .is_some());
-    for schema_name in ["Session", "Event", "TurnResponse", "InterruptResponse", "Error"] {
-        assert!(schema["components"]["schemas"][schema_name]["properties"]
-            .as_object()
-            .is_some_and(|properties| !properties.is_empty()), "{schema_name} must be concrete");
+    for schema_name in [
+        "Session",
+        "Event",
+        "TurnResponse",
+        "InterruptResponse",
+        "Error",
+    ] {
+        assert!(
+            schema["components"]["schemas"][schema_name]["properties"]
+                .as_object()
+                .is_some_and(|properties| !properties.is_empty()),
+            "{schema_name} must be concrete"
+        );
     }
     for (path, method) in [
         ("/v1/sessions", "get"),
@@ -329,16 +354,22 @@ fn api_openapi_contract_covers_each_implemented_session_route() {
         ("/v1/sessions/{id}/interrupt", "post"),
         ("/v1/sessions/{id}/events", "get"),
     ] {
-        assert!(schema["paths"][path][method]["responses"].get("401").is_some());
+        assert!(schema["paths"][path][method]["responses"]
+            .get("401")
+            .is_some());
     }
     for path in ["/v1/sessions/{id}", "/v1/sessions/{id}/events"] {
-        assert!(schema["paths"][path]["get"]["responses"].get("409").is_some());
+        assert!(schema["paths"][path]["get"]["responses"]
+            .get("409")
+            .is_some());
     }
 }
 
 #[test]
 fn dashboard_state_surfaces_api_sessions_as_nonattachable_rows() {
-    use crate::daemon::api_sessions::{ApiSessionBackend, CreateApiSession, ResolvedApiSessionSettings};
+    use crate::daemon::api_sessions::{
+        ApiSessionBackend, CreateApiSession, ResolvedApiSessionSettings,
+    };
 
     let temp = tempfile::tempdir().unwrap();
     let record = super::super::api_sessions::ApiSessionStore::new(temp.path())
@@ -347,14 +378,22 @@ fn dashboard_state_surfaces_api_sessions_as_nonattachable_rows() {
             cwd: temp.path().to_path_buf(),
             name: Some("dashboard-api".to_string()),
             resolved_settings: ResolvedApiSessionSettings {
-                model: None, safe: false, model_provider: Some("codex".to_string()),
-                harness: Some("codex".to_string()), routing_mode: None,
+                model: None,
+                safe: false,
+                model_provider: Some("codex".to_string()),
+                harness: Some("codex".to_string()),
+                routing_mode: None,
             },
-        }).unwrap();
-    let state = super::super::http_dashboard_state::build_dashboard_state(
-        temp.path(), None, 0, 0, Vec::new(),
-    ).unwrap();
-    let row = state.sessions.iter().find(|session| session.id == record.id).unwrap();
+        })
+        .unwrap();
+    let state =
+        super::http_dashboard_state::build_dashboard_state(temp.path(), None, 0, 0, Vec::new())
+            .unwrap();
+    let row = state
+        .sessions
+        .iter()
+        .find(|session| session.id == record.id)
+        .unwrap();
     assert_eq!(row.kind, "api");
     assert_eq!(row.source, "api");
     assert!(!row.attachable);
@@ -551,30 +590,87 @@ fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
     let cwd = temp.path().join("cwd");
     std::fs::create_dir(&cwd).unwrap();
     let script = temp.path().join("codex.jsonl");
-    std::fs::write(&script, "{\"type\":\"thread.started\",\"thread_id\":\"codex-http-thread\"}\n").unwrap();
+    std::fs::write(
+        &script,
+        "{\"type\":\"thread.started\",\"thread_id\":\"codex-http-thread\"}\n",
+    )
+    .unwrap();
     let _mock_guard = super::super::api_session_http::set_test_headless_executable(
         http_test_mock_agent().to_string_lossy().into_owned(),
-        vec!["--mock-stream-json".to_string(), script.to_string_lossy().into_owned()],
+        vec![
+            "--mock-stream-json".to_string(),
+            script.to_string_lossy().into_owned(),
+        ],
     );
     let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
     let lifecycle = std::sync::Arc::new(
         super::super::api_session_lifecycle::ApiSessionLifecycle::new(store.clone()),
     );
     let port = spawn_dashboard_with_activity_and_lifecycle(
-        temp.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(),
-        ToolTelemetryStore::new(), "dashboard-token".to_string(), "api-token".to_string(),
-        None, None, lifecycle,
-    ).unwrap();
-    let create = format!(r#"{{"backend":"codex","cwd":"{}"}}"#, cwd.to_string_lossy().replace('\\', "\\\\"));
-    let (_, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "127.0.0.1", Some("Bearer api-token"), None, Some(&create)).unwrap();
-    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+        temp.path().to_path_buf(),
+        None,
+        9999,
+        100,
+        empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
+        "dashboard-token".to_string(),
+        "api-token".to_string(),
+        None,
+        None,
+        lifecycle,
+    )
+    .unwrap();
+    let create = format!(
+        r#"{{"backend":"codex","cwd":"{}"}}"#,
+        cwd.to_string_lossy().replace('\\', "\\\\")
+    );
+    let (_, _, body) = fetch_api_request(
+        port,
+        "POST",
+        "/v1/sessions",
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        Some(&create),
+    )
+    .unwrap();
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     for message in ["first", "resume"] {
-        let (status, _, _) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/turns"), "127.0.0.1", Some("Bearer api-token"), None, Some(&format!(r#"{{"message":"{message}"}}"))).unwrap();
+        let request = format!(r#"{{"message":"{message}"}}"#);
+        let (status, _, _) = fetch_api_request(
+            port,
+            "POST",
+            &format!("/v1/sessions/{id}/turns"),
+            "127.0.0.1",
+            Some("Bearer api-token"),
+            None,
+            Some(&request),
+        )
+        .unwrap();
         assert!(status.contains("202"));
-        wait_for_api_state(&store, &id, super::super::api_sessions::ApiSessionState::Idle);
+        wait_for_api_state(
+            &store,
+            &id,
+            super::super::api_sessions::ApiSessionState::Idle,
+        );
     }
-    assert_eq!(store.get(&id).unwrap().provider_session_id.as_deref(), Some("codex-http-thread"));
-    assert!(std::fs::read_to_string(temp.path().join("logs").join("api").join(&id).join("2.jsonl")).unwrap().contains("codex-http-thread"));
+    assert_eq!(
+        store.get(&id).unwrap().provider_session_id.as_deref(),
+        Some("codex-http-thread")
+    );
+    assert!(std::fs::read_to_string(
+        temp.path()
+            .join("logs")
+            .join("api")
+            .join(&id)
+            .join("2.jsonl")
+    )
+    .unwrap()
+    .contains("codex-http-thread"));
 }
 
 #[test]
@@ -594,27 +690,106 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
         super::super::api_session_lifecycle::ApiSessionLifecycle::new(store.clone()),
     );
     let port = spawn_dashboard_with_activity_and_lifecycle(
-        temp.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(),
-        ToolTelemetryStore::new(), "dashboard-token".to_string(), "api-token".to_string(),
-        None, None, lifecycle,
-    ).unwrap();
-    let create = format!(r#"{{"backend":"claude","cwd":"{}"}}"#, cwd.to_string_lossy().replace('\\', "\\\\"));
-    let (_, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "127.0.0.1", Some("Bearer api-token"), None, Some(&create)).unwrap();
-    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+        temp.path().to_path_buf(),
+        None,
+        9999,
+        100,
+        empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
+        "dashboard-token".to_string(),
+        "api-token".to_string(),
+        None,
+        None,
+        lifecycle,
+    )
+    .unwrap();
+    let create = format!(
+        r#"{{"backend":"claude","cwd":"{}"}}"#,
+        cwd.to_string_lossy().replace('\\', "\\\\")
+    );
+    let (_, _, body) = fetch_api_request(
+        port,
+        "POST",
+        "/v1/sessions",
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        Some(&create),
+    )
+    .unwrap();
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let path = format!("/v1/sessions/{id}/turns");
     let headers = [("Idempotency-Key", "replay-key")];
-    let (first, _, first_body) = fetch_api_request_with_headers(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, &headers, Some(r#"{"message":"first"}"#)).unwrap();
+    let (first, _, first_body) = fetch_api_request_with_headers(
+        port,
+        "POST",
+        &path,
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        &headers,
+        Some(r#"{"message":"first"}"#),
+    )
+    .unwrap();
     assert!(first.contains("202"));
-    let (replayed, _, replay_body) = fetch_api_request_with_headers(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, &headers, Some(r#"{"message":"first"}"#)).unwrap();
+    let (replayed, _, replay_body) = fetch_api_request_with_headers(
+        port,
+        "POST",
+        &path,
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        &headers,
+        Some(r#"{"message":"first"}"#),
+    )
+    .unwrap();
     assert!(replayed.contains("200"));
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&first_body).unwrap()["turn_id"], serde_json::from_str::<serde_json::Value>(&replay_body).unwrap()["turn_id"]);
-    let (conflict, _, _) = fetch_api_request_with_headers(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, &headers, Some(r#"{"message":"different"}"#)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first_body).unwrap()["turn_id"],
+        serde_json::from_str::<serde_json::Value>(&replay_body).unwrap()["turn_id"]
+    );
+    let (conflict, _, _) = fetch_api_request_with_headers(
+        port,
+        "POST",
+        &path,
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        &headers,
+        Some(r#"{"message":"different"}"#),
+    )
+    .unwrap();
     assert!(conflict.contains("409"));
-    let (replaced, _, _) = fetch_api_request(port, "POST", &path, "127.0.0.1", Some("Bearer api-token"), None, Some(r#"{"message":"replacement","interrupt_running":true}"#)).unwrap();
+    let (replaced, _, _) = fetch_api_request(
+        port,
+        "POST",
+        &path,
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        Some(r#"{"message":"replacement","interrupt_running":true}"#),
+    )
+    .unwrap();
     assert!(replaced.contains("202"));
-    let (interrupted, _, interrupt_body) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/interrupt"), "127.0.0.1", Some("Bearer api-token"), None, None).unwrap();
+    let (interrupted, _, interrupt_body) = fetch_api_request(
+        port,
+        "POST",
+        &format!("/v1/sessions/{id}/interrupt"),
+        "127.0.0.1",
+        Some("Bearer api-token"),
+        None,
+        None,
+    )
+    .unwrap();
     assert!(interrupted.contains("200"));
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&interrupt_body).unwrap()["status"], "interrupted");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&interrupt_body).unwrap()["status"],
+        "interrupted"
+    );
 }
 
 #[test]
