@@ -74,6 +74,7 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && s
 
 [task.test]
 stack = "clud_1044_validation_retry"
+cmd = "cd /workspace && bash test"
 
 [task.api-session-storage-test]
 stack = "clud_1044_validation_retry"
@@ -94,4 +95,3 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::http::tests"
 [task.api-wire-single-test]
 stack = "clud_1044_validation_retry"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::wire_prost"
-cmd = "cd /workspace && bash test"
