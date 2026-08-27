@@ -8,6 +8,14 @@ must pass a resolved target. No other place in the binary reconstructs backend
 argv, iteration budget, working directory, repeat schedule, DONE/BLOCKED
 marker paths, or stream-json injection.
 
+Daemon-managed native sessions use the same construction path through the
+typed `command::build_headless_turn_plan` helper. Its request carries only a
+message, absolute cwd, and initial/resume identity — never raw argv or an
+environment overlay. Claude headless turns add `--output-format stream-json
+--verbose` plus `--session-id` or `--resume` before `-p`; Codex uses `exec
+--json` or `exec resume --json`. The daemon adapter parses their JSONL
+provider IDs separately from the foreground progress renderer.
+
 ## The struct
 
 `LaunchPlan` lives in `crates/clud-bin/src/command/types.rs`. Trimmed shape:

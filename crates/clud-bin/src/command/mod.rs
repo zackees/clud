@@ -13,6 +13,8 @@ pub use builder::{
 };
 pub use do_input::resolve_do_command_target;
 pub use types::{LaunchPlan, LoopMarkers, RepeatSchedule};
+pub(crate) use builder::build_headless_turn_plan;
+pub(crate) use types::{HeadlessSession, HeadlessTurnRequest};
 
 #[cfg(test)]
 mod tests;

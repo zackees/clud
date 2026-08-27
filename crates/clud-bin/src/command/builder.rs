@@ -14,7 +14,9 @@ use super::prompts::{
     build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, push_prompt,
     push_prompt_interactive, REBASE_PROMPT,
 };
-use super::types::{LaunchPlan, LoopMarkers, RepeatSchedule};
+use super::types::{
+    HeadlessSession, HeadlessTurnRequest, LaunchPlan, LoopMarkers, RepeatSchedule,
+};
 
 const CODEX_PROJECT_DOC_FALLBACK_KEY: &str = "project_doc_fallback_filenames";
 const CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG: &str = r#"project_doc_fallback_filenames=["CODEX.md"]"#;
@@ -143,6 +145,114 @@ pub fn build_launch_plan_for_target(
 ) -> LaunchPlan {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     build_launch_plan_for_target_at(args, target, backend_path, &cwd)
+}
+
+/// Build one daemon-owned headless turn through the canonical launch builder.
+/// Codex's interactive `resume` and headless `exec resume` grammars differ,
+/// so this cannot be represented by CLI `--resume` alone.
+pub(crate) fn build_headless_turn_plan(
+    args: &Args,
+    target: ResolvedLaunchTarget,
+    backend_path: &str,
+    request: &HeadlessTurnRequest,
+) -> Result<LaunchPlan, String> {
+    if !request.cwd.is_absolute() {
+        return Err("headless turn cwd must be absolute".to_string());
+    }
+    let backend = target.effective_harness;
+    if !matches!(backend, Backend::Claude | Backend::Codex) {
+        return Err(format!(
+            "headless sessions support only Claude or Codex, not {}",
+            backend.executable_name()
+        ));
+    }
+    let mut turn_args = args.clone();
+    turn_args.command = None;
+    turn_args.prompt = Some(request.message.clone());
+    turn_args.message = None;
+    turn_args.continue_session = false;
+    turn_args.resume = None;
+    turn_args.pty = false;
+    turn_args.subprocess = true;
+    turn_args.passthrough.clear();
+
+    let mut plan =
+        build_launch_plan_for_target_at(&turn_args, target, backend_path, &request.cwd);
+    match (backend, &request.session) {
+        (Backend::Claude, HeadlessSession::Initial { claude_session_id }) => {
+            let id = claude_session_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "initial Claude turn requires a session id".to_string())?;
+            insert_claude_headless_flags(&mut plan.command, "--session-id", id)?;
+        }
+        (Backend::Claude, HeadlessSession::Resume { provider_session_id }) => {
+            require_provider_id(provider_session_id)?;
+            insert_claude_headless_flags(&mut plan.command, "--resume", provider_session_id)?;
+        }
+        (Backend::Codex, HeadlessSession::Initial { claude_session_id }) => {
+            if claude_session_id.is_some() {
+                return Err("initial Codex turn must not carry a Claude session id".to_string());
+            }
+            insert_codex_headless_flags(&mut plan.command, None)?;
+        }
+        (Backend::Codex, HeadlessSession::Resume { provider_session_id }) => {
+            require_provider_id(provider_session_id)?;
+            insert_codex_headless_flags(&mut plan.command, Some(provider_session_id))?;
+        }
+        _ => unreachable!("only Claude and Codex were accepted above"),
+    }
+    // This flag means the foreground renderer owns the stream; daemon callers
+    // keep raw JSONL for event storage instead.
+    plan.stream_json_progress = false;
+    plan.launch_mode = LaunchMode::Subprocess;
+    Ok(plan)
+}
+
+fn require_provider_id(id: &str) -> Result<(), String> {
+    (!id.is_empty())
+        .then_some(())
+        .ok_or_else(|| "resumed headless turn requires a provider session id".to_string())
+}
+
+fn insert_claude_headless_flags(
+    command: &mut Vec<String>,
+    identity_flag: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let prompt_index = command
+        .iter()
+        .position(|arg| arg == "-p")
+        .ok_or_else(|| "Claude headless plan is missing -p".to_string())?;
+    command.splice(
+        prompt_index..prompt_index,
+        [
+            "--output-format".to_string(),
+            "stream-json".to_string(),
+            "--verbose".to_string(),
+            identity_flag.to_string(),
+            session_id.to_string(),
+        ],
+    );
+    Ok(())
+}
+
+fn insert_codex_headless_flags(
+    command: &mut Vec<String>,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    let exec_index = command
+        .iter()
+        .position(|arg| arg == "exec")
+        .ok_or_else(|| "Codex headless plan is missing exec".to_string())?;
+    let mut flags = Vec::new();
+    if session_id.is_some() {
+        flags.push("resume".to_string());
+    }
+    flags.push("--json".to_string());
+    if let Some(id) = session_id { flags.push(id.to_string()); }
+    command.splice(exec_index + 1..exec_index + 1, flags);
+    Ok(())
 }
 
 #[cfg(test)]
