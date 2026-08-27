@@ -198,6 +198,36 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
         "not_found"
     );
+    let store = super::super::api_sessions::ApiSessionStore::new(dir.path());
+    for index in 0..=super::super::api_sessions::DEFAULT_EVENT_LIMIT {
+        store
+            .append_event(
+                id,
+                None,
+                "source_test".to_string(),
+                serde_json::json!({"index": index}),
+            )
+            .unwrap();
+    }
+    for path in [
+        format!("/v1/sessions/{id}/events?after=bad"),
+        format!("/v1/sessions/{id}/events?limit=0"),
+        format!("/v1/sessions/{id}/events?limit=129"),
+    ] {
+        let (status, _, body) = fetch_api_request(
+            port, "GET", &path, "localhost", Some("Bearer api-canary"), None, None,
+        ).unwrap();
+        assert!(status.contains("400"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "invalid_cursor");
+    }
+    let (status, _, body) = fetch_api_request(
+        port, "GET", &format!("/v1/sessions/{id}/events?after=0&limit=1"), "localhost",
+        Some("Bearer api-canary"), None, None,
+    ).unwrap();
+    assert!(status.contains("200"));
+    let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(page["events"].as_array().unwrap().len(), 1);
+    assert_eq!(page["retention_gap"], true);
     for (host, authorization, cookie) in [
         ("attacker.invalid", Some("Bearer api-canary"), None),
         ("localhost", Some("Bearer wrong"), None),
@@ -285,6 +315,25 @@ fn api_openapi_contract_covers_each_implemented_session_route() {
     assert!(schema["components"]["schemas"]
         .get("TurnResponse")
         .is_some());
+    for schema_name in ["Session", "Event", "TurnResponse", "InterruptResponse", "Error"] {
+        assert!(schema["components"]["schemas"][schema_name]["properties"]
+            .as_object()
+            .is_some_and(|properties| !properties.is_empty()), "{schema_name} must be concrete");
+    }
+    for (path, method) in [
+        ("/v1/sessions", "get"),
+        ("/v1/sessions", "post"),
+        ("/v1/sessions/{id}", "get"),
+        ("/v1/sessions/{id}", "delete"),
+        ("/v1/sessions/{id}/turns", "post"),
+        ("/v1/sessions/{id}/interrupt", "post"),
+        ("/v1/sessions/{id}/events", "get"),
+    ] {
+        assert!(schema["paths"][path][method]["responses"].get("401").is_some());
+    }
+    for path in ["/v1/sessions/{id}", "/v1/sessions/{id}/events"] {
+        assert!(schema["paths"][path]["get"]["responses"].get("409").is_some());
+    }
 }
 
 fn http_test_mock_agent() -> std::path::PathBuf {
@@ -468,6 +517,38 @@ fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity()
     )
     .unwrap();
     assert!(resumed_raw.contains("provider-http"));
+}
+
+#[test]
+fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("cwd");
+    std::fs::create_dir(&cwd).unwrap();
+    let script = temp.path().join("codex.jsonl");
+    std::fs::write(&script, "{\"type\":\"thread.started\",\"thread_id\":\"codex-http-thread\"}\n").unwrap();
+    let _mock_guard = super::super::api_session_http::set_test_headless_executable(
+        http_test_mock_agent().to_string_lossy().into_owned(),
+        vec!["--mock-stream-json".to_string(), script.to_string_lossy().into_owned()],
+    );
+    let store = super::super::api_sessions::ApiSessionStore::new(temp.path());
+    let lifecycle = std::sync::Arc::new(
+        super::super::api_session_lifecycle::ApiSessionLifecycle::new(store.clone()),
+    );
+    let port = spawn_dashboard_with_activity_and_lifecycle(
+        temp.path().to_path_buf(), None, 9999, 100, empty_live_provider(), TelemetryStore::new(),
+        ToolTelemetryStore::new(), "dashboard-token".to_string(), "api-token".to_string(),
+        None, None, lifecycle,
+    ).unwrap();
+    let create = format!(r#"{{"backend":"codex","cwd":"{}"}}"#, cwd.to_string_lossy().replace('\\', "\\\\"));
+    let (_, _, body) = fetch_api_request(port, "POST", "/v1/sessions", "127.0.0.1", Some("Bearer api-token"), None, Some(&create)).unwrap();
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+    for message in ["first", "resume"] {
+        let (status, _, _) = fetch_api_request(port, "POST", &format!("/v1/sessions/{id}/turns"), "127.0.0.1", Some("Bearer api-token"), None, Some(&format!(r#"{{"message":"{message}"}}"))).unwrap();
+        assert!(status.contains("202"));
+        wait_for_api_state(&store, &id, super::super::api_sessions::ApiSessionState::Idle);
+    }
+    assert_eq!(store.get(&id).unwrap().provider_session_id.as_deref(), Some("codex-http-thread"));
+    assert!(std::fs::read_to_string(temp.path().join("logs").join("api").join(&id).join("2.jsonl")).unwrap().contains("codex-http-thread"));
 }
 
 #[test]

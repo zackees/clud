@@ -774,6 +774,40 @@ fn openapi_document() -> serde_json::Value {
     }
     document["components"]["securitySchemes"] = serde_json::json!({"bearerAuth":{"type":"http","scheme":"bearer","bearerFormat":"opaque daemon capability"}});
     document["security"] = serde_json::json!([{ "bearerAuth": [] }]);
+    // The embedded skeleton keeps the hand-maintained route map readable; the
+    // concrete durable-record shapes live here so clients can use the same
+    // DTO fields actually serialized by the HTTP handler.
+    let schemas = &mut document["components"]["schemas"];
+    schemas["Session"]["properties"] = serde_json::json!({
+        "schema_version":{"type":"integer"}, "id":{"type":"string"},
+        "backend":{"type":"string","enum":["claude","codex"]}, "cwd":{"type":"string"},
+        "name":{"type":"string"}, "resolved_settings":{"type":"object"},
+        "provider_session_id":{"type":"string"}, "state":{"type":"string","enum":["starting","running","interrupting","idle","failed","terminated"]},
+        "generation":{"type":"integer"}, "current_turn_id":{"type":"string"},
+        "created_at_ms":{"type":"integer"}, "updated_at_ms":{"type":"integer"}, "last_error":{"type":"string"},
+        "turns":{"type":"array","items":{"type":"object"}}, "events":{"type":"array","items":{"$ref":"#/components/schemas/Event"}},
+        "next_event_cursor":{"type":"integer"}, "idempotency":{"type":"array","items":{"type":"object"}}
+    });
+    schemas["Event"]["properties"] = serde_json::json!({
+        "cursor":{"type":"integer"}, "at_ms":{"type":"integer"}, "turn_id":{"type":"string"},
+        "kind":{"type":"string"}, "data":{}
+    });
+    schemas["TurnResponse"]["properties"] = serde_json::json!({
+        "session_id":{"type":"string"}, "turn_id":{"type":"string"}, "generation":{"type":"integer"}, "status":{"type":"string","enum":["started","replayed","busy"]}
+    });
+    schemas["InterruptResponse"]["properties"] = serde_json::json!({"status":{"type":"string","enum":["interrupted"]},"forced":{"type":"boolean"}});
+    schemas["Error"]["properties"] = serde_json::json!({"code":{"type":"string"},"message":{"type":"string"}});
+    for item in document["paths"].as_object_mut().into_iter().flat_map(|paths| paths.values_mut()) {
+        for operation in ["get", "post", "delete"] {
+            if let Some(responses) = item.get_mut(operation).and_then(|value| value.get_mut("responses")) {
+                responses["401"] = serde_json::json!({"$ref":"#/components/responses/Error"});
+            }
+        }
+    }
+    for path in ["/v1/sessions/{id}", "/v1/sessions/{id}/events"] {
+        document["paths"][path]["get"]["responses"]["409"] =
+            serde_json::json!({"$ref":"#/components/responses/Error","description":"corrupt_session"});
+    }
     document
 }
 
