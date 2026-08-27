@@ -5811,26 +5811,28 @@ Connection: close
         );
     }
 
-    /// The backstop still exists: once `admission_wait` elapses, a client gets
-    /// a definite answer rather than waiting forever behind a wedged worker.
+    /// #1054 RED: local admission saturation is not an API error.  A second
+    /// socket stays in the kernel backlog past the old finite budget, then its
+    /// original request is admitted exactly once when the sole worker exits.
     #[test]
-    fn a_saturated_bridge_still_answers_after_the_admission_wait() {
+    fn a_saturated_bridge_admits_the_original_request_after_the_old_budget() {
         let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
-        // `admission_wait` is measured by the accept loop from the moment it
-        // *notices* saturation, which happens slightly before the notifier
-        // below is observed here. The second client therefore waits
-        // `admission_wait` minus that skew, so the budget has to be large
-        // enough that CI scheduling noise cannot eat the margin: a 50ms budget
-        // failed on loaded Linux and macOS runners at exactly this assertion.
+        let upstream = FakeResponses::start();
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("bridge.jsonl");
+        // Keep the first worker alive past the former admission deadline.
+        // The second request must remain unaccepted rather than collecting a
+        // synthetic 503, then make one normal upstream call after admission.
         let bridge = BridgeHandle::start(
             BridgeConfig {
                 max_concurrency: 1,
-                admission_wait: Duration::from_millis(500),
+                admission_wait: Duration::from_millis(100),
                 header_timeout: Duration::from_secs(5),
-                ..BridgeConfig::default()
+                ..bridged_config(&upstream)
             }
-            .with_request_hold(Duration::from_secs(5))
-            .with_admission_notifier(admitted_tx),
+            .with_request_hold(Duration::from_millis(500))
+            .with_admission_notifier(admitted_tx)
+            .with_log_path(log_path.clone()),
         )
         .unwrap();
         let addr = bridge.socket_addr();
@@ -5844,16 +5846,37 @@ Connection: close
             .recv_timeout(Duration::from_secs(30))
             .expect("first request admitted");
 
-        let started = Instant::now();
-        let saturated = request(addr, &authorized("HEAD", "/v1/messages", &token, ""));
-        assert_eq!(status(&saturated), 503);
-        // Half the budget: proves the backstop waited rather than answering
-        // immediately, while leaving room for the accept-loop skew above.
+        let queued_token = token.clone();
+        let queued = thread::spawn(move || {
+            request(
+                addr,
+                &authorized("POST", "/v1/messages", &queued_token, PROBE_BODY),
+            )
+        });
+        thread::sleep(Duration::from_millis(250));
         assert!(
-            started.elapsed() >= Duration::from_millis(250),
-            "the 503 must come only after the admission wait, not immediately"
+            !queued.is_finished(),
+            "the queued socket must outlive the old admission budget"
+        );
+        let response = queued.join().expect("queued request thread");
+        assert_eq!(status(&response), 200, "queued request: {response}");
+        assert!(!response.contains("bridge busy"));
+        assert_eq!(
+            upstream
+                .requests()
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            1,
+            "the queued original must make exactly one upstream request"
         );
         drop(occupied);
+        let mut bridge = bridge;
+        bridge.shutdown().unwrap();
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        assert!(log.contains("admission_queued"), "{log}");
+        assert!(log.contains("admission_acquired"), "{log}");
+        assert!(log.contains("wait_ms"), "{log}");
     }
 
     /// Regression guard: Claude Code sends `POST /v1/messages?beta=true`.
