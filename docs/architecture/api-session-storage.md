@@ -33,3 +33,21 @@ events, and persists a recognized provider ID. The waiter joins this drain
 before sealing the turn, so the last identity/output event cannot race normal
 completion into `idle`. Unknown provider records are opaque events and
 malformed records become diagnostics.
+
+## Lifecycle serialization
+
+The #1043 lifecycle controller keeps one in-memory captured-process handle per
+logical ID, with a controller mutation gate around interrupt/replace/start
+sequencing. Its durable admission transition takes the per-session file lock,
+checks the idempotency ledger, and records both a new generation and its key in
+one write *before* a subprocess is created. A competing normal submission
+receives `session_busy`; a duplicate idempotency key with the same fingerprint
+replays its original turn ID even after a controller restart, while a different
+fingerprint conflicts. A later resume requires an already-captured provider
+identity. Replacement removes the active handle, durably enters
+`interrupting`, requests an interrupt, waits a bounded grace period, records
+graceful or forced disposition, then starts the next generation. Terminal kill
+signals the captured tree, seals the current turn as killed, and makes the
+durable session `terminated`, so future submissions are refused. These
+controls use only API captured subprocesses and never alter legacy interactive
+attach Ctrl-C behavior.
