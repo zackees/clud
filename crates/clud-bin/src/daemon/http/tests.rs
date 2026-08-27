@@ -858,6 +858,11 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
     )
     .unwrap();
     assert!(replaced.contains("202"));
+    wait_for_api_state(
+        &store,
+        &id,
+        super::super::api_sessions::ApiSessionState::Running,
+    );
     let (interrupted, _, interrupt_body) = fetch_api_request(
         port,
         "POST",
@@ -868,7 +873,11 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
         None,
     )
     .unwrap();
-    assert!(interrupted.contains("200"));
+    assert!(
+        interrupted.contains("200"),
+        "unexpected interrupt response: {interrupted}; body: {interrupt_body}; record: {:?}",
+        store.get(&id)
+    );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&interrupt_body).unwrap()["status"],
         "interrupted"
