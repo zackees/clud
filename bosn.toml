@@ -1,36 +1,36 @@
 # Linux validation stack.  The checkout is deliberately read-only; all Python,
 # Cargo, Rustup, and uv build state lives in bosn-managed volumes instead.
-[stack.linux]
+[stack.clud_validation]
 dockerfile = "bosn/Dockerfile"
 default = true
 workdir = "/workspace"
 
-[stack.linux.mounts.source]
+[stack.clud_validation.mounts.source]
 source = "."
 destination = "/workspace"
 readonly = true
 
-[stack.linux.volumes.target]
+[stack.clud_validation.volumes.target]
 scope = "stack"
 destination = "/workspace/target"
 
-[stack.linux.volumes.venv]
+[stack.clud_validation.volumes.venv]
 scope = "stack"
 destination = "/workspace/.venv"
 
-[stack.linux.volumes.uv-cache]
+[stack.clud_validation.volumes.uv-cache]
 scope = "machine"
 destination = "/root/.cache/uv"
 
-[stack.linux.volumes.cargo-home]
+[stack.clud_validation.volumes.cargo-home]
 scope = "machine"
 destination = "/root/.cargo"
 
-[stack.linux.volumes.rustup-home]
+[stack.clud_validation.volumes.rustup-home]
 scope = "machine"
 destination = "/root/.rustup"
 
-[stack.linux.env]
+[stack.clud_validation.env]
 CARGO_TARGET_DIR = "/workspace/target"
 UV_CACHE_DIR = "/root/.cache/uv"
 # This repository pins Soldr through its packaging/CI flow rather than a
@@ -38,17 +38,17 @@ UV_CACHE_DIR = "/root/.cache/uv"
 SOLDR_ALLOW_UNPINNED = "1"
 
 [task.lint]
-stack = "linux"
+stack = "clud_validation"
 cmd = "cd /workspace && bash lint"
 
 [task.focused-test]
-stack = "linux"
+stack = "clud_validation"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::headless_adapter"
 
 [task.api-discovery-test]
-stack = "linux"
+stack = "clud_validation"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::http::tests::api_discovery_routes_require_bearer_and_return_json"
 
 [task.test]
-stack = "linux"
+stack = "clud_validation"
 cmd = "cd /workspace && bash test"
