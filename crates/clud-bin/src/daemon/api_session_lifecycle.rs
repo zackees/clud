@@ -110,16 +110,20 @@ impl ApiSessionLifecycle {
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id)
         {
-            if process.returncode().is_none() {
-                if !replace {
-                    self.active
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .insert(session_id.to_string(), process);
-                    return Ok(LifecycleReply::SessionBusy);
-                }
-                self.stop(session_id, &process);
+            // The active-map entry is the admission proof. Do not call into
+            // `NativeProcess::returncode` while holding this session gate:
+            // on a loaded Windows runner that probe can block the duplicate
+            // request indefinitely. The observer owns stale-handle removal;
+            // a just-completed handle may therefore produce one short busy
+            // retry, never a synchronous liveness probe.
+            if !replace {
+                self.active
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(session_id.to_string(), process);
+                return Ok(LifecycleReply::SessionBusy);
             }
+            self.stop(session_id, &process);
         } else if matches!(
             session.state,
             ApiSessionState::Running | ApiSessionState::Interrupting

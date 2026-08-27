@@ -86,15 +86,22 @@ fn running_submit_is_busy_while_duplicate_replays_after_controller_restart() {
         other => panic!("expected start, got {other:?}"),
     };
     assert_eq!(
-        lifecycle
-            .submit(
-                &id,
-                slow.clone(),
-                Some("request-b".to_string()),
-                "fingerprint-b".to_string(),
-                false
-            )
-            .unwrap(),
+        {
+            let (sent, received) = std::sync::mpsc::sync_channel(1);
+            let lifecycle = lifecycle.clone();
+            let id = id.clone();
+            let busy_plan = slow.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(lifecycle.submit(
+                    &id, busy_plan, Some("request-b".to_string()),
+                    "fingerprint-b".to_string(), false,
+                ));
+            });
+            received
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("known active handle must return busy without a process probe")
+                .unwrap()
+        },
         LifecycleReply::SessionBusy
     );
     assert_eq!(
