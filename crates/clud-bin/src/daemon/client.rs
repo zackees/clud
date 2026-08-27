@@ -575,7 +575,7 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
             }
             recorded_pid
         }
-        Err(err) => return Err(err),
+        Err(err) => return shutdown_connect_error(state_dir, &recorded, err),
     };
 
     // The acking daemon reports its own pid; when that is the pid we already
@@ -599,6 +599,24 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
 
     let _ = fs::remove_file(daemon_info_path(state_dir));
     Ok(pid)
+}
+
+/// A daemon can exit after its identity is checked but before the shutdown
+/// client connects. Treat that stale record exactly like the pre-connect dead
+/// identity case, while preserving real transport errors for live daemons.
+fn shutdown_connect_error(
+    state_dir: &Path,
+    recorded: &ProcessIdentity,
+    err: io::Error,
+) -> io::Result<u32> {
+    if identity_is_alive(recorded) {
+        return Err(err);
+    }
+    let _ = fs::remove_file(daemon_info_path(state_dir));
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("daemon pid {} exited before shutdown", recorded.pid),
+    ))
 }
 
 fn write_daemon_request(
