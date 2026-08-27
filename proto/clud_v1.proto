@@ -22,6 +22,7 @@ message ClientToDaemon {
     ProcSnapshotRequest proc_snapshot = 11;
     AcquireClientLeaseRequest acquire_client_lease = 12;
     ReleaseClientLeaseRequest release_client_lease = 13;
+    ApiSessionKillRequest api_session_kill = 14;
   }
   string request_id = 100;
 }
@@ -42,6 +43,7 @@ message DaemonToClient {
     ProcSnapshotResponse proc_snapshot = 12;
     ClientLeaseAcquiredResponse client_lease_acquired = 13;
     ClientLeaseReleasedResponse client_lease_released = 14;
+    ApiSessionKilledResponse api_session_killed = 15;
   }
   string request_id = 100;
 }
@@ -126,6 +128,9 @@ message AcquireClientLeaseRequest {
 message ReleaseClientLeaseRequest {
   ProcessIdentity identity = 1;
 }
+
+message ApiSessionKillRequest { string session_id = 1; }
+message ApiSessionKilledResponse { string session_id = 1; }
 
 message ClientLeaseAcquiredResponse {
   uint32 lease_count = 1;

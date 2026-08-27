@@ -1,66 +1,119 @@
 # Linux validation stack.  The checkout is deliberately read-only; all Python,
 # Cargo, Rustup, and uv build state lives in bosn-managed volumes instead.
-[stack.clud_1043_validation]
+[stack.clud_1044_final_retry]
 dockerfile = "bosn/Dockerfile"
 default = true
 workdir = "/workspace"
 
-[stack.clud_1043_validation.mounts.source]
+[stack.clud_1044_final_retry.mounts.source]
 source = "."
 destination = "/workspace"
 readonly = true
 
-[stack.clud_1043_validation.volumes.target]
+[stack.clud_1044_final_retry.volumes.target]
 scope = "stack"
 destination = "/workspace/target"
 
-[stack.clud_1043_validation.volumes.venv]
+[stack.clud_1044_final_retry.volumes.venv]
 scope = "stack"
 destination = "/workspace/.venv"
 
-[stack.clud_1043_validation.volumes.uv-cache]
+[stack.clud_1044_final_retry.volumes.dist]
+scope = "stack"
+destination = "/workspace/dist"
+
+[stack.clud_1044_final_retry.volumes.uv-cache]
 scope = "machine"
 destination = "/root/.cache/uv"
 
-[stack.clud_1043_validation.volumes.cargo-home]
+[stack.clud_1044_final_retry.volumes.ruff-cache]
+scope = "machine"
+destination = "/root/.cache/ruff"
+
+[stack.clud_1044_final_retry.volumes.cargo-home]
 scope = "machine"
 destination = "/root/.cargo"
 
-[stack.clud_1043_validation.volumes.rustup-home]
+[stack.clud_1044_final_retry.volumes.rustup-home]
 scope = "machine"
 destination = "/root/.rustup"
 
-[stack.clud_1043_validation.env]
+[stack.clud_1044_final_retry.env]
 CARGO_TARGET_DIR = "/workspace/target"
+CARGO_BUILD_JOBS = "1"
+SOLDR_JOBS = "1"
 UV_CACHE_DIR = "/root/.cache/uv"
+RUFF_CACHE_DIR = "/root/.cache/ruff"
 # This repository pins Soldr through its packaging/CI flow rather than a
 # rust-toolchain.toml; the image itself pins Rust 1.94.
 SOLDR_ALLOW_UNPINNED = "1"
 
 [task.lint]
-stack = "clud_1043_validation"
+stack = "clud_1044_final_retry"
 cmd = "cd /workspace && bash lint"
 
 [task.focused-test]
-stack = "clud_1043_validation"
+stack = "clud_1044_final_retry"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::headless_adapter"
 
 [task.api-discovery-test]
-stack = "clud_1043_validation"
+stack = "clud_1044_final_retry"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::http::tests::api_discovery_routes_require_bearer_and_return_json"
 
 [task.api-session-test]
-stack = "clud_1043_validation"
+stack = "clud_1044_final_retry"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions"
 
 [task.api-turn-controller-test]
-stack = "clud_1043_validation"
+stack = "clud_1044_final_retry"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && soldr cargo test -p clud --lib daemon::api_turn_controller && soldr cargo test -p clud --test api_turn_controller"
 
 [task.api-session-lifecycle-test]
-stack = "clud_1043_validation"
+stack = "clud_1044_final_retry"
 cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions && soldr cargo test -p clud --lib daemon::api_turn_controller && soldr cargo test -p clud --lib daemon::api_session_lifecycle && soldr cargo test -p clud --test api_turn_controller && soldr cargo test -p clud --test api_session_lifecycle"
 
+[task.api-session-integration-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo build -p mock-agent && soldr cargo test -p clud --lib daemon::api_sessions && soldr cargo test -p clud --lib daemon::api_turn_controller && soldr cargo test -p clud --lib daemon::api_session_lifecycle && soldr cargo test -p clud --lib daemon::http::tests && soldr cargo test -p clud --lib daemon::wire_prost && soldr cargo test -p clud --lib command:: && soldr cargo test -p clud --test api_turn_controller && soldr cargo test -p clud --test api_session_lifecycle"
+
 [task.test]
-stack = "clud_1043_validation"
-cmd = "cd /workspace && bash test"
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && .venv/bin/python -m ci.test --full"
+
+[task.api-session-storage-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_sessions"
+
+[task.api-turn-controller-single-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_turn_controller"
+
+[task.api-session-lifecycle-single-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::api_session_lifecycle"
+
+[task.api-http-single-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo build -p mock-agent && soldr cargo test -p clud --lib daemon::http::tests"
+
+[task.api-wire-single-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo test -p clud --lib daemon::wire_prost"
+
+# Canonical ci.test --full lanes, split so a foreground Bosn session exposes
+# the exact stalled phase while preserving its workspace and pytest coverage.
+[task.ci-workspace-no-run]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo build -p clud -p mock-agent -p daemon-stub && CLUD_INTEGRATION_TESTS=1 soldr cargo test --workspace --no-run"
+
+[task.ci-workspace-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && CLUD_INTEGRATION_TESTS=1 soldr cargo test --workspace"
+
+[task.ci-pytest-unit]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && CLUD_TEST_BINARY=/workspace/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/workspace/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/workspace/target/debug/mock-agent .venv/bin/python -m pytest -m 'not integration'"
+
+[task.ci-pytest-integration]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && .venv/bin/python -m ci.build_wheel --dev && CLUD_INTEGRATION_TESTS=1 CLUD_NO_UNLOCK=1 CLUD_TEST_BINARY=/workspace/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/workspace/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/workspace/target/debug/mock-agent .venv/bin/python -m pytest -m integration -v"

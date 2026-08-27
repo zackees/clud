@@ -5,10 +5,11 @@ use std::sync::{mpsc, Arc, Mutex};
 use running_process::broker::protocol::Frame;
 use running_process::NativeProcess;
 
+use super::super::api_session_lifecycle::ApiSessionLifecycle;
 use super::super::client_leases::ClientLeaseRegistry;
 use super::super::gc_service::RegistryMsg;
 use super::super::proc_sampler::ProcSamplerHandle;
-use super::super::server::dispatch_daemon_request_with_sampler;
+use super::super::server::dispatch_daemon_request_with_sampler_and_lifecycle;
 use super::super::types::DaemonResponse;
 use super::super::wire_prost::{
     decode_daemon_request, encode_daemon_response_prost, WireFrame, CLUD_PROST_PAYLOAD_PROTOCOL,
@@ -30,6 +31,7 @@ pub(super) fn answer_payload_frame(
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     proc_sampler: Option<&ProcSamplerHandle>,
     client_leases: &ClientLeaseRegistry,
+    api_lifecycle: &Arc<ApiSessionLifecycle>,
 ) -> PayloadAnswer {
     let envelope_request_id = format!("rp-{}", frame.request_id);
     let request = decode_daemon_request(&WireFrame {
@@ -37,12 +39,13 @@ pub(super) fn answer_payload_frame(
         payload: frame.payload.clone(),
     });
     let response = match request {
-        Ok(request) => dispatch_daemon_request_with_sampler(
+        Ok(request) => dispatch_daemon_request_with_sampler_and_lifecycle(
             state_dir,
             workers,
             gc_tx,
             proc_sampler,
             client_leases,
+            api_lifecycle,
             request,
         ),
         Err(err) => DaemonResponse::Error {

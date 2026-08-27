@@ -115,6 +115,7 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
         }
         DaemonResponse::Created { .. }
         | DaemonResponse::Terminated { .. }
+        | DaemonResponse::ApiSessionKilled { .. }
         | DaemonResponse::Interrupted { .. }
         | DaemonResponse::AdoptKillAck { .. }
         | DaemonResponse::Gc { .. }

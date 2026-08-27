@@ -319,6 +319,33 @@ fn daemon_response_line_prost_roundtrips() {
 }
 
 #[test]
+fn api_session_kill_is_additive_in_json_and_prost() {
+    let request = DaemonRequest::ApiSessionKill {
+        session_id: "api-sess-test".to_string(),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["op"], "api_session_kill");
+    assert_json_parity(
+        &request,
+        &serde_json::from_value::<DaemonRequest>(json).unwrap(),
+    );
+    let frame = encode_daemon_request_prost(&request, "api-kill").unwrap();
+    assert_json_parity(&request, &decode_daemon_request(&frame).unwrap());
+
+    let response = DaemonResponse::ApiSessionKilled {
+        session_id: "api-sess-test".to_string(),
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["op"], "api_session_killed");
+    assert_json_parity(
+        &response,
+        &serde_json::from_value::<DaemonResponse>(json).unwrap(),
+    );
+    let frame = encode_daemon_response_prost(&response, "api-kill").unwrap();
+    assert_json_parity(&response, &decode_daemon_response(&frame).unwrap());
+}
+
+#[test]
 fn daemon_request_prost_roundtrips_json_shapes() {
     let cases = vec![
         DaemonRequest::Create {
@@ -330,6 +357,9 @@ fn daemon_request_prost_roundtrips_json_shapes() {
         DaemonRequest::ListLiveCwds,
         DaemonRequest::Terminate {
             session_id: "sess-test".to_string(),
+        },
+        DaemonRequest::ApiSessionKill {
+            session_id: "api-sess-test".to_string(),
         },
         DaemonRequest::Interrupt {
             session_id: "sess-test".to_string(),
@@ -384,6 +414,9 @@ fn daemon_response_prost_roundtrips_json_shapes() {
         },
         DaemonResponse::Terminated {
             session: session.clone(),
+        },
+        DaemonResponse::ApiSessionKilled {
+            session_id: "api-sess-test".to_string(),
         },
         DaemonResponse::Interrupted { session },
         DaemonResponse::AdoptKillAck { accepted: 2 },

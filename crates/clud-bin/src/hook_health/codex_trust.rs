@@ -111,5 +111,8 @@ pub(in crate::hook_health) fn looks_like_windows_path(path: &str) -> bool {
 }
 
 pub(in crate::hook_health) fn is_extended_key_for(key: &str, canonical_key: &str) -> bool {
-    key.starts_with(r"\\?\") && normalize_project_path_key(key) == canonical_key
+    let Some(stripped) = key.strip_prefix(r"\\?\") else {
+        return false;
+    };
+    normalize_project_path_key(key) == canonical_key || stripped.replace('\\', "/") == canonical_key
 }

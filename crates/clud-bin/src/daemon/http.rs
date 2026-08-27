@@ -40,7 +40,7 @@ use crate::launch_log::{self, LaunchRecord};
 use crate::session_registry::LiveSession;
 
 #[path = "http_response.rs"]
-mod http_response;
+pub(crate) mod http_response;
 use http_response::{
     find_body_start, json_error_bytes, read_body, respond_capability_bootstrap, respond_html,
     respond_json, respond_text,
@@ -553,6 +553,42 @@ pub(super) fn spawn_dashboard_with_activity(
     test_activity: Option<TestRuntimeActivity>,
     activity: Option<DaemonActivity>,
 ) -> Option<u16> {
+    let api_lifecycle = Arc::new(super::api_session_lifecycle::ApiSessionLifecycle::new(
+        super::api_sessions::ApiSessionStore::new(state_dir.clone()),
+    ));
+    spawn_dashboard_with_activity_and_lifecycle(
+        state_dir,
+        gc_tx,
+        ipc_port,
+        started_at_unix,
+        live_sessions_provider,
+        telemetry,
+        tool_telemetry,
+        dashboard_token,
+        api_token,
+        test_activity,
+        activity,
+        api_lifecycle,
+    )
+}
+
+/// Production passes the same manager to both IPC transports and HTTP. Test
+/// callers use `spawn_dashboard_with_activity`, which owns an isolated one.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_dashboard_with_activity_and_lifecycle(
+    state_dir: PathBuf,
+    gc_tx: Option<mpsc::Sender<RegistryMsg>>,
+    ipc_port: u16,
+    started_at_unix: i64,
+    live_sessions_provider: LiveSessionsProvider,
+    telemetry: TelemetryStore,
+    tool_telemetry: ToolTelemetryStore,
+    dashboard_token: String,
+    api_token: String,
+    test_activity: Option<TestRuntimeActivity>,
+    activity: Option<DaemonActivity>,
+    api_lifecycle: Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
+) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
         Err(err) => {
@@ -587,6 +623,7 @@ pub(super) fn spawn_dashboard_with_activity(
                 },
                 test_activity,
                 activity,
+                api_lifecycle,
             )
         });
     match res {
@@ -612,6 +649,7 @@ fn run_dashboard_loop(
     stores: DashboardTelemetryStores,
     test_activity: Option<TestRuntimeActivity>,
     activity: Option<DaemonActivity>,
+    api_lifecycle: Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
 ) {
     for request in server.incoming_requests() {
         let _connection_guard = activity.as_ref().map(DaemonActivity::start_connection);
@@ -636,17 +674,21 @@ fn run_dashboard_loop(
                 );
                 continue;
             }
-            match (method, path.as_str()) {
-                (Method::Get, "/v1/health") => respond_json(
+            match (method.clone(), path.as_str()) {
+                (Method::Get, "/v1/health") => {
+                    respond_json(request, 200, br#"{"status":"ok","api_version":"v1"}"#)
+                }
+                (Method::Get, "/v1/openapi.json") => respond_json(
                     request,
                     200,
-                    br#"{"status":"ok","api_version":"v1"}"#,
+                    &serde_json::to_vec(&openapi_document()).unwrap_or_else(|_| b"{}".to_vec()),
                 ),
-                (Method::Get, "/v1/openapi.json") => respond_json(request, 200, OPENAPI_JSON.as_bytes()),
-                _ => respond_json(
+                _ => super::api_session_http::handle(
                     request,
-                    404,
-                    br#"{"code":"not_found","message":"API route not found"}"#,
+                    method,
+                    &path,
+                    state_dir.clone(),
+                    &api_lifecycle,
                 ),
             }
             continue;
@@ -715,7 +757,66 @@ fn run_dashboard_loop(
     }
 }
 
-const OPENAPI_JSON: &str = r#"{"openapi":"3.1.0","info":{"title":"clud daemon API","version":"v1"},"paths":{"/v1/health":{"get":{"responses":{"200":{"description":"healthy"},"401":{"description":"bearer required"}}}},"/v1/openapi.json":{"get":{"responses":{"200":{"description":"schema"},"401":{"description":"bearer required"}}}}},"components":{"schemas":{"Error":{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"}}}}}}"#;
+const OPENAPI_JSON: &str = r##"{"openapi":"3.1.0","info":{"title":"clud daemon API","version":"v1"},"paths":{"/v1/health":{"get":{"responses":{"200":{"description":"healthy"},"401":{"$ref":"#/components/responses/Error"}}}},"/v1/openapi.json":{"get":{"responses":{"200":{"description":"schema"},"401":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions":{"get":{"responses":{"200":{"description":"logical sessions","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/Session"}}}}},"401":{"$ref":"#/components/responses/Error"}}},"post":{"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateSession"}}}},"responses":{"201":{"description":"created","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Session"}}}},"400":{"$ref":"#/components/responses/Error"},"401":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}":{"parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"get":{"responses":{"200":{"description":"session","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Session"}}}},"404":{"$ref":"#/components/responses/Error"}}},"delete":{"responses":{"200":{"description":"terminated","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TerminalResponse"}}}},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/interrupt":{"post":{"responses":{"200":{"description":"interrupted","content":{"application/json":{"schema":{"$ref":"#/components/schemas/InterruptResponse"}}}},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/turns":{"post":{"parameters":[{"name":"Idempotency-Key","in":"header","required":false,"schema":{"type":"string"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/TurnRequest"}}}},"responses":{"200":{"description":"idempotent replay","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TurnResponse"}}}},"202":{"description":"started","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TurnResponse"}}}},"400":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"},"409":{"$ref":"#/components/responses/Error"},"422":{"$ref":"#/components/responses/Error"}}}},"/v1/sessions/{id}/events":{"get":{"parameters":[{"name":"after","in":"query","schema":{"type":"integer","minimum":0}},{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":128}}],"responses":{"200":{"description":"bounded cursor events","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventsResponse"}}}},"400":{"$ref":"#/components/responses/Error"},"404":{"$ref":"#/components/responses/Error"}}}}},"components":{"schemas":{"CreateSession":{"type":"object","required":["backend","cwd"],"properties":{"backend":{"enum":["claude","codex"]},"cwd":{"type":"string","description":"existing directory; stored as canonical absolute path"},"name":{"type":"string"},"model":{"type":"string"},"safe":{"type":"boolean"}}},"Session":{"type":"object","required":["id","backend","cwd","state","generation"]},"TurnRequest":{"type":"object","required":["message"],"properties":{"message":{"type":"string","minLength":1,"maxLength":65536},"interrupt_running":{"type":"boolean"}}},"TurnResponse":{"type":"object","required":["session_id","turn_id","status"]},"InterruptResponse":{"type":"object","required":["status","forced"]},"TerminalResponse":{"type":"object","required":["status"]},"EventsResponse":{"type":"object","required":["events","next_cursor","retention_gap"],"properties":{"events":{"type":"array","items":{"$ref":"#/components/schemas/Event"}},"next_cursor":{"type":"integer"},"retention_gap":{"type":"boolean"}}},"Event":{"type":"object","required":["cursor","at_ms","kind","data"]},"Error":{"type":"object","required":["code","message"]}},"responses":{"Error":{"description":"stable API error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Error"}}}}}}}"##;
+
+fn openapi_document() -> serde_json::Value {
+    let mut document: serde_json::Value =
+        serde_json::from_str(OPENAPI_JSON).expect("embedded OpenAPI is valid JSON");
+    let id_parameter =
+        serde_json::json!({"name":"id","in":"path","required":true,"schema":{"type":"string"}});
+    for path in [
+        "/v1/sessions/{id}/interrupt",
+        "/v1/sessions/{id}/turns",
+        "/v1/sessions/{id}/events",
+    ] {
+        document["paths"][path]["parameters"] =
+            serde_json::Value::Array(vec![id_parameter.clone()]);
+    }
+    document["components"]["securitySchemes"] = serde_json::json!({"bearerAuth":{"type":"http","scheme":"bearer","bearerFormat":"opaque daemon capability"}});
+    document["security"] = serde_json::json!([{ "bearerAuth": [] }]);
+    // The embedded skeleton keeps the hand-maintained route map readable; the
+    // concrete durable-record shapes live here so clients can use the same
+    // DTO fields actually serialized by the HTTP handler.
+    let schemas = &mut document["components"]["schemas"];
+    schemas["Session"]["properties"] = serde_json::json!({
+        "schema_version":{"type":"integer"}, "id":{"type":"string"},
+        "backend":{"type":"string","enum":["claude","codex"]}, "cwd":{"type":"string"},
+        "name":{"type":"string"}, "resolved_settings":{"type":"object"},
+        "provider_session_id":{"type":"string"}, "state":{"type":"string","enum":["starting","running","interrupting","idle","failed","terminated"]},
+        "generation":{"type":"integer"}, "current_turn_id":{"type":"string"},
+        "created_at_ms":{"type":"integer"}, "updated_at_ms":{"type":"integer"}, "last_error":{"type":"string"},
+        "turns":{"type":"array","items":{"type":"object"}}, "events":{"type":"array","items":{"$ref":"#/components/schemas/Event"}},
+        "next_event_cursor":{"type":"integer"}, "idempotency":{"type":"array","items":{"type":"object"}}
+    });
+    schemas["Event"]["properties"] = serde_json::json!({
+        "cursor":{"type":"integer"}, "at_ms":{"type":"integer"}, "turn_id":{"type":"string"},
+        "kind":{"type":"string"}, "data":{}
+    });
+    schemas["TurnResponse"]["properties"] = serde_json::json!({
+        "session_id":{"type":"string"}, "turn_id":{"type":"string"}, "generation":{"type":"integer"}, "status":{"type":"string","enum":["started","replayed","busy"]}
+    });
+    schemas["InterruptResponse"]["properties"] = serde_json::json!({"status":{"type":"string","enum":["interrupted"]},"forced":{"type":"boolean"}});
+    schemas["Error"]["properties"] =
+        serde_json::json!({"code":{"type":"string"},"message":{"type":"string"}});
+    for item in document["paths"]
+        .as_object_mut()
+        .into_iter()
+        .flat_map(|paths| paths.values_mut())
+    {
+        for operation in ["get", "post", "delete"] {
+            if let Some(responses) = item
+                .get_mut(operation)
+                .and_then(|value| value.get_mut("responses"))
+            {
+                responses["401"] = serde_json::json!({"$ref":"#/components/responses/Error"});
+            }
+        }
+    }
+    for path in ["/v1/sessions/{id}", "/v1/sessions/{id}/events"] {
+        document["paths"][path]["get"]["responses"]["409"] = serde_json::json!({"$ref":"#/components/responses/Error","description":"corrupt_session"});
+    }
+    document
+}
 
 // ---------- route handlers ----------
 
@@ -961,7 +1062,7 @@ mod http_dashboard_state;
 use http_dashboard_state::{build_dashboard_state, send_gc_op};
 #[path = "http_info.rs"]
 mod http_info;
-pub use http_info::{read_dashboard_info, read_dashboard_port};
+pub use http_info::{read_api_info, read_dashboard_info, read_dashboard_port};
 
 /// Public view of `daemon.json` used by the `clud ui` CLI.
 #[derive(Debug, Clone)]

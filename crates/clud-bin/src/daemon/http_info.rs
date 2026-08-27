@@ -1,5 +1,7 @@
 use super::*;
 
+pub type ApiInfo = (u32, Option<u16>, Option<String>, Option<String>);
+
 pub fn read_dashboard_port(state_dir: &Path) -> io::Result<Option<u16>> {
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
     Ok(info.dashboard_port)
@@ -17,7 +19,7 @@ pub fn read_dashboard_info(state_dir: &Path) -> io::Result<DashboardInfo> {
     })
 }
 
-pub fn read_api_info(state_dir: &Path) -> io::Result<(u32, Option<u16>, Option<String>, Option<String>)> {
+pub fn read_api_info(state_dir: &Path) -> io::Result<ApiInfo> {
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
     Ok((info.pid, info.dashboard_port, info.api_token, info.version))
 }

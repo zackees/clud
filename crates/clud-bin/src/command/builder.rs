@@ -14,9 +14,7 @@ use super::prompts::{
     build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, push_prompt,
     push_prompt_interactive, REBASE_PROMPT,
 };
-use super::types::{
-    HeadlessSession, HeadlessTurnRequest, LaunchPlan, LoopMarkers, RepeatSchedule,
-};
+use super::types::{HeadlessSession, HeadlessTurnRequest, LaunchPlan, LoopMarkers, RepeatSchedule};
 
 const CODEX_PROJECT_DOC_FALLBACK_KEY: &str = "project_doc_fallback_filenames";
 const CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG: &str = r#"project_doc_fallback_filenames=["CODEX.md"]"#;
@@ -178,8 +176,7 @@ pub(crate) fn build_headless_turn_plan(
     turn_args.subprocess = true;
     turn_args.passthrough.clear();
 
-    let mut plan =
-        build_launch_plan_for_target_at(&turn_args, target, backend_path, &request.cwd);
+    let mut plan = build_launch_plan_for_target_at(&turn_args, target, backend_path, &request.cwd);
     match (backend, &request.session) {
         (Backend::Claude, HeadlessSession::Initial { claude_session_id }) => {
             let id = claude_session_id
@@ -188,7 +185,12 @@ pub(crate) fn build_headless_turn_plan(
                 .ok_or_else(|| "initial Claude turn requires a session id".to_string())?;
             insert_claude_headless_flags(&mut plan.command, "--session-id", id)?;
         }
-        (Backend::Claude, HeadlessSession::Resume { provider_session_id }) => {
+        (
+            Backend::Claude,
+            HeadlessSession::Resume {
+                provider_session_id,
+            },
+        ) => {
             require_provider_id(provider_session_id)?;
             insert_claude_headless_flags(&mut plan.command, "--resume", provider_session_id)?;
         }
@@ -198,7 +200,12 @@ pub(crate) fn build_headless_turn_plan(
             }
             insert_codex_headless_flags(&mut plan.command, None)?;
         }
-        (Backend::Codex, HeadlessSession::Resume { provider_session_id }) => {
+        (
+            Backend::Codex,
+            HeadlessSession::Resume {
+                provider_session_id,
+            },
+        ) => {
             require_provider_id(provider_session_id)?;
             insert_codex_headless_flags(&mut plan.command, Some(provider_session_id))?;
         }
@@ -252,7 +259,9 @@ fn insert_codex_headless_flags(
         flags.push("resume".to_string());
     }
     flags.push("--json".to_string());
-    if let Some(id) = session_id { flags.push(id.to_string()); }
+    if let Some(id) = session_id {
+        flags.push(id.to_string());
+    }
     command.splice(exec_index + 1..exec_index + 1, flags);
     Ok(())
 }

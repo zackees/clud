@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::api_sessions::{ApiSessionBackend, ApiSessionState, ApiSessionStore};
 
 pub(super) fn build_dashboard_state(
     state_dir: &Path,
@@ -10,6 +11,10 @@ pub(super) fn build_dashboard_state(
     let now_unix = current_unix();
 
     let mut sessions = read_session_views(state_dir).unwrap_or_default();
+    // Logical API sessions deliberately appear as non-attachable rows rather
+    // than worker snapshots. Their IDs may be used by API-aware CLI commands,
+    // but never by the attach transport.
+    merge_api_sessions(&mut sessions, state_dir);
     merge_launch_records(&mut sessions, launch_log::read_recent(state_dir));
     // Issue #190: surface direct-runner sessions (default `clud` invocation
     // path) by reading the redb session registry. The on-disk snapshot
@@ -160,6 +165,49 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
     // Newest first.
     out.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
     Ok(out)
+}
+
+fn merge_api_sessions(sessions: &mut Vec<SessionView>, state_dir: &Path) {
+    for record in ApiSessionStore::new(state_dir).list().unwrap_or_default() {
+        let live = matches!(
+            record.state,
+            ApiSessionState::Running | ApiSessionState::Interrupting | ApiSessionState::Starting
+        );
+        sessions.push(SessionView {
+            id: record.id,
+            kind: "api".to_string(),
+            source: "api".to_string(),
+            backend: Some(
+                match record.backend {
+                    ApiSessionBackend::Claude => "claude",
+                    ApiSessionBackend::Codex => "codex",
+                }
+                .to_string(),
+            ),
+            launch_mode: Some("subprocess".to_string()),
+            name: record.name,
+            cwd: Some(record.cwd.display().to_string()),
+            repo_root: None,
+            command: Vec::new(),
+            clud_argv: Vec::new(),
+            clud_pid: None,
+            created_at: Some(record.created_at_ms),
+            exited_at: None,
+            duration_ms: None,
+            detachable: false,
+            background: false,
+            attachable: false,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            exit_code: None,
+            failure_reason: record.last_error,
+            worker_port: 0,
+            live,
+            ctrl_c: None,
+        });
+    }
+    sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
 }
 
 /// Merge live rows from the redb session registry into the dashboard's

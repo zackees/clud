@@ -20,7 +20,7 @@ pub(super) fn respond_html(request: Request, status: u16, body: &[u8]) {
     respond_with_content_type(request, status, body, html_content_type());
 }
 
-pub(super) fn respond_json(request: Request, status: u16, body: &[u8]) {
+pub(crate) fn respond_json(request: Request, status: u16, body: &[u8]) {
     respond_with_content_type(request, status, body, json_content_type());
 }
 
@@ -55,7 +55,7 @@ fn no_cache_header() -> Header {
     Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).expect("static cache header")
 }
 
-pub(super) fn read_body(request: &mut Request) -> io::Result<Vec<u8>> {
+pub(crate) fn read_body(request: &mut Request) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     request
         .as_reader()

@@ -1,7 +1,8 @@
 mod activity;
+mod api_session_http;
+pub mod api_session_lifecycle;
 pub mod api_sessions;
 pub mod api_turn_controller;
-pub mod api_session_lifecycle;
 mod attach;
 mod client;
 mod client_compat;
@@ -42,8 +43,8 @@ pub use client::{
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
 pub use http::{
-    dashboard_url_from_info, fetch_state_json, read_api_info, read_dashboard_info, read_dashboard_port,
-    DashboardInfo,
+    dashboard_url_from_info, fetch_state_json, read_api_info, read_dashboard_info,
+    read_dashboard_port, DashboardInfo,
 };
 // Issue #469: re-exports for the telemetry integration test under
 // `tests/telemetry_endpoint.rs` which spawns the dashboard server

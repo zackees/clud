@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::client::{ensure_daemon, request_session_termination};
+use super::api_sessions::ApiSessionStore;
+use super::client::{ensure_daemon, request_api_session_kill, request_session_termination};
 use super::io_helpers::read_json_file;
 use super::paths::{logs_dir, session_log_path, session_snapshot_path};
 use super::sessions::{list_background_sessions, resolve_session_id};
@@ -20,6 +21,12 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
 
     if all {
         let sessions = list_background_sessions(state_dir);
+        let api_sessions: Vec<_> = ApiSessionStore::new(state_dir)
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| session.state != super::api_sessions::ApiSessionState::Terminated)
+            .collect();
         let mut failed = 0;
         for session in &sessions {
             match request_session_termination(state_dir, &session.id) {
@@ -31,13 +38,23 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
             }
         }
 
+        for session in &api_sessions {
+            match request_api_session_kill(state_dir, &session.id) {
+                Ok(()) => eprintln!("[clud] killed API session {}", session.id),
+                Err(err) => {
+                    eprintln!("[clud] failed to kill API session {}: {}", session.id, err);
+                    failed += 1;
+                }
+            }
+        }
+
         // Also reap CLUD-tagged orphans whose originator clud is gone. The
         // session registry only covers `--detach` / `--detachable` work; a
         // foreground clud that died via SIGKILL leaves its env-tagged
         // descendants behind, and they would otherwise live forever.
         let outcome = reap_orphans(&ReapOpts::default());
 
-        if sessions.is_empty() && outcome.found == 0 {
+        if sessions.is_empty() && api_sessions.is_empty() && outcome.found == 0 {
             println!("No active sessions or orphans to kill.");
             return 0;
         }
@@ -52,6 +69,22 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
         return 1;
     };
 
+    // API logical IDs are separate from worker snapshots and are never sent
+    // through the attach/worker termination RPC.
+    let api_store = ApiSessionStore::new(state_dir);
+    if api_store.get(input).is_ok() {
+        return match request_api_session_kill(state_dir, input) {
+            Ok(()) => {
+                eprintln!("[clud] killed API session {input}");
+                0
+            }
+            Err(err) => {
+                eprintln!("[clud] failed to kill API session {input}: {err}");
+                1
+            }
+        };
+    }
+
     let resolved = match resolve_session_id(state_dir, input) {
         Ok(id) => id,
         Err(err) => {
@@ -60,7 +93,13 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
         }
     };
 
-    match request_session_termination(state_dir, &resolved) {
+    let api = ApiSessionStore::new(state_dir).get(&resolved).is_ok();
+    let result = if api {
+        request_api_session_kill(state_dir, &resolved).map(|_| ())
+    } else {
+        request_session_termination(state_dir, &resolved).map(|_| ())
+    };
+    match result {
         Ok(_) => {
             eprintln!("[clud] killed session {}", resolved);
             0
@@ -89,11 +128,13 @@ fn format_duration_short(millis: u64) -> String {
 
 pub(super) fn run_list(state_dir: &Path) -> i32 {
     let sessions = list_background_sessions(state_dir);
-    if sessions.is_empty() {
+    let api_sessions = ApiSessionStore::new(state_dir).list().unwrap_or_default();
+    if sessions.is_empty() && api_sessions.is_empty() {
         println!("No background sessions.");
         return 0;
     }
 
+    let has_background_sessions = !sessions.is_empty();
     let (repeat_jobs, attachable_sessions): (Vec<_>, Vec<_>) = sessions
         .into_iter()
         .partition(|session| session.repeat_interval_secs.is_some());
@@ -141,6 +182,21 @@ pub(super) fn run_list(state_dir: &Path) -> i32 {
             println!("{:<30} {:<8} {:<8} {}", display_name, pid, uptime, cwd);
         }
     }
+
+    if !api_sessions.is_empty() {
+        if has_background_sessions {
+            println!();
+        }
+        println!("{:<30} {:<12} CWD", "API SESSION", "STATUS");
+        for session in api_sessions {
+            println!(
+                "{:<30} {:<12} {}",
+                session.id,
+                format!("{:?}", session.state).to_ascii_lowercase(),
+                session.cwd.display()
+            );
+        }
+    }
     0
 }
 
@@ -174,6 +230,9 @@ pub(super) fn run_logs(
     let Some(input) = session_id else {
         return run_logs_summary(state_dir);
     };
+    if let Ok(session) = ApiSessionStore::new(state_dir).get(input) {
+        return run_api_logs(state_dir, &session, follow, lines, interrupted);
+    }
     let resolved = match resolve_session_id(state_dir, input) {
         Ok(id) => id,
         Err(_) => {
@@ -256,6 +315,54 @@ pub(super) fn run_logs(
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// API turns write JSONL under their logical ID and are intentionally not
+/// routed through worker snapshot logging or attach semantics.
+fn run_api_logs(
+    state_dir: &Path,
+    session: &super::api_sessions::ApiSessionRecord,
+    follow: bool,
+    lines: Option<usize>,
+    interrupted: &AtomicBool,
+) -> i32 {
+    let Some(turn) = session.turns.last() else {
+        eprintln!("[clud] API session {} has no turn log", session.id);
+        return 1;
+    };
+    let path = super::paths::api_turn_log_path(state_dir, &session.id, turn.generation);
+    let mut offset = match print_log_tail(&path, lines) {
+        Ok(offset) => offset,
+        Err(err) => {
+            eprintln!("[clud] failed to read API log {}: {err}", path.display());
+            return 1;
+        }
+    };
+    if !follow {
+        return 0;
+    }
+    while matches!(
+        ApiSessionStore::new(state_dir)
+            .get(&session.id)
+            .map(|value| value.state),
+        Ok(super::api_sessions::ApiSessionState::Starting
+            | super::api_sessions::ApiSessionState::Running
+            | super::api_sessions::ApiSessionState::Interrupting)
+    ) {
+        if interrupted.load(Ordering::SeqCst) {
+            super::attach::log_observed_interrupt_reason("api_logs_follow");
+            return 130;
+        }
+        if let Ok((new_offset, bytes)) = follow_read(&path, offset) {
+            if !bytes.is_empty() {
+                let _ = io::stdout().write_all(&bytes);
+                let _ = io::stdout().flush();
+            }
+            offset = new_offset;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    0
 }
 
 /// Read the on-disk snapshot for `session_id` and return its `exit_code`

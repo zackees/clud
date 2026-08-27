@@ -34,10 +34,53 @@ before sealing the turn, so the last identity/output event cannot race normal
 completion into `idle`. Unknown provider records are opaque events and
 malformed records become diagnostics.
 
+## HTTP contract
+
+`/v1/*` is loopback, Host-validated, and bearer-only; dashboard query-token
+and cookie bootstrap never authorize it. Typed session routes create/list/get
+durable records, expose bounded `after` cursor events with an explicit
+`limit` from 1 through 128, and map invalid input,
+missing IDs, and active conflicts to stable JSON errors. No route accepts raw
+argv, environment injection, or a per-turn CWD override.
+The event response is `{events,next_cursor,retention_gap}`; a retention gap
+explicitly tells a poller that its cursor predates the bounded retained window.
+
+CLI `clud kill <logical-id>` uses the additive daemon `api_session_kill` RPC.
+It is distinct from `terminate`, which remains exclusively the worker
+`SessionSnapshot` termination contract. `clud list` and `clud logs` continue
+to read their respective local bounded stores; no API session is projected as
+an attachable worker snapshot.
+
+`POST /v1/sessions/{id}/turns` accepts `{ "message": string,
+"interrupt_running": boolean }` and an optional `Idempotency-Key` header.
+It reconstructs a subprocess-only `LaunchPlan` from the record's persisted
+settings and immutable canonical CWD. Generation zero creates a provider
+conversation; later generations require the captured provider identity. The
+only successful responses are `202 started` and `200 replayed`; active,
+terminated, missing-identity, and conflicting retry cases are stable JSON
+errors (`409`). No request can supply a CWD, raw argv, or environment.
+
+The existing `clud list`, `clud logs <logical-id>`, and `clud kill
+<logical-id>` commands recognize logical API IDs separately from worker
+snapshots. Dashboard rows have `source: "api"`, `kind: "api"`, and
+`attachable: false`; an API session is never eligible for the attach transport.
+The daemon shares one API lifecycle manager across HTTP and both daemon RPC
+transports, so an IPC kill reaches the captured child rather than only its
+durable record.
+Bearer capabilities are returned only by `clud daemon api-info --json`, never
+by dashboard state, logs, error payloads, or OpenAPI output.
+
+Captured API children do not inherit the daemon dashboard/API capability
+environment, so those capabilities cannot be reflected into raw turn output.
+Provider JSONL itself is retained verbatim in the per-turn raw log and bounded
+event stream for diagnostics; it is sensitive provider output, not a generic
+secret-redaction service. API callers must therefore treat events and logs as
+sensitive data and avoid emitting credentials through their provider tooling.
+
 ## Lifecycle serialization
 
 The #1043 lifecycle controller keeps one in-memory captured-process handle per
-logical ID, with a controller mutation gate around interrupt/replace/start
+logical ID, with a per-logical-ID mutation gate around interrupt/replace/start
 sequencing. Its durable admission transition takes the per-session file lock,
 checks the idempotency ledger, and records both a new generation and its key in
 one write *before* a subprocess is created. A competing normal submission

@@ -206,18 +206,19 @@ fn windows_codex_project_key_normalizes_extended_path() {
 #[test]
 fn extended_path_only_trust_config_warns() {
     let temp = tempdir().unwrap();
-    let repo = PathBuf::from(r"C:\Users\Niteris\Dev\Repo");
+    // A Windows-shaped relative path is writable on the Windows checkout but
+    // resolves under the read-only Linux source mount. Keep this fixture in temp.
+    let repo = temp.path().join("repo");
     let home = temp.path().join("home");
     let codex = repo.join(".codex").join("hooks.json");
     write(
         &codex,
         r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{}]}]}}"#,
     );
+    let extended_repo_key = format!(r"\\?\{}", repo.display());
     write(
         &home.join(".codex").join("config.toml"),
-        r#"[projects.'\\?\C:\Users\Niteris\Dev\Repo']
-trust_level = "trusted"
-"#,
+        &format!("[projects.'{extended_repo_key}']\ntrust_level = \"trusted\"\n"),
     );
 
     let report = inspect_paths(&repo, Some(&home));

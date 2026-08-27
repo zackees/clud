@@ -346,6 +346,25 @@ fn request_daemon_shutdown_treats_dead_pid_as_not_found() {
     );
 }
 
+#[test]
+fn shutdown_connect_error_cleans_a_daemon_that_exited_after_the_precheck() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_daemon_info(tmp.path(), u32::MAX, 9);
+
+    let err = shutdown_connect_error(
+        tmp.path(),
+        &ProcessIdentity::new(u32::MAX, 1),
+        io::Error::new(io::ErrorKind::ConnectionRefused, "daemon exited"),
+    )
+    .expect_err("a dead daemon's refused connection is an absent daemon");
+
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    assert!(
+        !daemon_info_path(tmp.path()).exists(),
+        "the post-precheck race must not leave stale daemon.json behind"
+    );
+}
+
 struct EnvGuard {
     key: &'static str,
     prior: Option<String>,
