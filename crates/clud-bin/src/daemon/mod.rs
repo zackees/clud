@@ -9,6 +9,7 @@ mod daemon_events;
 mod entry;
 mod gc_service;
 mod handover_registry;
+mod headless_adapter;
 mod http;
 mod io_helpers;
 mod keys;

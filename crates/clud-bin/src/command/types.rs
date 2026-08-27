@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{
@@ -5,6 +7,24 @@ use crate::backend::{
 };
 use crate::graphics::GraphicsConfig;
 use crate::provider_catalog::ResolvedModelSelection;
+
+/// A single non-interactive provider turn owned by the daemon session API.
+/// This narrow typed input deliberately excludes raw argv and environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessTurnRequest {
+    pub message: String,
+    pub cwd: PathBuf,
+    pub session: HeadlessSession,
+}
+
+/// Whether a headless turn creates or resumes a provider conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadlessSession {
+    /// Claude needs a caller-assigned UUID; Codex creates its own thread.
+    Initial { claude_session_id: Option<String> },
+    /// An ID captured from an earlier provider event.
+    Resume { provider_session_id: String },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchPlan {
