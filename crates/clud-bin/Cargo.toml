@@ -151,10 +151,6 @@ protox = "0.9"
 name = "clud"
 path = "src/lib.rs"
 
-[[test]]
-name = "pty_behavior"
-path = "tests/pty_behavior.rs"
-
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 cpal = "0.16"
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
@@ -255,8 +251,8 @@ path = "src/bin/clud_cmd_scan.rs"
 
 # Issue #517: test-only probe binary. Installs the real production
 # `startup::install_ctrl_c_flag` handler and reports which
-# `CtrlEventKind` fired, so `tests/ctrlc_signal_kinds.rs` and
-# `tests/ctrlc_windows_events.rs` can drive it with real OS signals /
+# `CtrlEventKind` fired, so `tests/signals/ctrlc_signal_kinds.rs` and
+# `tests/signals/ctrlc_windows_events.rs` can drive it with real OS signals /
 # console-control events instead of re-implementing the handler.
 [[bin]]
 name = "clud-ctrlc-probe"

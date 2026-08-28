@@ -462,7 +462,7 @@ Diagnostics and misc:
   hint, and logs the measured signature via `verbose_log`. Wired into
   `runner::run_plan_subprocess` and `runner::run_plan_pty`. No-op on
   non-Windows. E2E probes against real spinning threads live in
-  `tests/wedge_watchdog_e2e.rs` (ignored; run manually).
+  `tests/reaper/wedge_watchdog_e2e.rs` (ignored; run manually).
   Issue #709: a healthy tick no longer pays for the host-wide thread
   enumeration. `subtree_could_hide_a_hot_thread` compares each process's
   *user-mode* delta against `GATE_USER_PCT_THRESHOLD` first — a thread's user

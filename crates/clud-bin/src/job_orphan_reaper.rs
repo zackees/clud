@@ -2593,7 +2593,7 @@ mod imp {
     /// then throwing all but one entry away. The Toolhelp32 walk itself is
     /// unavoidable here — `parent_pid` has no cheap per-PID Win32 answer,
     /// which is exactly why #687 wants a daemon-owned service and why
-    /// `tests/tier_refresh_probe.rs` concluded a "targeted" sysinfo refresh
+    /// `tests/diagnostics/tier_refresh_probe.rs` concluded a "targeted" sysinfo refresh
     /// saves nothing on Windows — but the per-process `String` allocation and
     /// map insert are pure waste when one entry is wanted. On a 500-process
     /// host that is 500 UTF-16 decodes traded for at most one.

@@ -210,7 +210,7 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
 /// measured with `CLUD_USE_RUNTIME_CACHE=1` on Windows: `daemon.json` naming a
 /// PID that was already dead. The spawn now goes through
 /// [`crate::trampoline::relay_child_and_wait`], which adds no containment; see
-/// its doc comment and `tests/runtime_cache_hop_windows.rs`.
+/// its doc comment and `tests/diagnostics/runtime_cache_hop_windows.rs`.
 fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 

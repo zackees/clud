@@ -1,7 +1,7 @@
 # probe-target/
 
 Deterministic Windows-only target process for
-`crates/clud-bin/tests/win32_hooking_probe.rs`.
+`crates/clud-bin/tests/diagnostics/win32_hooking_probe.rs`.
 
 The binary is test-only and is not shipped with `clud`. It exposes small
 subcommands for sleeping, holding a file handle, spawning a process chain, and

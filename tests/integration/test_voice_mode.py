@@ -17,7 +17,7 @@ Why this test only runs in environments where the kitty path is wired
 correctly: the runner has no actual terminal sending real release
 sequences. We synthesize them by piping the bytes to clud's stdin, which
 flows through the PTY pump's F3Observer. The Rust integration test in
-``crates/clud-bin/tests/pty_behavior.rs`` already covers the observer in
+``crates/clud-bin/tests/pty/pty_behavior.rs`` already covers the observer in
 isolation — this is the end-to-end smoke that the wiring from
 observer → VoiceMode → PTY write is intact.
 """

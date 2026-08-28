@@ -47,7 +47,7 @@ pub use http::{
     read_dashboard_port, DashboardInfo,
 };
 // Issue #469: re-exports for the telemetry integration test under
-// `tests/telemetry_endpoint.rs` which spawns the dashboard server
+// `tests/diagnostics/telemetry_endpoint.rs` which spawns the dashboard server
 // directly and asserts the full HTTP round-trip.
 #[cfg(test)]
 pub use cpu_alert_publish::SAMPLE_INTERVAL as CPU_SAMPLE_INTERVAL_FOR_TEST;

@@ -25,8 +25,7 @@ use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
 };
 
-#[path = "common/exe.rs"]
-mod exe;
+use crate::exe;
 
 /// Path to the `clud` binary under test.
 ///

@@ -38,7 +38,7 @@ Output lands at `target/debug/mock-agent` (`.exe` on Windows). All
   `test_mock_agents.py`, `test_loop_stream_json.py`,
   `test_voice_mode.py`, `test_daemon_persistence.py`,
   `test_daemon_cleanup.py`, and `test_session_registry_concurrency.py`.
-- **Rust PTY integration tests** (`crates/clud-bin/tests/pty_behavior.rs`)
+- **Rust PTY integration tests** (`crates/clud-bin/tests/pty/pty_behavior.rs`)
   — `mock_agent_path()` locates the freshest `target/.../mock-agent`
   and falls back to `cargo build -p mock-agent --message-format json`
   if the binary is missing. `ci/test.py` pre-builds it so this

@@ -1,7 +1,5 @@
 //! Mock-backed lifecycle serialization coverage for #1043.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,7 +12,7 @@ use clud::daemon::api_sessions::{
 };
 use clud::graphics::GraphicsConfig;
 
-use common::{mock_agent_path, wait_until};
+use crate::common::{mock_agent_path, wait_until};
 
 fn plan(executable: PathBuf, cwd: &Path, args: Vec<String>) -> LaunchPlan {
     let mut command = vec![executable.to_string_lossy().into_owned()];

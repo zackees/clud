@@ -38,8 +38,7 @@ use std::time::{Duration, Instant};
 use clud::orphan_reaper::{self, ReapOpts};
 use clud::reaper_facts::SpareReason;
 
-#[path = "common/exe.rs"]
-mod exe;
+use crate::exe;
 
 /// Long enough for a sweep to run and for a doomed process to actually die,
 /// short enough that a hang fails the test rather than the job.

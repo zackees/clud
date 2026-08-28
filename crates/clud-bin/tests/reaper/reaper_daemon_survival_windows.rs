@@ -28,8 +28,7 @@ use std::time::{Duration, Instant};
 
 use clud::job_orphan_reaper::ForegroundJobTracker;
 
-#[path = "common/exe.rs"]
-mod exe;
+use crate::exe;
 
 /// `daemon-stub` belongs to `testbins/`, so this crate has no
 /// `CARGO_BIN_EXE_daemon-stub` to fall back on — see `common/exe.rs` for the

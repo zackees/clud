@@ -104,11 +104,11 @@ matches `at FILE:LINE` lines produced by `std::backtrace::Backtrace`
 
 - `crash_report::tests::*` — panic-hook + rotation + sanitize + native
   signal/exception name lookup (10 unit tests).
-- `tests/crash_report.rs` — end-to-end panic catch in-process (2
+- `tests/diagnostics/crash_report.rs` — end-to-end panic catch in-process (2
   integration tests).
 - `symbols::tests::*` — `is_resolved_frame_line`, `count_resolved_frames`,
   `is_unsymbolicated`, `list_reports_newest_first` (8 unit tests).
-- `tests/symbols.rs` — `clud symbols verify --all` / `clud symbols
+- `tests/diagnostics/symbols.rs` — `clud symbols verify --all` / `clud symbols
   install` / bare `clud symbols` exit codes + output (4 integration
   tests spawning the real `clud` binary with `CLUD_DAEMON_STATE_DIR`
   redirected).

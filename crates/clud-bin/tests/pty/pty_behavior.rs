@@ -29,7 +29,7 @@
 //! than panicking. On a real Windows Terminal / cmd / pwsh session, on Linux,
 //! and on macOS, the canary passes and the real assertions run.
 //!
-//! Raw-PTY-pump integration tests live in `tests/pty_pump.rs`; shared
+//! Raw-PTY-pump integration tests live in `tests/pty/pty_pump.rs`; shared
 //! harness helpers are in `tests/common/mod.rs`.
 
 use std::time::Duration;
@@ -37,8 +37,7 @@ use std::time::Duration;
 use running_process::pty::NativePtyProcess;
 use serde_json::Value;
 
-mod common;
-use common::{cargo_built_executable_path, drain_reader, mock_agent_path, wait_until};
+use crate::common::{cargo_built_executable_path, drain_reader, mock_agent_path, wait_until};
 
 #[test]
 fn cargo_build_output_reports_mock_agent_executable() {
