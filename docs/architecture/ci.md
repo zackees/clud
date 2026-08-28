@@ -335,10 +335,10 @@ the test code to learn a new one:
 binary at compile time, with no runtime override. That breaks 13 tests when the
 binary is executed on a different machine:
 
-- `crates/clud-bin/tests/symbols.rs:35` (4 tests)
-- `crates/clud-bin/tests/telemetry_endpoint.rs:33` (4 tests)
-- `crates/clud-bin/tests/ctrlc_signal_kinds.rs:17` (4 tests, unix)
-- `crates/clud-bin/tests/ctrlc_windows_events.rs:30` (1 test, windows)
+- `crates/clud-bin/tests/diagnostics/symbols.rs:35` (4 tests)
+- `crates/clud-bin/tests/diagnostics/telemetry_endpoint.rs:33` (4 tests)
+- `crates/clud-bin/tests/signals/ctrlc_signal_kinds.rs:17` (4 tests, unix)
+- `crates/clud-bin/tests/signals/ctrlc_windows_events.rs:30` (1 test, windows)
 
 Fix: a shared `common::bin_path("clud")` helper that prefers a runtime
 `CLUD_TEST_BIN_DIR` env var and falls back to the `env!` constant, so local

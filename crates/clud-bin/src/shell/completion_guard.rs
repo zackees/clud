@@ -41,7 +41,7 @@
 //! Because the lever is a variable Git for Windows consults rather than one it
 //! documents as an API, a change on their side would silently stop suppressing
 //! completions. The guardrail against that is
-//! `tests/shell_completion_guard.rs`, which asserts the observed **function
+//! `tests/cli/shell_completion_guard.rs`, which asserts the observed **function
 //! count** of a real login shell — not merely that this variable is set.
 
 /// The variable Git for Windows' `/etc/profile.d/git-prompt.sh` consults.

@@ -14,8 +14,7 @@ use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, Std
 
 use clud::orphan_reaper::{reap_orphans, ReapOpts};
 
-mod common;
-use common::{mock_agent_path, wait_until};
+use crate::common::{mock_agent_path, wait_until};
 
 /// Anyone-but-a-real-clud PID. Picked high enough to dodge live processes on
 /// the host yet inside the legal u32 range that

@@ -281,7 +281,7 @@ fn install_unix_termination_probe(interrupted: &Arc<AtomicBool>) {
 /// Pure `signal number -> CtrlEventKind` mapping for the three signals
 /// [`install_unix_termination_probe`] registers. Factored out so the
 /// mapping is unit-testable without spawning a thread or sending a real
-/// signal (the integration test in `tests/ctrlc_signal_kinds.rs` covers
+/// signal (the integration test in `tests/signals/ctrlc_signal_kinds.rs` covers
 /// the end-to-end real-signal path).
 #[cfg(unix)]
 fn unix_termination_signal_kind(sig: i32) -> crate::ctrl_c_track::CtrlEventKind {

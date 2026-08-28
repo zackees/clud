@@ -58,7 +58,7 @@ pub(super) type LiveSessionsProvider =
 
 /// Test-only public entry point: spawn the dashboard HTTP listener for
 /// telemetry-only scenarios (no GC backend). Integration tests under
-/// `tests/telemetry_endpoint.rs` use this to wire up the server without
+/// `tests/diagnostics/telemetry_endpoint.rs` use this to wire up the server without
 /// taking on the `gc_service::RegistryMsg` type that the full
 /// `spawn_dashboard` signature otherwise leaks.
 pub fn spawn_dashboard_telemetry_only(

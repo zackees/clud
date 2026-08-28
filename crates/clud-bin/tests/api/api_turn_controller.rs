@@ -4,8 +4,6 @@
 //! the earliest provider identity before sealing the turn, and retain raw
 //! provider evidence independently of the bounded event cursor window.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -18,7 +16,7 @@ use clud::daemon::api_sessions::{
 use clud::daemon::api_turn_controller::launch_captured_turn;
 use clud::graphics::GraphicsConfig;
 
-use common::{mock_agent_path, wait_until};
+use crate::common::{mock_agent_path, wait_until};
 
 fn plan(
     executable: PathBuf,

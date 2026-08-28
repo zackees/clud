@@ -1,4 +1,4 @@
-//! Shared helpers for `tests/pty_behavior.rs` and `tests/pty_pump.rs`.
+//! Shared helpers for `tests/pty/pty_behavior.rs` and `tests/pty/pty_pump.rs`.
 //!
 //! Cargo treats files under `tests/` as separate integration-test crates,
 //! but `tests/common/mod.rs` is brought in by each via `mod common;` and

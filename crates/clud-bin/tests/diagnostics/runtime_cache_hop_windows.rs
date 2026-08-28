@@ -26,8 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[path = "common/exe.rs"]
-mod exe;
+use crate::exe;
 
 /// `daemon-stub` lives in `testbins/`, so this crate has no
 /// `CARGO_BIN_EXE_daemon-stub`; `common/exe.rs` owns the bundle-vs-local

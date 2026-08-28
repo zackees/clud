@@ -5,7 +5,7 @@
 //! `CLUD_*` env vars and ships them to `$CLUD_DAEMON_HTTP_SERVER`. With
 //! `--fail-on-no-server` the command exits non-zero if either the env
 //! var is unset or the POST round-trip fails — the integration test in
-//! `tests/telemetry_endpoint.rs` uses that flag to prove a real send.
+//! `tests/diagnostics/telemetry_endpoint.rs` uses that flag to prove a real send.
 //! Without the flag, failures are swallowed (exit 0) so the eventual
 //! hook caller never breaks because the daemon is down.
 //!

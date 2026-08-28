@@ -13,8 +13,7 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
-#[path = "common/exe.rs"]
-mod exe;
+use crate::exe;
 
 fn probe_reports(signal: libc::c_int, expected_kind: &str) {
     let probe = exe::bin_path(

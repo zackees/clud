@@ -42,7 +42,7 @@ containment and set the very marker whose absence is under test.
 
 ## Consumers
 
-- `crates/clud-bin/tests/reaper_daemon_survival_windows.rs` — Tier 2 of #674.
+- `crates/clud-bin/tests/reaper/reaper_daemon_survival_windows.rs` — Tier 2 of #674.
   Four tests, deliberately; anything expressible against injected `ProcessFacts`
   belongs in Tier 1 instead.
 - `bench/README.md` — the Tier 3 opt-in runbook for checking the stub's signal

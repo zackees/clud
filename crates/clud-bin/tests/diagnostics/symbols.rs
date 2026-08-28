@@ -13,8 +13,7 @@ use running_process::{
 };
 use tempfile::TempDir;
 
-#[path = "common/exe.rs"]
-mod exe;
+use crate::exe;
 
 fn write_report(dir: &std::path::Path, name: &str, backtrace: &str) {
     let path = dir.join(name);

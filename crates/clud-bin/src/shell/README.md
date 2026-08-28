@@ -49,7 +49,7 @@ The two enforcement layers live elsewhere:
   those builders are duplicates and the daemon one has drifted before, so a
   policy added to one belongs in both. Opt out with
   `CLUD_GIT_BASH_COMPLETIONS=1`. Guardrail:
-  `tests/shell_completion_guard.rs` asserts a real login shell's **function
+  `tests/cli/shell_completion_guard.rs` asserts a real login shell's **function
   count**, not the env var, because the lever is a Git-for-Windows
   implementation detail that could change silently. Rationale:
   [DD-031](../../../../docs/DESIGN_DECISIONS.md#dd-031-git-bash-completions-are-suppressed-in-the-backends-login-shell).

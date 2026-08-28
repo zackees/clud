@@ -1,5 +1,4 @@
-#[path = "common/exe.rs"]
-mod exe;
+use crate::exe;
 
 use std::time::Duration;
 

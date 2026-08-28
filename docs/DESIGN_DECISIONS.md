@@ -1184,7 +1184,7 @@ round-trip, because the lever is Git-for-Windows-specific.
 `WINELOADERNOEXEC` is a variable Git for Windows *consults*, not one it
 documents as an API, so a change on their side would silently stop suppressing
 completions and the tax would quietly return. The guardrail is therefore
-`tests/shell_completion_guard.rs`, which asserts the observed **function count**
+`tests/cli/shell_completion_guard.rs`, which asserts the observed **function count**
 of a real login shell rather than merely that the variable is set — an
 env-var-presence assertion would keep passing through exactly the regression it
 is meant to catch. The variable is deliberately not set off Windows, where Wine

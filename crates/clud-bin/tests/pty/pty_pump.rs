@@ -9,7 +9,7 @@
 //! must not delay stdin forwarding) via the `..._for_test` writer-injection
 //! seam.
 //!
-//! Lives separately from `tests/pty_behavior.rs` so each integration-test
+//! Lives separately from `tests/pty/pty_behavior.rs` so each integration-test
 //! binary stays under the 1K-LOC ceiling. Shared helpers come from
 //! `tests/common/mod.rs`.
 
@@ -20,8 +20,7 @@ use std::time::{Duration, Instant};
 
 use running_process::pty::NativePtyProcess;
 
-mod common;
-use common::{drain_reader, mock_agent_path};
+use crate::common::{drain_reader, mock_agent_path};
 
 /// Counting hooks for pump integration tests. Records F3 presses,
 /// releases, ticks, and can opt into voice interception via `intercept`.
