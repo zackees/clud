@@ -30,6 +30,9 @@ every backend's skills dir on launch. `clud-loop` was retired once
 - [clud-improve/](clud-improve/SKILL.md) - File concrete clud improvement
   reports directly as GitHub issues against `zackees/clud`; ask for details
   only on a bare manual `/clud-improve` invocation.
+- [clud-omarchy/](clud-omarchy/SKILL.md) - Route Omarchy and Hyprland desktop
+  configuration tasks to current official documentation and maintained agent
+  skills without bundling a stale copy of their configuration syntax.
 - [clud-docker-recover/](clud-docker-recover/SKILL.md) - Diagnose and recover
   a wedged Docker Desktop (engine pipe/socket absent, WSL/Docker startup
   failures) via the bundled `docker/docker_recover.py` tool. Read-only

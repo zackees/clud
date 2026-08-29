@@ -269,6 +269,7 @@ fn bundled_includes_all_known_skills() {
     assert!(names.contains(&"clud-docker-rust-app-dev"));
     assert!(names.contains(&"clud-windows-trash"));
     assert!(names.contains(&"clud-extern-repos"));
+    assert!(names.contains(&"clud-omarchy"));
     assert!(names.contains(&"clud-improve"));
     assert!(names.contains(&"clud-docker-mac-x86"));
     assert!(names.contains(&"clud-docker-recover"));
