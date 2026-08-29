@@ -6826,7 +6826,17 @@ Connection: close
         );
         assert!(text.contains(r#""request_id":"req_second_turn""#), "{text}");
         assert!(text.contains(r#""phase":"continuation""#), "{text}");
-        let event: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        // The scenario is "an in-band 400 *after a successful turn*", so the
+        // log legitimately holds one line per turn. Parsing the whole file as
+        // a single JSON value fails with `trailing characters, line: 2`.
+        // Select the event by name, the way
+        // `a_non_streaming_in_band_400_is_logged_and_sanitized` below already
+        // does against the same log.
+        let event = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|event| event["event"] == "in_band_upstream_failure")
+            .expect("in-band failure event");
         assert_eq!(
             event.pointer("/request_shape/input_kinds"),
             Some(&serde_json::json!([
