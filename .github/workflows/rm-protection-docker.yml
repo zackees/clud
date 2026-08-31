@@ -1,0 +1,102 @@
+name: RM protection (Docker)
+
+# Proves, inside a container, that the cmd-scan hook refuses every shape of
+# `rm -rf $VAR/` that would expand to `rm -rf /`.
+#
+# ## The container never runs a removal
+#
+# Each case is a JSON tool-call payload piped to the hook on stdin. The hook
+# parses it and prints a verdict; the command text inside is never expanded,
+# evaluated, or handed to a shell. So there is nothing to execute even though
+# thousands of the payloads literally read `rm -rf /`.
+#
+# The container is defense in depth for that property, not a licence to relax
+# it. Do not add a step that runs a case to "see what really happens" — the
+# whole point is that the command is rejected before anything runs, and the
+# guard is verified by asking the guard, not by testing the blast radius.
+#
+# Manual by design (`workflow_dispatch`): it is a focused check on one
+# subsystem, and the exhaustive version of this corpus already runs on every
+# PR as `block_bad_cmd_rm_vars` unit tests. `workflow_call` lets ci.yml adopt
+# it later without restructuring.
+#
+# Background: #1064 (the incident and the fail-closed fix), #963 (the
+# interpreter), #1068 (the stress corpus this mirrors).
+
+on:
+  workflow_dispatch: {}
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  rm-protection:
+    name: rm -rf $VAR guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-build
+        with:
+          target: x86_64-unknown-linux-gnu
+          strategy: native
+          soldr-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Through ci.xbuild like every other compile in this repo, so the hook
+      # under test is built the same way the shipped one is.
+      - name: Build the hook binary
+        run: >
+          "$VENV_PY" -m ci.xbuild compile
+          --target x86_64-unknown-linux-gnu
+          --strategy native
+          --profile dev
+
+      - name: Locate the hook binary
+        id: binary
+        run: |
+          set -euo pipefail
+          for candidate in \
+            target/x86_64-unknown-linux-gnu/debug/clud-block-bad-cmd \
+            target/debug/clud-block-bad-cmd; do
+            if [ -x "$candidate" ]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              echo "using $candidate"
+              exit 0
+            fi
+          done
+          echo "hook binary not found after compile" >&2
+          exit 1
+
+      # The base image tracks the runner's libc, because the binary is copied
+      # in rather than rebuilt. A mismatch shows up unmistakably as exit 127
+      # on every case rather than as a silent pass.
+      - name: Build the check image
+        run: >
+          docker build
+          -f ci/docker/rm_protection/Dockerfile
+          --build-arg BASE=ubuntu:24.04
+          --build-arg BINARY=${{ steps.binary.outputs.path }}
+          -t clud-rm-protection:ci
+          .
+
+      # No network, read-only root, unprivileged, all capabilities dropped,
+      # and a tmpfs for the only writable path. Nothing of the checkout is
+      # mounted, so the container has nothing to lose even in the failure mode
+      # this check exists to prevent.
+      - name: Verify every rm shape is refused
+        run: >
+          docker run --rm
+          --network none
+          --read-only
+          --cap-drop ALL
+          --security-opt no-new-privileges
+          --tmpfs /tmp:rw,noexec,nosuid
+          --tmpfs /work:rw,noexec,nosuid
+          --tmpfs /home/checker:rw,noexec,nosuid
+          clud-rm-protection:ci
