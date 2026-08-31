@@ -108,7 +108,7 @@ fn resolve_posix_rm_variable_expansions_at_depth(
     let mut assignment_counts = HashMap::<String, usize>::new();
     let mut replacements = Vec::<Replacement>::new();
 
-    for statement in statements {
+    for statement in &statements {
         if matches!(
             statement.separator_before,
             Separator::Pipe | Separator::Background
@@ -201,6 +201,9 @@ fn resolve_posix_rm_variable_expansions_at_depth(
     }
 
     if replacements.is_empty() {
+        if let Some(reason) = unproven_hazard_reason(&statements) {
+            return deny(reason);
+        }
         return RmVariableResolution::Unchanged;
     }
     replacements.sort_by_key(|replacement| replacement.start);
@@ -888,15 +891,112 @@ fn contains_removal_program_text(command: &str) -> bool {
         let end = start + program.len();
         let previous = command[..start].chars().next_back();
         let next = command[end..].chars().next();
-        previous.is_none_or(|ch| ch.is_ascii_whitespace() || ";|&(){}'\"`".contains(ch))
-            && next.is_some_and(|ch| ch.is_ascii_whitespace())
+        previous.is_none_or(|ch| ch.is_ascii_whitespace() || ";|&(){}'\"`\\".contains(ch))
+            && next.is_some_and(is_word_close)
     }) || command.match_indices("rmdir").any(|(start, program)| {
         let end = start + program.len();
         let previous = command[..start].chars().next_back();
         let next = command[end..].chars().next();
-        previous.is_none_or(|ch| ch.is_ascii_whitespace() || ";|&(){}'\"`".contains(ch))
-            && next.is_some_and(|ch| ch.is_ascii_whitespace())
+        previous.is_none_or(|ch| ch.is_ascii_whitespace() || ";|&(){}'\"`\\".contains(ch))
+            && next.is_some_and(is_word_close)
     })
+}
+
+/// A character that can terminate a command word. Whitespace is the usual
+/// one, but a program name produced by substitution closes with `)` or a
+/// backtick — `$(which rm) -rf "$V"/` runs a removal just as surely as
+/// `rm -rf "$V"/` does.
+fn is_word_close(ch: char) -> bool {
+    ch.is_ascii_whitespace() || ";|&)}'\"`".contains(ch)
+}
+
+/// The last line of defence: a removal and a `$VAR/` operand sit in the same
+/// pipeline, yet the interpreter proved nothing about it.
+///
+/// Reaching here means the main loop never recognized the removal's operand —
+/// because the program was not spelled `rm`/`rmdir` (`busybox rm`, `nice rm`,
+/// `$(echo rm)`), or because the path never reached the removal as an argument
+/// at all (`echo "$V"/ | xargs rm -rf`). The interpreter's whole contract is
+/// that it *proves* a removal safe before allowing it, so "I did not
+/// understand this" must resolve to a denial, not to silence. Without this,
+/// every construct the analyzer does not model is a bypass, and the list of
+/// such constructs is open-ended.
+///
+/// Scoped to a pipeline rather than the whole command so that an unrelated
+/// safe removal beside an unrelated variable — `rm -rf /tmp/x && echo "$V"/` —
+/// is not swept up. Within one pipeline the stages share data, so a `$VAR/`
+/// upstream of an `xargs rm` is exactly the hazard.
+fn unproven_hazard_reason(statements: &[Statement<'_>]) -> Option<&'static str> {
+    for pipeline in pipeline_groups(statements) {
+        let has_removal = pipeline
+            .iter()
+            .any(|statement| statement_bears_a_removal(statement));
+        let has_path_variable = pipeline
+            .iter()
+            .any(|statement| contains_path_variable_prefix(statement.text));
+        if has_removal && has_path_variable {
+            return Some(
+                "a removal shares a pipeline with a `$VAR/` path that could not be proven safe",
+            );
+        }
+    }
+    None
+}
+
+/// Whether a statement could run a removal, judged by the words it contains.
+///
+/// Any word naming `rm`/`rmdir` counts, wherever it sits. An earlier version
+/// tried to be cleverer by ignoring a name that followed an option — reasoning
+/// that in `sudo -u rm echo …` the `rm` is a *username*, not a program. That
+/// heuristic is not sound in the direction that matters: in `xargs -0 rm -rf`
+/// and `find … -exec rm -rf {} +` the name also follows an option, and there
+/// it really is the program about to run. Telling those apart needs a table of
+/// which options take values for every launcher that exists, so the rule is
+/// dropped in favour of the safe direction. The cost is that a contrived
+/// `sudo -u rm echo "$V"/*` is refused; the alternative cost is a filesystem.
+///
+/// `find … -delete` is included because it *is* a recursive removal wearing a
+/// different name — `find / -delete` is the same catastrophe as `rm -rf /`.
+/// Other destructive verbs stay out of scope (DD-057): `shred` and friends act
+/// on named files and cannot recurse into a root.
+///
+/// A statement that cannot be lexed falls back to the raw-text probe, since an
+/// unlexable statement is exactly when guessing low is most dangerous.
+fn statement_bears_a_removal(statement: &Statement<'_>) -> bool {
+    let Ok(words) = lex_words(statement.text, statement.start) else {
+        return contains_removal_program_text(&statement.text.to_ascii_lowercase());
+    };
+    let names_a_removal = words.iter().any(|word| {
+        matches!(
+            program_name(&word.cooked).to_ascii_lowercase().as_str(),
+            "rm" | "rmdir"
+        )
+    });
+    let deletes_via_find = words
+        .first()
+        .is_some_and(|word| program_name(&word.cooked).eq_ignore_ascii_case("find"))
+        && words.iter().any(|word| word.cooked == "-delete");
+    // The word scan sees `$(which rm)` as one opaque word, so the raw-text
+    // probe runs too: a removal built at runtime is still a removal.
+    names_a_removal
+        || deletes_via_find
+        || contains_removal_program_text(&statement.text.to_ascii_lowercase())
+}
+
+/// Split statements into pipeline groups. A `|` continues the current group;
+/// every other separator starts a new one.
+fn pipeline_groups<'a, 'b>(statements: &'b [Statement<'a>]) -> Vec<Vec<&'b Statement<'a>>> {
+    let mut groups: Vec<Vec<&Statement<'_>>> = Vec::new();
+    for statement in statements {
+        if statement.separator_before == Separator::Pipe {
+            if let Some(current) = groups.last_mut() {
+                current.push(statement);
+                continue;
+            }
+        }
+        groups.push(vec![statement]);
+    }
+    groups
 }
 
 fn contains_path_variable_prefix(command: &str) -> bool {
@@ -922,8 +1022,8 @@ fn contains_path_variable_prefix(command: &str) -> bool {
             continue;
         }
         if byte == b'$' && !single_quoted {
-            if let Some((_, end)) = parse_simple_expansion(bytes, i) {
-                if bytes.get(end) == Some(&b'/') {
+            if let Some(end) = any_expansion_end(bytes, i) {
+                if slash_follows_ignoring_quotes(bytes, end) {
                     return true;
                 }
                 i = end;
@@ -933,6 +1033,64 @@ fn contains_path_variable_prefix(command: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// The end of *any* expansion beginning at `start`, not just one whose value
+/// the interpreter can reason about.
+///
+/// [`parse_simple_expansion`] deliberately recognizes only `$name` and
+/// `${name}`, because those are the forms it can resolve. This scanner answers
+/// a different question — "is a value being substituted here at all?" — so it
+/// must also accept the forms it cannot resolve: `${V:-/}`, `${V#x}`,
+/// `${!V}`, `$(cmd)`. Those are *more* dangerous, not less: `${V:-/}` has `/`
+/// as its literal default. Treating them as "not an expansion" is what let a
+/// removal behind an unmodelled launcher or inside a subshell slip past every
+/// fallback.
+fn any_expansion_end(bytes: &[u8], start: usize) -> Option<usize> {
+    match bytes.get(start + 1) {
+        Some(b'{') => matching_close(bytes, start + 1, b'{', b'}'),
+        Some(b'(') => matching_close(bytes, start + 1, b'(', b')'),
+        _ => parse_simple_expansion(bytes, start).map(|(_, end)| end),
+    }
+}
+
+/// Index just past the delimiter that closes the one at `open`, honouring
+/// nesting. `None` when it is never closed, which the callers treat as "no
+/// expansion here" — an unbalanced command is caught by the lexer instead.
+fn matching_close(bytes: &[u8], open: usize, opener: u8, closer: u8) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == opener {
+            depth += 1;
+        } else if byte == closer {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index + 1);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Whether a `/` follows the expansion that ended at `end`, looking past any
+/// quote characters that close or reopen around it.
+///
+/// The shell joins adjacent quoted chunks into one word, so `"$V"/`, `"$V"'/'`
+/// and `"$V""/"` all expand exactly like `$V/`. Checking only the byte
+/// immediately after the expansion sees the closing `"` and concludes there is
+/// no slash — which silently disabled [`looks_like_hazardous_rm`] for the most
+/// common spelling of the hazard, and with it every fallback that depends on
+/// it. Whitespace is *not* skipped: `echo "$V" /tmp` is two separate words and
+/// carries no risk.
+fn slash_follows_ignoring_quotes(bytes: &[u8], end: usize) -> bool {
+    let mut index = end;
+    while matches!(bytes.get(index), Some(b'"' | b'\'')) {
+        index += 1;
+    }
+    bytes.get(index) == Some(&b'/')
 }
 
 fn unsafe_delete_base_reason(value: &str) -> Option<&'static str> {
@@ -1203,53 +1361,305 @@ mod tests {
         }
     }
 
-    /// **The boundary of this interpreter, stated as a test.**
-    ///
-    /// Each command below reaches `rm` with a mis-expanded path and is *not*
-    /// denied. They are recorded so the limit is visible rather than folklore:
-    /// a change that closes one should fail here and be updated deliberately.
-    ///
-    /// Two different reasons are mixed together on purpose, because the
-    /// distinction is what matters when deciding what to fix first:
-    ///
-    /// - **Structural**: the removal sits inside a construct the interpreter
-    ///   refuses to reason about (subshell, brace group, loop, function body)
-    ///   or behind a launcher it does not unwrap (`busybox`, `nice`, `xargs`).
-    ///   These reach `rm -rf /` and are the dangerous ones.
-    /// - **Out of declared scope**: the operand is not `$VAR` at the start of
-    ///   the word (`/tmp/$U`), or the program is not `rm`/`rmdir`
-    ///   (`find -delete`). See DD-057 on why the verb set is narrow.
-    ///
-    /// This is why `block_bad_cmd_rm_vars` is not the whole answer, and why
-    /// the post-expansion wrapper in #1067 exists: a wrapper sees the real
-    /// argv and does not care which construct produced it.
+    // ---- Stress corpus ------------------------------------------------
+    //
+    // The hazard is one idea with many spellings: a removal reaches an
+    // operand that begins with an unprovable variable and is followed by `/`,
+    // so the shell expands it to `/`. Enumerating spellings by hand always
+    // trails the language, so the axes below are crossed instead — every
+    // combination has to be denied.
+    //
+    // Nothing here executes. Each generated string is handed to
+    // `resolve_posix_rm_variable_expansions`, which returns a verdict.
+
+    /// Ways to spell the removal program itself.
+    const RM_SPELLINGS: &[&str] = &[
+        "rm -rf",
+        "rm -fr",
+        "rm -r -f",
+        "rm -f -r",
+        "rm --recursive --force",
+        "rm -rf --",
+        "rm -Rf",
+        "rmdir",
+        "/bin/rm -rf",
+        "/usr/bin/rm -rf",
+        r"\rm -rf",
+        "sudo rm -rf",
+        "env rm -rf",
+        "command rm -rf",
+        "time rm -rf",
+        "nice rm -rf",
+        "busybox rm -rf",
+        "sudo -n rm -rf",
+    ];
+
+    /// Ways to spell an operand that expands to `/` when the variable is not
+    /// set to a proven literal.
+    const HAZARD_OPERANDS: &[&str] = &[
+        r#""$V"/"#,
+        r#"$V/"#,
+        r#"${V}/"#,
+        r#""${V}"/"#,
+        r#""$V"/*"#,
+        r#""$V"//"#,
+        r#""$V"/."#,
+        r#""$V"/.."#,
+        r#""$V"/build"#,
+        r#""$V"'/'"#,
+        r#""$V""/""#,
+        r#""${V:-/}"/"#,
+        r#""${V:+/}"/"#,
+        r#""${V#x}"/"#,
+        r#""${V%x}"/"#,
+        r#""${!V}"/"#,
+    ];
+
+    /// Structures that wrap a statement. Each takes the inner command and
+    /// returns the full command line. The analyzer must not lose the removal
+    /// inside any of them.
+    fn structures() -> Vec<(&'static str, fn(&str) -> String)> {
+        vec![
+            ("bare", |c: &str| c.to_string()),
+            ("trailing stmt", |c: &str| format!("{c} ; echo done")),
+            ("leading stmt", |c: &str| format!("echo start ; {c}")),
+            ("and-chain", |c: &str| format!("true && {c}")),
+            ("or-chain", |c: &str| format!("false || {c}")),
+            ("pipe target", |c: &str| format!("true | {c}")),
+            ("background", |c: &str| format!("{c} &")),
+            ("newline", |c: &str| format!("echo start\n{c}")),
+            ("subshell", |c: &str| format!("({c})")),
+            ("brace group", |c: &str| format!("{{ {c}; }}")),
+            ("nested subshell", |c: &str| format!("( ( {c} ) )")),
+            ("for body", |c: &str| format!("for i in 1 2; do {c}; done")),
+            ("while body", |c: &str| format!("while true; do {c}; done")),
+            ("until body", |c: &str| format!("until false; do {c}; done")),
+            ("if body", |c: &str| format!("if true; then {c}; fi")),
+            ("else body", |c: &str| {
+                format!("if false; then :; else {c}; fi")
+            }),
+            ("case body", |c: &str| format!("case x in x) {c};; esac")),
+            ("function body", |c: &str| format!("f() {{ {c}; }}; f")),
+            ("eval", |c: &str| format!("eval \"{c}\"")),
+            ("bash -c", |c: &str| format!("bash -c \"{c}\"")),
+            ("sh -c", |c: &str| format!("sh -c '{c}'")),
+            ("command subst", |c: &str| format!("echo $({c})")),
+            ("backticks", |c: &str| format!("echo `{c}`")),
+        ]
+    }
+
+    /// The stress test: every removal spelling, in every operand spelling, in
+    /// every structure. A single miss here is a path to `rm -rf /`.
     #[test]
-    fn known_gaps_the_interpreter_does_not_reach() {
-        let structural = [
-            r#"(rm -rf "$U"/)"#,
-            r#"{ rm -rf "$U"/; }"#,
-            r#"for U in /; do rm -rf "$U"/; done"#,
-            r#"while true; do rm -rf "$U"/; done"#,
-            r#"U=/tmp; f() { rm -rf "$U"/; }; f"#,
-            r#"$(echo rm) -rf "$U"/"#,
-            r#"`echo rm` -rf "$U"/"#,
-            r#"busybox rm -rf "$U"/"#,
-            r#"nice rm -rf "$U"/"#,
-            r#"echo "$U"/ | xargs rm -rf"#,
-        ];
-        let out_of_scope = [
-            r#"rm -rf /tmp/$U"#,
-            r#"rm -rf "$U"foo/"#,
-            r#"find "$U"/ -delete"#,
-            r#"shred -u "$U"/x"#,
-        ];
-        for command in structural.iter().chain(out_of_scope.iter()) {
-            assert!(
-                !denied(command),
-                "this gap has been closed — move {command:?} into the covered \
-                 tests above and update DD-057"
-            );
+    fn stress_every_removal_spelling_in_every_structure_is_denied() {
+        let mut escaped: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for (structure_name, wrap) in structures() {
+            for spelling in RM_SPELLINGS {
+                for operand in HAZARD_OPERANDS {
+                    let command = wrap(&format!("{spelling} {operand}"));
+                    checked += 1;
+                    if !denied(&command) {
+                        escaped.push(format!("[{structure_name}] {command}"));
+                    }
+                }
+            }
         }
+        assert!(
+            escaped.is_empty(),
+            "{} of {checked} hazardous commands were NOT denied:\n{}",
+            escaped.len(),
+            escaped.join("\n")
+        );
+    }
+
+    /// The same hazard reached through a program that consumes paths from its
+    /// input rather than its argv.
+    #[test]
+    fn stress_removals_fed_by_another_program_are_denied() {
+        let mut escaped: Vec<String> = Vec::new();
+        for operand in HAZARD_OPERANDS {
+            for command in [
+                format!("echo {operand} | xargs rm -rf"),
+                format!("printf %s {operand} | xargs -0 rm -rf"),
+                format!("echo {operand} | xargs -I{{}} rm -rf {{}}"),
+                format!("find {operand} -delete"),
+                format!("find {operand} -exec rm -rf {{}} +"),
+            ] {
+                if !denied(&command) {
+                    escaped.push(command);
+                }
+            }
+        }
+        assert!(
+            escaped.is_empty(),
+            "{} indirect removals were NOT denied:\n{}",
+            escaped.len(),
+            escaped.join("\n")
+        );
+    }
+
+    /// Provenance stress: the variable is assigned, but never to something the
+    /// interpreter can reduce to one safe literal.
+    #[test]
+    fn stress_unprovable_assignments_are_denied() {
+        let mut escaped: Vec<String> = Vec::new();
+        for assignment in [
+            "V=/",
+            r#"V="""#,
+            "V=/tmp/../..",
+            "V=$(echo /tmp)",
+            "V=`echo /tmp`",
+            "V=${OTHER}",
+            "V=$OTHER",
+            "V=/tmp; V=/",
+            "V=/tmp; V=$OTHER",
+            "read V",
+            "if true; then V=/tmp; fi",
+            "for V in / /tmp; do :; done",
+            "V=/tmp && V=/",
+            "export V",
+            "V=~",
+            "V=..",
+            "V=.",
+            "V=/../",
+        ] {
+            let command = format!(r#"{assignment}; rm -rf "$V"/"#);
+            if !denied(&command) {
+                escaped.push(command);
+            }
+        }
+        assert!(
+            escaped.is_empty(),
+            "{} unprovable assignments were NOT denied:\n{}",
+            escaped.len(),
+            escaped.join("\n")
+        );
+    }
+
+    /// Second tier of the corpus: axes that are easy to forget because they
+    /// are punctuation, spacing, or a launcher nobody lists.
+    #[test]
+    fn stress_obscure_spellings_are_denied() {
+        let mut escaped: Vec<String> = Vec::new();
+        for command in [
+            // Launchers that exec another program.
+            r#"nohup rm -rf "$V"/"#,
+            r#"timeout 5 rm -rf "$V"/"#,
+            r#"setsid rm -rf "$V"/"#,
+            r#"stdbuf -o0 rm -rf "$V"/"#,
+            r#"ionice -c3 rm -rf "$V"/"#,
+            r#"doas rm -rf "$V"/"#,
+            r#"env -i rm -rf "$V"/"#,
+            r#"command -p rm -rf "$V"/"#,
+            r#"time -p rm -rf "$V"/"#,
+            r#"xargs -a list rm -rf "$V"/"#,
+            // The program name itself quoted or built at runtime.
+            r#""rm" -rf "$V"/"#,
+            r#"'rm' -rf "$V"/"#,
+            r#"$(which rm) -rf "$V"/"#,
+            r#"`which rm` -rf "$V"/"#,
+            // Spacing and punctuation.
+            "rm    -rf     \"$V\"/",
+            "rm\t-rf\t\"$V\"/",
+            r#"  rm -rf "$V"/  "#,
+            r#"rm -rf "$V"/ ;"#,
+            r#"rm -rf "$V"/ ;;"#,
+            // A line continuation splices the operand back on.
+            "rm -rf \\\n \"$V\"/",
+            // Redirections attached to the removal.
+            r#"rm -rf "$V"/ >/dev/null"#,
+            r#"rm -rf "$V"/ >/dev/null 2>&1"#,
+            r#"rm -rf "$V"/ 2>/dev/null &"#,
+            // A trailing comment must not hide the operand.
+            r#"rm -rf "$V"/ # cleanup"#,
+            // The hazard is one of several operands.
+            r#"rm -rf /tmp/ok "$V"/"#,
+            r#"rm -rf "$V"/ /tmp/ok"#,
+            // Other variables that are routinely unset in a fresh shell.
+            r#"rm -rf "$1"/"#,
+            r#"rm -rf "${1}"/"#,
+            r#"rm -rf "$BUILD_DIR"/"#,
+            // Structures combined rather than used one at a time.
+            r#"f() { ( rm -rf "$V"/ ); }; f"#,
+            r#"for i in 1; do ( rm -rf "$V"/ ); done"#,
+            r#"if true; then f() { rm -rf "$V"/; }; f; fi"#,
+            r#"bash -c 'for i in 1; do rm -rf "$V"/; done'"#,
+            r#"eval 'f() { rm -rf "$V"/; }; f'"#,
+        ] {
+            if !denied(command) {
+                escaped.push(command.to_string());
+            }
+        }
+        assert!(
+            escaped.is_empty(),
+            "{} obscure spellings were NOT denied:\n{}",
+            escaped.len(),
+            escaped.join("\n")
+        );
+    }
+
+    /// The other half of the contract. A guard that denies everything is not a
+    /// guard, it is an outage — these must all stay allowed, and the list is
+    /// deliberately full of near-misses.
+    #[test]
+    fn stress_benign_commands_are_not_swept_up() {
+        let mut blocked: Vec<String> = Vec::new();
+        for command in [
+            // Proven-literal removals: the reason this guard is usable at all.
+            r#"V=/tmp/safe; rm -rf "$V"/"#,
+            r#"V=/tmp/safe; rm -rf "$V"/*.txt"#,
+            r#"V=/tmp/safe/deep/dir; rm -rf "$V"/build"#,
+            // Literal operands with no variable at all.
+            "rm -rf /tmp/scratch",
+            "rm -rf ./build",
+            "rm -rf build/",
+            // A variable that never reaches a removal.
+            r#"echo "$V"/"#,
+            r#"ls "$V"/"#,
+            r#"cat "$V"/file"#,
+            r#"mkdir -p "$V"/nested"#,
+            // `rm` as a word that is not the program.
+            "git rm -r --cached foo",
+            "docker run --rm ubuntu",
+            "echo 'rm -rf /'",
+            // The removal and the variable are in unrelated pipelines.
+            r#"rm -rf /tmp/x && echo "$V"/y"#,
+            r#"echo "$V"/y ; rm -rf /tmp/x"#,
+            // No trailing slash: expands to an empty operand, deletes nothing.
+            r#"rm -rf "$V""#,
+            r#"rm -rf $V"#,
+            // Single quotes are not an expansion.
+            r#"rm -rf '$V'/"#,
+        ] {
+            if denied(command) {
+                blocked.push(command.to_string());
+            }
+        }
+        assert!(
+            blocked.is_empty(),
+            "{} benign commands were WRONGLY denied:\n{}",
+            blocked.len(),
+            blocked.join("\n")
+        );
+    }
+
+    /// The one shape this guard knowingly over-refuses.
+    ///
+    /// `sudo -u rm echo "$V"/*` runs `echo` as a user named `rm`; nothing is
+    /// deleted. Recognizing that requires knowing which options of which
+    /// launcher take a value — `sudo -u` does, `xargs -0` does not — and the
+    /// same shape with `xargs -0 rm -rf` or `find … -exec rm -rf {} +` really
+    /// does run a removal. There is no sound text-only rule that separates
+    /// them, so the tie is broken toward refusing.
+    ///
+    /// Pinned so the trade is visible and deliberate rather than an accident.
+    #[test]
+    fn a_username_spelled_rm_is_conservatively_refused() {
+        assert!(denied(r#"sudo -u rm echo "$V"/*"#));
+        // Without a `$VAR/` operand there is no hazard to weigh, so the same
+        // shape stays allowed.
+        assert!(!denied("sudo -u rm echo hello"));
     }
 
     #[test]
@@ -1398,8 +1808,13 @@ mod tests {
         ] {
             assert!(denied(command), "expected denial for {command}");
         }
+        // `sudo -u rm echo …` runs `echo` as a user named `rm`, but a
+        // `$VAR/` operand in the same statement is now refused rather than
+        // reasoned about — see
+        // `a_username_spelled_rm_is_conservatively_refused`.
+        assert!(denied(r#"SP=/tmp/safe/path; sudo -u rm echo "$SP"/*"#));
         assert_eq!(
-            resolve_posix_rm_variable_expansions(r#"SP=/tmp/safe/path; sudo -u rm echo "$SP"/*"#),
+            resolve_posix_rm_variable_expansions("SP=/tmp/safe/path; sudo -u rm echo hello"),
             RmVariableResolution::Unchanged
         );
     }
