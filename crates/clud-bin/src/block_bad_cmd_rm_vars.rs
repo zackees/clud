@@ -58,9 +58,14 @@ struct Word {
     /// The word contains an unquoted brace group `{...}` (#1077).
     brace: bool,
     /// The word begins with a tilde that the shell would expand to a home
-    /// directory (`~/`, `~user/`). HOME can be `/`, so this is an unprovable
-    /// root-adjacent base. (#1076)
+    /// directory (`~/`, `~user/`). Hazardous only when it resolves to the home
+    /// root with no concrete subpath. (#1076)
     tilde_at_start: bool,
+    /// The word contains an ANSI-C `$'...'` chunk that was decoded into literal
+    /// bytes. Such a literal must be held to the same standard as a substituted
+    /// variable value (a decoded `/` is a root), unlike an ordinary typed
+    /// literal. (#1074)
+    had_ansi_c: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -553,6 +558,7 @@ fn lex_words(segment: &str, command_offset: usize) -> Result<Vec<Word>, ()> {
             unmodeled_expansion: false,
             brace: false,
             tilde_at_start: false,
+            had_ansi_c: false,
         });
         if quote == Some(b'\'') {
             if byte == b'\'' {
@@ -630,6 +636,7 @@ fn lex_words(segment: &str, command_offset: usize) -> Result<Vec<Word>, ()> {
             if bytes.get(i + 1) == Some(&b'\'') {
                 if let Some((decoded, end)) = decode_ansi_c_string(bytes, i) {
                     current.cooked.push_str(&decoded);
+                    current.had_ansi_c = true;
                     i = end;
                     continue;
                 }
@@ -1453,7 +1460,11 @@ fn operand_hazard_reason(
     variables: &HashMap<String, VariableValue>,
 ) -> Option<&'static str> {
     if word.tilde_at_start {
-        return Some("a removal operand begins with a tilde that expands to a home directory");
+        if let Some(reason) = tilde_operand_hazard(&word.cooked, variables) {
+            return Some(reason);
+        }
+        // A tilde followed by a concrete subpath (`~/.cache/myapp`) is a safe,
+        // specific directory; fall through to the remaining checks.
     }
     if word.unmodeled_expansion {
         return Some("a removal operand uses a parameter expansion this guard cannot model");
@@ -1479,12 +1490,72 @@ fn operand_hazard_reason(
     if word.brace && brace_operand_can_be_root(&word.cooked) {
         return Some("a removal operand uses brace expansion that can produce a filesystem root");
     }
+    // A typed literal operand (`.`, `./cache`, `build`, `/tmp/x`) is the
+    // developer's explicit choice and is only hazardous when it is a literal
+    // root; content that came from a variable value or an ANSI-C decode is held
+    // to the stricter `unsafe_delete_base_reason` standard (a resolved `.`,
+    // `..`, or `/` is refused).
+    let has_substitution = !word.expansions.is_empty() || word.had_ansi_c;
     for field in operand_fields(word, variables) {
-        if let Some(reason) = field_hazard_reason(&field) {
+        if let Some(reason) = field_hazard_reason(&field, has_substitution) {
             return Some(reason);
         }
     }
     None
+}
+
+/// Whether a leading-tilde operand deletes the home root itself rather than a
+/// concrete subpath. `~`, `~/`, `~user`, `~user/`, and `~/…`-with-only-glob
+/// components target the whole home tree and are refused; `~/.cache/myapp` and
+/// `~/project/build` are safe. When HOME is assigned a dangerous base in the
+/// same command (`HOME=/`), the tilde inherits it and even a concrete subpath
+/// is refused. (#1076)
+fn tilde_operand_hazard(
+    cooked: &str,
+    variables: &HashMap<String, VariableValue>,
+) -> Option<&'static str> {
+    let after_tilde = cooked.strip_prefix('~').unwrap_or(cooked);
+    let (user, rest) = match after_tilde.find('/') {
+        Some(index) => (&after_tilde[..index], &after_tilde[index..]),
+        None => (after_tilde, ""),
+    };
+    // A bare `~` (no username) expands to $HOME; if HOME was assigned in this
+    // command, resolve against its value.
+    if user.is_empty() {
+        match variables.get("HOME") {
+            Some(VariableValue::Known(home)) => {
+                let base = home.trim_end_matches('/');
+                let resolved = format!("{base}{rest}");
+                return unsafe_delete_base_reason(&resolved);
+            }
+            Some(VariableValue::Hazard) => {
+                return Some("a removal operand expands `~` against an unprovable HOME");
+            }
+            _ => {}
+        }
+    }
+    // HOME (or the named user's home) is unknown. Deleting a concrete subpath
+    // of it is safe; deleting the home root itself (no concrete component
+    // below it) is not.
+    let below = rest.trim_start_matches('/').trim_end_matches('/');
+    match normalized_component_count(below) {
+        Some(depth) if depth >= 1 => None,
+        _ => Some("a removal operand targets a home-directory root"),
+    }
+}
+
+/// Whether a typed literal operand is an absolute filesystem or drive root
+/// (`/`, `C:/`, `//server/share`, or a top-level directory). A relative path
+/// (`.`, `./cache`, `build`, `src/`) is never a root. Used to hold typed
+/// literals to a looser standard than substituted values. (#1079)
+fn literal_is_root(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let absolute = value.starts_with('/')
+        || (bytes.len() >= 3
+            && bytes[1] == b':'
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[2] == b'/');
+    absolute && unsafe_delete_base_reason(value).is_some()
 }
 
 /// Sentinel marking an unprovable expansion inside a reconstructed operand
@@ -1524,13 +1595,24 @@ fn operand_fields(word: &Word, variables: &HashMap<String, VariableValue>) -> Ve
 }
 
 /// Whether a single reconstructed operand field could delete a root.
-fn field_hazard_reason(field: &str) -> Option<&'static str> {
+///
+/// `has_substitution` says whether the field carried a variable value or an
+/// ANSI-C decode. A fully-literal field with no substitution is only refused
+/// when it is a literal root; a field that resolved from a substitution is held
+/// to the stricter `unsafe_delete_base_reason` standard.
+fn field_hazard_reason(field: &str, has_substitution: bool) -> Option<&'static str> {
     if !field.contains(UNPROVABLE) {
         if field.is_empty() {
             // An empty operand deletes nothing.
             return None;
         }
-        return unsafe_delete_base_reason(field);
+        return if has_substitution {
+            unsafe_delete_base_reason(field)
+        } else if literal_is_root(field) {
+            Some("a removal operand is a literal filesystem or drive root")
+        } else {
+            None
+        };
     }
     // The field carries an unprovable expansion. The catastrophe is one at the
     // field's start immediately followed by `/`: an empty variable yields `/`,
@@ -1960,19 +2042,31 @@ mod tests {
         assert!(denied(r#"rm -rf $IFS"$V"/"#));
     }
 
-    /// #1076 — a leading tilde expands to a home directory, which can be `/`.
+    /// #1076 — a leading tilde that targets the home ROOT (no concrete subpath)
+    /// is refused; a tilde followed by a concrete directory is a specific,
+    /// legitimate deletion and must be allowed.
     #[test]
-    fn issue_1076_tilde_expansion_is_denied() {
+    fn issue_1076_tilde_home_root_is_denied_but_subpaths_are_allowed() {
         for command in [
+            r#"rm -rf ~"#,
             r#"rm -rf ~/"#,
             r#"rm -rf ~/*"#,
             r#"rm -rf ~root/"#,
             r#"HOME=/; rm -rf ~/"#,
+            // HOME assigned a dangerous base poisons an otherwise-concrete path.
+            r#"HOME=/; rm -rf ~/x"#,
         ] {
             assert!(denied(command), "expected denial for {command}");
         }
-        // Control: a tilde that is not at word start is an ordinary filename.
-        assert!(!denied(r#"rm -rf ./~backup"#));
+        for command in [
+            // Not at word start: an ordinary filename.
+            r#"rm -rf ./~backup"#,
+            // Concrete subpaths of the home directory are safe.
+            r#"rm -rf ~/.cache/myapp"#,
+            r#"rm -rf ~/project/build"#,
+        ] {
+            assert!(!denied(command), "expected allow for {command}");
+        }
     }
 
     /// #1077 — brace expansion can produce a root (`{/,}` → `/`), but a benign
@@ -2012,6 +2106,31 @@ mod tests {
             r#"find "$V"/ -exec perl -e unlink {} +"#,
         ] {
             assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// `find … -delete` and `find … -exec <deleter>` are hazardous only when
+    /// the start path is a hazardous base — an unprovable `$VAR/`, a literal
+    /// filesystem/drive root, or the home root. A cwd-relative start path is
+    /// the developer's explicit choice and must be allowed, exactly as
+    /// `rm -rf .` is.
+    #[test]
+    fn find_delete_denies_roots_but_allows_relative_start_paths() {
+        for command in [
+            r#"find "$V"/ -delete"#,
+            r#"find / -delete"#,
+            r#"find C:/ -delete"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+        for command in [
+            r#"find . -delete"#,
+            r#"find . -name '*.pyc' -delete"#,
+            r#"find build -type f -delete"#,
+            r#"find ./cache -delete"#,
+            r#"find /tmp/x -delete"#,
+        ] {
+            assert!(!denied(command), "expected allow for {command}");
         }
     }
 
@@ -2467,6 +2586,17 @@ mod tests {
             r#"echo $'\x41'"#,
             // A tilde that is not at word start is an ordinary filename. (#1076)
             r#"rm -rf ./~backup"#,
+            // A tilde followed by a concrete subpath deletes a specific
+            // directory, not the home root. (#1076)
+            r#"rm -rf ~/.cache/myapp"#,
+            r#"rm -rf ~/project/build"#,
+            // Cwd-relative finds delete only under the working directory, like
+            // `rm -rf .` — not a root. (#1079)
+            r#"find . -name '*.pyc' -delete"#,
+            r#"find . -delete"#,
+            r#"find build -type f -delete"#,
+            r#"find ./cache -delete"#,
+            r#"find /tmp/x -delete"#,
             // A brace group with no root among its alternatives. (#1077)
             r#"rm -rf {a,b}.txt"#,
             r#"rm -rf ./{build,dist}"#,
