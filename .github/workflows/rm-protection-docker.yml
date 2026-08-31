@@ -48,22 +48,25 @@ jobs:
           strategy: native
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Through ci.xbuild like every other compile in this repo, so the hook
-      # under test is built the same way the shipped one is.
+      # Only the hook binary, not the workspace. `ci.xbuild compile` builds
+      # `--workspace --bins`, which on a standard runner exhausts memory and
+      # gets the compiler killed by the OOM reaper (soldr#2781). This check
+      # needs exactly one binary, so it asks for exactly one, and caps
+      # parallelism so a burst of codegen units cannot reach the same limit.
+      # Still routed through soldr, per the repo's toolchain rule.
       - name: Build the hook binary
-        run: >
-          "$VENV_PY" -m ci.xbuild compile
-          --target x86_64-unknown-linux-gnu
-          --strategy native
-          --profile dev
+        env:
+          CARGO_BUILD_JOBS: "2"
+          SOLDR_JOBS: "2"
+        run: soldr cargo build -p clud --bin clud-block-bad-cmd
 
       - name: Locate the hook binary
         id: binary
         run: |
           set -euo pipefail
           for candidate in \
-            target/x86_64-unknown-linux-gnu/debug/clud-block-bad-cmd \
-            target/debug/clud-block-bad-cmd; do
+            target/debug/clud-block-bad-cmd \
+            target/x86_64-unknown-linux-gnu/debug/clud-block-bad-cmd; do
             if [ -x "$candidate" ]; then
               echo "path=$candidate" >> "$GITHUB_OUTPUT"
               echo "using $candidate"
