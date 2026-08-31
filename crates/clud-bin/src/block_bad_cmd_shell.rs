@@ -321,6 +321,125 @@ pub(super) fn nested_shell_command(
     None
 }
 
+/// POSIX shells that execute a script passed via `-c`. Broader than
+/// [`SHELL_WRAPPERS`] because #1082 must also reach `dash`/`ksh` (and the
+/// busybox multiplexers), which are not among the dialect-selecting wrappers.
+pub(super) const POSIX_C_SHELLS: &[&str] =
+    &["bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "busybox"];
+
+/// Extract the script text passed to a POSIX shell via `-c`, first unwrapping
+/// leading launchers (`uv run …`, `busybox`, `find … -exec … \;`). Returns
+/// only the script operand (word after `-c`), so the caller can run the rm
+/// resolver against it — the recursion in [`nested_shell_command`] reaches the
+/// denylist path but never the rm-variable resolver, which is exactly the
+/// #1082 bypass (`dash -c 'rm -rf "$V"/'` and friends sailed through).
+pub(super) fn posix_c_shell_script(words: &[String]) -> Option<String> {
+    let unwrapped = strip_command_launchers(words);
+    let words: &[String] = unwrapped.as_deref().unwrap_or(words);
+    let first = program_name(words.first()?);
+    // `busybox sh -c …` invokes the applet named by the *next* word; a bare
+    // `busybox -c` is not a shell invocation.
+    if first == "busybox" {
+        return None;
+    }
+    if !contains_str(POSIX_C_SHELLS, &first) {
+        return None;
+    }
+    for (i, word) in words.iter().enumerate().skip(1) {
+        // Stop at the script operand; anything before `-c` is a shell option.
+        let option = word.to_ascii_lowercase();
+        let option = option.trim_start_matches('-');
+        if word.starts_with('-') && option.contains('c') && i + 1 < words.len() {
+            return Some(words[i + 1].clone());
+        }
+    }
+    None
+}
+
+/// Peel leading command launchers so [`posix_c_shell_script`] sees the real
+/// shell head. Handles `busybox <applet …>`, `uv run [opts] <cmd …>`, and
+/// `find … -exec <cmd …> \;`/`+`. Returns `None` when a launcher is present
+/// but its wrapped command cannot be located.
+fn strip_command_launchers(words: &[String]) -> Option<Vec<String>> {
+    let mut current = words.to_vec();
+    for _ in 0..8 {
+        let first = program_name(current.first()?);
+        match first.as_str() {
+            "busybox" => {
+                // `busybox sh -c …` → `sh -c …`.
+                current = current.get(1..)?.to_vec();
+                if current.is_empty() {
+                    return None;
+                }
+            }
+            "uv" if current.get(1).map(String::as_str) == Some("run") => {
+                current = uv_run_remaining(&current)?;
+            }
+            "find" => {
+                current = find_exec_command(&current)?;
+            }
+            _ => return Some(current),
+        }
+    }
+    None
+}
+
+/// The argv `uv run [options] -- <cmd> [args]` ultimately launches. Mirrors
+/// [`resolve_uv_run_tool`]'s option-skipping but returns the whole remaining
+/// slice rather than only the tool word. `--script <file>` runs a file, not a
+/// shell head we can extract, so it yields `None`.
+fn uv_run_remaining(words: &[String]) -> Option<Vec<String>> {
+    let mut i = 2usize;
+    while i < words.len() {
+        let word = &words[i];
+        if word == "--" {
+            i += 1;
+            break;
+        }
+        if word == "--script" || word.starts_with("--script=") {
+            return None;
+        }
+        if !word.starts_with('-') {
+            break;
+        }
+        let consumes_value = (!word.contains('=') && contains_str(UV_RUN_OPTIONS_WITH_VALUE, word))
+            || contains_str(UV_RUN_SHORT_OPTIONS_WITH_VALUE, word);
+        if consumes_value {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    let rest = words.get(i..)?.to_vec();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// The command `find … -exec <cmd …> ;`/`+` would run, as a word slice. The
+/// terminator (`;`, an escaped `\;`, or `+`) and everything after it are
+/// dropped.
+fn find_exec_command(words: &[String]) -> Option<Vec<String>> {
+    let mut i = 1usize;
+    while i < words.len() {
+        if matches!(words[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            let start = i + 1;
+            let mut j = start;
+            while j < words.len() && !matches!(words[j].as_str(), ";" | "\\;" | "+") {
+                j += 1;
+            }
+            if j > start {
+                return Some(words[start..j].to_vec());
+            }
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
 pub(super) fn python_rust_hybrid_root(cwd: Option<&Path>) -> Option<PathBuf> {
     let anchor = cwd?.canonicalize().ok()?;
     for candidate in std::iter::once(anchor.as_path()).chain(anchor.ancestors().skip(1)) {
