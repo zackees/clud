@@ -2639,3 +2639,50 @@ This is narrower than the command gate's inversion ([DD-056](#dd-056-the-command
 which denies *everything* it cannot verify but only under `CLUD_CMD_GATE`. This
 one needs no configuration and is always on, which is why it is scoped to the
 single class where allow-on-error is unrecoverable.
+
+## DD-058: the rm-variable interpreter reasons over resolved values, not literal token shape
+
+**Status:** Accepted
+
+**Context:** #963's interpreter and its #1064/#1068 hardening keyed the hazard on
+the **literal token shape `$VAR/`** present in the command text: it value-checked
+a removal operand only when a `/` sat textually adjacent to a recognized
+expansion, and it identified the removal program by a literal `rm`/`rmdir`
+token. A red-team sweep (#1070) showed that assumption is bypassable in many
+unrelated ways, each confirmed to expand to `rm -rf /` in real bash while the
+guard allowed it: the program named through a variable (`R=rm; $R -rf "$V"/`),
+the slash or the whole root carried inside a value (`D=/; rm -rf "$D"`), the `/`
+synthesized by an unmodeled parameter operator (`${V:0:1}`), ANSI-C quoting
+(`$'\x2f'`), `$IFS` word-splitting, tilde and brace expansion, and a provable
+rewrite that disabled the cross-statement fallback for its siblings.
+
+**Decision:** Move the interpreter from *token-shape* reasoning to *value-flow*
+reasoning (#1071–#1078, #1088):
+
+- Resolve the program word through the same value/substitution model as
+  operands, so a variable- or substitution-built `rm` is recognized.
+- Value-check every removal operand after substituting known values, and
+  propagate a `Hazard` value for a variable assigned an unprovable base — so a
+  root reaches the check regardless of where the `/` came from.
+- Decode ANSI-C `$'...'` in the lexer; treat unmodeled `${...}` operators,
+  unquoted `$IFS`, leading tilde, and brace groups that can expand to a root as
+  hazards.
+- Run the `unproven_hazard_reason` fallback unconditionally, so a provable
+  rewrite in one statement no longer suppresses the sweep for another.
+
+**Scope broadened, but deliberately still incomplete.** The recursive-delete
+verb set is widened past `rm`/`rmdir`/`find -delete` to a **curated, best-effort**
+denylist of known idioms — Perl `File::Path` `rmtree`/`remove_tree`, Python
+`shutil.rmtree`/`os.removedirs`, `rsync … --delete`, `find … -exec <deleter>`
+(#1079) — fired only when a `$VAR/`-rooted operand is present. This is explicitly
+not exhaustive: any interpreter can delete a tree, and enumerating them is a
+losing race. Likewise the guard still reasons about command *text* before the
+shell expands it, so constructs that only reveal their argv at runtime remain
+out of reach. Those residual classes are why the post-expansion wrapper (#1067,
+`tap`) and `set -u` (#1066) remain the durable answers; this decision closes the
+text-time gaps that are closable and records that the rest are not.
+
+**Consequences:** The benign corpus is unchanged — proven-literal removals still
+rewrite, and near-misses (`echo $'\x41'`, `rm -rf ./~backup`, `rm -rf {a,b}.txt`,
+`git rm`) stay allowed — pinned by `stress_benign_commands_are_not_swept_up`.
+Each closed bypass is a regression test in `block_bad_cmd_rm_vars.rs`.
