@@ -55,7 +55,7 @@ pub(super) fn read_stdin_nonblocking() -> Option<StdinRead> {
                 let now = Instant::now();
                 let wait_until = idle_until.map_or(deadline, |idle| idle.min(deadline));
                 if now >= wait_until {
-                    incomplete_reason = Some(if idle_until.is_some() && wait_until <= deadline {
+                    incomplete_reason = Some(if idle_until.is_some_and(|idle| idle <= deadline) {
                         "idle"
                     } else {
                         "deadline"
@@ -81,6 +81,7 @@ pub(super) fn read_stdin_nonblocking() -> Option<StdinRead> {
     Some(StdinRead {
         text: decode_stdin(&chunks),
         log_messages,
+        incomplete: incomplete_reason,
     })
 }
 
@@ -133,7 +134,7 @@ pub(super) fn read_stdin_threaded() -> StdinRead {
         let now = Instant::now();
         let wait_until = idle_until.map_or(deadline, |idle| idle.min(deadline));
         if now >= wait_until {
-            incomplete_reason = Some(if idle_until.is_some() && wait_until <= deadline {
+            incomplete_reason = Some(if idle_until.is_some_and(|idle| idle <= deadline) {
                 "idle"
             } else {
                 "deadline"
@@ -155,7 +156,7 @@ pub(super) fn read_stdin_threaded() -> StdinRead {
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                incomplete_reason = Some(if idle_until.is_some() && wait_until <= deadline {
+                incomplete_reason = Some(if idle_until.is_some_and(|idle| idle <= deadline) {
                     "idle"
                 } else {
                     "deadline"
@@ -175,6 +176,7 @@ pub(super) fn read_stdin_threaded() -> StdinRead {
     StdinRead {
         text: decode_stdin(&chunks),
         log_messages,
+        incomplete: incomplete_reason,
     }
 }
 

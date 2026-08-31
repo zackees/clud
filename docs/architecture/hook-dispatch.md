@@ -107,6 +107,45 @@ wedges, which is the outcome this whole subsystem exists to prevent. A blocking
 hook's stdout is relayed verbatim rather than re-wrapped, since it may be
 speaking the harness's own JSON protocol.
 
+**Exception 1: removals on `PreToolUse`.** A hook that cannot parse its payload
+has not inspected the command inside it, and for one class of command that is
+unrecoverable. When `run_for_event` cannot decode its payload or recognize its
+shape *and* the raw stdin bytes name a removal program, it denies rather than
+allows — no configuration, in every session. This is the narrowest inversion
+that covers the incident in #1064, where an unparseable payload silently allowed
+an `rm -rf "$VAR"/` that expanded to `rm -rf /`. It applies to `PreToolUse`
+alone: refusing is meaningless once the tool has already run, and the denial
+speaks that event's protocol.
+
+Note what is *not* a trigger. A read that stopped before EOF is recorded, but on
+its own it means nothing is wrong — Claude Code routinely writes a complete
+payload and leaves the pipe open (anthropics/claude-code#53177, and see
+[windows-quirks.md](windows-quirks.md)), which is the very reason the idle
+timeout exists. A genuinely truncated payload cuts a JSON string mid-flight and
+so fails to decode, which the decode check already catches; the truncation
+reason only sharpens the message. Treating the open pipe itself as unverifiable
+denied every tool call whose text merely mentioned `rm`.
+
+The probe (`raw_payload_mentions_removal`, in `block_bad_cmd_rm_vars.rs`) reads
+raw bytes rather than extracted command text, and matches the removal as a word:
+escape sequences collapse to separators, end-of-input counts as a boundary, and
+a leading directory is stripped. Everything that is *not* a removal still fails
+open, which is what keeps a hook hiccup from wedging the session. DD-057 records
+why the inversion is scoped this narrowly and why the probe deliberately
+over-matches.
+
+**Exception 2: the command gate.** When `CLUD_CMD_GATE` is set to an enabling
+value (DD-056 lists them) in the session environment, `run_for_event`'s own
+allow-by-default exits — an empty payload, a payload that will not decode, a
+payload shape it does not recognize — become denials instead. The gate's
+guarantee is that every
+command reaches a wrapper that can inspect its post-expansion argv, and a
+payload the hook could not read is a command it could not verify. Allowing there
+would restore exactly the silent-permissive default the gate exists to remove.
+The inversion is scoped to that env var and to `PreToolUse`: an ungated session
+keeps the fail-open behavior described above. See DD-056 and
+`block_bad_cmd_gate.rs`.
+
 ## Which event an invocation serves, and who dispatches
 
 A bare `clud-cmd-scan` means `PreToolUse`. That is what every already-installed
