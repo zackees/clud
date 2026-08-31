@@ -304,13 +304,20 @@ The guard runs as a Claude Code hook. Add it once to `~/.claude/settings.json`
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "*",
         "hooks": [{ "type": "command", "command": "clud-cmd-scan", "timeout": 30 }]
       }
     ]
   }
 }
 ```
+
+Use `"matcher": "*"`, not `"Bash"`. A `Bash`-scoped matcher only guards the
+Bash tool, so catastrophic commands (`rm -rf $VAR/`) issued through Claude
+Code's PowerShell tool, an MCP shell server (`mcp__*`), or a Codex session slip
+past unchecked (zackees/clud#1084). `"*"` scans every tool call; the hook
+self-selects the shell dialect internally, so a non-shell tool call is a cheap
+no-op.
 
 If you ever see `clud-cmd-scan: command not found`, the guard isn't installed
 and is doing nothing — run `uv tool install --force clud`. (If you have an old
