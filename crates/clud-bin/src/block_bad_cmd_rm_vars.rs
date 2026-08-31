@@ -1050,6 +1050,11 @@ fn any_expansion_end(bytes: &[u8], start: usize) -> Option<usize> {
     match bytes.get(start + 1) {
         Some(b'{') => matching_close(bytes, start + 1, b'{', b'}'),
         Some(b'(') => matching_close(bytes, start + 1, b'(', b')'),
+        // Positional and special parameters are one character and are not
+        // valid identifiers, so the name parser rejects them. They matter
+        // here: `$1` is unset in any shell that was not passed an argument,
+        // so `rm -rf "$1"/` is the same catastrophe under a different name.
+        Some(byte) if byte.is_ascii_digit() || b"@*#?$!-_".contains(byte) => Some(start + 2),
         _ => parse_simple_expansion(bytes, start).map(|(_, end)| end),
     }
 }
@@ -1413,6 +1418,13 @@ mod tests {
         r#""${V#x}"/"#,
         r#""${V%x}"/"#,
         r#""${!V}"/"#,
+        // Positional and special parameters: unset in any shell that was not
+        // passed arguments, and not valid identifiers, so they need their own
+        // handling in the hazard scanner.
+        r#""$1"/"#,
+        r#""${1}"/"#,
+        r#""$@"/"#,
+        r#"$1/"#,
     ];
 
     /// Structures that wrap a statement. Each takes the inner command and
