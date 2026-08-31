@@ -49,6 +49,23 @@ struct Word {
     cooked: String,
     expansions: Vec<Expansion>,
     dynamic: bool,
+    /// The word contains a `${...}` parameter expansion using an operator this
+    /// interpreter does not model (offset `:o:l`, `:-`, `#`, `%`, `!indirect`,
+    /// …). Such a form can yield `/` from a non-root variable
+    /// (`${HOME:0:1}` → `/`), so at a removal operand it is an unprovable
+    /// hazard regardless of what follows it. (#1073)
+    unmodeled_expansion: bool,
+    /// The word contains an unquoted brace group `{...}` (#1077).
+    brace: bool,
+    /// The word begins with a tilde that the shell would expand to a home
+    /// directory (`~/`, `~user/`). Hazardous only when it resolves to the home
+    /// root with no concrete subpath. (#1076)
+    tilde_at_start: bool,
+    /// The word contains an ANSI-C `$'...'` chunk that was decoded into literal
+    /// bytes. Such a literal must be held to the same standard as a substituted
+    /// variable value (a decoded `/` is a root), unlike an ordinary typed
+    /// literal. (#1074)
+    had_ansi_c: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +73,11 @@ enum VariableValue {
     Known(String),
     Unset,
     Conflict,
+    /// The variable was assigned a value that is itself an unprovable deletion
+    /// base — an unprovable expansion at the value's start immediately followed
+    /// by `/` (`D="$V"/`). Using `$D` as a removal operand is then as dangerous
+    /// as `$V/`, even without a trailing slash of its own. (#1072)
+    Hazard,
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +113,14 @@ fn resolve_posix_rm_variable_expansions_at_depth(
 
     for inner in scan_command_substitutions(&scan_command) {
         if depth >= MAX_SUBSTITUTION_RECURSION_DEPTH {
-            if looks_like_hazardous_rm(&inner) {
+            // Fail closed at the cap. `looks_like_hazardous_rm` alone misses a
+            // hazard buried under further `$( … )` nesting, because its path
+            // scanner steps over a whole substitution; flattening the
+            // substitution syntax first reveals the residual removal + `$VAR/`
+            // so it can be denied instead of allowed. (#1088)
+            if looks_like_hazardous_rm(&inner)
+                || looks_like_hazardous_rm(&flatten_command_substitutions(&inner))
+            {
                 return deny("nested shell structure exceeded the static analysis depth limit");
             }
             continue;
@@ -107,6 +136,12 @@ fn resolve_posix_rm_variable_expansions_at_depth(
     let mut variables = HashMap::<String, VariableValue>::new();
     let mut assignment_counts = HashMap::<String, usize>::new();
     let mut replacements = Vec::<Replacement>::new();
+    // Statements whose removal was recognized (`rm`/`rmdir`, possibly wrapped)
+    // and whose operands the main loop fully examined — either rewriting each
+    // hazardous one or proving it safe. Such a statement cannot leak an
+    // unproven hazard, so the fallback skips it; a statement the main loop did
+    // NOT recognize is still weighed conservatively there. (#1078)
+    let mut proven_statements = std::collections::HashSet::<usize>::new();
 
     for statement in &statements {
         if matches!(
@@ -153,6 +188,15 @@ fn resolve_posix_rm_variable_expansions_at_depth(
             {
                 return deny("a removal operand uses an indirect or dynamic path expansion");
             }
+            // Comprehensive operand hazard analysis (tilde, unmodeled
+            // expansions, brace roots, value-carried roots, `$IFS`-split
+            // operands, and `$VAR/` shapes the per-expansion loop below does
+            // not reach). Proven-safe operands return `None` here and fall
+            // through to the rewrite loop. (#1072, #1073, #1074, #1075, #1076,
+            // #1077)
+            if let Some(reason) = operand_hazard_reason(word, &variables) {
+                return deny(reason);
+            }
             for expansion in &word.expansions {
                 if expansion.logical_start != 0
                     || word.cooked.as_bytes().get(expansion.logical_end) != Some(&b'/')
@@ -198,12 +242,19 @@ fn resolve_posix_rm_variable_expansions_at_depth(
                 });
             }
         }
+        // The removal was recognized and every operand examined without a
+        // denial: this statement is proven and the fallback may skip it.
+        proven_statements.insert(statement.start);
     }
 
+    // The fallback runs unconditionally: a sibling operand that WAS rewritten
+    // must not disable the check for a different, unproven removal elsewhere in
+    // the command. The check is variable-aware, so an operand that was proven
+    // safe (and rewritten) is not itself counted as a hazard. (#1078)
+    if let Some(reason) = unproven_hazard_reason(&statements, &variables, &proven_statements) {
+        return deny(reason);
+    }
     if replacements.is_empty() {
-        if let Some(reason) = unproven_hazard_reason(&statements) {
-            return deny(reason);
-        }
         return RmVariableResolution::Unchanged;
     }
     replacements.sort_by_key(|replacement| replacement.start);
@@ -504,6 +555,10 @@ fn lex_words(segment: &str, command_offset: usize) -> Result<Vec<Word>, ()> {
             cooked: String::new(),
             expansions: Vec::new(),
             dynamic: false,
+            unmodeled_expansion: false,
+            brace: false,
+            tilde_at_start: false,
+            had_ansi_c: false,
         });
         if quote == Some(b'\'') {
             if byte == b'\'' {
@@ -552,10 +607,20 @@ fn lex_words(segment: &str, command_offset: usize) -> Result<Vec<Word>, ()> {
         if matches!(byte, b'<' | b'>') && bytes.get(i + 1) == Some(&b'(') {
             current.dynamic = true;
         }
+        if quote.is_none() && byte == b'~' && current.cooked.is_empty() {
+            // A leading, unquoted tilde undergoes home-directory expansion.
+            current.tilde_at_start = true;
+        }
         if quote.is_none()
             && (byte == b'{' || byte == b'}' || (byte == b'~' && current.cooked.ends_with('=')))
         {
             current.dynamic = true;
+            // A brace that starts a group (rather than the `{` of a `${...}`
+            // parameter expansion, whose `$` we would already have pushed) can
+            // undergo brace expansion.
+            if byte == b'{' && !current.cooked.ends_with('$') {
+                current.brace = true;
+            }
         }
         if byte == b'$' {
             if bytes.get(i + 1) == Some(&b'(') {
@@ -563,6 +628,20 @@ fn lex_words(segment: &str, command_offset: usize) -> Result<Vec<Word>, ()> {
                 current.cooked.push('$');
                 i += 1;
                 continue;
+            }
+            // ANSI-C quoting: `$'...'` decodes its escapes into a literal
+            // string, so `$'\x2f'` is the slash `/` and `$'\x72\x6d'` is the
+            // program name `rm`. Decoding lets the ordinary literal path see
+            // the real bytes. (#1074)
+            if bytes.get(i + 1) == Some(&b'\'') {
+                if let Some((decoded, end)) = decode_ansi_c_string(bytes, i) {
+                    current.cooked.push_str(&decoded);
+                    current.had_ansi_c = true;
+                    i = end;
+                    continue;
+                }
+                // An unterminated `$'…` cannot be proven; fall through and let
+                // the dynamic marker below flag the word.
             }
             if let Some((name, end)) = parse_simple_expansion(bytes, i) {
                 let logical_start = current.cooked.len();
@@ -584,6 +663,11 @@ fn lex_words(segment: &str, command_offset: usize) -> Result<Vec<Word>, ()> {
                 continue;
             }
             current.dynamic = true;
+            // A `${...}` the simple-expansion parser rejected uses an operator
+            // we do not model; treat it as unprovable at a removal operand. (#1073)
+            if bytes.get(i + 1) == Some(&b'{') {
+                current.unmodeled_expansion = true;
+            }
         }
         push_utf8_char(segment, &mut current.cooked, &mut i)?;
     }
@@ -636,6 +720,158 @@ fn parse_simple_expansion(bytes: &[u8], start: usize) -> Option<(String, usize)>
     ))
 }
 
+/// Decode an ANSI-C quoted string `$'...'` beginning at `start` (which points
+/// at the `$`, with `bytes[start + 1] == b'\''`).
+///
+/// Returns the decoded literal and the index just past the closing quote, or
+/// `None` when the string is never closed. Enough of the escape grammar is
+/// handled to unmask a smuggled `/` or program name: `\xHH`, `\0NNN` octal,
+/// `\uHHHH`, `\UHHHHHHHH`, and the common single-character escapes. An escape
+/// this decoder does not recognize is emitted verbatim (bash keeps the
+/// backslash too), which is safe here — the point is only to reveal literal
+/// bytes, and over-revealing cannot hide a hazard.
+fn decode_ansi_c_string(bytes: &[u8], start: usize) -> Option<(String, usize)> {
+    let mut i = start + 2; // past `$'`
+    let mut out = String::new();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => return Some((out, i + 1)),
+            b'\\' => {
+                let Some(&esc) = bytes.get(i + 1) else {
+                    out.push('\\');
+                    i += 1;
+                    continue;
+                };
+                match esc {
+                    b'n' => {
+                        out.push('\n');
+                        i += 2;
+                    }
+                    b't' => {
+                        out.push('\t');
+                        i += 2;
+                    }
+                    b'r' => {
+                        out.push('\r');
+                        i += 2;
+                    }
+                    b'a' => {
+                        out.push('\u{7}');
+                        i += 2;
+                    }
+                    b'b' => {
+                        out.push('\u{8}');
+                        i += 2;
+                    }
+                    b'e' | b'E' => {
+                        out.push('\u{1b}');
+                        i += 2;
+                    }
+                    b'f' => {
+                        out.push('\u{c}');
+                        i += 2;
+                    }
+                    b'v' => {
+                        out.push('\u{b}');
+                        i += 2;
+                    }
+                    b'\\' => {
+                        out.push('\\');
+                        i += 2;
+                    }
+                    b'\'' => {
+                        out.push('\'');
+                        i += 2;
+                    }
+                    b'"' => {
+                        out.push('"');
+                        i += 2;
+                    }
+                    b'x' => {
+                        let (value, consumed) = read_radix_digits(bytes, i + 2, 16, 2);
+                        if consumed == 0 {
+                            out.push('\\');
+                            out.push('x');
+                            i += 2;
+                        } else {
+                            push_code_point(&mut out, value);
+                            i += 2 + consumed;
+                        }
+                    }
+                    b'u' => {
+                        let (value, consumed) = read_radix_digits(bytes, i + 2, 16, 4);
+                        if consumed == 0 {
+                            out.push('\\');
+                            out.push('u');
+                            i += 2;
+                        } else {
+                            push_code_point(&mut out, value);
+                            i += 2 + consumed;
+                        }
+                    }
+                    b'U' => {
+                        let (value, consumed) = read_radix_digits(bytes, i + 2, 16, 8);
+                        if consumed == 0 {
+                            out.push('\\');
+                            out.push('U');
+                            i += 2;
+                        } else {
+                            push_code_point(&mut out, value);
+                            i += 2 + consumed;
+                        }
+                    }
+                    b'0'..=b'7' => {
+                        let (value, consumed) = read_radix_digits(bytes, i + 1, 8, 3);
+                        push_code_point(&mut out, value);
+                        i += 1 + consumed;
+                    }
+                    other => {
+                        // Unknown escape: keep both characters verbatim.
+                        out.push('\\');
+                        out.push(other as char);
+                        i += 2;
+                    }
+                }
+            }
+            _ => {
+                push_utf8_char(
+                    std::str::from_utf8(bytes).unwrap_or_default(),
+                    &mut out,
+                    &mut i,
+                )
+                .ok()?;
+            }
+        }
+    }
+    None
+}
+
+/// Read up to `max` digits in `radix` starting at `start`. Returns the decoded
+/// value and the number of digits consumed (0 when none were valid).
+fn read_radix_digits(bytes: &[u8], start: usize, radix: u32, max: usize) -> (u32, usize) {
+    let mut value = 0u32;
+    let mut consumed = 0usize;
+    while consumed < max {
+        let Some(&byte) = bytes.get(start + consumed) else {
+            break;
+        };
+        let Some(digit) = (byte as char).to_digit(radix) else {
+            break;
+        };
+        value = value.saturating_mul(radix).saturating_add(digit);
+        consumed += 1;
+    }
+    (value, consumed)
+}
+
+/// Append a decoded code point as a literal character. An invalid code point
+/// cannot be a path separator, so it is simply dropped.
+fn push_code_point(out: &mut String, value: u32) {
+    if let Some(ch) = char::from_u32(value) {
+        out.push(ch);
+    }
+}
+
 fn is_name_start(byte: u8) -> bool {
     byte == b'_' || byte.is_ascii_alphabetic()
 }
@@ -664,7 +900,7 @@ fn apply_assignment_statement(
             let (name, value) = assignment_parts(&word.cooked).expect("checked above");
             let count = counts.entry(name.to_string()).or_default();
             *count += 1;
-            let state = if *count > 1
+            let mut state = if *count > 1
                 || matches!(
                     separator,
                     Separator::And | Separator::Or | Separator::Pipe | Separator::Background
@@ -678,6 +914,11 @@ fn apply_assignment_statement(
             } else {
                 VariableValue::Known(value.to_string())
             };
+            // A value that is itself an unprovable deletion base (`D="$V"/`)
+            // poisons `$D` even without a trailing slash of its own. (#1072)
+            if matches!(state, VariableValue::Conflict) && assignment_value_is_hazard(value) {
+                state = VariableValue::Hazard;
+            }
             variables.insert(name.to_string(), state);
         }
         return;
@@ -724,6 +965,21 @@ fn assignment_parts(word: &str) -> Option<(&str, &str)> {
     is_valid_name(name).then_some((name, value))
 }
 
+/// Whether an assignment's (cooked) value is itself an unprovable deletion
+/// base: it begins with a parameter expansion whose next character is `/`
+/// (`"$V"/` cooks to `${V}/`). With the leading variable unprovable, the value
+/// can be `/` (empty variable) or `//…` — so `$D` is as dangerous as `$V/`,
+/// with or without a trailing slash of its own. (#1072)
+fn assignment_value_is_hazard(value_cooked: &str) -> bool {
+    let Some(rest) = value_cooked.strip_prefix("${") else {
+        return false;
+    };
+    let Some(close) = rest.find('}') else {
+        return false;
+    };
+    rest.as_bytes().get(close + 1) == Some(&b'/')
+}
+
 fn is_valid_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     bytes.next().is_some_and(is_name_start) && bytes.all(is_name_continue)
@@ -754,6 +1010,13 @@ fn contains_unsupported_control_flow(statements: &[Statement<'_>]) -> bool {
             || statement.text.starts_with('{')
             || statement.text.contains("()")
     })
+}
+
+/// Strip command- and process-substitution syntax so a hazard buried under
+/// deep `$( … )` / backtick nesting becomes visible to the flat text probes.
+/// Parameter expansions (`${V}`) are left intact.
+fn flatten_command_substitutions(text: &str) -> String {
+    text.replace("$(", " ").replace(['(', ')', '`'], " ")
 }
 
 fn looks_like_hazardous_rm(command: &str) -> bool {
@@ -799,12 +1062,44 @@ pub(super) fn raw_payload_mentions_removal(raw: &str) -> bool {
     [
         flatten_escape_sequences(&decoded),
         strip_backslashes(&decoded),
+        collapse_word_concatenation(&decoded),
     ]
     .iter()
     .any(|text| {
         text.split(|ch: char| !is_command_name_char(ch))
             .any(is_removal_program_word)
     })
+}
+
+/// A third reading that mirrors the shell's *concatenation* of adjacent quoted
+/// and escaped chunks inside one word: `r''m`, `r""m`, `"r"m` and `r\m` all
+/// name `rm`. The other two readings turn a quote or backslash into a
+/// separator, which splits these into `r` and `m` and misses them; here a
+/// quote or backslash wedged between two command-name characters is dropped so
+/// the halves rejoin. Empty quote pairs are collapsed first. Over-matching is
+/// acceptable — this path runs only on already-unparseable payloads. (#1085)
+fn collapse_word_concatenation(raw: &str) -> String {
+    let without_empty_pairs = raw.replace("''", "").replace("\"\"", "");
+    let chars: Vec<char> = without_empty_pairs.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if matches!(ch, '\'' | '"' | '\\') {
+            let prev_joins = out.chars().next_back().is_some_and(is_command_name_char);
+            let next_joins = chars
+                .get(index + 1)
+                .copied()
+                .is_some_and(is_command_name_char);
+            if prev_joins || next_joins {
+                index += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
 }
 
 /// Resolve `\u00XX` escapes to the character they denote.
@@ -926,14 +1221,24 @@ fn is_word_close(ch: char) -> bool {
 /// safe removal beside an unrelated variable — `rm -rf /tmp/x && echo "$V"/` —
 /// is not swept up. Within one pipeline the stages share data, so a `$VAR/`
 /// upstream of an `xargs rm` is exactly the hazard.
-fn unproven_hazard_reason(statements: &[Statement<'_>]) -> Option<&'static str> {
+fn unproven_hazard_reason(
+    statements: &[Statement<'_>],
+    variables: &HashMap<String, VariableValue>,
+    proven: &std::collections::HashSet<usize>,
+) -> Option<&'static str> {
     for pipeline in pipeline_groups(statements) {
-        let has_removal = pipeline
-            .iter()
-            .any(|statement| statement_bears_a_removal(statement));
-        let has_path_variable = pipeline
-            .iter()
-            .any(|statement| contains_path_variable_prefix(statement.text));
+        // A statement the main loop proved (recognized removal, operands all
+        // examined) cannot leak an unproven hazard, so it is excluded from
+        // both sides of the test. Everything else is weighed conservatively:
+        // a word that merely *names* `rm` (a `sudo -u rm` username) beside a
+        // `$VAR/` operand is refused even when that variable is known-safe,
+        // because the guard cannot prove which one will run.
+        let has_removal = pipeline.iter().any(|statement| {
+            !proven.contains(&statement.start) && statement_bears_a_removal(statement, variables)
+        });
+        let has_path_variable = pipeline.iter().any(|statement| {
+            !proven.contains(&statement.start) && statement_has_hazard_operand(statement, variables)
+        });
         if has_removal && has_path_variable {
             return Some(
                 "a removal shares a pipeline with a `$VAR/` path that could not be proven safe",
@@ -941,6 +1246,31 @@ fn unproven_hazard_reason(statements: &[Statement<'_>]) -> Option<&'static str> 
         }
     }
     None
+}
+
+/// Whether a statement carries an unprovable removal operand.
+///
+/// This is the union of two probes, because each catches what the other
+/// misses. The text probe [`contains_path_variable_prefix`] flags any `$VAR/`
+/// shape (including special parameters like `$1`, and known-safe variables that
+/// were never validated because the statement's program was not a recognized
+/// removal). The word probe [`operand_hazard_reason`] additionally flags shapes
+/// with no trailing slash that are hazardous anyway — an unmodeled `${...}`
+/// operator, a leading tilde, a root-producing brace group. When the statement
+/// cannot be lexed, only the text probe applies.
+fn statement_has_hazard_operand(
+    statement: &Statement<'_>,
+    variables: &HashMap<String, VariableValue>,
+) -> bool {
+    if contains_path_variable_prefix(statement.text) {
+        return true;
+    }
+    let Ok(words) = lex_words(statement.text, statement.start) else {
+        return false;
+    };
+    words
+        .iter()
+        .any(|word| operand_hazard_reason(word, variables).is_some())
 }
 
 /// Whether a statement could run a removal, judged by the words it contains.
@@ -962,7 +1292,17 @@ fn unproven_hazard_reason(statements: &[Statement<'_>]) -> Option<&'static str> 
 ///
 /// A statement that cannot be lexed falls back to the raw-text probe, since an
 /// unlexable statement is exactly when guessing low is most dangerous.
-fn statement_bears_a_removal(statement: &Statement<'_>) -> bool {
+///
+/// Beyond a literally-spelled `rm`/`rmdir` and `find … -delete`, this also
+/// recognizes: a removal whose program name is built from a variable or
+/// substitution (`$R -rf …`, `$(which rm) …`) that cannot be proven to be a
+/// non-removal (#1071); a removal split apart by unquoted `$IFS`
+/// (`rm${IFS}-rf …`, #1075); and a curated set of well-known recursive-delete
+/// idioms in other programs (#1079).
+fn statement_bears_a_removal(
+    statement: &Statement<'_>,
+    variables: &HashMap<String, VariableValue>,
+) -> bool {
     let Ok(words) = lex_words(statement.text, statement.start) else {
         return contains_removal_program_text(&statement.text.to_ascii_lowercase());
     };
@@ -980,7 +1320,397 @@ fn statement_bears_a_removal(statement: &Statement<'_>) -> bool {
     // probe runs too: a removal built at runtime is still a removal.
     names_a_removal
         || deletes_via_find
+        || words.iter().any(word_ifs_splits_to_removal)
+        || first_program_word_is_potential_removal(&words, variables)
+        || statement_bears_extra_deleter(&words)
         || contains_removal_program_text(&statement.text.to_ascii_lowercase())
+}
+
+/// Whether an unquoted `$IFS` word-splits a token so that its first field names
+/// a removal — `rm${IFS}-rf${IFS}"$V"/` is `rm -rf "$V"/` after splitting.
+/// A modeled `$IFS`/`${IFS}` renders as the literal `${IFS}` in the cooked
+/// token, so splitting on that string recovers the fields. (#1075)
+fn word_ifs_splits_to_removal(word: &Word) -> bool {
+    if !word
+        .expansions
+        .iter()
+        .any(|expansion| expansion.name == "IFS" && expansion.quote == QuoteContext::Unquoted)
+    {
+        return false;
+    }
+    let first = word
+        .cooked
+        .split("${IFS}")
+        .find(|field| !field.is_empty())
+        .unwrap_or_default();
+    matches!(program_name(first).as_str(), "rm" | "rmdir")
+}
+
+/// Whether the program word (the first word past any leading assignments) is a
+/// removal that is built dynamically and cannot be proven to be something
+/// else. A dynamic program word that resolves to a known non-removal literal
+/// is *not* flagged; one that resolves to `rm`/`rmdir`, or that cannot be
+/// resolved at all, is. (#1071)
+fn first_program_word_is_potential_removal(
+    words: &[Word],
+    variables: &HashMap<String, VariableValue>,
+) -> bool {
+    let mut index = 0usize;
+    while words
+        .get(index)
+        .and_then(|word| assignment_parts(&word.cooked))
+        .is_some()
+    {
+        index += 1;
+    }
+    let Some(first) = words.get(index) else {
+        return false;
+    };
+    let is_dynamic_program =
+        first.dynamic || first.unmodeled_expansion || !first.expansions.is_empty();
+    if !is_dynamic_program {
+        // An ordinary literal program name is handled by the caller's other
+        // branches; nothing dynamic to reason about here.
+        return false;
+    }
+    if !first.dynamic && !first.unmodeled_expansion {
+        if let Some(resolved) = resolve_static_operand(first, variables) {
+            return matches!(program_name(&resolved).as_str(), "rm" | "rmdir");
+        }
+    }
+    // The program word is dynamic and unprovable: it cannot be shown to be a
+    // non-removal, so — paired with a hazardous operand by the caller — it is
+    // treated as a removal.
+    true
+}
+
+/// A curated, best-effort denylist of well-known recursive-delete idioms that
+/// wear a program name other than `rm`/`rmdir`/`find -delete`.
+///
+/// This is deliberately *not* exhaustive (see DD-057): recursive deletion is an
+/// open-ended space, and the real fix is the post-expansion wrapper (#1067).
+/// It fires only alongside a `$VAR/`-rooted operand, and covers the confirmed
+/// incident shapes: Perl `File::Path` (`rmtree`/`remove_tree`), Python
+/// `shutil.rmtree`/`os.removedirs`, `rsync … --delete`, and
+/// `find … -exec <non-rm deleter>`. (#1079)
+fn statement_bears_extra_deleter(words: &[Word]) -> bool {
+    let names: Vec<String> = words
+        .iter()
+        .map(|word| program_name(&word.cooked))
+        .collect();
+    let joined_lower = words
+        .iter()
+        .map(|word| word.cooked.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let has = |name: &str| names.iter().any(|candidate| candidate == name);
+
+    if has("perl") && (joined_lower.contains("rmtree") || joined_lower.contains("remove_tree")) {
+        return true;
+    }
+    if (has("python") || has("python2") || has("python3"))
+        && (joined_lower.contains("rmtree") || joined_lower.contains("removedirs"))
+    {
+        return true;
+    }
+    if has("rsync")
+        && words
+            .iter()
+            .any(|word| word.cooked == "--delete" || word.cooked.starts_with("--delete-"))
+    {
+        return true;
+    }
+    if names.first().is_some_and(|first| first == "find") {
+        for (index, word) in words.iter().enumerate() {
+            if word.cooked == "-exec" || word.cooked == "-execdir" {
+                if let Some(next) = words.get(index + 1) {
+                    if matches!(
+                        program_name(&next.cooked).as_str(),
+                        "rm" | "rmdir"
+                            | "perl"
+                            | "python"
+                            | "python2"
+                            | "python3"
+                            | "unlink"
+                            | "shred"
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether a removal operand could expand to a filesystem root (or another
+/// unprovable dangerous base), judged with the variable model. Returns a deny
+/// reason, or `None` when the operand is provably safe.
+///
+/// Covers: a leading tilde (`~/`, home may be `/`); an unmodeled `${...}`
+/// operator (can be `/`); brace expansion that can produce a root; a variable
+/// whose *value* is an unprovable base (`D="$V"/`); and — after honouring
+/// proven values and unquoted `$IFS` word-splitting — a value-carried root
+/// (`D=/`) or an unprovable expansion at a field's start followed by `/`
+/// (`$V/`, `$V$S` with `S=/`). A field that resolves to a proven-safe literal
+/// returns `None`, so ordinary cleanup still rewrites.
+fn operand_hazard_reason(
+    word: &Word,
+    variables: &HashMap<String, VariableValue>,
+) -> Option<&'static str> {
+    if word.tilde_at_start {
+        if let Some(reason) = tilde_operand_hazard(&word.cooked, variables) {
+            return Some(reason);
+        }
+        // A tilde followed by a concrete subpath (`~/.cache/myapp`) is a safe,
+        // specific directory; fall through to the remaining checks.
+    }
+    if word.unmodeled_expansion {
+        return Some("a removal operand uses a parameter expansion this guard cannot model");
+    }
+    // A dynamic operand whose path begins with a substitution or special
+    // parameter (`$1/`, `$@/`, `$(cmd)/`, `` `cmd`/ ``) cannot be proven; the
+    // slash after it makes it a `$VAR/`-style hazard.
+    if word.dynamic
+        && (word.cooked.starts_with('$') || word.cooked.starts_with('`'))
+        && word.cooked.contains('/')
+    {
+        return Some("a removal operand uses an indirect or dynamic path expansion");
+    }
+    if word
+        .expansions
+        .iter()
+        .any(|expansion| matches!(variables.get(&expansion.name), Some(VariableValue::Hazard)))
+    {
+        return Some(
+            "a removal operand uses a variable whose value is an unprovable deletion base",
+        );
+    }
+    if word.brace && brace_operand_can_be_root(&word.cooked) {
+        return Some("a removal operand uses brace expansion that can produce a filesystem root");
+    }
+    // A typed literal operand (`.`, `./cache`, `build`, `/tmp/x`) is the
+    // developer's explicit choice and is only hazardous when it is a literal
+    // root; content that came from a variable value or an ANSI-C decode is held
+    // to the stricter `unsafe_delete_base_reason` standard (a resolved `.`,
+    // `..`, or `/` is refused).
+    let has_substitution = !word.expansions.is_empty() || word.had_ansi_c;
+    for field in operand_fields(word, variables) {
+        if let Some(reason) = field_hazard_reason(&field, has_substitution) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// Whether a leading-tilde operand deletes the home root itself rather than a
+/// concrete subpath. `~`, `~/`, `~user`, `~user/`, and `~/…`-with-only-glob
+/// components target the whole home tree and are refused; `~/.cache/myapp` and
+/// `~/project/build` are safe. When HOME is assigned a dangerous base in the
+/// same command (`HOME=/`), the tilde inherits it and even a concrete subpath
+/// is refused. (#1076)
+fn tilde_operand_hazard(
+    cooked: &str,
+    variables: &HashMap<String, VariableValue>,
+) -> Option<&'static str> {
+    let after_tilde = cooked.strip_prefix('~').unwrap_or(cooked);
+    let (user, rest) = match after_tilde.find('/') {
+        Some(index) => (&after_tilde[..index], &after_tilde[index..]),
+        None => (after_tilde, ""),
+    };
+    // A bare `~` (no username) expands to $HOME; if HOME was assigned in this
+    // command, resolve against its value.
+    if user.is_empty() {
+        match variables.get("HOME") {
+            Some(VariableValue::Known(home)) => {
+                let base = home.trim_end_matches('/');
+                let resolved = format!("{base}{rest}");
+                return unsafe_delete_base_reason(&resolved);
+            }
+            Some(VariableValue::Hazard) => {
+                return Some("a removal operand expands `~` against an unprovable HOME");
+            }
+            _ => {}
+        }
+    }
+    // HOME (or the named user's home) is unknown. Deleting a concrete subpath
+    // of it is safe; deleting the home root itself (no concrete component
+    // below it) is not.
+    let below = rest.trim_start_matches('/').trim_end_matches('/');
+    match normalized_component_count(below) {
+        Some(depth) if depth >= 1 => None,
+        _ => Some("a removal operand targets a home-directory root"),
+    }
+}
+
+/// Whether a typed literal operand is an absolute filesystem or drive root
+/// (`/`, `C:/`, `//server/share`, or a top-level directory). A relative path
+/// (`.`, `./cache`, `build`, `src/`) is never a root. Used to hold typed
+/// literals to a looser standard than substituted values. (#1079)
+fn literal_is_root(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let absolute = value.starts_with('/')
+        || (bytes.len() >= 3
+            && bytes[1] == b':'
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[2] == b'/');
+    absolute && unsafe_delete_base_reason(value).is_some()
+}
+
+/// Sentinel marking an unprovable expansion inside a reconstructed operand
+/// field. It is not a valid path character, so it never collides with real
+/// content.
+const UNPROVABLE: char = '\u{1}';
+
+/// Reconstruct the operand's fields as the shell would produce them: proven
+/// variable values are substituted in, unprovable expansions become
+/// [`UNPROVABLE`], and an unquoted `$IFS` starts a new field.
+fn operand_fields(word: &Word, variables: &HashMap<String, VariableValue>) -> Vec<String> {
+    let cooked = &word.cooked;
+    let mut expansions: Vec<&Expansion> = word.expansions.iter().collect();
+    expansions.sort_by_key(|expansion| expansion.logical_start);
+
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut pos = 0usize;
+    for expansion in expansions {
+        if expansion.logical_start < pos {
+            continue;
+        }
+        current.push_str(&cooked[pos..expansion.logical_start]);
+        pos = expansion.logical_end;
+        if expansion.name == "IFS" && expansion.quote == QuoteContext::Unquoted {
+            fields.push(std::mem::take(&mut current));
+            continue;
+        }
+        match variables.get(&expansion.name) {
+            Some(VariableValue::Known(value)) => current.push_str(value),
+            _ => current.push(UNPROVABLE),
+        }
+    }
+    current.push_str(&cooked[pos..]);
+    fields.push(current);
+    fields
+}
+
+/// Whether a single reconstructed operand field could delete a root.
+///
+/// `has_substitution` says whether the field carried a variable value or an
+/// ANSI-C decode. A fully-literal field with no substitution is only refused
+/// when it is a literal root; a field that resolved from a substitution is held
+/// to the stricter `unsafe_delete_base_reason` standard.
+fn field_hazard_reason(field: &str, has_substitution: bool) -> Option<&'static str> {
+    if !field.contains(UNPROVABLE) {
+        if field.is_empty() {
+            // An empty operand deletes nothing.
+            return None;
+        }
+        return if has_substitution {
+            unsafe_delete_base_reason(field)
+        } else if literal_is_root(field) {
+            Some("a removal operand is a literal filesystem or drive root")
+        } else {
+            None
+        };
+    }
+    // The field carries an unprovable expansion. The catastrophe is one at the
+    // field's start immediately followed by `/`: an empty variable yields `/`,
+    // a `/` value yields `//`. An unprovable expansion NOT followed by `/`
+    // (`rm -rf "$V"`) expands to an empty operand and is left alone.
+    let stripped = field.trim_start_matches(UNPROVABLE);
+    if stripped.len() != field.len() && stripped.starts_with('/') {
+        return Some("a removal operand starts with an unprovable expansion followed by a slash");
+    }
+    None
+}
+
+/// Whether a literal brace operand can expand to a filesystem root, e.g.
+/// `{/,}` → `/`, `/{,}` → `/`, `{/,/tmp}` → `/`. Benign forms like
+/// `{a,b}.txt` cannot. (#1077)
+fn brace_operand_can_be_root(cooked: &str) -> bool {
+    match expand_braces(cooked) {
+        Some(expansions) => expansions
+            .iter()
+            .any(|candidate| unsafe_delete_base_reason(candidate).is_some()),
+        // A brace group we could not expand (nested variables, malformed) is
+        // treated conservatively as a hazard.
+        None => true,
+    }
+}
+
+/// Expand literal brace groups into the set of strings they produce. Returns
+/// `None` when the input contains no brace group or cannot be expanded with the
+/// small model here (unbalanced, or containing a dynamic expansion). Bounded to
+/// keep a pathological input cheap.
+fn expand_braces(input: &str) -> Option<Vec<String>> {
+    if !input.contains('{') {
+        return None;
+    }
+    // A brace group holding a dynamic expansion is beyond this literal model.
+    if input.contains('$') || input.contains('`') {
+        return None;
+    }
+    let expanded = expand_braces_recursive(input, 0)?;
+    (!expanded.is_empty()).then_some(expanded)
+}
+
+fn expand_braces_recursive(input: &str, depth: usize) -> Option<Vec<String>> {
+    const MAX_DEPTH: usize = 8;
+    const MAX_RESULTS: usize = 256;
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    // Find the first top-level `{ … , … }` group.
+    let open = bytes.iter().position(|&byte| byte == b'{')?;
+    let mut depth_count = 0usize;
+    let mut close = None;
+    let mut alternatives = Vec::new();
+    let mut segment_start = open + 1;
+    let mut has_comma = false;
+    for (index, &byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'{' => depth_count += 1,
+            b'}' => {
+                depth_count -= 1;
+                if depth_count == 0 {
+                    alternatives.push(&input[segment_start..index]);
+                    close = Some(index);
+                    break;
+                }
+            }
+            b',' if depth_count == 1 => {
+                has_comma = true;
+                alternatives.push(&input[segment_start..index]);
+                segment_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    if !has_comma {
+        // `{x}` with no comma is not a brace expansion in bash; leave it.
+        return None;
+    }
+    let prefix = &input[..open];
+    let suffix = &input[close + 1..];
+    let mut results = Vec::new();
+    for alternative in alternatives {
+        let candidate = format!("{prefix}{alternative}{suffix}");
+        if candidate.contains('{') {
+            match expand_braces_recursive(&candidate, depth + 1) {
+                Some(nested) => results.extend(nested),
+                None => results.push(candidate),
+            }
+        } else {
+            results.push(candidate);
+        }
+        if results.len() > MAX_RESULTS {
+            break;
+        }
+    }
+    Some(results)
 }
 
 /// Split statements into pipeline groups. A `|` continues the current group;
@@ -1232,6 +1962,212 @@ mod tests {
         )
     }
 
+    /// #1071 — the removal program is named by a variable or substitution. The
+    /// analyzer even records `R=Known("rm")`; it must resolve that into the
+    /// program slot and, unable to prove the first word is a non-removal while a
+    /// `$VAR/` operand is present, deny.
+    #[test]
+    fn issue_1071_program_name_via_variable_or_substitution_is_denied() {
+        for command in [
+            r#"R=rm; $R -rf "$V"/"#,
+            r#"X=r; Y=m; ${X}${Y} -rf "$V"/"#,
+            r#"$(printf 'r''m') -rf "$V"/"#,
+            r#"p=rm; "$p" -rf "$V"/"#,
+            r#"`which rm` -rf "$V"/"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// #1072 — a variable's *value* carries the slash or the root, so the
+    /// hazard is not textually adjacent to the expansion.
+    #[test]
+    fn issue_1072_value_carried_slash_or_root_is_denied() {
+        for command in [
+            r#"D=/; rm -rf "$D""#,
+            r#"D="$V"/; rm -rf "$D""#,
+            r#"S=/; rm -rf "$V$S""#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+        // Control: the textually-adjacent form must stay denied too.
+        assert!(denied(r#"V=/; rm -rf "$V"/"#));
+    }
+
+    /// #1073 — substring/offset and other `${...}` operators this guard does
+    /// not model can yield `/` from a non-root variable (`${HOME:0:1}` → `/`).
+    #[test]
+    fn issue_1073_unmodeled_parameter_operators_are_denied() {
+        for command in [
+            r#"V=/tmp/safe; rm -rf ${V:0:1}*"#,
+            r#"rm -rf ${HOME:0:1}"#,
+            r#"rm -rf ${HOME::1}"#,
+            r#"find ${HOME:0:1} -delete"#,
+            r#"echo ${HOME:0:1} | xargs rm -rf"#,
+            r#"rm -rf ${HOME:0:1}etc"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// #1074 — ANSI-C quoting `$'...'` decodes escapes into literal bytes, so a
+    /// smuggled `/` (as operand) or `rm` (as program) must be seen.
+    #[test]
+    fn issue_1074_ansi_c_quoting_is_decoded_and_denied() {
+        for command in [
+            r#"rm -rf $'\x2f'"#,
+            r#"rm -rf $'\057'"#,
+            r#"rm -rf $'\U0000002f'"#,
+            r#"V=; rm -rf "$V"$'\x2f'"#,
+            r#"$'\x72\x6d' -rf "$V"/"#,
+            r#"$'\162\155' -rf "$V"/"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+        // Control: a benign ANSI-C literal in a non-removal is untouched.
+        assert_eq!(
+            resolve_posix_rm_variable_expansions(r#"echo $'\x41'"#),
+            RmVariableResolution::Unchanged
+        );
+    }
+
+    /// #1075 — an unquoted `$IFS`/`${IFS}` word-splits the token so the first
+    /// field names the removal.
+    #[test]
+    fn issue_1075_ifs_word_splitting_is_denied() {
+        for command in [r#"rm${IFS}-rf${IFS}"$V"/"#, r#"rm$IFS-rf$IFS"$V"/"#] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+        // Control: `$IFS` with the operand intact was already denied; keep it.
+        assert!(denied(r#"rm -rf $IFS"$V"/"#));
+    }
+
+    /// #1076 — a leading tilde that targets the home ROOT (no concrete subpath)
+    /// is refused; a tilde followed by a concrete directory is a specific,
+    /// legitimate deletion and must be allowed.
+    #[test]
+    fn issue_1076_tilde_home_root_is_denied_but_subpaths_are_allowed() {
+        for command in [
+            r#"rm -rf ~"#,
+            r#"rm -rf ~/"#,
+            r#"rm -rf ~/*"#,
+            r#"rm -rf ~root/"#,
+            r#"HOME=/; rm -rf ~/"#,
+            // HOME assigned a dangerous base poisons an otherwise-concrete path.
+            r#"HOME=/; rm -rf ~/x"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+        for command in [
+            // Not at word start: an ordinary filename.
+            r#"rm -rf ./~backup"#,
+            // Concrete subpaths of the home directory are safe.
+            r#"rm -rf ~/.cache/myapp"#,
+            r#"rm -rf ~/project/build"#,
+        ] {
+            assert!(!denied(command), "expected allow for {command}");
+        }
+    }
+
+    /// #1077 — brace expansion can produce a root (`{/,}` → `/`), but a benign
+    /// brace group in the working directory must not be swept up.
+    #[test]
+    fn issue_1077_brace_expansion_to_root_is_denied() {
+        for command in [r#"rm -rf {/,}"#, r#"rm -rf /{,}"#, r#"rm -rf {/,/tmp}"#] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+        // Control: a brace group with no root among its alternatives.
+        assert!(!denied(r#"rm -rf {a,b}.txt"#));
+    }
+
+    /// #1078 — a sibling operand that WAS rewritten must not disable the check
+    /// for a different, unproven removal elsewhere in the command.
+    #[test]
+    fn issue_1078_a_sibling_rewrite_does_not_disable_the_fallback() {
+        for command in [
+            r#"A=/tmp/safe/a; rm -rf "$A"/build; nice rm -rf "$V"/"#,
+            r#"A=/tmp/safe/a; rm -rf "$A"/build && find "$V"/ -delete"#,
+            "A=/tmp/safe/a; rm -rf \"$A\"/build\nionice rm -rf \"$V\"/",
+            r#"A=/tmp/safe/a; rm -rf "$A"/build | timeout 5 rm -rf "$V"/"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// #1079 — a curated, best-effort denylist of well-known recursive-delete
+    /// idioms in programs other than `rm`/`rmdir`/`find -delete`, fired only in
+    /// the presence of a `$VAR/`-rooted operand (DD-057: best-effort).
+    #[test]
+    fn issue_1079_other_recursive_deleters_are_denied() {
+        for command in [
+            r#"perl -MFile::Path -e 'rmtree($ARGV[0])' "$V"/"#,
+            r#"python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$V"/"#,
+            r#"rsync -a --delete /var/empty/ "$V"/"#,
+            r#"find "$V"/ -exec perl -e unlink {} +"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// `find … -delete` and `find … -exec <deleter>` are hazardous only when
+    /// the start path is a hazardous base — an unprovable `$VAR/`, a literal
+    /// filesystem/drive root, or the home root. A cwd-relative start path is
+    /// the developer's explicit choice and must be allowed, exactly as
+    /// `rm -rf .` is.
+    #[test]
+    fn find_delete_denies_roots_but_allows_relative_start_paths() {
+        for command in [
+            r#"find "$V"/ -delete"#,
+            r#"find / -delete"#,
+            r#"find C:/ -delete"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+        for command in [
+            r#"find . -delete"#,
+            r#"find . -name '*.pyc' -delete"#,
+            r#"find build -type f -delete"#,
+            r#"find ./cache -delete"#,
+            r#"find /tmp/x -delete"#,
+        ] {
+            assert!(!denied(command), "expected allow for {command}");
+        }
+    }
+
+    /// #1085 — the raw-payload probe over unparseable bytes must recover a word
+    /// the shell would concatenate: `r''m`, `r""m`, `"r"m`, `r\m` all name
+    /// `rm`. `raw_payload_mentions_removal` is `pub(super)`, so this exercises
+    /// it directly.
+    #[test]
+    fn issue_1085_raw_probe_recovers_concatenated_removal_words() {
+        for payload in [
+            "r''m",
+            r#"r""m"#,
+            r#""r"m"#,
+            r"r\m",
+            r"cd /tmp && r''m -rf x",
+        ] {
+            assert!(
+                raw_payload_mentions_removal(payload),
+                "raw probe missed {payload:?}"
+            );
+        }
+        // A payload with no removal word must not trip it.
+        assert!(!raw_payload_mentions_removal("echo hello world"));
+        assert!(!raw_payload_mentions_removal("git commit -m done"));
+    }
+
+    /// #1088 — a hazardous removal wrapped in more `$( … )` nesting than the
+    /// recursion cap allows must fail closed, not fall through to allow.
+    #[test]
+    fn issue_1088_recursion_cap_fails_closed() {
+        let mut nested = String::from(r#"rm -rf "$V"/"#);
+        for _ in 0..12 {
+            nested = format!("$({nested})");
+        }
+        assert!(denied(&format!("echo {nested}")));
+    }
+
     /// Every spelling of the catastrophic shape — `$VAR` at the start of an
     /// operand, immediately followed by `/` — must be denied when the value
     /// cannot be proven. This is the shape that expands to `rm -rf /`, and it
@@ -1427,10 +2363,13 @@ mod tests {
         r#"$1/"#,
     ];
 
+    /// A named structure that wraps an inner command into a full command line.
+    type Structure = (&'static str, fn(&str) -> String);
+
     /// Structures that wrap a statement. Each takes the inner command and
     /// returns the full command line. The analyzer must not lose the removal
     /// inside any of them.
-    fn structures() -> Vec<(&'static str, fn(&str) -> String)> {
+    fn structures() -> Vec<Structure> {
         vec![
             ("bare", |c: &str| c.to_string()),
             ("trailing stmt", |c: &str| format!("{c} ; echo done")),
@@ -1643,6 +2582,27 @@ mod tests {
             r#"rm -rf $V"#,
             // Single quotes are not an expansion.
             r#"rm -rf '$V'/"#,
+            // A benign ANSI-C literal in a non-removal command. (#1074)
+            r#"echo $'\x41'"#,
+            // A tilde that is not at word start is an ordinary filename. (#1076)
+            r#"rm -rf ./~backup"#,
+            // A tilde followed by a concrete subpath deletes a specific
+            // directory, not the home root. (#1076)
+            r#"rm -rf ~/.cache/myapp"#,
+            r#"rm -rf ~/project/build"#,
+            // Cwd-relative finds delete only under the working directory, like
+            // `rm -rf .` — not a root. (#1079)
+            r#"find . -name '*.pyc' -delete"#,
+            r#"find . -delete"#,
+            r#"find build -type f -delete"#,
+            r#"find ./cache -delete"#,
+            r#"find /tmp/x -delete"#,
+            // A brace group with no root among its alternatives. (#1077)
+            r#"rm -rf {a,b}.txt"#,
+            r#"rm -rf ./{build,dist}"#,
+            // A proven-safe removal beside another proven-safe removal: the
+            // unconditional fallback must not invent a hazard. (#1078)
+            r#"A=/tmp/safe/a; rm -rf "$A"/build; B=/tmp/safe/b; rm -rf "$B"/dist"#,
         ] {
             if denied(command) {
                 blocked.push(command.to_string());
