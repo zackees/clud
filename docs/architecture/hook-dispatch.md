@@ -152,6 +152,16 @@ A bare `clud-cmd-scan` means `PreToolUse`. That is what every already-installed
 hook line means, and those lines keep working untouched. Other events are named
 explicitly: `clud-cmd-scan --event Stop`.
 
+An already-installed line should register with `matcher: "*"`, not `"Bash"`. A
+`Bash`-scoped matcher only ever fires on the Bash tool, so a catastrophic
+command (`rm -rf $VAR/`) issued through Claude Code's PowerShell tool, an MCP
+shell server (`mcp__*`), or a Codex session would bypass the guard entirely
+(zackees/clud#1084). This is why this repo's own committed `.claude/settings.json`
+and `.codex/hooks.json` register `clud-cmd-scan` with `matcher: "*"`. The scan
+self-selects the shell dialect internally, so a non-shell tool call is a cheap
+no-op. (clud's own compiled dispatch already uses `*` — see below — so this only
+matters for the bare lines a user or repo installs by hand.)
+
 Two things can therefore invoke the dispatcher for PreToolUse — the bare line a
 user installed, and the `--event PreToolUse` line clud compiles — and a declared
 hook must run exactly once. The tie is broken by `CLUD_HOOK_DISPATCH`, which
