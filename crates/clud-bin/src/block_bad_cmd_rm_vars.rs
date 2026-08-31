@@ -1069,6 +1069,189 @@ mod tests {
         )
     }
 
+    /// Every spelling of the catastrophic shape — `$VAR` at the start of an
+    /// operand, immediately followed by `/` — must be denied when the value
+    /// cannot be proven. This is the shape that expands to `rm -rf /`, and it
+    /// is the one the interpreter exists to stop.
+    #[test]
+    fn every_spelling_of_the_catastrophic_shape_is_denied() {
+        for command in [
+            // Quoting and bracing.
+            r#"rm -rf "$U"/"#,
+            r#"rm -rf $U/"#,
+            r#"rm -rf ${U}/"#,
+            r#"rm -rf "${U}"/"#,
+            // What follows the slash does not make it safer.
+            r#"rm -rf "$U"/*"#,
+            r#"rm -rf "$U"//"#,
+            r#"rm -rf "$U"/."#,
+            r#"rm -rf "$U"/.."#,
+            // Flag spellings, including end-of-options.
+            r#"rm -rf -- "$U"/"#,
+            r#"rm --recursive --force "$U"/"#,
+            r#"rm -r -f "$U"/"#,
+            r#"rm -fr "$U"/"#,
+            r#"rmdir "$U"/"#,
+            // The program named by path, or with alias expansion suppressed.
+            r#"/bin/rm -rf "$U"/"#,
+            r#"\rm -rf "$U"/"#,
+            // Transparent wrappers the denylist already knows how to unwrap.
+            r#"command rm -rf "$U"/"#,
+            r#"env rm -rf "$U"/"#,
+            r#"sudo rm -rf "$U"/"#,
+            r#"time rm -rf "$U"/"#,
+            // Statement position must not matter.
+            r#"rm -rf "$U"/ ; echo done"#,
+            r#"true | rm -rf "$U"/"#,
+            r#"rm -rf "$U"/ &"#,
+            "cd /tmp\nrm -rf \"$U\"/",
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// The value's provenance has to be *provable*, not merely present. Each
+    /// of these assigns the variable somewhere the interpreter cannot reduce
+    /// to one literal, so none of them may pass.
+    #[test]
+    fn a_value_that_cannot_be_proven_literal_is_denied() {
+        for command in [
+            // Proven, but proven *dangerous*.
+            r#"U=/; rm -rf "$U"/"#,
+            r#"U=""; rm -rf "$U"/"#,
+            r#"U=/tmp/../..; rm -rf "$U"/"#,
+            // Two assignments disagree.
+            r#"U=/tmp; U=/; rm -rf "$U"/"#,
+            // Assigned on only one path.
+            r#"if true; then U=/tmp; fi; rm -rf "$U"/"#,
+            // Value produced at runtime.
+            r#"U=$(echo /tmp); rm -rf "$U"/"#,
+            r#"U=`echo /tmp`; rm -rf "$U"/"#,
+            r#"read U; rm -rf "$U"/"#,
+            r#"U=${OTHER}; rm -rf "$U"/"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// Parameter-expansion forms that could smuggle a root past a naive
+    /// matcher. `${U:-/}` in particular *defaults to* `/`.
+    #[test]
+    fn parameter_expansion_forms_are_denied() {
+        for command in [
+            r#"rm -rf "${U:-/}"/"#,
+            r#"rm -rf "${U:+/}"/"#,
+            r#"rm -rf "${U#foo}"/"#,
+            r#"rm -rf "${U%%bar}"/"#,
+            r#"rm -rf "${!U}"/"#,
+            r#"rm -rf "${U:=/}"/"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// Concatenation tricks: the `/` arrives from an adjacent quoted chunk
+    /// rather than sitting directly after the expansion.
+    #[test]
+    fn a_slash_from_an_adjacent_chunk_still_counts() {
+        for command in [r#"rm -rf "$U"'/'"#, r#"rm -rf "$U""/""#, r#"rm -rf "$U"\/"#] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// A nested shell is still a shell. The removal inside the string must be
+    /// reached, not treated as opaque text.
+    #[test]
+    fn removals_inside_a_nested_interpreter_are_denied() {
+        for command in [
+            r#"eval "rm -rf $U/""#,
+            r#"bash -c "rm -rf $U/""#,
+            r#"sh -c 'rm -rf $U/'"#,
+        ] {
+            assert!(denied(command), "expected denial for {command}");
+        }
+    }
+
+    /// A provable literal is rewritten rather than refused, so ordinary
+    /// cleanup keeps working. Without this the guard would be unusable and
+    /// would get switched off.
+    #[test]
+    fn a_provable_literal_is_rewritten_not_refused() {
+        for command in [
+            r#"U=/tmp/safe; rm -rf "$U"/"#,
+            r#"U=/tmp/safe; rm -rf "$U"/*.txt"#,
+        ] {
+            assert!(!denied(command), "expected a rewrite for {command}");
+            assert!(
+                !rewritten(command).contains("$U"),
+                "the rewrite must substitute the literal: {command}"
+            );
+        }
+    }
+
+    /// Shapes that expand to something harmless. Worth pinning so nobody
+    /// "fixes" them into denials and adds friction for no safety gain.
+    ///
+    /// With `U` unset, `rm -rf "$U"` runs `rm -rf ""` (an error, deletes
+    /// nothing) and `rm -rf $U` runs `rm -rf` with no operand (likewise). The
+    /// catastrophe needs the trailing `/`, which is exactly what the
+    /// interpreter keys on.
+    #[test]
+    fn shapes_without_a_trailing_slash_expand_to_nothing_and_are_allowed() {
+        for command in [r#"rm -rf "$U""#, r#"rm -rf $U"#] {
+            assert!(!denied(command), "expected allow for {command}");
+        }
+    }
+
+    /// **The boundary of this interpreter, stated as a test.**
+    ///
+    /// Each command below reaches `rm` with a mis-expanded path and is *not*
+    /// denied. They are recorded so the limit is visible rather than folklore:
+    /// a change that closes one should fail here and be updated deliberately.
+    ///
+    /// Two different reasons are mixed together on purpose, because the
+    /// distinction is what matters when deciding what to fix first:
+    ///
+    /// - **Structural**: the removal sits inside a construct the interpreter
+    ///   refuses to reason about (subshell, brace group, loop, function body)
+    ///   or behind a launcher it does not unwrap (`busybox`, `nice`, `xargs`).
+    ///   These reach `rm -rf /` and are the dangerous ones.
+    /// - **Out of declared scope**: the operand is not `$VAR` at the start of
+    ///   the word (`/tmp/$U`), or the program is not `rm`/`rmdir`
+    ///   (`find -delete`). See DD-057 on why the verb set is narrow.
+    ///
+    /// This is why `block_bad_cmd_rm_vars` is not the whole answer, and why
+    /// the post-expansion wrapper in #1067 exists: a wrapper sees the real
+    /// argv and does not care which construct produced it.
+    #[test]
+    fn known_gaps_the_interpreter_does_not_reach() {
+        let structural = [
+            r#"(rm -rf "$U"/)"#,
+            r#"{ rm -rf "$U"/; }"#,
+            r#"for U in /; do rm -rf "$U"/; done"#,
+            r#"while true; do rm -rf "$U"/; done"#,
+            r#"U=/tmp; f() { rm -rf "$U"/; }; f"#,
+            r#"$(echo rm) -rf "$U"/"#,
+            r#"`echo rm` -rf "$U"/"#,
+            r#"busybox rm -rf "$U"/"#,
+            r#"nice rm -rf "$U"/"#,
+            r#"echo "$U"/ | xargs rm -rf"#,
+        ];
+        let out_of_scope = [
+            r#"rm -rf /tmp/$U"#,
+            r#"rm -rf "$U"foo/"#,
+            r#"find "$U"/ -delete"#,
+            r#"shred -u "$U"/x"#,
+        ];
+        for command in structural.iter().chain(out_of_scope.iter()) {
+            assert!(
+                !denied(command),
+                "this gap has been closed — move {command:?} into the covered \
+                 tests above and update DD-057"
+            );
+        }
+    }
+
     #[test]
     fn issue_963_rewrites_every_rm_operand_but_not_later_reads() {
         let command = r#"git status; SP="C:/Users/test/.clud/tmp/session/scratchpad"; rm -f "$SP"/*.txt "$SP"/*.json "$SP"/*.md; ls "$SP""#;
