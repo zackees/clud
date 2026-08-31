@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "clud"
-version = "2.7.7"
+version = "2.7.8"
 dependencies = [
  "arboard",
  "base64",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-stub"
-version = "2.7.7"
+version = "2.7.8"
 dependencies = [
  "libc",
  "running-process",
@@ -2335,7 +2335,7 @@ dependencies = [
 
 [[package]]
 name = "mock-agent"
-version = "2.7.7"
+version = "2.7.8"
 dependencies = [
  "libc",
  "serde_json",
@@ -2953,11 +2953,11 @@ dependencies = [
 
 [[package]]
 name = "probe-dll"
-version = "2.7.7"
+version = "2.7.8"
 
 [[package]]
 name = "probe-target"
-version = "2.7.7"
+version = "2.7.8"
 
 [[package]]
 name = "proc-macro-crate"
