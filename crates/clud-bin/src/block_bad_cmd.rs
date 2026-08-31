@@ -204,6 +204,15 @@ fn shell_dialect_for_tool(tool_name: &str) -> ShellDialect {
 struct StdinRead {
     text: String,
     log_messages: Vec<String>,
+    /// Why the read stopped short (`idle`, `deadline`, `max_bytes`), or
+    /// `None` when stdin reached EOF intact.
+    ///
+    /// Recorded for the log and to sharpen the message at the decode and
+    /// shape failure sites. **Never a denial trigger on its own** — stopping
+    /// short is routine, because the writer may simply hold the pipe open
+    /// after sending a complete payload. See the note in [`run_for_event`]
+    /// and DD-057 before wiring this into a decision.
+    incomplete: Option<&'static str>,
 }
 
 pub fn run() -> i32 {
@@ -260,11 +269,39 @@ pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 
 pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     let event = invocation.event.as_str();
+
+    // Resolved before anything else can fail, because the gate's entire value
+    // is that a hook which cannot read or parse its input still *denies*. Each
+    // early `return 0` below is an allow-by-default that the gate must
+    // override — see `block_bad_cmd_gate`'s module docs for why this module's
+    // usual fail-open posture is inverted here.
+    let gate_enforced = event == PRE_TOOL_USE_EVENT
+        && block_bad_cmd_gate::gate_mode() == block_bad_cmd_gate::GateMode::Enforce;
+
     let stdin = read_stdin_bounded();
     for message in &stdin.log_messages {
         append_log(message);
     }
     append_log(&format!("raw_stdin_bytes={}", stdin.text.len()));
+
+    // `stdin.incomplete` is deliberately *not* a denial trigger on its own. It
+    // is set whenever the read stopped before EOF, and the most common reason
+    // for that is not truncation at all: Claude Code routinely hands a hook a
+    // complete payload and then leaves the pipe open, which is the whole
+    // reason the idle timeout exists (see `windows-quirks.md` and
+    // anthropics/claude-code#53177). Treating that as unverifiable denied
+    // every tool call whose text merely mentioned `rm` — including #963's own
+    // safe-rewrite path — with retry advice that could never succeed.
+    //
+    // A genuinely truncated payload cuts a JSON string mid-flight and so
+    // cannot decode, which the decode and shape checks below already catch.
+    // The reason survives only to sharpen the message there.
+    if gate_enforced && stdin.text.trim().is_empty() {
+        return block_bad_cmd_gate::gate_deny(
+            "the hook received an empty tool-call payload, so the command could not be verified. \
+             Retry it.",
+        );
+    }
 
     let payload: Value = match serde_json::from_str(if stdin.text.trim().is_empty() {
         "{}"
@@ -274,6 +311,14 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         Ok(value) => value,
         Err(error) => {
             append_log(&format!("json_decode_error: {error}"));
+            if let Some(code) = refuse_unverifiable_payload(
+                event,
+                gate_enforced,
+                &stdin.text,
+                &describe_unverifiable("decode the tool-call payload", stdin.incomplete),
+            ) {
+                return code;
+            }
             return 0;
         }
     };
@@ -281,6 +326,14 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(payload) = parse_payload_value(&payload, &cwd) else {
         append_log("unsupported_payload_shape");
+        if let Some(code) = refuse_unverifiable_payload(
+            event,
+            gate_enforced,
+            &stdin.text,
+            &describe_unverifiable("recognize the tool-call payload shape", stdin.incomplete),
+        ) {
+            return code;
+        }
         return 0;
     };
     append_log(&format!(
@@ -289,6 +342,20 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         payload.cwd.to_string_lossy(),
         payload.command
     ));
+
+    // The gate runs before `discover_effective_clud_config` on purpose: a repo
+    // settings file must not be able to switch it off, and config discovery is
+    // itself something that can fail. A non-empty command from an unrecognized
+    // tool is gated too — an unknown shell-shaped tool must not be a way past.
+    if gate_enforced
+        && (block_bad_cmd_gate::gates_tool(&payload.tool_name)
+            || !payload.command.trim().is_empty())
+    {
+        let prefix = block_bad_cmd_gate::gate_prefix();
+        if let Some(reason) = block_bad_cmd_gate::gate_reason(&payload.command, &prefix) {
+            return block_bad_cmd_gate::gate_deny(&reason);
+        }
+    }
 
     let config =
         crate::repo_clud_config::discover_effective_clud_config(&payload.cwd).unwrap_or_default();
@@ -425,6 +492,70 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
 
     append_log("allowed");
     0
+}
+
+/// Refuse a tool call whose payload could not be read or parsed, when allowing
+/// it would be unsafe. `Some(exit_code)` means the call was refused.
+///
+/// This module fails open on purpose — a guard that cannot run must not wall
+/// off every tool call — and that stays true for the general case. But the
+/// default is wrong for one narrow class: a removal is the only mistake here
+/// that cannot be undone, so "the hook broke, therefore allow" is exactly
+/// backwards for it.
+///
+/// So there are two triggers, and the second needs no configuration:
+///
+/// - the command gate is enforcing, where nothing unverified may run at all;
+/// - or the raw payload mentions a removal program, whatever the gate is doing.
+///
+/// The second probe reads the raw bytes rather than a parsed command because
+/// structured parsing is precisely what failed. It is deliberately crude: it
+/// over-matches (a `git rm` in a commit message would trip it), and
+/// over-matching costs one retry, while under-matching costs a filesystem.
+///
+/// Only `PreToolUse` can refuse. Denying is meaningless once the tool has
+/// already run, and [`deny_json`] speaks that event's protocol specifically —
+/// a `PostToolUse` payload carries the tool's own output, which is both large
+/// enough to hit the read cap and likely to contain the word `rm` for reasons
+/// that have nothing to do with what ran.
+fn refuse_unverifiable_payload(
+    event: &str,
+    gate_enforced: bool,
+    raw: &str,
+    what: &str,
+) -> Option<i32> {
+    if event != PRE_TOOL_USE_EVENT {
+        return None;
+    }
+    if gate_enforced {
+        return Some(block_bad_cmd_gate::gate_deny(&format!(
+            "{what}, so the command could not be verified. Retry it."
+        )));
+    }
+    if !block_bad_cmd_rm_vars::raw_payload_mentions_removal(raw) {
+        return None;
+    }
+    let reason = format!(
+        "Blocked unsafe removal: {what}, so the hook could not check the removal it contains. \
+         Retry the command, or issue the removal as its own tool call using literal paths."
+    );
+    append_log(&format!("BLOCKED: {reason}"));
+    println!("{}", deny_json(&reason));
+    eprintln!("[block-bad-cmd hook] refusing an unverifiable payload: {reason}");
+    Some(2)
+}
+
+/// Phrase what went wrong, naming the truncation reason when there was one.
+///
+/// The reason is context for the message, never grounds for refusing by
+/// itself — see the note in [`run_for_event`].
+fn describe_unverifiable(what: &str, incomplete: Option<&'static str>) -> String {
+    match incomplete {
+        Some(reason) => {
+            format!("the hook could not {what} (the read stopped at `{reason}`)")
+        }
+        None => format!("the hook could not {what}"),
+    }
 }
 
 /// Whether the parent repo's hooks apply to what this call touches
@@ -2399,6 +2530,9 @@ fn extract_command(payload: &Value) -> String {
 mod block_bad_cmd_shell;
 use block_bad_cmd_shell::*;
 
+#[path = "block_bad_cmd_gate.rs"]
+mod block_bad_cmd_gate;
+
 #[path = "block_bad_cmd_rm_vars.rs"]
 mod block_bad_cmd_rm_vars;
 use block_bad_cmd_rm_vars::*;
@@ -2469,6 +2603,204 @@ mod tests {
 
     fn denies(command: &str) -> bool {
         evaluate_command(command, None, false, &[]).reason.is_some()
+    }
+
+    /// A truncated or undecodable payload used to allow the tool call
+    /// unconditionally. That is still right for the general case, but a
+    /// removal is the one mistake that cannot be undone, so it now fails
+    /// closed on the raw bytes — no gate, no env var, no configuration.
+    #[test]
+    fn unverifiable_payload_mentioning_a_removal_fails_closed() {
+        let truncated = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf \"$SP\"/"#;
+        assert_eq!(
+            refuse_unverifiable_payload(
+                PRE_TOOL_USE_EVENT,
+                false,
+                truncated,
+                "stdin was truncated"
+            ),
+            Some(2),
+            "a payload the hook cannot parse must not allow a removal through"
+        );
+    }
+
+    /// The anti-wedge property the surrounding module depends on: a broken
+    /// payload that has nothing to do with removal still fails open.
+    #[test]
+    fn unverifiable_payload_without_a_removal_still_fails_open() {
+        for raw in [
+            r#"{"tool_name":"Bash","tool_input":{"command":"cargo build --rel"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"git status"#,
+            "",
+            "not json at all",
+        ] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, false, raw, "stdin was truncated"),
+                None,
+                "expected fail-open for {raw:?}"
+            );
+        }
+    }
+
+    /// Under the gate nothing unverified runs, removal or not.
+    #[test]
+    fn the_gate_refuses_every_unverifiable_payload() {
+        for raw in ["", "not json at all", r#"{"tool_name":"Bash""#] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, true, raw, "stdin was truncated"),
+                Some(2),
+                "expected gate denial for {raw:?}"
+            );
+        }
+    }
+
+    /// `rm` inside a larger word must not trip the probe, or ordinary commands
+    /// start failing closed for no reason.
+    #[test]
+    fn the_removal_probe_does_not_fire_on_substrings() {
+        for raw in [
+            "cargo build --target armv7",
+            "ls form/ dorm/",
+            "npm run warm",
+            // `-` and `.` are command-name characters, so these stay one word
+            // and never reduce to a bare `rm`.
+            "docker run --rm ubuntu",
+            "bash alarm.sh",
+            "cat pyproject.toml",
+            // A directory that merely ends in `rm` is not the program `rm`.
+            "ls /srv/confirm",
+        ] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, false, raw, "stdin was truncated"),
+                None,
+                "expected no denial for {raw:?}"
+            );
+        }
+    }
+
+    /// A multi-line command arrives in the payload as JSON, where the newline
+    /// is the two characters `\` and `n` — not whitespace. A probe that
+    /// demands real whitespace before `rm` therefore misses every removal that
+    /// begins a line, which is the most ordinary shape a multi-line command
+    /// has.
+    #[test]
+    fn the_removal_probe_reads_through_json_escapes() {
+        for raw in [
+            r#"{"tool_name":"Bash","tool_input":{"command":"cd /tmp\nrm -rf $SP/"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"set -e\r\nrm -rf \"$SP\"/"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"echo hi\n\trm -rf $SP"#,
+        ] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, false, raw, "stdin was truncated"),
+                Some(2),
+                "a removal after a JSON-escaped newline must still fail closed: {raw:?}"
+            );
+        }
+    }
+
+    /// Truncation is one of the three paths into this function, so the probe
+    /// must treat end-of-input as a word boundary. A payload cut off at the
+    /// exact moment it named the removal is the worst case, not an edge case.
+    #[test]
+    fn the_removal_probe_treats_truncation_as_a_boundary() {
+        for raw in [
+            r#"{"tool_name":"Bash","tool_input":{"command":"rm"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"cd /tmp && rm"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"rmdir"#,
+        ] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, false, raw, "stdin was truncated"),
+                Some(2),
+                "a payload truncated just after naming a removal must fail closed: {raw:?}"
+            );
+        }
+    }
+
+    /// Denying is only meaningful before the tool runs, and `deny_json`
+    /// speaks `PreToolUse`'s protocol. A `PostToolUse` payload carries the
+    /// tool's own output, which is both large enough to hit the read cap and
+    /// full of words like `rm` for reasons unrelated to what ran.
+    #[test]
+    fn only_pre_tool_use_can_refuse_an_unverifiable_payload() {
+        let removal = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf "$SP"/"#;
+        for event in ["PostToolUse", "Stop", "SessionStart", "UserPromptSubmit"] {
+            assert_eq!(
+                refuse_unverifiable_payload(event, false, removal, "stdin was truncated"),
+                None,
+                "{event} must not deny"
+            );
+            assert_eq!(
+                refuse_unverifiable_payload(event, true, removal, "stdin was truncated"),
+                None,
+                "{event} must not deny even under the gate"
+            );
+        }
+    }
+
+    /// Spellings a real payload can carry. Quoting is the common one: the
+    /// command text is inside a JSON string, so its own quotes arrive escaped.
+    #[test]
+    fn the_removal_probe_reads_quoted_and_wrapped_removals() {
+        for raw in [
+            // `\"rm\"` — the command quoted inside the JSON string.
+            r#"{"tool_input":{"command":"\"rm\" -rf $SP/"#,
+            r#"{"tool_input":{"command":"'rm' -rf $SP/"#,
+            // A removal reached through a launcher still names the program.
+            r#"{"tool_input":{"command":"busybox rm -rf $SP/"#,
+            r#"{"tool_input":{"command":"sudo rm -rf $SP/"#,
+            r#"{"tool_input":{"command":"xargs rm -rf"#,
+            // Case is not meaningful to the probe.
+            r#"{"tool_input":{"command":"RM -RF $SP/"#,
+        ] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, false, raw, "stdin was truncated"),
+                Some(2),
+                "expected a denial for {raw:?}"
+            );
+        }
+    }
+
+    /// `rm` invoked by path is the same program. The probe keys on the command
+    /// name, so it has to see through a leading directory.
+    #[test]
+    fn the_removal_probe_sees_removals_invoked_by_path() {
+        for raw in [
+            r#"{"tool_input":{"command":"/bin/rm -rf \"$SP\"/"#,
+            r#"{"tool_input":{"command":"/usr/bin/rm -rf $SP/"#,
+            r#"{"tool_input":{"command":"\\usr\\bin\\rm.exe -rf $SP"#,
+        ] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, false, raw, "stdin was truncated"),
+                Some(2),
+                "a removal invoked by path must fail closed: {raw:?}"
+            );
+        }
+    }
+
+    /// The two readings of a backslash. Under JSON rules `\n` is a newline and
+    /// its `n` must vanish; under literal rules the backslash is a separator
+    /// and the letter behind it is part of the word. Since the payload is
+    /// malformed there is no telling which the writer meant, so a match in
+    /// either reading counts.
+    #[test]
+    fn the_removal_probe_reads_both_escape_conventions() {
+        for raw in [
+            // Literal reading: `\rm` is the shell idiom for bypassing an alias.
+            // Under JSON rules the `\r` would swallow the `r` and leave `m`.
+            r#"{"tool_input":{"command":"\rm -rf $SP/"#,
+            // A payload that escaped the command name character by
+            // character. A well-behaved encoder never does this to ASCII,
+            // but this probe only runs when the payload did not come out
+            // of a well-behaved encoder.
+            r#"{"tool_input":{"command":"\u0072\u006d -rf $SP/"#,
+            r#"{"tool_input":{"command":"\u0072\u006ddir $SP"#,
+        ] {
+            assert_eq!(
+                refuse_unverifiable_payload(PRE_TOOL_USE_EVENT, false, raw, "stdin was truncated"),
+                Some(2),
+                "expected a denial for {raw:?}"
+            );
+        }
     }
 
     fn allows(command: &str) -> bool {

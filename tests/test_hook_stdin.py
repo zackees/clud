@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 from tests import process
 
@@ -126,6 +129,121 @@ def test_block_bad_cmd_allows_malformed_json(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "permissionDecision" not in result.stdout
+
+
+# --- #1064: unverifiable payloads fail closed for removals only -------------
+#
+# These feed the hook payloads it cannot parse. Nothing here ever executes a
+# command: the hook reads stdin and prints a decision, so the `rm -rf` text
+# below is inert data used to steer that decision.
+
+
+def test_unparseable_payload_naming_a_removal_is_denied(tmp_path: Path) -> None:
+    """A removal the hook could not inspect must not be allowed through.
+
+    The payload is cut off mid-JSON and stdin is left open, which is the exact
+    shape that used to reach an unconditional `return 0`.
+    """
+    truncated = '{"tool_name":"Bash","tool_input":{"command":"rm -rf \\"$SP\\"/'
+
+    result = _run_hook_with_open_stdin(tmp_path, truncated)
+
+    assert result.returncode == 2, result.stdout
+    hook_output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "deny"
+    assert "removal" in hook_output["permissionDecisionReason"]
+
+
+def test_unparseable_payload_naming_a_removal_after_a_newline_is_denied(
+    tmp_path: Path,
+) -> None:
+    """A newline inside the command is `\\n` in the payload, not whitespace.
+
+    A probe that demanded real whitespace before `rm` missed every removal
+    that began a line, which is the ordinary shape of a multi-line command.
+    """
+    truncated = '{"tool_name":"Bash","tool_input":{"command":"cd /tmp\\nrm -rf $SP/'
+
+    result = _run_hook_with_open_stdin(tmp_path, truncated)
+
+    assert result.returncode == 2, result.stdout
+    assert '"deny"' in result.stdout
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX shell needed to hold the pipe open"
+)
+def test_complete_payload_is_verified_even_when_stdin_never_reaches_eof(
+    tmp_path: Path,
+) -> None:
+    """A held-open pipe is not a truncated payload.
+
+    Claude Code routinely writes a complete payload and leaves stdin open
+    (anthropics/claude-code#53177, `windows-quirks.md`), which is the whole
+    reason the idle timeout exists. Treating that as unverifiable denied every
+    tool call whose text merely mentioned `rm` — including #963's own safe
+    rewrite — with retry advice that could never succeed.
+
+    `tests.process` closes the child's stdin on write, so the pipe is held
+    open by a shell instead.
+    """
+    home = tmp_path / "home"
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": 'SP="/tmp/safe/path"; rm -f "$SP"/*.txt'},
+            "cwd": str(tmp_path),
+        }
+    )
+    script = (
+        f"{{ printf %s {shlex.quote(payload)}; sleep 2; }} "
+        f"| {shlex.quote(str(_block_bad_cmd_binary()))}"
+    )
+
+    result = process.run(
+        ["bash", "-c", script],
+        stdout=process.PIPE,
+        stderr=process.PIPE,
+        text=True,
+        env=_hook_env(home),
+        timeout=30,
+    )
+
+    assert result.returncode == 0, (
+        "a complete payload whose writer held the pipe open must still be "
+        f"verified normally; stdout={result.stdout!r}"
+    )
+    # #963 proves this removal safe and rewrites it, rather than denying.
+    hook_output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "allow"
+    assert "$SP" not in hook_output["updatedInput"]["command"]
+
+    log = (home / ".clud" / "tools" / "hooks" / "block-bad-cmd.log").read_text(
+        encoding="utf-8"
+    )
+    assert "stdin_read_incomplete" in log, (
+        "the read must actually have stopped short, or this test is not "
+        "exercising the path it claims to"
+    )
+
+
+def test_unparseable_payload_without_a_removal_is_still_allowed(
+    tmp_path: Path,
+) -> None:
+    """The anti-wedge property: a broken payload is not a reason to block.
+
+    A regression here is worse than the bug #1064 fixed, because it would wall
+    off every tool call whenever the hook hiccups.
+    """
+    for truncated in (
+        '{"tool_name":"Bash","tool_input":{"command":"cargo build --rel',
+        '{"tool_name":"Bash","tool_input":{"command":"docker run --rm ubuntu',
+        "{not-json but mentions armv7 and form/",
+    ):
+        result = _run_hook_with_open_stdin(tmp_path, truncated)
+
+        assert result.returncode == 0, f"{truncated!r} -> {result.stdout!r}"
+        assert "permissionDecision" not in result.stdout
 
 
 def test_rm_literal_assignment_rewrites_before_backend_prompt(tmp_path: Path) -> None:

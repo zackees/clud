@@ -324,7 +324,7 @@ fn resolve_static_operand(
     Some(resolved)
 }
 
-fn mask_heredoc_bodies_preserving_offsets(command: &str) -> String {
+pub(super) fn mask_heredoc_bodies_preserving_offsets(command: &str) -> String {
     if !command.contains("<<") {
         return command.to_string();
     }
@@ -758,6 +758,129 @@ fn looks_like_hazardous_rm(command: &str) -> bool {
     contains_removal_program_text(&lower)
         && (contains_path_variable_prefix(command)
             || (lower.contains("eval") && command.contains('$')))
+}
+
+/// Whether raw, unparsed payload bytes appear to name a removal program.
+///
+/// This is deliberately *not* [`contains_removal_program_text`], which reads
+/// shell command text that has already been extracted from the payload. Here
+/// there is no extracted command — parsing is precisely what failed — so the
+/// input is a JSON fragment that may be truncated mid-token, and three of its
+/// properties break the command-text probe:
+///
+/// - A newline inside a JSON string is the two characters `\` and `n`, not
+///   whitespace. `cd /tmp\nrm -rf $SP/` puts a literal `n` before the `rm`.
+/// - Truncation is one of the paths that lands here, so the bytes can simply
+///   stop after `rm`, leaving no following character to inspect.
+/// - The removal may be invoked by path (`/bin/rm`, `\usr\bin\rm.exe`).
+///
+/// So this scans for the removal as a *word*: escape sequences collapse to
+/// separators, tokens are cut on anything that cannot appear in a command
+/// name, and end-of-input counts as a boundary. It over-matches on purpose —
+/// `git rm` in a commit message trips it, and that costs one retry, while
+/// under-matching costs a filesystem.
+///
+/// Covers `rm` and `rmdir` only, matching the interpreter it backstops. Other
+/// destructive verbs (`shred`, `unlink`, `find -delete`, `git clean -xfd`) are
+/// deliberately out of scope: each widens the over-match, and only `rm` has
+/// incident evidence behind it.
+pub(super) fn raw_payload_mentions_removal(raw: &str) -> bool {
+    let decoded = decode_short_unicode_escapes(&raw.to_ascii_lowercase());
+    // Two readings of the same bytes, because the payload is malformed and
+    // there is no telling which one the writer meant. Under JSON rules `\n` is
+    // a newline and its `n` must vanish, or `cd /tmp\nrm` hides the removal;
+    // under literal rules the backslash is just a separator, and swallowing
+    // the next character would hide the `rm` in `\rm` (the shell idiom for
+    // bypassing an alias). Neither reading subsumes the other, so a match in
+    // either is a match — over-matching is the safe direction here.
+    [
+        flatten_escape_sequences(&decoded),
+        strip_backslashes(&decoded),
+    ]
+    .iter()
+    .any(|text| {
+        text.split(|ch: char| !is_command_name_char(ch))
+            .any(is_removal_program_word)
+    })
+}
+
+/// Resolve `\u00XX` escapes to the character they denote.
+///
+/// A JSON encoder has no reason to escape an ASCII letter, but this probe runs
+/// precisely when the payload did not come out of a well-behaved encoder, and
+/// `rm` would otherwise tokenize to `0072`/`006d` and hide a
+/// removal. Only ASCII is decoded; anything else is left as written, since no
+/// command name this looks for lives outside it.
+fn decode_short_unicode_escapes(raw: &str) -> String {
+    if !raw.contains("\\u") {
+        return raw.to_string();
+    }
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let is_escape = chars[i] == '\\' && chars.get(i + 1) == Some(&'u') && i + 5 < chars.len();
+        if is_escape {
+            let digits: String = chars[i + 2..i + 6].iter().collect();
+            if let Some(decoded) = u32::from_str_radix(&digits, 16)
+                .ok()
+                .filter(|code| *code < 0x80)
+                .and_then(char::from_u32)
+            {
+                out.push(decoded);
+                i += 6;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Replace each backslash with a space, keeping the character behind it.
+///
+/// The literal reading: `\rm` becomes ` rm`, so an alias-bypassing removal is
+/// still seen as the word `rm`.
+fn strip_backslashes(raw: &str) -> String {
+    raw.replace('\\', " ")
+}
+
+/// Replace every `\<char>` pair with two spaces.
+///
+/// JSON escapes (`\n`, `\t`, `\"`, `\\`) and shell line continuations both
+/// become separators, which is all this probe needs from them, and Windows
+/// path separators fall away so `\usr\bin\rm.exe` tokenizes to `rm.exe`.
+/// Both characters are dropped, not just the backslash: `\n` must not leave an
+/// `n` behind, or `cd /tmp\nrm -rf …` reads as the word `nrm` and the removal
+/// hides. The literal reading of the same bytes is covered separately by
+/// [`strip_backslashes`].
+fn flatten_escape_sequences(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            out.push(' ');
+            if chars.next().is_some() {
+                out.push(' ');
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Characters that can appear inside a command name as written on a command
+/// line. `/` is included so a path-qualified removal stays one token; `-` and
+/// `.` are included so `--rm` and `alarm.sh` stay whole and do *not* match.
+fn is_command_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/')
+}
+
+fn is_removal_program_word(word: &str) -> bool {
+    let word = word.strip_suffix(".exe").unwrap_or(word);
+    matches!(word, "rm" | "rmdir") || word.ends_with("/rm") || word.ends_with("/rmdir")
 }
 
 fn contains_removal_program_text(command: &str) -> bool {

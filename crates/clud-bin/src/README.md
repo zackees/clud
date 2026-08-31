@@ -368,7 +368,23 @@ which test tier a change belongs in — lives in
   only single, statically proven literal assignments into a complete
   `allow + updatedInput` hook response; unresolved, dynamic, conflicting, or
   root-like values become deterministic denials so unattended agents can retry
-  without an approval prompt.
+  without an approval prompt. It also owns `raw_payload_mentions_removal`, the
+  word-boundary probe over *raw, unparsed* payload bytes that #1064's
+  fail-closed path consults when the hook could not parse its input at all —
+  separate from the command-text probe next to it, because raw bytes may be
+  truncated mid-token, write newlines as `\n`, and name the program by path.
+- `block_bad_cmd_gate.rs` - the command gate: an **allowlist** requiring every
+  statement in a shell tool call to be invoked through a wrapper (`tap` by
+  default), so the wrapper sees post-expansion argv instead of the hook having
+  to prove safety from command text. Off unless `CLUD_CMD_GATE` is set to an
+  enabling value (DD-056 lists them) in
+  the session environment. Unlike the rest of `block_bad_cmd`, it **fails
+  closed** — an unreadable or unparseable payload is a denial, since an
+  unverifiable command cannot be allowed. Deliberately does not reuse
+  `command_words`, whose wrapper-unwrapping would let `env tap ...` satisfy the
+  prefix check. Refuses anything it cannot decompose with certainty (command
+  substitution, subshells, process substitution, control flow); the cost of
+  that is one extra tool call, not a wedged session. See DD-056.
 - `settings_tui.rs` - `clud settings`: small cross-platform TUI checkbox menu
   over global boolean settings in `~/.clud/settings.json` (`clud_settings.rs`
   owns persistence). Pure `Menu` state machine + crossterm raw-mode I/O shell,

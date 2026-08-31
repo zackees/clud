@@ -2513,3 +2513,129 @@ existing attach/list/kill worker machinery remains compatible because it does
 not accidentally classify logical API sessions as attachable workers. Bounded
 event and idempotency retention prevents durable session metadata from becoming
 an unbounded prompt/transcript store.
+
+## DD-056: the command gate is an allowlist, and it fails closed
+
+**Status:** Accepted
+
+**Context:** #963's abstract interpreter (`block_bad_cmd_rm_vars.rs`) defends
+against catastrophic deletes by *proving*, from command text, that a path
+variable holds one nonempty literal path. That is 1100 lines answering a hard
+question, and every parser bug in it is a bypass. The wider `bad_commands` /
+`bad_pipelines` policy is a denylist: it enumerates bad shapes, so a gap in the
+enumeration is a hole. Both fail open by design, which is correct for a
+"friction-reducing nudge" but leaves no shape that is actually load-bearing
+after a real incident.
+
+**Decision:** Add a gate that requires every statement in a shell tool call to
+be invoked through a wrapper (`tap` by default). The wrapper runs *after* shell
+expansion, so it observes the real argv — an unset variable has already become
+`/` and there is nothing left to prove. The hook's remaining job is the much
+smaller one of guaranteeing the wrapper is on the path of every command.
+
+Three properties follow deliberately, each inverting a surrounding convention:
+
+1. **Allowlist, not denylist.** One command shape is permitted; everything else
+   is denied. There is no enumeration to leave a gap in.
+2. **Fails closed.** When `CLUD_CMD_GATE` is set to `enforce`, `1`, or `on`
+   (surrounding whitespace ignored; anything else, including unset, leaves
+   the gate off), `run_for_event`'s
+   allow-by-default exits (unreadable stdin, empty/undecodable/unrecognized
+   payload) become denials. A payload the hook cannot read is a command it
+   cannot verify.
+3. **Refuses what it cannot decompose.** Command substitution, subshells,
+   process substitution, and control flow are denied rather than analyzed,
+   because they run programs the gate would never inspect.
+
+Property 3 is affordable only because of an asymmetry: when the interpreter
+cannot decide, denying blocks legitimate work, so it is tuned to allow; when the
+gate cannot decide, denying costs one extra tool call. Uncertainty is cheap
+here, so the scanner spends it freely.
+
+The gate does not reuse `command_words`, despite the overlap. That helper
+unwraps `env`, `exec`, `command`, and `sudo` so denylist rules can find the real
+program underneath — precisely the behavior that would let `env tap ...` satisfy
+a prefix check. Reusing denylist machinery inside an allowlist reintroduces the
+enumeration problem the allowlist exists to escape.
+
+**Consequences:** Compound commands must be split across tool calls, and
+control flow, command substitution and heredoc-free pipelines that mix wrapped
+and unwrapped stages are refused; agents adapt to this from the denial message.
+Coverage is depth-1: `tap make` does not confine the Makefile, which matches the
+threat model (an agent slip in the tool-call string) but is not containment —
+that remains a sandbox's job. Redirections are performed by the shell, not the
+wrapper, so `tap cmd > "$VAR/out"` can still write to a mis-expanded path; a
+redirect touches one file and cannot recurse, and `set -u` in the session shell
+is the proportionate mitigation. Coverage is also per-session: only sessions
+where clud set `CLUD_CMD_GATE` are gated, which is why `block_bad_cmd_rm_vars`
+stays in place rather than being retired on arrival.
+
+## DD-057: a hook that cannot verify its payload denies removals and allows everything else
+
+**Status:** Accepted
+
+**Context:** `block_bad_cmd` is "a friction-reducing nudge, not a security
+sandbox". It fails open on purpose, and `hook-dispatch.md` explains why: a guard
+that cannot run must not wall off every tool call, because a wedged session is
+the outcome the whole subsystem exists to prevent. `run_for_event` accordingly
+had three unconditional allow exits — stdin truncated, payload undecodable,
+payload shape unrecognized.
+
+That default is wrong for exactly one class of command. #963 built an
+interpreter that proves a removal's path variable holds one nonempty literal
+path, but the interpreter only runs if the payload parses first. In the incident
+behind #1064, it did not: a hook that could not read its input silently allowed
+an `rm -rf "$VAR"/` that expanded to `rm -rf /`. Every other allowed-in-error
+command can be undone. A recursive delete cannot.
+
+**Decision:** Invert the default for removals only, on `PreToolUse` alone. When
+the payload cannot be decoded or its shape recognized *and* the raw stdin bytes
+name a removal program, deny. Everything else still fails open.
+
+A read that stopped before EOF is deliberately *not* a trigger. It is recorded,
+and it names the reason in the denial message, but on its own it means nothing
+is wrong: Claude Code routinely writes a complete payload and then leaves the
+pipe open (anthropics/claude-code#53177), which is why the idle timeout exists
+at all. A genuinely truncated payload cuts a JSON string mid-flight and cannot
+decode, so the decode check already covers it. An early draft treated the open
+pipe as unverifiable and thereby denied every tool call whose text merely
+mentioned `rm` — including #963's own safe-rewrite path — with retry advice that
+could never succeed. That is the anti-wedge property failing, which is worse
+than the bug being fixed.
+
+Two consequences follow, and both are deliberate.
+
+*The probe reads raw bytes, and is not the interpreter's probe.*
+`contains_removal_program_text` reads shell command text that has already been
+extracted from a payload. Here there is no extracted command — parsing is what
+failed — so the input is a possibly-truncated JSON fragment, and three of its
+properties break that probe: a newline inside a JSON string is the two
+characters `\` and `n` rather than whitespace, so `cd /tmp\nrm -rf $SP/` reads a
+literal `n` before the `rm`; truncation can stop the bytes immediately after
+`rm`, leaving no following character; and the program may be named by path
+(`/bin/rm`). `raw_payload_mentions_removal` therefore matches the removal as a
+*word* — escapes collapse to separators, end-of-input is a boundary, a leading
+directory is stripped. The interpreter's probe is left alone so #963's decisions
+do not move.
+
+*The probe over-matches on purpose.* `git rm` in a commit message trips it. That
+costs one retry; under-matching costs a filesystem, and the probe only ever runs
+on payloads that already failed to parse, so the false-positive population is
+tiny to begin with.
+
+**Consequences:** A removal whose payload the hook cannot read is refused, and
+the agent retries it — in the worst case as its own tool call with literal
+paths. The anti-wedge property is preserved for every other command and is
+pinned from both sides: `unverifiable_payload_without_a_removal_still_fails_open`
+covers a broken payload that has nothing to do with removal, and
+`test_complete_payload_is_verified_even_when_stdin_never_reaches_eof` covers the
+held-open pipe that actually regressed. A
+regression there is worse than the bug this fixes, because it would wall off
+every tool call whenever the hook hiccups. Truncation is genuinely exceptional
+(a 1 MB cap, a 0.25 s idle timeout, a 2 s deadline), so this path is not on the
+common route.
+
+This is narrower than the command gate's inversion ([DD-056](#dd-056-the-command-gate-is-an-allowlist-and-it-fails-closed)),
+which denies *everything* it cannot verify but only under `CLUD_CMD_GATE`. This
+one needs no configuration and is always on, which is why it is scoped to the
+single class where allow-on-error is unrecoverable.
