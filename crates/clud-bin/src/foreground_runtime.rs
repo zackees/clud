@@ -373,6 +373,11 @@ fn unified_startup_notices(codex_available: bool, deepseek_available: bool) -> V
 /// of these slots survive into the DeepSeek child and misroute model
 /// selection. `ANTHROPIC_CUSTOM_MODEL_OPTION*` stays a separate prefix scrub
 /// below, not a literal entry here, since it has no fixed suffix.
+///
+/// `CLAUDE_CODE_EFFORT_LEVEL` is deliberately NOT on this list (DD-059): an
+/// ambient user value is preserved so the harness's own `/effort` control
+/// stays authoritative, and clud no longer injects its own pin -- the catalog
+/// default effort travels on the harness's `--effort` session flag instead.
 const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
@@ -389,7 +394,6 @@ const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
     "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
     "CLAUDE_CODE_SUBAGENT_MODEL",
-    "CLAUDE_CODE_EFFORT_LEVEL",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
 ];
@@ -431,10 +435,6 @@ fn apply_anthropic_compat_overlay(
     let model = selection
         .and_then(|selection| selection.wire_model.as_deref())
         .unwrap_or(default_wire_model);
-    let effort = selection
-        .and_then(|selection| selection.effort)
-        .unwrap_or(crate::provider_catalog::EffortLevel::Max)
-        .as_str();
     let role_models = descriptor.role_models;
     let opus_model = role_models.map_or(model, |roles| roles.opus);
     let sonnet_model = role_models.map_or(model, |roles| roles.sonnet);
@@ -463,7 +463,6 @@ fn apply_anthropic_compat_overlay(
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
             subagent_model.to_string(),
         ),
-        ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), effort.to_string()),
     ]);
     match role_models.and_then(|roles| roles.fable) {
         Some(fable) => env.push((
@@ -1195,6 +1194,43 @@ mod tests {
         assert_eq!(lookup(runtime.env(), "CLAUDE_CODE_EFFORT_LEVEL"), None);
     }
 
+    /// DD-059: the direct Anthropic-compat overlay neither scrubs an ambient
+    /// `CLAUDE_CODE_EFFORT_LEVEL` nor injects its own pin, so `/effort` stays
+    /// the live session control -- mirroring the unified overlay's rule. The
+    /// old code overwrote the ambient value with the selection's effort (or
+    /// a `max` fallback when none was selected).
+    #[test]
+    fn anthropic_compat_overlay_preserves_ambient_effort_and_injects_no_default() {
+        let mut route = plan(ModelProvider::DeepSeek, Backend::Claude);
+        // A legacy `@high` selection must not re-pin the user's ambient value.
+        route.model_selection = crate::provider_catalog::resolve(
+            Some(ModelProvider::DeepSeek),
+            Some("deepseek-v4-pro@high"),
+            None,
+            None,
+        )
+        .unwrap();
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            vec![("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "xhigh".to_string())],
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert_eq!(
+            lookup(runtime.env(), "CLAUDE_CODE_EFFORT_LEVEL"),
+            Some("xhigh")
+        );
+        assert!(!runtime.has_bridge());
+
+        let empty = ForegroundRuntime::start_with_secret_store(
+            &route,
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert_eq!(lookup(empty.env(), "CLAUDE_CODE_EFFORT_LEVEL"), None);
+    }
+
     #[test]
     fn unified_missing_provider_notices_are_sanitized_and_actionable() {
         let notices = unified_startup_notices(false, false);
@@ -1326,11 +1362,14 @@ mod tests {
     /// delta -- the new `ANTHROPIC_DEFAULT_FABLE_MODEL` pin (#936
     /// "Generalization" -> 1d). Every other pair is byte-identical to the
     /// pre-refactor baseline that was confirmed green before this function
-    /// was touched.
+    /// was touched. Second delta (DD-059): the `CLAUDE_CODE_EFFORT_LEVEL`
+    /// pin is gone -- effort travels on the harness's `--effort` flag and the
+    /// overlay neither injects nor scrubs it.
     #[test]
     fn golden_anthropic_compat_overlay_default_selection() {
         let mut env = Vec::new();
         apply_anthropic_compat_overlay(&mut env, "ds-golden-secret", deepseek_descriptor(), None);
+        assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
         let mut pairs = env.clone();
         pairs.sort();
         assert_eq!(
@@ -1368,7 +1407,6 @@ mod tests {
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
                     "786432".to_string()
                 ),
-                ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "max".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
                     "deepseek-v4-flash".to_string()
@@ -1378,9 +1416,10 @@ mod tests {
     }
 
     /// GOLDEN: a selection whose wire model has no `[1m]` suffix, so no
-    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set. Same delta as above: only
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set. Same deltas as above: only
     /// the new `ANTHROPIC_DEFAULT_FABLE_MODEL` pin is added relative to the
-    /// confirmed pre-refactor baseline.
+    /// confirmed pre-refactor baseline, and no `CLAUDE_CODE_EFFORT_LEVEL`
+    /// pin is emitted even for an explicitly selected effort (DD-059).
     #[test]
     fn golden_anthropic_compat_overlay_auto_context_selection_has_no_compact_window() {
         let selection = crate::provider_catalog::resolve(
@@ -1429,13 +1468,13 @@ mod tests {
                     "deepseek-v4-pro".to_string()
                 ),
                 ("ANTHROPIC_MODEL".to_string(), "deepseek-v4-pro".to_string()),
-                ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "high".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
                     "deepseek-v4-flash".to_string()
                 ),
             ]
         );
+        assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
     }
 
     /// GOLDEN: the second documented delta -- the widened scrub const now
@@ -1553,7 +1592,7 @@ mod tests {
             Some(&selection),
         );
         assert_eq!(lookup(&env, "ANTHROPIC_MODEL"), Some("deepseek-v4-pro"));
-        assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), Some("high"));
+        assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
         assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
     }
 
@@ -2050,7 +2089,6 @@ mod tests {
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
                     "1048576".to_string()
                 ),
-                ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "max".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
                     "kimi-k3[1m]".to_string()

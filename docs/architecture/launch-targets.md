@@ -517,12 +517,14 @@ nobody can answer.
 ### Child environment overlay
 
 At the `ForegroundRuntime` spawn boundary, the initiating process's own
-preflight has already guaranteed the key exists, so `apply_deepseek_overlay`
+preflight has already guaranteed the key exists, so `apply_anthropic_compat_overlay`
 reads it from the vault a second time — directly in the process that is
 about to spawn the child, foreground or worker — and builds a DeepSeek-only
 overlay for the Claude child: the documented Anthropic-compatible endpoint,
-auth token, and the resolved model, effort, and context profile. The reviewed
-default remains the stable `deepseek-v4-pro[1m]` alias with max effort. As of
+auth token, and the resolved model and context profile. Effort is not
+overlaid: the catalog's `low` default rides the harness's `--effort` session
+flag so `/effort` stays live (DD-059). The reviewed
+default remains the stable `deepseek-v4-pro[1m]` alias. As of
 2026-08-12, DeepSeek's live Models & Pricing page identifies that alias as
 `DeepSeek-V4-Pro-0813`; the API slug did not change. Explicit Pro/Flash and
 auto/1m selections are applied as documented in

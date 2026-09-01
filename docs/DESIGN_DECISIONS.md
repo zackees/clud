@@ -1850,11 +1850,12 @@ independent.
 
 **Consequences:** The same effort label can have different latency/cost effects
 on different models. Unified mode does not promise to restore Sol `low`,
-Terra/Luna `medium`, or direct DeepSeek `max` defaults after a switch because
+Terra/Luna `medium`, or a provider's catalog default after a switch because
 that source information no longer exists at the gateway. Unsupported Codex
 values fail before an upstream call, while DeepSeek-compatible or future values
-are not rejected by Codex policy. Direct Claude, Codex, Codex-via-Claude, and
-DeepSeek launch profiles are unchanged.
+are not rejected by Codex policy. Direct Claude, Codex, and Codex-via-Claude
+launch profiles are unchanged; the direct DeepSeek profile later dropped its
+max-effort pin — see [DD-059](#dd-059-direct-provider-launches-carry-effort-on-the-session-flag-and-the-reviewed-default-is-low).
 
 ---
 
@@ -2686,3 +2687,46 @@ text-time gaps that are closable and records that the rest are not.
 rewrite, and near-misses (`echo $'\x41'`, `rm -rf ./~backup`, `rm -rf {a,b}.txt`,
 `git rm`) stay allowed — pinned by `stress_benign_commands_are_not_swept_up`.
 Each closed bypass is a regression test in `block_bad_cmd_rm_vars.rs`.
+
+---
+
+## DD-059: Direct provider launches carry effort on the session flag, and the reviewed default is low
+
+**Status:** Accepted
+
+**Context:** A `clud --deepseek` session reported that `/effort` was overridden:
+the direct Anthropic-compat overlay (`apply_anthropic_compat_overlay`) pinned
+`CLAUDE_CODE_EFFORT_LEVEL` to the selection's effort — `max`, once the catalog's
+reviewed DeepSeek default applied. Claude Code treats that env var as a locked
+override that beats `/effort`, `--effort`, and settings, so the picker could
+never move the session. The pin was also redundant: `command::builder` already
+emits `--effort <level>` whenever the resolved selection carries an effort,
+catalog defaults included. The unified overlay (DD-042) already had the right
+rule — preserve an ambient value, inject nothing — making direct mode the odd
+one out.
+
+**Decision:**
+
+- The direct overlay neither injects nor scrubs `CLAUDE_CODE_EFFORT_LEVEL`.
+  The catalog default effort travels on the harness's own `--effort` session
+  flag, which sets the *initial* value and leaves `/effort` live for the rest
+  of the session. An ambient user-exported value is preserved and, per the
+  harness's own precedence, wins over the flag — the user's own pin is their
+  choice.
+- The reviewed default effort for every Anthropic-compat direct row is now
+  `low` instead of `max`: DeepSeek Pro and Flash, Kimi K3, and the OpenRouter
+  Sonnet row all set `default_effort: Some(EffortLevel::Low)`. Flash
+  previously had no default at all, which silently fell through to the
+  overlay's `max` fallback; the catalog is now the single source of truth for
+  direct-mode defaults.
+- Unified mode is unchanged (DD-042): the harness resolves effort, clud
+  applies no catalog default, and DeepSeek's documented five-name-to-two-level
+  wire mapping still owns the server side.
+
+**Consequences:** `/effort` is the live per-turn control in direct DeepSeek,
+Kimi, and OpenRouter sessions, exactly as in unified mode. Sessions that
+relied on the old implicit `max` now start at `low` and must opt up; DeepSeek's
+server still maps `low`/`medium` to effective `high`. clud's `--effort` and
+provider settings become initial values rather than locks. Subagent effort
+follows the harness's own subagent policy instead of inheriting the removed
+pin.

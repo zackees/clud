@@ -444,6 +444,32 @@ fn test_bridge_uses_a_discovery_id_and_separate_effort() {
         .any(|pair| pair == ["--effort", "high"]));
 }
 
+/// DD-059: a plain `clud --deepseek` launch carries the catalog default
+/// effort on the harness's own `--effort` session flag (an initial value, so
+/// `/effort` stays the live session control) instead of a pinned
+/// `CLAUDE_CODE_EFFORT_LEVEL` env var. `main` populates
+/// `resolved_model_selection` from `resolve_for_launch` with the catalog
+/// default enabled for direct launches; the test mirrors that seam.
+#[test]
+fn test_deepseek_bridge_catalog_default_effort_rides_the_session_flag() {
+    let mut args = parse(&["clud", "--deepseek"]);
+    args.resolved_model_selection = crate::provider_catalog::resolve_for_launch(
+        ModelProvider::DeepSeek,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let p = build_launch_plan_for_target(&args, deepseek_bridge_target(), "claude");
+    assert!(
+        p.command.windows(2).any(|pair| pair == ["--effort", "low"]),
+        "expected --effort low from the catalog default, got: {}",
+        p.command.join(" ")
+    );
+}
+
 /// Issue #955: the shared catalog is the extension seam for both the native
 /// Codex harness and Claude's discovery namespace. This deliberately iterates
 /// rows instead of restating Sol/Terra/Luna in the adapter test.

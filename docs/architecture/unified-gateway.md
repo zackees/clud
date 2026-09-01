@@ -63,12 +63,14 @@ no source marker. Unified mode therefore has one honest contract: the harness's
 effective effort is session-wide, survives `/model` switches, and is consumed
 independently on every request.
 
-Unified child setup neither injects DeepSeek's direct-mode
-`CLAUDE_CODE_EFFORT_LEVEL=max` nor deletes an ambient user value. The direct
-`clud --deepseek` max profile is unchanged. `/effort auto` and a session with no
-explicit setting are harness-resolved; the gateway cannot recover `auto` or
-secretly restore Sol's `low`, Terra/Luna's `medium`, or direct DeepSeek's `max`
-after the final request value exists.
+Unified child setup neither injects a direct-mode effort pin nor deletes an
+ambient user value, and direct mode now follows the same rule
+([DD-059](../DESIGN_DECISIONS.md#dd-059-direct-provider-launches-carry-effort-on-the-session-flag-and-the-reviewed-default-is-low)): the
+catalog default (currently `low` for every Anthropic-compat row) rides the
+harness's `--effort` session flag and `/effort` stays live. `/effort auto` and
+a session with no explicit setting are harness-resolved; the gateway cannot
+recover `auto` or secretly restore Sol's `low`, Terra/Luna's `medium`, or a
+provider's catalog default after the final request value exists.
 
 | Route | Gateway behavior |
 |---|---|
@@ -105,8 +107,9 @@ every client build; `/effort` and `--effort` remain the protocol-level controls.
 
 The advertised DeepSeek Pro row maps to the reviewed
 `deepseek-v4-pro[1m]` wire ID. Unified mode does not install direct DeepSeek's
-global max-effort/1m overlay and does not suppress Claude plan mode for Codex;
-Claude Code remains the per-turn policy owner.
+global 1m overlay — and neither mode installs an effort pin (DD-059) — and does
+not suppress Claude plan mode for Codex; Claude Code remains the per-turn
+policy owner.
 
 ## Credential commands
 
