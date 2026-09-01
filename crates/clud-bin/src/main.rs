@@ -665,6 +665,109 @@ fn run(mut args: args::Args) {
         large_file_guard::run(&root);
     }
 
+    // Build only the route metadata needed for credential admission before the
+    // daemon can start. The canonical plan below still uses the resolved
+    // executable path after the normal bootstrap sequence.
+    let bridge_preflight_plan = command::build_launch_plan_for_target(
+        &args,
+        launch_target,
+        launch_target.effective_harness.executable_name(),
+    );
+    // Admit a direct Codex-to-Claude bridge before any daemon bootstrap. In
+    // particular, detached and centralized launches must not create a daemon
+    // or immediately-dead session when their bridge credential is absent.
+    // `--dry-run` intentionally stays credential-free and side-effect-free.
+    if !args.dry_run {
+        if let Err(error) =
+            clud::foreground_runtime::ForegroundRuntime::preflight(&bridge_preflight_plan)
+        {
+            launch_log::record_failure_reason(format_args!(
+                "failed to start provider bridge: {error}"
+            ));
+            eprintln!("[clud] failed to start provider bridge: {error}");
+            std::process::exit(1);
+        }
+    }
+
+    // Grant daemon-mutation authority only after every utility/special mode
+    // has exited and only for the command-less normal launch shape (`clud run`
+    // was normalized to this above). Non-launch modes never inherit it.
+    if args.command.is_none() && !args.no_daemon && !args.dry_run {
+        unsafe {
+            std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
+        }
+    } else {
+        unsafe {
+            std::env::remove_var(daemon::ENV_ALLOW_DAEMON_SPAWN);
+        }
+    }
+
+    // Issue #135: always-on clud daemon. One background process per user
+    // hosts the GC registry (redb owner + worker thread) and is the
+    // execution target for `--detach` / `--detachable` / repeat jobs /
+    // `--experimental-daemon-centralized`. Foreground interactive
+    // launches still use the direct runner by default (PR #152 reverted
+    // the attach-pump default). Only a normal launch receives the positive
+    // spawn capability. Skip on `--no-daemon` and `--dry-run` so tests that copy
+    // the binary into a tempdir don't leave the daemon's `.old` exe
+    // locked when tempdir cleanup runs. Never blocks a launch on
+    // spawn failure.
+    let mut foreground_client_lease = None;
+    // A centralized session runs its work *through* the daemon, so it needs one
+    // just as much as a command-less launch does -- and it needs it started
+    // **here**, before the job tracker below, or on Windows the daemon joins
+    // this process's Job Object and dies with the CLI (#569). #983 narrowed
+    // this to `command.is_none()`, which pushed the centralized path's daemon
+    // start after the tracker and left `clud loop --repeat` with a daemon that
+    // did not outlive the launch.
+    let needs_early_daemon = args.command.is_none() || daemon::experimental_enabled(&args);
+    if needs_early_daemon && !args.no_daemon && !args.dry_run {
+        // The capability is granted for the same launches that need the
+        // daemon; `run_centralized_session` re-grants it harmlessly.
+        unsafe {
+            std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
+        }
+        if args.verbose {
+            verbose_log::log("[clud] daemon: ensure running");
+        }
+        match daemon::default_state_dir() {
+            Ok(state_dir) => {
+                if let Err(e) = daemon::ensure_daemon(&state_dir) {
+                    if daemon::is_incompatible_daemon_error(&e) {
+                        daemon::print_incompatible_daemon_error(&e);
+                        std::process::exit(1);
+                    }
+                    eprintln!("[clud] note: daemon unavailable: {}", e);
+                    if args.verbose {
+                        verbose_log::log(format_args!("[clud] daemon: unavailable: {e}"));
+                    }
+                } else {
+                    if !daemon::experimental_enabled(&args) {
+                        match daemon::acquire_foreground_client_lease(&state_dir) {
+                            Ok(lease) => foreground_client_lease = Some(lease),
+                            Err(error) => {
+                                eprintln!("[clud] note: foreground lease unavailable: {error}");
+                            }
+                        }
+                    }
+                    // Issue #183: record one row in the `repo_visits` table
+                    // per (repo_root, current launch). Errors are non-fatal:
+                    // failing to record a visit must never block a launch.
+                    record_repo_visit_best_effort(&state_dir, args.verbose);
+                }
+            }
+            Err(e) => {
+                eprintln!("[clud] note: cannot resolve state dir: {}", e);
+            }
+        }
+    } else if args.verbose {
+        verbose_log::log("[clud] daemon: skipped");
+    }
+
+    // #569: the persistent daemon deliberately starts before this foreground
+    // process joins the Windows tracking job, so it can outlive the CLI.
+    let job_orphan_reaper = job_orphan_reaper::ForegroundJobTracker::install();
+
     // After foreground startup has refreshed bundled tools, fire the
     // hook-config scanner against the cwd. Warns on bare
     // `uv run` in Pre/PostToolUse hooks of Python+Rust polyglot
@@ -814,81 +917,6 @@ fn run(mut args: args::Args) {
     }
 
     let plan = command::build_launch_plan_for_target(&args, launch_target, &backend_path);
-    // Admit a direct Codex-to-Claude bridge before any daemon bootstrap. In
-    // particular, detached and centralized launches must not create a daemon
-    // or immediately-dead session when their bridge credential is absent.
-    // `--dry-run` intentionally stays credential-free and side-effect-free.
-    if !args.dry_run {
-        if let Err(error) = clud::foreground_runtime::ForegroundRuntime::preflight(&plan) {
-            launch_log::record_failure_reason(format_args!(
-                "failed to start provider bridge: {error}"
-            ));
-            eprintln!("[clud] failed to start provider bridge: {error}");
-            std::process::exit(1);
-        }
-    }
-
-    // Grant daemon-mutation authority only after every utility/special mode
-    // has exited and only for the command-less normal launch shape (`clud run`
-    // was normalized to this above). Non-launch modes never inherit it.
-    if args.command.is_none() && !args.no_daemon && !args.dry_run {
-        unsafe {
-            std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
-        }
-    } else {
-        unsafe {
-            std::env::remove_var(daemon::ENV_ALLOW_DAEMON_SPAWN);
-        }
-    }
-
-    // Issue #135: always-on clud daemon. One background process per user
-    // hosts the GC registry (redb owner + worker thread) and is the execution
-    // target for detached, repeat, and centralized launches. Keep it before
-    // the Windows job tracker so it can outlive this CLI (#569).
-    let mut foreground_client_lease = None;
-    let needs_early_daemon = args.command.is_none() || daemon::experimental_enabled(&args);
-    if needs_early_daemon && !args.no_daemon && !args.dry_run {
-        unsafe {
-            std::env::set_var(daemon::ENV_ALLOW_DAEMON_SPAWN, "1");
-        }
-        if args.verbose {
-            verbose_log::log("[clud] daemon: ensure running");
-        }
-        match daemon::default_state_dir() {
-            Ok(state_dir) => {
-                if let Err(e) = daemon::ensure_daemon(&state_dir) {
-                    if daemon::is_incompatible_daemon_error(&e) {
-                        daemon::print_incompatible_daemon_error(&e);
-                        std::process::exit(1);
-                    }
-                    eprintln!("[clud] note: daemon unavailable: {}", e);
-                    if args.verbose {
-                        verbose_log::log(format_args!("[clud] daemon: unavailable: {e}"));
-                    }
-                } else {
-                    if !daemon::experimental_enabled(&args) {
-                        match daemon::acquire_foreground_client_lease(&state_dir) {
-                            Ok(lease) => foreground_client_lease = Some(lease),
-                            Err(error) => {
-                                eprintln!("[clud] note: foreground lease unavailable: {error}");
-                            }
-                        }
-                    }
-                    record_repo_visit_best_effort(&state_dir, args.verbose);
-                }
-            }
-            Err(e) => {
-                eprintln!("[clud] note: cannot resolve state dir: {}", e);
-            }
-        }
-    } else if args.verbose {
-        verbose_log::log("[clud] daemon: skipped");
-    }
-
-    // #569: the persistent daemon deliberately starts before this foreground
-    // process joins the Windows tracking job, so it can outlive the CLI.
-    let job_orphan_reaper = job_orphan_reaper::ForegroundJobTracker::install();
-
     if args.verbose {
         verbose_log::log(format_args!(
             "[clud] plan: backend={} mode={} iterations={} stream_json={}",
