@@ -253,6 +253,11 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
     env["XDG_STATE_HOME"] = str(home / ".local" / "state")
     env["XDG_CACHE_HOME"] = str(home / ".cache")
     env["CLUD_HOOK_HOME"] = str(home)
+    # Mock-agent integration tests exercise the positive Codex-provider →
+    # Claude-harness route. Supply a dummy API credential so launch admission
+    # can proceed to the mock bridge; credential-absence behavior has its own
+    # isolated Rust CLI regression that explicitly removes this variable.
+    env["OPENAI_API_KEY"] = "test-openai-api-key"
     # Prevent any VIRTUAL_ENV interference
     env.pop("VIRTUAL_ENV", None)
 
