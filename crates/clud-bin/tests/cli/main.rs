@@ -5,8 +5,11 @@
 //! one test executable instead of two. Test IDs are
 //! `cli::<module>::<test_name>`.
 
+#[path = "../common/mod.rs"]
+mod common;
 #[path = "../common/exe.rs"]
 mod exe;
 
+mod codex_bridge_preflight_cli;
 mod provider_selection_cli;
 mod shell_completion_guard;

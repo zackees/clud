@@ -665,6 +665,30 @@ fn run(mut args: args::Args) {
         large_file_guard::run(&root);
     }
 
+    // Build only the route metadata needed for credential admission before the
+    // daemon can start. The canonical plan below still uses the resolved
+    // executable path after the normal bootstrap sequence.
+    let bridge_preflight_plan = command::build_launch_plan_for_target(
+        &args,
+        launch_target,
+        launch_target.effective_harness.executable_name(),
+    );
+    // Admit a direct Codex-to-Claude bridge before any daemon bootstrap. In
+    // particular, detached and centralized launches must not create a daemon
+    // or immediately-dead session when their bridge credential is absent.
+    // `--dry-run` intentionally stays credential-free and side-effect-free.
+    if !args.dry_run {
+        if let Err(error) =
+            clud::foreground_runtime::ForegroundRuntime::preflight(&bridge_preflight_plan)
+        {
+            launch_log::record_failure_reason(format_args!(
+                "failed to start provider bridge: {error}"
+            ));
+            eprintln!("[clud] failed to start provider bridge: {error}");
+            std::process::exit(1);
+        }
+    }
+
     // Grant daemon-mutation authority only after every utility/special mode
     // has exited and only for the command-less normal launch shape (`clud run`
     // was normalized to this above). Non-launch modes never inherit it.

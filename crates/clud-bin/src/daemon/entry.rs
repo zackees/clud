@@ -807,6 +807,17 @@ fn select_session_kind(
 }
 
 pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &AtomicBool) -> i32 {
+    // Reject credential-less direct Codex bridge requests before the daemon
+    // creates a session that would immediately die in its worker. `start`
+    // repeats this admission check for workers/repeat launches, where a login
+    // can disappear after submission.
+    if let Err(error) = crate::foreground_runtime::ForegroundRuntime::preflight(plan) {
+        crate::launch_log::record_failure_reason(format_args!(
+            "failed to start provider bridge: {error}"
+        ));
+        eprintln!("[clud] failed to start provider bridge: {error}");
+        return 1;
+    }
     let state_dir = state_dir(args);
     if args.verbose {
         verbose_log::log(format_args!(
