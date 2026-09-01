@@ -625,6 +625,16 @@ def test_dry_run_reports_independent_provider_and_harness() -> None:
     assert data["command"][effort_index + 1] == "medium"
 
 
+def test_dry_run_deepseek_carries_low_catalog_effort_on_the_session_flag() -> None:
+    """DD-059: the direct DeepSeek default effort rides `--effort`, not an env pin."""
+    result = _run("--dry-run", "--deepseek", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_selection"]["effort"] == "low"
+    effort_index = data["command"].index("--effort")
+    assert data["command"][effort_index + 1] == "low"
+
+
 def test_dry_run_keeps_sol_selected_through_the_claude_loop_path() -> None:
     """Issue #955: loop/repeat planning must not lose the discovery address."""
     result = _run(

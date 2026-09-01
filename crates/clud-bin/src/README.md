@@ -157,7 +157,10 @@ Entry and orchestration:
   and `SessionStart(clear)` HTTP hooks, and tears the listener down on every
   runner return path. Unified mode enables discovery while preserving Claude
   credentials and ambient session effort; the direct Codex route enables the
-  same protocol with a Codex-only catalog and child-local 1.05M context metadata.
+  same protocol with a Codex-only catalog and child-local 1.05M context
+  metadata. Direct Anthropic-compat providers (DeepSeek, Kimi, OpenRouter)
+  carry the catalog's `low` effort default on the harness's `--effort` session
+  flag and never pin or scrub `CLAUDE_CODE_EFFORT_LEVEL` (DD-059).
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a

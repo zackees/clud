@@ -163,9 +163,11 @@ accepted work.
   and carries ordinary effort through Claude Code's independent `--effort`
   session flag. The bridge still accepts `wire@effort` as a compatibility
   input; only the provider wire ID reaches OpenAI.
-- Direct DeepSeek keeps its reviewed no-override max/1m child profile. Explicit
-  model, effort, and context selections replace only their corresponding
-  child-profile values.
+- Direct DeepSeek keeps its reviewed no-override 1m child profile. Effort
+  defaults to the catalog's `low` and travels on Claude Code's `--effort`
+  session flag — an initial value, never a pinned `CLAUDE_CODE_EFFORT_LEVEL`,
+  so `/effort` stays live (DD-059). Explicit model, effort, and context
+  selections replace only their corresponding child-profile values.
 - Direct OpenRouter uses the Claude harness with
   `openrouter-claude-sonnet` as its reviewed clud profile and
   `~anthropic/claude-sonnet-latest` as the wire ID. Because `anthropic/*` and

@@ -173,7 +173,7 @@ pub const MODELS: &[CatalogModel] = &[
         legacy_aliases: &["deepseek-v4-pro[1m]", "clud-claude-deepseek-v4-pro"],
         supported_efforts: ANTHROPIC_EFFORTS,
         supported_context_windows: AUTO_OR_1M_CONTEXT,
-        default_effort: Some(EffortLevel::Max),
+        default_effort: Some(EffortLevel::Low),
         default_context_window: Some("1m"),
         provider_default: true,
         claude_max_context_tokens: None,
@@ -188,7 +188,7 @@ pub const MODELS: &[CatalogModel] = &[
         legacy_aliases: &[],
         supported_efforts: ANTHROPIC_EFFORTS,
         supported_context_windows: AUTO_CONTEXT,
-        default_effort: None,
+        default_effort: Some(EffortLevel::Low),
         default_context_window: None,
         provider_default: false,
         claude_max_context_tokens: None,
@@ -203,7 +203,7 @@ pub const MODELS: &[CatalogModel] = &[
         legacy_aliases: &["kimi-k3[1m]"],
         supported_efforts: KIMI_EFFORTS,
         supported_context_windows: AUTO_OR_1M_CONTEXT,
-        default_effort: Some(EffortLevel::Max),
+        default_effort: Some(EffortLevel::Low),
         default_context_window: Some("1m"),
         provider_default: true,
         claude_max_context_tokens: None,
@@ -222,7 +222,7 @@ pub const MODELS: &[CatalogModel] = &[
         legacy_aliases: &[],
         supported_efforts: ANTHROPIC_EFFORTS,
         supported_context_windows: AUTO_CONTEXT,
-        default_effort: Some(EffortLevel::Max),
+        default_effort: Some(EffortLevel::Low),
         default_context_window: None,
         provider_default: true,
         claude_max_context_tokens: None,
@@ -1184,7 +1184,11 @@ mod tests {
         assert_eq!(default.display_name, "DeepSeek V4 Pro 0813");
         assert_eq!(selection.model.as_deref(), Some("deepseek-v4-pro"));
         assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro[1m]"));
-        assert_eq!(selection.effort, Some(EffortLevel::Max));
+        assert_eq!(selection.effort, Some(EffortLevel::Low));
+        assert_eq!(
+            selection.effort_source,
+            Some(SelectionSource::CatalogDefault)
+        );
         assert_eq!(selection.context_window.as_deref(), Some("1m"));
         assert_eq!(
             selection.context_window_source,
@@ -1257,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_launch_catalog_default_carries_1m_context_and_max_effort() {
+    fn kimi_launch_catalog_default_carries_1m_context_and_low_effort() {
         let selection = resolve_for_launch(ModelProvider::Kimi, None, None, None, None, true)
             .unwrap()
             .unwrap();
@@ -1265,7 +1269,7 @@ mod tests {
         assert_eq!(default.display_name, "Kimi K3");
         assert_eq!(selection.model.as_deref(), Some("kimi-k3"));
         assert_eq!(selection.wire_model.as_deref(), Some("kimi-k3[1m]"));
-        assert_eq!(selection.effort, Some(EffortLevel::Max));
+        assert_eq!(selection.effort, Some(EffortLevel::Low));
         assert_eq!(selection.context_window.as_deref(), Some("1m"));
         assert_eq!(default.claude_compact_window, Some(1_048_576));
     }
