@@ -51,6 +51,18 @@ struct ClaudeSettings {
 }
 
 impl ForegroundRuntime {
+    /// Validate the shared launch-admission requirements without creating a
+    /// listener, settings file, child environment, or harness process. Daemon
+    /// submission calls this before creating a durable session; `start` calls
+    /// it again at the worker/foreground boundary to cover later credential
+    /// loss and every non-daemon launch mode.
+    pub fn preflight(plan: &LaunchPlan) -> Result<(), BridgeError> {
+        if is_codex_via_claude(plan) && !is_unified(plan) {
+            preflight_codex_bridge_credentials()?;
+        }
+        Ok(())
+    }
+
     pub fn start(plan: &LaunchPlan, env: Vec<(String, String)>) -> Result<Self, BridgeError> {
         // `dsh` owns its provider configuration and credentials. A native
         // DeepSeek Harness launch needs no clud vault or bridge setup at all.
@@ -76,6 +88,10 @@ impl ForegroundRuntime {
             None => crate::provider_auth::NativeSecretStore::new(),
         }
         .map_err(|_| BridgeError::AnthropicCompatCredentials)?;
+        // This is the shared pre-child admission boundary for subprocess,
+        // PTY, detached, and worker launches. It must precede BridgeHandle
+        // construction so refusal cannot bind a listener or expose settings.
+        Self::preflight(plan)?;
         let runtime = Self::start_with_secret_store(plan, env, &store)?;
         for notice in &runtime.startup_notices {
             eprintln!("{notice}");
@@ -277,6 +293,21 @@ impl ForegroundRuntime {
         let adapter = NativePtyAdapter { rows, cols };
         self.spawn_with(&adapter, SpawnMode::Pty, command, cwd)
     }
+}
+
+// Unit routing tests intentionally construct bridge runtimes without a host
+// credential. The compiled CLI regression exercises the production boundary
+// with a real isolated process/home; keep its resolver separate from those
+// structural unit tests so they never accidentally consult developer state.
+#[cfg(not(test))]
+fn preflight_codex_bridge_credentials() -> Result<(), BridgeError> {
+    crate::codex_upstream::ResolvedCredentials::preflight_default()
+        .map_err(BridgeError::CodexBridgeCredentials)
+}
+
+#[cfg(test)]
+fn preflight_codex_bridge_credentials() -> Result<(), BridgeError> {
+    Ok(())
 }
 
 impl fmt::Debug for ForegroundRuntime {

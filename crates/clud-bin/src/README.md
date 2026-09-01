@@ -150,7 +150,9 @@ Entry and orchestration:
   [unified-gateway.md](../../../docs/architecture/unified-gateway.md).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
-  bridge or unified gateway, applies child-local overlays, emits sanitized
+  bridge or unified gateway, preflights direct Codex bridge credentials before
+  creating a listener or child (including daemon admission), applies child-local
+  overlays, emits sanitized
   optional-provider notices, registers launch-scoped authenticated `PreCompact`
   and `SessionStart(clear)` HTTP hooks, and tears the listener down on every
   runner return path. Unified mode enables discovery while preserving Claude

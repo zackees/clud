@@ -638,8 +638,8 @@ mod codex_upstream_credentials;
 use codex_upstream_credentials::{base64url_decode, resolve_api_key_target};
 use codex_upstream_credentials::{new_session_id, RetryObserver};
 pub use codex_upstream_credentials::{
-    ApiKeyCredentials, CludSubscriptionCredentials, CodexCliCredentials, ResolvedCredentials,
-    StreamOutcome, UpstreamConfig,
+    ApiKeyCredentials, CludSubscriptionCredentials, CodexBridgeCredentialError,
+    CodexCliCredentials, ResolvedCredentials, StreamOutcome, UpstreamConfig,
 };
 pub struct UpstreamClient<C: CredentialSource> {
     credentials: C,

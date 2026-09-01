@@ -346,6 +346,9 @@ pub enum BridgeError {
     /// Descriptor-backed provider credentials could not be read at the
     /// child-spawn boundary. The error is provider-neutral and secret-free.
     AnthropicCompatCredentials,
+    /// Direct Codex-via-Claude admission failed before the listener or child
+    /// exists. The renderer is shared by foreground and daemon launches.
+    CodexBridgeCredentials(crate::codex_upstream::CodexBridgeCredentialError),
     /// The caller has explicitly disabled the discovery request unified mode
     /// needs, so launching would silently present a misleading picker.
     DiscoveryDisabled,
@@ -368,6 +371,7 @@ impl fmt::Display for BridgeError {
             Self::AnthropicCompatCredentials => formatter.write_str(
                 "provider credentials are unavailable at the child-spawn boundary",
             ),
+            Self::CodexBridgeCredentials(error) => write!(formatter, "{error}"),
             Self::DiscoveryDisabled => formatter.write_str(
                 "this Claude gateway requires model discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled",
             ),

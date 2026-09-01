@@ -1,5 +1,52 @@
 use super::*;
 
+/// A secret-free explanation of why the bridge cannot be admitted.  This is
+/// deliberately narrower than [`UpstreamError`]: it owns the stable launch
+/// UX, while request-time resolution retains the detailed transport policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexBridgeCredentialError {
+    Missing,
+    ExpiredOrRevoked,
+    Corrupt,
+    Unreadable,
+}
+
+impl std::fmt::Display for CodexBridgeCredentialError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => formatter.write_str(
+                "cannot launch Claude with the Codex provider: no Codex bridge credential is configured.\n\
+\n\
+Choose one:\n\
+  ChatGPT subscription: clud auth login codex --acknowledge-experimental\n\
+  OpenAI API (metered): set OPENAI_API_KEY\n\
+\n\
+A native Codex CLI login is separate and is not imported from ~/.codex/auth.json.\n\
+To use that login now: clud --codex --harness default",
+            ),
+            Self::ExpiredOrRevoked => formatter.write_str(
+                "cannot launch Claude with the Codex provider: the clud-owned Codex bridge credential has expired or was revoked.\n\
+\n\
+Recover with:\n\
+  clud auth login codex --acknowledge-experimental",
+            ),
+            Self::Corrupt => formatter.write_str(
+                "cannot launch Claude with the Codex provider: the clud-owned Codex bridge credential is corrupt.\n\
+\n\
+Recover with:\n\
+  clud auth logout codex\n\
+  clud auth login codex --acknowledge-experimental",
+            ),
+            Self::Unreadable => formatter.write_str(
+                "cannot launch Claude with the Codex provider: the clud-owned Codex bridge credential is unreadable.\n\
+\n\
+Restore access to the clud credential store, then run:\n\
+  clud auth login codex --acknowledge-experimental",
+            ),
+        }
+    }
+}
+
 /// Platform API key credentials.
 #[derive(Clone)]
 pub struct ApiKeyCredentials {
@@ -129,6 +176,26 @@ impl CludSubscriptionCredentials {
             .with_account_id(credentials.account_id)
             .with_header("originator", CODEX_ORIGINATOR),
         })
+    }
+}
+
+fn classify_subscription_load_error(error: &str) -> CodexBridgeCredentialError {
+    if error == "no clud ChatGPT subscription login" {
+        CodexBridgeCredentialError::Missing
+    } else if error.starts_with("clud subscription credentials are corrupted")
+        || error == "clud subscription credentials have no access token"
+    {
+        CodexBridgeCredentialError::Corrupt
+    } else if error.starts_with("could not read clud subscription credentials")
+        || error.starts_with("could not create clud auth directory")
+        || error.starts_with("could not open clud credential lock")
+        || error.starts_with("could not lock clud credentials")
+    {
+        CodexBridgeCredentialError::Unreadable
+    } else {
+        // Refresh failures are intentionally collapsed by codex_auth so no
+        // upstream response or token detail reaches a launch diagnostic.
+        CodexBridgeCredentialError::ExpiredOrRevoked
     }
 }
 
@@ -265,6 +332,44 @@ pub enum ResolvedCredentials {
 }
 
 impl ResolvedCredentials {
+    /// Probe whether the direct Codex-via-Claude route can start. This never
+    /// returns credentials, so it cannot pin a token for the harness lifetime;
+    /// each request still calls `resolve_default` through `build_pipeline`.
+    pub fn preflight_default() -> Result<(), CodexBridgeCredentialError> {
+        let Some(home) = dirs_home() else {
+            return Err(CodexBridgeCredentialError::Unreadable);
+        };
+        Self::preflight_with(
+            codex_auth::load_fresh_at(&home),
+            ApiKeyCredentials::from_env,
+        )
+    }
+
+    fn preflight_with(
+        subscription: Result<SubscriptionCredentials, String>,
+        api_key: impl FnOnce() -> Result<ApiKeyCredentials, UpstreamError>,
+    ) -> Result<(), CodexBridgeCredentialError> {
+        match subscription {
+            Ok(credentials) => CludSubscriptionCredentials::from_record(credentials)
+                .map(|_| ())
+                .map_err(|error| match error {
+                    UpstreamError::Credentials(message) => {
+                        classify_subscription_load_error(message)
+                    }
+                    _ => CodexBridgeCredentialError::Corrupt,
+                }),
+            Err(error)
+                if classify_subscription_load_error(&error)
+                    == CodexBridgeCredentialError::Missing =>
+            {
+                api_key()
+                    .map(|_| ())
+                    .map_err(|_| CodexBridgeCredentialError::Missing)
+            }
+            Err(error) => Err(classify_subscription_load_error(&error)),
+        }
+    }
+
     /// A clud-managed subscription record is an explicit, persisted selection
     /// made by `clud auth login codex`; while it exists no API-key fallback is
     /// attempted. Without it, only the platform API-key path is considered.
@@ -301,6 +406,99 @@ impl CredentialSource for ResolvedCredentials {
         match self {
             Self::ApiKey(credentials) => credentials.resolve(),
             Self::Subscription(credentials) => credentials.resolve(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    #[test]
+    fn bridge_preflight_renderer_is_actionable_and_secret_free() {
+        let missing = CodexBridgeCredentialError::Missing.to_string();
+        assert!(missing.contains("clud auth login codex --acknowledge-experimental"));
+        assert!(missing.contains("set OPENAI_API_KEY"));
+        assert!(missing.contains("clud --codex --harness default"));
+        assert!(missing.contains("separate and is not imported from ~/.codex/auth.json"));
+        assert!(!missing.contains("Bearer "));
+
+        let expired = CodexBridgeCredentialError::ExpiredOrRevoked.to_string();
+        assert!(expired.contains("expired or was revoked"));
+        assert!(expired.contains("clud auth login codex --acknowledge-experimental"));
+
+        let corrupt = CodexBridgeCredentialError::Corrupt.to_string();
+        assert!(corrupt.contains("clud auth logout codex"));
+        assert!(corrupt.contains("clud auth login codex --acknowledge-experimental"));
+
+        let unreadable = CodexBridgeCredentialError::Unreadable.to_string();
+        assert!(unreadable.contains("unreadable"));
+        assert!(!unreadable.contains(".clud/codex-auth.json"));
+    }
+
+    #[test]
+    fn preflight_classifies_clud_owned_state_without_echoing_details() {
+        assert_eq!(
+            classify_subscription_load_error("no clud ChatGPT subscription login"),
+            CodexBridgeCredentialError::Missing
+        );
+        assert_eq!(
+            classify_subscription_load_error(
+                "clud subscription credentials are corrupted; run `clud auth logout codex`"
+            ),
+            CodexBridgeCredentialError::Corrupt
+        );
+        assert_eq!(
+            classify_subscription_load_error(
+                "could not read clud subscription credentials: permission denied"
+            ),
+            CodexBridgeCredentialError::Unreadable
+        );
+        assert_eq!(
+            classify_subscription_load_error(
+                "the Codex login has expired -- run `clud auth login codex`"
+            ),
+            CodexBridgeCredentialError::ExpiredOrRevoked
+        );
+    }
+
+    #[test]
+    fn preflight_admits_subscription_or_api_key_without_retaining_either() {
+        let subscription = SubscriptionCredentials {
+            access_token: "test-subscription-access".to_string(),
+            refresh_token: "test-subscription-refresh".to_string(),
+            account_id: None,
+            email: None,
+            expires_at_unix: None,
+        };
+        assert!(ResolvedCredentials::preflight_with(Ok(subscription), || unreachable!()).is_ok());
+        assert!(ResolvedCredentials::preflight_with(
+            Err("no clud ChatGPT subscription login".to_string()),
+            || ApiKeyCredentials::new("test-api-key", None),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn preflight_reports_expired_corrupt_and_unreadable_owned_records() {
+        for (raw, expected) in [
+            (
+                "the Codex login has expired -- run `clud auth login codex`",
+                CodexBridgeCredentialError::ExpiredOrRevoked,
+            ),
+            (
+                "clud subscription credentials are corrupted; run `clud auth logout codex`",
+                CodexBridgeCredentialError::Corrupt,
+            ),
+            (
+                "could not read clud subscription credentials: permission denied",
+                CodexBridgeCredentialError::Unreadable,
+            ),
+        ] {
+            assert_eq!(
+                ResolvedCredentials::preflight_with(Err(raw.to_string()), || unreachable!()),
+                Err(expected)
+            );
         }
     }
 }
