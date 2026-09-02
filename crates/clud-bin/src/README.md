@@ -309,12 +309,26 @@ which test tier a change belongs in — lives in
   `~/.clud/tools/hooks/block-bad-cmd.log` (#525). User-facing rule-writing
   guide lives in the root `README.md`. Also enforces `bash.block_cd` via
   `block_bad_cmd_cd.rs` (see below), after the command rules so an
-  independently forbidden command reports the stronger reason.
+  independently forbidden command reports the stronger reason. And it is the
+  dispatcher for Tier B (#966 §6, #967 Phase 4): `declared_hook_denial`
+  resolves the fire targets once per call (parent, then distinct child/extern
+  roots), runs each root's hooks rooted at the root — the parent's hooks only
+  for parent/child-owned paths, never extern-owned — layers any deny, and
+  gates child/extern execution behind the codex project trust table
+  (`hook_health/codex_trust.rs`) and extern roots behind `hook_trust.rs`
+  (DD-060/DD-061).
 - `clud_hooks.rs` - `.clud/hooks.json` schema, discovery, and matcher
-  semantics (#967 Phase 2). Matchers are anchored regexes over the tool name;
-  an uncompilable one falls back to equality so a declaration clud cannot parse
-  under-matches rather than firing someone's guard against tools they never
-  named. Parsing is lenient per entry, like `repo_clud_config`.
+  semantics (#967 Phase 2), plus the Tier B source for sub-repos (#967 Phase 4,
+  D4): `from_frontend_settings` reads `.claude/settings.json`,
+  `.claude/settings.local.json`, and `.codex/hooks.json` (in that order) and
+  parses the `hooks.<Event>` group shape and the legacy direct shapes,
+  including codex's root-level `<Event>` legacy shape. Non-`command` handler
+  types are skipped, `hooks.state` (codex's trust table) is never an event,
+  and entries dedupe across files by (event, matcher, command). Matchers are
+  anchored regexes over the tool name; an uncompilable one falls back to
+  equality so a declaration clud cannot parse under-matches rather than firing
+  someone's guard against tools they never named. Parsing is lenient per
+  entry, like `repo_clud_config`.
 - `extern_root.rs` - where a repo's foreign checkouts live (#986). Beside the
   repo (`~/dev/myrepo` -> `~/dev/myrepo-extern/`), not inside it, so no tool
   pointed at the repo can reach them and no exclusion has to be maintained.
@@ -325,6 +339,12 @@ which test tier a change belongs in — lives in
   during migration. Claiming (`claim_state`/`claim`) refuses a non-empty
   directory clud did not create, because the name is guessed from the repo's
   own and guessing wrong must not scatter clones through somebody's project.
+- `extern_cli.rs` - `clud extern trust <name>` (#967 Phase 4, DD-060): the
+  one-command enable for a foreign checkout's hooks. Records `{name, origin}`
+  in the parent's `hook_trust` store (origin read from the checkout's
+  `.git/config` in-process), plus `--list` and `--revoke`; the parent root is
+  resolved via `block_bad_cmd::nearest_repo_root_public`, so the command works
+  from anywhere under the parent.
 - `clud_hook_roots.rs` - the typed hook-root registry (#966 §5-6, #967 Phase
   3). `parent` (session root), `extern` (immediate children of
   `.extern-repos/`, implicit), `child` (declared in `.clud/settings.json`;
@@ -336,6 +356,14 @@ which test tier a change belongs in — lives in
   would answer "parent" for a subagent's edit inside a sub-repo. Roots clud
   resolves at launch that a hook cannot rediscover travel in `CLUD_HOOK_ROOTS`
   as JSON.
+- `hook_trust.rs` - the Tier-B trust store (#967 Phase 4, DD-060/DD-062): the
+  `hook_trust.extern` allowlist in the parent's gitignored
+  `.clud/settings.local.json`, keyed by checkout name + origin URL. `load` is
+  lenient (corrupt or missing store = empty allowlist), `record`/`revoke` are
+  read-modify-write preserving every other key in the file, `is_trusted`
+  matches origin exactly or by name alone for origin-less checkouts, and
+  `origin_of` reads `.git/config` in-process (both remote section spellings,
+  quoted values, worktree `gitdir:` files) without spawning git.
 - `clud_hooks_compile.rs` - compiles declarations into a frontend's native
   registration (#977, #967 Phase 2b). One dispatcher line per declared event,
   matcher `*` — the per-hook matcher is applied by clud at dispatch time, so
@@ -444,7 +472,11 @@ Skills and hooks:
   backend's skills dir. See
   [DD-039](../../../docs/DESIGN_DECISIONS.md#dd-039-single-skill-installer-over-a-single-source-tree).
 - `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
-  remediation.
+  remediation. `codex_trust.rs` also owns `codex_project_trusted` — the
+  `[projects."<key>"] trust_level = "trusted"` check against
+  `~/.codex/config.toml` that gates child/extern Tier-B hook execution in
+  codex sessions (#967 Phase 4), and the `add_codex_project_trust` repair
+  behind `clud --fix-hooks`.
 - `block_bad_cmd_rollout.rs` - startup health/migration for the native
   `clud-block-bad-cmd` helper: stale install warning plus exact old hook
   command rewrites when the helper is available.
@@ -549,6 +581,8 @@ Quick lookup, which file owns a given subcommand:
 - `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.
 - `clud settings [--list]` -> `settings_tui.rs`.
+- `clud extern trust <name> [--list|--revoke]` -> `extern_cli.rs` (+
+  `hook_trust.rs` for the store).
 
 ## Cross-Cutting Subsystems
 
@@ -572,6 +606,9 @@ Subsystems that span multiple files have their own topic docs under
 - **Provider selection** (routing mode + provider-neutral model registry) -> [docs/architecture/provider-selection.md](../../../docs/architecture/provider-selection.md)
 - **Unified gateway** (`codex_bridge`, `codex_history`, `foreground_runtime`,
   `provider_catalog`, `auth`) -> [docs/architecture/unified-gateway.md](../../../docs/architecture/unified-gateway.md)
+- **Hook dispatch** (`clud_hooks*`, `clud_hook_roots`, `hook_trust`,
+  `extern_cli`, `block_bad_cmd*`, `extern_root`, `hook_health`) ->
+  [docs/architecture/hook-dispatch.md](../../../docs/architecture/hook-dispatch.md)
 
 Non-obvious design choices (single `LaunchPlan`, `lib.rs` as the only
 `mod ...` site, cooperative Ctrl+C, redb single-owner) have ADRs in
