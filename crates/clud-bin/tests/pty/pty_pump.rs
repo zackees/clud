@@ -710,6 +710,78 @@ fn extra_rx_ctrl_c_byte_interrupts_pump() {
     }
 }
 
+/// Regression for issue #1101: Ctrl+C in the kitty keyboard protocol's
+/// CSI u encoding must interrupt the pump the same way the legacy `0x03`
+/// byte does.
+///
+/// clud used to push `DISAMBIGUATE_ESCAPE_CODES` alongside
+/// `REPORT_EVENT_TYPES`, which makes a kitty-protocol terminal send Ctrl+C
+/// as `\x1b[99;5u` instead of `0x03`. The pump's only interrupt detector was
+/// `chunk.contains(&0x03)`, and raw mode had already cleared `ISIG` so the
+/// `ctrlc` SIGINT handler could not cover for it either — a `clud grind` run
+/// could only be stopped by closing the terminal window, while the forwarded
+/// sequences echoed back from the child as literal `^[[99;5:2u` text.
+///
+/// The primary fix is not pushing that flag (see `KEYBOARD_ENHANCEMENT_FLAGS`
+/// in `session.rs`). This test pins the backstop: whoever pushes the flag —
+/// a child TUI, or a future change here — Ctrl+C still has to work. It uses
+/// the autorepeat spelling (`:2u`) because that is what a *held* Ctrl+C
+/// emits, which is the state the reporter was actually stuck in.
+///
+/// Mirrors `extra_rx_ctrl_c_byte_interrupts_pump`, including its POSIX exit
+/// code caveat: the load-bearing assertion is that the pump returned at all
+/// rather than blocking on the child's 10s sleep.
+#[test]
+fn extra_rx_kitty_csi_u_ctrl_c_interrupts_pump() {
+    require_pty_or_skip!("extra_rx_kitty_csi_u_ctrl_c_interrupts_pump");
+
+    let agent = mock_agent_path();
+    let argv = vec![
+        agent.to_string_lossy().to_string(),
+        "--mock-sleep-ms".to_string(),
+        "10000".to_string(),
+    ];
+
+    let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+    std::thread::sleep(Duration::from_millis(150));
+
+    let (extra_tx, extra_rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = extra_tx.send(b"\x1b[99;5:2u".to_vec());
+    });
+
+    let interrupted = AtomicBool::new(false);
+    let mut hooks = CountingHooks::new(false);
+
+    let start = Instant::now();
+    let exit = clud::session::run_raw_pty_pump_with_extra_rx(
+        &process,
+        &interrupted,
+        &mut hooks,
+        Cursor::new(Vec::<u8>::new()),
+        Some(extra_rx),
+    );
+    let elapsed = start.elapsed();
+
+    let _ = process.close_impl();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "pump should return promptly after a CSI u Ctrl+C; took {:?}",
+        elapsed
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            exit, 130,
+            "CSI u Ctrl+C must yield SIGINT-convention exit code 130 on Windows; got {}",
+            exit
+        );
+    }
+}
+
 // ─── Issue #538: dedicated writer thread decouples stdin forwarding from a
 // stalled stdout sink ────────────────────────────────────────────────────
 

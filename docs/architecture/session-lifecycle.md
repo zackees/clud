@@ -60,9 +60,32 @@ arms the per-session guards in this order before allocating the PTY:
    the pump owns forwarding.
 4. `_raw_guard = session::enter_raw_mode_if_tty()` (`runner.rs:526`,
    `session.rs:273`) — `crossterm::terminal::enable_raw_mode` plus
-   `PushKeyboardEnhancementFlags(REPORT_EVENT_TYPES |
-   DISAMBIGUATE_ESCAPE_CODES)` so the kitty keyboard protocol carries F3
-   release events through. Dropped at `runner.rs:541`.
+   `PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT_FLAGS)` so the kitty
+   keyboard protocol carries F3 release events through. Dropped at
+   `runner.rs:541`.
+
+   **`DISAMBIGUATE_ESCAPE_CODES` is deliberately *not* in that set
+   (issue #1101).** It was pushed alongside `REPORT_EVENT_TYPES` from
+   a4ef5f5 until 2026-09-02, and it makes a kitty-protocol terminal
+   re-encode every Ctrl chord as CSI u — Ctrl+C arrives as `\x1b[99;5u`
+   instead of byte `0x03`. That removed both ways out of a session at once:
+   `stdin_chunk_requests_interrupt` matched no `0x03`, and raw mode had
+   already cleared `ISIG` so no SIGINT reached the `ctrlc` handler. The
+   sequences were forwarded verbatim to a child that does not speak the
+   protocol, whose PTY echoed them back as literal text, so holding Ctrl+C
+   flooded the terminal with `^[[99;5:2u` while a 200-iteration
+   `clud grind` ran on.
+
+   `REPORT_EVENT_TYPES` stays because it is the flag that asks for key
+   release at all, which is what #13's hold-to-record needs; `F3Observer`
+   matches the event type on both the tilde and CSI u spellings. Whether
+   every terminal attaches event types to the legacy `\x1b[13~` encoding with
+   disambiguate off is *not* asserted — the spec states no dependency between
+   the flags but does not spell the interaction out. Where it does not hold,
+   hold-to-record falls back to the VAD-silence auto-stop `voice.rs` already
+   uses on ConPTY. `stdin_chunk_requests_interrupt` also decodes the CSI u
+   spelling of Ctrl+C as a backstop, so a child TUI that pushes the flag for
+   its own use cannot take Ctrl+C away again.
 
 ## The pump loop (`run_raw_pty_pump`)
 

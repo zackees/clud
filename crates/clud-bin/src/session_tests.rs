@@ -496,3 +496,82 @@ fn output_writer_flushes_remaining_chunks_before_exiting() {
         "both chunks must land, in order, before the writer thread exits"
     );
 }
+
+// ─── Ctrl+C detection (issue #1101) ───────────────────────────────────
+//
+// `clud grind` on a kitty-protocol terminal became uninterruptible: the
+// pushed `DISAMBIGUATE_ESCAPE_CODES` flag made the terminal send Ctrl+C as
+// `\x1b[99;5u` rather than `0x03`, and raw mode had already cleared `ISIG`
+// so the `ctrlc` SIGINT handler could not cover for it. The primary fix is
+// not pushing that flag; the CSI u decoder below is the backstop.
+
+#[test]
+fn pushed_flags_exclude_disambiguate_escape_codes() {
+    // The whole of issue #1101 is downstream of this one bit. A future
+    // edit that re-adds it takes Ctrl+C away from every kitty-protocol
+    // terminal again, so assert it directly rather than by behavior.
+    assert!(
+        !KEYBOARD_ENHANCEMENT_FLAGS.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        "DISAMBIGUATE_ESCAPE_CODES re-encodes Ctrl+C as CSI u — see issue #1101"
+    );
+    assert!(
+        KEYBOARD_ENHANCEMENT_FLAGS.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
+        "REPORT_EVENT_TYPES carries the F3 release event hold-to-record needs (#13)"
+    );
+}
+
+#[test]
+fn kitty_csi_u_ctrl_c_requests_interrupt() {
+    // Bare form (no explicit event type) — what kitty sends on press.
+    assert!(stdin_chunk_requests_interrupt(b"\x1b[99;5u"), "press");
+    // Explicit press and autorepeat. A held key emits a stream of :2u,
+    // which is exactly the flood the reporter saw; any one of them has
+    // to be enough to break out.
+    assert!(stdin_chunk_requests_interrupt(b"\x1b[99;5:1u"), "press :1");
+    assert!(stdin_chunk_requests_interrupt(b"\x1b[99;5:2u"), "repeat :2");
+    // Ctrl+Shift+C: terminal reports the shifted `C` (67) with ctrl+shift
+    // modifiers (4 + 1 + 1 = 6).
+    assert!(stdin_chunk_requests_interrupt(b"\x1b[67;6u"), "ctrl+shift");
+    // Embedded in a larger chunk, and repeated.
+    assert!(stdin_chunk_requests_interrupt(b"hi\x1b[99;5uthere"));
+    assert!(stdin_chunk_requests_interrupt(
+        b"\x1b[99;5:2u\x1b[99;5:2u\x1b[99;5:3u"
+    ));
+}
+
+#[test]
+fn kitty_csi_u_release_alone_does_not_request_interrupt() {
+    // Event type 3 is a key release. The press that preceded it already
+    // fired; counting the release too would interrupt twice.
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99;5:3u"));
+}
+
+#[test]
+fn non_ctrl_c_csi_u_sequences_do_not_request_interrupt() {
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99u"), "bare c");
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99;1u"), "c, no mods");
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99;2u"), "shift+c");
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99;3u"), "alt+c");
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[100;5u"), "ctrl+d");
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[27u"), "escape");
+    assert!(
+        !stdin_chunk_requests_interrupt(b"\x1b[13;1:3~"),
+        "F3 release"
+    );
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[6n"), "DSR query");
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[200~pasted\x1b[201~"));
+}
+
+#[test]
+fn malformed_csi_u_sequences_do_not_request_interrupt_or_panic() {
+    // Truncated (final byte lands in the next chunk), non-numeric params,
+    // a modifier field of 0 (which would underflow the bitfield decrement),
+    // and a lone ESC. None may match, none may panic.
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99;5"));
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99;xu"));
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[;;;u"));
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b[99;0u"));
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b["));
+    assert!(!stdin_chunk_requests_interrupt(b"\x1b"));
+    assert!(!stdin_chunk_requests_interrupt(&[0x1b, b'[', 0xff, b'u']));
+}
