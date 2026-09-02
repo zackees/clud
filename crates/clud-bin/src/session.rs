@@ -327,15 +327,48 @@ pub fn enter_raw_mode_if_tty() -> Option<RawTerminalGuard> {
     }
 }
 
+/// Keyboard-enhancement flags clud pushes for the lifetime of a PTY session.
+///
+/// **`DISAMBIGUATE_ESCAPE_CODES` is deliberately absent** (issue #1101).
+/// That flag makes a kitty-protocol terminal re-encode every Ctrl chord as a
+/// CSI u sequence, so Ctrl+C arrives as `\x1b[99;5u` instead of byte `0x03`.
+/// It took away the ability to interrupt a session two ways at once:
+/// `stdin_chunk_requests_interrupt` saw no `0x03`, and raw mode had already
+/// cleared `ISIG` so no SIGINT reached the `ctrlc` handler either. The bytes
+/// were then forwarded verbatim to a child that does not speak the protocol,
+/// whose PTY echoed them back as literal text — holding Ctrl+C flooded the
+/// terminal with `^[[99;5:2u` and a 200-iteration `clud grind` could only be
+/// stopped by closing the window.
+///
+/// `REPORT_EVENT_TYPES` is kept because it is the flag that asks the terminal
+/// for key release at all, which is what issue #13's hold-to-record needs.
+/// `F3Observer` already matches the event type on both the tilde and CSI u
+/// forms (`parse_f3_csi`), so whichever spelling a terminal uses is counted.
+///
+/// What is **not** claimed here is that every kitty-protocol terminal attaches
+/// event types to the legacy `\x1b[13~` encoding once disambiguate is off. The
+/// protocol spec presents the two flags as independent and states no
+/// dependency, but does not spell that interaction out. If some terminal turns
+/// out to report release only for CSI u forms, F3 hold-to-record there
+/// degrades to the VAD-silence auto-stop `voice.rs` already uses as its
+/// ConPTY fallback — a precision loss in an optional feature, deliberately
+/// traded against being unable to interrupt a session at all.
+///
+/// Both flags were pushed together in a4ef5f5 (2026-04-14), four weeks before
+/// the voice feature that now documents them existed.
+const KEYBOARD_ENHANCEMENT_FLAGS: KeyboardEnhancementFlags =
+    KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+
 impl RawTerminalGuard {
     pub fn enter() -> io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
 
         let mut stdout = io::stdout();
-        let flags = KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-            | KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
-        let enhancement_flags_pushed =
-            execute!(stdout, PushKeyboardEnhancementFlags(flags)).is_ok();
+        let enhancement_flags_pushed = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT_FLAGS)
+        )
+        .is_ok();
 
         Ok(Self {
             enhancement_flags_pushed,
