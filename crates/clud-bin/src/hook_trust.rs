@@ -252,11 +252,7 @@ pub fn revoke(repo_root: &Path, name: &str) -> Result<bool, String> {
 /// it is a bare directory name — no path separators, no `.`/`..`.
 #[must_use]
 pub fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
 /// The `origin` remote URL of the git repository at `repo_root`, read from
@@ -329,10 +325,7 @@ fn remote_origin_url(text: &str) -> Option<String> {
 }
 
 fn section_is_origin(header: &str) -> bool {
-    let inner = header
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
+    let inner = header.trim_start_matches('[').trim_end_matches(']').trim();
     let Some((section, rest)) = inner.split_once(['.', ' ']) else {
         return inner.eq_ignore_ascii_case("remote");
     };

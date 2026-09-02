@@ -239,6 +239,13 @@ fn run(mut args: args::Args) {
     // #407: `clud test` records/reports per-bucket test runtimes. Self-
     // contained; never launches a backend. `run` returns the wrapped command's
     // exit code unchanged so prefixing it onto an existing invocation is safe.
+    // `clud extern` manages the per-machine trust allowlist for foreign
+    // checkouts' hooks (#967 Phase 4). Self-contained; never launches a
+    // backend and must not touch the daemon.
+    if let Some(args::Command::Extern { subcommand }) = &args.command {
+        std::process::exit(clud::extern_cli::run(subcommand.as_ref()));
+    }
+
     if let Some(args::Command::Test { subcommand }) = &args.command {
         let code = match subcommand {
             args::TestSubcommand::Run {

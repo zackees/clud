@@ -18,7 +18,9 @@ fn an_empty_or_missing_store_is_empty() {
     assert!(load(&root).is_empty());
     assert!(parse("").unwrap().is_empty());
     assert!(parse("{}").unwrap().is_empty());
-    assert!(parse(r#"{"rust": {"use_soldr": true}}"#).unwrap().is_empty());
+    assert!(parse(r#"{"rust": {"use_soldr": true}}"#)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -69,7 +71,7 @@ fn parse_skips_malformed_entries_and_dedupes() {
 #[test]
 fn parse_errors_only_on_bad_json() {
     assert!(parse("not json").is_err());
-    assert!(parse(r#"{"hook_trust": "nope"}"#).is_err() == false); // warned, not fatal
+    assert!(parse(r#"{"hook_trust": "nope"}"#).is_ok()); // warned, not fatal
 }
 
 #[test]
@@ -77,12 +79,28 @@ fn record_writes_and_load_reads_back() {
     let tmp = TempDir::new().unwrap();
     let root = repo(tmp.path(), "myrepo");
 
-    record(&root, "running-process", "https://github.com/zackees/running-process.git")
-        .unwrap();
+    record(
+        &root,
+        "running-process",
+        "https://github.com/zackees/running-process.git",
+    )
+    .unwrap();
     let store = load(&root);
-    assert!(is_trusted(&store, "running-process", Some("https://github.com/zackees/running-process.git")));
-    assert!(!is_trusted(&store, "running-process", Some("https://github.com/someone-else/running-process.git")));
-    assert!(!is_trusted(&store, "other", Some("https://github.com/zackees/running-process.git")));
+    assert!(is_trusted(
+        &store,
+        "running-process",
+        Some("https://github.com/zackees/running-process.git")
+    ));
+    assert!(!is_trusted(
+        &store,
+        "running-process",
+        Some("https://github.com/someone-else/running-process.git")
+    ));
+    assert!(!is_trusted(
+        &store,
+        "other",
+        Some("https://github.com/zackees/running-process.git")
+    ));
 }
 
 #[test]
@@ -167,12 +185,16 @@ fn a_stale_entry_after_gc_teardown_is_harmless() {
     record(&root, "alpha", "https://a").unwrap();
 
     // GC tears the checkout down; the entry stays in the store.
-    fs::remove_dir_all(&extern_root.join("alpha")).unwrap();
+    fs::remove_dir_all(extern_root.join("alpha")).unwrap();
     assert!(load(&root).extern_entries.len() == 1, "stale entry remains");
 
     // A fresh checkout from a different origin must not inherit the trust.
     fs::create_dir_all(extern_root.join("alpha")).unwrap();
-    assert!(!is_trusted(&load(&root), "alpha", Some("https://different")));
+    assert!(!is_trusted(
+        &load(&root),
+        "alpha",
+        Some("https://different")
+    ));
     // A fresh checkout from the same origin is still trusted — the user
     // trusted that name + remote.
     assert!(is_trusted(&load(&root), "alpha", Some("https://a")));
@@ -223,7 +245,10 @@ fn origin_of_accepts_both_section_spellings_and_quotes() {
         Some("https://mine".to_string())
     );
     assert_eq!(remote_origin_url("[remote \"origin\"]\n"), None);
-    assert_eq!(remote_origin_url("[core]\n\turl = https://not-a-remote\n"), None);
+    assert_eq!(
+        remote_origin_url("[core]\n\turl = https://not-a-remote\n"),
+        None
+    );
 }
 
 #[test]
