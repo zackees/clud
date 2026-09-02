@@ -52,7 +52,13 @@ def _cmd_scan_binary() -> Path:
     raise AssertionError("clud-cmd-scan test binary not found")
 
 
-def _make_repo(tmp_path: Path, *, hooks: str | None, settings: str | None = None) -> Path:
+def _make_repo(
+    tmp_path: Path,
+    *,
+    hooks: str | None,
+    settings: str | None = None,
+    hooks_json: str | None = None,
+) -> Path:
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     (repo / "src").mkdir()
@@ -64,6 +70,10 @@ def _make_repo(tmp_path: Path, *, hooks: str | None, settings: str | None = None
         clud = repo / ".clud"
         clud.mkdir()
         (clud / "settings.json").write_text(settings, encoding="utf-8")
+    if hooks_json is not None:
+        clud = repo / ".clud"
+        clud.mkdir()
+        (clud / "hooks.json").write_text(hooks_json, encoding="utf-8")
     return repo
 
 
@@ -172,3 +182,103 @@ def test_override_env_releases_a_single_call(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ---------------------------------------------------------------------
+# Phase 5: "auto" relaxes for a migrated repo.
+# ---------------------------------------------------------------------
+
+
+def test_a_migrated_repo_relaxes_to_allow_in_repo_cd(tmp_path: Path) -> None:
+    # Migration earns relaxation (D13): a `.clud/hooks.json` opt-in means the
+    # repo's hooks are dispatcher-managed and cwd-immune, however sensitive
+    # their command text looks — so "auto" resolves to relaxed, `cd` moves
+    # freely inside the registered root, and only an escape is denied.
+    repo = _make_repo(
+        tmp_path,
+        hooks=None,
+        hooks_json=json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {"command": "uv run python ci/hooks/check-on-stop.py"}
+                    ]
+                }
+            }
+        ),
+    )
+
+    inside = _run(tmp_path, repo, "cd src && ls")
+    assert inside.returncode == 0, inside.stdout + inside.stderr
+
+    escaping = _run(tmp_path, repo, "cd ~ && ls")
+    assert escaping.returncode == 2, escaping.stdout + escaping.stderr
+    assert "deny" in escaping.stdout
+
+
+def test_a_migrated_repo_that_keeps_a_sensitive_raw_hook_stays_strict(
+    tmp_path: Path,
+) -> None:
+    # The harness fires raw frontend-settings hooks unrooted, so a sensitive
+    # one keeps the repo strict even after the migration — the opt-in cannot
+    # mask it.
+    repo = _make_repo(
+        tmp_path,
+        hooks=SENSITIVE_HOOK,
+        hooks_json=json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {"command": "uv run python ci/hooks/check-on-stop.py"}
+                    ]
+                }
+            }
+        ),
+    )
+
+    result = _run(tmp_path, repo, "cd src && ls")
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "check-on-stop.py" in result.stdout
+
+
+def test_relaxed_movement_judges_against_the_whole_registered_root_set(
+    tmp_path: Path,
+) -> None:
+    # Relaxed pins the session to the registered trees — parent and extern
+    # alike (Phase 3 roots) — so a move into a granted sibling is allowed and
+    # only an escape of all of them is denied.
+    repo = _make_repo(
+        tmp_path,
+        hooks=None,
+        hooks_json=json.dumps(
+            {"hooks": {"Stop": [{"command": "check-on-stop.py"}]}}
+        ),
+    )
+    extern = tmp_path / "extern" / "dep"
+    extern.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    roots = json.dumps(
+        [
+            {"kind": "parent", "path": str(repo)},
+            {"kind": "extern", "path": str(extern)},
+        ]
+    )
+
+    into_extern = _run(
+        tmp_path,
+        repo,
+        f"cd {extern} && ls",
+        extra_env={"CLUD_HOOK_ROOTS": roots},
+    )
+    assert into_extern.returncode == 0, into_extern.stdout + into_extern.stderr
+
+    escaping = _run(
+        tmp_path,
+        repo,
+        f"cd {elsewhere} && ls",
+        extra_env={"CLUD_HOOK_ROOTS": roots},
+    )
+    assert escaping.returncode == 2, escaping.stdout + escaping.stderr
+    assert "deny" in escaping.stdout

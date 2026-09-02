@@ -221,21 +221,79 @@ fn strict_allows_cd_back_to_a_registered_root_as_the_recovery_path() {
 }
 
 #[test]
-fn strict_denies_an_unresolvable_target_but_escape_only_does_not() {
-    // Strict must be able to prove the destination is a root; escape-only
+fn strict_denies_an_unresolvable_target_but_relaxed_does_not() {
+    // Strict must be able to prove the destination is a root; relaxed
     // narrows only on evidence of an escape, and has none here.
     assert!(deny("cd $SOME_DIR", CdPolicy::Strict).is_some());
-    assert!(deny("cd $SOME_DIR", CdPolicy::EscapeOnly).is_none());
+    assert!(deny("cd $SOME_DIR", CdPolicy::Relaxed).is_none());
     assert!(deny("cd -", CdPolicy::Strict).is_some());
-    assert!(deny("cd -", CdPolicy::EscapeOnly).is_none());
+    assert!(deny("cd -", CdPolicy::Relaxed).is_none());
 }
 
 #[test]
-fn escape_only_allows_in_repo_movement_and_denies_leaving() {
-    assert!(deny("cd src", CdPolicy::EscapeOnly).is_none());
-    assert!(deny("cd ./crates", CdPolicy::EscapeOnly).is_none());
-    assert!(deny("cd ~", CdPolicy::EscapeOnly).is_some());
-    assert!(deny("cd ../elsewhere", CdPolicy::EscapeOnly).is_some());
+fn relaxed_allows_in_repo_movement_and_denies_leaving() {
+    // The Phase 5 exit criterion: a fully-migrated repo can `cd` freely
+    // inside its registered trees, and only an escape of *all* of them is
+    // denied.
+    assert!(deny("cd src", CdPolicy::Relaxed).is_none());
+    assert!(deny("cd ./crates", CdPolicy::Relaxed).is_none());
+    assert!(deny("cd ~", CdPolicy::Relaxed).is_some());
+    assert!(deny("cd ../elsewhere", CdPolicy::Relaxed).is_some());
+}
+
+#[test]
+fn relaxed_allows_movement_between_registered_roots() {
+    // Phase 3 widened the pinned set from {parent root} to all registered
+    // roots; moving from one root's tree into another's is not an escape.
+    let roots = if cfg!(windows) {
+        vec![
+            PathBuf::from(r"C:\repo"),
+            PathBuf::from(r"C:\extern\dep"),
+            PathBuf::from(r"C:\child"),
+        ]
+    } else {
+        vec![
+            PathBuf::from("/repo"),
+            PathBuf::from("/extern/dep"),
+            PathBuf::from("/child"),
+        ]
+    };
+    let from_extern = roots[1].join("src");
+    let from_child = roots[2].join("lib");
+    let reason = |command: &str, cwd: &Path| {
+        cd_denial_reason(
+            command,
+            ShellDialect::Posix,
+            CdPolicy::Relaxed,
+            cwd,
+            &roots,
+            Some(&home()),
+            None,
+        )
+    };
+    assert!(reason("cd /repo", &from_extern).is_none());
+    assert!(
+        reason("cd ..", &from_child).is_none(),
+        "back into the child root"
+    );
+    assert!(
+        reason("cd ../..", &from_child).is_some(),
+        "out of every registered root"
+    );
+    assert!(reason("cd /elsewhere", &from_extern).is_some());
+    // Strict still requires the destination to *be* a root: in-tree
+    // subdirectories stay denied even in a multi-root session.
+    assert!(reason("cd src", &from_extern).is_none());
+    assert!(cd_denial_reason(
+        "cd src",
+        ShellDialect::Posix,
+        CdPolicy::Strict,
+        &roots[1],
+        &roots,
+        Some(&home()),
+        None,
+    )
+    .is_some());
 }
 
 #[test]
@@ -293,6 +351,23 @@ fn a_strict_denial_quotes_the_hook_that_earned_it() {
 fn scan_with(sensitive: bool, any: bool) -> HookCwdScan {
     HookCwdScan {
         any_hooks: any,
+        dispatcher_managed: false,
+        sensitive: if sensitive {
+            vec![SensitiveHook {
+                source: PathBuf::from(".claude/settings.json"),
+                command: "uv run python ci/hooks/check.py".to_string(),
+            }]
+        } else {
+            Vec::new()
+        },
+        broken_git_prefix: Vec::new(),
+    }
+}
+
+fn scan_with_dispatcher(dispatcher_managed: bool, sensitive: bool) -> HookCwdScan {
+    HookCwdScan {
+        any_hooks: false,
+        dispatcher_managed,
         sensitive: if sensitive {
             vec![SensitiveHook {
                 source: PathBuf::from(".claude/settings.json"),
@@ -317,7 +392,7 @@ fn auto_resolves_against_the_hooks_actually_in_scope() {
     );
     assert_eq!(
         resolve_policy(BlockCd::Auto, true, &safe),
-        CdPolicy::EscapeOnly
+        CdPolicy::Relaxed
     );
     assert_eq!(resolve_policy(BlockCd::Auto, true, &none), CdPolicy::Off);
     // Outside a repo there is no root to pin to.
@@ -325,6 +400,56 @@ fn auto_resolves_against_the_hooks_actually_in_scope() {
         resolve_policy(BlockCd::Auto, false, &sensitive),
         CdPolicy::Off
     );
+}
+
+/// The Phase 5 truth table across migration states (#967 Phase 5, #966 D13):
+/// setting × hook-sensitivity × dispatcher opt-in × in-repo ⇒ verdict.
+#[test]
+fn auto_resolver_truth_table_across_migration_states() {
+    use crate::repo_clud_config::BlockCd;
+    // Raw hooks only — the Phase 1 states, unchanged by migration.
+    let raw_sensitive = scan_with(true, true);
+    let raw_safe = scan_with(false, true);
+    let nothing = scan_with(false, false);
+    // Dispatcher opt-in, no raw hooks — "fully on clud hooks".
+    let migrated = scan_with_dispatcher(true, false);
+    // Migration is *not* complete while a cwd-sensitive raw hook remains.
+    let migrated_but_raw_sensitive = scan_with_dispatcher(true, true);
+    // Opt-in with no raw hooks outside a repo cannot happen in practice
+    // (opt-in implies a repo), but the resolver must still answer off.
+    let migrated_outside = scan_with_dispatcher(true, false);
+
+    let cases: &[(BlockCd, bool, &HookCwdScan, CdPolicy)] = &[
+        // Unmigrated: sensitive raw hooks keep strict (Phase 1 behavior).
+        (BlockCd::Auto, true, &raw_sensitive, CdPolicy::Strict),
+        // Unmigrated with cwd-safe raw hooks: nothing breaks on drift.
+        (BlockCd::Auto, true, &raw_safe, CdPolicy::Relaxed),
+        // No hooks / not a repo: no policy at all.
+        (BlockCd::Auto, true, &nothing, CdPolicy::Off),
+        (BlockCd::Auto, false, &raw_sensitive, CdPolicy::Off),
+        // Migrated: relaxed is earned even though the scan sees no raw hooks.
+        (BlockCd::Auto, true, &migrated, CdPolicy::Relaxed),
+        // Sensitive raw hooks keep strict even after migration — the harness
+        // still fires that copy unrooted.
+        (
+            BlockCd::Auto,
+            true,
+            &migrated_but_raw_sensitive,
+            CdPolicy::Strict,
+        ),
+        (BlockCd::Auto, false, &migrated_outside, CdPolicy::Off),
+        // Explicit settings ignore the environment entirely.
+        (BlockCd::Always, true, &nothing, CdPolicy::Strict),
+        (BlockCd::Never, true, &raw_sensitive, CdPolicy::Off),
+        (BlockCd::Always, false, &nothing, CdPolicy::Off),
+    ];
+    for (setting, in_repo, scan, expected) in cases {
+        assert_eq!(
+            resolve_policy(*setting, *in_repo, scan),
+            *expected,
+            "setting={setting:?} in_repo={in_repo} scan={scan:?}"
+        );
+    }
 }
 
 #[test]
@@ -415,7 +540,7 @@ fn a_stop_hook_is_scanned_even_though_hook_health_reads_only_pretooluse() {
 }
 
 #[test]
-fn a_repo_whose_hooks_are_all_path_binaries_resolves_to_escape_only() {
+fn a_repo_whose_hooks_are_all_path_binaries_resolves_to_relaxed() {
     let tmp = TempDir::new().unwrap();
     write_json(
         &tmp.path().join(".claude").join("settings.json"),
@@ -423,11 +548,63 @@ fn a_repo_whose_hooks_are_all_path_binaries_resolves_to_escape_only() {
     );
     let scan = scan_hook_cwd_sensitivity(tmp.path(), None);
     assert!(scan.any_hooks);
+    assert!(!scan.dispatcher_managed);
     assert!(scan.sensitive.is_empty());
     assert_eq!(
         resolve_policy(BlockCd::Auto, true, &scan),
-        CdPolicy::EscapeOnly
+        CdPolicy::Relaxed
     );
+}
+
+#[test]
+fn a_hooks_json_opt_in_is_dispatcher_managed_even_with_no_raw_hooks() {
+    // The Phase 5 core: a fully-migrated repo's scan sees no raw hooks at
+    // all, yet `"auto"` must not resolve to off — its declared hooks are
+    // dispatcher-managed and cwd-immune, so the repo earns relaxed.
+    let tmp = TempDir::new().unwrap();
+    write_json(
+        &tmp.path().join(".clud").join("hooks.json"),
+        r#"{"hooks":{"Stop":[{"command":"uv run python ci/hooks/check-on-stop.py"}]}}"#,
+    );
+    // Note the declared command *looks* cwd-sensitive (a relative script
+    // path) — that must not matter, because the dispatcher roots it (D10).
+    let scan = scan_hook_cwd_sensitivity(tmp.path(), None);
+    assert!(!scan.any_hooks);
+    assert!(scan.dispatcher_managed);
+    assert!(scan.sensitive.is_empty());
+    assert_eq!(
+        resolve_policy(BlockCd::Auto, true, &scan),
+        CdPolicy::Relaxed
+    );
+}
+
+#[test]
+fn a_hooks_json_opt_in_does_not_mask_a_sensitive_raw_hook() {
+    // Migrating is not complete while a cwd-sensitive hook is still declared
+    // in a frontend config — the harness fires that copy itself, unrooted, so
+    // any drift still breaks it (DD-063).
+    let tmp = TempDir::new().unwrap();
+    write_json(
+        &tmp.path().join(".clud").join("hooks.json"),
+        r#"{"hooks":{"Stop":[{"command":"uv run python ci/hooks/check-on-stop.py"}]}}"#,
+    );
+    write_json(
+        &tmp.path().join(".claude").join("settings.json"),
+        r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"uv run python ci/hooks/check-on-stop.py"}]}]}}"#,
+    );
+    let scan = scan_hook_cwd_sensitivity(tmp.path(), None);
+    assert!(scan.dispatcher_managed);
+    assert_eq!(scan.sensitive.len(), 1);
+    assert_eq!(resolve_policy(BlockCd::Auto, true, &scan), CdPolicy::Strict);
+}
+
+#[test]
+fn an_empty_hooks_json_is_not_an_opt_in() {
+    let tmp = TempDir::new().unwrap();
+    write_json(&tmp.path().join(".clud").join("hooks.json"), r#"{}"#);
+    let scan = scan_hook_cwd_sensitivity(tmp.path(), None);
+    assert!(!scan.dispatcher_managed);
+    assert_eq!(resolve_policy(BlockCd::Auto, true, &scan), CdPolicy::Off);
 }
 
 #[test]
@@ -473,6 +650,50 @@ fn an_unparsable_hook_config_is_skipped_rather_than_fatal() {
         scan_hook_cwd_sensitivity(tmp.path(), None),
         HookCwdScan::default()
     );
+}
+
+// -----------------------------------------------------------------
+// `CwdChanged` backstop: drift the PreToolUse scanner cannot see.
+// -----------------------------------------------------------------
+
+/// The `CwdChanged` drift predicate, per policy: strict requires the new cwd
+/// to *be* a root; relaxed only that it stay inside one of the registered
+/// trees; off (and an empty root set) never warns.
+#[test]
+fn drift_warning_matches_the_policy_it_was_resolved_from() {
+    let inside = root().join("src");
+    let escaped = home();
+
+    // Strict: even an in-tree subdirectory is drift.
+    let strict = drift_warning(&inside, CdPolicy::Strict, &[root()]);
+    assert!(strict.is_some(), "strict must flag in-tree drift");
+    assert!(drift_warning(&root(), CdPolicy::Strict, &[root()]).is_none());
+
+    // Relaxed: in-tree movement is fine, an escape of every root is not.
+    assert!(drift_warning(&inside, CdPolicy::Relaxed, &[root()]).is_none());
+    let relaxed = drift_warning(&escaped, CdPolicy::Relaxed, &[root()]);
+    assert!(relaxed.is_some());
+    assert!(relaxed.unwrap().contains("CwdChanged"), "names the event");
+
+    // Off and empty-root-set never warn.
+    assert!(drift_warning(&escaped, CdPolicy::Off, &[root()]).is_none());
+    assert!(drift_warning(&escaped, CdPolicy::Strict, &[]).is_none());
+    assert!(drift_warning(&escaped, CdPolicy::Relaxed, &[]).is_none());
+}
+
+#[test]
+fn drift_warning_judges_against_the_whole_registered_root_set() {
+    // The session can legally sit in any registered root's tree; only a cwd
+    // outside all of them drifts.
+    let roots = if cfg!(windows) {
+        vec![PathBuf::from(r"C:\repo"), PathBuf::from(r"C:\extern\dep")]
+    } else {
+        vec![PathBuf::from("/repo"), PathBuf::from("/extern/dep")]
+    };
+    assert!(drift_warning(&roots[1], CdPolicy::Strict, &roots).is_none());
+    assert!(drift_warning(&roots[1].join("src"), CdPolicy::Relaxed, &roots).is_none());
+    assert!(drift_warning(&roots[1].join("src"), CdPolicy::Strict, &roots).is_some());
+    assert!(drift_warning(&home(), CdPolicy::Relaxed, &roots).is_some());
 }
 
 // -----------------------------------------------------------------

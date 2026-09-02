@@ -25,9 +25,10 @@ fn commands_for(fragment: &Value, event: &str) -> Vec<String> {
 
 #[test]
 fn every_declared_event_gets_a_dispatcher_line() {
-    let fragment = claude_settings_fragment(&hooks(
-        r#"{"hooks":{"PreToolUse":[{"command":"a"}],"Stop":[{"command":"b"}]}}"#,
-    ))
+    let fragment = claude_settings_fragment(
+        &hooks(r#"{"hooks":{"PreToolUse":[{"command":"a"}],"Stop":[{"command":"b"}]}}"#),
+        false,
+    )
     .expect("declared");
 
     assert_eq!(
@@ -44,9 +45,10 @@ fn every_declared_event_gets_a_dispatcher_line() {
 fn several_hooks_on_one_event_still_register_a_single_line() {
     // clud dispatches the whole event; one registration is all the frontend
     // needs, and more would run the set repeatedly.
-    let fragment = claude_settings_fragment(&hooks(
-        r#"{"hooks":{"Stop":[{"command":"a"},{"command":"b"},{"command":"c"}]}}"#,
-    ))
+    let fragment = claude_settings_fragment(
+        &hooks(r#"{"hooks":{"Stop":[{"command":"a"},{"command":"b"},{"command":"c"}]}}"#),
+        false,
+    )
     .expect("declared");
 
     assert_eq!(commands_for(&fragment, "Stop").len(), 1);
@@ -57,9 +59,10 @@ fn the_registered_matcher_is_catch_all_whatever_the_declaration_scopes_to() {
     // The per-hook matcher is applied by clud at dispatch time. Narrowing the
     // registration would silently drop declarations — a line scoped to `Bash`
     // can never deliver an `Edit`-matched hook.
-    let fragment = claude_settings_fragment(&hooks(
-        r#"{"hooks":{"PreToolUse":[{"matcher":"Edit","command":"a"}]}}"#,
-    ))
+    let fragment = claude_settings_fragment(
+        &hooks(r#"{"hooks":{"PreToolUse":[{"matcher":"Edit","command":"a"}]}}"#),
+        false,
+    )
     .expect("declared");
 
     assert_eq!(fragment["hooks"]["PreToolUse"][0]["matcher"], "*");
@@ -69,8 +72,49 @@ fn the_registered_matcher_is_catch_all_whatever_the_declaration_scopes_to() {
 fn a_repo_that_declares_nothing_compiles_to_nothing() {
     // The signal not to pass `--settings` at all: a repo that has not opted
     // in should see the launch it saw before this feature existed.
-    assert!(claude_settings_fragment(&hooks("{}")).is_none());
-    assert!(claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[]}}"#)).is_none());
+    assert!(claude_settings_fragment(&hooks("{}"), false).is_none());
+    assert!(claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[]}}"#), false).is_none());
+}
+
+#[test]
+fn the_cwd_changed_backstop_line_rides_only_on_frontend_support() {
+    // The capability probe answers for the installed client; a negative
+    // answer must degrade silently to no line at all (DD-064).
+    assert!(claude_settings_fragment(&hooks("{}"), false).is_none());
+
+    let fragment = claude_settings_fragment(&hooks("{}"), true).expect("declared");
+    assert_eq!(
+        commands_for(&fragment, "CwdChanged"),
+        vec!["clud-cmd-scan --event CwdChanged"]
+    );
+}
+
+#[test]
+fn a_repo_declaring_nothing_still_registers_the_backstop_when_supported() {
+    // The backstop is clud's own line; it exists for an opted-in repo even if
+    // the repo declared no events at all. It is what turns a chdir by an
+    // alias into a visible drift warning.
+    let fragment = claude_settings_fragment(&hooks("{}"), true).expect("declared");
+    assert_eq!(
+        commands_for(&fragment, "CwdChanged"),
+        vec!["clud-cmd-scan --event CwdChanged"]
+    );
+}
+
+#[test]
+fn a_declared_cwd_changed_hook_and_the_backstop_share_one_line() {
+    // A repo declaring the event itself gets the same single dispatcher line;
+    // clud's own backstop logic runs inside it alongside the repo's hooks.
+    let fragment = claude_settings_fragment(
+        &hooks(r#"{"hooks":{"CwdChanged":[{"command":"check-here.py"}]}}"#),
+        true,
+    )
+    .expect("declared");
+
+    assert_eq!(
+        commands_for(&fragment, "CwdChanged"),
+        vec!["clud-cmd-scan --event CwdChanged"]
+    );
 }
 
 #[test]
@@ -88,8 +132,9 @@ fn merging_concatenates_per_event_rather_than_replacing() {
     // registration silently displace the bridge's lifecycle hooks, or a
     // settings document the user passed on the command line.
     let mut base = json!({"hooks":{"Stop":[{"matcher":"*","hooks":[{"command":"theirs"}]}]}});
-    let overlay = claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#))
-        .expect("declared");
+    let overlay =
+        claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#), false)
+            .expect("declared");
 
     merge_hook_settings(&mut base, &overlay).expect("merges");
 
@@ -106,8 +151,9 @@ fn merging_preserves_unrelated_keys_and_events() {
         "permissions": {"deny": ["Bash(rm *)"]},
         "hooks": {"SessionStart": [{"hooks":[{"command":"theirs"}]}]}
     });
-    let overlay = claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#))
-        .expect("declared");
+    let overlay =
+        claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#), false)
+            .expect("declared");
 
     merge_hook_settings(&mut base, &overlay).expect("merges");
 
@@ -123,8 +169,9 @@ fn merging_preserves_unrelated_keys_and_events() {
 #[test]
 fn merging_into_a_document_without_hooks_creates_the_section() {
     let mut base = json!({"model": "some-model"});
-    let overlay = claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#))
-        .expect("declared");
+    let overlay =
+        claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#), false)
+            .expect("declared");
 
     merge_hook_settings(&mut base, &overlay).expect("merges");
 
@@ -138,8 +185,9 @@ fn merging_into_a_document_without_hooks_creates_the_section() {
 fn a_malformed_target_is_an_error_rather_than_a_silent_drop() {
     // Losing a registration quietly would mean the hooks never fire and
     // nothing says why.
-    let overlay = claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#))
-        .expect("declared");
+    let overlay =
+        claude_settings_fragment(&hooks(r#"{"hooks":{"Stop":[{"command":"a"}]}}"#), false)
+            .expect("declared");
 
     let mut not_an_object = json!([]);
     assert!(merge_hook_settings(&mut not_an_object, &overlay).is_err());

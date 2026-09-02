@@ -35,6 +35,16 @@
 //! line gives it — which since #980 runs declared hooks too — and gets nothing
 //! for other events, matching codex's own apparent single-event support. No
 //! second codex writer is introduced.
+//!
+//! ## The `CwdChanged` backstop (#967 Phase 5)
+//!
+//! Alongside the declared events, clud registers one line of its own:
+//! `clud-cmd-scan --event CwdChanged`, the reactive drift backstop that
+//! catches a session cwd moved by an alias or a script, which the PreToolUse
+//! scanner cannot see. It is registered only where the frontend supports the
+//! event — the capability probe answers for the installed client, and a
+//! negative answer (or a probe that cannot run) degrades silently to no line
+//! at all, because the backstop is hygiene, never correctness (DD-064).
 
 use serde_json::{json, Value};
 
@@ -58,6 +68,11 @@ pub const DISPATCH_ENV: &str = "CLUD_HOOK_DISPATCH";
 /// install.
 pub const PRE_TOOL_USE: &str = "PreToolUse";
 
+/// clud's own reactive drift backstop event (zackees/clud#967 Phase 5). The
+/// harness fires it whenever the session cwd changes, including changes the
+/// PreToolUse scanner never sees — an alias or a script that chdirs.
+pub const CWD_CHANGED_EVENT: &str = "CwdChanged";
+
 /// The command string a compiled line runs for `event`.
 #[must_use]
 pub fn dispatcher_command(event: &str) -> String {
@@ -65,13 +80,16 @@ pub fn dispatcher_command(event: &str) -> String {
 }
 
 /// Build the Claude settings fragment registering clud's dispatcher for every
-/// event `hooks` declares.
+/// event `hooks` declares, plus clud's own `CwdChanged` backstop line when
+/// `cwd_changed_supported` says the frontend can fire the event — the answer
+/// of the version probe in `backend_bootstrap.rs`, threaded through
+/// `foreground_runtime.rs`.
 ///
 /// `None` when the repo declares nothing, which is the signal not to pass
 /// `--settings` at all — a repo that has not opted in should see a launch
 /// identical to the one it saw before this feature existed.
 #[must_use]
-pub fn claude_settings_fragment(hooks: &CludHooks) -> Option<Value> {
+pub fn claude_settings_fragment(hooks: &CludHooks, cwd_changed_supported: bool) -> Option<Value> {
     let mut events = serde_json::Map::new();
     for event in hooks.events() {
         events.insert(
@@ -85,10 +103,31 @@ pub fn claude_settings_fragment(hooks: &CludHooks) -> Option<Value> {
             }]),
         );
     }
+    if cwd_changed_supported {
+        events.insert(CWD_CHANGED_EVENT.to_string(), cwd_changed_registration());
+    }
     if events.is_empty() {
         return None;
     }
     Some(json!({ "hooks": Value::Object(events) }))
+}
+
+/// The registration for clud's own `CwdChanged` backstop line.
+///
+/// The harness ignores `matcher` on `CwdChanged` (it fires on every directory
+/// change), but the fragment's other lines carry one and this keeps the shape
+/// uniform. A repo that declares `CwdChanged` itself gets the same single
+/// line either way — the map insert is idempotent, and one dispatcher line
+/// per event is all the frontend needs.
+#[must_use]
+fn cwd_changed_registration() -> Value {
+    json!([{
+        "matcher": "*",
+        "hooks": [{
+            "type": "command",
+            "command": dispatcher_command(CWD_CHANGED_EVENT),
+        }],
+    }])
 }
 
 /// Merge `overlay`'s hook entries into `base`, concatenating per event.

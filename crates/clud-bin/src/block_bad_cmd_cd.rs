@@ -30,6 +30,22 @@
 //! pattern matching. A regex is either too blunt (denies `cd src/`) or
 //! misses `cd ../..`, `cd $HOME`, `cd %USERPROFILE%`, and absolute paths.
 //! See DD-047.
+//!
+//! ## `"auto"` is a three-level resolver (#967 Phase 5, #966 D13)
+//!
+//! `"auto"` resolves against the hook environment at fire time:
+//!
+//! - any cwd-sensitive **raw** hook in scope (still in `.claude/settings*.json`
+//!   or `.codex/hooks.json`, so the harness fires it unrooted) → **strict**:
+//!   the session cwd must be a registered root;
+//! - fully dispatcher-managed (`.clud/hooks.json` opt-in) or all raw hooks
+//!   cwd-safe → **relaxed**: `cd` freely within the registered trees, block
+//!   only escaping all of them;
+//! - no hooks / not a repo → **off**.
+//!
+//! Migrating to `.clud/hooks.json` is what *earns* the relaxation — a built-in
+//! adoption incentive (DD-063). [`drift_warning`] is the `CwdChanged` reactive
+//! backstop for drift the PreToolUse scanner cannot see (DD-064).
 
 use super::*;
 
@@ -38,17 +54,21 @@ use super::*;
 pub(super) const BLOCK_CD_RULE_ID: &str = "block-cd";
 
 /// How strictly session-mutating `cd`s are policed, after `"auto"` has been
-/// resolved against the environment.
+/// resolved against the environment (#966 §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CdPolicy {
     /// No cd policing at all.
     Off,
-    /// Deny only `cd`s whose resolved target escapes every registered root's
-    /// tree. `cd src/` stays allowed.
-    EscapeOnly,
+    /// The relaxed level of `"auto"`: `cd` freely within the registered repo
+    /// trees; deny only a `cd` whose resolved target escapes **every**
+    /// registered root. This is the mode a repo earns by migrating its hooks
+    /// to `.clud/hooks.json`, where the dispatcher makes them cwd-immune
+    /// (D13, DD-063).
+    Relaxed,
     /// The session cwd must *be* a registered root: only `cd <root>` is
     /// allowed, subdirectories included in the denial. This is the mode for
-    /// repos whose hooks would break on any drift.
+    /// repos with cwd-sensitive raw hooks (still fired by the harness,
+    /// unrooted), which would break on any drift.
     Strict,
 }
 
@@ -451,9 +471,9 @@ fn occurrence_denial(
         .unwrap_or_else(|| "<home>".to_string());
     match (&occurrence.target, policy) {
         (CdTarget::NoOp, _) => None,
-        // Escape-only cannot prove an unresolvable target leaves the tree, and
+        // Relaxed cannot prove an unresolvable target leaves the tree, and
         // this layer is hygiene: it narrows only on evidence.
-        (CdTarget::Unresolvable, CdPolicy::EscapeOnly) => None,
+        (CdTarget::Unresolvable, CdPolicy::Relaxed) => None,
         (CdTarget::Unresolvable, CdPolicy::Strict) => Some(strict_message(
             &described,
             roots,
@@ -472,7 +492,7 @@ fn occurrence_denial(
                 ))
             }
         }
-        (CdTarget::Path(path), CdPolicy::EscapeOnly) => {
+        (CdTarget::Path(path), CdPolicy::Relaxed) => {
             if roots.iter().any(|root| is_within(path, root)) {
                 None
             } else {
@@ -542,11 +562,12 @@ fn strict_message(
 
 fn escape_message(described: &str, roots: &[PathBuf]) -> String {
     format!(
-        "Blocked `cd {described}`: it moves the session cwd outside the repo ({roots}) for every \
-         later tool call, which breaks repo-relative hooks and tooling. Use `(cd DIR && CMD)`, \
-         `git -C DIR ...`, or an absolute path instead; a subshell `cd` is always allowed because \
-         it cannot leak. To change the policy set `bash.block_cd` in .clud/settings.json, or \
-         bypass this one call with CLUD_BAD_CMD_OVERRIDE={rule}:<reason>.",
+        "Blocked `cd {described}`: it moves the session cwd outside the registered repos \
+         ({roots}) for every later tool call, where repo-relative tooling stops resolving and \
+         the session loses its orientation. Use `(cd DIR && CMD)`, `git -C DIR ...`, or an \
+         absolute path instead; a subshell `cd` is always allowed because it cannot leak. To \
+         change the policy set `bash.block_cd` in .clud/settings.json, or bypass this one call \
+         with CLUD_BAD_CMD_OVERRIDE={rule}:<reason>.",
         roots = roots_display(roots),
         rule = BLOCK_CD_RULE_ID,
     )
@@ -556,11 +577,19 @@ fn escape_message(described: &str, roots: &[PathBuf]) -> String {
 // `"auto"` resolution: how cwd-sensitive are the hooks in scope?
 // ---------------------------------------------------------------------
 
-/// What a scan of the frontends' hook configs found.
+/// What a scan of the hook environment found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookCwdScan {
-    /// Any hook command at all is configured for this repo or user.
+    /// Any hook command at all is configured for this repo or user in the
+    /// **raw** frontend configs (`.claude/settings*.json`, `.codex/hooks.json`).
     pub any_hooks: bool,
+    /// Whether the repo has opted into `.clud/hooks.json` (#967 Phase 2). Its
+    /// declared hooks are dispatcher-managed and therefore cwd-immune (cwd +
+    /// `CLUD_PROJECT_DIR` = the declaring repo's root, D10), so their command
+    /// text never counts toward sensitivity — this flag is what lets `"auto"`
+    /// resolve to relaxed for a migrated repo whose raw frontend hooks are
+    /// gone or cwd-safe (D13, DD-063).
+    pub dispatcher_managed: bool,
     /// Hook commands that resolve a relative path against the inherited
     /// cwd, with the file they came from. First entry is quoted in denials.
     pub sensitive: Vec<SensitiveHook>,
@@ -605,8 +634,16 @@ fn truncate_command(command: &str) -> String {
 /// Deliberately not routed through `hook_health::inspect`, which parses only
 /// `PreToolUse`: the wedge that motivated this work came from a `Stop` hook,
 /// and this path also has to stay cheap enough for a per-tool-call hook.
+///
+/// The scan covers only the **raw** frontend configs. A `.clud/hooks.json`
+/// opt-in is recorded as [`HookCwdScan::dispatcher_managed`] instead — those
+/// hooks are rooted by the dispatcher no matter what their command text looks
+/// like, so they never make a repo strict (#966 D10, D13).
 pub fn scan_hook_cwd_sensitivity(repo_root: &Path, home: Option<&Path>) -> HookCwdScan {
-    let mut scan = HookCwdScan::default();
+    let mut scan = HookCwdScan {
+        dispatcher_managed: crate::clud_hooks::discover(repo_root).is_some(),
+        ..HookCwdScan::default()
+    };
     for hook in frontend_hook_commands(repo_root, home) {
         scan.any_hooks = true;
         if has_broken_git_rev_parse_prefix(&hook.command) {
@@ -782,12 +819,21 @@ fn looks_like_relative_path(token: &str) -> bool {
     !is_absolute_pathish(&unquoted)
 }
 
-/// Resolve `"auto"` against the environment, per #966 §8.
+/// Resolve `"auto"` against the environment, per #966 §8 — the three-level
+/// resolver of #967 Phase 5:
 ///
-/// Phase 1 has no dispatcher, so the relaxed level cannot be earned yet: a
-/// repo with cwd-sensitive hooks gets strict pinning, one whose hooks are
-/// all cwd-immune gets escape-only, and a repo with no hooks — or no repo at
-/// all — gets nothing.
+/// | environment | `"auto"` resolves to |
+/// | --- | --- |
+/// | any cwd-sensitive raw hooks in scope (unmigrated repo, relative-path commands in `.claude/settings.json`) | **strict** — pin cwd to the registered roots |
+/// | fully on clud hooks (dispatcher-managed; hooks cwd-immune), or raw hooks all cwd-safe | **relaxed** — `cd` freely within registered repo trees; block only escaping all of them |
+/// | no hooks / not a repo | **off** |
+///
+/// Migrating to `.clud/hooks.json` is what *earns* the relaxation (D13): a
+/// migrated repo's hooks are rooted by the dispatcher, so drift breaks
+/// nothing and the policy loosens from "cwd must be a root" to "cwd must stay
+/// inside the registered trees". Any cwd-sensitive **raw** hook still in
+/// scope — the harness fires it unrooted, so drift would break it — keeps the
+/// repo strict even if it has also migrated (DD-063).
 pub(super) fn resolve_policy(
     setting: crate::repo_clud_config::BlockCd,
     in_repo: bool,
@@ -804,15 +850,58 @@ pub(super) fn resolve_policy(
             }
         }
         BlockCd::Auto => {
-            if !in_repo || !scan.any_hooks {
+            if !in_repo || (!scan.any_hooks && !scan.dispatcher_managed) {
                 CdPolicy::Off
             } else if scan.sensitive.is_empty() {
-                CdPolicy::EscapeOnly
+                CdPolicy::Relaxed
             } else {
                 CdPolicy::Strict
             }
         }
     }
+}
+
+/// Whether the session cwd landing at `new_cwd` violates the pinning policy —
+/// the `CwdChanged` backstop's predicate (zackees/clud#967 Phase 5).
+///
+/// The PreToolUse scanner only sees `cd`s written in a tool call; an alias or
+/// a script that chdirs moves the session cwd invisibly. This is the reactive
+/// check for that drift. Hygiene only — nothing may depend on it for
+/// correctness, because the upstream cwd contract is unstable (D12, DD-064).
+///
+/// Returns `None` when the policy is off, there are no roots, or the new cwd
+/// still satisfies the policy: strict requires it to *be* a registered root,
+/// relaxed only that it stay inside one of the registered trees.
+pub(super) fn drift_warning(new_cwd: &Path, policy: CdPolicy, roots: &[PathBuf]) -> Option<String> {
+    if policy == CdPolicy::Off || roots.is_empty() {
+        return None;
+    }
+    let drifted = match policy {
+        CdPolicy::Strict => !is_registered_root(new_cwd, roots),
+        CdPolicy::Relaxed => !roots.iter().any(|root| is_within(new_cwd, root)),
+        CdPolicy::Off => return None,
+    };
+    if !drifted {
+        return None;
+    }
+    let inside = match policy {
+        CdPolicy::Strict => "which the `bash.block_cd` policy pins to a registered root",
+        CdPolicy::Relaxed => {
+            "outside the registered repos the `bash.block_cd` policy pins the \
+                              session to"
+        }
+        CdPolicy::Off => unreachable!(),
+    };
+    Some(format!(
+        "[clud] CwdChanged: the session cwd moved to {}, {inside} ({roots}). A chdir from an \
+         alias or a script can bypass the PreToolUse scanner, which is why this event exists. \
+         Nothing was blocked and clud's hooks stay correctly rooted (containment is resolved per \
+         path), but `cd` back into a registered repo to restore the invariant. This is a \
+         hygiene warning; to silence it set `bash.block_cd` to false or migrate every hook to \
+         .clud/hooks.json.",
+        crate::path_norm::display_slash(new_cwd),
+        roots = roots_display(roots),
+    ))
 }
 
 /// Nearest ancestor of `start` (inclusive) containing a `.git` entry.

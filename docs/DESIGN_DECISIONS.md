@@ -2854,3 +2854,81 @@ the store directly on every dispatch. The cost of the lenient read is
 theoretical (a corrupt file silently distrusts everything, which is the safe
 direction: hooks stay off). Because the store is per-parent-repo, cloning the
 parent elsewhere starts untrusted, which is the conservative default.
+
+## DD-063: `"auto"` relaxes `bash.block_cd` only for repos fully on clud hooks
+
+**Status:** Accepted
+
+**Context:** Phase 1 pinned every repo whose hooks were cwd-sensitive, with
+`"auto"` resolving to strict-or-nothing from the raw frontend settings. Phase
+2 made a repo's hooks dispatcher-managed once it opted into
+`.clud/hooks.json`, which made the pinning unnecessary there: the dispatcher
+roots every declared hook (cwd + `CLUD_PROJECT_DIR` = the declaring repo's
+root, D10), so cwd drift no longer breaks them. Keeping such a repo strict
+punished the migration — the exact behavior Phase 5 exists to remove. The
+spec (D13) asks `"auto"` to be a three-level resolver whose relaxed level is
+*earned*.
+
+**Decision:**
+
+- `"auto"` resolves to **strict** whenever any cwd-sensitive raw hook is in
+  scope — `.claude/settings*.json`, `.codex/hooks.json`, or the user's home
+  copies. The harness fires those hooks unrooted, so any drift breaks them;
+  migration must not mask that.
+- It resolves to **relaxed** when the repo is fully dispatcher-managed: a
+  `.clud/hooks.json` opt-in (an empty file is not an opt-in) with no
+  sensitive raw hooks. Relaxed denies only a `cd` whose resolved target
+  escapes *every* registered root — the Phase 3 `CLUD_HOOK_ROOTS` set
+  (parent, children, extern), not just the parent root — and allows all
+  movement within them.
+- It resolves to **off** when the repo has no hooks at all, or the session
+  stands outside any repo.
+- The scan records the opt-in as a `dispatcher_managed` flag; a declared
+  hook's command text never counts toward sensitivity, because the
+  dispatcher roots it. `"always"`/`"never"` stay as before.
+
+**Consequences:** Migration is now a real upgrade — the repo earns
+relaxation, and in-repo `cd`s stop being blocked. The strict level remains
+the safe default for unmigrated repos, and a repo that keeps a sensitive raw
+hook stays strict even after migrating, because that hook still fires
+unrooted. The CwdChanged backstop (DD-064) is what makes relaxation
+defensible: drift the scanner cannot see is detected reactively, warning
+instead of blocking, because the relaxed invariant is no longer enforced at
+PreToolUse alone.
+
+## DD-064: cwd pinning and the CwdChanged backstop are hygiene, never correctness
+
+**Status:** Accepted
+
+**Context:** `bash.block_cd` blocks a session-mutating `cd` before it runs,
+but the PreToolUse scanner sees only `cd`s written in a tool call. An alias
+or a script that chdirs moves the session cwd invisibly, and nothing in the
+pinning path can see it. The harness's `CwdChanged` event fires on every
+directory change — including those — but the upstream cwd contract is
+unstable (anthropics/claude-code#83636, #76708, #84685), the event carries no
+decision control (exit 2 only shows stderr; the change is not reverted), and
+it arrived only in Claude Code 2.1.83. The spec (D12) asks for the reactive
+backstop, but the feature must not become load-bearing on any of that.
+
+**Decision:**
+
+- The `CwdChanged` handler resolves `bash.block_cd` against the session
+  parent root (`CLAUDE_PROJECT_DIR`, which stays put while cwd drifts) and
+  prints a hygiene warning when the new cwd violates the policy; it never
+  blocks. A declared `CwdChanged` hook's exit-2 is downgraded to a warning,
+  because a refusal cannot be enforced after the fact.
+- The handler always exits 0, so no payload shape, hook failure, or harness
+  misbehavior can turn it into a wall.
+- The line is registered only where a bounded per-launch capability probe
+  (`claude --version`, floor 2.1.83) says the installed client fires the
+  event; any probe failure degrades silently to no line. It rides only on
+  opted-in repos, so a non-opted-in launch keeps its pre-Phase-2 argv
+  exactly.
+
+**Consequences:** PreToolUse pinning remains the correctness layer; the
+backstop is a diagnostic that makes relaxation (DD-063) safe to offer. A
+frontend regression that breaks `CwdChanged` — or stops exporting
+`CLAUDE_PROJECT_DIR` — costs users a missing warning, never a wedge. The
+5-second probe adds nothing to launches without an opted-in repo, and a
+hand-installed bare line still behaves (the handler is explicit-event-only
+in the dispatch matrix).
