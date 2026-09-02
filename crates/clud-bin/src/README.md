@@ -316,7 +316,9 @@ which test tier a change belongs in — lives in
   for parent/child-owned paths, never extern-owned — layers any deny, and
   gates child/extern execution behind the codex project trust table
   (`hook_health/codex_trust.rs`) and extern roots behind `hook_trust.rs`
-  (DD-060/DD-061).
+  (DD-060/DD-061). A `CwdChanged` event bypasses the scanner entirely: it is
+  handed to `block_bad_cmd_cwd_changed.rs` (see below), the #967 Phase 5
+  backstop that reacts to drift the PreToolUse scan cannot see.
 - `clud_hooks.rs` - `.clud/hooks.json` schema, discovery, and matcher
   semantics (#967 Phase 2), plus the Tier B source for sub-repos (#967 Phase 4,
   D4): `from_frontend_settings` reads `.claude/settings.json`,
@@ -373,7 +375,11 @@ which test tier a change belongs in — lives in
   registration cannot displace the bridge's lifecycle hooks or a user's own
   `--settings` document. Codex has no argument surface for hooks at all (`-c`
   overrides `config.toml`; hooks live in a separate `hooks.json`), so the
-  compiler is Claude-only by construction.
+  compiler is Claude-only by construction. Phase 5 adds the `CwdChanged`
+  backstop (`CWD_CHANGED_EVENT`, DD-064): `claude_settings_fragment` inserts
+  the line only where the capability probe in `backend_bootstrap.rs` says the
+  installed Claude fires the event, and a repo's own declared `CwdChanged`
+  hook shares that same line instead of registering twice.
 - `clud_hooks_run.rs` - Tier-B execution. Runs each declared hook with cwd and
   `CLUD_PROJECT_DIR` set to the declaring repo's root, the harness payload
   forwarded on stdin (pipe closed, so a hook blocking in `json.load(sys.stdin)`
@@ -383,19 +389,41 @@ which test tier a change belongs in — lives in
   wall in front of every tool call. The only in-repo user of
   `StdinMode::Piped`. See `docs/architecture/hook-dispatch.md`.
 - `block_bad_cmd_cd.rs` - `bash.block_cd` session-cwd pinning (#967 Phase 1,
-  DD-047). Scans for `cd`s that would move the *session* cwd — subshells,
-  `$(...)`, and nested shells are skipped because they cannot leak — resolves
-  the target against the registered roots (Phase 1: the containing repo root)
-  and denies per policy. `"auto"` resolves at fire time by classifying every
-  hook command in scope for cwd sensitivity: a relative script path pins the
-  cwd (strict), all-PATH-binary hooks only block leaving the repo, no hooks
-  means no policy. That classifier reads `.claude/settings*.json` and
-  `.codex/hooks.json` across **all** events, deliberately not through
-  `hook_health::inspect`, which parses only `PreToolUse` — the wedge that
-  motivated the issue came from a `Stop` hook. `hook_health` reuses it for the
-  broken-`git rev-parse`-prefix warning. Every settings/hook read sits behind
-  a word-boundary pre-filter so a command with no `cd` pays one lowercase
-  scan.
+  DD-047; Phase 5 relaxation = DD-063). Scans for `cd`s that would move the
+  *session* cwd — subshells, `$(...)`, and nested shells are skipped because
+  they cannot leak — resolves the target against the registered roots (Phase
+  3's `CLUD_HOOK_ROOTS`: parent, children, and extern trees) and denies per
+  policy. `"auto"` is a three-level resolver at fire time: **strict** whenever
+  any cwd-sensitive raw hook is in scope (a relative script path pins the
+  cwd), **relaxed** when the repo is fully dispatcher-managed — a
+  `.clud/hooks.json` opt-in (`dispatcher_managed`, recorded by the scan even
+  with no raw hooks; an empty file is not an opt-in) with no sensitive raw
+  hooks — denying only escapes of the whole registered-root set, and **off**
+  with no hooks or outside any repo. Declared-hook command text never counts
+  toward sensitivity because the dispatcher roots it. The classifier reads
+  `.claude/settings*.json` and `.codex/hooks.json` across **all** events,
+  deliberately not through `hook_health::inspect`, which parses only
+  `PreToolUse` — the wedge that motivated the issue came from a `Stop` hook.
+  `hook_health` reuses it for the broken-`git rev-parse`-prefix warning.
+  `drift_warning` is the pure predicate the `CwdChanged` backstop (next
+  entry) uses. Every settings/hook read sits behind a word-boundary
+  pre-filter so a command with no `cd` pays one lowercase scan.
+- `block_bad_cmd_cwd_changed.rs` - the #967 Phase 5 `CwdChanged` backstop
+  (DD-064): reactive detection of session-cwd drift the PreToolUse scanner
+  cannot see (aliases, scripts that chdir). Dispatched by `block_bad_cmd.rs`
+  on the explicit event, it resolves `bash.block_cd` against the session
+  parent root (`CLAUDE_PROJECT_DIR` — it stays put while cwd drifts — with a
+  walk-up fallback to the repo the session landed in), prints a `[clud]
+  CwdChanged:` hygiene warning when the payload's `new_cwd` violates the
+  policy, and still runs a repo's declared `CwdChanged` hooks rooted at the
+  repo (Tier B). It **never blocks**: exit 2 from a declared hook is
+  downgraded to a warning, because the cwd has already changed and the
+  harness gives the event no decision control. Always exits 0, so no payload
+  shape or harness misbehavior can turn it into a wall. The backstop line is
+  registered only where a bounded per-launch capability probe
+  (`probe_claude_cwd_changed_support` in `backend_bootstrap.rs`: `claude
+  --version`, floor 2.1.83) says the installed client fires the event; a
+  probe failure or a non-Claude harness degrades silently to no line.
 - `block_bad_cmd_rm_vars.rs` - #963's POSIX/Bash abstract interpreter for
   catastrophic `rm`/`rmdir` operands rooted at `$VAR` or `${VAR}`. It rewrites
   only single, statically proven literal assignments into a complete

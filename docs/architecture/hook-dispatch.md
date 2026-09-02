@@ -7,7 +7,7 @@ Design record: [#966](https://github.com/zackees/clud/issues/966) (spec),
 [#967](https://github.com/zackees/clud/issues/967) (phased plan),
 [#977](https://github.com/zackees/clud/issues/977) (settings compilation),
 [#965](https://github.com/zackees/clud/issues/965) (the failure that started
-it). Decisions: DD-047, DD-060, DD-061, DD-062.
+it). Decisions: DD-047, DD-060, DD-061, DD-062, DD-063, DD-064.
 
 ## The problem
 
@@ -325,12 +325,46 @@ An extern checkout that declares hooks does not run them until it is trusted:
 | `foreground_runtime.rs` | composing the launch-scoped `--settings` document and injecting it into argv |
 | `clud_hooks_run.rs` | Tier-B execution: rooting, stdin payload, exit-code contract |
 | `block_bad_cmd.rs` | the hook binary: event arg, Tier A, then Tier B — the firing matrix (per-target roots, containment), the codex and extern-trust gates, layered deny |
-| `block_bad_cmd_cd.rs` | `bash.block_cd` cwd pinning, and the hook-command scanner both it and `hook_health` use |
+| `block_bad_cmd_cd.rs` | `bash.block_cd` cwd pinning and the three-level `"auto"` resolver, the hook-command scanner both it and `hook_health` use, and the `CwdChanged` drift predicate |
+| `block_bad_cmd_cwd_changed.rs` | the `CwdChanged` backstop handler: the drift warning and Tier-B dispatch for a session-cwd move, with the deny downgraded to a warning |
+| `backend_bootstrap.rs` | the `claude --version` capability probe (`probe_claude_cwd_changed_support`, floor 2.1.83) that decides whether the backstop line is registered |
 | `hook_health/inspect.rs` | warnings: broken `git rev-parse` prefix, double-declared hooks |
 
-## Not yet built
+## Phase 5: `"auto"` relaxation and the `CwdChanged` backstop
 
-Phase 5 of #967: the `"auto"` relaxation of `bash.block_cd` once a repo's
-hooks are dispatcher-managed and therefore cwd-immune. Phases 3 (the typed
-root registry and path-based containment) and 4 (Tier-B trust for foreign
-checkouts, DD-060/DD-061/DD-062) are built.
+`bash.block_cd: "auto"` is a three-level resolver decided by the repo's
+migration state (D13, DD-063):
+
+| resolved policy | when |
+| --- | --- |
+| strict | any cwd-sensitive raw hook is in scope — `.claude/settings*.json`, `.codex/hooks.json`, or the user's home copies. Phase 1 behavior, and the right one: the harness fires those hooks unrooted, so any cwd drift breaks them. |
+| relaxed | the repo is fully dispatcher-managed — a `.clud/hooks.json` opt-in with no sensitive raw hooks left. `cd` moves freely **within** the registered trees (parent, children, extern roots — the Phase 3 `CLUD_HOOK_ROOTS` set, not just the parent root), and only a `cd` that escapes all of them is denied. |
+| off | no hooks at all, or no repo. No behavior change. |
+
+The `.clud/hooks.json` opt-in marks the scan `dispatcher_managed` even when
+the raw frontend configs are empty, so migrating earns relaxation; its
+declared command text never counts toward sensitivity, because the
+dispatcher roots every declared hook (cwd + `CLUD_PROJECT_DIR` = the
+declaring repo's root, D10). A sensitive raw hook keeps the repo strict even
+after migration, and an empty `hooks.json` is not an opt-in.
+
+**The `CwdChanged` backstop** (D12, DD-064) closes the gap the scanner
+cannot see: a session cwd moved by an alias or a script is invisible to
+PreToolUse, yet breaks exactly what pinning protects. clud registers its own
+`clud-cmd-scan --event CwdChanged` line alongside the declared events and
+the handler:
+
+1. resolves `bash.block_cd` against the session parent root and warns when
+   the new cwd violates the policy — `[clud] CwdChanged: the session cwd
+   moved to …` — pointing the user at `cd` back or at the escape hatches;
+2. dispatches repo-declared `CwdChanged` hooks rooted at the repo the
+   session now stands in, via the same firing matrix as every other event.
+
+Hygiene only, never correctness: the handler always exits 0 (the harness
+gives this event no decision control — an exit 2 only shows stderr, the
+change is not reverted), a declared hook's exit-2 is downgraded to a
+warning, and the line is registered only where a capability probe says the
+installed client fires the event — a per-launch bounded `claude --version`
+against the 2.1.83 floor, degrading silently to no line on any failure. The
+line rides only on opted-in repos, so a non-opted-in launch keeps its
+pre-Phase-2 argv exactly.
