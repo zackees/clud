@@ -556,6 +556,20 @@ Diagnostics and misc:
   streak standing across an idle stretch, since the loop treats it as "no
   observation". `descendants_of` also carries a visited set: a PID-reuse cycle
   in the Toolhelp parent graph previously made the walk non-terminating.
+- `workspace_trust.rs` - issue #1102: reads
+  `projects["<abs cwd>"].hasTrustDialogAccepted` out of Claude Code's
+  `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) and returns
+  `WorkspaceTrust::{Trusted, Untrusted, Unknown}` — `Unknown` for a missing or
+  unparseable file, so a relocated config never warns a user that a trusted
+  workspace is untrusted. `warn_if_workspace_untrusted` prints one stderr
+  notice, called from `main.rs` above the `launch_mode` match so an unattended
+  `clud grind` gets one line rather than one per iteration; it is silent
+  unless the backend is Claude, the workspace is untrusted, **and** the repo
+  actually has a `.claude/settings*.json` for that decision to suppress. Never
+  writes the trust flag — see
+  [DD-066](../../../docs/DESIGN_DECISIONS.md#dd-066-clud-reports-an-untrusted-workspace-and-never-records-the-trust-itself).
+  Tests: `workspace_trust_tests.rs` (decision table + notice text),
+  `tests/integration/test_workspace_trust_notice.py` (end-to-end, exactly-once).
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.

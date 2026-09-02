@@ -27,7 +27,16 @@ pub fn inspect_current() -> HookHealthReport {
     inspect_paths(&repo_root, home.as_deref())
 }
 
-pub(in crate::hook_health) fn hook_home_dir() -> Option<PathBuf> {
+/// clud's notion of the user home, overridable by `CLUD_HOOK_HOME`.
+///
+/// The override is not a test convenience bolted on after the fact: on Windows
+/// `dirs::home_dir()` asks `SHGetKnownFolderPath`, which ignores a
+/// `USERPROFILE` set by a test harness or a sandbox. Without it, a process
+/// pointed at a temp home still reads the developer's real dotfiles.
+///
+/// Public so `workspace_trust` can resolve `~/.claude.json` through the same
+/// chain rather than growing a fourth copy of it.
+pub fn hook_home_dir() -> Option<PathBuf> {
     std::env::var_os("CLUD_HOOK_HOME")
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
