@@ -414,6 +414,71 @@ def test_required_red_logs_then_cancels_without_another_poll(
     assert events.index("required_failure") < events.index("cancel") < events.index("EXIT")
 
 
+def test_empty_required_set_fails_fast_instead_of_waiting_for_the_matrix(
+    watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Protection configured with zero contexts must mean all-checks-required.
+
+    The old fallback treated an empty required set as "nothing is required",
+    so a red fast lane was advisory and the watcher idled until every slow
+    matrix lane (the Mac builds) finished. An empty set is protection data
+    that names no checks — fail fast, don't wait it out.
+    """
+    log = watcher.WatchLog.create(527, "zackees/clud", root=tmp_path)
+    monkeypatch.setattr(
+        watcher.PRSnapshot,
+        "fetch",
+        lambda *args: watcher.PRSnapshot(527, "OPEN", "UNKNOWN", "abc123", "main"),
+    )
+    monkeypatch.setattr(watcher, "fetch_required_check_names", lambda *args: set())
+    polls = 0
+
+    def gates(*_args, **_kwargs):
+        nonlocal polls
+        polls += 1
+        return gate_snapshot(
+            watcher,
+            [
+                watcher.CheckRow("linux lint", "fail", "FAILURE"),
+                watcher.CheckRow("macos arm64", "pending", "IN_PROGRESS"),
+            ],
+            mergeable="UNKNOWN",
+        )
+
+    monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
+    monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
+    monkeypatch.setattr(
+        watcher,
+        "_build_failure_report",
+        lambda *args: watcher.FailureReport(args[0], None, "boom", "test failure"),
+    )
+    monkeypatch.setattr(
+        watcher,
+        "cancel_pr_runs",
+        lambda _pr, _repo, _sha, _opts, _log=None: 1,
+    )
+    opts = watcher.CancelOptions(
+        on={"fail"},
+        mode="runs",
+        timeout=30,
+        require=False,
+        dry_run=False,
+        ignore_permission_errors=True,
+        no_retry=False,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        watcher.watch(527, "zackees/clud", 20, 3600, None, opts, log)
+
+    assert exc.value.code == watcher.EXIT_REQUIRED_FAIL
+    assert polls == 1
+
+
+def test_default_poll_interval_is_quick(watcher) -> None:
+    ns = watcher.parse_args(["527"])
+    assert ns.interval == 20
+
+
 def test_required_red_cancels_before_fetching_failure_logs(
     watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

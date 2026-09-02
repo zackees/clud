@@ -2932,3 +2932,43 @@ frontend regression that breaks `CwdChanged` — or stops exporting
 5-second probe adds nothing to launches without an opted-in repo, and a
 hand-installed bare line still behaves (the handler is explicit-event-only
 in the dispatch matrix).
+
+---
+
+## DD-065: PR CI waits are fail-fast, single-path, and cancel only the watched PR's own work
+
+**Status:** Accepted
+
+**Context:** Agents waiting on PR checks kept waiting for *all* matrix lanes —
+the Mac builds being the long pole — even after a fast Linux lane had already
+gone red, jamming the pipeline for the length of the slowest runner. Raw
+waiter commands (`gh pr checks --watch`, `gh run watch`, `gh pr merge --auto`,
+hand-rolled polling loops) wait locally, cannot see a first error, and never
+release the queued lanes they no longer care about. The `git.pr_wait_fail_fast`
+deny existed but defaulted off, missed `gh pr merge --auto`, and — in gated
+(`tap`) sessions — the gate prefix hid the `gh` program name from the guard.
+
+**Decision:**
+
+- **One wait path.** The bundled `github/pr_merge_watch.py` tool is the only
+  PR-wait primitive. The `git.pr_wait_fail_fast` deny now defaults **on** and
+  covers `gh pr checks --watch`, `gh run watch`, `gh pr merge --auto`, and
+  polling loops; the guard strips the `tap` gate prefix before matching.
+  Explicit opt-out stays available.
+- **Fail fast, always.** The watcher exits the moment a check is red and never
+  idles out the rest of the matrix: with no branch protection, no allowlist,
+  *or* protection that names zero checks, every check counts as required. It
+  polls every 20 seconds by default so a watching agent reacts quickly.
+- **Break off, scoped.** On failure exit the watcher cancels only the watched
+  PR's own remaining workflow runs on its head SHA — never another PR's jobs.
+  The agent's reaction (fix + push) then supersedes the stale run through the
+  CI workflow's existing `concurrency` group, which cancels the prior matrix
+  for the same PR. No global or cross-PR cancellation exists anywhere.
+
+**Consequences:** A red fast lane surfaces in ≤20s with the failing check
+named, first-error classified, and the PR's remaining lanes released instead
+of occupying runners for the slowest build. The escape hatch
+(`CLUD_BAD_CMD_OVERRIDE`, or flipping `git.pr_wait_fail_fast` off) remains for
+deliberate raw use. Merge readiness still requires all required checks green
+and `mergeable=MERGEABLE` — fail-fast shortens failure, it does not weaken
+the green gate.

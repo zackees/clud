@@ -25,7 +25,7 @@ const CODEX_CONFIG_OVERRIDES_NOTE: &str =
 const SHELL_DISABLE_POWERSHELL_NOTE: &str =
     "When true, clud injects a PreToolUse hook into Claude and Codex that denies any Bash/Shell call resolving to powershell.exe / pwsh / *.ps1. For Claude it also sets CLAUDE_CODE_USE_POWERSHELL_TOOL=0 + CLAUDE_CODE_GIT_BASH_PATH to a vendored bash. Also sets CLUD_DISABLE_POWERSHELL=1 in the backend env so skills/CLAUDE.md content can branch on it. Per-backend overrides under shell.claude.disable_powershell / shell.codex.disable_powershell take precedence; null inherits the top-level value. Default false. See https://github.com/zackees/clud/issues/447.";
 const GIT_PR_WAIT_FAIL_FAST_NOTE: &str =
-    "When true, cmd-scan denies raw `gh pr checks --watch` / `gh run watch` and hand-rolled PR-status polling loops, pointing the agent at the bundled fail-fast waiter (`clud tool run github/pr_merge_watch.py <PR>`) instead. Off by default; toggle with `clud settings`.";
+    "When true, cmd-scan denies raw `gh pr checks --watch` / `gh run watch` / `gh pr merge --auto` and hand-rolled PR-status polling loops, pointing the agent at the bundled fail-fast waiter (`clud tool run github/pr_merge_watch.py <PR>`) instead. On by default (DD-065); toggle with `clud settings`.";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GlobalLaunchPreferences {
@@ -180,7 +180,7 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
 
     if let Some(git) = seed_object_entry(document, "git") {
         git.entry("pr_wait_fail_fast".to_string())
-            .or_insert(Value::Bool(false));
+            .or_insert(Value::Bool(true));
     }
 
     if let Some(web_term) = seed_object_entry(document, "web_term") {
@@ -674,7 +674,7 @@ pub fn save_auto_fix_hooks_enabled_at(home: &Path, enabled: bool) -> Result<(), 
 }
 
 /// PR-wait fail-fast git command improvements (`clud settings` toggle).
-/// Off by default — see `GIT_PR_WAIT_FAIL_FAST_NOTE`.
+/// On by default (DD-065) — see `GIT_PR_WAIT_FAIL_FAST_NOTE`.
 pub fn load_pr_wait_fail_fast_enabled() -> Result<bool, SettingsError> {
     let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
     load_pr_wait_fail_fast_enabled_at(&home)
@@ -688,7 +688,7 @@ pub fn load_pr_wait_fail_fast_enabled_at(home: &Path) -> Result<bool, SettingsEr
         .get("git")
         .and_then(|item| item.get("pr_wait_fail_fast"))
         .and_then(Value::as_bool)
-        .unwrap_or(false))
+        .unwrap_or(true))
 }
 
 pub fn save_pr_wait_fail_fast_enabled(enabled: bool) -> Result<(), SettingsError> {
