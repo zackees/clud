@@ -111,4 +111,5 @@ pub mod wasm;
 pub mod webterm;
 pub mod wedge_watchdog;
 pub mod win_creation_flags;
+pub mod workspace_trust;
 pub mod worktrees;

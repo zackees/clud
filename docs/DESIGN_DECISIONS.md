@@ -2972,3 +2972,65 @@ of occupying runners for the slowest build. The escape hatch
 deliberate raw use. Merge readiness still requires all required checks green
 and `mergeable=MERGEABLE` — fail-fast shortens failure, it does not weaken
 the green gate.
+
+## DD-066: clud reports an untrusted workspace and never records the trust itself
+
+**Context (issue #1102):** Claude Code gates a project's
+`.claude/settings*.json` behind a per-project trust decision stored as
+`projects["<abs cwd>"].hasTrustDialogAccepted` in `~/.claude.json`. Until that
+flag is set it loads none of that file and prints its own red banner saying so
+— at the top of every one of up to 200 iterations of an unattended
+`clud grind`, where it scrolls away unread.
+
+It is easy to dismiss: clud already injects `--dangerously-skip-permissions`
+([DD-002](#dd-002-yolo-mode-is-the-default-safe-is-the-opt-out)), so the
+dropped `permissions.allow` entries change nothing for tool gating. Everything
+else the file configures is a different story — the repo gets a materially
+different unattended run than the one its author gets interactively, and the
+only signal is a banner nobody is watching.
+
+**Decision:**
+
+- **Say it once, in clud's own voice, before iteration 1.** The notice lives
+  in `main.rs` above the `launch_mode` match, outside both `run_plan_*` loops
+  and covering the centralized-daemon path with the same call.
+- **Only when it can matter.** Silent unless the run is multi-iteration, the
+  backend is Claude, the state file is readable *and* says untrusted, and the
+  repo actually ships a `.claude/settings*.json` for that decision to suppress.
+  A bare directory gets nothing.
+- **The iteration gate is the point.** On a single interactive launch the
+  harness's own banner is on screen and readable; a second one would be a
+  double banner in the one case that never needed help. The unattended
+  multi-iteration run is the one with no other way to surface this.
+- **An unreadable or unparseable `~/.claude.json` is `Unknown`, not
+  untrusted.** A fresh machine, a relocated `CLAUDE_CONFIG_DIR`, and a
+  half-written file must not tell a user their trusted workspace is untrusted.
+- **clud never writes the flag, and the notice never coaches anyone into
+  writing it by hand.** It points at the interactive prompt and stops there;
+  a unit test asserts the text mentions neither `hasTrustDialogAccepted` nor
+  `.claude.json`.
+
+**Why not auto-trust?** Trust is the boundary that decides whether a
+checkout's settings — including anything it declares that executes — are
+honored. Accepting it on a user's behalf, in a tool whose premise is running
+unattended in repos, makes clud the thing that disarms the check. The cost of
+not doing it is one line of stderr per launch.
+
+**The Codex asymmetry is deliberate, and worth naming.** clud *does* write
+`[projects."<key>"] trust_level = "trusted"` into `~/.codex/config.toml`
+(`hook_health/codex_trust.rs`, on by default via `auto_fix_hooks`). That is not
+the same act: it is a hook-health *repair*, taken as part of installing clud's
+own hooks into a project so they can run, reported in the repair output, and
+opt-out-able with `--no-fix-hooks`. Flipping a Claude workspace to trusted to
+silence an unrelated banner has none of that framing — the user asked clud to
+run an agent, not to widen what a checkout is allowed to configure.
+
+If a maintainer later wants the symmetric behavior, the shape already exists:
+add a `RepairAction` alongside `AddCodexProjectTrust` so it lands under the
+same reported, opt-out-able repair path. This decision is only that the
+*notice* must not quietly become a write.
+
+**Consequences:** An untrusted workspace with project settings is called out
+once per launch instead of 200 times by someone else. A trusted workspace, a
+non-Claude backend, a settings-free directory, and `--dry-run` all produce no
+new output at all.

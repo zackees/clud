@@ -5,7 +5,7 @@ use clud::{
     launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth,
     runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli,
     tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm,
-    worktrees,
+    workspace_trust, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -1113,6 +1113,19 @@ fn run(mut args: args::Args) {
     // `[foreground.cpu_banner] enabled = false` settings toggle. Builds an
     // inert cfg in any of those cases so `BannerWatcher::spawn` is a no-op.
     let cpu_banner_cfg = build_cpu_banner_cfg(&args, &plan);
+
+    // Issue #1102: say once, here, that the harness has no trust decision for
+    // this workspace and will therefore ignore its `.claude/settings*.json`.
+    // Deliberately outside every iteration loop and outside both launch
+    // modes' bodies, so an unattended `clud grind` gets one line rather than
+    // 200 — and so the centralized-daemon path is covered by the same call.
+    if !args.dry_run {
+        workspace_trust::warn_if_workspace_untrusted(
+            plan.backend,
+            plan.cwd.as_deref(),
+            plan.iterations,
+        );
+    }
 
     let exit_code = if centralized {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
