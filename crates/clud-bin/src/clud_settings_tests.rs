@@ -17,9 +17,9 @@ fn missing_settings_file_defaults_auto_fix_hooks_enabled() {
 }
 
 #[test]
-fn missing_settings_file_defaults_pr_wait_fail_fast_disabled() {
+fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();
-    assert!(!load_pr_wait_fail_fast_enabled_at(home.path()).unwrap());
+    assert!(load_pr_wait_fail_fast_enabled_at(home.path()).unwrap());
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn first_run_global_settings_seed_discoverable_defaults_only() {
 
     assert_eq!(document["shell"]["disable_powershell"], false);
     assert_eq!(document["hook_health"]["auto_fix_hooks"], true);
-    assert_eq!(document["git"]["pr_wait_fail_fast"], false);
+    assert_eq!(document["git"]["pr_wait_fail_fast"], true);
     assert_eq!(document["daemon"]["idle_timeout_secs"], 900);
     assert_eq!(document["daemon"]["proc_sampler"]["interval_ms"], 2_000);
     // #465 AC 1: both orphan-sweep knobs are seeded so an operator can

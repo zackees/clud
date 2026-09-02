@@ -205,10 +205,11 @@ fn setting_items() -> Vec<SettingItem> {
     items.push(SettingItem {
         key: "git.pr_wait_fail_fast",
         label: "PR-wait fail-fast git commands",
-        note: "Blocks raw `gh pr checks --watch`-style commands in favor of \
-               a bundled fail-fast waiter script. Off by default; may \
-               become the default later.",
-        value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false)),
+        note: "Blocks raw `gh pr checks --watch` / `gh pr merge --auto` in \
+               favor of a bundled fail-fast waiter script that exits on the \
+               first red check instead of waiting out the full matrix. On \
+               by default (DD-065).",
+        value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true)),
     });
     items.push(SettingItem {
         key: "bash.block_cd",

@@ -1246,6 +1246,11 @@ def watch(
             # Cancel current-head work before the advisory log probe, which
             # can be slower than the cancellation API for large failed runs.
             _cancel_for_exit("fail", pr, repo, snapshot.head_sha, opts, log)
+            if "fail" in opts.on or "always" in opts.on:
+                print(
+                    f"NOTE  {len(pending)} check(s) still running on this head SHA; "
+                    "cancelling this PR's remaining runs — push a fix to supersede them"
+                )
             report = _build_failure_report(c, repo_for_protection)
             print(report.render())
             if log and (report.first_error or report.classifier):
@@ -1319,9 +1324,11 @@ def _is_required(
 ) -> bool:
     if require_re is not None:
         return bool(require_re.search(c.name))
-    if required is None:
-        # No protection AND no allowlist: treat every check as required so
-        # we never silently merge with a regression.
+    if not required:
+        # No protection (None), no allowlist, OR protection that lists zero
+        # checks (empty set): treat every check as required so a red lane
+        # fails the wait immediately instead of the watcher idling until
+        # the whole matrix — including the slow Mac lanes — finishes.
         return True
     return c.name in required
 
@@ -1348,7 +1355,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("pr_number", type=int, help="PR number to watch")
     p.add_argument("--repo", help="owner/name (defaults to current repo's origin)")
-    p.add_argument("--interval", type=int, default=60, help=argparse.SUPPRESS)
+    p.add_argument(
+        "--interval",
+        type=int,
+        default=20,
+        help="seconds between polls (default 20)",
+    )
     p.add_argument(
         "--timeout",
         type=int,

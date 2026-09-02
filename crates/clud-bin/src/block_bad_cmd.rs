@@ -407,7 +407,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // Best-effort: a missing/unreadable global settings file must never
     // block the hook itself — fall back to the documented off default.
     let pr_wait_fail_fast_enabled =
-        crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false);
+        crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true);
     let rust_use_soldr = config.rust.use_soldr;
     let mut evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
         &payload.command,
@@ -1449,9 +1449,21 @@ fn evaluate_command_into(
 }
 
 fn blocking_pr_wait_reason(command_text: &str, dialect: ShellDialect) -> Option<String> {
-    let segments = split_shell_segments(command_text, dialect);
+    // Heredoc bodies are data, not commands. The depth-0 caller already
+    // strips them, but this function is also reached recursively with
+    // substitution-inner text that still carries its heredoc (a commit
+    // message quoting `gh pr checks --watch` must not read as a waiter).
+    let stripped = strip_heredoc_bodies(command_text);
+    let segments = split_shell_segments(&stripped, dialect);
+    let gate_prefix = block_bad_cmd_gate::gate_prefix();
     for segment in &segments {
-        let words = command_words(segment);
+        let mut words = command_words(segment);
+        // Gated sessions wrap every command with the gate prefix (`tap gh
+        // ...`); strip it so the guard sees the real program name instead of
+        // letting the prefix hide the waiter.
+        if words.len() > 1 && program_name(&words[0]) == gate_prefix.as_str() {
+            words.remove(0);
+        }
         if native_gh_waiter(&words) {
             return Some(format!(
                 "GitHub CLI watch commands wait locally and do not cancel the remaining matrix on first required failure. Use `{PR_WATCH_REPLACEMENT}` instead."
@@ -1466,7 +1478,11 @@ fn blocking_pr_wait_reason(command_text: &str, dialect: ShellDialect) -> Option<
         return None;
     }
 
-    for inner in scan_command_substitutions(command_text) {
+    for inner in scan_command_substitutions(&stripped) {
+        // Heredoc bodies inside a substitution are data, not commands — a
+        // commit message quoting `gh pr checks --watch` must not be denied
+        // as a hand-rolled polling loop.
+        let inner = strip_heredoc_bodies(&inner);
         let words = command_words(&inner);
         if gh_poll_target(&words) {
             return Some(format!(
@@ -1475,7 +1491,7 @@ fn blocking_pr_wait_reason(command_text: &str, dialect: ShellDialect) -> Option<
         }
     }
 
-    let words = tokenize(command_text);
+    let words = tokenize(&stripped);
     for (index, word) in words.iter().enumerate() {
         if program_name(word) == "gh" && gh_poll_target(&words[index..]) {
             return Some(format!(
@@ -1515,6 +1531,12 @@ fn native_gh_waiter(words: &[String]) -> bool {
             .iter()
             .any(|word| word == "--watch" || word.starts_with("--watch=")))
         || positionals.starts_with(&["run", "watch"])
+        // `--auto` enqueues a merge that GitHub blocks on the full matrix —
+        // the slowest-lane wait this guard exists to prevent.
+        || (positionals.starts_with(&["pr", "merge"])
+            && words
+                .iter()
+                .any(|word| word == "--auto" || word.starts_with("--auto=")))
 }
 
 fn gh_poll_target(words: &[String]) -> bool {
@@ -3692,6 +3714,12 @@ mod tests {
             "gh run watch 123456 --exit-status",
             "gh run --repo zackees/clud watch 123456",
             "env GH_HOST=github.com gh run watch 123456",
+            "gh pr merge 528 --auto",
+            "gh pr merge --repo zackees/clud 528 --auto",
+            // Gated sessions wrap the command with the gate prefix; the
+            // guard must see through it.
+            "tap gh pr checks 528 --watch",
+            "tap gh pr merge 528 --auto",
         ] {
             let reason = evaluate_command(command, None, false, &[])
                 .reason
@@ -3769,6 +3797,7 @@ mod tests {
             "gh pr view 528 --json state,mergeStateStatus,statusCheckRollup",
             "gh run view 123456 --json jobs,status",
             "gh run list --branch feat/x",
+            "gh pr merge 528",
             "for pr in 101 102; do gh pr checks \"$pr\"; done",
             "foreach ($pr in 101,102) { gh pr checks $pr }",
             "clud tool run github/pr_merge_watch.py 528",
@@ -3776,6 +3805,8 @@ mod tests {
             "printf 'wait unless explicitly disabled\\n'",
             "Write-Output 'gh run watch 123456'",
             "python - <<'PY'\nprint('until gh pr checks 528; do sleep 60; done')\nPY",
+            // A commit message quoting the denied shapes is data, not a waiter.
+            "git commit -m \"$(cat <<'EOF'\ngh pr checks 528 --watch\nEOF\n)\"",
         ] {
             assert!(allows(command), "{command} should be allowed");
         }
@@ -3783,9 +3814,9 @@ mod tests {
 
     #[test]
     fn pr_wait_fail_fast_gate_off_allows_raw_gh_watch() {
-        // `clud settings`' pr_wait_fail_fast toggle defaults to false; with
-        // the gate explicitly off, the raw watcher command that the
-        // always-on tests above deny must be allowed.
+        // `clud settings`' pr_wait_fail_fast toggle defaults to true; with
+        // the gate explicitly off (an opt-out), the raw watcher command
+        // that the default-on tests above deny must be allowed.
         let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
             "gh pr checks 528 --watch",
             None,
