@@ -854,7 +854,20 @@ fn declared_hook_fragment(plan: &LaunchPlan) -> Option<serde_json::Value> {
         .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
     let repo_root = crate::block_bad_cmd::nearest_repo_root_public(&cwd)?;
     let hooks = crate::clud_hooks::discover(&repo_root)?;
-    crate::clud_hooks_compile::claude_settings_fragment(&hooks)
+    // Phase 5: clud's own `CwdChanged` backstop line rides on frontend
+    // support, probed once per launch against the resolved backend binary.
+    // Every consumer of the fragment is a Claude launch (the bridge wraps
+    // Claude; codex has no argument surface for hooks), so probe only there —
+    // a failed probe degrades silently to no line (DD-064).
+    let cwd_changed_supported = plan.effective_harness() == Backend::Claude
+        && plan
+            .command
+            .first()
+            .map(|binary| {
+                crate::backend_bootstrap::probe_claude_cwd_changed_support(binary.as_ref())
+            })
+            .unwrap_or(false);
+    crate::clud_hooks_compile::claude_settings_fragment(&hooks, cwd_changed_supported)
 }
 
 /// Hand `generated` to Claude as a launch-scoped `--settings` source.

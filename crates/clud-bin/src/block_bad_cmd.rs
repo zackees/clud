@@ -270,6 +270,19 @@ pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     let event = invocation.event.as_str();
 
+    // The CwdChanged backstop speaks its own protocol: the payload describes
+    // a session-cwd move, not a tool call, and the handler always exits 0
+    // (the harness gives this event no decision control). None of the
+    // PreToolUse machinery below — gate, payload shape, Tier A — applies.
+    if event == crate::clud_hooks_compile::CWD_CHANGED_EVENT {
+        let stdin = read_stdin_bounded();
+        for message in &stdin.log_messages {
+            append_log(message);
+        }
+        let parent = block_bad_cmd_cwd_changed::session_parent_root();
+        return block_bad_cmd_cwd_changed::handle_cwd_changed(&stdin.text, parent.as_deref());
+    }
+
     // Resolved before anything else can fail, because the gate's entire value
     // is that a hook which cannot read or parse its input still *denies*. Each
     // early `return 0` below is an allow-by-default that the gate must
@@ -3150,6 +3163,9 @@ pub use block_bad_cmd_cd::{
     frontend_hook_commands, has_broken_git_rev_parse_prefix, is_cwd_sensitive_hook_command,
     scan_hook_cwd_sensitivity, HookCwdScan, SensitiveHook, GIT_REV_PARSE_PREFIX_FIX,
 };
+
+#[path = "block_bad_cmd_cwd_changed.rs"]
+mod block_bad_cmd_cwd_changed;
 
 /// The lexical repo-root walk, for callers outside this module.
 ///

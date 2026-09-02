@@ -31,6 +31,15 @@ const MIN_UNIFIED_CLAUDE_CODE_VERSION: ClaudeCodeVersion = ClaudeCodeVersion {
     patch: 223,
 };
 
+/// The version floor for the `CwdChanged` hook event, which Claude Code
+/// introduced in 2.1.83. Older clients never fire it, so the backstop line
+/// would sit inert.
+const MIN_CWD_CHANGED_CLAUDE_CODE_VERSION: ClaudeCodeVersion = ClaudeCodeVersion {
+    major: 2,
+    minor: 1,
+    patch: 83,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ClaudeCodeVersion {
     major: u64,
@@ -670,6 +679,66 @@ fn parse_claude_code_version(output: &str) -> Option<ClaudeCodeVersion> {
         })
 }
 
+/// Whether the installed Claude Code can fire the `CwdChanged` hook event
+/// (zackees/clud#967 Phase 5).
+///
+/// The backstop is hygiene, never correctness (DD-064), so the probe is
+/// deliberately conservative: any failure — the binary missing or hanging,
+/// output that will not parse, an older version — answers `false`, and the
+/// launch simply registers no `CwdChanged` line. It runs once per launch and
+/// only for a repo that opted into `.clud/hooks.json`, so its budget is
+/// bounded: the whole probe gives up after a few seconds and degrades to no
+/// line rather than stall a launch.
+#[must_use]
+pub fn probe_claude_cwd_changed_support(claude_path: &Path) -> bool {
+    const PROBE_BUDGET: Duration = Duration::from_secs(5);
+
+    let process = match subprocess::ManagedSubprocess::start_inheriting_env(
+        vec![
+            claude_path.to_string_lossy().into_owned(),
+            "--version".to_string(),
+        ],
+        None,
+        true,
+        invisible_helper_creationflags(),
+    ) {
+        Ok(process) => process,
+        Err(_) => return false,
+    };
+
+    let deadline = std::time::Instant::now() + PROBE_BUDGET;
+    let mut buf = Vec::<u8>::new();
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = process.kill();
+            return false;
+        }
+        match process.read_stdout(Some(Duration::from_millis(100))) {
+            ReadStatus::Line(line) => buf.extend_from_slice(&line),
+            ReadStatus::Timeout => {
+                // Polling observes direct-root exit and closes its Job, while
+                // reader threads may still be draining buffered final bytes —
+                // same pattern as `run_captured_command`; the deadline above
+                // is what bounds this loop.
+                let _ = process.poll();
+            }
+            ReadStatus::Eof => break,
+        }
+    }
+
+    let exit_code = process
+        .wait(Some(Duration::from_secs(2)))
+        .map_err(|_| ())
+        .ok();
+    if exit_code != Some(0) {
+        return false;
+    }
+
+    let output = String::from_utf8_lossy(&buf);
+    parse_claude_code_version(&output)
+        .is_some_and(|version| version >= MIN_CWD_CHANGED_CLAUDE_CODE_VERSION)
+}
+
 fn run_captured_command(command: Vec<String>) -> Result<(i32, String), String> {
     let process = subprocess::ManagedSubprocess::start_inheriting_env(
         command,
@@ -722,6 +791,27 @@ mod tests {
             })
         );
         assert_eq!(parse_claude_code_version("Claude Code unknown"), None);
+    }
+
+    #[test]
+    fn cwd_changed_probe_floor_is_the_event_introduction_version() {
+        // 2.1.83 is the first Claude Code that fires `CwdChanged`; anything
+        // older must not get the backstop line, and the probe must accept
+        // exactly the floor and above.
+        let floor = MIN_CWD_CHANGED_CLAUDE_CODE_VERSION;
+        assert_eq!(
+            floor,
+            ClaudeCodeVersion {
+                major: 2,
+                minor: 1,
+                patch: 83
+            }
+        );
+        assert!(parse_claude_code_version("2.1.82").is_none_or(|v| v < floor));
+        assert!(parse_claude_code_version("2.1.83").is_some_and(|v| v >= floor));
+        assert!(parse_claude_code_version("2.2.0").is_some_and(|v| v >= floor));
+        assert!(parse_claude_code_version("1.9.99").is_none_or(|v| v < floor));
+        assert!(parse_claude_code_version("3.0.0").is_some_and(|v| v >= floor));
     }
 
     #[test]
