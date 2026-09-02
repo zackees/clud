@@ -35,6 +35,17 @@
 //! warning rather than taking the rest of the file's hooks down with it. A
 //! settings file that silently disarms itself over a typo is worse than one
 //! that runs everything it could still understand.
+//!
+//! ## Tier B source: frontend settings of non-opted-in sub-repos
+//!
+//! Phase 4 (#966 D4) also reads a sub-repo's hooks out of the frontend
+//! settings the harness itself would load — `.claude/settings.json`,
+//! `.claude/settings.local.json`, `.codex/hooks.json` — via
+//! [`from_frontend_settings`]. That is safe for the *same* reason the
+//! parent's frontend settings are off limits (D3): the harness never loads a
+//! nested repo's settings, so a hook found there cannot fire natively and
+//! again through clud. Callers use it only for extern and child roots, and
+//! only after [`discover`] found no `.clud/hooks.json` opt-in.
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -243,6 +254,193 @@ fn parse_entry(value: &Value) -> Result<HookEntry, String> {
         command,
         timeout_secs,
     })
+}
+
+/// Frontend settings files the harness itself would load for a repo rooted
+/// at `repo_root`, in the harness's layering order: the shared Claude file,
+/// then its gitignored local one, then the codex file.
+const FRONTEND_SETTINGS_FILES: &[&[&str]] = &[
+    &[".claude", "settings.json"],
+    &[".claude", "settings.local.json"],
+    &[".codex", "hooks.json"],
+];
+
+/// Read a sub-repo's hooks from its frontend settings — the Tier B source
+/// for extern and child roots that have not opted into `.clud/hooks.json`
+/// (zackees/clud#967 Phase 4, #966 D4).
+///
+/// `None` when nothing is declared, mirroring [`discover`]'s contract. The
+/// same file missing, unreadable, or unparsable is reported on stderr and
+/// treated as absent.
+#[must_use]
+pub fn from_frontend_settings(repo_root: &Path) -> Option<CludHooks> {
+    let mut merged = CludHooks::default();
+    for (index, segments) in FRONTEND_SETTINGS_FILES.iter().enumerate() {
+        let mut path = repo_root.to_path_buf();
+        for segment in *segments {
+            path.push(segment);
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // The last file in the list is the codex one, which also accepts the
+        // root-level `<Event>` legacy shape; the Claude files never do.
+        let codex = index == FRONTEND_SETTINGS_FILES.len() - 1;
+        match parse_frontend(&text, codex) {
+            Ok(hooks) => merged.merge(hooks),
+            Err(error) => eprintln!(
+                "clud: failed to parse {}: {error}; ignoring",
+                path.display()
+            ),
+        }
+    }
+    if merged.is_empty() {
+        return None;
+    }
+    merged.source = Some(repo_root.to_path_buf());
+    Some(merged)
+}
+
+impl CludHooks {
+    /// Merge `other` into `self`, dropping a hook already declared — the
+    /// shared and local Claude files layer in the harness, so the same hook
+    /// in both must fire once, not twice.
+    fn merge(&mut self, other: CludHooks) {
+        for (event, entries) in other.events {
+            let target = self.events.entry(event).or_default();
+            for entry in entries {
+                if !target
+                    .iter()
+                    .any(|seen| seen.matcher == entry.matcher && seen.command == entry.command)
+                {
+                    target.push(entry);
+                }
+            }
+        }
+    }
+}
+
+/// Parse hooks out of a frontend settings body. Same lenient posture as
+/// [`parse`]: a document that is not JSON at all is an error; anything else
+/// malformed is skipped with a warning.
+///
+/// Recognized shapes:
+///
+/// - `hooks.<Event>` — an array of groups, or a single group object, in both
+///   frontends' current shapes (`{ "matcher": …, "hooks": [{ "type":
+///   "command", "command": …, "timeout": … }] }` and the older direct
+///   `{ "matcher": …, "command": … }`).
+/// - root-level `<Event>` — codex's legacy shape, which the codex file holds
+///   nothing else at the root to confuse with.
+fn parse_frontend(text: &str, codex: bool) -> Result<CludHooks, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(CludHooks::default());
+    }
+    let root: Value = serde_json::from_str(trimmed).map_err(|error| error.to_string())?;
+    let Some(object) = root.as_object() else {
+        return Err("frontend settings must contain a JSON object".to_string());
+    };
+    let mut parsed = CludHooks::default();
+    if let Some(hooks) = object.get("hooks").and_then(Value::as_object) {
+        for (event, entries) in hooks {
+            if codex && event == "state" {
+                // Codex's per-hook trust table (`hooks.state`), not an event.
+                continue;
+            }
+            add_frontend_event(&mut parsed, event, entries);
+        }
+    }
+    if codex {
+        for (event, entries) in object {
+            if event != "hooks" {
+                add_frontend_event(&mut parsed, event, entries);
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn add_frontend_event(parsed: &mut CludHooks, event: &str, value: &Value) {
+    let groups: Vec<&Value> = match value {
+        Value::Array(groups) => groups.iter().collect(),
+        Value::Object(_) => vec![value],
+        _ => {
+            eprintln!(
+                "clud: frontend hook event {event:?} must be an array or a group object; ignoring it"
+            );
+            return;
+        }
+    };
+    let mut collected = Vec::new();
+    for (index, group) in groups.iter().enumerate() {
+        match parse_frontend_group(group) {
+            Ok(entries) => collected.extend(entries),
+            Err(reason) => eprintln!("clud: frontend hook {event}[{index}] ignored: {reason}"),
+        }
+    }
+    parsed
+        .events
+        .entry(event.to_string())
+        .or_default()
+        .extend(collected);
+}
+
+/// One item of a frontend `hooks.<Event>` array (or a lone group object).
+///
+/// Either the current group shape — `{ "matcher": …, "hooks": [{
+/// "type": "command", "command": …, "timeout": … }] }`, which can expand to
+/// several entries — or the older direct `{ "matcher": …, "command": …,
+/// "timeout": … }` entry.
+fn parse_frontend_group(value: &Value) -> Result<Vec<HookEntry>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "entry must be an object".to_string())?;
+    let matcher = object
+        .get("matcher")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|matcher| !matcher.is_empty())
+        .map(ToOwned::to_owned);
+
+    if let Some(handlers) = object.get("hooks") {
+        let handlers = handlers
+            .as_array()
+            .ok_or_else(|| "`hooks` must be an array".to_string())?;
+        let mut entries = Vec::new();
+        for (index, handler) in handlers.iter().enumerate() {
+            if !handler_type_is_command(handler) {
+                continue;
+            }
+            match parse_entry(handler) {
+                Ok(mut entry) => {
+                    if entry.matcher.is_none() {
+                        entry.matcher = matcher.clone();
+                    }
+                    entries.push(entry);
+                }
+                Err(reason) => eprintln!("clud: frontend hook handler[{index}] ignored: {reason}"),
+            }
+        }
+        return Ok(entries);
+    }
+
+    let mut entry = parse_entry(value)?;
+    if entry.matcher.is_none() {
+        entry.matcher = matcher;
+    }
+    Ok(vec![entry])
+}
+
+/// Whether a frontend handler is something clud executes. The harness tags
+/// handlers with `type` (`"command"`, `"stdin"`, …); only an explicit
+/// `"command"` — or an untagged handler in the older shape — is run.
+fn handler_type_is_command(handler: &Value) -> bool {
+    match handler.get("type").and_then(Value::as_str) {
+        None => true,
+        Some("command") => true,
+        Some(_) => false,
+    }
 }
 
 #[cfg(test)]

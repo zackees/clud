@@ -15,7 +15,7 @@ mod warnings;
 use crate::args::{Args, Command as CliCommand};
 use crate::backend::{Backend, ResolvedLaunchTarget};
 
-pub use codex_trust::codex_project_key;
+pub use codex_trust::{codex_project_key, codex_project_trusted};
 pub use inspect::{inspect_current, inspect_paths};
 pub use repairs::plan_repairs;
 pub use types::{

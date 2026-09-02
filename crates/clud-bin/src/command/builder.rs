@@ -595,6 +595,7 @@ fn build_launch_plan_for_target_at(
         | Some(Command::Symbols { .. })
         | Some(Command::Test { .. })
         | Some(Command::Settings { .. })
+        | Some(Command::Extern { .. })
         | Some(Command::Daemon { .. })
         | Some(Command::InternalDaemon { .. })
         | Some(Command::InternalWorker { .. }) => {}

@@ -36,6 +36,7 @@ pub mod crash_report;
 pub mod ctrl_c_track;
 pub mod daemon;
 pub mod dashboard_auth;
+pub mod extern_cli;
 pub mod extern_root;
 
 pub mod dnd;
@@ -46,6 +47,7 @@ pub mod graphics;
 pub mod grind;
 pub mod harness_picker;
 pub mod hook_health;
+pub mod hook_trust;
 pub mod job_orphan_reaper;
 pub mod large_file_guard;
 pub mod launch_log;

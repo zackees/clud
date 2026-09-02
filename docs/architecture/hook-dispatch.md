@@ -7,7 +7,7 @@ Design record: [#966](https://github.com/zackees/clud/issues/966) (spec),
 [#967](https://github.com/zackees/clud/issues/967) (phased plan),
 [#977](https://github.com/zackees/clud/issues/977) (settings compilation),
 [#965](https://github.com/zackees/clud/issues/965) (the failure that started
-it). Decisions: DD-047.
+it). Decisions: DD-047, DD-060, DD-061, DD-062.
 
 ## The problem
 
@@ -79,6 +79,26 @@ it.
 `.claude/settings.json` *and* declared here runs twice, and the copy the
 harness fires is the unrooted one — the exact failure the declaration was
 supposed to fix. `hook_health` warns when it sees the same command in both.
+
+### Tier B source: where a sub-repo's hooks come from
+
+The parent's hooks come from its `.clud/hooks.json`. A `child` or `extern`
+repo has no such opt-in — it is just a checkout the session wandered into — so
+clud reads the files the frontend itself would run there, in order:
+
+1. `.clud/hooks.json` — the opted-in declaration, preferred when present.
+2. `.claude/settings.json` and `.claude/settings.local.json` —
+   `hooks.<Event>` entries.
+3. `.codex/hooks.json` — the same group shape, plus codex's root-level
+   `<Event>` legacy shape.
+
+Both the modern group shape (`{matcher, hooks: [{type: "command", command,
+timeout}]}`) and the legacy direct shape (`{matcher, command, timeout}`)
+parse; a `matcher` on the group is inherited by its handlers. Non-`command`
+handler types are skipped, `hooks.state` (codex's own trust table) is never an
+event, and entries dedupe across files by (event, matcher, command). A repo
+declaring nothing in any of these files has no hooks — `None`, not an empty
+set. See `clud_hooks::from_frontend_settings`.
 
 ## The execution contract
 
@@ -213,19 +233,29 @@ contributes, so a bug there costs the user `permissions`, not just hooks. See
 
 A session can touch files in more than one repo, and which repo's hooks apply
 is decided by what the containing repo *is* to the session, not by path
-geometry:
+geometry. Two questions have different answers per kind: do the **parent's**
+hooks fire there, and do the repo's **own** hooks fire?
 
-| kind | how it is registered | parent hooks fire there? |
-| --- | --- | --- |
-| `parent` | the session root | yes |
-| `extern` | immediate children of the repo's extern directory | **never** |
-| `child` | declared in `.clud/settings.json` | yes |
-| unregistered | — | no |
+| kind | how it is registered | parent hooks fire there? | the repo's own hooks |
+| --- | --- | --- | --- |
+| `parent` | the session root | yes | yes, for parent- and child-owned paths |
+| `extern` | immediate children of the repo's extern directory | **never** | its own Tier B source, rooted at the checkout, trust-gated (DD-060) |
+| `child` | declared in `.clud/settings.json` | yes | its own Tier B source, rooted at the child, layered parent-first (DD-061) |
+| unregistered | — | no | no |
 
 `extern` roots are temporary, foreign visits: the parent's guards have no
 business running against a repo it does not own and will not keep, and firing
 them there is the #841 ENOENT wedge. A declared `child` is the opposite — part
 of the parent's world, so the parent's guards apply to it.
+
+Denial is layered and any deny wins: Tier A, then the parent's hooks, then the
+child's own. A call that touches only child files still gets the parent's
+guards; a call spanning roots fires each distinct root exactly once, parent
+first; a call touching nothing any registered root owns fires no Tier-B hooks
+at all. In a codex session (no `CLAUDE_PROJECT_DIR`), child and extern
+execution is additionally gated behind codex's own project trust table in
+`~/.codex/config.toml` — clud does not run a repo's hooks there before codex
+itself would.
 
 Since #986 those checkouts live **beside** the repo — `~/dev/myrepo` keeps them
 in `~/dev/myrepo-extern/` — which makes containment a disjoint question rather
@@ -260,27 +290,47 @@ because a path-separated list is ambiguous on Windows where paths contain
 `:`. The launch harvests them from its own argv and from the repo's
 `.claude/settings*.json`, and registers them as `extern`: a granted sibling
 directory is no more the parent's business than a checkout clud cloned, and
-its project guards would misfire there. The two differ in *trust* — the user
-named these at launch — which Phase 4 has to distinguish when it gates running
-a foreign repo's own hooks. A launch that grants nothing sets no variable at
-all.
+its project guards would misfire there. The two kinds of extern differ in
+*trust*: a gc-tracked checkout's hooks stay off until the user names it with
+`clud extern trust <name>`, while a root the user named at launch is the
+consent itself and is never gated (DD-060). A launch that grants nothing sets
+no variable at all.
+
+### Trusting a foreign checkout
+
+An extern checkout that declares hooks does not run them until it is trusted:
+
+- `clud extern trust <name>` records `{name, origin}` in the parent's
+  gitignored `.clud/settings.local.json` under `hook_trust.extern` (DD-062).
+  The origin is read from the checkout's `.git/config`, so re-cloning the
+  same name from a different origin does not carry trust.
+- Until then, every dispatch that would have fired the checkout's hooks
+  prints one visible notice — `[clud] extern checkout "dep" declares hooks,
+  but is not trusted; they are not running. Trust it with: clud extern trust
+  dep` — and keeps the hooks off. Opted-in `.clud/hooks.json` declarations in
+  an extern are gated exactly like frontend-settings ones: the trust boundary
+  is the checkout, not the file format.
+- `clud extern trust --list` and `--revoke` round-trip the store.
 
 ## Where the code is
 
 | file | role |
 | --- | --- |
-| `clud_hooks.rs` | `.clud/hooks.json` schema, discovery, matcher semantics |
+| `clud_hooks.rs` | `.clud/hooks.json` schema + Tier B source: the frontend settings files a sub-repo's hooks come from; discovery, matcher semantics |
 | `clud_hook_roots.rs` | the typed root registry, containment, and the firing rule |
+| `hook_trust.rs` | the `hook_trust.extern` allowlist in `.clud/settings.local.json`: load, `is_trusted` (name + origin), `record`, `revoke`, in-process `.git/config` origin read |
+| `extern_cli.rs` | `clud extern trust` / `--list` / `--revoke` |
+| `hook_health/codex_trust.rs` | `codex_project_trusted`: the `~/.codex/config.toml` project trust table that gates child/extern Tier-B execution in codex sessions |
 | `clud_hooks_compile.rs` | compiling declarations into a frontend's native registration, and the merge that keeps it from displacing anything |
 | `foreground_runtime.rs` | composing the launch-scoped `--settings` document and injecting it into argv |
 | `clud_hooks_run.rs` | Tier-B execution: rooting, stdin payload, exit-code contract |
-| `block_bad_cmd.rs` | the hook binary: event arg, Tier A, then Tier B |
+| `block_bad_cmd.rs` | the hook binary: event arg, Tier A, then Tier B — the firing matrix (per-target roots, containment), the codex and extern-trust gates, layered deny |
 | `block_bad_cmd_cd.rs` | `bash.block_cd` cwd pinning, and the hook-command scanner both it and `hook_health` use |
 | `hook_health/inspect.rs` | warnings: broken `git rev-parse` prefix, double-declared hooks |
 
 ## Not yet built
 
-Phases 3–5 of #967: the typed root registry (`extern` vs `child` repos) and
-path-based containment, Tier-B trust for foreign checkouts, and the `"auto"`
-relaxation of `bash.block_cd` once a repo's hooks are dispatcher-managed and
-therefore cwd-immune.
+Phase 5 of #967: the `"auto"` relaxation of `bash.block_cd` once a repo's
+hooks are dispatcher-managed and therefore cwd-immune. Phases 3 (the typed
+root registry and path-based containment) and 4 (Tier-B trust for foreign
+checkouts, DD-060/DD-061/DD-062) are built.

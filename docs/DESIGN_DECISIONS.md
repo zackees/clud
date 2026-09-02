@@ -2730,3 +2730,127 @@ server still maps `low`/`medium` to effective `high`. clud's `--effort` and
 provider settings become initial values rather than locks. Subagent effort
 follows the harness's own subagent policy instead of inheriting the removed
 pin.
+
+## DD-060: a foreign checkout's hooks run only after the user names it
+
+**Status:** Accepted
+
+**Context:** An `extern` root is a checkout clud cloned or the user granted,
+never a repo the session root owns (#966 §6, #967 Phase 4). Before Phase 4 the
+dispatcher ran only the parent's hooks, so no decision was needed about the
+extern's *own* hooks. Once the dispatcher learned a checkout's own declarations
+(DD-061, D4), running them unprompted would hand a repo the agent merely
+visited control over every tool call — the same trust leap as running the
+parent's hooks in the extern, which #841 already showed wedges sessions. But
+the repo's hooks are also the point of the visit: a checkout with a guard
+claud would silently skip is no safer than one whose guard never ran.
+
+**Decision:**
+
+- A gc-tracked extern checkout's Tier-B hooks are **off** until the user runs
+  `clud extern trust <name>`. The first sighting of an extern root that
+  declares hooks prints one visible notice naming exactly that command, then
+  keeps the hooks off — no prompt flow, no silent skip:
+  `[clud] extern checkout "dep" declares hooks, but is not trusted; they are
+  not running. Trust it with: clud extern trust dep`.
+- Trust is an allowlist in the parent's gitignored `.clud/settings.local.json`
+  under `hook_trust.extern` (DD-062), keyed by checkout **name + origin URL**.
+  The origin is read from the checkout's `.git/config` in-process — both
+  remote section spellings, quoted values, and worktree `gitdir:` files — and
+  a checkout with no readable origin matches by name alone.
+- Re-cloning the same name from a different origin does **not** carry trust:
+  the origin is half of the key. A stale entry left behind by gc teardown is
+  harmless — it names a checkout that no longer exists, and re-cloning the
+  same origin is still trusted.
+- Roots the user named at launch — `--add-dir` targets and
+  `permissions.additionalDirectories`, harvested into `CLUD_HOOK_ROOTS` — are
+  registered as `extern` but are **never** trust-gated: naming them is the
+  consent, exactly as naming a checkout is.
+- `clud extern trust` with `--list` and `--revoke` round-trips the store; a
+  trust entry is per-parent-repo, not global.
+
+**Consequences:** A foreign checkout cannot execute hooks until its owner says
+so, in the same repo where the session runs, with one command the notice
+spells out. The gate costs nothing when the checkout declares no hooks (the
+sighting check only runs for extern roots that have any). Trust is
+machine-local and gitignored, so it neither leaks origin URLs into history nor
+travels to other machines. Opted-in `.clud/hooks.json` declarations in an
+extern are gated exactly like frontend-settings declarations — the trust
+boundary is the checkout, not the file format.
+
+## DD-061: child and extern hooks fire rooted at the declaring repo, layered parent-first
+
+**Status:** Accepted
+
+**Context:** #966 §6 fixes which repo's *own* hooks run in a nested repo.
+Before Phase 4 the firing matrix covered only the parent's hooks: always in
+the parent, always in a declared `child`, never in an `extern` (the #841
+wedge). The matrix said nothing about the nested repo's own declarations —
+the harness never loads them at all, because it reads hooks only from the
+session root. A nested repo's guard therefore never ran unless the session
+happened to start there.
+
+**Decision:**
+
+- **Parent root:** the parent's Tier-B hooks fire for touches to parent- and
+  child-owned paths only — never for an extern-owned path alone.
+- **Child root:** declaration is consent, so a child's own hooks run with no
+  prompt, rooted at the child. Denial is layered: Tier A first, then the
+  parent's hooks, then the child's own; any deny denies. A call that touches
+  only child files still gets the parent's guards, and a call spanning roots
+  fires each distinct root once, parent first.
+- **Extern root:** only the checkout's own hooks, rooted at the checkout,
+  trust-gated (DD-060). The parent's hooks never fire there.
+- **Tier B source for sub-repos (D4):** the opted-in `.clud/hooks.json` is
+  preferred; otherwise clud reads `.claude/settings.json`,
+  `.claude/settings.local.json`, and `.codex/hooks.json` — the files the
+  frontend itself would run there. Both the group shape (`hooks.<Event>` of
+  `{matcher, hooks:[...]}`) and the legacy direct shapes parse, non-`command`
+  handler types are skipped, `hooks.state` (codex's own trust table) is never
+  an event, and duplicates across files dedupe by (event, matcher, command).
+- **Codex sessions** gate child and extern Tier-B execution behind codex's own
+  project trust: `codex_project_trusted` reads `[projects."<key>"]` in
+  `~/.codex/config.toml`, where `<key>` is the normalized project path.
+  clud detects a codex session by the absence of `CLAUDE_PROJECT_DIR` and does
+  not run a repo's hooks there before codex itself would; the skip says so and
+  names the fix.
+
+**Consequences:** Every repo a session touches can be guarded by its own
+hooks, rooted correctly regardless of where the agent stands, while the
+parent's guards still cover everything it owns. Nested git repos are still
+never auto-detected as children — declaration remains the consent that makes
+the child tier's no-prompt trust sound. The parent's hooks and the extern's
+hooks cannot both fire on one call, so there is no ambiguity about which
+repo's guards apply in a foreign checkout.
+
+## DD-062: trust state lives in the parent's gitignored `.clud/settings.local.json`
+
+**Status:** Accepted
+
+**Context:** DD-014 split `.clud/settings.json` (tracked — the repo's
+declaration) from `.clud/settings.local.json` (gitignored — the user's
+overrides). The extern trust allowlist (DD-060) is machine-local state with
+no business in history: entries encode the user's decision about a specific
+checkout and its origin URL. It must survive clud restarts, be written by
+`clud extern trust` from any cwd under the parent repo, and be read on every
+tool call by the hook binary.
+
+**Decision:**
+
+- The trust store is the `hook_trust.extern` key of `<repo_root>/.clud/
+  settings.local.json`, an array of `{name, origin}` records. `record` and
+  `revoke` are read-modify-write: every other key in the file is preserved,
+  so the file's human owners keep using it for their own overrides.
+- Parsing is lenient in both directions: a missing, empty, or corrupt store
+  reads as an empty allowlist (a launch must not die on a damaged local
+  file), and an unparsable store does not prevent a later successful write.
+- Names are validated (no separators, no leading dots) before they are
+  recorded; `is_trusted` matches origin exactly, or by name alone when the
+  checkout has no origin.
+
+**Consequences:** Trust is scoped to one machine and one parent repo, never
+committed, and readable without spawning a subprocess — the hook binary reads
+the store directly on every dispatch. The cost of the lenient read is
+theoretical (a corrupt file silently distrusts everything, which is the safe
+direction: hooks stay off). Because the store is per-parent-repo, cloning the
+parent elsewhere starts untrusted, which is the conservative default.

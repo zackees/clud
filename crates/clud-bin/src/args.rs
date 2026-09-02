@@ -502,6 +502,18 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: Option<ConfigSubcommand>,
     },
+    /// Manage the trust allowlist for foreign checkouts' hooks
+    /// (zackees/clud#967 Phase 4, #966 D9).
+    ///
+    /// An `extern` checkout's own hooks stay off until this command records
+    /// the allow in the parent's gitignored `.clud/settings.local.json`,
+    /// keyed by the checkout's name and origin URL, so a re-clone from a
+    /// different remote does not inherit the trust. Running `clud extern`
+    /// with no subcommand prints this help summary.
+    Extern {
+        #[command(subcommand)]
+        subcommand: Option<ExternSubcommand>,
+    },
     /// Issue #183: open the local web dashboard served by the always-on
     /// clud daemon. Shows live sessions, garbage tracking, and the repos
     /// clud has been launched in. Loopback only.
@@ -969,6 +981,28 @@ pub enum ToolSubcommand {
     },
 }
 
+/// Subcommands under `clud extern` (zackees/clud#967 Phase 4).
+#[derive(Subcommand, Debug, Clone)]
+pub enum ExternSubcommand {
+    /// Trust an extern checkout so its own hooks fire for its files.
+    ///
+    /// The allow entry is recorded in the parent's gitignored
+    /// `.clud/settings.local.json`, keyed by the checkout's directory name
+    /// and its origin remote URL, so a re-clone from a different remote does
+    /// not inherit the trust.
+    Trust {
+        /// The checkout's directory name under the repo's extern directory.
+        name: Option<String>,
+        /// Print the recorded allow entries (optionally only for `name`)
+        /// and exit without changing anything.
+        #[arg(long)]
+        list: bool,
+        /// Remove the allow entry for `name` instead of adding one.
+        #[arg(long)]
+        revoke: bool,
+    },
+}
+
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcSubcommand {
@@ -1057,6 +1091,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "log",
     "gc",
     "config",
+    "extern",
     "ui",
     "trash",
     "tool",
@@ -1200,6 +1235,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--fail-on-no-server",
         // `clud settings --list` bool flag.
         "--list",
+        // `clud extern trust --list` / `--revoke` bool flags.
+        "--revoke",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     // Subcommands whose own parser consumes `--` as data rather than as clud's

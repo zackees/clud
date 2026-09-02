@@ -213,3 +213,189 @@ fn an_unparsable_declaration_is_reported_and_ignored_not_fatal() {
     write_hooks(tmp.path(), "{not json");
     assert_eq!(discover(tmp.path()), None);
 }
+
+// --- Tier B source: from_frontend_settings (#967 Phase 4, #966 D4) ---
+
+fn write_settings(root: &Path, rel: &[&str], text: &str) {
+    let mut path = root.to_path_buf();
+    for segment in rel {
+        path.push(segment);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, text).unwrap();
+}
+
+#[test]
+fn frontend_source_reads_the_claude_group_shape() {
+    let tmp = TempDir::new().unwrap();
+    write_settings(
+        tmp.path(),
+        &[".claude", "settings.json"],
+        r#"{
+          "permissions": { "additionalDirectories": ["/srv/other"] },
+          "hooks": {
+            "PreToolUse": [
+              {
+                "matcher": "Bash",
+                "hooks": [
+                  { "type": "command", "command": "ci/hooks/check.py", "timeout": 15 },
+                  { "type": "stdin", "command": "ignored-kind" }
+                ]
+              }
+            ],
+            "Stop": [ { "command": "ci/hooks/on_stop.py" } ]
+          }
+        }"#,
+    );
+
+    let hooks = from_frontend_settings(tmp.path()).expect("declares hooks");
+    assert_eq!(
+        hooks.for_event("PreToolUse"),
+        [HookEntry {
+            matcher: Some("Bash".to_string()),
+            command: "ci/hooks/check.py".to_string(),
+            timeout_secs: 15,
+        }],
+        "the `type: stdin` handler must not be executed by clud"
+    );
+    assert_eq!(
+        hooks.for_event("Stop"),
+        [entry(None, "ci/hooks/on_stop.py")]
+    );
+}
+
+#[test]
+fn frontend_source_reads_the_legacy_direct_shape_and_single_group() {
+    let tmp = TempDir::new().unwrap();
+    write_settings(
+        tmp.path(),
+        &[".claude", "settings.json"],
+        r#"{
+          "hooks": {
+            "PreToolUse": [
+              { "matcher": "Bash", "command": "guard-bash" },
+              { "command": "guard-all" }
+            ]
+          }
+        }"#,
+    );
+    write_settings(
+        tmp.path(),
+        &[".claude", "settings.local.json"],
+        r#"{
+          "hooks": {
+            "Stop": { "command": "on-stop" }
+          }
+        }"#,
+    );
+
+    let hooks = from_frontend_settings(tmp.path()).expect("declares hooks");
+    assert_eq!(
+        hooks.for_event("PreToolUse"),
+        [entry(Some("Bash"), "guard-bash"), entry(None, "guard-all")]
+    );
+    assert_eq!(hooks.for_event("Stop"), [entry(None, "on-stop")]);
+}
+
+#[test]
+fn frontend_source_layers_shared_then_local_without_double_firing() {
+    let tmp = TempDir::new().unwrap();
+    write_settings(
+        tmp.path(),
+        &[".claude", "settings.json"],
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","command":"same-guard"}]}}"#,
+    );
+    // The local file extends the shared one, exactly as the harness merges
+    // them; a hook in both must fire once.
+    write_settings(
+        tmp.path(),
+        &[".claude", "settings.local.json"],
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","command":"same-guard"},{"command":"local-only"}]}}"#,
+    );
+
+    let hooks = from_frontend_settings(tmp.path()).expect("declares hooks");
+    assert_eq!(
+        hooks.for_event("PreToolUse"),
+        [entry(Some("Bash"), "same-guard"), entry(None, "local-only")],
+        "the duplicate triple is deduped"
+    );
+}
+
+#[test]
+fn frontend_source_reads_the_codex_shapes() {
+    let tmp = TempDir::new().unwrap();
+    write_settings(
+        tmp.path(),
+        &[".codex", "hooks.json"],
+        r#"{
+          "hooks": {
+            "PreToolUse": [
+              { "matcher": "Bash", "hooks": [ { "type": "command", "command": "codex-guard" } ] }
+            ],
+            "state": { "whatever": { "trusted_hash": "x" } }
+          }
+        }"#,
+    );
+
+    let hooks = from_frontend_settings(tmp.path()).expect("declares hooks");
+    assert_eq!(
+        hooks.for_event("PreToolUse"),
+        [entry(Some("Bash"), "codex-guard")],
+        "hooks.state is codex's trust table, not an event"
+    );
+}
+
+#[test]
+fn frontend_source_accepts_the_codex_root_level_legacy_shape() {
+    let tmp = TempDir::new().unwrap();
+    write_settings(
+        tmp.path(),
+        &[".codex", "hooks.json"],
+        r#"{
+          "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "legacy-guard" } ] } ]
+        }"#,
+    );
+
+    let hooks = from_frontend_settings(tmp.path()).expect("declares hooks");
+    assert_eq!(
+        hooks.for_event("PreToolUse"),
+        [entry(Some("Bash"), "legacy-guard")]
+    );
+}
+
+#[test]
+fn frontend_source_never_treats_claude_root_keys_as_events() {
+    let tmp = TempDir::new().unwrap();
+    write_settings(
+        tmp.path(),
+        &[".claude", "settings.json"],
+        r#"{
+          "permissions": { "allow": ["Bash"] },
+          "model": "sonnet"
+        }"#,
+    );
+
+    assert_eq!(
+        from_frontend_settings(tmp.path()),
+        None,
+        "permissions and model are settings, not hook events"
+    );
+}
+
+#[test]
+fn frontend_source_none_when_nothing_declared() {
+    let tmp = TempDir::new().unwrap();
+    assert_eq!(from_frontend_settings(tmp.path()), None);
+
+    write_settings(tmp.path(), &[".claude", "settings.json"], "{}");
+    assert_eq!(from_frontend_settings(tmp.path()), None);
+
+    write_settings(tmp.path(), &[".claude", "settings.json"], "{not json");
+    assert_eq!(
+        from_frontend_settings(tmp.path()),
+        None,
+        "a broken file is reported and treated as absent, never fatal"
+    );
+}
