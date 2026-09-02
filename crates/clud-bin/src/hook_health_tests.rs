@@ -545,3 +545,43 @@ fn a_hook_that_only_moved_earns_no_double_fire_warning() {
 
     assert!(!report.warnings.iter().any(|w| w.contains("runs twice")));
 }
+
+#[test]
+fn codex_project_trusted_reads_the_projects_table() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    let config = home.join(".codex").join("config.toml");
+    let key = codex_project_key(&repo);
+
+    assert!(
+        !codex_project_trusted(&repo, &home),
+        "no config at all is not trusted"
+    );
+
+    write(
+        &config,
+        &format!("[projects.\"{key}\"]\ntrust_level = \"trusted\"\n"),
+    );
+    assert!(codex_project_trusted(&repo, &home));
+
+    // Any other value — or no value — is not trusted.
+    write(
+        &config,
+        &format!("[projects.\"{key}\"]\ntrust_level = \"ask\"\n"),
+    );
+    assert!(!codex_project_trusted(&repo, &home));
+    write(&config, &format!("[projects.\"{key}\"]\n"));
+    assert!(!codex_project_trusted(&repo, &home));
+
+    // A different project's trust does not leak in.
+    write(
+        &config,
+        "[projects.\"/elsewhere\"]\ntrust_level = \"trusted\"\n",
+    );
+    assert!(!codex_project_trusted(&repo, &home));
+
+    // An unparsable config is not trusted.
+    write(&config, "{not toml");
+    assert!(!codex_project_trusted(&repo, &home));
+}

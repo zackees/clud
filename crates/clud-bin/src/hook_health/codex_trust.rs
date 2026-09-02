@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use toml_edit::{table, value, DocumentMut};
+use toml_edit::{table, value, DocumentMut, Item};
 
 use super::{CODEX_PRE_TOOL_USE_STATE, CURRENT_CODEX_HOOKS_FEATURE, LEGACY_CODEX_HOOKS_FEATURE};
 
@@ -115,4 +115,39 @@ pub(in crate::hook_health) fn is_extended_key_for(key: &str, canonical_key: &str
         return false;
     };
     normalize_project_path_key(key) == canonical_key || stripped.replace('\\', "/") == canonical_key
+}
+
+/// Whether the repo at `repo_root` is trusted in the codex project trust
+/// table — `[projects."<key>"] trust_level = "trusted"` in
+/// `~/.codex/config.toml`, where `<key>` is the normalized project path
+/// (see [`codex_project_key`]). `false` when the config is missing or
+/// unparsable.
+///
+/// This is the boundary clud honors before running a sub-repo's own hooks in
+/// a codex session (zackees/clud#967 Phase 4): codex itself would not run a
+/// repo's hooks until the project is trusted here, and clud does not go
+/// around codex's model.
+pub fn codex_project_trusted(repo_root: &Path, home: &Path) -> bool {
+    let config_path = home.join(".codex").join("config.toml");
+    let canonical_key = codex_project_key(repo_root);
+    let Ok(text) = fs::read_to_string(&config_path) else {
+        return false;
+    };
+    let Ok(document) = text.parse::<DocumentMut>() else {
+        return false;
+    };
+    let Some(projects) = document.get("projects").and_then(Item::as_table) else {
+        return false;
+    };
+    // Bound to a local: the iterator temporary borrows `document`, which must
+    // outlive the block's tail expression.
+    let trusted = projects.iter().any(|(key, item)| {
+        let trusted = item
+            .get("trust_level")
+            .and_then(Item::as_str)
+            .map(|level| level.eq_ignore_ascii_case("trusted"))
+            .unwrap_or(false);
+        trusted && (key == canonical_key || is_extended_key_for(key, &canonical_key))
+    });
+    trusted
 }

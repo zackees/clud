@@ -600,45 +600,106 @@ fn describe_unverifiable(what: &str, incomplete: Option<&'static str>) -> String
     }
 }
 
-/// Whether the parent repo's hooks apply to what this call touches
-/// (zackees/clud#967 Phase 3).
+/// The roots whose own hooks should run for this call, in firing order — the
+/// #966 §6 matrix (zackees/clud#967 Phase 4).
 ///
 /// Containment is resolved from the tool's *inputs*, never from the payload
-/// cwd alone: a subagent editing `.extern-repos/<sub>/src/lib.rs` usually
-/// still has cwd at the parent root, so keying on cwd would answer "parent"
-/// for a file that is plainly not the parent's. For `Bash`, the inputs are
-/// cwd plus wherever the command would `cd` to.
+/// cwd alone: a subagent editing an extern checkout's file usually still has
+/// cwd at the parent root, so keying on cwd would answer "parent" for a file
+/// that is plainly not the parent's. For `Bash`, the inputs are cwd plus
+/// wherever the command would `cd` to.
 ///
-/// A call that touches an `extern` root is the case this exists for: the
-/// parent's guards have no business running against a foreign checkout, and
-/// firing them there is the #841 ENOENT wedge.
-fn parent_hooks_apply(repo_root: &Path, payload: &HookPayloadView) -> bool {
-    let config =
-        crate::repo_clud_config::discover_effective_clud_config(repo_root).unwrap_or_default();
-    let env_roots = std::env::var(crate::clud_hook_roots::HOOK_ROOTS_ENV).ok();
-    let roots = crate::clud_hook_roots::HookRoots::resolve(
-        repo_root,
-        &config.hook_roots.children,
-        env_roots.as_deref(),
-    );
+/// The parent fires when any touched path is parent- or child-owned, and
+/// never for extern-owned paths — the parent's guards have no business
+/// running against a foreign checkout, which is the #841 ENOENT wedge. Each
+/// distinct child root fires its own hooks; each distinct extern root does
+/// too, trust-gated by the caller. Layered-deny order: parent, then children
+/// and externs, most specific first.
+fn tier_b_fire_targets(
+    roots: &crate::clud_hook_roots::HookRoots,
+    touched: &[PathBuf],
+) -> Vec<crate::clud_hook_roots::HookRoot> {
+    use crate::clud_hook_roots::RootKind;
 
-    let named = crate::clud_hook_roots::tool_input_paths(payload.tool_input.as_ref(), &payload.cwd);
-    let cd_targets = if payload.command.is_empty() {
-        Vec::new()
-    } else {
-        block_bad_cmd_cd::session_cd_targets(
-            &payload.command,
-            shell_dialect_for_tool(&payload.tool_name),
-            &payload.cwd,
-            home_dir().as_deref(),
-        )
-    };
-
-    let touched = crate::clud_hook_roots::containment_paths(named, cd_targets, &payload.cwd);
-
+    let mut targets: Vec<crate::clud_hook_roots::HookRoot> = Vec::new();
     // Any touched path the parent owns is enough: a call that spans repos
     // still deserves the parent's guards for the parent's own files.
-    touched.iter().any(|path| roots.parent_hooks_apply_to(path))
+    if touched.iter().any(|path| roots.parent_hooks_apply_to(path)) {
+        if let Some(parent) = roots
+            .all()
+            .iter()
+            .find(|root| root.kind == RootKind::Parent)
+        {
+            targets.push(parent.clone());
+        }
+    }
+    for root in roots.all() {
+        if root.kind == RootKind::Parent {
+            continue;
+        }
+        let hit = touched.iter().any(|path| {
+            roots
+                .containing(path)
+                .is_some_and(|seen| seen.path == root.path)
+        });
+        if hit && !targets.iter().any(|seen| seen.path == root.path) {
+            targets.push(root.clone());
+        }
+    }
+    targets
+}
+
+/// Whether a sub-repo's own hooks must be skipped in this session: the codex
+/// parity gate (zackees/clud#967 Phase 4).
+///
+/// Codex has no hook-argument surface and no compiled clud lines, so a codex
+/// session is detected by the absence of the harness's project-dir env var.
+/// Codex itself would not run a repo's hooks until the project is trusted in
+/// `~/.codex/config.toml`; clud honors the same boundary before running an
+/// extern or child repo's own hooks in a codex session. `None` for home — no
+/// home, no codex config to be gated by.
+fn tier_b_gated_in_codex(repo_root: &Path, home: Option<&Path>) -> bool {
+    if std::env::var_os("CLAUDE_PROJECT_DIR").is_some() {
+        // A Claude session: the harness has already run whatever it trusts.
+        return false;
+    }
+    match home {
+        Some(home) => !crate::hook_health::codex_project_trusted(repo_root, home),
+        None => false,
+    }
+}
+
+/// Whether a GC-tracked extern checkout's own hooks must be skipped for lack
+/// of trust (zackees/clud#967 Phase 4, #966 D9).
+///
+/// A checkout clud cloned at the user's request is provenance, not consent —
+/// its hooks stay off until `clud extern trust <name>` records the name +
+/// origin in the parent's gitignored `.clud/settings.local.json`. Roots the
+/// user *named* at launch (`--add-dir`, `permissions.additionalDirectories`)
+/// carry the same `Extern` containment kind but are the consent D9 requires:
+/// they are never gated.
+fn extern_trust_gated(parent: &Path, root: &crate::clud_hook_roots::HookRoot) -> bool {
+    if !is_gc_tracked_extern(parent, &root.path) {
+        return false;
+    }
+    let Some(name) = root.path.file_name() else {
+        return true;
+    };
+    let name = name.to_string_lossy();
+    let origin = crate::hook_trust::origin_of(&root.path);
+    let store = crate::hook_trust::load(parent);
+    !crate::hook_trust::is_trusted(&store, &name, origin.as_deref())
+}
+
+/// Whether `path` lives under one of the parent's GC-tracked extern roots —
+/// the checkouts clud cloned beside the repo (`<name>-extern/`, legacy
+/// `.extern-repos/`) — as opposed to a directory the user granted at launch.
+fn is_gc_tracked_extern(parent: &Path, path: &Path) -> bool {
+    let key = crate::path_norm::normalize_for_key(path);
+    crate::extern_root::known_roots(parent).iter().any(|base| {
+        let base_key = crate::path_norm::normalize_for_key(base);
+        key == base_key || key.starts_with(&format!("{base_key}/"))
+    })
 }
 
 /// Whether *this* invocation is the one that should run declared hooks.
@@ -666,33 +727,125 @@ struct DeclaredHookDenial {
     log_messages: Vec<String>,
 }
 
-/// Run the repo's `.clud/hooks.json` hooks for `event` and report a block.
+/// Run the Tier B hooks for `event` — the parent's, each touched child
+/// repo's, and each touched extern checkout's own hooks — in the #966 §6
+/// firing order, and report a block (zackees/clud#967 Phase 4).
 ///
-/// Costs one `is_file` probe when a repo declares nothing, which is every
-/// repo that has not opted in.
+/// - **parent**: `.clud/hooks.json` only (Phase 2 D3) — its frontend
+///   settings already fire natively, so reading them here would double-fire.
+/// - **child**: declaration is consent (D6/D7); the child's own hooks run
+///   rooted at the child, from `.clud/hooks.json` if it opted in, else from
+///   its frontend settings (the Tier B source, D4).
+/// - **extern**: the checkout's own hooks run rooted at the checkout, but
+///   only when the parent's trust allowlist names it (D9); otherwise they
+///   stay off with one visible notice naming `clud extern trust <name>`.
+///
+/// Any deny denies: the parent's hooks run first, then children and externs,
+/// and the first block stops the call. Costs one `is_file` probe when the
+/// session's own repo declares nothing and the call touches nothing else.
 fn declared_hook_denial(
     event: &str,
     payload: &HookPayloadView,
     raw_payload: &str,
 ) -> Option<DeclaredHookDenial> {
+    use crate::clud_hook_roots::RootKind;
+
     let repo_root = crate::clud_hooks_run::resolve_root(&payload.cwd)?;
-    if !parent_hooks_apply(&repo_root, payload) {
-        return None;
-    }
-    let hooks = crate::clud_hooks::discover(&repo_root)?;
+    let config =
+        crate::repo_clud_config::discover_effective_clud_config(&repo_root).unwrap_or_default();
+    let env_roots = std::env::var(crate::clud_hook_roots::HOOK_ROOTS_ENV).ok();
+    let roots = crate::clud_hook_roots::HookRoots::resolve(
+        &repo_root,
+        &config.hook_roots.children,
+        env_roots.as_deref(),
+    );
+
+    let named = crate::clud_hook_roots::tool_input_paths(payload.tool_input.as_ref(), &payload.cwd);
+    let cd_targets = if payload.command.is_empty() {
+        Vec::new()
+    } else {
+        block_bad_cmd_cd::session_cd_targets(
+            &payload.command,
+            shell_dialect_for_tool(&payload.tool_name),
+            &payload.cwd,
+            home_dir().as_deref(),
+        )
+    };
+    let touched = crate::clud_hook_roots::containment_paths(named, cd_targets, &payload.cwd);
+
     let tool_name = (!payload.tool_name.is_empty() && payload.tool_name != "?")
         .then_some(payload.tool_name.as_str());
-    let entries = hooks.matching(event, tool_name);
-    if entries.is_empty() {
-        return None;
+    let mut run_log: Vec<String> = Vec::new();
+    // Structured skip events. These land in the hook log even when nothing
+    // denies; hook-run diagnostics (`clud_hook_ran …`) are logged only on a
+    // block, as in Phase 2.
+    let mut skip_log: Vec<String> = Vec::new();
+
+    for target in tier_b_fire_targets(&roots, &touched) {
+        let kind = target.kind;
+        let hooks = match kind {
+            RootKind::Parent => crate::clud_hooks::discover(&target.path),
+            RootKind::Child | RootKind::Extern => crate::clud_hooks::discover(&target.path)
+                .or_else(|| crate::clud_hooks::from_frontend_settings(&target.path)),
+        };
+        let Some(hooks) = hooks else {
+            continue;
+        };
+
+        if kind != RootKind::Parent && tier_b_gated_in_codex(&repo_root, home_dir().as_deref()) {
+            let notice = format!(
+                "[clud] not running the hooks of {} {:?}: this codex project is not \
+                 trusted yet. Trust the project in ~/.codex/config.toml (or run `clud \
+                 --fix-hooks`)",
+                kind.as_str(),
+                target.path
+            );
+            skip_log.push(format!(
+                "tier_b_hooks_skipped kind={} path={:?} reason=codex_project_untrusted",
+                kind.as_str(),
+                target.path
+            ));
+            eprintln!("{notice}");
+            continue;
+        }
+
+        if kind == RootKind::Extern && extern_trust_gated(&repo_root, &target) {
+            let name = target.path.file_name().map_or_else(
+                || "?".to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let notice = format!(
+                "[clud] extern checkout {name:?} declares hooks, but is not trusted; they are \
+                 not running. Trust it with: clud extern trust {name}"
+            );
+            skip_log.push(format!(
+                "extern_hooks_skipped name={name:?} reason=untrusted"
+            ));
+            eprintln!("{notice}");
+            continue;
+        }
+
+        let entries = hooks.matching(event, tool_name);
+        if entries.is_empty() {
+            continue;
+        }
+        let outcome = crate::clud_hooks_run::run_hooks(&entries, &target.path, raw_payload);
+        run_log.extend(outcome.log_messages);
+        if let Some(reason) = outcome.deny_reason {
+            let mut log_messages = skip_log;
+            log_messages.extend(run_log);
+            return Some(DeclaredHookDenial {
+                reason,
+                stdout: outcome.deny_stdout,
+                log_messages,
+            });
+        }
     }
-    let outcome = crate::clud_hooks_run::run_hooks(&entries, &repo_root, raw_payload);
-    let reason = outcome.deny_reason?;
-    Some(DeclaredHookDenial {
-        reason,
-        stdout: outcome.deny_stdout,
-        log_messages: outcome.log_messages,
-    })
+
+    for message in &skip_log {
+        append_log(message);
+    }
+    None
 }
 
 /// Resolve `bash.block_cd` and decide whether this command's
@@ -5484,5 +5637,155 @@ mod tests {
         assert!(allows("V=/var/log/myapp; echo x > \"$V\"/app.log"));
         assert!(allows("LOGDIR=/tmp/logs; truncate -s0 \"$LOGDIR\"/x"));
         assert!(allows("dd if=/dev/zero of=/tmp/img bs=1M count=1"));
+    }
+
+    // ---- #967 Phase 4: the #966 §6 firing matrix ------------------------
+
+    use crate::clud_hook_roots::{HookRoots, RootKind};
+
+    /// A temp layout: `base/repo` (the parent), `base/repo-extern/<name>`
+    /// (GC-tracked extern checkouts), and a declared child `base/repo/sub`.
+    fn tier_layout() -> (tempfile::TempDir, PathBuf) {
+        let base = tempdir().unwrap();
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let extern_root = base.path().join("repo-extern");
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(extern_root.join(name).join(".git")).unwrap();
+        }
+        (base, repo)
+    }
+
+    fn roots_for(repo: &Path) -> HookRoots {
+        HookRoots::resolve(repo, &["sub".to_string()], None)
+    }
+
+    #[test]
+    fn fire_targets_run_parent_first_then_children_then_externs() {
+        let (base, repo) = tier_layout();
+        let extern_root = base.path().join("repo-extern");
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let roots = roots_for(&repo);
+
+        let targets = tier_b_fire_targets(
+            &roots,
+            &[
+                repo.join("src/lib.rs"),
+                sub.join("src/lib.rs"),
+                extern_root.join("alpha/src/lib.rs"),
+            ],
+        );
+        let kinds: Vec<_> = targets.iter().map(|root| root.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![RootKind::Parent, RootKind::Child, RootKind::Extern],
+            "layered-deny order: parent first, then the child, then the extern"
+        );
+        assert_eq!(
+            targets.last().unwrap().path,
+            extern_root.join("alpha"),
+            "the extern target is the checkout itself, for rooting its hooks"
+        );
+    }
+
+    #[test]
+    fn an_extern_only_touch_never_fires_the_parent() {
+        let (base, repo) = tier_layout();
+        let extern_root = base.path().join("repo-extern");
+        let roots = roots_for(&repo);
+
+        let targets = tier_b_fire_targets(&roots, &[extern_root.join("beta/src/lib.rs")]);
+        assert_eq!(
+            targets.iter().map(|root| root.kind).collect::<Vec<_>>(),
+            vec![RootKind::Extern],
+            "the parent's guards have no business in a foreign checkout (#841)"
+        );
+        assert_eq!(targets[0].path, extern_root.join("beta"));
+    }
+
+    #[test]
+    fn each_distinct_root_fires_once_even_when_called_spans_its_files() {
+        let (base, repo) = tier_layout();
+        let extern_root = base.path().join("repo-extern");
+        let roots = roots_for(&repo);
+
+        let targets = tier_b_fire_targets(
+            &roots,
+            &[
+                extern_root.join("alpha/a.rs"),
+                extern_root.join("alpha/b.rs"),
+                repo.join("x.rs"),
+            ],
+        );
+        assert_eq!(
+            targets.iter().map(|root| root.kind).collect::<Vec<_>>(),
+            vec![RootKind::Parent, RootKind::Extern],
+            "two files in the same checkout must not double-fire its hooks"
+        );
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn a_call_touching_nothing_registered_fires_nothing() {
+        let (base, repo) = tier_layout();
+        let roots = roots_for(&repo);
+        assert!(
+            tier_b_fire_targets(&roots, &[base.path().join("elsewhere/x")]).is_empty(),
+            "an unregistered path is no repo's business"
+        );
+    }
+
+    #[test]
+    fn gc_tracked_extern_roots_are_trust_gated_but_named_roots_are_not() {
+        let (base, repo) = tier_layout();
+        let extern_root = base.path().join("repo-extern");
+        let alpha = extern_root.join("alpha");
+        let roots = roots_for(&repo);
+
+        // A cloned checkout is untrusted until `clud extern trust` records it.
+        let untrusted = tier_b_fire_targets(&roots, &[alpha.join("src/lib.rs")]);
+        assert!(extern_trust_gated(&repo, &untrusted[0]));
+        assert!(
+            !crate::hook_trust::is_trusted(&crate::hook_trust::load(&repo), "alpha", None),
+            "no trust file is created by merely touching the checkout"
+        );
+
+        // Trusting it (name + origin) turns the gate off.
+        std::fs::write(
+            alpha.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://example.com/alpha.git\n",
+        )
+        .unwrap();
+        crate::hook_trust::record(&repo, "alpha", "https://example.com/alpha.git").unwrap();
+        let trusted = tier_b_fire_targets(&roots, &[alpha.join("src/lib.rs")]);
+        assert!(!extern_trust_gated(&repo, &trusted[0]));
+
+        // A re-clone from a different origin is untrusted again.
+        std::fs::write(
+            alpha.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://evil.example.com/alpha.git\n",
+        )
+        .unwrap();
+        let re_cloned = tier_b_fire_targets(&roots, &[alpha.join("src/lib.rs")]);
+        assert!(extern_trust_gated(&repo, &re_cloned[0]));
+    }
+
+    #[test]
+    fn a_root_the_user_named_at_launch_is_never_trust_gated() {
+        // `--add-dir` / `permissions.additionalDirectories` roots are
+        // registered as `extern` for containment, but the user named them —
+        // the consent D9 requires — so they are not gated.
+        let (base, repo) = tier_layout();
+        let named = base.path().join("granted-sibling");
+        std::fs::create_dir_all(&named).unwrap();
+        let encoded = format!(
+            r#"[{{"kind":"extern","path":{}}}]"#,
+            serde_json::json!(named.to_string_lossy())
+        );
+        let roots = HookRoots::resolve(&repo, &[], Some(&encoded));
+        let targets = tier_b_fire_targets(&roots, &[named.join("x.rs")]);
+        assert_eq!(targets.len(), 1);
+        assert!(!extern_trust_gated(&repo, &targets[0]));
     }
 }
