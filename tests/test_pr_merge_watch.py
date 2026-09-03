@@ -522,7 +522,7 @@ def test_default_poll_interval_is_quick(watcher) -> None:
     assert ns.interval == 20
 
 
-def test_required_red_cancels_before_fetching_failure_logs(
+def test_required_red_diagnoses_before_cancelling(
     watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     log = watcher.WatchLog.create(527, "zackees/clud", root=tmp_path)
@@ -561,7 +561,11 @@ def test_required_red_cancels_before_fetching_failure_logs(
         watcher.watch(527, "zackees/clud", 60, 3600, None, opts, log)
 
     assert exc.value.code == watcher.EXIT_REQUIRED_FAIL
-    assert order == ["cancel", "diagnose"]
+    # Diagnose first. Cancelling raced the failing job's log becoming
+    # readable, so the caller got a bare "FAIL <name>" with nothing to act
+    # on — the opposite of what failing fast is for. The probe is one
+    # bounded request, so the matrix minutes it costs are seconds.
+    assert order == ["diagnose", "cancel"]
 
 
 def test_check_api_failure_cannot_synthesize_green(
@@ -908,3 +912,104 @@ def test_cancellation_permission_error_does_not_replace_original_exit(
         )
 
     assert exc.value.code == watcher.EXIT_REVIEW_ACTIVITY
+
+
+# A verbatim slice of a real failing Windows integration job, kept with its
+# runner prefixes intact. Everything below asserts against the shape GitHub
+# actually emits, because the shape is what the old patterns got wrong.
+REAL_PYTEST_LOG = (
+    "2026-09-03T19:45:30.9660131Z tests/integration/test_mock_agents.py"
+    "::TestLoopMode::test_codex_loop_iterations FAILED [ 79%]\n"
+    "2026-09-03T19:47:21.6282237Z E               TimeoutError: process timed out\n"
+    "2026-09-03T19:47:21.6447671Z =========================== short test summary info"
+    " ===========================\n"
+    "2026-09-03T19:47:21.6460585Z FAILED tests/integration/test_mock_agents.py"
+    "::TestLoopMode::test_codex_loop_iterations - AssertionError: timed out after 30s\n"
+)
+
+GH_RUN_VIEW_LOG = (
+    "Test windows-x64\tRun integration suite\t2026-09-03T19:47:21.6460585Z "
+    "FAILED tests/integration/test_mock_agents.py::TestLoopMode::test_codex_loop_iterations\n"
+)
+
+
+def test_normalize_log_strips_both_runner_prefix_shapes(watcher) -> None:
+    """The REST job endpoint and `gh run view` prefix lines differently."""
+    rest = watcher.normalize_log("2026-09-03T19:47:21.6460585Z FAILED tests/x.py::t")
+    run_view = watcher.normalize_log(GH_RUN_VIEW_LOG)
+    assert rest == "FAILED tests/x.py::t"
+    assert run_view.startswith("FAILED tests/integration/test_mock_agents.py")
+
+
+def test_a_pytest_failure_is_classified_as_a_test_failure_not_a_network_blip(
+    watcher,
+) -> None:
+    """Regression: the anchored patterns could never match a prefixed line.
+
+    A pytest failure fell through every earlier pattern to the `timed out`
+    one and was reported to the caller as "network/transient" — which reads
+    as "retry it", the wrong call for a real red.
+    """
+    sample = watcher.normalize_log(REAL_PYTEST_LOG)
+    label = next((lbl for pat, lbl in watcher.CLASSIFIERS if pat.search(sample)), None)
+    assert label == "test failure"
+
+
+def test_the_first_error_names_the_failing_test(watcher) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_gh(*args, **kwargs):
+        captured["args"] = args
+        return watcher.GhResult(0, REAL_PYTEST_LOG, "")
+
+    watcher.gh = fake_gh
+    first_err, label = watcher.classify_failure("zackees/clud", "999", "12345")
+    assert "test_codex_loop_iterations" in first_err
+    assert label == "test failure"
+
+
+def test_the_probe_reads_the_job_not_the_run(watcher, monkeypatch) -> None:
+    """`gh run view --log-failed` refuses while the run is in progress.
+
+    On the fail-fast path the run is always in progress, so a run-level probe
+    returns nothing exactly when the caller needs it. The job endpoint serves
+    a finished job's log regardless of its siblings.
+    """
+    calls: list[tuple] = []
+
+    def fake_gh(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "api":
+            return watcher.GhResult(0, REAL_PYTEST_LOG, "")
+        return watcher.GhResult(1, "", "run is still in progress")
+
+    monkeypatch.setattr(watcher, "gh", fake_gh)
+    text = watcher.fetch_failure_log("zackees/clud", "999", "12345")
+    assert "test_codex_loop_iterations" in text
+    assert calls == [
+        ("api", "repos/zackees/clud/actions/jobs/12345/logs", "--allow-escape-sequences")
+    ]
+
+
+def test_a_failing_checks_link_yields_both_ids(watcher) -> None:
+    link = "https://github.com/zackees/clud/actions/runs/33798803736/job/100794241127"
+    assert watcher._extract_run_id_from_link(link) == "33798803736"
+    assert watcher._extract_job_id_from_link(link) == "100794241127"
+
+
+def test_a_run_only_link_still_yields_the_run(watcher) -> None:
+    link = "https://github.com/zackees/clud/actions/runs/33798803736"
+    assert watcher._extract_run_id_from_link(link) == "33798803736"
+    assert watcher._extract_job_id_from_link(link) is None
+
+
+def test_a_timed_out_probe_is_a_failed_call_not_a_crash(watcher, monkeypatch) -> None:
+    """The probe runs ahead of cancellation; it must never be what blocks it."""
+
+    def boom(*args, **kwargs):
+        raise TimeoutError("probe hung")
+
+    monkeypatch.setattr(watcher.RunningProcess, "run", boom)
+    res = watcher.gh("api", "whatever", timeout=1.0)
+    assert not res.ok
+    assert "timed out" in res.stderr
