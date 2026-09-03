@@ -33,7 +33,12 @@ def test_a_posix_signal_is_reported_as_a_crash() -> None:
     assert "SIGSEGV" in described
     assert "crashed" in described
 
+    # Named from a fixed table, not the host's `signal.Signals`: Windows has
+    # no SIGKILL, so reading a Linux lane's log there would otherwise render
+    # the most common CI kill as a bare "signal 9". Caught by the Windows
+    # lane doing exactly that.
     assert "SIGKILL" in describe_pytest_exit(-9)
+    assert "SIGTERM" in describe_pytest_exit(-15)
 
 
 def test_a_windows_ntstatus_is_reported_as_a_crash() -> None:

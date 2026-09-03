@@ -28,7 +28,6 @@ import argparse
 import json
 import os
 import shutil
-import signal
 import sys
 from pathlib import Path
 
@@ -77,7 +76,7 @@ def describe_pytest_exit(returncode: int) -> str:
     """
     if returncode < 0:
         signum = -returncode
-        name = signal.Signals(signum).name if signum in _SIGNAL_NUMBERS else f"signal {signum}"
+        name = _POSIX_SIGNAL_NAMES.get(signum, f"signal {signum}")
         return (
             f"exit {returncode}: killed by {name} -- the process crashed or was "
             f"killed, so any missing summary is expected rather than a clue"
@@ -100,7 +99,27 @@ def describe_pytest_exit(returncode: int) -> str:
     )
 
 
-_SIGNAL_NUMBERS = {member.value for member in signal.Signals}
+# Named from a fixed table rather than `signal.Signals`, which is the *host's*
+# signal set. A negative exit code can only have come from a POSIX runner, but
+# the log may well be read on Windows -- where `SIGKILL` does not exist, so the
+# host enum would render the most common CI kill as a bare "signal 9". The
+# number means the same thing wherever it is interpreted, so the name should
+# too.
+_POSIX_SIGNAL_NAMES = {
+    1: "SIGHUP",
+    2: "SIGINT",
+    3: "SIGQUIT",
+    4: "SIGILL",
+    6: "SIGABRT",
+    8: "SIGFPE",
+    9: "SIGKILL",
+    11: "SIGSEGV",
+    13: "SIGPIPE",
+    14: "SIGALRM",
+    15: "SIGTERM",
+    24: "SIGXCPU",
+    25: "SIGXFSZ",
+}
 
 
 def _pytest_ok(returncode: int) -> bool:
