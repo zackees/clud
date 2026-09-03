@@ -88,6 +88,9 @@ pub mod soldr_activate;
 pub mod startup;
 pub mod stream_json;
 pub mod subprocess;
+#[cfg(test)]
+pub(crate) mod test_env;
+
 pub mod symbols;
 pub mod test_runtime;
 pub mod tool_cli;

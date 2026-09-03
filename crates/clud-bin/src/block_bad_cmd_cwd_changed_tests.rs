@@ -1,13 +1,17 @@
 //! Tests for the `CwdChanged` backstop handler (#967 Phase 5, #966 D12).
 
 use super::*;
-use std::sync::Mutex;
 use tempfile::tempdir;
 
 /// Serializes the tests that mutate process-global env (`HOME`,
-/// `CLAUDE_PROJECT_DIR`) — same pattern as the override lock in
-/// `block_bad_cmd`'s own tests.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// `CLAUDE_PROJECT_DIR`).
+///
+/// Crate-shared, not file-private: `gc::session_tmp` rewrites `HOME` too, and
+/// a lock per file serializes each file against itself while both share one
+/// process environment. See `crate::test_env`.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::test_env::home_lock()
+}
 
 struct EnvGuard {
     old: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -104,7 +108,7 @@ fn cwd_from_payload_prefers_new_cwd_then_cwd_then_process_cwd() {
 #[test]
 fn a_garbage_or_empty_payload_still_exits_zero() {
     // The backstop is hygiene: no payload shape may turn it into a wall.
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (dir, _repo) = fixture();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -123,7 +127,7 @@ fn drift_out_of_the_registered_roots_warns() {
     // A migrated repo resolves "auto" to relaxed; a chdir that escapes the
     // registered roots is exactly the drift the PreToolUse scanner cannot
     // see, so the backstop flags it — while still exiting 0.
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (dir, repo) = fixture();
     write_hooks_json(&repo, "touch marker");
     let home = dir.path().join("home");
@@ -150,7 +154,7 @@ fn drift_out_of_the_registered_roots_warns() {
 fn a_strict_repo_also_warns_on_drift_outside_the_registered_roots() {
     // A cwd-sensitive raw hook in the frontend settings keeps the repo
     // strict; the backstop still flags a chdir the scanner could not see.
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (dir, repo) = fixture();
     std::fs::create_dir_all(repo.join(".claude")).unwrap();
     std::fs::write(
@@ -182,7 +186,7 @@ fn a_strict_repo_also_warns_on_drift_outside_the_registered_roots() {
 fn a_move_within_the_registered_roots_does_not_warn() {
     // Relaxed allows `cd` freely inside the registered trees; a move to a
     // subdirectory is the normal case and must stay silent.
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (dir, repo) = fixture();
     write_hooks_json(&repo, "touch marker");
     let home = dir.path().join("home");
@@ -204,7 +208,7 @@ fn a_move_within_the_registered_roots_does_not_warn() {
 fn block_cd_false_silences_the_backstop() {
     // bash.block_cd=false opts out of pinning entirely; the backstop must
     // not second-guess that choice.
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (dir, repo) = fixture();
     std::fs::create_dir_all(repo.join(".claude")).unwrap();
     std::fs::write(
@@ -233,7 +237,7 @@ fn a_declared_cwd_changed_hook_runs_rooted_at_the_repo() {
     // The payload carries no command text — the session *moved* — so Tier B
     // keys on the new cwd, and the hook runs rooted at the repo it belongs
     // to, exactly the rooting contract every declared hook gets.
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (dir, repo) = fixture();
     write_hooks_json(&repo, "touch marker");
     let home = dir.path().join("home");
@@ -252,7 +256,7 @@ fn a_refusing_cwd_changed_hook_is_downgraded_to_a_warning() {
     // The cwd has already changed and the harness gives this event no
     // decision control, so an exit 2 cannot be honored — surfacing it as a
     // wall would be a denial clud cannot enforce.
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (dir, repo) = fixture();
     write_hooks_json(&repo, "exit 2");
     let home = dir.path().join("home");
@@ -275,7 +279,7 @@ fn a_refusing_cwd_changed_hook_is_downgraded_to_a_warning() {
 
 #[test]
 fn session_parent_root_prefers_claude_project_dir() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock();
     let (_dir, repo) = fixture();
     let _guard = EnvGuard::set(&[("CLAUDE_PROJECT_DIR", repo.clone())]);
 

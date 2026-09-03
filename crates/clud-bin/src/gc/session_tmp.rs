@@ -285,11 +285,10 @@ mod tests {
 
     impl HomeGuard {
         fn set(dir: &Path) -> Self {
-            static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-            let lock = M
-                .get_or_init(|| std::sync::Mutex::new(()))
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            // Shared with the CwdChanged handler tests, which rewrite HOME too;
+            // a lock private to this file serialized it against itself only.
+            // See crate::test_env.
+            let lock = crate::test_env::home_lock();
             let prior_home = std::env::var("HOME").ok();
             let prior_userprofile = std::env::var("USERPROFILE").ok();
             std::env::set_var("HOME", dir);
