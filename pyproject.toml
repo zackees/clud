@@ -55,8 +55,24 @@ test = [
     "pytest-timeout>=2.3.0",
     "psutil>=5.9",
     "running-process==4.10.1",
-    # `tests/test_mcp_server.py` imports the bridge module directly.
-    "mcp>=2.1",
+    # `tests/test_mcp_server.py` imports the bridge module directly, and
+    # skips itself when the SDK is absent.
+    #
+    # Not on Windows arm64. `mcp` requires `pyjwt[crypto]`, whose `crypto`
+    # extra pulls `cryptography`, and upstream stopped publishing `win_arm64`
+    # wheels after 46.0.3 -- the current 50.0.1 ships `win_amd64` only. uv
+    # therefore builds it from sdist there, which needs an OpenSSL
+    # installation the runner does not have:
+    #
+    #     Building cryptography==50.0.1
+    #     x Failed to build `cryptography==50.0.1`
+    #     warning: openssl-sys@0.9.117: Could not find directory of OpenSSL
+    #     installation, and this `-sys` crate cannot proceed
+    #
+    # That failed both windows-arm lanes on every `main` run. The bridge is
+    # platform-independent Python covered on the five other lanes, so the
+    # coverage lost here is the packaging of a dependency, not the code.
+    "mcp>=2.1; sys_platform != 'win32' or platform_machine != 'ARM64'",
 ]
 dev = [
     { include-group = "test" },
