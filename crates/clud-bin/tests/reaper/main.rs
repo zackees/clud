@@ -22,3 +22,12 @@ mod reaper_orphan_sweep_survival;
 mod subprocess_capture_lifecycle_windows;
 mod tool_shell_lifecycle_windows;
 mod wedge_watchdog_e2e;
+
+/// These tests run host-wide sweeps that reap any CLUD-tagged process with a
+/// dead originator. libtest runs them on parallel threads, and one test's
+/// sweep kills another test's just-spawned child — the un-wait()ed child then
+/// becomes a zombie, invisible to every environ scan and permanently missing
+/// from the candidate set (the #994 reaper flake, "candidates=[]" with
+/// `/proc/<pid>/environ` → EACCES). Serialize every test that performs a
+/// host-wide sweep.
+pub(crate) static REAPER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
