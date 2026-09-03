@@ -94,18 +94,29 @@ impl ScopeSelector {
         None
     }
 
+    /// Draw the four selector rows.
+    ///
+    /// **Every line ends `\r\n`, never a bare `\n` (#1063).** The caller holds
+    /// a [`RawModeGuard`], and raw mode clears `OPOST` on POSIX, so the kernel
+    /// stops translating line feed into carriage-return + line feed. A bare
+    /// `\n` then moves down one row and leaves the cursor in the column it was
+    /// already in, so each row starts where the previous one ended and the menu
+    /// walks diagonally off to the right. Windows keeps translating `\n` in its
+    /// console layer, which is why this only ever showed on Linux and macOS.
+    ///
+    /// `every_rendered_line_ends_in_crlf` fails if a `writeln!` creeps back in.
     pub fn render<W: Write>(&self, out: &mut W) -> io::Result<()> {
-        writeln!(out, "Launch setup scope")?;
-        writeln!(out, "  Up/Down move, Enter select, Esc session-only")?;
-        writeln!(
+        write!(out, "Launch setup scope\r\n")?;
+        write!(out, "  Up/Down move, Enter select, Esc session-only\r\n")?;
+        write!(
             out,
-            "{} {} Session only   this launch",
+            "{} {} Session only   this launch\r\n",
             cursor(self.selected() == LaunchSetupScope::SessionOnly),
             marker(self.selected() == LaunchSetupScope::SessionOnly)
         )?;
-        writeln!(
+        write!(
             out,
-            "{} {} Globally       remember launch preferences",
+            "{} {} Globally       remember launch preferences\r\n",
             cursor(self.selected() == LaunchSetupScope::Global),
             marker(self.selected() == LaunchSetupScope::Global)
         )?;
@@ -228,7 +239,10 @@ fn prompt_scope_inner<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
             _ => continue,
         };
         if let Some(scope) = selector.handle(event) {
-            writeln!(out)?;
+            // Still inside `RawModeGuard`, so this closing line needs the same
+            // CRLF the rows do — a bare `\n` would leave whatever clud prints
+            // next starting in the selector's last column (#1063).
+            write!(out, "\r\n")?;
             out.flush()?;
             return Ok(scope);
         }
@@ -471,8 +485,40 @@ mod tests {
         selector.render(&mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "Launch setup scope\n  Up/Down move, Enter select, Esc session-only\n> [x] Session only   this launch\n  [ ] Globally       remember launch preferences\n"
+            "Launch setup scope\r\n  Up/Down move, Enter select, Esc session-only\r\n> [x] Session only   this launch\r\n  [ ] Globally       remember launch preferences\r\n"
         );
+    }
+
+    /// Issue #1063: the selector renders under `RawModeGuard`, where `OPOST`
+    /// is off and a bare `\n` moves down without returning to column zero —
+    /// each row started where the last ended and the menu ran diagonally off
+    /// the screen on Linux and macOS.
+    ///
+    /// Asserted structurally rather than against fixed text so a future row,
+    /// or a `writeln!` reintroduced anywhere in `render`, fails here too.
+    #[test]
+    fn every_rendered_line_ends_in_crlf() {
+        for selected in [LaunchSetupScope::SessionOnly, LaunchSetupScope::Global] {
+            let mut selector = ScopeSelector::default();
+            if selected == LaunchSetupScope::Global {
+                selector.handle(SelectorEvent::Down);
+            }
+            let mut out = Vec::new();
+            selector.render(&mut out).unwrap();
+            let rendered = String::from_utf8(out).unwrap();
+
+            assert_eq!(
+                rendered.matches('\n').count(),
+                rendered.matches("\r\n").count(),
+                "every line feed must be a CRLF while raw mode is on: {rendered:?}"
+            );
+            assert_eq!(
+                rendered.matches("\r\n").count(),
+                ScopeSelector::RENDERED_LINES,
+                "the cursor-up redraw moves {} rows, so render must emit exactly that many: {rendered:?}",
+                ScopeSelector::RENDERED_LINES
+            );
+        }
     }
 
     #[test]
