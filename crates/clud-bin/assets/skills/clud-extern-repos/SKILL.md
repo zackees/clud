@@ -33,6 +33,24 @@ You do not need to add an ignore entry for it, and you should not: it is outside
 
 Checkouts still under the older `<repo>/.extern-repos/` location keep working and are still tracked, but put new ones beside the repo.
 
+A dependent checkout is a **complete project**, so parent-repo tooling that
+discovers projects by walking up from `$PWD` will find it and bind to it. That
+is not hypothetical: in #972 a Stop hook installed in the parent repo resolved
+its root that way, landed in the dependent checkout, and ran *that* project's
+hook through `uv run` — turning a "quick lint" into a full native build of a
+Rust-backed dependency. Two fires cost ~600s and ~400s, and the second died
+with a build-backend error that named no hook at all.
+
+Two rules follow, and they apply wherever the checkout lives:
+
+- **Anchor hooks to the session project root**, not `$PWD`. Claude Code passes
+  it in the hook payload (`cwd`), and the settings live in that repo anyway. A
+  hook installed in repo A should never execute repo B's hook.
+- **Never let a hook trigger a project sync**: use `uv run --no-project` (or
+  `--frozen`). A hook may lint; it may not compile a dependency from source.
+  clud's `uv_run_hook_guard` warns about the bare form, and since #972 it looks
+  at `Stop` hooks and at dependent checkouts in both locations.
+
 Create feature branches in the dependent repo using the `feat/<short-name>` convention.
 
 ## Coordination
