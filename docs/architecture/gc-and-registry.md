@@ -241,7 +241,7 @@ Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the da
 ## Filesystem sweeps (non-registry)
 
 Alongside the redb-tracked kinds, the daemon's periodic tick
-(`run_periodic_purge_tick` in `crates/clud-bin/src/daemon/gc_service.rs`) runs three
+(`run_periodic_purge_tick` in `crates/clud-bin/src/daemon/gc_service.rs`) runs four
 **filesystem-only** sweeps that have no registry row — they operate directly on directories
 under `~/.clud` (and, opt-in, on external dev roots). Each self-throttles via a sentinel
 timestamp under `~/.clud/state/` so the per-tick cost is one stat + age compare.
@@ -250,6 +250,7 @@ timestamp under `~/.clud/state/` so the per-tick cost is one stat + age compare.
 |---|---|---|---|---|
 | uv-cache (#423) | `~/.clud/cache/uv/environments-v2/` | 7d | `uv-cache-sweep.last` (24h) | always |
 | session-temp (#509) | `~/.clud/tmp/` | 48h | `session-tmp-sweep.last` (6h) | default on |
+| session-state (#1014) | `~/.clud/state/sessions/` | 48h ambient / 30d notable | `session-state-sweep.last` (6h) | always |
 | target (#510) | `target/` dirs under `CLUD_GC_TARGET_ROOTS` | 14d | `target-sweep.last` (24h) | opt-in |
 
 **Session temp (#509).** At session launch the backend agent's temp env (`TMPDIR` on Unix,
@@ -259,6 +260,28 @@ timestamp under `~/.clud/state/` so the per-tick cost is one stat + age compare.
 can reclaim. Set `CLUD_SESSION_TMP=0` to keep the OS temp dir. If the dir can't be created the
 override is silently skipped (the child keeps the OS temp dir) — launch never fails on this.
 
+**Forensic session state (#1014).** Every launch leaves a `<pid>__<start-epoch>/` directory under
+`~/.clud/state/sessions/` holding the reaper's `reap.jsonl` / `reap-health.json` and, since #1011,
+a `bridge.jsonl`. Nothing aged it out, so it accumulated one entry per session ever run — the
+sibling `state/launches/` tree has been bounded by `MAX_RECORDS = 200` since #998. The entries are
+tiny; the cost is directory-listing time and a tree nobody can search by hand during an incident.
+
+Two windows, because the whole point of #998 and #1011 is that a failure trail survives to be read
+afterwards. `crate::gc::session_state::classify` reads the directory's `bridge.jsonl` and calls it
+**ambient** if every record is one the bridge wrote through `record_ambient` (`catalog_advertised`,
+`admission_queued`, `admission_acquired` — see `AMBIENT_EVENTS`), **notable** otherwise. Ambient
+directories go at 48h, notable ones at 30d. Anything unreadable, unparseable, or carrying an
+unrecognized event counts as notable: drift and corruption both fail toward *keeping* the trail,
+since deleting a forensic log on a parse guess is the only unrecoverable mistake available here.
+`ambient_event_names_match_record_ambient_call_sites` fails if a new `record_ambient` event is
+added without listing it.
+
+A **live session's directory is never swept**, at any age — the reaper and the bridge write into it
+for the whole life of the launch. Liveness is injected from `daemon/session_state_sweep.rs` rather
+than called inside `gc::session_state`, which keeps the policy module free of process introspection
+and its decision table unit-testable. A recycled PID can therefore keep one small directory alive
+until that unrelated process exits; that is the safe direction and costs a few hundred bytes.
+
 **Target reclamation (#510).** Opt-in: does nothing unless `CLUD_GC_TARGET_ROOTS` names one or
 more dev roots (OS path-list separated). The sweep walks each root (bounded depth, skipping
 `.git`/`node_modules`/`.claude` and not descending into a found `target/`), and removes `target/`
@@ -266,7 +289,7 @@ dirs — identified by a sibling `Cargo.toml` — whose mtime is older than
 `CLUD_GC_TARGET_STALE_DAYS` (default 14). Default-off because reclaiming `target/` forces a
 rebuild; the long mtime gate is the cheap stand-in for "no live build owns this."
 
-**Background thread + prioritization.** The session-temp and target sweeps walk the filesystem
+**Background thread + prioritization.** The session-temp, session-state and target sweeps walk the filesystem
 and can take a while, so the tick spawns them on a detached `clud-gc-sweep` thread rather than
 blocking the registry tick loop; an `AtomicBool` guard prevents overlapping sweeps. Priority
 (`maintenance_action` in `gc_service.rs`):

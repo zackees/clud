@@ -23,6 +23,7 @@ mod process_utils;
 mod rp_broker;
 mod runtime_config;
 mod server;
+mod session_state_sweep;
 mod session_tmp_sweep;
 mod sessions;
 mod target_sweep;
