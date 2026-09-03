@@ -1417,6 +1417,11 @@ fn run_orphan_sweep(
             ("reaped", json!(outcome.reaped)),
             ("candidate_pids", json!(outcome.candidate_pids)),
             ("reaped_pids", json!(outcome.reaped_pids)),
+            // #1146: a name for every PID above. Added as its own key rather
+            // than by widening the three *_pids arrays, because those are a
+            // persisted record shape — a reader of an existing log would break
+            // on an array whose elements changed type.
+            ("pid_labels", json!(outcome.labels)),
             ("skipped_pids", json!(skipped_pids)),
             // Candidates held back by the grace window this pass; they become
             // eligible on a later tick if they are still around.
