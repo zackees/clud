@@ -2058,6 +2058,28 @@ fn serve_codex_discovery_messages(
         .or_else(|| provider_catalog::non_claude_model_by_any_id(base))
         .filter(|entry| entry.provider == ModelProvider::Codex);
     let known_to_clud = provider_catalog::model_by_any_id(base).is_some();
+    // #1022: an ID the user pinned at launch is theirs, even when clud's
+    // catalog has no row for it.
+    //
+    // `ModelSpec::parse` deliberately forwards an unknown *full* id
+    // (`codex_model.rs`: "`gpt-5.7-whatever` is how a user reaches a model
+    // released after this table was written, and refusing it would make the
+    // table a gate we would have to keep updating"). #1005 made the table
+    // exactly that gate on the request path, so `--model gpt-5.7-nova`
+    // launched fine and then 400d on every turn.
+    //
+    // Matching on the launch selection rather than restoring blanket
+    // passthrough is what keeps #1005's fix intact. The two are distinguished
+    // by provenance, not by string shape: an ID the *user* typed is honored,
+    // while one the *harness* invented -- Claude Code merges the gateway's
+    // rows with its own built-in catalog, so `anthropic.*` rows the user never
+    // chose do arrive here -- is still refused (#997). No string test can tell
+    // those apart, which is why #1005 could not fix one without breaking the
+    // other.
+    let pinned_at_launch = config
+        .default_model
+        .as_ref()
+        .is_some_and(|spec| spec.model.trim() == base);
     // Claude Code merges this gateway's rows with its own built-in catalog, so
     // IDs the gateway never advertised do arrive here. Only a `claude*` ID is
     // caller-owned -- `codex_translate::resolve_selection` maps those onto the
@@ -2065,7 +2087,10 @@ fn serve_codex_discovery_messages(
     // here: forwarding it unrewritten would translate an unknown ID to the
     // Codex upstream, which answers with an error about a model the user never
     // knowingly sent there (#997).
-    if discovered.is_none() && !base.is_empty() && !base.to_ascii_lowercase().starts_with("claude")
+    if discovered.is_none()
+        && !pinned_at_launch
+        && !base.is_empty()
+        && !base.to_ascii_lowercase().starts_with("claude")
     {
         let ids = provider_catalog::models_for_provider(ModelProvider::Codex)
             .filter_map(|entry| entry.discovery_id)
@@ -3752,6 +3777,91 @@ Connection: close
         for body in [&response, &refused] {
             assert!(body.contains("clud-claude-codex-terra"), "{body}");
         }
+        assert!(
+            upstream.requests().is_empty(),
+            "a refused model must not reach the Codex upstream"
+        );
+    }
+
+    /// Issue #1022: an uncataloged full ID the user pinned at launch reaches
+    /// upstream verbatim.
+    ///
+    /// `--model gpt-5.7-nova` launched fine and then 400d on every turn after
+    /// #1005 made the catalog a gate on the request path. `ModelSpec::parse`
+    /// forwards unknown *full* ids on purpose -- that is how a user reaches a
+    /// model released after clud's table was written -- and this is the other
+    /// half of that contract.
+    #[test]
+    fn a_launch_pinned_uncataloged_model_reaches_upstream_unchanged() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_default_model(Some(ModelSpec::parse("gpt-5.7-nova@medium").unwrap())),
+        )
+        .unwrap();
+        let body = PROBE_BODY.replace("claude-x", "gpt-5.7-nova");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+
+        // Verbatim: the point of the escape hatch is that clud does not need a
+        // row for the model to get out of the way.
+        let sent = upstream.requests().remove(0);
+        let sent_body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
+        let json: serde_json::Value = serde_json::from_str(sent_body).expect("JSON body");
+        assert_eq!(json["model"], "gpt-5.7-nova", "{sent_body}");
+    }
+
+    /// The narrowness is the whole design, so it gets its own test.
+    ///
+    /// #1005 exists because Claude Code merges this gateway's rows with its
+    /// own built-in catalog, so IDs the *harness* invented arrive here looking
+    /// exactly like IDs the *user* typed. Provenance is the only thing that
+    /// separates them. If the check degraded into "any default is set", an
+    /// invented ID would sail through on a session that merely happened to
+    /// pin something -- which is #997 all over again.
+    #[test]
+    fn an_uncataloged_model_is_still_refused_when_it_is_not_the_pinned_one() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_default_model(Some(ModelSpec::parse("gpt-5.7-nova@medium").unwrap())),
+        )
+        .unwrap();
+        // A pin *is* in effect -- just not for this ID.
+        let body = PROBE_BODY.replace("claude-x", "gpt-9-invented-by-the-harness");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+        );
+        assert_eq!(status(&response), 400, "{response}");
+        assert!(
+            response.contains("unknown clud Codex model 'gpt-9-invented-by-the-harness'"),
+            "{response}"
+        );
+        assert!(
+            upstream.requests().is_empty(),
+            "a refused model must not reach the Codex upstream"
+        );
+    }
+
+    /// The caveat #1022 names, pinned so it is a known limit rather than a
+    /// surprise: the escape hatch is scoped to the launch selection, so
+    /// `/model <newer-id>` mid-session still refuses. Widening it to any
+    /// id-shaped string is remedy (a), which reopens what #1005 closed.
+    #[test]
+    fn switching_to_a_different_uncataloged_model_mid_session_still_refuses() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        // No launch pin at all: nothing is the user's own selection here.
+        let body = PROBE_BODY.replace("claude-x", "gpt-5.7-nova");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+        );
+        assert_eq!(status(&response), 400, "{response}");
         assert!(
             upstream.requests().is_empty(),
             "a refused model must not reach the Codex upstream"
