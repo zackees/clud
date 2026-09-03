@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use running_process::{
-    CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
+    CommandSpec, NativeProcess, ProcessConfig, ProcessError, ReadStatus, StderrMode, StdinMode,
 };
 
 use crate::clud_hooks::HookEntry;
@@ -99,6 +99,16 @@ struct OneResult {
     log_messages: Vec<String>,
 }
 
+/// Whether writing the payload failed only because the hook had already gone.
+///
+/// Matched on `io::ErrorKind`, not on the rendered message: the text is a
+/// platform string (`Broken pipe (os error 32)` on Linux, a different one on
+/// Windows) and matching it would silently stop working on the platform where
+/// it was never tested.
+fn is_broken_pipe(error: &ProcessError) -> bool {
+    matches!(error, ProcessError::Io(io) if io.kind() == std::io::ErrorKind::BrokenPipe)
+}
+
 fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResult, String> {
     let config = ProcessConfig {
         // A hook command is a *shell* command line — that is the shape both
@@ -125,7 +135,20 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
     // `write_stdin` closes the pipe afterwards, which is the EOF a hook
     // blocking in `json.load(sys.stdin)` is waiting for.
     if let Err(error) = process.write_stdin(payload.as_bytes()) {
-        return Err(format!("failed to write payload to stdin: {error}"));
+        // A hook that exits without reading its input -- `exit 2`, or any
+        // script that decides before reading -- leaves nothing on the other
+        // end of the pipe, and the write fails with EPIPE. That is the hook
+        // declining the payload, not a failure to run it: the process started,
+        // it made a decision, and its exit code is that decision.
+        //
+        // Treating it as a run failure discarded that code. A hook whose
+        // `exit 2` should have blocked was reported as "could not run"
+        // whenever it exited before this write landed -- a race the hook
+        // always wins when it never reads stdin at all, and one that showed up
+        // as a test failing 2 of 6 local runs while passing in isolation.
+        if !is_broken_pipe(&error) {
+            return Err(format!("failed to write payload to stdin: {error}"));
+        }
     }
 
     let deadline = Duration::from_secs(entry.timeout_secs);
