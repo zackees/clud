@@ -33,12 +33,9 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# The MCP bridge (`python -m clud.mcp_server`, `clud-mcp`) is opt-in: the SDK
-# is a heavyweight dependency the CLI itself never needs.
+# The MCP bridge (`python -m clud.mcp_server`) is opt-in: the SDK is a
+# heavyweight dependency the CLI itself never needs.
 mcp = ["mcp>=2.1"]
-
-[project.scripts]
-clud-mcp = "clud.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/zackees/clud"
