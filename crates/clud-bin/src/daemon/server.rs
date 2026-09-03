@@ -1087,6 +1087,15 @@ fn daemon_create_session(
     Ok(snapshot)
 }
 
+/// Remove a worker from the registry as soon as its process exits.
+///
+/// One dedicated waiter thread per worker, blocking on `wait`. That is worth
+/// naming because #305 phase 4 proposes adding a 30-second sweep that scans
+/// the registry for dead PIDs, on the premise that "today's cleanup is
+/// reactive ... only runs on activity". It is not: this waiter is
+/// unconditional and fires on process exit regardless of whether any client
+/// touches the daemon again. A periodic scan would duplicate it, and #542
+/// separately asks the daemon not to grow new fixed-interval work.
 fn reap_worker_when_done(
     state_dir: std::path::PathBuf,
     workers: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
