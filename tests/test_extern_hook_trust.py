@@ -421,8 +421,13 @@ def test_child_hooks_fire_in_a_codex_session_only_when_the_project_is_trusted(
     # Trusting the project in ~/.codex/config.toml turns them on.
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
+    # A TOML *literal* key (single quotes). A Windows key is
+    # `c:\\users\\...`, and in a basic (double-quoted) string those
+    # backslashes are escapes -- `\\u` in `\\users` starts a unicode escape and
+    # the file does not parse, so the project never reads as trusted and the
+    # assertion below fails with clud's "not trusted yet" notice.
     config.write_text(
-        f'[projects."{_codex_project_key(str(repo))}"]\ntrust_level = "trusted"\n',
+        f"[projects.'{_codex_project_key(str(repo))}']\ntrust_level = \"trusted\"\n",
         encoding="utf-8",
     )
     result = _run(tmp_path, payload=payload, claude=False, home=home)

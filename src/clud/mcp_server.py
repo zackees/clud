@@ -66,7 +66,11 @@ def _resolve_cwd(raw: str, default: str) -> str:
     value = os.path.expandvars(os.path.expanduser(value))
     if not os.path.isabs(value):
         value = os.path.join(os.getcwd(), value)
-    return value
+    # Normalise separators, not just make it absolute. `~/work` and `rel/dir`
+    # expand to `C:\\Users\\x/work` on Windows -- a mixed-separator path that
+    # most APIs tolerate and no reader or comparison does. The docstring above
+    # already promised a normalised value.
+    return os.path.normpath(value)
 
 
 async def _stream_and_capture(proc: asyncio.subprocess.Process, ctx: Context) -> str:
