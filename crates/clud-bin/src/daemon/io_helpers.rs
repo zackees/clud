@@ -77,6 +77,15 @@ pub(super) fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::R
     serde_json::from_slice(&bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
+/// Mint a session id.
+///
+/// Daemon-side and unique per call, which is load-bearing beyond naming
+/// (#305). The spawn-storm that issue describes needs two `Create` requests
+/// to race on *the same* session, and nothing can arrange that: the id is
+/// minted here rather than supplied by the client — `WorkerLaunchSpec` has no
+/// id field to carry one — so per-session spawn serialization would lock a
+/// key that is unique by construction. `new_session_ids_never_collide` pins
+/// that; if a client-supplied id is ever added, revisit #305 phase 2.
 pub(super) fn new_session_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let sequence = COUNTER.fetch_add(1, Ordering::AcqRel);
@@ -251,6 +260,55 @@ mod tests {
                 "{label}: opting out must leave the user's {BASH_ENV_KEY} untouched"
             );
         }
+    }
+
+    /// #305 phase 2 proposes a per-session spawn mutex so concurrent
+    /// `Create`s for one session cannot race. That collision is impossible
+    /// while ids are minted per request, so this pins the property the
+    /// conclusion rests on rather than the conclusion.
+    ///
+    /// Concurrent on purpose: a counter that looked unique single-threaded
+    /// but handed the same value to two threads is exactly the failure that
+    /// would resurrect the phase.
+    #[test]
+    fn new_session_ids_never_collide() {
+        use std::collections::HashSet;
+
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 256;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..PER_THREAD)
+                        .map(|_| new_session_id())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let ids: Vec<String> = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("id thread"))
+            .collect();
+
+        let unique: HashSet<&String> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            THREADS * PER_THREAD,
+            "session ids must be unique; a collision would make #305's \
+             per-session spawn race reachable"
+        );
+    }
+
+    /// The ids carry the millisecond they were minted in, so two created in
+    /// the same millisecond still differ. Without the counter they would not,
+    /// and a fast enough pair of launches would collide.
+    #[test]
+    fn ids_minted_in_the_same_millisecond_still_differ() {
+        let first = new_session_id();
+        let second = new_session_id();
+        assert_ne!(first, second);
+        assert!(first.starts_with("sess-"), "{first}");
     }
 
     #[test]
