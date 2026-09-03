@@ -21,7 +21,11 @@ from ._daemon_helpers import copy_launcher, run_clud
 
 pytestmark = pytest.mark.integration
 
-_TIMEOUT = 15
+# 30s for the same reason as `test_mock_agents` (#994): these launches spawn a
+# real clud through the mock agent on shared runners, and 15s is close enough
+# to the observed spread to fail on load alone. This file inherited the 15
+# from that one when it was written.
+_TIMEOUT = 30
 _NOTICE = "does not have this workspace trusted"
 
 

@@ -27,7 +27,18 @@ from ._daemon_helpers import (
 
 pytestmark = pytest.mark.integration
 
-_TIMEOUT = 15
+# 30s, matching `test_voice_mode` and `test_loop_stream_json`. The old 15s was
+# the budget #994 names: it was missed by 0.2s in one observed run
+# (`test_tool_shell_exit_reaps_leaked_client`, "timed out after 15s (waited
+# 15.2s)") and by 1.6s in another (`test_subprocess_stdin_is_not_terminal_when
+# _piped`, 16.6s), on runs whose diffs could not reach either test. A limit
+# missed by a second is a statement about the runner, not the code.
+#
+# Widening rather than making it configurable, matching how the sibling
+# deadlines were handled in 6e5634b and 40dd895: an env knob only helps
+# someone who already knows to set it, and the failure mode here is a stranger
+# reading a red lane.
+_TIMEOUT = 30
 _ANSI_RE = re.compile(r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]|\][^\x07]*\x07)")
 
 
