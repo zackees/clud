@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -43,11 +44,37 @@ class _FakeCtx:
         del message
 
 
-def _fake_clud(tmp_path: Path, body: str) -> str:
-    script = tmp_path / "fake-clud"
-    script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
-    script.chmod(0o755)
-    return str(script)
+def _fake_clud(tmp_path: Path, stdout_text: str) -> str:
+    """A stand-in `clud` that prints `stdout_text` and exits 0.
+
+    Portable on purpose. The previous version wrote a `#!/bin/sh` script and
+    chmod'd it: on Windows there is no shebang, `chmod` is a no-op, and
+    `CreateProcess` refuses the file with `WinError 193: %1 is not a valid
+    Win32 application`. Every test that actually executed the fake died there
+    -- invisibly, because the Rust reaper harness (#1124) aborted the Windows
+    lane before pytest ever ran.
+
+    The work is done by a Python file so the payload needs no shell quoting;
+    the launcher only has to be something each platform will exec.
+    """
+    impl = tmp_path / "fake_clud_impl.py"
+    impl.write_text(
+        f"import sys\nsys.stdout.write({stdout_text!r})\n", encoding="utf-8"
+    )
+    if os.name == "nt":
+        # CreateProcess does run `.cmd` (via cmd.exe); it will not run a
+        # extension-less script.
+        launcher = tmp_path / "fake-clud.cmd"
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "{impl}" %*\r\n', encoding="utf-8"
+        )
+    else:
+        launcher = tmp_path / "fake-clud"
+        launcher.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{impl}" "$@"\n', encoding="utf-8"
+        )
+        launcher.chmod(0o755)
+    return str(launcher)
 
 
 def test_build_argv_assembles_backend_model_and_flags(bridge, monkeypatch) -> None:
@@ -80,7 +107,10 @@ def test_build_argv_assembles_backend_model_and_flags(bridge, monkeypatch) -> No
 def test_resolve_cwd_expands_and_absolutizes(bridge, monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     assert bridge._resolve_cwd("", "/fallback") == "/fallback"
+    # `ntpath.expanduser` reads USERPROFILE and ignores HOME, so setting only
+    # HOME expanded `~` to the real profile of whoever ran the suite.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     assert bridge._resolve_cwd("~/work", "") == str(tmp_path / "work")
     assert bridge._resolve_cwd("rel/dir", "") == str(tmp_path / "rel" / "dir")
     assert bridge._resolve_cwd(str(tmp_path), "") == str(tmp_path)
@@ -112,7 +142,7 @@ def test_extract_text_joins_result_and_assistant_text(bridge) -> None:
 
 
 def test_dry_run_returns_the_launch_plan_json(bridge, tmp_path: Path, monkeypatch) -> None:
-    fake = _fake_clud(tmp_path, 'echo \'{"model_provider":"claude","dry_run":true}\'\n')
+    fake = _fake_clud(tmp_path, '{"model_provider":"claude","dry_run":true}\n')
     monkeypatch.setenv("CLUD_BIN", fake)
     result = asyncio.run(
         bridge.dry_run("hello", _FakeCtx(), backend="codex", model="terra")
@@ -125,7 +155,7 @@ def test_dry_run_returns_the_launch_plan_json(bridge, tmp_path: Path, monkeypatc
 def test_run_streams_output_and_appends_exit_code(
     bridge, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _fake_clud(tmp_path, "echo hello-from-clud\n")
+    fake = _fake_clud(tmp_path, "hello-from-clud\n")
     monkeypatch.setenv("CLUD_BIN", fake)
     result = asyncio.run(bridge.run("hello", _FakeCtx()))
     assert "hello-from-clud" in result
@@ -137,7 +167,7 @@ def test_run_rejects_unknown_backend(
 ) -> None:
     # Pin CLUD_BIN so the run reaches the backend validation instead of
     # failing earlier on a PATH miss (the exec runners have no `clud` on PATH).
-    fake = _fake_clud(tmp_path, "echo hi\n")
+    fake = _fake_clud(tmp_path, "hi\n")
     monkeypatch.setenv("CLUD_BIN", fake)
     result = asyncio.run(bridge.run("hello", _FakeCtx(), backend="gpt"))
     assert result.startswith("error: unknown backend")
@@ -146,7 +176,7 @@ def test_run_rejects_unknown_backend(
 def test_discover_api_reads_base_url_and_token(bridge, tmp_path: Path, monkeypatch) -> None:
     fake = _fake_clud(
         tmp_path,
-        'echo \'{"base_url":"http://127.0.0.1:1","token":"tok"}\'\n',
+        '{"base_url":"http://127.0.0.1:1","token":"tok"}\n',
     )
     monkeypatch.setenv("CLUD_BIN", fake)
     base, token = asyncio.run(bridge._discover_api())
