@@ -18,6 +18,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rustc-link-arg=/STACK:8388608");
     }
+
+    // Issue #1016 item 3: give ELF builds a GNU build-id.
+    //
+    // Debug info now ships *beside* the release as a per-triple `.dwp`, and a
+    // sidecar has to be provably the one for this binary. Version plus triple
+    // identifies a release, not a build: a rebuilt or patched binary at the
+    // same version would pair with the wrong DWARF and mis-symbolicate, which
+    // is worse than not symbolicating at all because the wrong line numbers
+    // look authoritative.
+    //
+    // The format already has the field for exactly this, and clud was not
+    // emitting it -- `readelf -n` on a built binary showed only
+    // `.note.ABI-tag`. The linker default is no build-id unless a distro
+    // patches it in, so it has to be asked for.
+    //
+    // Gated to ELF: this is a GNU-ld/lld flag. MSVC's link.exe would reject
+    // it, and Mach-O carries LC_UUID instead, which the Apple linker emits
+    // without being asked.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg=-Wl,--build-id=sha1");
+    }
     // Issue #1016: bake the target triple into the binary.
     //
     // Cargo sets `TARGET` for build scripts but not for the crate itself, so
