@@ -139,6 +139,23 @@ fn quiet() -> ReapOpts {
     }
 }
 
+/// A full-host environment scan can race a just-spawned child: under CI load
+/// the child's row is missing from the first pass ("candidates=[]", the #994
+/// reaper flake). Retry the sweep until the PID is observed or the deadline
+/// passes. Test-only robustness — production reap semantics are unchanged.
+fn sweep_until_selected(
+    pid: u32,
+    mut sweep: impl FnMut() -> orphan_reaper::ReapOutcome,
+) -> orphan_reaper::ReapOutcome {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut outcome = sweep();
+    while !outcome.candidate_pids.contains(&pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        outcome = sweep();
+    }
+    outcome
+}
+
 /// #688's headline claim, against the sweep that `clud slay` and the daemon's
 /// periodic heartbeat both run.
 ///
@@ -157,7 +174,9 @@ fn a_tagged_undeclared_listening_daemon_survives_the_orphan_sweep() {
     let originator = a_dead_originator_pid();
     let stub = start_tagged_stub(temp.path(), "sweep", "spawn-detached", originator);
 
-    let outcome = orphan_reaper::reap_orphans_filtered(&quiet(), &mut |pid| pid == stub);
+    let outcome = sweep_until_selected(stub, || {
+        orphan_reaper::reap_orphans_filtered(&quiet(), &mut |pid| pid == stub)
+    });
     std::thread::sleep(SETTLE);
     let survived = pid_is_alive(stub);
     clud::process_tree::kill_tree(stub);
@@ -196,7 +215,7 @@ fn a_tagged_undeclared_listening_daemon_survives_the_on_exit_scan() {
     let me = std::process::id();
     let stub = start_tagged_stub(temp.path(), "exit", "spawn-detached", me);
 
-    let outcome = orphan_reaper::scan_and_report(me, &quiet());
+    let outcome = sweep_until_selected(stub, || orphan_reaper::scan_and_report(me, &quiet()));
     std::thread::sleep(SETTLE);
     let survived = pid_is_alive(stub);
     clud::process_tree::kill_tree(stub);
@@ -238,7 +257,9 @@ fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
     // Let it appear in a full-host environment scan.
     std::thread::sleep(SETTLE);
 
-    let outcome = orphan_reaper::reap_orphans_filtered(&quiet(), &mut |candidate| candidate == pid);
+    let outcome = sweep_until_selected(pid, || {
+        orphan_reaper::reap_orphans_filtered(&quiet(), &mut |candidate| candidate == pid)
+    });
     assert!(
         outcome.candidate_pids.contains(&pid),
         "the sweep never selected the leaked client; candidates={:?}",
