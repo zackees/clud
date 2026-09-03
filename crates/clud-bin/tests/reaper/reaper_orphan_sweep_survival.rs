@@ -297,13 +297,13 @@ fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
 }
 
 fn sleeper() -> Command {
-    if cfg!(windows) {
-        let mut command = Command::new("ping.exe");
-        command.args(["-n", "60", "127.0.0.1"]);
-        command
-    } else {
-        let mut command = Command::new("sleep");
-        command.arg("60");
-        command
-    }
+    // A repo-built child, deliberately not coreutils `sleep`: on GitHub
+    // runners a PATH shim can re-exec a host binary with a scrubbed
+    // environment, which made the tagged child invisible to the full-host
+    // environ scan ("candidates=[]" across ten seconds of retries, the
+    // #994 reaper flake). `mock-agent` is the child shape `orphan_reap`
+    // already uses and is proven visible on the exec runners.
+    let mut command = Command::new(exe::sibling_bin_path("mock-agent"));
+    command.args(["--mock-sleep-ms", "60000"]);
+    command
 }
