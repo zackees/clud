@@ -21,6 +21,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use super::delete_audit;
+
 /// How old (by mtime) a top-level entry must be before [`sweep_stale_at`]
 /// removes it. 48h matches the worktree GC policy value but is a *separate*
 /// constant — session-temp lifetime and worktree staleness are independent
@@ -137,6 +139,9 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
             report.removed += 1;
             continue;
         }
+        // Audit before acting (#893) — the root is clud-owned, but the
+        // audit line is what proves it after the fact.
+        delete_audit::record("gc.session-tmp", &path, "session-tmp stale>48h");
         let result = if meta.is_dir() {
             fs::remove_dir_all(&path)
         } else {

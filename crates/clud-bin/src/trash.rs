@@ -350,6 +350,10 @@ fn copy_dir_all(source: &Path, dest: &Path) -> Result<(), TrashError> {
 }
 
 fn remove_source_best_effort(source: &Path, metadata: &std::fs::Metadata) {
+    // Audit before acting (#893): this deletes the user's original after the
+    // cross-volume copy into quarantine succeeded — the one trash-path
+    // deletion of live user data rather than clud-owned copies.
+    crate::gc::delete_audit::record("trash.cross-volume-source", source, "trash move completed");
     let _ = if metadata.is_dir() {
         std::fs::remove_dir_all(source)
     } else {

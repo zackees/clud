@@ -47,6 +47,10 @@ pub use http::{
     dashboard_url_from_info, fetch_state_json, read_api_info, read_dashboard_info,
     read_dashboard_port, DashboardInfo,
 };
+/// `types` is private; re-export just the state-dir env-var name so
+/// `gc::delete_audit` (#893) resolves the same variable without a second
+/// definition of the string.
+pub(crate) use types::ENV_STATE_DIR;
 // Issue #469: re-exports for the telemetry integration test under
 // `tests/diagnostics/telemetry_endpoint.rs` which spawns the dashboard server
 // directly and asserts the full HTTP round-trip.
