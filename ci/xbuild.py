@@ -53,7 +53,49 @@ import shlex
 import sys
 from pathlib import Path
 
-from ci import process
+
+def _reject_by_path_invocation() -> None:
+    r"""Refuse `python ci/xbuild.py ...` before its imports can mislead (#1017).
+
+    Running this file *by path* puts `ci/` on `sys.path[0]` rather than the
+    repo root, so `from ci import process` below resolves against whatever
+    `ci` distribution happens to sit in site-packages. The traceback then
+    points at an unrelated package:
+
+        ImportError: cannot import name 'process' from 'ci'
+            (C:\tools\python13\Lib\site-packages\ci\__init__.py)
+
+    which sends a reader hunting through this repo for a missing symbol that
+    is not missing. CI is unaffected because it uses the module form
+    (`python -m ci.xbuild`), but the by-path form is the one a person types,
+    and it is why a release wheel could not be reproduced locally.
+
+    Rejecting rather than repairing `sys.path`: one canonical invocation is
+    what keeps a local build and a CI build the same build, which is the whole
+    point of being able to reproduce the wheel. A silently-repaired second
+    entry point would drift.
+    """
+    if __package__:
+        # Imported as `ci.xbuild`, or run with `-m`. Correct either way.
+        return
+    entry = Path(sys.path[0]).resolve() if sys.path and sys.path[0] else None
+    if entry != Path(__file__).resolve().parent:
+        return
+    argv = " ".join(shlex.quote(arg) for arg in sys.argv[1:])
+    print(
+        "ci/xbuild.py cannot be run by path: that puts ci/ on sys.path and "
+        "`from ci import process` resolves to an unrelated installed `ci` "
+        "package instead of this repo's.\n"
+        f"Run it as a module from the repo root instead:\n"
+        f"    python -m ci.xbuild {argv}".rstrip(),
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+_reject_by_path_invocation()
+
+from ci import process  # noqa: E402 - must follow the guard above
 
 ROOT = Path(__file__).resolve().parent.parent
 
