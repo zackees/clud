@@ -10,7 +10,19 @@ from tests import process
 
 pytestmark = pytest.mark.integration
 
-_TIMEOUT = 30
+# Scaled to the work: the heaviest tests here run `--loop-count 10`, ten full
+# clud launches through the mock agent under one budget. 30s was the
+# single-launch number from `test_mock_agents` (#994) and left 3s per
+# iteration -- tighter than the budget that already failed at three
+# iterations on a loaded Windows runner (see `test_workspace_trust_notice`).
+#
+# Capped at 75 rather than scaled the whole way: `pyproject.toml` sets
+# pytest-timeout's per-test `timeout = 90`, so anything at or above that is
+# unreachable -- the test is killed before the budget expires. Ten iterations
+# at the ~12s/iteration this lane showed under load would exceed 90s outright,
+# so if that ever becomes the normal case the per-test ceiling is the thing to
+# revisit, not this number.
+_TIMEOUT = 75
 
 
 def _run(
