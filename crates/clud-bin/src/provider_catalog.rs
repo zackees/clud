@@ -442,6 +442,19 @@ pub fn model_by_discovery_id(value: &str) -> Option<CatalogModel> {
 /// gateway request naming `gpt-*` or `deepseek-*` routes to its own provider
 /// instead of being proxied to Anthropic as an "ordinary Claude" model.
 /// Claude-owned rows are excluded — those remain caller-owned native IDs.
+/// Any catalog row matching `value` by CLI id, wire id, discovery id, or a
+/// legacy alias -- including Claude and OpenRouter rows.
+///
+/// This answers "does clud know this ID at all", which is a different question
+/// from "can this route serve it" ([`non_claude_model_by_any_id`], which
+/// excludes Claude and OpenRouter). Conflating the two made the bridge tell a
+/// user that `opus` or `openrouter-claude-sonnet` does not exist, when the
+/// accurate answer is that clud knows it and this gateway is not serving it
+/// (#1010).
+pub fn model_by_any_id(value: &str) -> Option<CatalogModel> {
+    catalog_match(value)
+}
+
 pub fn non_claude_model_by_any_id(value: &str) -> Option<CatalogModel> {
     catalog_match(value).filter(|entry| {
         entry.provider != ModelProvider::Claude && entry.provider != ModelProvider::OpenRouter
@@ -826,6 +839,53 @@ pub fn resolve_for_launch(
         }
     }
     Ok(Some(selection.clone()))
+}
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+
+    /// Guards the claim the unified refusal in `codex_bridge` relies on
+    /// (#1010 item 2): reaching that branch means clud has genuinely never
+    /// heard of the model, so #1009's "clud knows it, this gateway is not
+    /// serving it" case cannot fire there and adding it would be dead code.
+    ///
+    /// The condition is narrower than "no `clud-claude-*` alias exists" —
+    /// `clud-claude-deepseek-v4-pro` is exactly such an alias, and it is
+    /// harmless because `non_claude_model_by_any_id` resolves DeepSeek rows,
+    /// so `catalog` is `Some` and the refusal never fires.
+    ///
+    /// What would make the second case reachable is such an alias on a
+    /// **Claude or OpenRouter** row — the two providers that lookup excludes.
+    /// Then `exact_catalog` misses it (not a discovery id), the fallback
+    /// excludes it (wrong provider), `catalog` is `None`, the refusal fires,
+    /// and `model_by_any_id` finds it: a model clud knows, called unknown.
+    /// That is item 1's bug, on the other route.
+    #[test]
+    fn only_a_claude_or_openrouter_alias_would_make_the_unified_second_case_reachable() {
+        for entry in MODELS {
+            if entry.provider != ModelProvider::Claude
+                && entry.provider != ModelProvider::OpenRouter
+            {
+                continue;
+            }
+            let mut candidates = vec![("cli_id", entry.cli_id), ("wire_id", entry.wire_id)];
+            candidates.extend(entry.legacy_aliases.iter().map(|a| ("legacy_alias", *a)));
+            for (kind, value) in candidates {
+                if !value.starts_with("clud-claude-") {
+                    continue;
+                }
+                assert_eq!(
+                    entry.discovery_id,
+                    Some(value),
+                    "{kind} `{value}` is a clud-claude-* identifier on a {:?} row and is not \
+                     that row's discovery_id, so the unified refusal in codex_bridge can now be \
+                     reached by a model clud knows. Restore #1009's second case there — see #1010.",
+                    entry.provider,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

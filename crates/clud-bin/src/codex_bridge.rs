@@ -1421,18 +1421,32 @@ fn serve_unified_messages(
         // rather than leaking to Anthropic as an "ordinary Claude" model.
         .or_else(|| provider_catalog::non_claude_model_by_any_id(model));
     if model.starts_with("clud-claude-") && catalog.is_none() {
-        let ids = unified_catalog_ids(unified);
-        // #1021: the direct route has recorded its refusals since #1000; this
-        // one recorded nothing, so a unified session wedged on a picker row
-        // left no evidence. The message wording still lags the direct route's
-        // case split -- that is #1010's item 2, deliberately not folded in
-        // here so this stays a logging change.
+        let ids = unified_catalog_ids(unified).join(", ");
+        // #1010 item 2: this route kept #1000's single message after #1009
+        // gave the direct route two cases and made it quote the offending ID.
+        // Only the quoting carries over.
+        //
+        // The direct route's second case -- "clud knows this model, but this
+        // gateway is not serving it" -- is unreachable here, and adding it
+        // would be dead code.
+        //
+        // `exact_catalog` above resolves any discovery ID with no provider
+        // filter, and the fallback resolves anything else by cli id, wire id,
+        // or legacy alias for every provider except Claude and OpenRouter. So
+        // reaching this branch with an ID clud knows would need a
+        // `clud-claude-*` alias on a *Claude or OpenRouter* row that is not
+        // that row's discovery ID. No such row exists today -- note that
+        // `clud-claude-deepseek-v4-pro` is such an alias but on a DeepSeek
+        // row, which the fallback resolves, so it never lands here.
+        //
+        // `only_a_claude_or_openrouter_alias_would_make_the_unified_second_
+        // case_reachable` in provider_catalog fails if one is ever added.
         record_model_rejection(log, 400, "unknown_model", model);
         let body = serde_json::json!({
             "type": "error",
             "error": {
                 "type": "invalid_request_error",
-                "message": format!("unknown clud gateway model; available IDs: {}", ids.join(", ")),
+                "message": format!("unknown clud gateway model '{model}'; available IDs: {ids}"),
             }
         })
         .to_string();
@@ -2025,11 +2039,25 @@ fn serve_codex_discovery_messages(
     let (base, effort) = model
         .rsplit_once('@')
         .map_or((model, None), |(base, effort)| (base, Some(effort)));
+    // #1010 item 3: `codex_translate::resolve_selection` trims and treats an
+    // empty selection as "unspecified -> serve the default". Testing the raw
+    // string here made `{"model":""}` and `{"model":" claude-opus-5"}` take the
+    // refusal instead, the first of which rendered as the nonsense
+    // `unknown clud Codex model ''`. Same predicate, same answer.
+    let base = base.trim();
     // A persisted or continued session can name a Codex row by wire ID or CLI
     // alias instead of its discovery ID, exactly as on the unified route.
-    let known = provider_catalog::model_by_discovery_id(base)
-        .or_else(|| provider_catalog::non_claude_model_by_any_id(base));
-    let discovered = known.filter(|entry| entry.provider == ModelProvider::Codex);
+    //
+    // Two different questions, deliberately two lookups (#1010 item 1):
+    // `discovered` is *routing* -- only a Codex row can be served here.
+    // `known_to_clud` is *wording* -- whether clud has heard of the ID at all,
+    // which includes the Claude tier aliases and OpenRouter rows that the
+    // routing lookup excludes. Using the routing chain for both told a user
+    // that `opus` does not exist.
+    let discovered = provider_catalog::model_by_discovery_id(base)
+        .or_else(|| provider_catalog::non_claude_model_by_any_id(base))
+        .filter(|entry| entry.provider == ModelProvider::Codex);
+    let known_to_clud = provider_catalog::model_by_any_id(base).is_some();
     // Claude Code merges this gateway's rows with its own built-in catalog, so
     // IDs the gateway never advertised do arrive here. Only a `claude*` ID is
     // caller-owned -- `codex_translate::resolve_selection` maps those onto the
@@ -2037,7 +2065,8 @@ fn serve_codex_discovery_messages(
     // here: forwarding it unrewritten would translate an unknown ID to the
     // Codex upstream, which answers with an error about a model the user never
     // knowingly sent there (#997).
-    if discovered.is_none() && !base.to_ascii_lowercase().starts_with("claude") {
+    if discovered.is_none() && !base.is_empty() && !base.to_ascii_lowercase().starts_with("claude")
+    {
         let ids = provider_catalog::models_for_provider(ModelProvider::Codex)
             .filter_map(|entry| entry.discovery_id)
             .collect::<Vec<_>>()
@@ -2047,7 +2076,7 @@ fn serve_codex_discovery_messages(
         // while a model clud does know but this bridge does not serve is a
         // clud-side limit -- saying so stops the user debugging their own
         // model choice.
-        let (message, reason) = if known.is_some() {
+        let (message, reason) = if known_to_clud {
             (
                 format!(
                     "clud knows the model '{base}', but this Codex gateway is not \
@@ -3755,6 +3784,111 @@ Connection: close
         // launch left something worth reading, not a footer on every session.
         let log = bridge.log.as_ref().expect("configured log");
         assert!(!lock_log(log).has_notable_records());
+    }
+
+    /// Issue #1010 item 2: the unified route kept #1000's message after #1009
+    /// gave the direct route a quoted ID, so a `--unified` user could not see
+    /// what the gateway actually received.
+    ///
+    /// Only the quoting carries over. #1009's *second* case is unreachable
+    /// here — see the comment at the refusal and
+    /// `a_clud_claude_alias_would_need_the_unified_second_case`.
+    #[test]
+    fn the_unified_refusal_quotes_the_offending_id() {
+        let fake = FakeResponses::start();
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                .with_upstreams(fake.base_url.clone(), fake.base_url.clone()),
+        );
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let token = bridge.bearer_token().to_string();
+        let body = PROBE_BODY.replace("claude-x", "clud-claude-nonexistent");
+        let refused = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                "native-claude-credential",
+                &body,
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+            ),
+        );
+        assert_eq!(status(&refused), 400, "{refused}");
+        assert!(
+            refused.contains("unknown clud gateway model 'clud-claude-nonexistent'"),
+            "{refused}"
+        );
+        // Still says what this gateway can serve.
+        assert!(refused.contains("clud-claude-codex-terra"), "{refused}");
+        bridge.shutdown().unwrap();
+    }
+
+    /// Issue #1010 item 1: a model clud *does* know was reported as unknown.
+    ///
+    /// The case discriminator was the Codex-route resolution chain, and
+    /// `non_claude_model_by_any_id` excludes Claude **and** OpenRouter rows.
+    /// So the tier aliases (`opus`/`sonnet`/`haiku`, whose wire ids carry no
+    /// `claude` prefix and therefore reach this path) and
+    /// `openrouter-claude-sonnet` were told they do not exist — the worst
+    /// possible answer for a user in a Codex session trying to get back to
+    /// Claude.
+    #[test]
+    fn a_model_clud_knows_is_never_reported_as_unknown() {
+        let upstream = FakeResponses::start();
+        let mut bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        for model in ["opus", "sonnet", "haiku", "openrouter-claude-sonnet"] {
+            let body = PROBE_BODY.replace("claude-x", model);
+            let refused = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", &bearer, &body),
+            );
+            assert_eq!(status(&refused), 400, "{model}: {refused}");
+            assert!(
+                refused.contains("clud knows the model"),
+                "{model} is in clud's catalog and must not be called unknown: {refused}"
+            );
+            assert!(
+                !refused.contains("unknown clud Codex model"),
+                "{model}: {refused}"
+            );
+        }
+        // A genuinely unknown id still gets the case-1 answer, so the split
+        // has not simply collapsed the other way.
+        let body = PROBE_BODY.replace("claude-x", "gpt-6-nonexistent");
+        let refused = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", &bearer, &body),
+        );
+        assert!(refused.contains("unknown clud Codex model"), "{refused}");
+        bridge.shutdown().unwrap();
+    }
+
+    /// Issue #1010 item 3: the guard tested the raw `model`, while
+    /// `resolve_selection` trims and treats empty as "serve the default".
+    ///
+    /// So `{"model":""}` was refused as `unknown clud Codex model ''` — a
+    /// confusing thing to show anyone — and a leading space on an otherwise
+    /// ordinary Claude id took the refusal too.
+    #[test]
+    fn an_empty_or_padded_model_serves_the_default_rather_than_refusing() {
+        let upstream = FakeResponses::start();
+        let mut bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        for model in ["", " claude-opus-5", "claude-opus-5 "] {
+            let body = PROBE_BODY.replace("claude-x", model);
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", &bearer, &body),
+            );
+            assert_ne!(
+                status(&response),
+                400,
+                "{model:?} must serve the default, not refuse: {response}"
+            );
+            assert!(!response.contains("unknown clud Codex model"), "{response}");
+        }
+        bridge.shutdown().unwrap();
     }
 
     /// Issue #1021: #999's catalog record landed on the direct Codex route
