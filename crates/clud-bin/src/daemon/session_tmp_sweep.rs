@@ -77,6 +77,17 @@ fn log_report(report: &session_tmp::SweepReport) {
             report.skipped,
         );
     }
+    // #1148: a live session holding tens of gigabytes is not swept — it is in
+    // use — but it was also completely silent. One line, largest first, so the
+    // 48 GB scratchpad that filled a 2 TB box appears somewhere before the
+    // disk does.
+    for (path, bytes) in &report.oversized {
+        eprintln!(
+            "[clud] session-tmp: {} holds {:.1} GB and is still in use (not swept)",
+            path.display(),
+            *bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        );
+    }
 }
 
 fn sentinel_path() -> Option<PathBuf> {

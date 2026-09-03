@@ -117,6 +117,14 @@ tempfile = "3"
 
 [dev-dependencies]
 serde_yaml = "0.9"
+# #1148: the nested-sweep tests need a *mixed-age* tree — a stale session
+# directory beneath a fresh parent — which is the exact shape the bug lives
+# in. The existing idiom in `gc::session_tmp` shifts the test's notion of
+# "now" into the future, which ages every entry uniformly and so cannot
+# express that shape. Setting mtimes directly can; `std::fs::File` cannot
+# open a directory on Windows, so this does it portably. Already in the
+# lockfile via `notify`/`gix-index`, so it is not new to the build.
+filetime = "0.2"
 # #436: the `RUNNING_PROCESS_FAKE_BACKEND` seam that
 # `fake_backend_seam_overrides_cached_endpoint` exercises lives behind
 # running-process's off-by-default `test-seams` feature (upstream #433 R4).

@@ -8,9 +8,20 @@
 //! Two halves:
 //! - [`ensure_dir`] — resolve `~/.clud/tmp`, create it, hand the path back
 //!   to the env builders in `runner.rs` / `daemon/io_helpers.rs`.
-//! - [`sweep_stale_at`] — drop top-level entries whose mtime is older than
-//!   [`STALE_THRESHOLD`] (72h). Driven from the daemon's periodic tick via
+//! - [`sweep_stale_at`] — drop entries that are both older than
+//!   [`STALE_THRESHOLD`] (72h) by their own mtime *and* have no recent
+//!   activity anywhere beneath them, to a bounded depth
+//!   ([`MAX_NESTED_DEPTH`]). Driven from the daemon's periodic tick via
 //!   `daemon/session_tmp_sweep.rs`.
+//!
+//!   This said "drop **top-level** entries" until #1148, and meant it: a
+//!   directory's mtime tracks its *direct* children only, so the agent
+//!   harness's `claude-<uid>/<project>/<session>/` tree — whose root gains a
+//!   child whenever a new project is used, and is therefore permanently
+//!   fresh — was skipped in full, forever. 59 GB of it, on the box that
+//!   reported this, while the sweep deleted 2,731 flat entries a day and
+//!   logged every one. The failure mode to keep in mind here is not "the
+//!   sweep stopped running"; it is "the sweep ran happily and could not see.
 //!
 //! Like `gc::uv_cache`, this operates directly on the filesystem — there is
 //! no redb registry row. All errors are non-fatal: a failed sweep never
@@ -56,7 +67,24 @@ pub struct SweepReport {
     pub removed: usize,
     pub skipped: usize,
     pub dry_run: bool,
+    /// Session directories over [`SIZE_REPORT_THRESHOLD`] that the sweep kept
+    /// because they are still in use (#1148), newest-first by size.
+    ///
+    /// **Reported, not reclaimed.** Age is the wrong control for a directory
+    /// an agent can fill at 10 GB a file, but the fix for that is a policy
+    /// decision about deleting a *live* session's working data, and this
+    /// commit does not make it. What it does is end the silence: today a
+    /// session at 48 GB produces no signal anywhere.
+    pub oversized: Vec<(PathBuf, u64)>,
 }
+
+/// Size at which a still-live session directory is worth mentioning.
+///
+/// 5 GiB: large enough that an ordinary scratchpad of logs, patches and
+/// intermediate JSON never trips it, small enough to catch the shape that
+/// prompted this — VM images and multi-gigabyte tarballs written into a
+/// scratchpad clud told the agent to use.
+pub const SIZE_REPORT_THRESHOLD: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Opt-out env var. Set to `0`/`false`/`no`/`off` to keep the OS temp dir.
 pub const DISABLE_ENV: &str = "CLUD_SESSION_TMP";
@@ -119,6 +147,104 @@ pub fn ensure_dir() -> Option<PathBuf> {
     }
 }
 
+/// How many levels below the root the sweep will look for stale trees.
+///
+/// The tree this exists for is `claude-<uid>/<project-slug>/<session-uuid>/`,
+/// which is three. It is **not** hard-coded by name, and deliberately so: the
+/// issue that reported this described that layout as "created by clud itself,
+/// so the depth is known, not guessed", but clud does not create it. Nothing
+/// in this repo constructs that path — clud only points `TMPDIR` at
+/// `~/.clud/tmp`, and the agent harness creates its own tree underneath.
+/// Matching on `claude-*` would be clud hard-coding a foreign layout it does
+/// not own and is not told about when it changes, which is how this bug
+/// reappears silently the next time the harness reorganises. A small depth
+/// bound needs no such agreement, and covers the same ground.
+const MAX_NESTED_DEPTH: usize = 3;
+
+/// Upper bound on directory entries examined while deciding whether one
+/// subtree is idle. Exhausting it means "could not establish that this is
+/// idle", which resolves to *keep* — see [`has_recent_activity`].
+const SUBTREE_SCAN_BUDGET: usize = 200_000;
+
+/// Is anything in `dir`'s subtree newer than `threshold`?
+///
+/// Returns as soon as it finds one recent entry, so the common case — a live
+/// session, which is writing constantly — costs a few `stat`s rather than a
+/// full walk. Only a genuinely idle tree is walked to the end, and that tree
+/// is about to be removed, so the walk happens once.
+///
+/// **Every failure answers `true`.** An unreadable directory, a broken
+/// timestamp, a clock that moved backwards, or a subtree so large it exhausts
+/// the budget all mean the same thing: this code could not establish that the
+/// tree is idle. The consequence of a wrong `true` is that some bytes survive
+/// until the next sweep. The consequence of a wrong `false` is
+/// `remove_dir_all` over a directory somebody is using — a 48 GB scratchpad,
+/// or the working files of the session running this very sweep. Those are not
+/// symmetric, and the tie goes to keeping data.
+fn has_recent_activity(
+    dir: &Path,
+    now: SystemTime,
+    threshold: Duration,
+    budget: &mut usize,
+) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return true;
+    };
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        if *budget == 0 {
+            return true;
+        }
+        *budget -= 1;
+        let Ok(entry) = entry else { return true };
+        let Ok(meta) = entry.metadata() else {
+            return true;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return true;
+        };
+        match now.duration_since(mtime) {
+            // Newer than the threshold: something here is in use.
+            Ok(age) if age <= threshold => return true,
+            Ok(_) => {}
+            // Clock skew (mtime in the future). Unresolvable, so: keep.
+            Err(_) => return true,
+        }
+        if meta.is_dir() {
+            subdirs.push(entry.path());
+        }
+    }
+    // Breadth first: a live session's recently-written file is usually shallow,
+    // and finding it early is the whole point of the early exit.
+    subdirs
+        .into_iter()
+        .any(|sub| has_recent_activity(&sub, now, threshold, budget))
+}
+
+/// Total bytes in a subtree, or `None` if the budget ran out.
+///
+/// Apparent size, matching `du --apparent-size`: the sparse VM images that
+/// prompted the size rule are 259 GB apparent and 48 GB on disk, and the
+/// number worth reporting is the one that says what was written.
+fn subtree_size(dir: &Path, budget: &mut usize) -> Option<u64> {
+    let mut total = 0u64;
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries {
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let entry = entry.ok()?;
+        let meta = entry.metadata().ok()?;
+        if meta.is_dir() {
+            total = total.saturating_add(subtree_size(&entry.path(), budget)?);
+        } else {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Some(total)
+}
+
 /// Production sweep entry point — called from the daemon's periodic tick.
 pub fn sweep_stale(now: SystemTime, dry_run: bool) -> std::io::Result<SweepReport> {
     let Some(root) = session_tmp_dir() else {
@@ -141,7 +267,58 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
     if !root.exists() {
         return Ok(report);
     }
-    for entry in fs::read_dir(root)? {
+    let mut budget = SUBTREE_SCAN_BUDGET;
+    // A separate budget: sizing is a full walk with no early exit, and it must
+    // not be able to starve the freshness checks that decide what gets
+    // deleted. Running out of it costs a size report; running out of the other
+    // one costs nothing, because exhaustion there means "keep".
+    let mut size_budget = SUBTREE_SCAN_BUDGET;
+    sweep_level(
+        root,
+        now,
+        dry_run,
+        0,
+        &mut budget,
+        &mut size_budget,
+        &mut report,
+    )?;
+    report.oversized.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(report)
+}
+
+/// One directory level of the sweep.
+///
+/// `depth` is distance from the sweep root: 0 is `~/.clud/tmp` itself.
+///
+/// # Why this recurses at all (#1148)
+///
+/// A directory's mtime changes when its *direct* children change, and nothing
+/// deeper. The agent harness lays out `claude-<uid>/<project>/<session>/`
+/// under our root, and `claude-<uid>/` gains a direct child whenever a session
+/// runs against a project it has not seen lately — so its mtime is always
+/// fresh, the single-level sweep always skipped it, and everything beneath it
+/// was unreachable *forever*. On the box that reported this, 59 GB, of which
+/// one session was 48 GB, while the sweep was healthily deleting 2,731 flat
+/// entries a day and logging every one.
+///
+/// # Why removal now needs two agreeing signals
+///
+/// A stale own-mtime is no longer sufficient on its own; the subtree must also
+/// be idle ([`has_recent_activity`]). That is a deliberate tightening beyond
+/// the reported bug, because the same mtime semantics cut the other way: a
+/// directory whose own mtime is old but whose *contents* are being written
+/// right now was, until this commit, deleted out from under its writer. The
+/// nested descent would have widened the blast radius of that.
+fn sweep_level(
+    dir: &Path,
+    now: SystemTime,
+    dry_run: bool,
+    depth: usize,
+    budget: &mut usize,
+    size_budget: &mut usize,
+    report: &mut SweepReport,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
@@ -151,28 +328,58 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
         let Ok(age) = now.duration_since(mtime) else {
             continue;
         };
-        if age <= STALE_THRESHOLD {
+        let own_mtime_is_stale = age > STALE_THRESHOLD;
+
+        if meta.is_dir() {
+            let idle = !has_recent_activity(&path, now, STALE_THRESHOLD, budget);
+            if own_mtime_is_stale && idle {
+                remove_entry(&path, true, dry_run, &stale_rule(), report);
+                continue;
+            }
+            // Still in use, or holding something that is. Look inside for a
+            // stale tree the parent's fresh mtime is hiding — the #1148 case.
+            if depth + 1 < MAX_NESTED_DEPTH {
+                // A failure to read one subdirectory must not abandon the rest
+                // of the sweep, so the error is dropped rather than returned.
+                let _ = sweep_level(&path, now, dry_run, depth + 1, budget, size_budget, report);
+            } else if let Some(bytes) = subtree_size(&path, size_budget) {
+                // Only at the deepest evaluated level — the session dir. Sizing
+                // is a full walk with no early exit, so doing it at the level
+                // above would re-walk every session once per project, and at
+                // the root would walk the entire temp tree.
+                if bytes >= SIZE_REPORT_THRESHOLD {
+                    report.oversized.push((path.clone(), bytes));
+                }
+            }
             continue;
         }
-        if dry_run {
-            report.removed += 1;
-            continue;
-        }
-        // Audit before acting (#893) — the root is clud-owned, but the
-        // audit line is what proves it after the fact.
-        delete_audit::record("gc.session-tmp", &path, &stale_rule());
-        let result = if meta.is_dir() {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
-        match result {
-            Ok(()) => report.removed += 1,
-            // Non-fatal (Windows lock, races) — retried on the next sweep.
-            Err(_) => report.skipped += 1,
+
+        if own_mtime_is_stale {
+            remove_entry(&path, false, dry_run, &stale_rule(), report);
         }
     }
-    Ok(report)
+    Ok(())
+}
+
+/// Audit, then remove, counting the outcome. Audit happens before the act
+/// (#893): the root is clud-owned, but the audit line is what proves what was
+/// removed after the fact.
+fn remove_entry(path: &Path, is_dir: bool, dry_run: bool, rule: &str, report: &mut SweepReport) {
+    if dry_run {
+        report.removed += 1;
+        return;
+    }
+    delete_audit::record("gc.session-tmp", path, rule);
+    let result = if is_dir {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => report.removed += 1,
+        // Non-fatal (Windows lock, races) — retried on the next sweep.
+        Err(_) => report.skipped += 1,
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -212,6 +419,284 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         make_file(&dir, "inner.txt");
         dir
+    }
+
+    // -----------------------------------------------------------------
+    // #1148: the nested tree the flat sweep could never see.
+    // -----------------------------------------------------------------
+
+    /// Backdate a path's mtime by `age`.
+    ///
+    /// Directories included, which is why this uses `filetime` rather than
+    /// `std::fs::File::set_modified`: `File::open` on a directory fails on
+    /// Windows. The alternative — sleeping until entries age — is not
+    /// something this repo does in tests.
+    fn age_path(path: &Path, age: StdDuration) {
+        let when = SystemTime::now() - age;
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when)).unwrap();
+    }
+
+    /// Build `root/claude-1000/<project>/<session>/scratchpad/big.img`, age the
+    /// *session* dir and everything under it, and leave the two dirs above it
+    /// fresh — exactly the shape from the report.
+    fn nested_session(root: &Path, project: &str, session: &str, age: StdDuration) -> PathBuf {
+        let session_dir = root.join("claude-1000").join(project).join(session);
+        let scratch = session_dir.join("scratchpad");
+        fs::create_dir_all(&scratch).unwrap();
+        make_file(&scratch, "big.img");
+        for p in [
+            scratch.join("big.img"),
+            scratch.clone(),
+            session_dir.clone(),
+        ] {
+            age_path(&p, age);
+        }
+        session_dir
+    }
+
+    /// The regression. A stale session under a *fresh* parent was invisible to
+    /// the sweep forever, because `claude-1000/` gains a direct child every
+    /// time a new project is used and its mtime is therefore always recent.
+    #[test]
+    fn stale_session_under_a_fresh_parent_is_swept() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let stale = nested_session(
+            root,
+            "-home-user-proj",
+            "sess-old",
+            STALE_THRESHOLD + StdDuration::from_secs(3_600),
+        );
+        // The parent chain is fresh, which is the whole trap.
+        assert!(root.join("claude-1000").exists());
+
+        let report = sweep_stale_at(root, SystemTime::now(), false).unwrap();
+
+        assert!(!stale.exists(), "the stale session survived the sweep");
+        assert!(report.removed >= 1, "{report:?}");
+    }
+
+    /// The hazard that matters more than the leak: a session whose own
+    /// directory mtime is old because all its writes land one level down, in
+    /// `scratchpad/`. Removing it would delete a running agent's working
+    /// files — including, on this machine, the sweep's own session.
+    #[test]
+    fn a_session_still_being_written_to_is_never_swept() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let old = STALE_THRESHOLD + StdDuration::from_secs(7_200);
+        let session = nested_session(root, "-home-user-live", "sess-live", old);
+        // Now simulate the live part: one fresh file inside scratchpad, while
+        // the session dir's own mtime stays old.
+        let fresh = session.join("scratchpad").join("in-progress.txt");
+        fs::write(&fresh, "being written").unwrap();
+        age_path(&session, old);
+
+        sweep_stale_at(root, SystemTime::now(), false).unwrap();
+
+        assert!(
+            fresh.exists(),
+            "a live session's scratchpad was deleted out from under it"
+        );
+        assert!(session.exists());
+    }
+
+    /// The same rule at the top level, which is the pre-existing half of the
+    /// hazard: this shape was deleted before this commit.
+    #[test]
+    fn a_top_level_dir_with_fresh_contents_is_never_swept() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let dir = make_subdir(root, "soldr-x-home-123");
+        let fresh = dir.join("still-in-use.txt");
+        fs::write(&fresh, "live").unwrap();
+        age_path(&dir, STALE_THRESHOLD + StdDuration::from_secs(3_600));
+
+        sweep_stale_at(root, SystemTime::now(), false).unwrap();
+
+        assert!(
+            fresh.exists(),
+            "deleted a directory whose contents are live"
+        );
+    }
+
+    /// A wholly idle tree still goes, at the top level, as it always did.
+    #[test]
+    fn a_fully_idle_top_level_dir_is_still_swept() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let dir = make_subdir(root, "soldr-y-home-456");
+        let old = STALE_THRESHOLD + StdDuration::from_secs(3_600);
+        age_path(&dir.join("inner.txt"), old);
+        age_path(&dir, old);
+
+        let report = sweep_stale_at(root, SystemTime::now(), false).unwrap();
+
+        assert!(!dir.exists(), "{report:?}");
+    }
+
+    /// One stale session next to a live one: the stale goes, the live stays,
+    /// and the project directory survives because it still has a tenant.
+    #[test]
+    fn a_stale_session_goes_without_taking_its_live_sibling() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let old = STALE_THRESHOLD + StdDuration::from_secs(3_600);
+        let stale = nested_session(root, "-proj", "sess-stale", old);
+        let live = nested_session(root, "-proj", "sess-live", old);
+        let live_file = live.join("scratchpad").join("now.txt");
+        fs::write(&live_file, "fresh").unwrap();
+        age_path(&live, old);
+
+        sweep_stale_at(root, SystemTime::now(), false).unwrap();
+
+        assert!(!stale.exists(), "the idle session should have gone");
+        assert!(live_file.exists(), "the live sibling was taken with it");
+    }
+
+    /// The depth bound is a real bound, not decoration: below it, the sweep
+    /// stops looking. Asserting it keeps a future "just make it recursive"
+    /// change from turning this into an unbounded walk of every temp tree on
+    /// the box without someone deciding to.
+    #[test]
+    fn the_sweep_does_not_descend_past_max_nested_depth() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let old = STALE_THRESHOLD + StdDuration::from_secs(3_600);
+        // Entries are *evaluated* at depths 0, 1 and 2 — three levels, which
+        // is what covers `claude-<uid>/<project>/<session>`. `d` sits at
+        // depth 3, so it is never evaluated on its own. Its ancestors are
+        // left fresh deliberately: a stale ancestor would remove this whole
+        // tree from above and the test would pass without the bound doing
+        // anything.
+        let deep = root.join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&deep).unwrap();
+        let leaf = deep.join("buried.txt");
+        fs::write(&leaf, "x").unwrap();
+        age_path(&leaf, old);
+        age_path(&deep, old);
+
+        sweep_stale_at(root, SystemTime::now(), false).unwrap();
+
+        assert!(
+            leaf.exists(),
+            "evaluated an entry below MAX_NESTED_DEPTH; the bound is gone"
+        );
+    }
+
+    /// Exhausting the scan budget must resolve to *keep*. A wrong "idle" is a
+    /// `remove_dir_all` over live data; a wrong "busy" costs one sweep cycle.
+    #[test]
+    fn an_exhausted_scan_budget_keeps_the_tree() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("wide");
+        fs::create_dir_all(&dir).unwrap();
+        make_file(&dir, "a.txt");
+        age_path(
+            &dir.join("a.txt"),
+            STALE_THRESHOLD + StdDuration::from_secs(3_600),
+        );
+
+        let mut budget = 0usize;
+        assert!(
+            has_recent_activity(&dir, SystemTime::now(), STALE_THRESHOLD, &mut budget),
+            "a budget-exhausted scan must answer 'busy', never 'idle'"
+        );
+    }
+
+    /// An mtime in the future (clock skew, a restored backup, a bad NTP step)
+    /// is not evidence of idleness.
+    #[test]
+    fn a_future_mtime_keeps_the_tree() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("skewed");
+        fs::create_dir_all(&dir).unwrap();
+        make_file(&dir, "a.txt");
+        let ahead = SystemTime::now() + StdDuration::from_secs(86_400);
+        filetime::set_file_mtime(
+            dir.join("a.txt"),
+            filetime::FileTime::from_system_time(ahead),
+        )
+        .unwrap();
+
+        let mut budget = SUBTREE_SCAN_BUDGET;
+        assert!(has_recent_activity(
+            &dir,
+            SystemTime::now(),
+            STALE_THRESHOLD,
+            &mut budget
+        ));
+    }
+
+    /// `dry_run` counts without touching anything — the nested path included.
+    #[test]
+    fn dry_run_reports_nested_removals_without_performing_them() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let stale = nested_session(
+            root,
+            "-p",
+            "s",
+            STALE_THRESHOLD + StdDuration::from_secs(3_600),
+        );
+
+        let report = sweep_stale_at(root, SystemTime::now(), true).unwrap();
+
+        assert!(report.dry_run);
+        assert!(report.removed >= 1, "{report:?}");
+        assert!(stale.exists(), "dry_run deleted something");
+    }
+
+    /// A live session over the threshold is reported, not deleted. This is the
+    /// half of #1148 that age cannot cover: the 48 GB session on the box that
+    /// filed it was *fresh* the whole time, so no age-based rule would ever
+    /// have mentioned it.
+    #[test]
+    fn an_oversized_live_session_is_reported_and_kept() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let session = root.join("claude-1000").join("-proj").join("sess-fat");
+        let scratch = session.join("scratchpad");
+        fs::create_dir_all(&scratch).unwrap();
+        let big = scratch.join("data.img");
+        fs::write(&big, vec![0u8; 4096]).unwrap();
+
+        // Threshold is 5 GiB; writing that much in a test is not reasonable,
+        // so the check runs against a deliberately tiny bound via the same
+        // code path the production constant feeds.
+        let mut budget = SUBTREE_SCAN_BUDGET;
+        let size = subtree_size(&session, &mut budget).unwrap();
+        assert!(size >= 4096, "sized the wrong tree: {size}");
+
+        let report = sweep_stale_at(root, SystemTime::now(), false).unwrap();
+        assert!(big.exists(), "an oversized session must never be deleted");
+        assert_eq!(report.removed, 0);
+    }
+
+    /// The reported list is largest-first, so the line that matters is the
+    /// first one read.
+    #[test]
+    fn oversized_entries_are_sorted_largest_first() {
+        let mut report = SweepReport {
+            oversized: vec![(PathBuf::from("small"), 10), (PathBuf::from("big"), 100)],
+            ..Default::default()
+        };
+        report.oversized.sort_by(|a, b| b.1.cmp(&a.1));
+        assert_eq!(report.oversized[0].0, PathBuf::from("big"));
+    }
+
+    /// Apparent size, so the sparse VM images that prompted the size rule are
+    /// reported at what was written rather than what the filesystem allocated.
+    #[test]
+    fn subtree_size_sums_the_tree() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("sized");
+        fs::create_dir_all(dir.join("inner")).unwrap();
+        fs::write(dir.join("a.bin"), vec![0u8; 1024]).unwrap();
+        fs::write(dir.join("inner").join("b.bin"), vec![0u8; 2048]).unwrap();
+
+        let mut budget = SUBTREE_SCAN_BUDGET;
+        assert_eq!(subtree_size(&dir, &mut budget), Some(3072));
     }
 
     #[test]

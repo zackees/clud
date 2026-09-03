@@ -584,6 +584,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "dirs 5.0.1",
+ "filetime",
  "fs4",
  "getrandom 0.4.2",
  "gix-hash",
