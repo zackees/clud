@@ -673,8 +673,10 @@ fn spare_rows_group_by_shape_and_reason_and_name_the_executable() {
     let ds: Vec<Descendant> = (0..19)
         .map(|i| descendant(586_530 + i, "clud", "clud __worker --session-id s"))
         .collect();
-    let classified: Vec<(Shape, &Descendant)> =
-        ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
     let spares: SpareList = ds
         .iter()
         .map(|d| (d.pid, SpareReason::SessionLeader))
@@ -682,7 +684,11 @@ fn spare_rows_group_by_shape_and_reason_and_name_the_executable() {
 
     let rows = spare_rows(&classified, &spares);
 
-    assert_eq!(rows.len(), 1, "19 identical spares must collapse to one row: {rows:#?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "19 identical spares must collapse to one row: {rows:#?}"
+    );
     assert_eq!(rows[0].count, 19);
     assert_eq!(rows[0].reason, SpareReason::SessionLeader);
     assert!(
@@ -703,15 +709,21 @@ fn spare_rows_separate_distinct_shapes() {
         descendant(2, "clud", "clud __worker --session-id b"),
         descendant(3, "ctrl-c", "ctrl-c __worker"),
     ];
-    let classified: Vec<(Shape, &Descendant)> =
-        ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
     let spares: SpareList = ds
         .iter()
         .map(|d| (d.pid, SpareReason::SessionLeader))
         .collect();
 
     let rows = spare_rows(&classified, &spares);
-    assert_eq!(rows.len(), 2, "distinct shapes must not be merged: {rows:#?}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "distinct shapes must not be merged: {rows:#?}"
+    );
     assert!(rows.iter().any(|r| r.count == 2));
     assert!(rows.iter().any(|r| r.count == 1));
 }
@@ -725,8 +737,10 @@ fn spare_rows_separate_distinct_reasons() {
         descendant(1, "clud", "clud __worker --session-id a"),
         descendant(2, "clud", "clud __worker --session-id b"),
     ];
-    let classified: Vec<(Shape, &Descendant)> =
-        ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
     let spares: SpareList = [
         (1, SpareReason::SessionLeader),
         (2, SpareReason::ListeningEndpoint),
@@ -735,7 +749,11 @@ fn spare_rows_separate_distinct_reasons() {
     .collect();
 
     let rows = spare_rows(&classified, &spares);
-    assert_eq!(rows.len(), 2, "one shape, two verdicts, two rows: {rows:#?}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "one shape, two verdicts, two rows: {rows:#?}"
+    );
 }
 
 /// Only spared candidates appear. A row for a process the reaper killed
@@ -746,8 +764,10 @@ fn spare_rows_omit_unspared_candidates() {
         descendant(1, "clud", "clud __worker --session-id a"),
         descendant(2, "clud", "clud __worker --session-id b"),
     ];
-    let classified: Vec<(Shape, &Descendant)> =
-        ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
     let spares: SpareList = [(1, SpareReason::SessionLeader)].into_iter().collect();
 
     let rows = spare_rows(&classified, &spares);
@@ -762,8 +782,10 @@ fn spare_rows_omit_unspared_candidates() {
 fn spare_row_labels_are_capped() {
     let huge = "x".repeat(5_000);
     let ds = [descendant(1, "weird", &format!("weird {huge}"))];
-    let classified: Vec<(Shape, &Descendant)> =
-        ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
     let spares: SpareList = [(1, SpareReason::SessionLeader)].into_iter().collect();
 
     let rows = spare_rows(&classified, &spares);
@@ -783,8 +805,10 @@ fn spare_rows_are_deterministically_ordered() {
         .iter()
         .map(|(pid, name)| descendant(*pid, name, &format!("{name} --run")))
         .collect();
-    let classified: Vec<(Shape, &Descendant)> =
-        ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
     let spares: SpareList = ds
         .iter()
         .map(|d| (d.pid, SpareReason::SessionLeader))
@@ -814,8 +838,10 @@ fn spare_row_renders_the_name_the_count_and_the_reason() {
         .iter()
         .map(|pid| descendant(*pid, "clud", "clud __worker --session-id s"))
         .collect();
-    let classified: Vec<(Shape, &Descendant)> =
-        ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
     let spares: SpareList = ds
         .iter()
         .map(|d| (d.pid, SpareReason::SessionLeader))
@@ -825,7 +851,10 @@ fn spare_row_renders_the_name_the_count_and_the_reason() {
     let line = rows[0].render();
 
     assert!(line.contains("2x"), "{line}");
-    assert!(line.contains("clud"), "the executable must be named: {line}");
+    assert!(
+        line.contains("clud"),
+        "the executable must be named: {line}"
+    );
     assert!(line.contains("(session_leader)"), "{line}");
     assert!(line.contains("586489, 586491"), "{line}");
     assert!(
