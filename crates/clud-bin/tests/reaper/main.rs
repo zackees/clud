@@ -15,6 +15,7 @@ mod common;
 #[path = "../common/exe.rs"]
 mod exe;
 
+mod fixture_ids;
 mod orphan_reap;
 mod reaper_batch_drain_windows;
 mod reaper_daemon_survival_windows;

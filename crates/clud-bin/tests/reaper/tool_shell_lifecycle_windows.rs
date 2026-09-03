@@ -12,8 +12,19 @@ use std::time::{Duration, Instant};
 
 use clud::job_orphan_reaper::ForegroundJobTracker;
 
+// Module-qualified for the same reason as in
+// `subprocess_capture_lifecycle_windows`: #1056 made every test id
+// `<module>::<fn>`, and `--exact` matches the full id. Derived from
+// `module_path!()` so a rename cannot leave a stale literal behind.
 const HELPER_SLEEP: &str = "helper_leaked_client_sleeps";
 const HELPER_NESTED: &str = "helper_spawns_nested_cmd";
+
+fn fixture_id(name: &str) -> String {
+    format!(
+        "{}::{name}",
+        crate::fixture_ids::libtest_module_prefix(module_path!())
+    )
+}
 const PID_PATH_ENV: &str = "CLUD_TOOL_SHELL_TEST_PID_PATH";
 
 fn quote_powershell(path: &Path) -> String {
@@ -107,7 +118,7 @@ fn live_tracker_reaps_direct_client_and_spares_nested_shell() {
          Set-Content -LiteralPath {pid_path} -Value $p.Id",
         pid_path = quote_powershell(&leaked_pid_path),
         exe = quote_powershell(&leaked_exe),
-        helper = HELPER_SLEEP,
+        helper = fixture_id(HELPER_SLEEP),
     );
     let mut agent = spawn_fake_agent(&leaked_script);
     tracker.register_backend(agent.id(), "cmd.exe");
@@ -126,7 +137,7 @@ fn live_tracker_reaps_direct_client_and_spares_nested_shell() {
          & {exe} --ignored --exact {helper}",
         pid_path = quote_powershell(&nested_pid_path),
         exe = quote_powershell(&nested_exe),
-        helper = HELPER_NESTED,
+        helper = fixture_id(HELPER_NESTED),
     );
     let mut agent = spawn_fake_agent(&nested_script);
     tracker.register_backend(agent.id(), "cmd.exe");

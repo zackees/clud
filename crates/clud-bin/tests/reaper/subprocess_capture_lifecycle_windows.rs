@@ -11,6 +11,27 @@ use std::time::{Duration, Instant};
 
 use clud::subprocess::ManagedSubprocess;
 
+/// libtest matches `--exact` against the **module-qualified** test id.
+///
+/// #1056 consolidated the former top-level `tests/*.rs` files into modules of
+/// one target, which changed every id from `<fn>` to `<module>::<fn>` (this
+/// target's own `main.rs` says so). These fixtures re-invoke the test binary
+/// and kept the pre-consolidation bare names, so `--exact` matched nothing,
+/// the child ran zero tests, and the pid file it was supposed to write never
+/// appeared -- surfacing 30s later as `NotFound` on the *parent* side, which
+/// reads like a spawn or containment bug rather than a name that stopped
+/// resolving.
+///
+/// Built from `module_path!()` rather than written out, so renaming this
+/// module cannot leave a stale literal behind -- which is exactly how the
+/// bare names survived #1056.
+fn fixture_id(name: &str) -> String {
+    format!(
+        "{}::{name}",
+        crate::fixture_ids::libtest_module_prefix(module_path!())
+    )
+}
+
 #[test]
 fn production_adapter_contains_an_immediate_descendant() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -27,7 +48,7 @@ fn production_adapter_contains_an_immediate_descendant() {
             exe.to_string_lossy().into_owned(),
             "--ignored".into(),
             "--exact".into(),
-            "race_parent_fixture".into(),
+            fixture_id("race_parent_fixture"),
         ],
         None,
         env,
@@ -96,8 +117,11 @@ fn race_parent_fixture() {
     // Deliberately do not wait: the fixture parent must exit while its child
     // still owns the inherited stdout/stderr handles. The production Job
     // owner in the outer test is responsible for reaping that descendant.
+    // Bound first: an array literal is homogeneous, so mixing `&'static str`
+    // with a `&String` temporary does not compile.
+    let sleeper = fixture_id("race_sleeper_fixture");
     let child = std::process::Command::new(exe)
-        .args(["--ignored", "--exact", "race_sleeper_fixture"])
+        .args(["--ignored", "--exact", sleeper.as_str()])
         .env("CLUD_634_FIXTURE", "sleeper")
         .spawn()
         .expect("spawn the pre-containment descendant fixture");
