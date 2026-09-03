@@ -142,6 +142,21 @@ jobs:
           --strategy ${{ inputs.strategy }}
           --profile ${{ inputs.profile }}
 
+      # Issue #1017: 2.7.2, 2.7.3 and 2.7.4 were tagged and built green, and
+      # none of them published -- a linux wheel had grown past PyPI's 100 MB
+      # per-file limit, and because `publish-release` is skipped when
+      # `publish-pypi` fails, the tag produced nothing and looked like it had
+      # succeeded. Nothing measured the wheels, so nothing said so.
+      #
+      # The cap is enforced only for `release`, because PyPI only ever sees
+      # release wheels and a dev wheel's size says nothing about theirs.
+      # Sizes are printed either way, so growth is visible in any build log.
+      - name: Check wheel size
+        if: ${{ inputs.bundle || inputs.wheel-artifact != '' }}
+        run: >
+          "$VENV_PY" -m ci.check_wheel_size --dist-dir dist/
+          ${{ inputs.profile == 'release' && '--max-mb 90' || '' }}
+
       - name: Build sdist
         if: ${{ inputs.include-sdist }}
         run: '"$VENV_PY" -m maturin sdist --out dist'
