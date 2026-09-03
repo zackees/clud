@@ -170,9 +170,22 @@ fn bash_under(env: Vec<(String, String)>, script: &str) -> (i32, String) {
 /// cannot arm the "unarmed" baseline.
 #[cfg(unix)]
 fn stock_env() -> Vec<(String, String)> {
-    std::env::vars()
-        .filter(|(key, _)| key != BASH_ENV_KEY && key != PREV_KEY)
-        .collect()
+    // Built explicitly rather than inherited.
+    //
+    // This used to be `std::env::vars()` minus the two keys we own. That reads
+    // the whole process environment, which sibling tests in this binary mutate
+    // (`HOME`, `USERPROFILE`, and others, from several files each holding its
+    // own lock). Iterating it while another thread writes is a race by
+    // construction, and it showed up as this file failing about 1 run in 8 of
+    // the full suite while passing alone.
+    //
+    // Nothing here needs the ambient environment. A bash that runs `echo` and
+    // sources a file needs a PATH and nothing else, so the fixture says so and
+    // stops depending on what the rest of the suite is doing.
+    vec![(
+        "PATH".to_string(),
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
+    )]
 }
 
 /// A real non-interactive bash must actually abort, not merely be handed a
