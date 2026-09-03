@@ -878,14 +878,36 @@ class TestInterruptReporting:
             time.sleep(0.1)
             if proc.poll() is None:
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
-            stdout, stderr = proc.communicate(timeout=10)
+            # 30s, not 10. This budget bounds *teardown* -- clud receiving the
+            # break, reaping a three-process tree, and closing its pipes. The
+            # Windows integration lane timed out here at 10s on a run that
+            # changed only an unrelated unit-test file, and `main` fails this
+            # lane in two of its last three runs, so 10 was measuring the
+            # runner rather than the code (#994).
+            #
+            # Raising it past the mock's own 15s sleep is safe *because of the
+            # `returncode == 130` assertion below*, not by accident: if the
+            # break were dropped, the mock would run to completion and clud
+            # would exit with its code, not 128+SIGINT, and the test would
+            # still fail. Do not delete that assertion and leave this budget
+            # alone -- together they are what makes a dropped break loud.
+            #
+            # 30 also has to fit. The waits here are sequential, and
+            # pytest-timeout caps each test at 90s (pyproject.toml); exceeding
+            # that trades a diagnosable TimeoutExpired for the timeout killer.
+            stdout, stderr = proc.communicate(timeout=30)
         finally:
             if proc.poll() is None:
                 kill_process(proc.pid)
                 proc.wait(timeout=5)
 
         combined = f"{stdout}\n{stderr}"
-        wait_for_pids_to_exit(child_pids + tree_pids, timeout=10)
+        # 15, not the 30 above: by the time communicate() has returned, clud
+        # has already exited and these children have already been signalled, so
+        # this waits for handles to close rather than for reaping to run.
+        # It also has to fit -- 10 + 10 + 30 + 30 = 80 against a 90s ceiling is
+        # not margin. This way the worst case is 65s.
+        wait_for_pids_to_exit(child_pids + tree_pids, timeout=15)
         assert proc.returncode == 130, combined
         assert "Terminate batch job" not in combined
 
