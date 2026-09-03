@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+from running_process import PIPE, RunningProcess
 
 from ci import bundle, xbuild
 
@@ -337,3 +340,43 @@ def test_missing_debuginfo_is_reported_but_never_fatal(tmp_path, monkeypatch) ->
 
     assert xbuild.collect_debuginfo(target, "release") == []
     assert not (tmp_path / "dist-debuginfo").exists()
+
+
+def test_by_path_invocation_is_rejected_with_the_module_form(tmp_path) -> None:
+    """Issue #1017 blocker 1: `python ci/xbuild.py ...` used to die with
+
+        ImportError: cannot import name 'process' from 'ci'
+            (.../site-packages/ci/__init__.py)
+
+    because running by path puts `ci/` on `sys.path[0]`, so `from ci import
+    process` binds to an unrelated installed distribution. The traceback names
+    the wrong package entirely, and this is a large part of why a release wheel
+    could not be reproduced on a developer machine.
+    """
+    result = RunningProcess.run(
+        [sys.executable, str(ROOT / "ci" / "xbuild.py"), "wheel", "--target", "x"],
+        # Explicit pipes rather than `capture_output=True`: the latter leaves
+        # `result.stderr` as None here, and the guard writes to stderr.
+        stdout=PIPE,
+        stderr=PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+
+    assert result.returncode == 2, result.stderr
+    # Names the real cause, not a missing symbol.
+    assert "cannot be run by path" in result.stderr
+    assert "unrelated installed `ci` package" in result.stderr
+    # Hands over the exact command, arguments preserved so it can be pasted.
+    assert "python -m ci.xbuild wheel --target x" in result.stderr
+    # The misleading failure is gone.
+    assert "cannot import name 'process'" not in result.stderr
+
+
+def test_module_form_is_untouched_by_the_guard() -> None:
+    """The guard must be a no-op for the invocation CI actually uses."""
+    assert xbuild.__package__ == "ci"
+    # Importable as a module means the guard did not fire at import time.
+    assert hasattr(xbuild, "main")
