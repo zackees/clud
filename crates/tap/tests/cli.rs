@@ -10,7 +10,7 @@
 //! cases use paths that are never touched *because* they are refused, and the
 //! passthrough cases wrap `echo` and a shell exiting with a chosen code.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use running_process::{
@@ -29,11 +29,35 @@ struct Run {
     stderr: String,
 }
 
+/// Locate the built `tap`.
+///
+/// `CARGO_BIN_EXE_tap` is baked in at *compile* time, and CI compiles the
+/// harnesses on one runner then executes them on another, where that path does
+/// not exist -- which is precisely how this test first failed, on all three
+/// unit lanes at once with `Spawn(NotFound)`. `CLUD_TEST_BIN_DIR` is the
+/// runtime override the exec runner sets for exactly this; the compile-time
+/// constant stays as the local fallback, so a plain `cargo test` is unchanged.
+/// Same precedence as `crates/clud-bin/tests/common/exe.rs`.
+fn tap_binary() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLUD_TEST_BIN_DIR") {
+        let name = if cfg!(windows) { "tap.exe" } else { "tap" };
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(env!("CARGO_BIN_EXE_tap"))
+}
+
 /// Run the built `tap` rooted at `session_root`.
 fn tap(session_root: &Path, args: &[&str]) -> Run {
-    let mut argv = vec![env!("CARGO_BIN_EXE_tap").to_string()];
+    let mut argv = vec![tap_binary().display().to_string()];
     argv.extend(args.iter().map(|a| (*a).to_string()));
+    run_argv(session_root, argv)
+}
 
+/// Spawn `argv` rooted at `session_root` and collect its separated streams.
+fn run_argv(session_root: &Path, argv: Vec<String>) -> Run {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
     env.retain(|(key, _)| key != "CLUD_SESSION_ROOT");
     env.push((
@@ -64,6 +88,28 @@ fn tap(session_root: &Path, args: &[&str]) -> Run {
         stderr,
     }
 }
+
+/// Run an argv **without** `tap`, for comparison.
+///
+/// The criterion is that an allowed command is indistinguishable from running
+/// it unwrapped. Comparing against a hardcoded string would instead assert
+/// what `echo` prints, which differs by platform; comparing against the
+/// unwrapped run states the actual property and is portable.
+fn bare(session_root: &Path, args: &[&str]) -> Run {
+    run_argv(
+        session_root,
+        args.iter().map(|a| (*a).to_string()).collect(),
+    )
+}
+
+/// The shell that exists on this platform, and how it takes a command.
+///
+/// `sh` and `echo` are not executables on Windows -- `echo` is a `cmd`
+/// builtin -- so spawning them by name fails with NotFound there.
+#[cfg(windows)]
+const SHELL: [&str; 2] = ["cmd", "/c"];
+#[cfg(not(windows))]
+const SHELL: [&str; 2] = ["sh", "-c"];
 
 /// Read one stream to EOF, mirroring `clud_hooks_run::drain`.
 fn drain(process: &NativeProcess, kind: StreamKind) -> String {
@@ -131,10 +177,21 @@ fn a_refusal_exits_126() {
 #[test]
 fn passes_stdout_through_byte_for_byte() {
     let root = session_root();
-    let output = tap(root.path(), &["echo", "hello-from-tap"]);
+    let args = [SHELL[0], SHELL[1], "echo hello-from-tap"];
 
-    assert_eq!(output.code, Some(0), "{:?}", output.stderr);
-    assert_eq!(output.stdout, "hello-from-tap\n");
+    let wrapped = tap(root.path(), &args);
+    let unwrapped = bare(root.path(), &args);
+
+    // The property is indistinguishability, asserted against the unwrapped
+    // run rather than a literal -- `echo` differs by platform, the contract
+    // does not.
+    assert_eq!(wrapped.stdout, unwrapped.stdout);
+    assert_eq!(wrapped.code, unwrapped.code);
+    assert!(
+        wrapped.stdout.contains("hello-from-tap"),
+        "{:?}",
+        wrapped.stdout
+    );
 }
 
 #[test]
@@ -142,7 +199,7 @@ fn passes_a_nonzero_exit_code_through() {
     let root = session_root();
     for code in [1, 2, 42] {
         let script = format!("exit {code}");
-        let output = tap(root.path(), &["sh", "-c", &script]);
+        let output = tap(root.path(), &[SHELL[0], SHELL[1], &script]);
         assert_eq!(output.code, Some(code), "exit {code} must survive");
     }
 }
