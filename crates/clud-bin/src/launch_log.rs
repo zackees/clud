@@ -73,6 +73,31 @@ pub fn record_failure_reason(reason: impl std::fmt::Display) {
     }
 }
 
+/// Exit codes that say nothing about whether the gateway was reached (#1020).
+///
+/// These are exactly the values `runner_exit::normalize_exit_code` produces for
+/// a signal death -- SIGINT (130), SIGKILL (137), SIGTERM (143) -- and the same
+/// values a shell reports for `128 + signo`. A child that was signalled did not
+/// "fail before reaching the gateway": it was stopped, and whether it would
+/// have got there is unknowable. Calling that a failure puts a failure label on
+/// a user-initiated cancel, in the one field #998 added to stop exit codes being
+/// misread.
+///
+/// The commonest shape by far is a PTY launch where the user reads the banner,
+/// changes their mind, and hits Ctrl+C before sending a turn: the bridge counted
+/// zero turns and the child exited 130. The subprocess runner never reached this
+/// classification for that case, because `run_plan_subprocess` returns 130 from
+/// its `ProcessOutcome::Interrupted` arm first. The PTY runner has no equivalent
+/// guard and cannot get one from clud's `interrupted` flag -- raw mode sends the
+/// Ctrl+C to the child, so clud's own signal handler never fires -- which is why
+/// the fix lives here, on the exit code, rather than in the runner.
+///
+/// Deliberately just these three rather than the whole `128 <` range: a program
+/// is free to exit 131 of its own accord, and over-broad exclusions would eat
+/// real diagnoses. `normalize_exit_code_signal_outputs_are_all_excluded` in
+/// `runner_exit.rs` fails if that mapping grows a case this list does not cover.
+pub const SIGNAL_EXIT_CODES: [i32; 3] = [130, 137, 143];
+
 /// The reason for the #995 failure class: a bridge-routed launch that exited
 /// non-zero without ever asking the bridge for a turn.
 ///
@@ -85,10 +110,11 @@ pub fn record_failure_reason(reason: impl std::fmt::Display) {
 /// launch that exits non-zero having asked for none failed before reaching the
 /// gateway, which is the fact #995 took a multi-log hunt to establish.
 ///
-/// `None` on a clean exit, on a launch that is not bridge-routed, and when the
-/// harness did reach the bridge -- `bridge.jsonl` owns that story.
+/// `None` on a clean exit, on a launch that is not bridge-routed, when the
+/// harness did reach the bridge -- `bridge.jsonl` owns that story -- and on a
+/// signal death, see [`SIGNAL_EXIT_CODES`].
 pub fn silent_bridge_reason(turn_requests: Option<usize>, exit_code: i32) -> Option<String> {
-    if exit_code == 0 || turn_requests != Some(0) {
+    if exit_code == 0 || turn_requests != Some(0) || SIGNAL_EXIT_CODES.contains(&exit_code) {
         return None;
     }
     Some(format!(
@@ -365,6 +391,42 @@ mod tests {
         assert_eq!(silent_bridge_reason(Some(3), 1), None);
         assert_eq!(silent_bridge_reason(None, 1), None);
         assert_eq!(silent_bridge_reason(Some(0), 0), None);
+    }
+
+    /// Issue #1020: a signal death is a cancel, not a diagnosis.
+    ///
+    /// The reported shape is a PTY launch — `clud --codex --harness claude`
+    /// under `foreground.pty`, or `clud loop` off Windows — where the user
+    /// reads the banner, changes their mind, and hits Ctrl+C before ever
+    /// sending a turn. The bridge counted zero turns and the child exited 130,
+    /// so the pre-#1020 rule wrote "it failed before reaching the gateway" onto
+    /// a user-initiated cancel.
+    ///
+    /// This became far easier to hit once #1101 made a PTY Ctrl+C actually
+    /// produce 130: before that fix, a kitty-protocol terminal never reached
+    /// `interrupt_pty_process` at all.
+    #[test]
+    fn a_signal_death_is_not_a_gateway_failure() {
+        for code in SIGNAL_EXIT_CODES {
+            assert_eq!(
+                silent_bridge_reason(Some(0), code),
+                None,
+                "exit {code} is a signal death; clud cannot say whether the gateway was reached"
+            );
+        }
+    }
+
+    /// The exclusion is three exact codes, not a `> 128` range. A program is
+    /// free to exit 131 or 129 on its own, and swallowing those would lose the
+    /// real #995 diagnosis they were added for.
+    #[test]
+    fn neighbouring_exit_codes_are_still_classified() {
+        for code in [1, 2, 127, 129, 131, 136, 142, 144] {
+            assert!(
+                silent_bridge_reason(Some(0), code).is_some(),
+                "exit {code} is not a signal death clud produces; it must keep its diagnosis"
+            );
+        }
     }
 
     /// The whole point of #998: an exit that clud caused carries the reason,
