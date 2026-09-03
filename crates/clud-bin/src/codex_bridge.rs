@@ -826,7 +826,7 @@ fn handle_connection(
         }
         ("GET", "/v1/models") => match &config.gateway_mode {
             GatewayMode::Codex => serve_codex_catalog(&mut stream, log),
-            GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config),
+            GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config, log),
         },
         ("GET", "/_clud/route/status") => match &config.gateway_mode {
             GatewayMode::Unified(unified) => serve_route_status(&mut stream, unified),
@@ -1068,11 +1068,15 @@ fn serve_route_clear(stream: &mut TcpStream, unified: &UnifiedGatewayConfig, bod
     let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
 }
 
-fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
+fn serve_unified_catalog(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    log: Option<&SharedBridgeLog>,
+) {
     let GatewayMode::Unified(unified) = &config.gateway_mode else {
         unreachable!("catalog route is guarded by the unified mode match arm");
     };
-    let data = provider_catalog::MODELS
+    let advertised = provider_catalog::MODELS
         .iter()
         .filter(|entry| match entry.provider {
             ModelProvider::Codex => unified.codex_available,
@@ -1083,13 +1087,24 @@ fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
             ModelProvider::OpenRouter => unified.openrouter_api_key.is_some(),
             ModelProvider::Claude => false,
         })
-        .filter_map(|entry| {
-            entry.discovery_id.map(|id| {
-                serde_json::json!({
-                    "id": id,
-                    "display_name": entry.display_name,
-                    "type": "model",
-                })
+        .filter_map(|entry| entry.discovery_id.map(|id| (id, entry.display_name)))
+        .collect::<Vec<_>>();
+    // #1021: unified had no `catalog_advertised` entry, which mattered more
+    // here than on the direct route -- that one advertises a fixed three rows,
+    // while this set varies with which provider credentials happen to be
+    // stored. "What did the gateway actually offer?" is not answerable after
+    // the fact without it.
+    record_catalog_advertised(
+        log,
+        &advertised.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    );
+    let data = advertised
+        .iter()
+        .map(|(id, display_name)| {
+            serde_json::json!({
+                "id": id,
+                "display_name": display_name,
+                "type": "model",
             })
         })
         .collect::<Vec<_>>();
@@ -1407,6 +1422,12 @@ fn serve_unified_messages(
         .or_else(|| provider_catalog::non_claude_model_by_any_id(model));
     if model.starts_with("clud-claude-") && catalog.is_none() {
         let ids = unified_catalog_ids(unified);
+        // #1021: the direct route has recorded its refusals since #1000; this
+        // one recorded nothing, so a unified session wedged on a picker row
+        // left no evidence. The message wording still lags the direct route's
+        // case split -- that is #1010's item 2, deliberately not folded in
+        // here so this stays a logging change.
+        record_model_rejection(log, 400, "unknown_model", model);
         let body = serde_json::json!({
             "type": "error",
             "error": {
@@ -3734,6 +3755,101 @@ Connection: close
         // launch left something worth reading, not a footer on every session.
         let log = bridge.log.as_ref().expect("configured log");
         assert!(!lock_log(log).has_notable_records());
+    }
+
+    /// Issue #1021: #999's catalog record landed on the direct Codex route
+    /// only, so a `--unified` launch wrote no `catalog_advertised` at all.
+    ///
+    /// It matters more here than there. The direct route advertises a fixed
+    /// three rows, so the log adds little; the unified set varies with which
+    /// provider credentials happen to be stored, and "what did the gateway
+    /// actually offer this session?" is otherwise unanswerable afterwards.
+    #[test]
+    fn a_unified_catalog_fetch_records_the_advertised_model_ids() {
+        let fake = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let config = BridgeConfig::default()
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                    .with_upstreams(fake.base_url.clone(), fake.base_url.clone()),
+            )
+            .with_log_path(log_path.clone());
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let token = bridge.bearer_token().to_string();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "GET",
+                "/v1/models?limit=1000",
+                "native-claude-credential",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(text.contains(r#""event":"catalog_advertised""#), "{text}");
+        // The recorded set must be the one actually served, not the whole
+        // catalog: DeepSeek and Codex are credentialed here, Claude never is.
+        assert!(text.contains("clud-claude-codex-terra"), "{text}");
+        assert!(text.contains("clud-claude-deepseek-v4-flash"), "{text}");
+        // Claude rows are never advertised through the unified catalog, so
+        // their absence is part of the contract this record captures.
+        assert!(!text.contains("clud-claude-openrouter"), "{text}");
+        assert!(
+            !text.contains(&token),
+            "the gateway token must never be logged"
+        );
+        // Ambient, exactly as on the direct route: this is context to read a
+        // failure against, not a reason to look on its own.
+        let log = bridge.log.as_ref().expect("configured log");
+        assert!(!lock_log(log).has_notable_records());
+    }
+
+    /// Issue #1021: the direct route has recorded its refusals since #1000;
+    /// the unified route's own `unknown clud gateway model` refusal recorded
+    /// nothing, so a unified session wedged on a picker row left no evidence.
+    #[test]
+    fn a_unified_refused_model_is_recorded_with_its_id() {
+        let fake = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let config = BridgeConfig::default()
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                    .with_upstreams(fake.base_url.clone(), fake.base_url.clone()),
+            )
+            .with_log_path(log_path.clone());
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let token = bridge.bearer_token().to_string();
+        let body = PROBE_BODY.replace("claude-x", "clud-claude-nonexistent");
+        let refused = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                "native-claude-credential",
+                &body,
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, &token)],
+            ),
+        );
+        assert_eq!(status(&refused), 400, "{refused}");
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(text.contains(r#""event":"request_rejected""#), "{text}");
+        assert!(text.contains(r#""reason":"unknown_model""#), "{text}");
+        assert!(text.contains("clud-claude-nonexistent"), "{text}");
+        assert!(
+            !text.contains(&token),
+            "the gateway token must never be logged"
+        );
+        // A refusal *is* worth an operator's attention, unlike the catalog.
+        let log = bridge.log.as_ref().expect("configured log");
+        assert!(lock_log(log).has_notable_records());
     }
 
     /// Issue #999: the refusal added by #1005 named the model to the user but

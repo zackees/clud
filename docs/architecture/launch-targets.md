@@ -235,9 +235,9 @@ client will not retry, preventing duplicate text or tool calls.
 
 Failure diagnostics are synthesized from allowlisted facts and scrubbed before
 they reach stderr or the bounded bridge log. A healthy turn records nothing;
-since #999 a catalog fetch on the direct Codex route does write an entry, but
-only a failure, refusal, or truncation makes the launch print the log's path on
-shutdown. The opt-in local benchmark is documented at
+since #999 a catalog fetch writes an entry -- on the unified route as well as
+the direct Codex one since #1021 -- but only a failure, refusal, or truncation
+makes the launch print the log's path on shutdown. The opt-in local benchmark is documented at
 [`bench/codex_bridge`](../../bench/codex_bridge/README.md); it measures the
 full local request path and reports RSS growth without a flaky normal-CI
 timing threshold.
