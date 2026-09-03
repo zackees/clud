@@ -173,7 +173,7 @@ mcp = [
 dev = [
     { name = "cmake" },
     { name = "maturin" },
-    { name = "mcp" },
+    { name = "mcp", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'" },
     { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -182,7 +182,7 @@ dev = [
     { name = "running-process" },
 ]
 test = [
-    { name = "mcp" },
+    { name = "mcp", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'" },
     { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -198,7 +198,7 @@ provides-extras = ["mcp"]
 dev = [
     { name = "cmake", specifier = ">=3.26" },
     { name = "maturin", specifier = ">=1.7,<2" },
-    { name = "mcp", specifier = ">=2.1" },
+    { name = "mcp", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'", specifier = ">=2.1" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
@@ -207,7 +207,7 @@ dev = [
     { name = "running-process", specifier = "==4.10.1" },
 ]
 test = [
-    { name = "mcp", specifier = ">=2.1" },
+    { name = "mcp", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'", specifier = ">=2.1" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
