@@ -9,7 +9,7 @@
 //! Config:
 //! - `CLUD_GC_TARGET_ROOTS` — dev roots to sweep (required to enable).
 //! - `CLUD_GC_TARGET_STALE_DAYS` — age gate in days (default
-//!   [`crate::gc::target_sweep::DEFAULT_STALE_DAYS`], 14).
+//!   [`crate::gc::target_sweep::DEFAULT_STALE_DAYS`], 3).
 //!
 //! Default-off because reclaiming `target/` forces a rebuild — more
 //! disruptive than the disposable session-temp sweep. All errors non-fatal.
@@ -185,7 +185,7 @@ mod tests {
         let report = maybe_sweep_at(
             &sentinel,
             &[dev],
-            Duration::from_secs(14 * 24 * 60 * 60),
+            Duration::from_secs(3 * 24 * 60 * 60),
             future_now,
         )
         .unwrap()

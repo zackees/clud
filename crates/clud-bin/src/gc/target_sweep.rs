@@ -14,7 +14,7 @@
 //! - **Bounded discovery.** The walk is depth-limited and never crosses into
 //!   `.git` / `node_modules` / a `target/` it already found. It never runs
 //!   over the whole filesystem — only the explicitly configured roots.
-//! - **mtime gate.** A `target/` touched within the threshold (default 14d)
+//! - **mtime gate.** A `target/` touched within the threshold (default 3d)
 //!   is left alone. A dir untouched that long is not part of an active build,
 //!   which is the cheap stand-in for "no live session owns this".
 
@@ -24,10 +24,24 @@ use std::time::{Duration, SystemTime};
 
 use super::delete_audit;
 
-/// Default staleness gate. Longer than the 48h session-temp / worktree
-/// policies because rebuilding `target/` is genuinely expensive, so we err
-/// toward keeping it.
-pub const DEFAULT_STALE_DAYS: u64 = 14;
+/// Default staleness gate.
+///
+/// Was 14 days, on the reasoning that rebuilding `target/` is expensive so we
+/// should err toward keeping it. That reasoning is right and the number was
+/// still wrong: a retention window only reclaims anything if it is shorter
+/// than the time the machine takes to fill its disk. On the workstation this
+/// was measured on, a four-day-old filesystem held 1.07 TiB, 206 GB of it in
+/// `target/` dirs — every one of them younger than 14 days, so the sweep ran
+/// on schedule and correctly declined to delete a single byte while the disk
+/// filled. A gate longer than the fill time is not a conservative policy, it
+/// is an inactive one.
+///
+/// Three days is the shared floor: it matches `gc::session_tmp` and
+/// `gc::uv_cache`, and 72h is what a Friday-evening-to-Monday-morning absence
+/// (~63h) needs so a returning user still has their build output. Raise it
+/// per-machine with `CLUD_GC_TARGET_STALE_DAYS` where rebuilds are the
+/// scarcer resource.
+pub const DEFAULT_STALE_DAYS: u64 = 3;
 
 /// How deep the discovery walk descends from each configured root before
 /// giving up. Deep enough for `root/<repo>/<crate>/target` layouts, shallow
@@ -242,7 +256,7 @@ mod tests {
         let report = sweep_roots_at(
             &[tmp.path().to_path_buf()],
             SystemTime::now(),
-            Duration::from_secs(14 * 24 * 60 * 60),
+            Duration::from_secs(3 * 24 * 60 * 60),
             false,
         );
         assert_eq!(report.targets_removed, 0);
@@ -257,7 +271,7 @@ mod tests {
         let report = sweep_roots_at(
             &[tmp.path().to_path_buf()],
             future_now,
-            Duration::from_secs(14 * 24 * 60 * 60),
+            Duration::from_secs(3 * 24 * 60 * 60),
             false,
         );
         assert_eq!(report.targets_removed, 1);
@@ -273,7 +287,7 @@ mod tests {
         let report = sweep_roots_at(
             &[tmp.path().to_path_buf()],
             future_now,
-            Duration::from_secs(14 * 24 * 60 * 60),
+            Duration::from_secs(3 * 24 * 60 * 60),
             true,
         );
         assert_eq!(report.targets_removed, 1);
@@ -282,7 +296,7 @@ mod tests {
 
     #[test]
     fn default_stale_days_is_14() {
-        assert_eq!(DEFAULT_STALE_DAYS, 14);
+        assert_eq!(DEFAULT_STALE_DAYS, 3);
     }
 
     // ---- #893 defense-in-depth guard ----
@@ -332,7 +346,7 @@ mod tests {
         let report = sweep_roots_at(
             &[tmp.path().to_path_buf()],
             future_now,
-            Duration::from_secs(14 * 24 * 60 * 60),
+            Duration::from_secs(3 * 24 * 60 * 60),
             false,
         );
         assert_eq!(report.targets_removed, 1);
@@ -343,7 +357,7 @@ mod tests {
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .find(|v| v["site"] == "gc.target-sweep")
             .expect("a gc.target-sweep line must exist");
-        assert_eq!(ours["rule"], "target-sweep stale>14d");
+        assert_eq!(ours["rule"], "target-sweep stale>3d");
         assert!(
             ours["path"].as_str().unwrap().ends_with("target"),
             "audit line names the exact path: {:?}",
