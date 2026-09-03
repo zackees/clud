@@ -47,6 +47,18 @@ pub(super) enum GitWorkState {
     /// Uncommitted changes, untracked files, unpushed commits, or a stash
     /// are present. Deleting would destroy local work, so pin the entry.
     HasLocalWork,
+    /// The tree is clean and every local commit is already *contained in the
+    /// remote default branch as a patch*, even though it is reachable from no
+    /// remote ref (#993).
+    ///
+    /// This is what a squash merge leaves behind, and it is the common case in
+    /// repos that squash-merge and delete the branch afterwards: the original
+    /// commits are ancestors of nothing on the remote, so `log --all --not
+    /// --remotes` reports them and the checkout reads as `HasLocalWork` —
+    /// pinned forever, when in truth its work is not merely pushed but already
+    /// shipped. Exactly backwards: these are the checkouts that should be
+    /// reclaimed *soonest*.
+    Merged,
     /// Not a git work tree of its own. We cannot make a safety judgement,
     /// so callers fall back to the mtime idle gate alone (the pre-guard
     /// behaviour) rather than pinning forever.
@@ -149,6 +161,139 @@ fn probe_git(cwd: &Path, args: &[&str]) -> Option<String> {
     }
 }
 
+/// The remote default branch to compare against, e.g. `origin/main`.
+///
+/// Prefers the `origin/HEAD` the clone recorded; falls back to the two
+/// conventional names. `None` when none resolves, which makes the caller
+/// answer "not merged" and keep the checkout pinned.
+fn remote_default_ref(cwd: &Path) -> Option<String> {
+    if let Some(out) = probe_git(
+        cwd,
+        &[
+            "--no-optional-locks",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "symbolic-ref",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        let name = out.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    for candidate in ["origin/main", "origin/master"] {
+        if probe_git(
+            cwd,
+            &[
+                "--no-optional-locks",
+                "--git-dir=.git",
+                "--work-tree=.",
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                candidate,
+            ],
+        )
+        .is_some_and(|out| !out.trim().is_empty())
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Whether every commit this checkout holds that no remote ref reaches is
+/// already present in the remote default branch *as a patch* (#993).
+///
+/// `git cherry` is what answers this: it compares patch ids rather than
+/// ancestry, so the new commit a squash merge created on `main` counts as
+/// equivalent to the originals. Lines are `- <sha>` for "an equivalent is
+/// upstream" and `+ <sha>` for "not upstream"; no `+` lines means fully
+/// merged.
+///
+/// Conservative in every direction, because the cost of a wrong yes is
+/// someone's unrecoverable work:
+///
+/// * A probe that fails, times out, or finds no remote default ref is a no.
+/// * `git cherry` only walks `HEAD`. If any *other* ref holds commits the
+///   remotes do not, this returns no rather than judging work it did not
+///   look at -- so a merged HEAD beside a real feature branch stays pinned.
+/// * An empty `git cherry` output with unpushed commits present would mean
+///   the two probes disagree; treated as a no.
+fn commits_are_squash_merged(cwd: &Path) -> bool {
+    let Some(upstream) = remote_default_ref(cwd) else {
+        return false;
+    };
+
+    // Every unpushed commit, and the subset reachable from HEAD. `git cherry`
+    // speaks only for HEAD, so anything outside it must veto.
+    let Some(all_unpushed) = probe_git(
+        cwd,
+        &[
+            "--no-optional-locks",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "log",
+            "--all",
+            "--not",
+            "--remotes",
+            "--format=%H",
+        ],
+    ) else {
+        return false;
+    };
+    let Some(head_unpushed) = probe_git(
+        cwd,
+        &[
+            "--no-optional-locks",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "log",
+            "HEAD",
+            "--not",
+            "--remotes",
+            "--format=%H",
+        ],
+    ) else {
+        return false;
+    };
+    let all: std::collections::BTreeSet<&str> = all_unpushed.split_whitespace().collect();
+    let head: std::collections::BTreeSet<&str> = head_unpushed.split_whitespace().collect();
+    if all.is_empty() || all != head {
+        return false;
+    }
+
+    let Some(cherry) = probe_git(
+        cwd,
+        &[
+            "--no-optional-locks",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "cherry",
+            &upstream,
+            "HEAD",
+        ],
+    ) else {
+        return false;
+    };
+    let mut saw_equivalent = false;
+    for line in cherry.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('+') {
+            return false;
+        }
+        if line.starts_with('-') {
+            saw_equivalent = true;
+        }
+    }
+    saw_equivalent
+}
+
 /// Probe a checkout's git state. Runs at most three cheap plumbing queries,
 /// and only ever on a directory the caller has already found idle, so the
 /// common case (active repos, non-idle repos) never pays for it.
@@ -231,7 +376,15 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
         return GitWorkState::ProbeFailed;
     };
     if !unpushed.trim().is_empty() {
-        return GitWorkState::HasLocalWork;
+        // Reachable from no remote ref -- but a squash merge produces exactly
+        // that, so ask whether these commits are already *in* the remote
+        // default branch as patches before pinning (#993). Anything short of a
+        // confident yes keeps the old, conservative answer.
+        return if commits_are_squash_merged(cwd) {
+            GitWorkState::Merged
+        } else {
+            GitWorkState::HasLocalWork
+        };
     }
 
     let Some(stash) = probe_git(
@@ -288,17 +441,25 @@ pub(crate) enum PurgeClass {
 /// Pure purge decision, factored out so the matrix is unit-testable without
 /// touching the filesystem or spawning git.
 ///
-/// | is_dir | idle  | git state    | purgeable |
-/// |--------|-------|--------------|-----------|
-/// | false  | *     | *            | no (gone / unreadable)   |
-/// | true   | false | *            | no (still active)        |
-/// | true   | true  | HasLocalWork | no (pinned: local work)  |
-/// | true   | true  | ProbeFailed  | no (pinned: unreadable)  |
-/// | true   | true  | Clean        | yes                      |
-/// | true   | true  | Unknown      | yes (mtime fallback)     |
+/// | is_dir | idle  | merged_idle | git state    | purgeable |
+/// |--------|-------|-------------|--------------|-----------|
+/// | false  | *     | *           | *            | no (gone / unreadable)   |
+/// | true   | false | false       | *            | no (still active)        |
+/// | true   | *     | *           | HasLocalWork | no (pinned: local work)  |
+/// | true   | *     | *           | ProbeFailed  | no (pinned: unreadable)  |
+/// | true   | true  | *           | Clean        | yes                      |
+/// | true   | true  | *           | Unknown      | yes (mtime fallback)     |
+/// | true   | *     | true        | Merged       | yes (short window, #993)  |
+///
+/// Two idle flags because merged checkouts earn a shorter window: their work
+/// is already shipped, so they are the *safest* thing to reclaim and the
+/// least useful to keep. `idle` is the full `stale_after`; `merged_idle` is
+/// [`merged_stale_after`]. Every other state still requires the full one, so
+/// this only ever adds a reclaim path -- it never shortens an existing spare.
 pub(super) fn extern_repo_purge_decision(
     is_dir: bool,
     idle: bool,
+    merged_idle: bool,
     git: GitWorkState,
 ) -> PurgeDecision {
     if !is_dir {
@@ -308,7 +469,10 @@ pub(super) fn extern_repo_purge_decision(
             class: PurgeClass::Dangling,
         };
     }
-    if !idle {
+    // A merged checkout may pass on the short window alone, so the gate is
+    // "idle by *some* applicable measure"; the per-state arms below decide
+    // which measure actually applies.
+    if !idle && !merged_idle {
         return PurgeDecision {
             purge: false,
             reason: "spared: recently active",
@@ -326,17 +490,44 @@ pub(super) fn extern_repo_purge_decision(
             reason: "pinned: git state unreadable",
             class: PurgeClass::Pinned,
         },
-        GitWorkState::Clean => PurgeDecision {
+        GitWorkState::Merged if merged_idle => PurgeDecision {
+            purge: true,
+            reason: "reclaimable: already merged upstream",
+            class: PurgeClass::Reclaimable,
+        },
+        GitWorkState::Merged => PurgeDecision {
+            purge: false,
+            reason: "spared: recently active",
+            class: PurgeClass::Spared,
+        },
+        GitWorkState::Clean if idle => PurgeDecision {
             purge: true,
             reason: "reclaimable: clean and pushed",
             class: PurgeClass::Reclaimable,
         },
-        GitWorkState::Unknown => PurgeDecision {
+        GitWorkState::Unknown if idle => PurgeDecision {
             purge: true,
             reason: "reclaimable: not a git checkout",
             class: PurgeClass::Reclaimable,
         },
+        // Idle only by the merged window, but not merged: the full window
+        // still governs.
+        GitWorkState::Clean | GitWorkState::Unknown => PurgeDecision {
+            purge: false,
+            reason: "spared: recently active",
+            class: PurgeClass::Spared,
+        },
     }
+}
+
+/// How long a *merged* checkout must sit idle before it is reclaimed.
+///
+/// An eighth of the ordinary window -- three hours against the 24h default,
+/// and it tracks `CLUD_GC_EXTERN_REPO_MAX_AGE_SECS` so an operator who widens
+/// or narrows the main window moves this with it. Floored at a minute so a
+/// deliberately tiny override cannot turn into "reclaim instantly".
+pub(super) fn merged_stale_after(stale_after: Duration) -> Duration {
+    (stale_after / 8).max(Duration::from_secs(60))
 }
 
 /// An extern-repo row is purgeable once the on-disk directory has been
@@ -354,17 +545,23 @@ pub(super) fn extern_repo_purge_verdict(
 ) -> PurgeDecision {
     let path = Path::new(&entry.path);
     if !path.is_dir() {
-        return extern_repo_purge_decision(false, false, GitWorkState::Unknown);
+        return extern_repo_purge_decision(false, false, false, GitWorkState::Unknown);
     }
-    let idle = most_recent_mtime(path)
-        .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
-        .map(|age| age >= stale_after)
+    let age =
+        most_recent_mtime(path).and_then(|mtime| SystemTime::now().duration_since(mtime).ok());
+    let idle = age.map(|age| age >= stale_after).unwrap_or(false);
+    let merged_idle = age
+        .map(|age| age >= merged_stale_after(stale_after))
         .unwrap_or(false);
-    if !idle {
-        // Not idle yet — skip the git probe entirely.
-        return extern_repo_purge_decision(true, false, GitWorkState::Unknown);
+    if !idle && !merged_idle {
+        // Idle by no measure — skip the git probe entirely, as before. The
+        // probe now starts at the *shorter* window, which is the only place
+        // this costs anything: a checkout between the two windows is probed
+        // where it previously was not, and only to find out whether it is
+        // merged.
+        return extern_repo_purge_decision(true, false, false, GitWorkState::Unknown);
     }
-    let decision = extern_repo_purge_decision(true, true, git_work_state(path));
+    let decision = extern_repo_purge_decision(true, idle, merged_idle, git_work_state(path));
     if !decision.purge {
         // The reason is the point: without it a pinned row is
         // indistinguishable from garbage that GC keeps failing to
@@ -401,17 +598,17 @@ mod tests {
         let cases = [
             // (is_dir, idle, git state)   → (purge, reason, display class)
             (
-                (false, true, GitWorkState::Clean),
+                (false, true, true, GitWorkState::Clean),
                 (false, "dangling: path missing", PurgeClass::Dangling),
             ),
             (
-                (true, false, GitWorkState::Clean),
+                (true, false, false, GitWorkState::Clean),
                 // Not yet eligible, but nothing is holding it: it ages in,
                 // so it must NOT be classed as pinned (issue #896).
                 (false, "spared: recently active", PurgeClass::Spared),
             ),
             (
-                (true, true, GitWorkState::HasLocalWork),
+                (true, true, true, GitWorkState::HasLocalWork),
                 (
                     false,
                     "pinned: uncommitted or unpushed work",
@@ -419,11 +616,11 @@ mod tests {
                 ),
             ),
             (
-                (true, true, GitWorkState::ProbeFailed),
+                (true, true, true, GitWorkState::ProbeFailed),
                 (false, "pinned: git state unreadable", PurgeClass::Pinned),
             ),
             (
-                (true, true, GitWorkState::Clean),
+                (true, true, true, GitWorkState::Clean),
                 (
                     true,
                     "reclaimable: clean and pushed",
@@ -431,7 +628,7 @@ mod tests {
                 ),
             ),
             (
-                (true, true, GitWorkState::Unknown),
+                (true, true, true, GitWorkState::Unknown),
                 (
                     true,
                     "reclaimable: not a git checkout",
@@ -439,8 +636,8 @@ mod tests {
                 ),
             ),
         ];
-        for ((is_dir, idle, git), (purge, reason, class)) in cases {
-            let got = extern_repo_purge_decision(is_dir, idle, git);
+        for ((is_dir, idle, merged_idle, git), (purge, reason, class)) in cases {
+            let got = extern_repo_purge_decision(is_dir, idle, merged_idle, git);
             assert_eq!(
                 got,
                 PurgeDecision {
@@ -448,7 +645,7 @@ mod tests {
                     reason,
                     class
                 },
-                "is_dir={is_dir} idle={idle} git={git:?}"
+                "is_dir={is_dir} idle={idle} merged_idle={merged_idle} git={git:?}"
             );
         }
     }
@@ -458,8 +655,112 @@ mod tests {
     /// git onto it would delete a checkout nobody ever inspected.
     #[test]
     fn unreadable_git_state_is_spared_not_purged() {
-        assert!(!extern_repo_purge_decision(true, true, GitWorkState::ProbeFailed).purge);
-        assert!(extern_repo_purge_decision(true, true, GitWorkState::Unknown).purge);
+        assert!(!extern_repo_purge_decision(true, true, true, GitWorkState::ProbeFailed).purge);
+        assert!(extern_repo_purge_decision(true, true, true, GitWorkState::Unknown).purge);
+    }
+
+    /// Build `<tmp>/origin` (a real remote) plus `<tmp>/work` cloned from it,
+    /// then squash-merge `work`'s feature commit into the remote's `main` and
+    /// delete the branch — the shape #993 describes, and the one this repo
+    /// produces on every merge.
+    fn squash_merged_clone(tmp: &Path) -> std::path::PathBuf {
+        let origin = tmp.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        init_repo(&origin);
+        std::fs::write(origin.join("base.txt"), "base\n").unwrap();
+        git(&origin, &["add", "-A"]);
+        git(&origin, &["commit", "-m", "base"]);
+
+        let work = tmp.join("work");
+        git(
+            tmp,
+            &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+        );
+        init_repo_identity(&work);
+
+        // A feature commit in the checkout...
+        std::fs::write(work.join("feature.txt"), "feature\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-m", "feature"]);
+
+        // ...landed on the remote as a *new* squashed commit. Same tree, so
+        // the same patch id; different sha, so no ancestry relationship.
+        std::fs::write(origin.join("feature.txt"), "feature\n").unwrap();
+        git(&origin, &["add", "-A"]);
+        git(&origin, &["commit", "-m", "feature (squashed)"]);
+
+        // The checkout learns about it, exactly as a `git fetch` would.
+        git(&work, &["fetch", "origin"]);
+        git(&work, &["remote", "set-head", "origin", "main"]);
+        work
+    }
+
+    fn init_repo_identity(root: &Path) {
+        git(root, &["config", "user.email", "t@example.com"]);
+        git(root, &["config", "user.name", "t"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        git(root, &["config", "core.hooksPath", ""]);
+    }
+
+    /// Issue #993, gap 2: a squash-merged checkout was pinned **forever**.
+    ///
+    /// Its commits are ancestors of nothing on the remote, so
+    /// `log --all --not --remotes` reports them and the old probe called that
+    /// unpushed work. The checkouts that should be reclaimed soonest were the
+    /// only ones that never could be.
+    #[test]
+    fn a_squash_merged_checkout_is_merged_not_local_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = squash_merged_clone(tmp.path());
+        assert_eq!(git_work_state(&work), GitWorkState::Merged);
+    }
+
+    /// The conservative default is untouched: a commit that is genuinely not
+    /// upstream in any form still pins the checkout.
+    #[test]
+    fn an_unmerged_commit_still_reads_as_local_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = squash_merged_clone(tmp.path());
+        std::fs::write(work.join("later.txt"), "not upstream\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-m", "later"]);
+        assert_eq!(git_work_state(&work), GitWorkState::HasLocalWork);
+    }
+
+    /// `git cherry` speaks only for HEAD, so unpushed work on any *other* ref
+    /// must veto the merged verdict rather than be judged unseen.
+    #[test]
+    fn unmerged_work_on_another_branch_vetoes_the_merged_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = squash_merged_clone(tmp.path());
+        git(&work, &["checkout", "-b", "side"]);
+        std::fs::write(work.join("side.txt"), "side\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-m", "side work"]);
+        git(&work, &["checkout", "main"]);
+        assert_eq!(git_work_state(&work), GitWorkState::HasLocalWork);
+    }
+
+    /// A merged checkout is reclaimed on the short window; every other state
+    /// still waits the full one, so this only adds a path.
+    #[test]
+    fn merged_earns_the_short_window_and_nothing_else_does() {
+        let full = Duration::from_secs(24 * 60 * 60);
+        assert_eq!(merged_stale_after(full), Duration::from_secs(3 * 60 * 60));
+        // A tiny override cannot become "reclaim instantly".
+        assert_eq!(
+            merged_stale_after(Duration::from_secs(10)),
+            Duration::from_secs(60)
+        );
+
+        // Idle by the short window only.
+        assert!(extern_repo_purge_decision(true, false, true, GitWorkState::Merged).purge);
+        assert!(!extern_repo_purge_decision(true, false, true, GitWorkState::Clean).purge);
+        assert!(!extern_repo_purge_decision(true, false, true, GitWorkState::Unknown).purge);
+        assert!(!extern_repo_purge_decision(true, false, true, GitWorkState::HasLocalWork).purge);
+        assert!(!extern_repo_purge_decision(true, false, true, GitWorkState::ProbeFailed).purge);
+        // Not idle at all.
+        assert!(!extern_repo_purge_decision(true, false, false, GitWorkState::Merged).purge);
     }
 
     fn git(cwd: &Path, args: &[&str]) -> String {
@@ -520,7 +821,7 @@ mod tests {
 
         assert!(!bare.join(".git").exists(), "fixture is not actually bare");
         assert_eq!(git_work_state(&bare), GitWorkState::ProbeFailed);
-        assert!(!extern_repo_purge_decision(true, true, git_work_state(&bare)).purge);
+        assert!(!extern_repo_purge_decision(true, true, true, git_work_state(&bare)).purge);
     }
 
     /// Regression guard for the hole the `.git` *existence* gate left open.
@@ -550,7 +851,7 @@ mod tests {
             "a malformed .git must fail closed, not inherit the parent repo"
         );
         // Fail closed means spare, never purge.
-        assert!(!extern_repo_purge_decision(true, true, GitWorkState::ProbeFailed).purge);
+        assert!(!extern_repo_purge_decision(true, true, true, GitWorkState::ProbeFailed).purge);
     }
 
     #[test]
