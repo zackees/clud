@@ -1702,7 +1702,27 @@ def _launch_windows_docker_desktop_guard() -> tuple[bool, str]:
             cwd=os.path.dirname(script),
             originator="clud-docker-recover-guard",
         )
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - see below; a guard failure must not abort recovery
+        # Deliberately broader than `OSError` (#1058). running-process signals
+        # launch failures through its own `RuntimeError`/`Exception` subclasses
+        # -- `ProcessAbnormalExit`, `ProbeUnavailableError`,
+        # `DaemonOutputNotAvailableError` -- none of which derive from
+        # `OSError`. The reported failure was exactly that shape:
+        #
+        #     RuntimeError: daemon I/O error: The system cannot find the file
+        #     specified. (os error 2)
+        #
+        # so the narrow catch let it propagate out of `_execute_restart`, and a
+        # `restart --yes --force` aborted *before touching Docker at all* while
+        # `doctor` still reported healthy. The caller already has a complete
+        # fallback below this call -- direct executable launch, then the CLI
+        # path -- and it was simply never reached.
+        #
+        # Failing to start an optional guard process is never a reason to
+        # abandon a recovery the user explicitly asked for. The return value
+        # keeps this distinguishable from a failed restart: this message says
+        # the *guard* did not start, and the fallback appends its own outcome
+        # after it.
         return False, f"Docker Desktop daemon guard launch failed: {exc}"
     return (
         True,

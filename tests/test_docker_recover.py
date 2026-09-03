@@ -1287,3 +1287,60 @@ def test_engine_wedged_does_not_steal_healthy_or_resource_pressure(dr):
         free_disk_bytes=55 * 1024**3,
     )
     assert dr.classify_failure(posix) == dr.CAT_ENGINE_UNAVAILABLE
+
+
+def test_guard_launch_failure_is_reported_not_raised(dr, monkeypatch):
+    """Issue #1058: `launch_detached` failing must not abort the restart.
+
+    The observed failure was `RuntimeError: daemon I/O error: The system cannot
+    find the file specified. (os error 2)` out of running-process. The guard
+    caught only `OSError`, so it propagated and `restart --yes --force`
+    returned before touching Docker — while `doctor` still said healthy.
+    """
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError(
+            "daemon I/O error: The system cannot find the file specified. (os error 2)"
+        )
+
+    monkeypatch.setattr(dr, "launch_detached", explode)
+
+    ok, detail = dr._launch_windows_docker_desktop_guard()
+
+    assert ok is False
+    assert "guard launch failed" in detail
+    # The cause survives into the message, so the operator sees what happened
+    # rather than a bare "guard failed".
+    assert "os error 2" in detail
+
+
+def test_guard_failure_still_reaches_the_direct_launch_fallback(dr, monkeypatch):
+    """The fallback below the guard already existed; #1058 is that a raised
+    exception skipped it. With the guard reporting instead of raising, a forced
+    restart proceeds to the bounded direct launch."""
+    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    launched: list[str] = []
+
+    # Guard reports failure the way the fixed code does, rather than raising.
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop_guard",
+        lambda: (False, "Docker Desktop daemon guard launch failed: os error 2"),
+    )
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
+    monkeypatch.setattr(dr, "_windows_docker_process_identities", lambda: set())
+
+    def direct(executable):
+        launched.append(executable)
+        return True, "launched Docker Desktop directly"
+
+    monkeypatch.setattr(dr, "_launch_windows_docker_desktop", direct)
+    monkeypatch.setattr(
+        dr, "_wait_for_windows_desktop_launch", lambda check: "desktop observed"
+    )
+
+    details = dr._execute_restart("Windows", hard=False)
+
+    assert launched == [desktop], "the guard failure must not skip the fallback"
+    assert any("guard launch failed" in d for d in details)
+    assert any("directly" in d for d in details)
