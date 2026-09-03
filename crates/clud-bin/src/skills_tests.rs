@@ -273,6 +273,8 @@ fn bundled_includes_all_known_skills() {
     assert!(names.contains(&"clud-improve"));
     assert!(names.contains(&"clud-docker-mac-x86"));
     assert!(names.contains(&"clud-docker-recover"));
+    assert!(names.contains(&"clud-bosn"));
+    assert!(names.contains(&"clud-preloop"));
 }
 
 /// Issue #531: the Docker-recovery skill must trigger on the failure
@@ -709,4 +711,142 @@ fn skills_dir_honors_skills_home_subdir_override() {
     assert!(!backend.root_exists(home.path()));
     std::fs::create_dir_all(home.path().join(".sometool")).unwrap();
     assert!(backend.root_exists(home.path()));
+}
+
+/// Issue #988's four "design questions to settle", pinned in the bodies that
+/// answer them. Each was a decision the issue left open, so each is a thing a
+/// later edit could quietly undo.
+///
+/// The install-shape one is the sharpest: preloop's own README documents
+/// `curl -fsSL … | sh`, and clud's rule-writing guide uses that exact shape as
+/// its canonical example of a pipeline worth blocking. A bundled clud skill
+/// telling an agent to run it would have the project contradicting itself in
+/// its own assets.
+#[test]
+fn local_loop_skills_never_pipe_a_download_into_a_shell() {
+    for name in ["clud-bosn", "clud-preloop"] {
+        let body = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == name)
+            .unwrap_or_else(|| panic!("{name} must be bundled"))
+            .skill_md;
+        // Only fenced blocks: those are the lines an agent copies. Prose that
+        // names the shape in order to refuse it is the guidance working, not a
+        // violation, and a line-wise scan cannot tell the two apart.
+        let mut in_fence = false;
+        for line in body.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if !in_fence {
+                continue;
+            }
+            let piped = line.contains("curl")
+                && line.contains('|')
+                && (line.contains("sh") || line.contains("bash"));
+            assert!(
+                !piped,
+                "{name} must not instruct a piped-download install: {line}"
+            );
+        }
+    }
+}
+
+/// Both skills hinge on separating *local iteration* from *the subject matter
+/// being Docker or Actions*. The issue calls that boundary the main risk, and a
+/// trigger-happy skill becomes noise the model learns to ignore -- so the
+/// negative cases live in the body, not just in the frontmatter triggers.
+#[test]
+fn local_loop_skills_carry_their_negative_cases() {
+    for name in ["clud-bosn", "clud-preloop"] {
+        let body = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == name)
+            .unwrap_or_else(|| panic!("{name} must be bundled"))
+            .skill_md;
+        assert!(
+            body.contains("## Do not use this when"),
+            "{name} must spell out when it should not fire"
+        );
+    }
+}
+
+/// Bootstrap is detect-and-instruct: a skill that fires and then strands the
+/// agent is worse than one that never fired, and auto-installing a tool the
+/// user never asked for is worse still.
+#[test]
+fn local_loop_skills_detect_before_they_commit() {
+    for (name, probe) in [
+        ("clud-bosn", "command -v bosn"),
+        ("clud-preloop", "command -v preloop"),
+    ] {
+        let body = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == name)
+            .unwrap_or_else(|| panic!("{name} must be bundled"))
+            .skill_md;
+        assert!(
+            body.contains(probe),
+            "{name} must check for the tool before committing the agent to it"
+        );
+    }
+}
+
+/// The prerequisites and the capability limits each README states. These are
+/// what turn "the skill fired and then it did not work" into a sentence the
+/// agent can say before starting.
+#[test]
+fn local_loop_skills_state_the_limits_their_readmes_state() {
+    let bosn = BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == "clud-bosn")
+        .expect("clud-bosn must be bundled")
+        .skill_md;
+    for required in [
+        "docker info", // an engine has to exist; bosn manages one, it is not one
+        "WSL",         // refused outright, exits non-zero
+        "bosn.toml",   // manifest-driven; without one there is nothing to converge
+        "partial",     // the Docker front door, so no drop-in replacement claim
+        "podman",      // named as not built
+        "BuildKit",    // builder cache is outside the label contract
+    ] {
+        assert!(bosn.contains(required), "clud-bosn must mention {required}");
+    }
+
+    let preloop = BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == "clud-preloop")
+        .expect("clud-preloop must be bundled")
+        .skill_md;
+    for required in [
+        "sha256",    // the verified-download path that replaces curl | sh
+        "5 minutes", // first-run base image build, before anything runs
+        "Rosetta",   // amd64 Docker actions unsupported on Apple Silicon goldens
+        "curated",   // the base image is not GitHub's, so green here != green there
+    ] {
+        assert!(
+            preloop.contains(required),
+            "clud-preloop must mention {required}"
+        );
+    }
+}
+
+/// The one question the issue left genuinely open: whether the two skills
+/// compose or conflict. preloop runs each job in its own microVM with its own
+/// Docker inside it, which host-side bosn never sees -- so they do not overlap,
+/// and the skill says which tool owns which loop rather than leaving the agent
+/// to guess.
+#[test]
+fn local_loop_skills_settle_their_scope_boundary() {
+    let preloop = BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == "clud-preloop")
+        .expect("clud-preloop must be bundled")
+        .skill_md;
+    assert!(preloop.contains("clud-bosn"), "the boundary must be named");
+    assert!(
+        preloop.contains("microVM"),
+        "and it must say why they do not overlap"
+    );
 }
