@@ -30,9 +30,15 @@ from tests import process
 
 from ._daemon_helpers import copy_launcher, run_clud
 
-# Windows has no bash on the runner image, and the Git-Bash that may be
-# present is not the shell the backend would use. The policy is a no-op there
-# rather than a failure, and the Windows lanes do not need another dependency.
+# Skipped on Windows for lane hygiene, NOT because the policy is absent there.
+# nounset is not cfg-gated: Claude Code runs Git Bash for Bash tool calls on
+# Windows -- that is the whole premise of #753's completion_guard, which this
+# is wired alongside -- so `BASH_ENV` arms there too. What this file asserts is
+# not Windows-specific, the Windows integration lanes already carry several
+# persistent unrelated reds, and the Windows-side guarantee is covered by the
+# builder parity tests in `daemon::io_helpers`, which run on the Windows lib
+# harness. Claiming the policy no-ops here would be the same
+# coverage-that-is-not-there failure this change exists to prevent.
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(sys.platform == "win32", reason="POSIX bash only"),
