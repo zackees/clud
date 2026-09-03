@@ -65,6 +65,12 @@ struct CrashReport {
     /// Which build this is. Version alone does not identify a sidecar: the
     /// same version is released for every triple.
     target: &'static str,
+    /// Which *build* this is (#1016 item 3). Version and triple identify a
+    /// release; a rebuilt binary at the same version would pair with the
+    /// wrong sidecar and mis-symbolicate. `None` where the format carries no
+    /// such id, which is every non-ELF target today.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_id: Option<&'static str>,
     role: String,
     /// `"panic"` (Rust panic hook) or `"native"` (signal / structured
     /// exception handler).
@@ -97,6 +103,12 @@ struct CrashReport {
 /// Idempotent: the panic hook itself is installed exactly once per process;
 /// subsequent calls only update the role the hook will tag reports with.
 pub fn install(role: &str) {
+    // Resolve the build id while we are still in ordinary startup. The native
+    // handler runs in signal context, where the file read this needs is not
+    // async-signal-safe; the panic hook is fine either way, but both paths
+    // share the report builder so both read the cached value.
+    crate::build_id::prime();
+
     let lock = CURRENT_ROLE.get_or_init(|| RwLock::new(role.to_string()));
     if let Ok(mut w) = lock.write() {
         *w = role.to_string();
@@ -179,6 +191,7 @@ fn write_panic_report(
     let report = CrashReport {
         version: env!("CARGO_PKG_VERSION"),
         target: BUILD_TARGET,
+        build_id: crate::build_id::own_build_id(),
         role: role.to_string(),
         kind: "panic",
         pid,
@@ -229,6 +242,7 @@ fn write_native_report(role: &str, meta: NativeCrashMeta) -> std::io::Result<Pat
     let report = CrashReport {
         version: env!("CARGO_PKG_VERSION"),
         target: BUILD_TARGET,
+        build_id: crate::build_id::own_build_id(),
         role: role.to_string(),
         kind: "native",
         pid,
@@ -799,6 +813,7 @@ mod tests {
             let report = CrashReport {
                 version: env!("CARGO_PKG_VERSION"),
                 target: BUILD_TARGET,
+                build_id: crate::build_id::own_build_id(),
                 role: "test".to_string(),
                 kind,
                 pid: 1,
@@ -819,5 +834,39 @@ mod tests {
                 "{kind} report must carry the triple"
             );
         }
+    }
+
+    /// #1016 item 3: the report must actually carry the build id.
+    ///
+    /// The field is `skip_serializing_if = "Option::is_none"`, so a reader
+    /// that stopped resolving would silently drop it from every report rather
+    /// than fail — the sidecar check would then have nothing to compare and
+    /// would quietly accept any DWARF.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_report_carries_the_build_id_on_a_platform_that_has_one() {
+        let report = CrashReport {
+            version: env!("CARGO_PKG_VERSION"),
+            target: BUILD_TARGET,
+            build_id: crate::build_id::own_build_id(),
+            role: "test".to_string(),
+            kind: "panic",
+            pid: 1,
+            cwd: None,
+            args: Vec::new(),
+            timestamp_unix_ms: 0,
+            panic_location: None,
+            panic_message: None,
+            signal_or_exception: None,
+            signal_number: None,
+            exception_code: None,
+            faulting_address: None,
+            backtrace: String::new(),
+        };
+        let json = serde_json::to_value(&report).expect("serialize");
+        let id = json["build_id"]
+            .as_str()
+            .expect("ELF builds carry a build-id; build.rs asks for one");
+        assert_eq!(id.len(), 40, "sha1 build-id: {id}");
     }
 }
