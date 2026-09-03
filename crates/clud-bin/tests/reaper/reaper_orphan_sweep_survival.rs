@@ -160,7 +160,9 @@ fn sweep_until_selected(
 /// survival-only test while the protection did not exist.
 #[test]
 fn a_tagged_undeclared_listening_daemon_survives_the_orphan_sweep() {
-    let _guard = crate::REAPER_TEST_LOCK.lock().expect("reaper test lock poisoned");
+    let _guard = crate::REAPER_TEST_LOCK
+        .lock()
+        .expect("reaper test lock poisoned");
     let temp = tempfile::tempdir().expect("tempdir");
     let originator = a_dead_originator_pid();
     let stub = start_tagged_stub(temp.path(), "sweep", "spawn-detached", originator);
@@ -200,7 +202,9 @@ fn a_tagged_undeclared_listening_daemon_survives_the_orphan_sweep() {
 /// separately unprotected.
 #[test]
 fn a_tagged_undeclared_listening_daemon_survives_the_on_exit_scan() {
-    let _guard = crate::REAPER_TEST_LOCK.lock().expect("reaper test lock poisoned");
+    let _guard = crate::REAPER_TEST_LOCK
+        .lock()
+        .expect("reaper test lock poisoned");
     let temp = tempfile::tempdir().expect("tempdir");
     // This test process stands in for the exiting clud, so the tag points at
     // it and only this test's own stubs can be selected.
@@ -231,7 +235,9 @@ fn a_tagged_undeclared_listening_daemon_survives_the_on_exit_scan() {
 /// reaped by the same sweep.
 #[test]
 fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
-    let _guard = crate::REAPER_TEST_LOCK.lock().expect("reaper test lock poisoned");
+    let _guard = crate::REAPER_TEST_LOCK
+        .lock()
+        .expect("reaper test lock poisoned");
     let originator = a_dead_originator_pid();
     // An ordinary long-running client: declares nothing, detaches from nothing,
     // listens on nothing.

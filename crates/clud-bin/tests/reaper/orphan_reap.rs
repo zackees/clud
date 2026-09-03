@@ -25,7 +25,9 @@ const DEAD_ORIGINATOR_PID: u32 = 99_999_999;
 fn reap_orphans_kills_a_dead_originator_child() {
     // See `crate::REAPER_TEST_LOCK`: this sweep would reap another reaper
     // test's just-spawned child if the harness ran them concurrently.
-    let _guard = crate::REAPER_TEST_LOCK.lock().expect("reaper test lock poisoned");
+    let _guard = crate::REAPER_TEST_LOCK
+        .lock()
+        .expect("reaper test lock poisoned");
     let mock = mock_agent_path();
 
     // Inherit our env so PATH / system DLLs resolve, then override the
