@@ -254,6 +254,28 @@ additive side.
 **Every map needs an eviction rule at the time it is introduced.** The marker
 cache's is `retain_identities`, called every pass against the live candidate set.
 
+### What the pass must exclude
+
+Two filters sit at the front of candidate selection. Both remove rows that
+`sysinfo` and PID equality would otherwise accept, and both were added after
+the same on-exit report claimed one leaked `__worker` nineteen times over.
+
+- **Threads are not processes.** On Linux `sysinfo` walks `/proc/<tgid>/task/`
+  and lists every task alongside its group leader; a thread reads back the
+  leader's environment block, so all 19 threads of one tagged process matched
+  the originator tag and every reap decision — spare reason included — was
+  taken 19 times against the same PID. `classify_scan` skips any row with a
+  `thread_kind()`, leaving the group leader to stand for its threads.
+- **The originator PID must be plausible, not merely equal.** Linux recycles
+  PIDs through `kernel.pid_max` and wraps. A leak tagged `CLUD:<n>` outlives
+  the wrap and is eventually met by an unrelated clud that the kernel handed
+  the same `<n>`: observed with a `__worker` leaked by an interrupted pytest
+  run a day and a half earlier, adopted on exit by a fresh clud that drew PID
+  3513633 a second time. The dead-originator sweep already filtered on
+  `parent_is_plausible` (the claimed parent must not have started *after* its
+  claimed child); `orphan_reaper::select_own_descendants` now applies the same
+  guard to the on-exit path.
+
 ---
 
 ## Observability
