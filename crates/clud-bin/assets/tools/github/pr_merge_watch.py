@@ -157,6 +157,20 @@ LOG_LINE_PREFIX = re.compile(
     r"^(?:[^\t]*\t[^\t]*\t)?\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?"
 )
 
+# GitHub's workflow-command annotations. `##[error]` is how a step reports the
+# thing that actually failed it -- `##[error]failing Rust harnesses:
+# reaper-<hash>.exe (rc=-1073740791)` was the entire explanation for one red,
+# and the anchored patterns below could not see it through the prefix.
+GHA_ANNOTATION = re.compile(r"^##\[(?:error|warning)\]")
+
+# Cargo's per-test result lines. These are NOT errors, and matching them is
+# not hypothetical: `test tests::oversized_codes_are_truncated_not_panicked_on
+# ... ok` contains the substring "panicked", so an unanchored search reported
+# a PASSING test as the first error of a failed run. A first-error line that
+# names the wrong thing is worse than none -- it sends the reader somewhere
+# real and irrelevant.
+CARGO_TEST_OUTCOME = re.compile(r"^test \S+ \.\.\. (ok|ignored)\b")
+
 # A guard on pathological logs only. Real failure logs run to a few thousand
 # lines; the summary that names the failing test is at the *end*, so this is
 # deliberately not a head slice.
@@ -180,6 +194,9 @@ CLASSIFIERS: list[tuple[re.Pattern[str], str]] = [
             r"^thread .*? panicked at"
             r"|FAILED \(\d+\)"
             r"|test result: FAILED"
+            # A harness that died rather than reported: GitHub's step
+            # annotation is all that survives when the process aborts.
+            r"|^##\[error\]failing Rust harnesses:"
             # pytest: the summary line and the inline per-test marker. Without
             # these a timed-out pytest case matched "timed out" below and was
             # mislabelled transient.
@@ -389,6 +406,37 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text)
 
 
+# Ordered most- to least-specific. `##[error]` first because when a step
+# emits one it is by construction the reason the step failed; the rest are
+# what a build or test harness prints on its way there.
+FIRST_ERROR_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^##\[error\]"),
+    re.compile(r"^FAILED \S"),
+    re.compile(r"^thread .*? panicked at"),
+    re.compile(r"^error(\[E\d+\])?:"),
+    re.compile(r"^Error:"),
+    re.compile(r"^Diff in "),
+]
+
+
+def first_error_line(sample: str) -> str:
+    """The first line that names why the job failed, or `""`.
+
+    Passing cargo test lines are skipped explicitly rather than filtered by
+    pattern precision, because a test may legitimately be *named* after the
+    failure mode it guards ("..._not_panicked_on") and no error pattern can
+    tell that apart from a real panic by content alone.
+    """
+    for raw in sample.splitlines():
+        line = raw.strip()
+        if not line or CARGO_TEST_OUTCOME.match(line):
+            continue
+        for pattern in FIRST_ERROR_PATTERNS:
+            if pattern.search(line):
+                return GHA_ANNOTATION.sub("", line).strip()
+    return ""
+
+
 def classify_failure(
     repo: str, run_id: str | None, job_id: str | None
 ) -> tuple[str, str | None]:
@@ -399,11 +447,7 @@ def classify_failure(
     sample = fetch_failure_log(repo, run_id, job_id)
     if not sample:
         return "", None
-    first_err = ""
-    for line in sample.splitlines():
-        if re.search(r"^error|^Error|^FAILED|panicked|Diff in", line):
-            first_err = line.strip()
-            break
+    first_err = first_error_line(sample)
     label = None
     for pattern, lbl in CLASSIFIERS:
         if pattern.search(sample):

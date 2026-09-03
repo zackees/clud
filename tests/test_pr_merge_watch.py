@@ -1013,3 +1013,50 @@ def test_a_timed_out_probe_is_a_failed_call_not_a_crash(watcher, monkeypatch) ->
     res = watcher.gh("api", "whatever", timeout=1.0)
     assert not res.ok
     assert "timed out" in res.stderr
+
+
+# Verbatim from the Windows unit job of run 33807762372, prefixes intact. The
+# harness aborted rather than reporting a failed test, so the ONLY line that
+# explains the red is GitHub's step annotation at the very end.
+REAL_ABORTED_HARNESS_LOG = (
+    "2026-09-03T21:30:48.3499037Z test tools::tests::"
+    "oversized_codes_are_truncated_not_panicked_on ... ok\n"
+    "2026-09-03T21:30:56.0850669Z test fixture_ids::"
+    "module_path_is_crate_rooted_in_this_target ... ok\n"
+    "2026-09-03T21:35:09.5122615Z ##[error]failing Rust harnesses: "
+    "reaper-b0f613a8f3a49815.exe (rc=-1073740791)\n"
+    "2026-09-03T21:35:09.6533894Z ##[error]Process completed with exit code 1.\n"
+)
+
+
+def test_a_passing_test_named_after_a_panic_is_not_the_first_error(watcher) -> None:
+    """Regression: the probe reported a PASSING test as the failure.
+
+    `oversized_codes_are_truncated_not_panicked_on ... ok` contains the
+    substring "panicked", and the unanchored search matched it. A first-error
+    line that names the wrong thing is worse than none: it sends the reader
+    somewhere real and irrelevant.
+    """
+    sample = watcher.normalize_log(REAL_ABORTED_HARNESS_LOG)
+    first = watcher.first_error_line(sample)
+    assert "oversized_codes" not in first
+    assert "reaper-b0f613a8f3a49815.exe" in first
+    assert "rc=-1073740791" in first
+
+
+def test_a_step_annotation_is_recognised_as_the_error(watcher) -> None:
+    """When a harness aborts, `##[error]` is the whole explanation."""
+    sample = watcher.normalize_log(REAL_ABORTED_HARNESS_LOG)
+    first = watcher.first_error_line(sample)
+    assert not first.startswith("##[error]"), "the annotation prefix should be stripped"
+    assert first.startswith("failing Rust harnesses:")
+    label = next((lbl for pat, lbl in watcher.CLASSIFIERS if pat.search(sample)), None)
+    assert label == "test failure"
+
+
+def test_a_run_with_no_error_line_yields_empty_not_a_false_positive(watcher) -> None:
+    passing = (
+        "2026-09-03T21:30:48.3499037Z test a::b_panicked_at_startup ... ok\n"
+        "2026-09-03T21:30:48.3499037Z test result: ok. 2 passed; 0 failed\n"
+    )
+    assert watcher.first_error_line(watcher.normalize_log(passing)) == ""
