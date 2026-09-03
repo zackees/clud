@@ -16,3 +16,4 @@
 
 pub mod completion_guard;
 pub mod git_bash_resolver;
+pub mod nounset;

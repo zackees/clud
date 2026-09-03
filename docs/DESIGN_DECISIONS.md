@@ -2567,7 +2567,7 @@ threat model (an agent slip in the tool-call string) but is not containment —
 that remains a sandbox's job. Redirections are performed by the shell, not the
 wrapper, so `tap cmd > "$VAR/out"` can still write to a mis-expanded path; a
 redirect touches one file and cannot recurse, and `set -u` in the session shell
-is the proportionate mitigation. Coverage is also per-session: only sessions
+is the proportionate mitigation (shipped in #1066; see DD-067). Coverage is also per-session: only sessions
 where clud set `CLUD_CMD_GATE` are gated, which is why `block_bad_cmd_rm_vars`
 stays in place rather than being retired on arrival.
 
@@ -3036,3 +3036,58 @@ same reported, opt-out-able repair path. This decision is only that the
 once per launch instead of 200 times by someone else. A trusted workspace, a
 non-Claude backend, a settings-free directory, and `--dry-run` all produce no
 new output at all.
+
+## DD-067: every clud-launched bash runs under `set -u`
+
+**Status:** Accepted
+
+**Context:** DD-056 closes with the one hole its own allowlist cannot reach:
+"Redirections are performed by the shell, not the wrapper, so
+`tap cmd > "$VAR/out"` can still write to a mis-expanded path... and `set -u`
+in the session shell is the proportionate mitigation." That mitigation was
+named but never shipped. The incident class from #1064 is broader than
+redirections: `rm -rf "$SP"/` with an unset `$SP` expands to `rm -rf /` before
+any hook, gate, or wrapper sees an argv worth objecting to. Every defense clud
+has operates on command text or on the post-expansion argv; none of them can
+object to an expansion that has already silently become nothing.
+
+**Decision:** clud sets `BASH_ENV` in the backend child environment to a
+generated file that runs `set -u`. Non-interactive bash — which is what every
+Bash tool call is — sources that file before executing the command, so an
+unset expansion aborts the shell with a named variable instead of proceeding
+with an empty string.
+
+The mechanism was verified rather than assumed, because a mechanism that
+silently does nothing reads as coverage that is not there. Measured inside a
+live tool call: `echo $-` gives `hmtBc` (no `i`, so non-interactive, so
+`BASH_ENV` is read), and the same shell prints `[]` for `${SP}` without our
+overrides and dies with `SP: unbound variable` with them.
+
+Three details are load-bearing:
+
+1. **The user's own `BASH_ENV` is chained, and sourced *first*.** Skipping our
+   injection when theirs is present would be a silent coverage gap; clobbering
+   it would break their setup. Sourcing theirs *after* `set -u` would be worse
+   than either: stock startup files routinely test unset variables
+   (`[ -z "$PS1" ]`, `$SSH_AUTH_SOCK`), so every tool call would die pointing
+   at *their* file for a policy they never opted into. Ours goes last, which
+   also means a `set +u` in their file cannot leave us disarmed.
+2. **The escape hatch is env-only.** `CLUD_NO_BASH_NOUNSET=1` (also `true`,
+   `yes`, `on`) launches without it. Deliberately not repo-configurable,
+   matching the `CLUD_HOOK_DISPATCH` precedent: a repo should not be able to
+   switch off a safety default for whoever runs an agent inside it.
+3. **Both child-env builders carry it.** `runner::child_env` and
+   `daemon::io_helpers::child_env` are deliberate duplicates (#933); a policy
+   in one and not the other means daemon sessions silently miss it. A parity
+   test asserts the two agree rather than trusting that both edits happened.
+
+**Consequences:** This is a real behavior change for every clud-launched
+session, which is why it ships alone with its own revert story. A tool call
+that relied on an unset variable expanding to nothing now fails loudly; that
+is the point, but it will surface latent sloppiness in existing scripts as new
+errors. clud ships no bash of its own for this to break — its hooks are Python
+— but a user's bash-implemented skill or tool script is also sourced under the
+same policy, since non-interactive bash reads `BASH_ENV` for script files too,
+not only for `-c`. The generated file is written atomically and only when its
+content differs, so concurrent launches cannot hand a shell a half-written
+file and leave it silently unarmed.
