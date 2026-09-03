@@ -21,7 +21,9 @@ fn quote_powershell(path: &Path) -> String {
 }
 
 fn wait_for_pid_file(path: &Path) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // 30s: spawning a cmd.exe chain is slow at the best of times, and a
+    // loaded shared runner (#994) routinely pushes it past the old 10s.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(text) = std::fs::read_to_string(path) {
             if let Ok(pid) = text.trim().parse() {

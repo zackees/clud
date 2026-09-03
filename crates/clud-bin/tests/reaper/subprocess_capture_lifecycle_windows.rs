@@ -35,12 +35,15 @@ fn production_adapter_contains_an_immediate_descendant() {
         Some(clud::win_creation_flags::CREATE_NEW_PROCESS_GROUP),
     )
     .expect("spawn immediate parent through production adapter");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // 30s: the fixture's Job-scoped descendant needs to spawn and write its
+    // pid file, and a loaded shared runner (#994) routinely pushes that
+    // past the old 5s deadline.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !pid_file.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     let pid: u32 = std::fs::read_to_string(&pid_file)
-        .expect("fixture descendant pid")
+        .expect("fixture descendant pid (did the 30s deadline expire first?)")
         .trim()
         .parse()
         .expect("numeric fixture pid");
