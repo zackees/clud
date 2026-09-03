@@ -45,6 +45,7 @@ fn main() {
     let mut pty_size_interval_ms: u64 = 100;
     let mut ansi_script: Option<PathBuf> = None;
     let mut tool_shell_probe_to: Option<PathBuf> = None;
+    let mut bash_nounset_probe_to: Option<PathBuf> = None;
     let mut codex_bridge_probe_to: Option<PathBuf> = None;
     // Emit canned `--output-format stream-json` lines from a file (one line
     // each, separated by `--mock-stream-delay-ms`). Used by integration tests
@@ -171,6 +172,13 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-bash-nounset-probe" {
+            if let Some(path) = args.get(i + 1) {
+                bash_nounset_probe_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
         if arg == "--mock-tool-shell-probe" {
             if let Some(path) = args.get(i + 1) {
                 tool_shell_probe_to = Some(PathBuf::from(path));
@@ -252,6 +260,11 @@ fn main() {
 
     if let Some(role) = helper_role.as_deref() {
         run_helper(&args[0], role, tree_log.as_ref(), sleep_ms);
+        return;
+    }
+
+    if let Some(path) = bash_nounset_probe_to.as_ref() {
+        run_bash_nounset_probe(path);
         return;
     }
 
@@ -681,3 +694,39 @@ fn run_tool_shell_probe(_exe: &str, report_path: &Path) {
 }
 
 use std::io::IsTerminal;
+
+/// Issue #1066: stand in for a Bash tool call that references an unset
+/// variable.
+///
+/// The agent is the process clud launched, so the shell spawned here inherits
+/// exactly the environment clud built — which is the thing under test. Running
+/// the same probe from the test process instead would prove only that bash
+/// honours `BASH_ENV`, not that clud actually set it on the backend.
+///
+/// The command is `rm -rf "$SP"/` from #1064 reduced to an echo. Under nounset
+/// the shell dies before the command runs; without it, `$SP` expands to
+/// nothing and the caller acts on the wrong path.
+fn run_bash_nounset_probe(report_path: &Path) {
+    let output = Command::new("bash")
+        .args(["-c", r#"echo "[${SP}]""#])
+        .stdin(Stdio::null())
+        .output();
+    let report = match output {
+        Ok(output) => serde_json::json!({
+            "bash_nounset_probe": {
+                "spawned": true,
+                "exit_code": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                "stderr": String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                "bash_env": std::env::var("BASH_ENV").ok(),
+            }
+        }),
+        Err(err) => serde_json::json!({
+            "bash_nounset_probe": {
+                "spawned": false,
+                "error": err.to_string(),
+            }
+        }),
+    };
+    let _ = std::fs::write(report_path, serde_json::to_string_pretty(&report).unwrap());
+}

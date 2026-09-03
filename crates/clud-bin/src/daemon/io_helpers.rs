@@ -21,6 +21,12 @@ pub(super) fn child_env() -> Vec<(String, String)> {
     // policy added to one belongs in both, or daemon sessions silently miss
     // it.
     let completion = crate::shell::completion_guard::env_overrides();
+    // Issue #1066: arm `set -u` in every non-interactive bash the backend
+    // spawns. Wired here as well as in `runner::child_env` for the reason the
+    // comment above gives — a policy in one and not the other means daemon
+    // sessions silently miss it, and a safety default that is only sometimes
+    // present is the worst of both.
+    let nounset = crate::shell::nounset::env_overrides();
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| key != "IN_CLUD" && key != originator_key)
         .filter(|(key, _)| {
@@ -28,6 +34,15 @@ pub(super) fn child_env() -> Vec<(String, String)> {
         })
         // Strip any inherited value so the override below is the only one.
         .filter(|(key, _)| !completion.iter().any(|(k, _)| k == key))
+        // Strip only the keys nounset is actually replacing — the same shape
+        // as the line above, and load-bearing for the same reason. Filtering a
+        // fixed key list instead would delete a user's inherited BASH_ENV in
+        // the cases where `env_overrides` returns nothing (opted out, no home,
+        // unwritable state dir), since nothing would then put it back. The
+        // runner's `push_or_replace` is inert when the overrides are empty;
+        // this has to be too, or opting out means something different
+        // depending on which builder launched you.
+        .filter(|(key, _)| !nounset.iter().any(|(k, _)| k == key))
         .collect();
     env.push(("IN_CLUD".to_string(), "1".to_string()));
     env.push((
@@ -36,6 +51,7 @@ pub(super) fn child_env() -> Vec<(String, String)> {
     ));
     env.extend(overrides);
     env.extend(completion);
+    env.extend(nounset);
     env
 }
 
@@ -176,6 +192,67 @@ mod tests {
         assert!(!injected, "{OPT_OUT_KEY}=1 must suppress the injection");
     }
 
+    /// Issue #1066, same drift risk as the #753 pair above and the reason the
+    /// comment in `child_env` says a policy belongs in both builders: assert
+    /// the daemon path arms nounset identically to `runner::child_env`,
+    /// rather than assuming the two edits stayed in step.
+    #[test]
+    fn child_env_arms_nounset_exactly_like_the_runner() {
+        use crate::shell::nounset::{BASH_ENV_KEY, OPT_OUT_KEY};
+
+        let guard = EnvGuard::set_all(&[(OPT_OUT_KEY, None), (BASH_ENV_KEY, None)]);
+        let daemon = child_env();
+        let runner = crate::runner::child_env();
+        drop(guard);
+
+        let pick = |env: &[(String, String)]| -> Vec<String> {
+            env.iter()
+                .filter(|(key, _)| key == BASH_ENV_KEY)
+                .map(|(_, value)| value.clone())
+                .collect()
+        };
+        let (daemon, runner) = (pick(&daemon), pick(&runner));
+        assert_eq!(
+            daemon.len(),
+            1,
+            "{BASH_ENV_KEY} must appear exactly once in the daemon child env"
+        );
+        assert_eq!(
+            daemon, runner,
+            "the two builders must arm nounset the same way; they have drifted"
+        );
+    }
+
+    /// Regression: the daemon builder used to strip a fixed key list before
+    /// layering, so when the overrides came back empty — opted out, no home,
+    /// unwritable state dir — nothing put the user's inherited `BASH_ENV`
+    /// back, and opting out *deleted* their startup file instead of leaving
+    /// the shell alone. The runner path, which layers with `push_or_replace`,
+    /// never had the bug, which is precisely what made it invisible.
+    #[test]
+    fn opting_out_preserves_an_inherited_bash_env_in_both_builders() {
+        use crate::shell::nounset::{BASH_ENV_KEY, OPT_OUT_KEY};
+
+        let theirs = "/home/someone/their-bash-env.sh";
+        let guard = EnvGuard::set_all(&[(OPT_OUT_KEY, Some("1")), (BASH_ENV_KEY, Some(theirs))]);
+        let daemon = child_env();
+        let runner = crate::runner::child_env();
+        drop(guard);
+
+        for (label, env) in [("daemon", &daemon), ("runner", &runner)] {
+            let got: Vec<&str> = env
+                .iter()
+                .filter(|(key, _)| key == BASH_ENV_KEY)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert_eq!(
+                got,
+                vec![theirs],
+                "{label}: opting out must leave the user's {BASH_ENV_KEY} untouched"
+            );
+        }
+    }
+
     #[test]
     fn parse_byte_size_raw_bytes() {
         assert_eq!(parse_byte_size("262144"), Some(262144));
@@ -263,6 +340,26 @@ mod tests {
             }
         }
 
+        /// Several keys under one lock. `EnvGuard`'s mutex is not reentrant,
+        /// so holding two single-key guards at once deadlocks — and the
+        /// nounset cases below need the opt-out and an inherited `BASH_ENV`
+        /// set together.
+        fn set_all(vars: &[(&'static str, Option<&str>)]) -> MultiEnvGuard {
+            let lock = Self::lock();
+            let prior = vars
+                .iter()
+                .map(|(key, value)| {
+                    let prior = std::env::var(*key).ok();
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                    (*key, prior)
+                })
+                .collect();
+            MultiEnvGuard { prior, _lock: lock }
+        }
+
         fn unset(key: &'static str) -> Self {
             let lock = Self::lock();
             let prior = std::env::var(key).ok();
@@ -280,6 +377,22 @@ mod tests {
             match self.prior.take() {
                 Some(v) => std::env::set_var(self.key, v),
                 None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    struct MultiEnvGuard {
+        prior: Vec<(&'static str, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for MultiEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.prior.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }

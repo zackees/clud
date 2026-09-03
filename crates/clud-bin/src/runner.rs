@@ -118,6 +118,16 @@ pub fn child_env() -> Vec<(String, String)> {
         push_or_replace(&mut env, &key, &value);
     }
 
+    // Issue #1066: arm `set -u` in every non-interactive bash the backend
+    // spawns, so an unset expansion aborts instead of silently becoming empty.
+    // `push_or_replace` is what chains rather than duplicates: the module has
+    // already stashed any inherited BASH_ENV under CLUD_PREV_BASH_ENV, and the
+    // generated file sources it. Kept in step with the daemon's copy in
+    // `daemon::io_helpers::child_env`.
+    for (key, value) in crate::shell::nounset::env_overrides() {
+        push_or_replace(&mut env, &key, &value);
+    }
+
     env
 }
 
