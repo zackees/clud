@@ -81,29 +81,19 @@ fn pid_is_alive(pid: u32) -> bool {
     clud::process_identity::ProcessIdentity::observe(pid).is_some()
 }
 
-/// A PID that is certainly not running: spawn something trivial, wait for it,
-/// and take its number. This is what makes a tag look *abandoned* to the sweep,
-/// which is the state `clud slay` and the daemon heartbeat select on.
+/// A PID that is certainly not running, which is what makes a tag look
+/// *abandoned* to the sweep — the state `clud slay` and the daemon heartbeat
+/// select on.
+///
+/// Deliberately NOT the PID of a just-dead throwaway process: on a busy
+/// runner that PID is recycled within moments by a long-lived process, and
+/// `reap_orphans_from_scan` then reads the tagged child as "originator still
+/// alive" and drops it from the candidate set forever ("candidates=[]", the
+/// #994 reaper flake). The constant sits above Linux's `pid_max` (4,194,304)
+/// so no process can ever hold it; `orphan_reap` uses the same value for the
+/// same reason and is stable on every CI lane.
 fn a_dead_originator_pid() -> u32 {
-    let mut child = trivial_command()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn throwaway process");
-    let pid = child.id();
-    let _ = child.wait();
-    pid
-}
-
-fn trivial_command() -> Command {
-    if cfg!(windows) {
-        let mut command = Command::new("cmd.exe");
-        command.args(["/d", "/c", "exit"]);
-        command
-    } else {
-        Command::new("true")
-    }
+    99_999_999
 }
 
 /// Start a `daemon-stub` in the given mode, tagged as a descendant of
