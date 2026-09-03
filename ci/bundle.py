@@ -54,6 +54,11 @@ WORKSPACE_BINARIES = (
     "clud-ctrlc-probe",
     "daemon-stub",
     "mock-agent",
+    # #1067: `crates/tap/tests/cli.rs` runs this one. Without it in the bundle
+    # the harness falls back to its compile-time `CARGO_BIN_EXE_tap`, which is
+    # a path on the *build* runner and does not exist on the exec runner --
+    # `Spawn(NotFound)` on every lane at once.
+    "tap",
 )
 #: Written by `ci.xbuild compile --with-tests`; the parsed `executable` fields
 #: from `cargo test --no-run --message-format=json`.
