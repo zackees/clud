@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/clud-bin",
+    "crates/tap",
     "testbins/daemon-stub",
     "testbins/mock-agent",
     "testbins/probe-dll",

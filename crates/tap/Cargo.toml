@@ -1,0 +1,15 @@
+[package]
+name = "tap-gate"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# The binary is `tap`: that is the name `block_bad_cmd_gate`'s
+# DEFAULT_GATE_PREFIX expects on the command line. The *package* cannot be
+# `tap` because that name is taken on crates.io by an unrelated crate.
+[[bin]]
+name = "tap"
+path = "src/main.rs"
+
+[dependencies]
+running-process = { version = "4.9.0", default-features = false, features = ["client"] }
