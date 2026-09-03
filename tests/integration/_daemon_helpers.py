@@ -201,7 +201,28 @@ def extract_session_id(line: str) -> str | None:
     return None
 
 
-def read_session_id(proc: process.Popen[str], timeout: float = 10.0) -> str:
+# The daemon is allowed longer to produce a session than this used to wait for
+# one.
+#
+# `daemon_create_session` budgets each worker-startup phase separately --
+# snapshot written, then TCP port accepting -- at `CLUD_DAEMON_WORKER_SPAWN_
+# BUDGET_SECS`, default 15s each (#305). So a spawn taking 12s is well inside
+# what production permits, and the old 10s here failed it anyway: the test was
+# stricter than the thing it was observing, which makes a healthy slow start
+# indistinguishable from a hang.
+#
+# That is the shape of the Windows integration lane's rotating failures --
+# `timed out waiting for daemon session id` landing on
+# `test_daemon_persistence` one run and `test_daemon_cleanup` the next, at
+# roughly half of `main`'s runs.
+#
+# 45 covers both phases plus margin and stays well under pytest-timeout's
+# per-test ceiling of 90 (`pyproject.toml`), so a genuine hang is still
+# reported rather than waiting forever.
+_SESSION_ID_TIMEOUT = 45.0
+
+
+def read_session_id(proc: process.Popen[str], timeout: float = _SESSION_ID_TIMEOUT) -> str:
     assert proc.stderr is not None
     deadline = time.time() + timeout
     while time.time() < deadline:

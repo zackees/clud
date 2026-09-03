@@ -21,11 +21,33 @@ from ._daemon_helpers import copy_launcher, run_clud
 
 pytestmark = pytest.mark.integration
 
-# 30s for the same reason as `test_mock_agents` (#994): these launches spawn a
-# real clud through the mock agent on shared runners, and 15s is close enough
-# to the observed spread to fail on load alone. This file inherited the 15
-# from that one when it was written.
-_TIMEOUT = 30
+# Scaled to the work, not copied from a single-launch test.
+#
+# Every test here runs `clud loop --loop-count 3`: three full clud launches
+# through the mock agent, not one. The 30s came from `test_mock_agents`
+# (#994), where it covers a *single* `-p` launch, and carrying that number
+# over meant a third of the budget per iteration.
+#
+# It failed on exactly that: the Windows integration lane measured
+#
+#     AssertionError: timed out after 30s (waited 36.9s)
+#
+# on `test_workspace_without_project_settings_is_silent`, then passed on
+# re-run -- the signature of a budget that is close to the runner's spread
+# rather than a defect. #994 names this shape: "a limit missed by a second is
+# a statement about the runner, not the code."
+#
+# 75, not more: `pyproject.toml` sets pytest-timeout's per-test `timeout = 90`,
+# which kills the test outright. A subprocess budget at or above that is
+# either unreachable or racing the killer, and the race is worse than either
+# outcome alone -- whichever fires first decides what the failure looks like.
+# 75 leaves the assertion room to report a real timeout, with the 90s killer
+# as the backstop for a hang it cannot observe.
+#
+# The asymmetry decides the direction within that ceiling: too small reports a
+# healthy test as failed and costs a diagnosis plus a re-run; too large only
+# delays reporting a hung one.
+_TIMEOUT = 75
 _NOTICE = "does not have this workspace trusted"
 
 
