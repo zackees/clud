@@ -38,6 +38,18 @@ use serde::Serialize;
 pub(crate) const MAX_REPORTS: usize = 50;
 const LAST_SEEN_FILE: &str = "last_seen";
 
+/// The target triple this binary was built for, stamped by `build.rs`.
+///
+/// Issue #1016: with debug info split out of the wheel, symbolication needs
+/// the matching sidecar, and the `.dwp` / `.pdb` / `.dSYM` is per-triple. The
+/// binary is the only thing that knows which build it is -- the wheel a user
+/// installed does not otherwise record it, and `env!("TARGET")` does not
+/// compile in a bin because cargo sets `TARGET` only for build scripts.
+///
+/// `"unknown"` if the build script could not read it, so a missing value is
+/// visible in a report rather than failing the build.
+pub const BUILD_TARGET: &str = env!("CLUD_TARGET");
+
 static CURRENT_ROLE: OnceLock<RwLock<String>> = OnceLock::new();
 static HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 static NATIVE_INSTALLED: OnceLock<()> = OnceLock::new();
@@ -50,6 +62,9 @@ static NATIVE_INSTALLED: OnceLock<()> = OnceLock::new();
 #[derive(Serialize)]
 struct CrashReport {
     version: &'static str,
+    /// Which build this is. Version alone does not identify a sidecar: the
+    /// same version is released for every triple.
+    target: &'static str,
     role: String,
     /// `"panic"` (Rust panic hook) or `"native"` (signal / structured
     /// exception handler).
@@ -163,6 +178,7 @@ fn write_panic_report(
 
     let report = CrashReport {
         version: env!("CARGO_PKG_VERSION"),
+        target: BUILD_TARGET,
         role: role.to_string(),
         kind: "panic",
         pid,
@@ -212,6 +228,7 @@ fn write_native_report(role: &str, meta: NativeCrashMeta) -> std::io::Result<Pat
 
     let report = CrashReport {
         version: env!("CARGO_PKG_VERSION"),
+        target: BUILD_TARGET,
         role: role.to_string(),
         kind: "native",
         pid,
@@ -726,4 +743,81 @@ mod tests {
     //   - Windows: build clud and from a debugger trigger an access
     //     violation in the foreground process; confirm a JSON file with
     //     `"signal_or_exception":"EXCEPTION_ACCESS_VIOLATION"` appears.
+
+    /// Issue #1016: the triple has to actually be baked, not defaulted.
+    ///
+    /// `build.rs` falls back to "unknown" so a build-script hiccup cannot fail
+    /// the build -- which means the failure mode is a binary that silently
+    /// cannot identify itself, and a sidecar fetch that cannot pick an asset.
+    /// Cargo always sets `TARGET` for build scripts, so "unknown" here means
+    /// the stamping broke.
+    #[test]
+    fn the_build_target_is_stamped() {
+        assert_ne!(
+            BUILD_TARGET, "unknown",
+            "build.rs did not stamp CLUD_TARGET; sidecar lookup cannot pick an asset"
+        );
+        assert!(
+            !BUILD_TARGET.is_empty(),
+            "an empty triple would build a nonsense asset name"
+        );
+        // A triple is at least arch-vendor-os; the loosest check that still
+        // rejects a placeholder, without pinning this test to one platform.
+        assert!(
+            BUILD_TARGET.matches('-').count() >= 2,
+            "{BUILD_TARGET} does not look like a target triple"
+        );
+    }
+
+    /// It must match what this test binary was actually compiled for, so a
+    /// stale or host-vs-target mix-up in `build.rs` is caught. Cross builds are
+    /// exactly where a wrong triple would pick the wrong sidecar and
+    /// mis-symbolicate, which is worse than not symbolicating at all.
+    #[test]
+    fn the_build_target_matches_this_compilation() {
+        assert!(
+            BUILD_TARGET.contains(std::env::consts::ARCH),
+            "{BUILD_TARGET} does not name this build's arch {}",
+            std::env::consts::ARCH
+        );
+        let os_marker = match std::env::consts::OS {
+            "macos" => "darwin",
+            other => other,
+        };
+        assert!(
+            BUILD_TARGET.contains(os_marker),
+            "{BUILD_TARGET} does not name this build's OS {os_marker}"
+        );
+    }
+
+    /// A crash report carries the triple, because that is where the sidecar
+    /// lookup reads it from. Both report kinds, since a native crash is the
+    /// one most likely to need symbolicating.
+    #[test]
+    fn both_report_kinds_record_the_target() {
+        for kind in ["panic", "native"] {
+            let report = CrashReport {
+                version: env!("CARGO_PKG_VERSION"),
+                target: BUILD_TARGET,
+                role: "test".to_string(),
+                kind,
+                pid: 1,
+                cwd: None,
+                args: Vec::new(),
+                timestamp_unix_ms: 0,
+                panic_location: None,
+                panic_message: None,
+                signal_or_exception: None,
+                signal_number: None,
+                exception_code: None,
+                faulting_address: None,
+                backtrace: String::new(),
+            };
+            let json = serde_json::to_value(&report).expect("serialize");
+            assert_eq!(
+                json["target"], BUILD_TARGET,
+                "{kind} report must carry the triple"
+            );
+        }
+    }
 }
