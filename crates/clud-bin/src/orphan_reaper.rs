@@ -58,7 +58,28 @@ pub struct ReapOutcome {
     /// that spared it for the wrong reason (or by accident, having failed to
     /// see it at all) passes that test and still regresses. Sorted by PID so
     /// the report and any assertion over it are deterministic.
-    pub spared: Vec<(u32, SpareReason)>,
+    ///
+    /// #1146 added the shape label for the same reason the reason is here: a
+    /// spare line is the reaper saying "I deliberately left this alive", and a
+    /// bare PID does not say what "this" was.
+    pub spared: Vec<SparedDescendant>,
+    /// Shape label for every candidate, keyed by PID (#1146).
+    ///
+    /// A map rather than a widened `candidate_pids`/`reaped_pids`: those two
+    /// are serialized element-for-element into `daemon-events.jsonl`
+    /// (`daemon::server`), so changing their element type would change a
+    /// persisted record format. Callers that want a name join against this.
+    pub labels: BTreeMap<u32, String>,
+}
+
+/// One spared candidate: which PID, why the OS said to leave it, and what it
+/// was (#1146).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparedDescendant {
+    pub pid: u32,
+    pub reason: SpareReason,
+    /// Shape label, already capped to [`PRINTED_LABEL_MAX`] (#360).
+    pub label: String,
 }
 
 /// One descendant's view, pre-classification.
@@ -551,6 +572,76 @@ fn may_kill(spares: &SpareList, daemons: &HashSet<u32>, pid: u32) -> bool {
     !spares.contains_key(&pid) && !daemons.contains(&pid)
 }
 
+/// One grouped spare row: N processes of the same shape, spared for the same
+/// reason (#1146).
+#[derive(Debug, Clone)]
+struct SpareRow {
+    /// Already capped to [`PRINTED_LABEL_MAX`].
+    label: String,
+    reason: SpareReason,
+    pids: Vec<u32>,
+    count: usize,
+}
+
+impl SpareRow {
+    /// The report line. A method rather than an inline `eprintln!` so the
+    /// thing this issue is actually about — what the operator reads — can be
+    /// asserted directly instead of inferred from a format string.
+    fn render(&self) -> String {
+        format!(
+            "         {count}x  {label:<30}  spared ({reason})  pids=[{joined}]",
+            count = self.count,
+            label = self.label,
+            reason = self.reason.as_str(),
+            joined = self
+                .pids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+}
+
+/// Collapse the spared candidates into one row per `(shape, reason)`.
+///
+/// The candidate rows have grouped by shape since the beginning; the spare
+/// lines did not, and #1146 is the report that resulted — nineteen lines
+/// identical but for the PID, describing one `__worker` and its eighteen
+/// threads, with no way to see that from the output.
+///
+/// Grouping on the reason as well as the shape is not cosmetic: the reason is
+/// *why* the reaper left the process alive, so folding two verdicts into one
+/// row would report a decision that was never taken.
+///
+/// Ordered by `(label, reason)` via `BTreeMap`, because `SpareList` is a
+/// `HashMap` and an unordered report cannot be asserted over. Labels are
+/// capped here, once, so every print site downstream inherits #360's bound.
+fn spare_rows(classified: &[(Shape, &Descendant)], spares: &SpareList) -> Vec<SpareRow> {
+    let mut by: BTreeMap<(String, &'static str), (SpareReason, Vec<u32>)> = BTreeMap::new();
+    for (shape, d) in classified {
+        let Some(reason) = spares.get(&d.pid) else {
+            continue;
+        };
+        let label = truncate_with_ellipsis(&shape.label(), PRINTED_LABEL_MAX);
+        by.entry((label, reason.as_str()))
+            .or_insert_with(|| (*reason, Vec::new()))
+            .1
+            .push(d.pid);
+    }
+    by.into_iter()
+        .map(|((label, _), (reason, mut pids))| {
+            pids.sort_unstable();
+            SpareRow {
+                count: pids.len(),
+                label,
+                reason,
+                pids,
+            }
+        })
+        .collect()
+}
+
 /// Shared classify / report / kill body for both entry points. Returns a
 /// default outcome when `descendants` is empty so callers can skip noise.
 ///
@@ -573,8 +664,6 @@ fn report_and_reap(
     }
     let candidate_pids: Vec<u32> = descendants.iter().map(|d| d.pid).collect();
     let spares = spare_list_for(&descendants, daemons);
-    let mut spared: Vec<(u32, SpareReason)> = spares.iter().map(|(pid, r)| (*pid, *r)).collect();
-    spared.sort_unstable_by_key(|(pid, _)| *pid);
 
     // Group by shape label so the report collapses N identical leaks into
     // a single row with a list of PIDs/ports.
@@ -586,6 +675,27 @@ fn report_and_reap(
     for (shape, d) in &classified {
         by_label.entry(shape.label()).or_default().push(*d);
     }
+
+    // #1146: built from `classified`, not from `spares` alone, so the label
+    // the report already computed travels with the decision instead of being
+    // dropped and re-derived by hand from /proc afterwards. Sorted by PID, as
+    // the field's contract promises.
+    let labels: BTreeMap<u32, String> = classified
+        .iter()
+        .map(|(shape, d)| (d.pid, shape.label()))
+        .collect();
+    let rows = spare_rows(&classified, &spares);
+    let mut spared: Vec<SparedDescendant> = classified
+        .iter()
+        .filter_map(|(shape, d)| {
+            spares.get(&d.pid).map(|reason| SparedDescendant {
+                pid: d.pid,
+                reason: *reason,
+                label: truncate_with_ellipsis(&shape.label(), PRINTED_LABEL_MAX),
+            })
+        })
+        .collect();
+    spared.sort_unstable_by_key(|s| s.pid);
 
     if !opts.quiet {
         let action_word = if opts.keep {
@@ -620,11 +730,11 @@ fn report_and_reap(
                 }
             }
         }
-        for (pid, reason) in &spared {
-            eprintln!(
-                "         sparing pid={pid} ({reason}) — OS signal says this is a daemon",
-                reason = reason.as_str(),
-            );
+        // #1146: one row per (shape, reason), matching the candidate rows
+        // above. This used to be one line per PID — the report that filed the
+        // issue printed nineteen of them, identical but for the number.
+        for row in &rows {
+            eprintln!("{}", row.render());
         }
     }
 
@@ -635,6 +745,7 @@ fn report_and_reap(
             candidate_pids,
             reaped_pids: Vec::new(),
             spared,
+            labels,
         };
     }
 
@@ -670,8 +781,13 @@ fn report_and_reap(
     if !opts.quiet {
         eprintln!("[clud] reaped {reaped} of {found} env-tagged descendant(s)");
         if !spared.is_empty() {
+            let what = rows
+                .iter()
+                .map(|r| format!("{}x {}", r.count, r.label))
+                .collect::<Vec<_>>()
+                .join(", ");
             eprintln!(
-                "[clud] spared {} descendant(s) protected by an OS daemon signal",
+                "[clud] spared {} descendant(s) protected by an OS daemon signal: {what}",
                 spared.len()
             );
         }
@@ -689,6 +805,7 @@ fn report_and_reap(
         candidate_pids,
         reaped_pids,
         spared,
+        labels,
     }
 }
 

@@ -180,11 +180,17 @@ fn a_tagged_undeclared_listening_daemon_survives_the_orphan_sweep() {
          candidates={:?}",
         outcome.candidate_pids
     );
-    let reason = outcome
-        .spared
-        .iter()
-        .find(|(pid, _)| *pid == stub)
-        .map(|(_, reason)| *reason);
+    let spared = outcome.spared.iter().find(|s| s.pid == stub);
+    let reason = spared.map(|s| s.reason);
+    // #1146: a spare line is the reaper reporting a deliberate decision, so it
+    // has to say what it left alive. A bare PID is the one thing a reader
+    // cannot look up afterwards — the process is, by construction, one they
+    // did not know was running.
+    assert!(
+        spared.is_some_and(|s| !s.label.is_empty()),
+        "the spared entry must carry a shape label: {:?}",
+        outcome.spared
+    );
     assert!(
         matches!(
             reason,
@@ -222,7 +228,7 @@ fn a_tagged_undeclared_listening_daemon_survives_the_on_exit_scan() {
         outcome.candidate_pids
     );
     assert!(
-        outcome.spared.iter().any(|(pid, _)| *pid == stub),
+        outcome.spared.iter().any(|s| s.pid == stub),
         "the on-exit scan reaped an sccache-shaped daemon"
     );
     assert!(survived, "the on-exit scan killed a spared daemon");

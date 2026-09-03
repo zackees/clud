@@ -649,3 +649,216 @@ fn a_concurrent_cluds_descendant_is_left_alone() {
     };
     assert!(select_own_descendants(vec![other], 3_513_633).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// #1146: the spare rows must name what they spared.
+// ---------------------------------------------------------------------------
+
+fn descendant(pid: u32, name: &str, command: &str) -> Descendant {
+    Descendant {
+        pid,
+        start_time: UNKNOWN_START_TIME,
+        name: name.to_string(),
+        command: command.to_string(),
+    }
+}
+
+/// The report this issue was filed about: 19 spare lines, each a bare PID,
+/// all of them the same one `__worker` shape. Grouping has to collapse them
+/// the way the candidate rows already collapse — one row, one count, one
+/// label — because "19 identical facts printed 19 times" is what made the
+/// original output unreadable.
+#[test]
+fn spare_rows_group_by_shape_and_reason_and_name_the_executable() {
+    let ds: Vec<Descendant> = (0..19)
+        .map(|i| descendant(586_530 + i, "clud", "clud __worker --session-id s"))
+        .collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
+    let spares: SpareList = ds
+        .iter()
+        .map(|d| (d.pid, SpareReason::SessionLeader))
+        .collect();
+
+    let rows = spare_rows(&classified, &spares);
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "19 identical spares must collapse to one row: {rows:#?}"
+    );
+    assert_eq!(rows[0].count, 19);
+    assert_eq!(rows[0].reason, SpareReason::SessionLeader);
+    assert!(
+        rows[0].label.contains("clud"),
+        "the row must name the executable, not just the PID: {:?}",
+        rows[0].label
+    );
+    assert_eq!(rows[0].pids.len(), 19);
+}
+
+/// Two shapes spared for the same reason are two different facts, and the
+/// original report could not tell them apart — it showed one `ctrl-c
+/// __worker` among 18 `clud __worker`s as 19 indistinguishable lines.
+#[test]
+fn spare_rows_separate_distinct_shapes() {
+    let ds = [
+        descendant(1, "clud", "clud __worker --session-id a"),
+        descendant(2, "clud", "clud __worker --session-id b"),
+        descendant(3, "ctrl-c", "ctrl-c __worker"),
+    ];
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
+    let spares: SpareList = ds
+        .iter()
+        .map(|d| (d.pid, SpareReason::SessionLeader))
+        .collect();
+
+    let rows = spare_rows(&classified, &spares);
+    assert_eq!(
+        rows.len(),
+        2,
+        "distinct shapes must not be merged: {rows:#?}"
+    );
+    assert!(rows.iter().any(|r| r.count == 2));
+    assert!(rows.iter().any(|r| r.count == 1));
+}
+
+/// Same shape, different OS verdict: the reason is *why* the reaper left it
+/// alive, so merging two reasons into one row would report a decision that
+/// was never taken.
+#[test]
+fn spare_rows_separate_distinct_reasons() {
+    let ds = [
+        descendant(1, "clud", "clud __worker --session-id a"),
+        descendant(2, "clud", "clud __worker --session-id b"),
+    ];
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
+    let spares: SpareList = [
+        (1, SpareReason::SessionLeader),
+        (2, SpareReason::ListeningEndpoint),
+    ]
+    .into_iter()
+    .collect();
+
+    let rows = spare_rows(&classified, &spares);
+    assert_eq!(
+        rows.len(),
+        2,
+        "one shape, two verdicts, two rows: {rows:#?}"
+    );
+}
+
+/// Only spared candidates appear. A row for a process the reaper killed
+/// would be a false claim about an action not taken.
+#[test]
+fn spare_rows_omit_unspared_candidates() {
+    let ds = [
+        descendant(1, "clud", "clud __worker --session-id a"),
+        descendant(2, "clud", "clud __worker --session-id b"),
+    ];
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
+    let spares: SpareList = [(1, SpareReason::SessionLeader)].into_iter().collect();
+
+    let rows = spare_rows(&classified, &spares);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pids, vec![1]);
+}
+
+/// #360's cap has to hold on this path too. A `Generic` label built from a
+/// multi-kilobyte cmdline reaches the new spare row and the new tail line,
+/// and an uncapped one would spray the terminal exactly as #360 describes.
+#[test]
+fn spare_row_labels_are_capped() {
+    let huge = "x".repeat(5_000);
+    let ds = [descendant(1, "weird", &format!("weird {huge}"))];
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
+    let spares: SpareList = [(1, SpareReason::SessionLeader)].into_iter().collect();
+
+    let rows = spare_rows(&classified, &spares);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].label.chars().count() <= PRINTED_LABEL_MAX,
+        "label must be capped for print (#360), got {} chars",
+        rows[0].label.chars().count()
+    );
+}
+
+/// Deterministic order, for the same reason `spared` is sorted by PID: a
+/// report and any assertion over it must not depend on map iteration order.
+#[test]
+fn spare_rows_are_deterministically_ordered() {
+    let ds: Vec<Descendant> = [(3, "zzz"), (1, "aaa"), (2, "mmm")]
+        .iter()
+        .map(|(pid, name)| descendant(*pid, name, &format!("{name} --run")))
+        .collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
+    let spares: SpareList = ds
+        .iter()
+        .map(|d| (d.pid, SpareReason::SessionLeader))
+        .collect();
+
+    let first = spare_rows(&classified, &spares);
+    for _ in 0..8 {
+        let again = spare_rows(&classified, &spares);
+        assert_eq!(
+            first.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
+            again.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
+        );
+    }
+    let labels: Vec<String> = first.iter().map(|r| r.label.clone()).collect();
+    let mut sorted = labels.clone();
+    sorted.sort();
+    assert_eq!(labels, sorted, "rows must be label-ordered");
+}
+
+/// The line an operator actually reads. Asserted verbatim because the whole
+/// issue is that the previous line — `sparing pid=586489 (session_leader) —
+/// OS signal says this is a daemon` — was syntactically fine and told the
+/// reader nothing about what had been spared.
+#[test]
+fn spare_row_renders_the_name_the_count_and_the_reason() {
+    let ds: Vec<Descendant> = [586_489u32, 586_491]
+        .iter()
+        .map(|pid| descendant(*pid, "clud", "clud __worker --session-id s"))
+        .collect();
+    let classified: Vec<(Shape, &Descendant)> = ds
+        .iter()
+        .map(|d| (classify(&d.name, &d.command), d))
+        .collect();
+    let spares: SpareList = ds
+        .iter()
+        .map(|d| (d.pid, SpareReason::SessionLeader))
+        .collect();
+
+    let rows = spare_rows(&classified, &spares);
+    let line = rows[0].render();
+
+    assert!(line.contains("2x"), "{line}");
+    assert!(
+        line.contains("clud"),
+        "the executable must be named: {line}"
+    );
+    assert!(line.contains("(session_leader)"), "{line}");
+    assert!(line.contains("586489, 586491"), "{line}");
+    assert!(
+        !line.contains("OS signal says this is a daemon"),
+        "the per-PID prose line is what this replaced: {line}"
+    );
+}
