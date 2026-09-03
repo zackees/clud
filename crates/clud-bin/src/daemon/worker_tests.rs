@@ -224,3 +224,70 @@ fn worker_attach_live_path_accepts_prost_messages() {
     drop(stream);
     assert!(handle.join().unwrap().is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// #1142: a worker whose daemon died must leave its accept loop.
+// ---------------------------------------------------------------------------
+
+/// The deadlock, stated as the truth table that produced it.
+///
+/// A client attached when the daemon dies used to pin the worker forever:
+/// `broadcast_exit` sets `stop_accepting`, which stops the eviction thread,
+/// so `has_client()` can never go false again and the old
+/// `stop_accepting && !has_client()` condition never fires.
+#[test]
+fn a_dead_daemon_stops_the_loop_even_with_a_client_attached() {
+    assert!(
+        should_stop_accepting(true, true, true),
+        "this is the 8-and-15-hour leak: daemon gone, client stuck attached"
+    );
+}
+
+/// The daemon's death is decisive on its own. The watchdog sets the flag after
+/// `broadcast_exit`, but the loop must not depend on having observed both.
+#[test]
+fn a_dead_daemon_stops_the_loop_on_its_own() {
+    assert!(should_stop_accepting(true, false, false));
+    assert!(should_stop_accepting(true, false, true));
+}
+
+/// The graceful drain is untouched. The child exited and a client is still
+/// reading its final output, so the loop stays up — removing this would trade
+/// the leak for truncated output at every normal exit.
+#[test]
+fn a_graceful_exit_still_waits_for_the_client_to_finish_reading() {
+    assert!(
+        !should_stop_accepting(false, true, true),
+        "a live daemon plus an attached client must keep draining"
+    );
+    assert!(
+        should_stop_accepting(false, true, false),
+        "once the client is gone there is nothing left to drain"
+    );
+}
+
+/// A healthy, idle worker keeps accepting.
+#[test]
+fn a_running_worker_keeps_accepting() {
+    assert!(!should_stop_accepting(false, false, false));
+    assert!(!should_stop_accepting(false, false, true));
+}
+
+/// The eviction thread shares this predicate, so this case is doing double
+/// duty: it says the accept loop keeps draining, and it says the *evictor*
+/// keeps running while it does.
+///
+/// That second reading is the fix for the other half of #1142. The evictor
+/// used to stop the instant `stop_accepting` was set, which is the instant
+/// shutdown begins — so a client whose socket had already died could never be
+/// cleared, `has_client()` stayed true, and the accept loop waited on it
+/// forever. Reachable with a perfectly healthy daemon, which is why the
+/// daemon-death flag alone does not cover it.
+#[test]
+fn the_evictor_outlives_the_start_of_shutdown() {
+    assert!(
+        !should_stop_accepting(false, true, true),
+        "the evictor must still be running here, or the client that pins \
+         has_client() can never be cleared"
+    );
+}

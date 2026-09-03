@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{self, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -163,11 +163,17 @@ pub(super) fn run_worker(
         return 1;
     }
 
+    // #1142: set when the daemon is observed gone, and read by the accept loop
+    // below. `stop_accepting` cannot carry this: it also means "the child
+    // exited, let the client finish reading", and that meaning waits on
+    // `!has_client()`. See `should_stop_accepting`.
+    let daemon_gone = Arc::new(AtomicBool::new(false));
     {
         let shared = Arc::clone(&shared);
         let runtime = runtime.clone();
         let state_dir = state_dir.to_path_buf();
         let session_id = session_id.to_string();
+        let daemon_gone = Arc::clone(&daemon_gone);
         // Issue #558: watch the daemon *process*. Polling a bare PID would
         // keep this worker alive forever if an unrelated process inherited
         // the daemon's number after it died.
@@ -181,6 +187,11 @@ pub(super) fn run_worker(
                 shared.broadcast_exit(137);
                 let _ = persist_snapshot(&state_dir, &session_id, &shared);
                 let _ = fs::remove_file(spec_path(&state_dir, &session_id));
+                // Order matters: `broadcast_exit` above stops the eviction
+                // thread, so this is what actually ends the accept loop.
+                // Setting it last keeps the snapshot and spec-file cleanup
+                // ahead of the exit, as they were.
+                daemon_gone.store(true, Ordering::Release);
                 break;
             }
             thread::sleep(Duration::from_millis(200));
@@ -192,8 +203,24 @@ pub(super) fn run_worker(
     // dead client so new attach attempts succeed immediately.
     {
         let shared = Arc::clone(&shared);
+        let daemon_gone = Arc::clone(&daemon_gone);
         thread::spawn(move || loop {
-            if shared.stop_accepting.load(Ordering::Acquire) {
+            // #1142: the same predicate the accept loop uses, so this keeps
+            // evicting for exactly as long as that loop can still be waiting
+            // on `has_client()`.
+            //
+            // This used to break on `stop_accepting` alone, which is set by
+            // `broadcast_exit` — so the moment the worker began shutting down,
+            // the only thing that could clear a dead client stopped running.
+            // A client whose socket had died but had not yet been evicted then
+            // held `has_client()` true forever and the accept loop never
+            // ended. That is reachable on an ordinary exit, with the daemon
+            // still alive, so the `daemon_gone` flag alone does not cover it.
+            if should_stop_accepting(
+                daemon_gone.load(Ordering::Acquire),
+                shared.stop_accepting.load(Ordering::Acquire),
+                shared.has_client(),
+            ) {
                 break;
             }
             shared.evict_dead_client();
@@ -202,7 +229,11 @@ pub(super) fn run_worker(
     }
 
     loop {
-        if shared.stop_accepting.load(Ordering::Acquire) && !shared.has_client() {
+        if should_stop_accepting(
+            daemon_gone.load(Ordering::Acquire),
+            shared.stop_accepting.load(Ordering::Acquire),
+            shared.has_client(),
+        ) {
             break;
         }
         match listener.accept() {
@@ -347,6 +378,34 @@ fn run_repeat_worker(
             thread::sleep(Duration::from_millis(250));
         }
     }
+}
+
+/// Should the worker's accept loop stop?
+///
+/// Two different reasons, and they must not share a rule (#1142).
+///
+/// `stop_accepting` alone is a *graceful* end: the child exited and the
+/// attached client still has final output to read, so the loop stays up until
+/// that client goes away. That drain is deliberate and is why the condition
+/// waits on `!has_client()`.
+///
+/// A dead daemon is not that. It is the end of the only route a client has to
+/// this worker, so there is nothing left to drain to and nobody left to drain
+/// for -- and waiting for `!has_client()` there is a deadlock rather than a
+/// courtesy:
+///
+/// 1. the daemon watchdog calls `broadcast_exit`, which sets `stop_accepting`;
+/// 2. the client-eviction thread's first act is to `break` on `stop_accepting`,
+///    so it stops evicting at exactly the moment eviction is needed;
+/// 3. a client registered at that instant is therefore never evicted,
+///    `has_client()` stays true, and this loop runs forever.
+///
+/// Observed on a developer machine: two `__worker` processes alive 8 and 15
+/// hours after their daemons died, reparented to init, ignoring SIGTERM and
+/// needing SIGKILL. The watchdog had run -- the tree was reaped and the exit
+/// broadcast -- but the process itself never left this loop.
+fn should_stop_accepting(daemon_gone: bool, stop_accepting: bool, has_client: bool) -> bool {
+    daemon_gone || (stop_accepting && !has_client)
 }
 
 fn run_repeat_once(
