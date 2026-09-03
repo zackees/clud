@@ -1379,17 +1379,41 @@ mod tests {
     fn a_healthy_first_frame_arriving_within_its_budget_succeeds() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        // Serve *every* attempt, not just the first (#994).
+        //
+        // This accepted once and then returned, dropping the listener with it.
+        // The retry loop below was therefore unwinnable: if attempt 1 failed
+        // for any reason at all, attempts 2-5 connected to a socket nobody was
+        // listening on and could only fail, and the test reported
+        // "loopback connect kept failing across 5 attempts" — which reads like
+        // five bad-luck SYNs and is really one failure plus four impossible
+        // ones. That is the shape actually observed on the macOS lane, and no
+        // amount of widening the first-frame budget could have fixed it,
+        // because the budget was never what blew.
+        listener.set_nonblocking(true).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let server_done = Arc::clone(&done);
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request);
-            std::thread::sleep(Duration::from_millis(80));
-            stream
-                .write_all(&sse_response("data: healthy\n\n"))
-                .unwrap();
+            while !server_done.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut request = [0_u8; 1024];
+                        let _ = stream.read(&mut request);
+                        std::thread::sleep(Duration::from_millis(80));
+                        // A client that gave up mid-attempt leaves a closed
+                        // socket; that is the retry working, not a failure.
+                        let _ = stream.write_all(&sse_response("data: healthy\n\n"));
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
         });
         let client = client(
             &base_url,
@@ -1407,6 +1431,7 @@ mod tests {
         );
         let mut outcome = None;
         let mut seen = Vec::new();
+        let mut last_error = None;
         // A loaded shared macOS runner can refuse a fresh loopback SYN
         // (`Transport("connection failed")`, #994) — the property under test
         // is the healthy-frame success path, not first-SYN luck, so retry
@@ -1423,13 +1448,23 @@ mod tests {
                     outcome = Some(result);
                     break;
                 }
-                Err(_) => seen.clear(),
+                Err(err) => {
+                    seen.clear();
+                    // Keep the cause: the old message asserted a connect
+                    // failure regardless of what actually went wrong, which
+                    // sent readers looking at loopback when the error was
+                    // something else entirely.
+                    last_error = Some(err);
+                }
             }
         }
-        let outcome = outcome.expect("loopback connect kept failing across 5 attempts");
+        let outcome = outcome.unwrap_or_else(|| {
+            panic!("no attempt succeeded across 5 tries; last error: {last_error:?}")
+        });
 
         assert_eq!(outcome.attempts, 1);
         assert_eq!(seen, b"data: healthy\n\n");
+        done.store(true, Ordering::SeqCst);
         server.join().unwrap();
     }
 
