@@ -132,7 +132,13 @@ def test_run_streams_output_and_appends_exit_code(
     assert "[clud exited with code 0]" in result
 
 
-def test_run_rejects_unknown_backend(bridge) -> None:
+def test_run_rejects_unknown_backend(
+    bridge, tmp_path: Path, monkeypatch
+) -> None:
+    # Pin CLUD_BIN so the run reaches the backend validation instead of
+    # failing earlier on a PATH miss (the exec runners have no `clud` on PATH).
+    fake = _fake_clud(tmp_path, "echo hi\n")
+    monkeypatch.setenv("CLUD_BIN", fake)
     result = asyncio.run(bridge.run("hello", _FakeCtx(), backend="gpt"))
     assert result.startswith("error: unknown backend")
 

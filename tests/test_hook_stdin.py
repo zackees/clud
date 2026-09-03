@@ -247,7 +247,12 @@ def test_unparseable_payload_without_a_removal_is_still_allowed(
 
 
 def test_rm_literal_assignment_rewrites_before_backend_prompt(tmp_path: Path) -> None:
-    """#963: resolve a preceding literal assignment before Claude can ask."""
+    """#963: resolve a preceding literal assignment before Claude can ask.
+
+    Since #1087, a provable rewrite scopes the *rewrite* — it no longer
+    auto-allows the entire compound command, so the decision here is `ask`
+    with the `$SP` operands rewritten to the proven literal.
+    """
     scratchpad = "C:/Users/test/.clud/tmp/claude/session/scratchpad"
     command = (
         'git status --porcelain; '
@@ -276,13 +281,18 @@ def test_rm_literal_assignment_rewrites_before_backend_prompt(tmp_path: Path) ->
     output = json.loads(result.stdout)
     hook_output = output["hookSpecificOutput"]
     assert hook_output["hookEventName"] == "PreToolUse"
-    assert hook_output["permissionDecision"] == "allow"
+    assert hook_output["permissionDecision"] == "ask"
     updated = hook_output["updatedInput"]
     assert updated.keys() == tool_input.keys()
     assert updated["description"] == "clear scratchpad"
     assert updated["timeout"] == 120_000
     assert updated["run_in_background"] is False
     assert updated["future_field"] == {"preserve": True}
+    rm_segment = updated["command"].split("; ")[2]
+    assert (
+        f'rm -f "{scratchpad}"/*.txt "{scratchpad}"/*.json "{scratchpad}"/*.md'
+        in rm_segment
+    ), rm_segment
     assert "$SP" not in updated["command"].split("rm -f", 1)[1].split(";", 1)[0]
     assert updated["command"].count(scratchpad) == 4
 
