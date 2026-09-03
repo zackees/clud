@@ -104,6 +104,20 @@ pythonpath = ["tests"]
 # isn't available.
 timeout = 90
 timeout_method = "thread"
+# Complements `timeout` rather than duplicating it, and exists to answer the
+# question #994 could not: when the Windows integration lane exits 1 with no
+# FAILED line and no pytest summary, did it hang or did it die?
+#
+# `timeout_method = "thread"` cannot interrupt every hang — a thread blocked in
+# a C-level call keeps blocking, and pytest then produces nothing. faulthandler
+# arms a C-level timer instead, so it dumps every thread's stack even from
+# inside such a call. Set below `timeout` so the stacks land *before* the
+# interrupt attempt.
+#
+# The two outcomes are now distinguishable: thread stacks in the log mean it
+# hung, and where; silence still means the process was killed or crashed
+# outright, which is itself the answer.
+faulthandler_timeout = 80
 markers = [
     "integration: end-to-end tests with mock agents; skipped unless CLUD_INTEGRATION_TESTS=1",
     "real_claude: opt-in secret-free protocol fixtures using an installed Claude Code binary",
