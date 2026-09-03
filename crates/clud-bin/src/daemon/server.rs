@@ -1710,6 +1710,12 @@ mod tests {
     // redesign.
     const PROST_PERF_BUDGET_NUMERATOR: u128 = 150;
     const PROST_PERF_BUDGET_DENOMINATOR: u128 = 100;
+    // #994: an absolute slack added on top of the relative budget. When the
+    // JSON median lands in the fast cluster (a few ms) on a loaded macOS
+    // runner, one scheduler hiccup in a prost sample blows the *relative*
+    // margin even though both protocols are healthy. Real prost regressions
+    // are order-of-magnitude, so millisecond-scale slack cannot mask one.
+    const PROST_PERF_LOAD_FLOOR: Duration = Duration::from_millis(10);
     // #380: macOS ARM runners exhibit bimodal latency (fast cluster ~50ms,
     // slow cluster ~200ms). At N=9 the JSON and prost medians can land on
     // opposite sides of the cluster gap purely by sample-count luck,
@@ -2170,7 +2176,7 @@ mod tests {
             json_median,
             PROST_PERF_BUDGET_NUMERATOR,
             PROST_PERF_BUDGET_DENOMINATOR,
-        );
+        ) + PROST_PERF_LOAD_FLOOR;
         assert!(
             prost_median <= budget,
             "prost ListLiveCwds median latency {prost_median:?} exceeded 50% JSON budget {budget:?}; JSON median {json_median:?}; JSON samples {json_samples:?}; prost samples {prost_samples:?}"

@@ -1397,8 +1397,11 @@ mod tests {
                 // Keep ample scheduler/socket setup margin on shared macOS
                 // runners (#994); the fake server still responds after only
                 // 80 ms, so this continues to exercise the success path.
-                first_frame_timeout: Some(Duration::from_secs(5)),
-                read_timeout: Duration::from_secs(5),
+                // 15s: the earlier 5s margin blew again on a loaded runner
+                // (run 33709832669) — the budget is not the property under
+                // test here, the success path is.
+                first_frame_timeout: Some(Duration::from_secs(15)),
+                read_timeout: Duration::from_secs(15),
                 ..fast_config()
             },
         );
