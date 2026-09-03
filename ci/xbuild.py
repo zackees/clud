@@ -47,9 +47,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -593,6 +595,77 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     return 0
 
 
+def _host_triple() -> str | None:
+    """This machine's Rust target triple, via rustc. `None` if unavailable."""
+    try:
+        result = process.run(
+            ["rustc", "-vV"], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return None
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("host: "):
+            return line.removeprefix("host: ").strip()
+    return None
+
+
+def cross_toolchain_preflight(target: str) -> str | None:
+    """Explain a missing cross C toolchain before cargo fails obscurely.
+
+    #1017 blocker 2: a local `wheel` for a non-host GNU triple dies minutes in
+    with
+
+        error: failed to run custom build command for `ring v0.17.14`
+          error occurred in cc-rs: failed to find tool
+          "x86_64-linux-gnu-gcc": program not found
+
+    The issue asks whether that is a soldr bug or clud failing to export
+    `CC_<target>` / `TARGET_CC`. It is neither. CI's
+    `.github/actions/setup-build` runs `soldr prepare --target <t>
+    --github-env "$GITHUB_ENV"`, which persists the toolchain env for every
+    later step. Nothing does that locally: `ci/xbuild.py` never invokes
+    `prepare`, and only documents that those variables "are exported by"
+    it -- so the build proceeds as if they were.
+
+    This does not fix that; it makes the gap legible at the point of entry
+    rather than as a cc-rs error inside a dependency, which is what sent the
+    issue looking in two wrong places.
+
+    Returns an explanation, or `None` when there is nothing to warn about.
+    """
+    # CI prepares the toolchain in a prior step, so its env is already right.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return None
+    # Only GNU/Linux cross builds hit this. Apple and MSVC fail earlier and
+    # more clearly on their own SDK checks.
+    if not target.endswith("-unknown-linux-gnu"):
+        return None
+    host = _host_triple()
+    if host is None or host == target:
+        return None
+
+    arch = target.split("-", 1)[0]
+    gcc = f"{arch}-linux-gnu-gcc"
+    env_key = "CC_" + target.replace("-", "_")
+    if os.environ.get(env_key) or os.environ.get("TARGET_CC"):
+        return None
+    if shutil.which(gcc):
+        return None
+
+    return (
+        f"error: no C cross toolchain for {target}.\n"
+        f"  `{gcc}` is not on PATH and neither {env_key} nor TARGET_CC is set,\n"
+        f"  so cc-rs will fail inside a dependency (ring) rather than here.\n"
+        f"\n"
+        f"  CI gets this from `soldr prepare --target {target} --github-env \"$GITHUB_ENV\"`\n"
+        f"  in .github/actions/setup-build, which persists the toolchain env for\n"
+        f"  later steps. There is no local equivalent yet -- see #1017 blocker 2.\n"
+        f"\n"
+        f"  Either install {gcc} and re-run, or export {env_key} to a working\n"
+        f"  cross compiler."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Cross-compile driver for clud CI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -620,6 +693,12 @@ def main(argv: list[str] | None = None) -> int:
     wheel.set_defaults(func=cmd_wheel)
 
     args = parser.parse_args(argv)
+
+    problem = cross_toolchain_preflight(args.target)
+    if problem is not None:
+        print(problem, file=sys.stderr)
+        return 1
+
     return args.func(args)
 
 
