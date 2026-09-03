@@ -33,7 +33,21 @@ use crate::tools::clud_uv_cache_dir;
 pub const ENVIRONMENTS_SUBDIR: &str = "environments-v2";
 
 /// How old (by mtime) an env must be before [`sweep_stale`] removes it.
-pub const STALE_THRESHOLD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+///
+/// 72 hours, matching `gc::session_tmp` and `gc::target_sweep`. It was a week,
+/// which on a machine that fills its disk in four days is long enough that the
+/// sweep never reclaims anything before the disk is gone — the same failure the
+/// 14-day `target/` gate had. Three days rather than two so a Friday-to-Monday
+/// absence does not cost the returning user their envs. A stale venv costs one
+/// `uv` re-resolve to rebuild.
+pub const STALE_THRESHOLD: Duration = Duration::from_secs(72 * 60 * 60);
+
+/// The audit `rule` string, derived from [`STALE_THRESHOLD`] rather than
+/// written out, so the two cannot drift apart the way they did when the
+/// threshold moved and a hardcoded `stale>7d` stayed behind.
+fn stale_rule() -> String {
+    format!("uv-cache env stale>{}d", STALE_THRESHOLD.as_secs() / 86_400)
+}
 
 /// Summary returned by [`list`]. Serializable for the JSON output path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +175,7 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
             continue;
         }
         // Audit before acting (#893).
-        delete_audit::record("gc.uv-cache", &path, "uv-cache env stale>7d");
+        delete_audit::record("gc.uv-cache", &path, &stale_rule());
         match fs::remove_dir_all(&path) {
             Ok(()) => report.stale_envs_removed += 1,
             Err(e) if is_locked(&e) => {

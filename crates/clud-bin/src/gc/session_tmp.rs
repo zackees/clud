@@ -9,7 +9,7 @@
 //! - [`ensure_dir`] — resolve `~/.clud/tmp`, create it, hand the path back
 //!   to the env builders in `runner.rs` / `daemon/io_helpers.rs`.
 //! - [`sweep_stale_at`] — drop top-level entries whose mtime is older than
-//!   [`STALE_THRESHOLD`] (48h). Driven from the daemon's periodic tick via
+//!   [`STALE_THRESHOLD`] (72h). Driven from the daemon's periodic tick via
 //!   `daemon/session_tmp_sweep.rs`.
 //!
 //! Like `gc::uv_cache`, this operates directly on the filesystem — there is
@@ -24,10 +24,29 @@ use std::time::{Duration, SystemTime};
 use super::delete_audit;
 
 /// How old (by mtime) a top-level entry must be before [`sweep_stale_at`]
-/// removes it. 48h matches the worktree GC policy value but is a *separate*
-/// constant — session-temp lifetime and worktree staleness are independent
-/// policies that only happen to share a number today (issue #509).
-pub const STALE_THRESHOLD: Duration = Duration::from_secs(48 * 60 * 60);
+/// removes it.
+///
+/// **72 hours, and the number is the weekend.** Someone who stops work Friday
+/// evening and returns Monday morning has been away ~63 hours; at the previous
+/// 48h every scratch artifact they left behind was gone before they sat back
+/// down. Three days clears that gap with margin and is the floor every
+/// temp-reclaiming policy in this repo now shares —
+/// [`crate::gc::uv_cache::STALE_THRESHOLD`] and
+/// [`crate::gc::target_sweep::DEFAULT_STALE_DAYS`] were brought to the same
+/// value for the same reason.
+///
+/// It remains a *separate* constant from the worktree GC policy: session-temp
+/// lifetime and worktree staleness are independent policies that only happen
+/// to share a number (issue #509).
+pub const STALE_THRESHOLD: Duration = Duration::from_secs(72 * 60 * 60);
+
+/// The audit `rule` string, derived from [`STALE_THRESHOLD`] so the two cannot
+/// drift. It read `stale>48h` for as long as the constant said 48h, which is
+/// exactly the kind of agreement a `format!` should be enforcing rather than a
+/// reviewer.
+fn stale_rule() -> String {
+    format!("session-tmp stale>{}h", STALE_THRESHOLD.as_secs() / 3_600)
+}
 
 /// Outcome of [`sweep_stale_at`]. `removed` counts files+dirs dropped (or,
 /// in `dry_run`, that would have been); `skipped` counts lock/permission
@@ -141,7 +160,7 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
         }
         // Audit before acting (#893) — the root is clud-owned, but the
         // audit line is what proves it after the fact.
-        delete_audit::record("gc.session-tmp", &path, "session-tmp stale>48h");
+        delete_audit::record("gc.session-tmp", &path, &stale_rule());
         let result = if meta.is_dir() {
             fs::remove_dir_all(&path)
         } else {
@@ -197,7 +216,7 @@ mod tests {
 
     #[test]
     fn stale_threshold_is_48h() {
-        assert_eq!(STALE_THRESHOLD, Duration::from_secs(48 * 60 * 60));
+        assert_eq!(STALE_THRESHOLD, Duration::from_secs(72 * 60 * 60));
     }
 
     #[test]
@@ -224,9 +243,9 @@ mod tests {
         let tmp = tempdir().unwrap();
         let f = make_file(tmp.path(), "old.txt");
         let d = make_subdir(tmp.path(), "old-dir");
-        // Pretend "now" is 49h in the future so the just-created entries
+        // Pretend "now" is past the threshold so the just-created entries
         // read as older than the 48h threshold.
-        let future_now = SystemTime::now() + StdDuration::from_secs(49 * 60 * 60);
+        let future_now = SystemTime::now() + STALE_THRESHOLD + StdDuration::from_secs(3_600);
         let report = sweep_stale_at(tmp.path(), future_now, false).unwrap();
         assert_eq!(report.removed, 2);
         assert!(!f.exists());
@@ -237,7 +256,7 @@ mod tests {
     fn sweep_dry_run_reports_without_deleting() {
         let tmp = tempdir().unwrap();
         let f = make_file(tmp.path(), "old.txt");
-        let future_now = SystemTime::now() + StdDuration::from_secs(49 * 60 * 60);
+        let future_now = SystemTime::now() + STALE_THRESHOLD + StdDuration::from_secs(3_600);
         let report = sweep_stale_at(tmp.path(), future_now, true).unwrap();
         assert_eq!(report.removed, 1);
         assert!(f.exists(), "dry run must not delete");
@@ -312,5 +331,54 @@ mod tests {
                 None => std::env::remove_var("USERPROFILE"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod retention_floor_tests {
+    use std::time::Duration;
+
+    /// Every temp-reclaiming policy shares one floor, and the floor is the
+    /// weekend.
+    ///
+    /// The bug this pins down is not "the number was wrong" — it is that four
+    /// sweeps each picked a plausible number in isolation (48h, 7d, 14d) and
+    /// nobody could see they disagreed. Two of them were longer than the time
+    /// this machine takes to fill its disk, so they ran on schedule and
+    /// reclaimed nothing. Asserting them together is what makes the next
+    /// divergence a test failure instead of a full disk.
+    ///
+    /// 72h because a Friday-evening-to-Monday-morning absence is ~63h: at 48h
+    /// the returning user's artifacts are already gone.
+    const WEEKEND_FLOOR: Duration = Duration::from_secs(72 * 60 * 60);
+
+    #[test]
+    fn every_temp_policy_shares_the_weekend_floor() {
+        assert_eq!(
+            super::STALE_THRESHOLD,
+            WEEKEND_FLOOR,
+            "session-temp must not age out faster than a weekend"
+        );
+        assert_eq!(
+            crate::gc::uv_cache::STALE_THRESHOLD,
+            WEEKEND_FLOOR,
+            "uv-cache must not age out faster than a weekend"
+        );
+        assert_eq!(
+            Duration::from_secs(crate::gc::target_sweep::DEFAULT_STALE_DAYS * 24 * 60 * 60),
+            WEEKEND_FLOOR,
+            "target sweep must not age out faster than a weekend"
+        );
+    }
+
+    /// The floor is a floor, not a target: it has to stay short enough to
+    /// actually reclaim. A week-long window on a box that fills in four days
+    /// is an off switch, which is how 7d and 14d survived unnoticed.
+    #[test]
+    fn the_floor_is_still_short_enough_to_reclaim() {
+        assert!(
+            WEEKEND_FLOOR < Duration::from_secs(4 * 24 * 60 * 60),
+            "a retention window must be shorter than the time the disk takes to fill"
+        );
     }
 }

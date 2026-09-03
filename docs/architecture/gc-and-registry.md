@@ -248,10 +248,10 @@ timestamp under `~/.clud/state/` so the per-tick cost is one stat + age compare.
 
 | Sweep | Target | Age gate | Cadence sentinel | Enabled |
 |---|---|---|---|---|
-| uv-cache (#423) | `~/.clud/cache/uv/environments-v2/` | 7d | `uv-cache-sweep.last` (24h) | always |
-| session-temp (#509) | `~/.clud/tmp/` | 48h | `session-tmp-sweep.last` (6h) | default on |
+| uv-cache (#423) | `~/.clud/cache/uv/environments-v2/` | 72h | `uv-cache-sweep.last` (24h) | always |
+| session-temp (#509) | `~/.clud/tmp/` | 72h | `session-tmp-sweep.last` (6h) | default on |
 | session-state (#1014) | `~/.clud/state/sessions/` | 48h ambient / 30d notable | `session-state-sweep.last` (6h) | always |
-| target (#510) | `target/` dirs under `CLUD_GC_TARGET_ROOTS` | 14d | `target-sweep.last` (24h) | opt-in |
+| target (#510) | `target/` dirs under `CLUD_GC_TARGET_ROOTS` | 3d | `target-sweep.last` (24h) | opt-in |
 
 **Session temp (#509).** At session launch the backend agent's temp env (`TMPDIR` on Unix,
 `TMP`+`TEMP` on Windows) is pointed at `~/.clud/tmp` by both env builders
@@ -286,7 +286,7 @@ until that unrelated process exits; that is the safe direction and costs a few h
 more dev roots (OS path-list separated). The sweep walks each root (bounded depth, skipping
 `.git`/`node_modules`/`.claude` and not descending into a found `target/`), and removes `target/`
 dirs — identified by a sibling `Cargo.toml` — whose mtime is older than
-`CLUD_GC_TARGET_STALE_DAYS` (default 14). Default-off because reclaiming `target/` forces a
+`CLUD_GC_TARGET_STALE_DAYS` (default 2). Default-off because reclaiming `target/` forces a
 rebuild; the long mtime gate is the cheap stand-in for "no live build owns this."
 
 **Background thread + prioritization.** The session-temp, session-state and target sweeps walk the filesystem
