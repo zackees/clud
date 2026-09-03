@@ -1219,6 +1219,13 @@ def watch(
         pending = [c for c in checks if c.bucket == "pending"]
         failing = [c for c in checks if c.bucket in {"fail", "cancel"}]
         counts = check_counts(checks)
+        if counts["total"] == 0:
+            # A fresh push registers no checks for the first few seconds; an
+            # empty rollup must read as "no data yet", never as green.
+            if log:
+                log.emit("checks", checks=counts, note="rollup_empty")
+            _sleep_remaining_interval(poll_started, interval)
+            continue
         if log:
             log.emit("checks", checks=counts)
             elapsed = round(max(0.0, time.monotonic() - log.started_monotonic), 2)

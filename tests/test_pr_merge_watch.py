@@ -474,6 +474,49 @@ def test_empty_required_set_fails_fast_instead_of_waiting_for_the_matrix(
     assert polls == 1
 
 
+def test_empty_rollup_on_a_fresh_push_is_not_green(
+    watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh push registers no checks for the first few seconds; an empty
+    rollup must read as "no data yet" and keep polling, never as GREEN."""
+    log = watcher.WatchLog.create(527, "zackees/clud", root=tmp_path)
+    monkeypatch.setattr(
+        watcher.PRSnapshot,
+        "fetch",
+        lambda *args: watcher.PRSnapshot(527, "OPEN", "UNKNOWN", "abc123", "main"),
+    )
+    monkeypatch.setattr(watcher, "fetch_required_check_names", lambda *args: None)
+    monkeypatch.setattr(watcher, "_sleep_remaining_interval", lambda *args: None)
+    monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
+    polls = 0
+
+    def gates(*_args, **_kwargs):
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            return gate_snapshot(watcher, [])
+        return gate_snapshot(
+            watcher, [watcher.CheckRow("linux", "pass", "SUCCESS")], mergeable="MERGEABLE"
+        )
+
+    monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
+    opts = watcher.CancelOptions(
+        on={"fail"},
+        mode="runs",
+        timeout=30,
+        require=False,
+        dry_run=False,
+        ignore_permission_errors=True,
+        no_retry=False,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        watcher.watch(527, "zackees/clud", 20, 3600, None, opts, log)
+
+    assert exc.value.code == watcher.EXIT_GREEN
+    assert polls == 2
+
+
 def test_default_poll_interval_is_quick(watcher) -> None:
     ns = watcher.parse_args(["527"])
     assert ns.interval == 20

@@ -2958,7 +2958,9 @@ deny existed but defaulted off, missed `gh pr merge --auto`, and — in gated
 - **Fail fast, always.** The watcher exits the moment a check is red and never
   idles out the rest of the matrix: with no branch protection, no allowlist,
   *or* protection that names zero checks, every check counts as required. It
-  polls every 20 seconds by default so a watching agent reacts quickly.
+  polls every 20 seconds by default so a watching agent reacts quickly. An
+  empty check rollup — a fresh push whose run has not registered yet — reads
+  as "no data yet" and keeps polling, never as green.
 - **Break off, scoped.** On failure exit the watcher cancels only the watched
   PR's own remaining workflow runs on its head SHA — never another PR's jobs.
   The agent's reaction (fix + push) then supersedes the stale run through the
