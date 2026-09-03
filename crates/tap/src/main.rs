@@ -43,11 +43,24 @@ const REFUSED_EXIT: i32 = 126;
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Resolve symlinks once, here at the edge, so `classify` stays a pure
+    // function of paths.
+    //
+    // This is load-bearing on macOS, where a session root under `/var/folders`
+    // is a symlink to `/private/var/folders`: the cwd resolves to the real
+    // path while the env var keeps the symlinked one, so a target genuinely
+    // inside the root compares as outside it and gets refused. CI caught that
+    // as a refusal of `rm` on a path inside a temp dir -- a false positive in
+    // production, not just in the test.
+    //
+    // Both sides must go through the same resolution or the comparison is
+    // between two different spellings of the same directory.
+    let cwd = real(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let session_root = std::env::var_os(SESSION_ROOT_ENV)
         .map(PathBuf::from)
+        .map(real)
         .unwrap_or_else(|| cwd.clone());
-    let home = home_dir();
+    let home = home_dir().map(real);
 
     match classify(&argv, &cwd, &session_root, home.as_deref()) {
         Decision::Refuse(message) => {
@@ -105,6 +118,17 @@ fn exit_byte(code: i32) -> u8 {
         return 128u8.saturating_add(signal);
     }
     (code & 0xFF) as u8
+}
+
+/// Resolve symlinks, keeping the original path when that is not possible.
+///
+/// A path that does not exist cannot be canonicalized, and that is the normal
+/// case for a removal target -- so this is only ever applied to the *roots*
+/// (cwd, session root, home), which do exist. Falling back to the raw path
+/// keeps the guard working rather than failing open on an unreadable
+/// directory.
+fn real(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// The user's home directory.
