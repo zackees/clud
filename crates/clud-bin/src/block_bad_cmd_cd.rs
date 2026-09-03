@@ -598,6 +598,10 @@ pub struct HookCwdScan {
     /// under `clud --fix-hooks`. A subset of `sensitive`, tracked separately
     /// because it has a specific remedy.
     pub broken_git_prefix: Vec<SensitiveHook>,
+    /// Hook commands that resolve their project root by walking **up from
+    /// `$PWD`** looking for a marker file (#972). Also a subset of
+    /// `sensitive`, and also tracked separately for its own remedy.
+    pub pwd_walk_prefix: Vec<SensitiveHook>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,6 +652,9 @@ pub fn scan_hook_cwd_sensitivity(repo_root: &Path, home: Option<&Path>) -> HookC
         scan.any_hooks = true;
         if has_broken_git_rev_parse_prefix(&hook.command) {
             scan.broken_git_prefix.push(hook.clone());
+        }
+        if has_pwd_walk_root_prefix(&hook.command) {
+            scan.pwd_walk_prefix.push(hook.clone());
         }
         if is_cwd_sensitive_hook_command(&hook.command) {
             scan.sensitive.push(hook);
@@ -796,6 +803,44 @@ pub fn has_broken_git_rev_parse_prefix(command: &str) -> bool {
         && lower.contains("||")
         && lower.contains("rev-parse")
 }
+
+/// Whether the command resolves its project root by walking **up from `$PWD`**
+/// until it finds a marker file, rather than using the session's project root
+/// (#972).
+///
+/// The shape is a loop over `dirname` testing for `pyproject.toml` (or similar)
+/// and then `cd`-ing to whatever it lands on. Like the broken `git rev-parse`
+/// prefix, it *looks* self-rooting — there is a real `cd` to a real absolute
+/// path — which is why it is worth naming separately from the generic
+/// relative-path warning. The hazard is not that the path is unrooted; it is
+/// that the root is chosen by the shell's cwd.
+///
+/// That matters because `clud-extern-repos` puts a **complete sibling project**
+/// at `<parent>/.extern-repos/<name>/`, with its own `pyproject.toml` and its
+/// own hook scripts. A hook fired while the shell sits in that checkout walks
+/// up, finds the dependent project first, and runs *its* hook. Cross-repo work
+/// is exactly when the shell lives there, so this misfires precisely in the
+/// workflow the convention exists to support — and when the dependent project
+/// is Rust-backed, `uv run` there is a native build, not a script launch.
+pub fn has_pwd_walk_root_prefix(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    // A `$PWD` seed (or a bare `cd`-less walk) plus a `dirname` climb is the
+    // signature. Requiring both keeps a command that merely mentions `$PWD`,
+    // or one that calls `dirname` once on a known path, out of it.
+    let seeds_from_pwd = lower.contains("$pwd") || lower.contains("${pwd}");
+    let climbs = lower.contains("dirname");
+    let tests_a_marker = lower.contains("pyproject.toml")
+        || lower.contains("package.json")
+        || lower.contains("cargo.toml")
+        || lower.contains(".git");
+    seeds_from_pwd && climbs && tests_a_marker
+}
+
+/// The replacement clud recommends for the `$PWD`-walk prefix.
+pub const PWD_WALK_PREFIX_FIX: &str =
+    "cd \"$CLAUDE_PROJECT_DIR\" && ... (the repo the hook is installed in, which is what it \
+     should act on; a `$PWD` walk finds whichever project the shell happens to be standing in, \
+     including a sibling checkout under .extern-repos/)";
 
 /// The replacement clud recommends for the broken prefix.
 pub const GIT_REV_PARSE_PREFIX_FIX: &str =

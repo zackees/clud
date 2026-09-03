@@ -55,6 +55,7 @@ pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport 
         ));
     }
     warnings.extend(broken_git_rev_parse_warnings(repo_root, home));
+    warnings.extend(pwd_walk_root_warnings(repo_root, home));
     warnings.extend(double_declared_hook_warnings(repo_root, home));
     HookHealthReport {
         repo_root: repo_root.to_path_buf(),
@@ -89,6 +90,37 @@ fn broken_git_rev_parse_warnings(repo_root: &Path, home: Option<&Path>) -> Vec<S
                  advance, `cd \"\"` is a silent no-op, and the hook resolves its script path \
                  against whatever cwd it inherited. Replace the prefix with {}",
                 crate::block_bad_cmd::GIT_REV_PARSE_PREFIX_FIX
+            )
+        })
+        .collect()
+}
+
+/// Warn about hooks that pick their project root by walking up from `$PWD`
+/// (#972).
+///
+/// Scanned from the same pass as the `git rev-parse` warning and reported the
+/// same way, because it is the same class of mistake: a prefix that looks
+/// self-rooting but lets the shell's cwd choose the project. The observed cost
+/// was two dead Stop hooks, ~17 minutes, and an opaque build-backend error —
+/// the agent saw "Failed to build fbuild", with nothing saying a hook had
+/// picked the wrong repo.
+fn pwd_walk_root_warnings(repo_root: &Path, home: Option<&Path>) -> Vec<String> {
+    let scan = crate::block_bad_cmd::scan_hook_cwd_sensitivity(repo_root, home);
+    let mut sources = BTreeSet::new();
+    for hook in &scan.pwd_walk_prefix {
+        sources.insert(display_path(&hook.source));
+    }
+    sources
+        .into_iter()
+        .map(|source| {
+            format!(
+                "Hook command in {source} chooses its project root by walking up from `$PWD` \
+                 until it finds a marker file. That root is whichever project the shell is \
+                 standing in, not the repo the hook belongs to: a session working under \
+                 `.extern-repos/<name>/` walks up into that sibling checkout and runs *its* \
+                 hook, and if it is Rust-backed the `uv run` there compiles it from source. \
+                 Replace the prefix with {}",
+                crate::block_bad_cmd::PWD_WALK_PREFIX_FIX
             )
         })
         .collect()

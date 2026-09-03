@@ -361,6 +361,7 @@ fn scan_with(sensitive: bool, any: bool) -> HookCwdScan {
             Vec::new()
         },
         broken_git_prefix: Vec::new(),
+        pwd_walk_prefix: Vec::new(),
     }
 }
 
@@ -377,6 +378,7 @@ fn scan_with_dispatcher(dispatcher_managed: bool, sensitive: bool) -> HookCwdSca
             Vec::new()
         },
         broken_git_prefix: Vec::new(),
+        pwd_walk_prefix: Vec::new(),
     }
 }
 
@@ -724,4 +726,59 @@ fn a_git_file_counts_so_linked_worktrees_resolve() {
     )
     .unwrap();
     assert!(nearest_repo_root(tmp.path()).is_some());
+}
+
+// ─── #972: a `$PWD` walk picks the wrong project ──────────────────────
+//
+// The observed failure was a Stop hook installed in FastLED binding to the
+// `fbuild` checkout under `.extern-repos/`, running *its* hook, and turning a
+// "quick lint" into a ~500-crate cargo build — twice, ~17 minutes, ending in
+// an opaque build-backend error that named no hook at all.
+
+/// The real wrapper from the issue. It is already `cwd_sensitive` via its
+/// relative script path, but that generic verdict describes the wrong hazard:
+/// the command *does* `cd` to an absolute path. What makes it dangerous is
+/// which path it picks.
+#[test]
+fn the_pwd_walk_wrapper_is_named_specifically_not_just_cwd_sensitive() {
+    let wrapper = "[ \"$FL_HOOK_SKIP\" = \"1\" ] && exit 0; S=ci/hooks/check-on-stop.py; \
+                   d=$PWD; while [ \"$d\" != / ] && { [ ! -f \"$d/pyproject.toml\" ] || \
+                   [ ! -f \"$d/$S\" ]; }; do d=$(dirname \"$d\"); done; \
+                   if [ -f \"$d/pyproject.toml\" ]; then cd \"$d\" && uv run python \"$S\"; fi";
+    assert!(has_pwd_walk_root_prefix(wrapper));
+    assert!(is_cwd_sensitive_hook_command(wrapper));
+    // Not the other specific remedy — these are different mistakes.
+    assert!(!has_broken_git_rev_parse_prefix(wrapper));
+}
+
+/// The signature is all three parts together. Each alone is ordinary shell
+/// that a correct hook may well contain, so requiring the conjunction is what
+/// keeps this from firing on hooks that are fine.
+#[test]
+fn an_incomplete_signature_is_not_a_pwd_walk() {
+    // Mentions $PWD, never climbs.
+    assert!(!has_pwd_walk_root_prefix(
+        "cd \"$PWD\" && uv run python ci/hooks/check-on-stop.py"
+    ));
+    // Climbs once against a known path, seeds from no cwd.
+    assert!(!has_pwd_walk_root_prefix(
+        "cd \"$(dirname \"$CLAUDE_PROJECT_DIR/pyproject.toml\")\" && ./guard.sh"
+    ));
+    // Walks, but tests no project marker — not root discovery.
+    assert!(!has_pwd_walk_root_prefix(
+        "d=$PWD; while [ -n \"$d\" ]; do d=$(dirname \"$d\"); done"
+    ));
+    // The recommended form.
+    assert!(!has_pwd_walk_root_prefix(
+        "cd \"$CLAUDE_PROJECT_DIR\" && uv run python ci/hooks/check-on-stop.py"
+    ));
+}
+
+/// The remedy names the session project root, and says why a walk is wrong —
+/// an operator reading it should not have to rediscover the extern-checkout
+/// interaction.
+#[test]
+fn the_pwd_walk_remedy_names_the_root_and_the_reason() {
+    assert!(crate::block_bad_cmd::PWD_WALK_PREFIX_FIX.contains("CLAUDE_PROJECT_DIR"));
+    assert!(crate::block_bad_cmd::PWD_WALK_PREFIX_FIX.contains(".extern-repos"));
 }
