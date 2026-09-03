@@ -561,17 +561,17 @@ fn codex_project_trusted_reads_the_projects_table() {
 
     write(
         &config,
-        &format!("[projects.\"{key}\"]\ntrust_level = \"trusted\"\n"),
+        &format!("[projects.'{key}']\ntrust_level = \"trusted\"\n"),
     );
     assert!(codex_project_trusted(&repo, &home));
 
     // Any other value — or no value — is not trusted.
     write(
         &config,
-        &format!("[projects.\"{key}\"]\ntrust_level = \"ask\"\n"),
+        &format!("[projects.'{key}']\ntrust_level = \"ask\"\n"),
     );
     assert!(!codex_project_trusted(&repo, &home));
-    write(&config, &format!("[projects.\"{key}\"]\n"));
+    write(&config, &format!("[projects.'{key}']\n"));
     assert!(!codex_project_trusted(&repo, &home));
 
     // A different project's trust does not leak in.

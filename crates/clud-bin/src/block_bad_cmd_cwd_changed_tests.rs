@@ -15,12 +15,21 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn set(vars: &[(&'static str, PathBuf)]) -> Self {
-        let old = vars
+        // `home_dir()` on Windows resolves USERPROFILE, not HOME; mirror
+        // HOME so the handler's log lands in the isolated home on every OS.
+        let mut names: Vec<&'static str> = vars.iter().map(|(name, _)| *name).collect();
+        if vars.iter().any(|(name, _)| *name == "HOME") {
+            names.push("USERPROFILE");
+        }
+        let old = names
             .iter()
-            .map(|(name, _)| (*name, std::env::var_os(name)))
+            .map(|name| (*name, std::env::var_os(name)))
             .collect();
         for (name, value) in vars {
             std::env::set_var(name, value);
+        }
+        if let Some((_, home)) = vars.iter().find(|(name, _)| *name == "HOME") {
+            std::env::set_var("USERPROFILE", home);
         }
         Self { old }
     }
