@@ -912,6 +912,41 @@ fn log_gc_finished(
     );
 }
 
+/// Env knob for the per-phase worker-spawn budget, in seconds.
+///
+/// Issue #305: 5s is generous on an idle machine and tight on a loaded one --
+/// many parallel rustc invocations, a slow disk, an oversubscribed CI runner.
+/// A timeout here is reported to the client as a failure, so a budget that is
+/// merely too small reads as a broken worker.
+pub(super) const ENV_WORKER_SPAWN_BUDGET_SECS: &str = "CLUD_DAEMON_WORKER_SPAWN_BUDGET_SECS";
+
+/// Default per-phase budget.
+///
+/// Raised from the original 5s. Waiting longer costs a slower error on a
+/// genuinely broken worker; waiting less costs a healthy session reported as
+/// failed. The second is worse: the caller cannot tell the two apart, and the
+/// retry re-runs the whole spawn -- which is how one slow machine turns into
+/// a pile of half-started workers.
+const DEFAULT_WORKER_SPAWN_BUDGET: Duration = Duration::from_secs(15);
+
+/// Per-phase budget for worker startup.
+///
+/// Applied separately to "the worker wrote its snapshot" and "the worker's
+/// port accepts connections": they fail for different reasons and each reports
+/// its own message.
+fn worker_spawn_budget() -> Duration {
+    parse_worker_spawn_budget(std::env::var(ENV_WORKER_SPAWN_BUDGET_SECS).ok().as_deref())
+}
+
+/// Test seam. A missing, unparseable, or zero value keeps the default rather
+/// than yielding a budget that fails instantly -- a typo in an env var must not
+/// look like a broken daemon.
+fn parse_worker_spawn_budget(raw: Option<&str>) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(DEFAULT_WORKER_SPAWN_BUDGET, Duration::from_secs)
+}
+
 fn daemon_create_session(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
@@ -969,15 +1004,36 @@ fn daemon_create_session(
         .start()
         .map_err(|err| io::Error::other(err.to_string()))?;
 
-    let started = Instant::now();
+    // Issue #305: each startup phase gets its own budget, measured from its
+    // own start.
+    //
+    // Both waits used to share one `Instant` and one 5s bound, so a snapshot
+    // that took 4.9s left the readiness check 0.1s -- and the readiness check
+    // is the one that reports the failure. Under load that produced "TCP port
+    // is not accepting connections" for a worker whose port was fine and whose
+    // startup was merely slow, which sends whoever reads it looking at
+    // networking instead of at contention.
+    let budget = worker_spawn_budget();
+    let snapshot_started = Instant::now();
     let mut snapshot = loop {
         match read_json_file::<SessionSnapshot>(&session_snapshot_path(state_dir, &session_id)) {
             Ok(snapshot) => break snapshot,
-            Err(err) if started.elapsed() < Duration::from_secs(5) => {
+            Err(err) if snapshot_started.elapsed() < budget => {
                 let _ = err;
                 thread::sleep(Duration::from_millis(25));
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                let _ = err;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "worker for session {session_id} did not write its snapshot within \
+                         {:.0}s; the spawn is slow rather than broken under load. Raise \
+                         {ENV_WORKER_SPAWN_BUDGET_SECS} to allow longer.",
+                        budget.as_secs_f64()
+                    ),
+                ));
+            }
         }
     };
 
@@ -987,6 +1043,7 @@ fn daemon_create_session(
     // this readiness loop observes it; that is still a valid created session
     // whose failure can be inspected later.
     if snapshot.attachable {
+        let ready_started = Instant::now();
         loop {
             if snapshot.exit_code.is_some() {
                 break;
@@ -1002,12 +1059,14 @@ fn daemon_create_session(
                     break;
                 }
             }
-            if started.elapsed() >= Duration::from_secs(5) {
+            if ready_started.elapsed() >= budget {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
-                        "worker wrote snapshot but TCP port {} is not accepting connections",
-                        snapshot.worker_port
+                        "worker wrote snapshot but TCP port {} is not accepting connections \
+                         after {:.0}s",
+                        snapshot.worker_port,
+                        budget.as_secs_f64()
                     ),
                 ));
             }
@@ -2451,6 +2510,47 @@ mod tests {
                 Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
             ),
             "pid 200 was first seen at `later`, so its own window has not elapsed"
+        );
+    }
+
+    /// Issue #305: the budget is a knob because 5s was a guess that held on an
+    /// idle machine and not on a loaded one.
+    #[test]
+    fn the_worker_spawn_budget_is_configurable() {
+        assert_eq!(
+            parse_worker_spawn_budget(Some("45")),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            parse_worker_spawn_budget(Some("  30  ")),
+            Duration::from_secs(30),
+            "the sibling env knobs trim, so this one does too"
+        );
+    }
+
+    /// A bad value must not become a budget that fails instantly.
+    ///
+    /// Zero is the dangerous one: it parses, so a naive implementation would
+    /// accept it and every spawn would time out immediately -- an env typo
+    /// presenting as a totally broken daemon.
+    #[test]
+    fn a_useless_budget_value_falls_back_to_the_default() {
+        for raw in [None, Some(""), Some("soon"), Some("-1"), Some("0")] {
+            assert_eq!(
+                parse_worker_spawn_budget(raw),
+                DEFAULT_WORKER_SPAWN_BUDGET,
+                "{raw:?} must not shorten the budget"
+            );
+        }
+    }
+
+    /// The default was raised from 5s, which is the value #305 names as too
+    /// tight under load. Pinned so a future edit cannot quietly restore it.
+    #[test]
+    fn the_default_budget_is_longer_than_the_five_seconds_that_was_too_tight() {
+        assert!(
+            DEFAULT_WORKER_SPAWN_BUDGET > Duration::from_secs(5),
+            "the point of #305 phase 3 is that 5s was the problem"
         );
     }
 }
