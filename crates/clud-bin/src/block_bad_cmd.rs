@@ -3182,8 +3182,9 @@ use block_bad_cmd_cd::{
     BLOCK_CD_RULE_ID,
 };
 pub use block_bad_cmd_cd::{
-    frontend_hook_commands, has_broken_git_rev_parse_prefix, is_cwd_sensitive_hook_command,
-    scan_hook_cwd_sensitivity, HookCwdScan, SensitiveHook, GIT_REV_PARSE_PREFIX_FIX,
+    frontend_hook_commands, has_broken_git_rev_parse_prefix, has_pwd_walk_root_prefix,
+    is_cwd_sensitive_hook_command, scan_hook_cwd_sensitivity, HookCwdScan, SensitiveHook,
+    GIT_REV_PARSE_PREFIX_FIX, PWD_WALK_PREFIX_FIX,
 };
 
 #[path = "block_bad_cmd_cwd_changed.rs"]
