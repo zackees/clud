@@ -698,7 +698,7 @@ fn spare_rows_group_by_shape_and_reason_and_name_the_executable() {
 /// __worker` among 18 `clud __worker`s as 19 indistinguishable lines.
 #[test]
 fn spare_rows_separate_distinct_shapes() {
-    let ds = vec![
+    let ds = [
         descendant(1, "clud", "clud __worker --session-id a"),
         descendant(2, "clud", "clud __worker --session-id b"),
         descendant(3, "ctrl-c", "ctrl-c __worker"),
@@ -721,7 +721,7 @@ fn spare_rows_separate_distinct_shapes() {
 /// was never taken.
 #[test]
 fn spare_rows_separate_distinct_reasons() {
-    let ds = vec![
+    let ds = [
         descendant(1, "clud", "clud __worker --session-id a"),
         descendant(2, "clud", "clud __worker --session-id b"),
     ];
@@ -742,7 +742,7 @@ fn spare_rows_separate_distinct_reasons() {
 /// would be a false claim about an action not taken.
 #[test]
 fn spare_rows_omit_unspared_candidates() {
-    let ds = vec![
+    let ds = [
         descendant(1, "clud", "clud __worker --session-id a"),
         descendant(2, "clud", "clud __worker --session-id b"),
     ];
@@ -761,7 +761,7 @@ fn spare_rows_omit_unspared_candidates() {
 #[test]
 fn spare_row_labels_are_capped() {
     let huge = "x".repeat(5_000);
-    let ds = vec![descendant(1, "weird", &format!("weird {huge}"))];
+    let ds = [descendant(1, "weird", &format!("weird {huge}"))];
     let classified: Vec<(Shape, &Descendant)> =
         ds.iter().map(|d| (classify(&d.name, &d.command), d)).collect();
     let spares: SpareList = [(1, SpareReason::SessionLeader)].into_iter().collect();
