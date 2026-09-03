@@ -72,6 +72,12 @@ impl ModelSpec {
     ///
     /// The heuristic: anything containing a `-` or `.` is a full id and passes
     /// through; a bare word must be in the alias table.
+    ///
+    /// On the Codex bridge's request path this forward compatibility is
+    /// qualified: #1005 refuses an uncataloged id there because the harness
+    /// merges its own catalog into the picker and invents ids the user never
+    /// chose. #1022 restores it for the one case where provenance is known --
+    /// the id pinned at launch. See `codex_bridge::serve_codex_discovery_messages`.
     pub fn parse(raw: &str) -> Result<Self, SelectionError> {
         let raw = raw.trim();
         if raw.is_empty() {

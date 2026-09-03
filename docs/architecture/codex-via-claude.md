@@ -37,8 +37,19 @@ IDs (`clud-claude-codex-sol`, `clud-claude-codex-terra`, and
 `clud-claude-codex-luna`); the bridge rewrites the selected row to its real
 `gpt-5.6-*` wire ID before calling OpenAI. Unknown reserved IDs fail locally.
 Provider wire IDs and the legacy `<model>@<effort>` spelling remain accepted
-for continued sessions and forward-compatible explicit IDs, but clud no
-longer emits a compound wire ID to Claude Code.
+for continued sessions, but clud no longer emits a compound wire ID to Claude
+Code.
+
+Forward compatibility is narrower than "any explicit ID" (#1005, #1022). An ID
+clud has no catalog row for is served only when it is the one pinned at launch
+(`--model`), and is otherwise refused with a 400. The two cases are told apart
+by provenance, not by string shape: Claude Code merges this gateway's rows with
+its own built-in catalog, so IDs the *harness* invented arrive looking exactly
+like IDs the *user* typed, and forwarding those would return an upstream error
+about a model the user never knowingly chose (#997). Matching on the launch
+selection honors the ID the user actually asked for while leaving that refusal
+intact. The known limit: `/model <newer-id>` mid-session is not the launch
+selection, so it still refuses.
 
 Discovery **adds** these three rows to Claude Code's `/model` picker; it does
 not replace the picker's built-in Anthropic rows, and no gateway response can.
