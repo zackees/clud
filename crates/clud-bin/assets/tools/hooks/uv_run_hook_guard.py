@@ -64,10 +64,30 @@ RESET = _ansi("\x1b[0m")
 # any one of these on a `uv run` invocation makes it safe.
 SAFE_UV_RUN_FLAGS = {"--no-project", "--no-sync", "--frozen"}
 
-# Hook event keys we care about. SessionStart, Stop, etc. don't pay
-# the per-tool-call cost so the rebuild penalty is much smaller; not
-# in scope for v0.
-SCANNED_EVENTS = ("PreToolUse", "PostToolUse")
+# Hook event keys we care about.
+#
+# `Stop` was excluded in v0 on the reasoning that it does not pay the
+# per-tool-call cost, so the rebuild penalty is smaller. #972 measured
+# the opposite: two Stop fires cost ~600s and ~400s, the second dying
+# with an opaque build-backend error. Frequency was never what made
+# this expensive — *per-fire* cost is, and one fire that triggers a
+# full native build is worse than fifty that re-sync a venv. A Stop
+# hook is also the one most likely to run a "quick lint" that is
+# secretly a build.
+#
+# `SessionStart` stays out: it fires once, before the agent works, so
+# a sync there is startup cost the user is already paying.
+SCANNED_EVENTS = ("PreToolUse", "PostToolUse", "Stop")
+
+# Where the `clud-extern-repos` convention puts dependent checkouts.
+#
+# Two locations, mirroring `extern_root::known_roots` on the Rust side:
+# `<repo>-extern/` beside the repo is current, `<repo>/.extern-repos/` is the
+# pre-#986 in-tree location that existing checkouts still use. Looking in only
+# one would leave the guard blind for half the users during the migration --
+# and being blind is the bug this is fixing.
+EXTERN_SUFFIX = "-extern"
+LEGACY_EXTERN_DIR = ".extern-repos"
 
 # File extensions we'll dereference one level when a hook command is
 # a path to a local repo script. .sh / .bash for POSIX, .cmd / .bat /
@@ -98,10 +118,10 @@ class Offender:
         )
 
 
-def _repo_qualifies(repo_root: Path) -> bool:
-    """Gate: scan only when the repo is a Python+Rust polyglot with a build backend."""
-    cargo = repo_root / "Cargo.toml"
-    pyproject = repo_root / "pyproject.toml"
+def _is_rust_backed(root: Path) -> bool:
+    """A checkout whose `uv run` is a Cargo build behind a Python front door."""
+    cargo = root / "Cargo.toml"
+    pyproject = root / "pyproject.toml"
     if not (cargo.is_file() and pyproject.is_file()):
         return False
     try:
@@ -112,6 +132,54 @@ def _repo_qualifies(repo_root: Path) -> bool:
     # subset enforcement here, just signal whether the user has a
     # build-system that uv would resolve when it sees the file.
     return re.search(r"(?m)^\s*build-backend\s*=\s*[\"']", body) is not None
+
+
+def _known_extern_roots(repo_root: Path) -> list[Path]:
+    """Both extern-checkout locations, most-preferred first.
+
+    Mirrors `extern_root::known_roots`. The sibling has no parent to live in
+    when the repo is at a filesystem root, which is the one case it is absent.
+    """
+    roots: list[Path] = []
+    name = repo_root.name
+    if name and repo_root.parent != repo_root:
+        roots.append(repo_root.parent / f"{name}{EXTERN_SUFFIX}")
+    roots.append(repo_root / LEGACY_EXTERN_DIR)
+    return roots
+
+
+def _extern_rust_checkouts(repo_root: Path) -> list[Path]:
+    """Rust-backed dependent projects under `.extern-repos/`.
+
+    #972: the native build a hook triggers need not be *this* repo's. The
+    `clud-extern-repos` convention puts a complete sibling project at
+    `<repo>/.extern-repos/<name>/`, and a hook wrapper that resolves its
+    project root by walking up from `$PWD` binds to whichever project
+    contains the shell — during cross-repo work, the dependent one. So the
+    parent repo can be pure Python and still have its Stop hook spend ten
+    minutes compiling a dependency, which is exactly what #972 recorded.
+    """
+    found: list[Path] = []
+    for extern in _known_extern_roots(repo_root):
+        if not extern.is_dir():
+            continue
+        try:
+            children = sorted(child for child in extern.iterdir() if child.is_dir())
+        except OSError:
+            continue
+        found.extend(child for child in children if _is_rust_backed(child))
+    return found
+
+
+def _repo_qualifies(repo_root: Path) -> bool:
+    """Gate: scan when a bare `uv run` here could trigger a native build.
+
+    Either this repo is itself a Python+Rust polyglot with a build backend,
+    or it has a Rust-backed dependent checkout that a `$PWD`-walking hook
+    can bind to. Requiring Cargo.toml at *this* root is what made the guard
+    silent through #972.
+    """
+    return _is_rust_backed(repo_root) or bool(_extern_rust_checkouts(repo_root))
 
 
 def _iter_hooks_from_claude(config_path: Path) -> list[tuple[str, str, str]]:
