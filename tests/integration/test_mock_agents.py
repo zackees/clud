@@ -893,10 +893,14 @@ class TestInterruptReporting:
                 proc.wait(timeout=5)
 
         combined = f"{stdout}\n{stderr}"
-        # Same reasoning as the communicate() budget above: this waits for a
-        # process tree to actually exit on Windows, which is slower under load
-        # than the reaping logic itself.
-        wait_for_pids_to_exit(child_pids + tree_pids, timeout=30)
+        # 15, not the 30 above: by the time communicate() has returned, clud
+        # has already exited and these children have already been signalled, so
+        # this is waiting for handles to close rather than for reaping to run.
+        # It also has to *fit*: the waits in this test are sequential, and
+        # 10 (pid log) + 10 (tree pids) + 30 + 30 would exceed pytest-timeout's
+        # per-test ceiling of 90 (pyproject.toml), which kills the test with a
+        # far less diagnosable failure than the TimeoutExpired it replaces.
+        wait_for_pids_to_exit(child_pids + tree_pids, timeout=15)
         assert proc.returncode == 130, combined
         assert "Terminate batch job" not in combined
 
