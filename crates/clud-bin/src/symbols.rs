@@ -72,6 +72,48 @@ pub fn sidecar_url(version: &str, target: &str) -> Option<String> {
     Some(format!("{RELEASE_DOWNLOAD_BASE}/{version}/{asset}"))
 }
 
+/// The release's checksum manifest, which covers the sidecar assets.
+///
+/// `auto-release.yml` publishes one `SHA256SUMS` per release spanning `dist/`
+/// and `debuginfo/`, so a fetched sidecar can be checked against the bytes the
+/// release actually published.
+pub const CHECKSUM_MANIFEST: &str = "SHA256SUMS";
+
+/// URL of the checksum manifest for `version`.
+#[must_use]
+pub fn checksum_manifest_url(version: &str) -> String {
+    format!("{RELEASE_DOWNLOAD_BASE}/{version}/{CHECKSUM_MANIFEST}")
+}
+
+/// The expected sha256 of `asset`, parsed out of a `SHA256SUMS` body.
+///
+/// Entries are `<hex>  ./<name>`, the `sha256sum` format the release job
+/// generates from inside the directory, hence the `./` prefix. Both spellings
+/// are accepted so a manifest generated without it still matches.
+///
+/// # Why a checksum is the verification available, and what it does not prove
+///
+/// #1016 item 3 asks that a sidecar whose build-id does not match be refused.
+/// The published `.dwp` has no build-id to compare: a DWARF package is a
+/// relocatable object carrying `.debug_*.dwo` sections and `.debug_cu_index`,
+/// and `readelf -n` on release 2.7.9's sidecar reports no notes at all.
+///
+/// So this authenticates the *asset*, not the *pairing*: it proves the bytes
+/// are the ones that release published for this version and triple. It does
+/// not prove they belong to the binary in hand -- a rebuild at the same
+/// version would still pair with the published sidecar and mis-symbolicate.
+/// DWARF's own answer to that is the DWO ID, which `.debug_cu_index` is keyed
+/// by; see the discussion on #1016.
+#[must_use]
+pub fn expected_sha256(manifest: &str, asset: &str) -> Option<String> {
+    manifest.lines().find_map(|line| {
+        let (hex, name) = line.split_once("  ")?;
+        let name = name.trim();
+        let name = name.strip_prefix("./").unwrap_or(name);
+        (name == asset && !hex.is_empty()).then(|| hex.trim().to_string())
+    })
+}
+
 /// Heuristic for whether a single backtrace line is an `at FILE:LINE`
 /// frame produced by `std::backtrace::Backtrace`.
 ///
@@ -432,6 +474,74 @@ mod tests {
         assert!(
             !RELEASE_DOWNLOAD_BASE.ends_with('/'),
             "the joiner adds the separator; a trailing one yields a double slash"
+        );
+    }
+
+    /// Real bytes from release 2.7.9's `SHA256SUMS`, trimmed to the rows that
+    /// matter. Using the published manifest rather than a synthetic one is
+    /// what makes the parser's format assumptions testable -- the `./` prefix
+    /// and the two-space separator are `sha256sum`'s, not ours.
+    const REAL_MANIFEST: &str = concat!(
+        "b586d13c8859db1c0f8bd665f83fdd3eecb60cc6fd6c6937f5e96e9c848c9648  ",
+        "./clud-2.7.9-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl\n",
+        "18f5d3675e5cd1237f81751517eadce44dc0cd053c330c45b0691608acb3aef4  ",
+        "./clud-aarch64-unknown-linux-gnu.dwp\n",
+        "6d30b668c7eb96f5e0e0d3d9c3c07becddcabaac9f18312f623616e4838901c3  ",
+        "./clud-x86_64-unknown-linux-gnu.dwp\n",
+    );
+
+    /// The checksum found must be the one the release actually published.
+    ///
+    /// `6d30b668...` was verified by downloading the 62 MB sidecar and running
+    /// `sha256sum` over it, so this pins the parser against reality rather
+    /// than against itself.
+    #[test]
+    fn finds_the_published_checksum_for_a_sidecar() {
+        let asset = sidecar_asset_name("x86_64-unknown-linux-gnu").unwrap();
+        assert_eq!(
+            expected_sha256(REAL_MANIFEST, &asset).as_deref(),
+            Some("6d30b668c7eb96f5e0e0d3d9c3c07becddcabaac9f18312f623616e4838901c3")
+        );
+    }
+
+    /// The two sidecars differ by one path component; picking the wrong row
+    /// would verify successfully against the wrong architecture's DWARF.
+    #[test]
+    fn does_not_confuse_the_two_architectures() {
+        let x86 = expected_sha256(REAL_MANIFEST, "clud-x86_64-unknown-linux-gnu.dwp");
+        let arm = expected_sha256(REAL_MANIFEST, "clud-aarch64-unknown-linux-gnu.dwp");
+        assert!(x86.is_some() && arm.is_some());
+        assert_ne!(x86, arm, "each triple has its own sidecar and its own sum");
+    }
+
+    /// An asset that is not listed has no expected sum -- callers must treat
+    /// that as "cannot verify", never as "verified".
+    #[test]
+    fn an_unlisted_asset_has_no_checksum() {
+        assert_eq!(
+            expected_sha256(REAL_MANIFEST, "clud-x86_64-pc-windows-msvc.dwp"),
+            None
+        );
+        assert_eq!(expected_sha256("", "anything"), None);
+        assert_eq!(expected_sha256("garbage without a separator\n", "x"), None);
+    }
+
+    /// A manifest generated without `sha256sum`'s `./` prefix still matches,
+    /// so the parser does not depend on which directory the release job ran in.
+    #[test]
+    fn a_bare_name_matches_too() {
+        let manifest = "abc123  clud-x86_64-unknown-linux-gnu.dwp\n";
+        assert_eq!(
+            expected_sha256(manifest, "clud-x86_64-unknown-linux-gnu.dwp").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn the_manifest_url_sits_beside_the_sidecar() {
+        assert_eq!(
+            checksum_manifest_url("2.7.9"),
+            "https://github.com/zackees/clud/releases/download/2.7.9/SHA256SUMS"
         );
     }
 }
