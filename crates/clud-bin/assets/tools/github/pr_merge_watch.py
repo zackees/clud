@@ -28,6 +28,12 @@ Exit codes:
   2  new review activity (unresolved coderabbit/human review)
   3  PR closed or merged out from under us
   4  timeout (configurable via --timeout, default 60min)
+
+The exit code IS the result — do not pipe this through `tail`, `grep` or
+`head`. A pipeline reports the *last* stage's status, so every one of the
+codes above collapses to whatever the filter exited with, and `tail` buffers
+to EOF so the per-poll progress lines vanish too. Redirect to a file and read
+it, or run it bare.
 """
 
 from __future__ import annotations
@@ -140,14 +146,48 @@ class WatchLog:
         self.closed = True
 
 
-# First-error classifier patterns. Applied to up to ~200 lines of
-# `gh run view --log-failed`. Order matters: first match wins.
+# Every line of a GitHub Actions log carries a prefix the anchored patterns
+# below must not see: the REST job-log endpoint emits
+# `2026-09-03T19:45:30.9660131Z <line>`, and `gh run view --log-failed` emits
+# `<job>\t<step>\t2026-…Z <line>`. Without stripping it, `^FAILED`,
+# `^error` and `^thread .*? panicked` can never match a real log — which is
+# how a pytest failure fell through to the transient-network pattern and was
+# reported to the caller as "network/transient".
+LOG_LINE_PREFIX = re.compile(
+    r"^(?:[^\t]*\t[^\t]*\t)?\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?"
+)
+
+# A guard on pathological logs only. Real failure logs run to a few thousand
+# lines; the summary that names the failing test is at the *end*, so this is
+# deliberately not a head slice.
+MAX_LOG_LINES = 100_000
+
+
+def normalize_log(text: str) -> str:
+    """Strip the runner's per-line prefix so anchored patterns mean what they say."""
+    lines = text.splitlines()[:MAX_LOG_LINES]
+    return "\n".join(LOG_LINE_PREFIX.sub("", line) for line in lines)
+
+
+# First-error classifier patterns, applied to the normalized log.
+# Order matters: first match wins.
 CLASSIFIERS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^Diff in .*?:\d+:|run `cargo fmt", re.MULTILINE), "rustfmt drift"),
     (re.compile(r"^error: .*?clippy::|warning:.*?clippy::", re.MULTILINE), "clippy warning"),
     (re.compile(r"^error\[E\d+\]:|^error: could not compile", re.MULTILINE), "compile error"),
     (
-        re.compile(r"^thread .*? panicked at|FAILED \(\d+\)|test result: FAILED", re.MULTILINE),
+        re.compile(
+            r"^thread .*? panicked at"
+            r"|FAILED \(\d+\)"
+            r"|test result: FAILED"
+            # pytest: the summary line and the inline per-test marker. Without
+            # these a timed-out pytest case matched "timed out" below and was
+            # mislabelled transient.
+            r"|^FAILED \S+::"
+            r"|short test summary info"
+            r"|^E\s+\w*(?:Error|Exception|AssertionError)",
+            re.MULTILINE,
+        ),
         "test failure",
     ),
     (
@@ -177,9 +217,18 @@ class GhResult:
         return self.exit_code == 0
 
 
-def gh(*args: str, check: bool = False) -> GhResult:
-    """Run gh with the supplied args; return the captured outcome."""
-    res = RunningProcess.run(["gh", *args], capture_output=True, text=True)
+def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResult:
+    """Run gh with the supplied args; return the captured outcome.
+
+    `timeout` bounds the call: a probe that would otherwise delay a
+    fail-fast exit is abandoned and reported as a failed call.
+    """
+    try:
+        res = RunningProcess.run(
+            ["gh", *args], capture_output=True, text=True, timeout=timeout
+        )
+    except TimeoutError:
+        return GhResult(124, "", f"gh {' '.join(args)} timed out after {timeout}s")
     if check and res.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} failed: {res.stderr.strip()}")
     return GhResult(res.returncode, res.stdout, res.stderr)
@@ -300,19 +349,56 @@ def fetch_required_check_names(repo: str, base_ref: str) -> set[str] | None:
     return required
 
 
-def classify_failure(repo: str, run_id: str, job_id: str | None) -> tuple[str, str | None]:
-    """Fetch `gh run view --log-failed` for the run/job; classify the first error.
+# One bounded probe. It runs on the fail-fast path, ahead of cancellation,
+# so it must never be what delays either.
+LOG_PROBE_TIMEOUT_SEC = 25.0
+
+
+def fetch_failure_log(repo: str, run_id: str | None, job_id: str | None) -> str:
+    """The failing job's log, normalized, or `""` if it cannot be read now.
+
+    Prefers the REST **job** endpoint. `gh run view --log-failed` resolves the
+    whole *run*, and GitHub refuses that while any job is still going —
+    `run … is still in progress; logs will be available when it is complete`.
+    On the fail-fast path the run is in progress by definition, so the
+    run-level probe returns nothing exactly when the caller needs it most.
+    The job endpoint serves a finished job's log regardless of its siblings.
+    """
+    if job_id:
+        res = gh(
+            "api",
+            f"repos/{repo}/actions/jobs/{job_id}/logs",
+            "--allow-escape-sequences",
+            timeout=LOG_PROBE_TIMEOUT_SEC,
+        )
+        if res.ok and res.stdout.strip():
+            return normalize_log(strip_ansi(res.stdout))
+    if not run_id:
+        return ""
+    res = gh(
+        "run", "view", run_id, "--repo", repo, "--log-failed",
+        timeout=LOG_PROBE_TIMEOUT_SEC,
+    )
+    return normalize_log(strip_ansi(res.stdout)) if res.ok else ""
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE.sub("", text)
+
+
+def classify_failure(
+    repo: str, run_id: str | None, job_id: str | None
+) -> tuple[str, str | None]:
+    """Read the failing job's log and classify the first error.
 
     Returns (first_error_line, classifier_label).
     """
-    args = ["run", "view", run_id, "--repo", repo, "--log-failed"]
-    if job_id:
-        args = ["run", "view", run_id, "--repo", repo, "--job", job_id, "--log-failed"]
-    res = gh(*args)
-    text = res.stdout if res.ok else ""
-    # Take a manageable slice — most CI failure logs surface the root in
-    # the first few hundred lines.
-    sample = "\n".join(text.splitlines()[:300])
+    sample = fetch_failure_log(repo, run_id, job_id)
+    if not sample:
+        return "", None
     first_err = ""
     for line in sample.splitlines():
         if re.search(r"^error|^Error|^FAILED|panicked|Diff in", line):
@@ -1250,15 +1336,18 @@ def watch(
                         "link": c.link,
                     },
                 )
-            # Cancel current-head work before the advisory log probe, which
-            # can be slower than the cancellation API for large failed runs.
+            # Diagnose first, then cancel. The probe is one bounded request
+            # against the failing *job*, so the matrix minutes this costs are
+            # seconds; cancelling first raced the log's availability and left
+            # the caller with a bare "FAIL <name>" and nothing to act on,
+            # which is the opposite of what failing fast is for.
+            report = _build_failure_report(c, repo_for_protection)
             _cancel_for_exit("fail", pr, repo, snapshot.head_sha, opts, log)
             if "fail" in opts.on or "always" in opts.on:
                 print(
                     f"NOTE  {len(pending)} check(s) still running on this head SHA; "
                     "cancelling this PR's remaining runs — push a fix to supersede them"
                 )
-            report = _build_failure_report(c, repo_for_protection)
             print(report.render())
             if log and (report.first_error or report.classifier):
                 log.emit(
@@ -1342,9 +1431,14 @@ def _is_required(
 
 def _build_failure_report(c: CheckRow, repo: str | None) -> FailureReport:
     run_id = _extract_run_id_from_link(c.link)
+    # A failing check's link is `…/actions/runs/<run>/job/<job>`. `job_id` was
+    # declared for this and never assigned, so every probe fell back to the
+    # run-level log — the one that is unavailable while the run is in
+    # progress, which on this path it always is.
+    job_id = c.job_id or _extract_job_id_from_link(c.link)
     first_err, classifier = ("", None)
-    if run_id and repo:
-        first_err, classifier = classify_failure(repo, run_id, c.job_id)
+    if repo and (run_id or job_id):
+        first_err, classifier = classify_failure(repo, run_id, job_id)
     return FailureReport(check=c, run_id=run_id, first_error=first_err, classifier=classifier)
 
 
@@ -1352,6 +1446,13 @@ def _extract_run_id_from_link(link: str | None) -> str | None:
     if not link:
         return None
     m = re.search(r"/actions/runs/(\d+)", link)
+    return m.group(1) if m else None
+
+
+def _extract_job_id_from_link(link: str | None) -> str | None:
+    if not link:
+        return None
+    m = re.search(r"/job/(\d+)", link)
     return m.group(1) if m else None
 
 
