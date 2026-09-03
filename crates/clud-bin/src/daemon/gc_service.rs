@@ -844,10 +844,12 @@ fn run_maintenance_sweeps(warn_free_bytes: u64) {
     match maintenance_action(low_disk, cpu_busy) {
         MaintenanceAction::RunUrgent => {
             crate::daemon::session_tmp_sweep::sweep_now();
+            crate::daemon::session_state_sweep::sweep_now();
             crate::daemon::target_sweep::sweep_now();
         }
         MaintenanceAction::RunNormal => {
             crate::daemon::session_tmp_sweep::maybe_sweep_session_tmp();
+            crate::daemon::session_state_sweep::maybe_sweep_session_state();
             crate::daemon::target_sweep::maybe_sweep_targets();
         }
         MaintenanceAction::Defer => {}
