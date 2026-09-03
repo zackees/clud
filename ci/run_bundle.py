@@ -37,6 +37,90 @@ ROOT = Path(__file__).resolve().parent.parent
 
 _PYTEST_NO_TESTS_COLLECTED = 5
 
+# pytest's documented exit codes. Anything outside this set did not come from
+# pytest deciding something -- it came from the process dying.
+_PYTEST_EXIT_MEANINGS = {
+    0: "all tests passed",
+    1: "tests failed (pytest ran to completion and printed a summary)",
+    2: "interrupted (Ctrl-C, or an internal KeyboardInterrupt)",
+    3: "internal error in pytest itself",
+    4: "pytest usage error (bad arguments)",
+    _PYTEST_NO_TESTS_COLLECTED: "no tests collected",
+}
+
+# Windows NTSTATUS codes a test process realistically dies on. Reported as a
+# large unsigned exit code rather than a signal, so a POSIX-shaped check for a
+# negative return sees nothing wrong.
+_NTSTATUS_MEANINGS = {
+    0xC0000005: "EXCEPTION_ACCESS_VIOLATION",
+    0xC000001D: "EXCEPTION_ILLEGAL_INSTRUCTION",
+    0xC00000FD: "EXCEPTION_STACK_OVERFLOW",
+    0xC0000374: "STATUS_HEAP_CORRUPTION",
+    0xC0000409: "STATUS_STACK_BUFFER_OVERRUN",
+    0xC000013A: "STATUS_CONTROL_C_EXIT",
+}
+
+
+def describe_pytest_exit(returncode: int) -> str:
+    """Say what a pytest exit code means, especially when it is not pytest's.
+
+    Issue #994: the Windows lane exited 1 with no `FAILED` line and no pytest
+    summary -- "the process died rather than a test failing" -- and the log
+    said only `Process completed with exit code 1`. A reader cannot tell a
+    crash from a hang from an ordinary failure, so every occurrence costs a
+    fresh diagnosis.
+
+    An exit code carries more than that if it is read. A negative value is a
+    POSIX signal; a large unsigned one is an NTSTATUS; and codes outside
+    pytest's documented set did not come from pytest at all.
+    """
+    if returncode < 0:
+        signum = -returncode
+        name = _POSIX_SIGNAL_NAMES.get(signum, f"signal {signum}")
+        return (
+            f"exit {returncode}: killed by {name} -- the process crashed or was "
+            f"killed, so any missing summary is expected rather than a clue"
+        )
+
+    unsigned = returncode & 0xFFFFFFFF
+    if unsigned in _NTSTATUS_MEANINGS:
+        return (
+            f"exit {returncode} (0x{unsigned:08X}): {_NTSTATUS_MEANINGS[unsigned]} "
+            f"-- a Windows crash, not a test result"
+        )
+
+    if returncode in _PYTEST_EXIT_MEANINGS:
+        return f"exit {returncode}: {_PYTEST_EXIT_MEANINGS[returncode]}"
+
+    return (
+        f"exit {returncode}: not one of pytest's documented codes (0-5), so "
+        f"this did not come from pytest deciding anything -- suspect the "
+        f"process dying, a wrapper, or a timeout killer"
+    )
+
+
+# Named from a fixed table rather than `signal.Signals`, which is the *host's*
+# signal set. A negative exit code can only have come from a POSIX runner, but
+# the log may well be read on Windows -- where `SIGKILL` does not exist, so the
+# host enum would render the most common CI kill as a bare "signal 9". The
+# number means the same thing wherever it is interpreted, so the name should
+# too.
+_POSIX_SIGNAL_NAMES = {
+    1: "SIGHUP",
+    2: "SIGINT",
+    3: "SIGQUIT",
+    4: "SIGILL",
+    6: "SIGABRT",
+    8: "SIGFPE",
+    9: "SIGKILL",
+    11: "SIGSEGV",
+    13: "SIGPIPE",
+    14: "SIGALRM",
+    15: "SIGTERM",
+    24: "SIGXCPU",
+    25: "SIGXFSZ",
+}
+
 
 def _pytest_ok(returncode: int) -> bool:
     return returncode in (0, _PYTEST_NO_TESTS_COLLECTED)
@@ -132,6 +216,20 @@ def run_pytest(marker: str, env: dict[str, str], extra: list[str]) -> int:
     return process.run(argv, cwd=ROOT, env=env).returncode
 
 
+def report_pytest_exit(returncode: int) -> bool:
+    """Print what the exit code means, and say whether it counts as success.
+
+    #994: `Process completed with exit code 1` is the whole story a reader
+    gets today, and it reads the same whether pytest failed a test, crashed,
+    or was killed. One line of interpretation is the difference between
+    "is this mine?" costing a log download and costing nothing.
+    """
+    ok = _pytest_ok(returncode)
+    if not ok:
+        print(f"::error::pytest {describe_pytest_exit(returncode)}", file=sys.stderr)
+    return ok
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a prebuilt CI test bundle")
     parser.add_argument("--bundle", type=Path, required=True)
@@ -147,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.suite == "unit":
         if run_harnesses(bundle, manifest, env) != 0:
             return 1
-        return 0 if _pytest_ok(run_pytest("not integration", env, args.pytest_args)) else 1
+        return 0 if report_pytest_exit(run_pytest("not integration", env, args.pytest_args)) else 1
 
     if install_wheel(bundle, env) != 0:
         return 1
@@ -172,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     env["CLUD_NO_UNLOCK"] = "1"
     # `-v` prints each test name before it runs, so a hang is pinned to an exact
     # test rather than showing up as silent dead air before the job timeout.
-    return 0 if _pytest_ok(run_pytest("integration", env, ["-v", *args.pytest_args])) else 1
+    return 0 if report_pytest_exit(run_pytest("integration", env, ["-v", *args.pytest_args])) else 1
 
 
 if __name__ == "__main__":
