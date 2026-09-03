@@ -878,14 +878,25 @@ class TestInterruptReporting:
             time.sleep(0.1)
             if proc.poll() is None:
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
-            stdout, stderr = proc.communicate(timeout=10)
+            # 30s, not 10. This budget bounds *teardown* -- clud receiving the
+            # break, reaping a three-process tree, and closing its pipes -- and
+            # not the mock's own 15s sleep, which only ends because the break
+            # arrives. The Windows integration lane timed out here at 10s and
+            # passed on re-run, which is a statement about the runner rather
+            # than the code (#994). Still far under pytest-timeout's per-test
+            # ceiling of 90 (pyproject.toml), so a genuine hang is still
+            # reported rather than waiting forever.
+            stdout, stderr = proc.communicate(timeout=30)
         finally:
             if proc.poll() is None:
                 kill_process(proc.pid)
                 proc.wait(timeout=5)
 
         combined = f"{stdout}\n{stderr}"
-        wait_for_pids_to_exit(child_pids + tree_pids, timeout=10)
+        # Same reasoning as the communicate() budget above: this waits for a
+        # process tree to actually exit on Windows, which is slower under load
+        # than the reaping logic itself.
+        wait_for_pids_to_exit(child_pids + tree_pids, timeout=30)
         assert proc.returncode == 130, combined
         assert "Terminate batch job" not in combined
 
