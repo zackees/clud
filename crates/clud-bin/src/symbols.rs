@@ -35,6 +35,43 @@ use std::path::{Path, PathBuf};
 
 use crate::args::{Args, SymbolsSubcommand};
 
+/// Where a released sidecar lives, as one named constant.
+///
+/// #1016 item 1: the URL is derivable from the version, but building it at
+/// the call site puts the tag-vs-version convention in as many places as
+/// there are callers, and leaves a fork or a mirror nothing to repoint.
+///
+/// The tag is the bare version -- clud's releases are tagged `2.7.9`, not
+/// `v2.7.9` -- and that convention lives here and nowhere else.
+pub const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/zackees/clud/releases/download";
+
+/// The sidecar asset for `target`, or `None` when that triple ships none.
+///
+/// `ci/xbuild.py::collect_debuginfo` stages exactly one file per ELF triple,
+/// named `clud-<triple>.dwp`, and deliberately not the `deps/clud-<hash>.dwp`
+/// it was copied from -- its own comment says an asset name carrying a build
+/// hash "is one #1016's fetcher could not predict". This is that fetcher's
+/// half of the arrangement.
+///
+/// Only ELF targets are covered, which is not an oversight: on MSVC and Apple
+/// `split-debuginfo = "packed"` is already the default, their `.pdb` / `.dSYM`
+/// were never embedded in the shipped wheel, and `collect_debuginfo` does not
+/// stage them. Returning `Some` for those would name an asset that does not
+/// exist, which is worse than saying there is nothing to fetch.
+#[must_use]
+pub fn sidecar_asset_name(target: &str) -> Option<String> {
+    target
+        .contains("-linux-")
+        .then(|| format!("clud-{target}.dwp"))
+}
+
+/// The full download URL for `version`'s sidecar for `target`.
+#[must_use]
+pub fn sidecar_url(version: &str, target: &str) -> Option<String> {
+    let asset = sidecar_asset_name(target)?;
+    Some(format!("{RELEASE_DOWNLOAD_BASE}/{version}/{asset}"))
+}
+
 /// Heuristic for whether a single backtrace line is an `at FILE:LINE`
 /// frame produced by `std::backtrace::Backtrace`.
 ///
@@ -220,6 +257,23 @@ fn verify(reports: &[PathBuf], all: bool) -> i32 {
              Build with `debug = \"line-tables-only\"` (already the project default) and ensure\n\
              the binary running `clud symbols verify` is the same build that produced the report."
         );
+        // #1016: a release build's inline caller chain lives in a sidecar
+        // beside the release, not in the binary. Naming the exact asset is
+        // the difference between "symbolication failed" and something the
+        // reader can act on -- and it is derivable here because the triple is
+        // baked in (`crash_report::BUILD_TARGET`).
+        match sidecar_url(env!("CARGO_PKG_VERSION"), crate::crash_report::BUILD_TARGET) {
+            Some(url) => println!(
+                "\nThis build's sidecar debug info (the inlined-frame DIEs a release\n\
+                 binary does not carry) is published beside the release:\n  {url}\n\
+                 Fetching it automatically is #1016; for now it can be downloaded by hand."
+            ),
+            None => println!(
+                "\nNo sidecar is published for {} — on this platform the debug info\n\
+                 was never split out of the shipped binary, so there is nothing to fetch.",
+                crate::crash_report::BUILD_TARGET
+            ),
+        }
         1
     }
 }
@@ -304,5 +358,80 @@ mod tests {
         assert!(bt.contains("/x/main.rs:1:1"));
         assert_eq!(count_resolved_frames(&bt), 1);
         Ok(())
+    }
+
+    /// The derived URL must be the one that actually exists.
+    ///
+    /// Checked against release 2.7.9, whose asset list really does contain
+    /// `clud-x86_64-unknown-linux-gnu.dwp`. Pinning a live example is what
+    /// makes this more than a restatement of the format string: the tag is
+    /// the bare version (clud tags `2.7.9`, not `v2.7.9`), and getting that
+    /// wrong yields a 404 that looks like a missing sidecar.
+    #[test]
+    fn the_derived_url_matches_a_release_asset_that_exists() {
+        assert_eq!(
+            sidecar_url("2.7.9", "x86_64-unknown-linux-gnu").as_deref(),
+            Some(
+                "https://github.com/zackees/clud/releases/download/2.7.9/\
+                 clud-x86_64-unknown-linux-gnu.dwp"
+            )
+        );
+        assert_eq!(
+            sidecar_asset_name("aarch64-unknown-linux-gnu").as_deref(),
+            Some("clud-aarch64-unknown-linux-gnu.dwp"),
+            "the aarch64 sidecar is published too"
+        );
+    }
+
+    /// Triples that publish no sidecar must say so rather than name a 404.
+    ///
+    /// `collect_debuginfo` stages only the ELF `.dwp`: on MSVC and Apple,
+    /// `packed` split-debuginfo is already the default and the `.pdb`/`.dSYM`
+    /// was never inside the shipped wheel. A confident URL for an asset that
+    /// was never uploaded is worse than "there is nothing to fetch".
+    #[test]
+    fn triples_without_a_published_sidecar_return_none() {
+        for target in [
+            "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ] {
+            assert_eq!(
+                sidecar_asset_name(target),
+                None,
+                "{target} publishes no .dwp"
+            );
+            assert_eq!(sidecar_url("2.7.9", target), None, "{target}");
+        }
+    }
+
+    /// The asset name is the one `ci/xbuild.py::collect_debuginfo` stages.
+    ///
+    /// That code renames the `deps/clud-<hash>.dwp` it copies from precisely
+    /// so this side can predict the name -- its comment says an asset name
+    /// carrying a build hash "is one #1016's fetcher could not predict". If
+    /// either side drifts, the fetch 404s.
+    #[test]
+    fn the_asset_name_carries_the_triple_and_no_build_hash() {
+        let name = sidecar_asset_name("x86_64-unknown-linux-gnu").expect("linux publishes one");
+        assert!(name.starts_with("clud-"), "{name}");
+        assert!(name.ends_with(".dwp"), "{name}");
+        assert!(name.contains("x86_64-unknown-linux-gnu"), "{name}");
+        assert!(
+            !name.chars().any(|c| c == '#'),
+            "the staged name is fixed, not hash-suffixed: {name}"
+        );
+    }
+
+    /// The base is a single constant so a fork or mirror has one thing to
+    /// repoint, which is item 1's stated reason for existing.
+    #[test]
+    fn the_release_base_is_one_named_constant() {
+        assert!(RELEASE_DOWNLOAD_BASE.starts_with("https://"));
+        assert!(
+            !RELEASE_DOWNLOAD_BASE.ends_with('/'),
+            "the joiner adds the separator; a trailing one yields a double slash"
+        );
     }
 }
