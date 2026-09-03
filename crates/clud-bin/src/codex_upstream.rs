@@ -1405,13 +1405,28 @@ mod tests {
                 ..fast_config()
             },
         );
+        let mut outcome = None;
         let mut seen = Vec::new();
-        let outcome = client
-            .stream(b"{}", &AtomicBool::new(false), &mut |chunk| {
+        // A loaded shared macOS runner can refuse a fresh loopback SYN
+        // (`Transport("connection failed")`, #994) — the property under test
+        // is the healthy-frame success path, not first-SYN luck, so retry
+        // the connection a bounded number of times.
+        for attempt in 0..5 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            match client.stream(b"{}", &AtomicBool::new(false), &mut |chunk| {
                 seen.extend_from_slice(chunk);
                 Ok(())
-            })
-            .unwrap();
+            }) {
+                Ok(result) => {
+                    outcome = Some(result);
+                    break;
+                }
+                Err(_) => seen.clear(),
+            }
+        }
+        let outcome = outcome.expect("loopback connect kept failing across 5 attempts");
 
         assert_eq!(outcome.attempts, 1);
         assert_eq!(seen, b"data: healthy\n\n");
