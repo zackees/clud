@@ -181,3 +181,74 @@ fn a_missing_root_is_a_successful_no_op() {
     let report = sweep_at(&tmp.path().join("nope"), SystemTime::now(), DEAD).unwrap();
     assert_eq!(report, SweepReport::default());
 }
+
+/// Issue #893: a live repo directory vanished with nothing in any log naming
+/// what removed it, and #996 answered that with a pre-deletion audit line from
+/// every destructive sweep. This sweep landed alongside that work and was
+/// missed, so it deleted forensic session directories silently — the one thing
+/// #893 exists to prevent.
+///
+/// Mirrors `target_sweep::sweep_writes_pre_deletion_audit_line`, including its
+/// tolerance for unrelated concurrent deletions sharing the log file.
+#[test]
+fn sweeping_writes_a_pre_deletion_audit_line() {
+    use crate::gc::delete_audit::{StateDirGuard, AUDIT_LOG_FILE};
+
+    let tmp = tempdir().unwrap();
+    let state = tempdir().unwrap();
+    let _guard = StateDirGuard::set(state.path());
+    let dir = session(tmp.path(), "1__1", Some(&ambient_log()));
+
+    let report = sweep_at(
+        tmp.path(),
+        later(AMBIENT_STALE_AFTER + Duration::from_secs(3600)),
+        DEAD,
+    )
+    .unwrap();
+
+    assert_eq!(report.removed, 1);
+    assert!(!dir.exists());
+
+    let body = fs::read_to_string(state.path().join(AUDIT_LOG_FILE)).unwrap();
+    let ours = body
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|v| v["site"] == "gc.session-state")
+        .expect("a gc.session-state line must exist");
+    assert_eq!(ours["rule"], "session-state ambient stale>48h");
+    assert!(
+        ours["path"].as_str().unwrap().ends_with("1__1"),
+        "the line names the exact directory removed: {:?}",
+        ours["path"]
+    );
+}
+
+/// The two retention windows are separate rules, and the audit line has to say
+/// which one fired — otherwise "why was my failure trail deleted?" is
+/// unanswerable from the log alone.
+#[test]
+fn the_audit_rule_distinguishes_the_two_retention_windows() {
+    use crate::gc::delete_audit::{StateDirGuard, AUDIT_LOG_FILE};
+
+    let tmp = tempdir().unwrap();
+    let state = tempdir().unwrap();
+    let _guard = StateDirGuard::set(state.path());
+    let body_with_failure = ambient_log() + r#"{"ts_ms":4,"event":"upstream_failed"}"#;
+    session(tmp.path(), "2__2", Some(&body_with_failure));
+
+    let report = sweep_at(
+        tmp.path(),
+        later(NOTABLE_STALE_AFTER + Duration::from_secs(3600)),
+        DEAD,
+    )
+    .unwrap();
+    assert_eq!(report.removed, 1);
+
+    let log = fs::read_to_string(state.path().join(AUDIT_LOG_FILE)).unwrap();
+    let ours = log
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|v| v["site"] == "gc.session-state")
+        .expect("a gc.session-state line must exist");
+    assert_eq!(ours["rule"], "session-state notable stale>30d");
+}

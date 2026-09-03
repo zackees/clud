@@ -31,6 +31,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use super::delete_audit;
+
 /// Age after which a session directory with nothing notable in it goes. Shares
 /// 48h with the session-temp and worktree policies, deliberately as its own
 /// constant — they are independent policies that agree today.
@@ -189,6 +191,19 @@ where
             }
             continue;
         }
+        // Audit *before* acting (#893), the same rule every other destructive
+        // sweep follows: a deletion that leaves no record is its own defect,
+        // and a line written first survives a crash mid-deletion. These
+        // directories hold the reaper and bridge forensics someone may come
+        // looking for, so "what removed my session log?" has to be answerable.
+        delete_audit::record(
+            "gc.session-state",
+            &path,
+            match retention {
+                Retention::Ambient => "session-state ambient stale>48h",
+                Retention::Notable => "session-state notable stale>30d",
+            },
+        );
         match fs::remove_dir_all(&path) {
             Ok(()) => report.removed += 1,
             // Losing the race with a starting session, or a permission
