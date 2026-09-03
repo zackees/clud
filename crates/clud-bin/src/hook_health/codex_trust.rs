@@ -114,7 +114,8 @@ pub(in crate::hook_health) fn is_extended_key_for(key: &str, canonical_key: &str
     let Some(stripped) = key.strip_prefix(r"\\?\") else {
         return false;
     };
-    normalize_project_path_key(key) == canonical_key || stripped.replace('\\', "/") == canonical_key
+    normalize_project_path_key(key) == canonical_key
+        || crate::path_norm::slash_separators(stripped) == canonical_key
 }
 
 /// Whether the repo at `repo_root` is trusted in the codex project trust
