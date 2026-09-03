@@ -252,8 +252,15 @@ fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
     });
     assert!(
         outcome.candidate_pids.contains(&pid),
-        "the sweep never selected the leaked client; candidates={:?}",
-        outcome.candidate_pids
+        "the sweep never selected the leaked client; candidates={:?}\n\
+         diagnostics: child_alive={} running_process_sees={:?} kernel_environ={}",
+        outcome.candidate_pids,
+        pid_is_alive(pid),
+        running_process::originator::find_processes_by_originator("CLUD")
+            .iter()
+            .map(|p| p.pid)
+            .collect::<Vec<_>>(),
+        leaked_environ_text(pid),
     );
     assert!(
         outcome.spared.is_empty(),
@@ -283,6 +290,23 @@ fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
             );
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// What the kernel itself exposes for the child's environ (Linux). This
+/// distinguishes "the tag never made it onto the child" from "the scanner
+/// cannot read it" when the sweep cannot see the leaked client on CI.
+fn leaked_environ_text(pid: u32) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read(format!("/proc/{pid}/environ"))
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|error| format!("unreadable: {error}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        String::from("n/a (not linux)")
     }
 }
 
