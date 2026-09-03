@@ -2571,6 +2571,41 @@ is the proportionate mitigation (shipped in #1066; see DD-067). Coverage is also
 where clud set `CLUD_CMD_GATE` are gated, which is why `block_bad_cmd_rm_vars`
 stays in place rather than being retired on arrival.
 
+### Rollout, and how to turn it off (#1067)
+
+`tap` v0 ships as the `tap` binary in `crates/tap`. It exists; it is not on by
+default, and clud does not set `CLUD_CMD_GATE`.
+
+The gate is controlled entirely by two environment variables, both read by
+`block_bad_cmd_gate`:
+
+| Variable | Effect |
+|---|---|
+| `CLUD_CMD_GATE` | `enforce`, `1`, or `on` turns the gate on. Anything else, including unset, leaves it off. |
+| `CLUD_CMD_GATE_PREFIX` | The required wrapper. Defaults to `tap`. |
+
+**Disabling returns to post-#1064 behaviour exactly.** Unsetting
+`CLUD_CMD_GATE` is the whole revert: the gate's own entry point short-circuits
+on it before inspecting anything, so no other code path changes. Removing the
+`tap` binary is not required and does nothing on its own -- an enabled gate
+with no `tap` on `PATH` refuses everything, which is the failure-closed
+direction but not a useful state.
+
+The enablement sequence in #1067 is deliberately staged, and steps 2-4 are not
+taken here:
+
+1. **Ship `tap` and dogfood it opt-in** — where this is. Turn it on for a
+   session with `CLUD_CMD_GATE=enforce`.
+2. **Measure the false-positive rate** from the hook log before going further.
+3. Set `CLUD_CMD_GATE` from the `LaunchPlan` where `tap` is on `PATH`, behind
+   a clud-side flag.
+4. Default-on for clud-launched sessions.
+
+Step 2 is not ceremony. The gate refuses compound commands, control flow, and
+command substitution outright; that is affordable only if the rate at which it
+refuses legitimate work is measured rather than assumed. Skipping to step 4
+would make that assumption on every user's behalf at once.
+
 ## DD-057: a hook that cannot verify its payload denies removals and allows everything else
 
 **Status:** Accepted

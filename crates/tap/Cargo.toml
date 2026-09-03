@@ -13,3 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 running-process = { version = "4.9.0", default-features = false, features = ["client"] }
+
+[dev-dependencies]
+tempfile = "3"
+running-process = { version = "4.9.0", default-features = false, features = ["client"] }
