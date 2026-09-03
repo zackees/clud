@@ -308,6 +308,36 @@ fn extract_port(command: &str) -> Option<String> {
     None
 }
 
+/// The pure selection half of [`scan_and_report`]: tagged processes that this
+/// process could actually have originated.
+///
+/// PID equality alone is not that test. Linux recycles PIDs through
+/// `kernel.pid_max` and wraps, so a long-lived leak tagged
+/// `CLUD:<n>` is eventually met by an unrelated clud that the kernel handed
+/// the same `<n>`. Observed in the wild: a `__worker` leaked by an
+/// interrupted pytest run 1.5 days earlier carried
+/// `RUNNING_PROCESS_ORIGINATOR=CLUD:3513633`, and a fresh clud that happened
+/// to be assigned PID 3513633 adopted it on exit and reported it as its own
+/// descendant.
+///
+/// `parent_alive` is the guard already computed for exactly this shape
+/// ([`process_scan::parent_is_plausible`]): the process now holding the
+/// originator PID must not have started *after* its claimed child. It is what
+/// the dead-originator sweep filters on, and the on-exit path needs it for the
+/// same reason. A candidate whose own start time is unknown fails it and is
+/// dropped here; the kill path already refuses to act on such a candidate
+/// (#673 Phase 6 / #688), so this only removes it from the report.
+fn select_own_descendants(
+    tagged: Vec<process_scan::TaggedProcess>,
+    self_pid: u32,
+) -> Vec<Descendant> {
+    tagged
+        .into_iter()
+        .filter(|p| p.parent_pid == self_pid && p.parent_alive)
+        .map(Descendant::from)
+        .collect()
+}
+
 /// Scan, classify, report, and (unless `opts.keep`) reap orphans whose
 /// originator-PID is `self_pid`.
 ///
@@ -322,12 +352,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
     // Only act on descendants whose originator points at *us*. Anything
     // pointing at a different CLUD:<pid> belongs to a concurrent clud
     // invocation and is not ours to touch.
-    let mine: Vec<Descendant> = scan
-        .tagged
-        .into_iter()
-        .filter(|p| p.parent_pid == self_pid)
-        .map(Descendant::from)
-        .collect();
+    let mine: Vec<Descendant> = select_own_descendants(scan.tagged, self_pid);
 
     let header = format!("[clud] orphan scan on exit (originator=CLUD:{self_pid}):");
     report_and_reap(mine, &header, opts, &scan.declared_daemons)

@@ -593,3 +593,59 @@ fn reap_orphans_in_keep_mode_does_not_kill() {
     assert_eq!(outcome.reaped, 0);
     assert!(outcome.found >= outcome.reaped);
 }
+
+/// A tagged process is only ours if we could plausibly have started it.
+///
+/// Linux recycles PIDs through `kernel.pid_max` and wraps. A `__worker`
+/// leaked by an interrupted pytest run carried
+/// `RUNNING_PROCESS_ORIGINATOR=CLUD:3513633` for a day and a half; a fresh
+/// clud that the kernel later handed PID 3513633 matched it on raw PID
+/// equality and reported someone else's leak as its own descendant.
+#[test]
+fn a_recycled_originator_pid_does_not_adopt_an_older_leak() {
+    let leak = process_scan::TaggedProcess {
+        pid: 586_489,
+        start_time: 1_700_000_000,
+        name: "clud".into(),
+        command: "clud __worker --session-id sess-1".into(),
+        originator: "CLUD:3513633".into(),
+        parent_pid: 3_513_633,
+        // We started *after* it, so we are not its originator.
+        parent_alive: false,
+    };
+    assert!(select_own_descendants(vec![leak], 3_513_633).is_empty());
+}
+
+/// The same filter still selects a genuine descendant: same originator PID,
+/// and a start time that is consistent with us having spawned it.
+#[test]
+fn a_genuine_descendant_of_this_pid_is_still_selected() {
+    let child = process_scan::TaggedProcess {
+        pid: 4321,
+        start_time: 1_700_000_000,
+        name: "node".into(),
+        command: "node vite.js".into(),
+        originator: "CLUD:3513633".into(),
+        parent_pid: 3_513_633,
+        parent_alive: true,
+    };
+    let selected = select_own_descendants(vec![child], 3_513_633);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].pid, 4321);
+}
+
+/// A descendant tagged with a *different* clud's PID is never ours, however
+/// plausible its own lineage is.
+#[test]
+fn a_concurrent_cluds_descendant_is_left_alone() {
+    let other = process_scan::TaggedProcess {
+        pid: 4321,
+        start_time: 1_700_000_000,
+        name: "node".into(),
+        command: "node vite.js".into(),
+        originator: "CLUD:999".into(),
+        parent_pid: 999,
+        parent_alive: true,
+    };
+    assert!(select_own_descendants(vec![other], 3_513_633).is_empty());
+}
