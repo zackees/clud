@@ -13,17 +13,27 @@
 //! frame and function names still come from `.symtab`, but the expanded
 //! inline caller chain does not. CI attaches the `.dwp` to the GitHub
 //! release, so the "fetch sidecars on first unsymbolicated report" path
-//! from the original issue is now implementable rather than a no-op;
-//! #1016 tracks it. This module does not fetch anything today — it is
-//! kept as an opportunistic verifier over what the running binary can
-//! already resolve on its own:
+//! from the original issue is real work again rather than a no-op.
 //!
 //! - `clud symbols` (bare) prints a five-line summary of the crash-
 //!   reports directory.
-//! - `clud symbols install` verifies that the running binary resolves
-//!   the most-recent crash report's backtrace. Exits 1 if it can't.
-//! - `clud symbols verify [--all]` is the same but explicit. `--all`
-//!   widens the scope from the most recent to every report.
+//! - `clud symbols install` fetches the sidecar the most recent report
+//!   needs, checks it against the release's `SHA256SUMS`, and caches it
+//!   under `~/.clud/state/symbols/<version>/`. It used to be an alias
+//!   for `verify`, which was honest while no sidecars existed and became
+//!   wrong the moment `split-debuginfo = "packed"` shipped them.
+//! - `clud symbols verify [--all]` checks that the running binary can
+//!   resolve a report's backtrace. Exits 1 if it can't. `--all` widens
+//!   the scope from the most recent report to every report.
+//!
+//! # Network
+//!
+//! `install` is the only thing here that reaches the network, and only
+//! when a person types it. The crash path does not fetch — the process is
+//! already dying and may be in a signal handler where allocation is
+//! unsafe — the startup notice does not fetch, and `verify` does not
+//! fetch. Air-gapped hosts therefore keep working, with local
+//! unsymbolicated output as the fallback (#1016).
 //!
 //! The opportunistic startup notice (see [`crate::crash_report::install`])
 //! prints a one-line hint pointing at `clud symbols verify` when a fresh
@@ -191,6 +201,191 @@ fn read_report_backtrace(path: &Path) -> Option<(String, String, u128)> {
     Some((backtrace, role, ts))
 }
 
+/// Turn a URL into bytes.
+///
+/// A seam, so the install path below is exercised without a network: an 85 MB
+/// `.dwp` is not something a test suite should be downloading, and a test that
+/// needs the real release to exist would fail for reasons that have nothing to
+/// do with the code.
+pub type Fetch<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
+
+/// The real fetcher. `ureq` is already this crate's HTTP client (`codex_auth`,
+/// `codex_bridge`).
+fn ureq_fetch(url: &str) -> Result<Vec<u8>, String> {
+    let response = ureq::get(url).call().map_err(|err| err.to_string())?;
+    let mut bytes = Vec::new();
+    // `into_reader`, not `into_string`: the payload is a binary sidecar tens
+    // of megabytes long, and `into_string` both caps at 10 MB and would mangle
+    // it as UTF-8.
+    std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
+        .map_err(|err| err.to_string())?;
+    Ok(bytes)
+}
+
+/// Where fetched sidecars live: `~/.clud/state/symbols/<version>/<asset>`.
+///
+/// Beside `~/.clud/state/crashes/`, as #1016 suggested. Keyed by version
+/// because that is what the asset is keyed by -- see [`expected_sha256`] for
+/// why a build-id cannot be the key here.
+fn cache_root() -> std::io::Result<PathBuf> {
+    let dir = crate::crash_report::crashes_dir()?
+        .parent()
+        .ok_or_else(|| std::io::Error::other("crashes dir has no parent"))?
+        .join("symbols");
+    Ok(dir)
+}
+
+/// The `(version, target)` a report was written by, or `None` if it does not
+/// say. Older reports predate both fields.
+fn read_report_identity(path: &Path) -> Option<(String, String)> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let version = value.get("version")?.as_str()?.to_string();
+    let target = value.get("target")?.as_str()?.to_string();
+    Some((version, target))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `clud symbols install` — fetch the sidecar this machine's most recent crash
+/// report needs, verify it against the release manifest, and cache it.
+///
+/// # Network happens here and nowhere else
+///
+/// #1016 is explicit that a tool which phones a release host after a crash
+/// will surprise people, and that some environments are air-gapped. So the
+/// only thing that ever reaches the network is this subcommand, typed by a
+/// person. The crash path does not fetch, the startup notice does not fetch,
+/// and `verify` does not fetch. That also keeps the fetch out of a dying
+/// process where allocation may be unsafe.
+pub fn install(reports: &[PathBuf]) -> i32 {
+    let cache = match cache_root() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("clud symbols: cannot resolve the symbol cache: {err}");
+            return 1;
+        }
+    };
+    install_with(reports, &ureq_fetch, &cache)
+}
+
+/// Test seam for [`install`].
+pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32 {
+    let Some(report) = reports.first() else {
+        println!("clud symbols: no crash reports, so no sidecar to fetch.");
+        return 0;
+    };
+    let Some((version, target)) = read_report_identity(report) else {
+        eprintln!(
+            "clud symbols: {} records no version/target, so the matching \
+             sidecar cannot be named. Reports written before #1016 do not \
+             carry them.",
+            report.display()
+        );
+        return 1;
+    };
+    let Some(asset) = sidecar_asset_name(&target) else {
+        // Not a failure of this machine: no such asset is published. Saying
+        // so beats a 404 the user has to interpret.
+        println!(
+            "clud symbols: no sidecar is published for {target}. Debug info \
+             for that target is not split out of the wheel, so there is \
+             nothing to fetch."
+        );
+        return 0;
+    };
+
+    let destination = cache_root.join(&version).join(&asset);
+    if destination.is_file() {
+        println!(
+            "clud symbols: already have {} ({})",
+            asset,
+            destination.display()
+        );
+        return 0;
+    }
+
+    let manifest_url = checksum_manifest_url(&version);
+    let manifest = match fetch(&manifest_url) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(err) => {
+            eprintln!("clud symbols: cannot fetch {manifest_url}: {err}");
+            return 1;
+        }
+    };
+    // The expected digest is read *before* the payload, so there is never a
+    // window where a downloaded file exists with nothing to check it against.
+    let Some(expected) = expected_sha256(&manifest, &asset) else {
+        eprintln!(
+            "clud symbols: release {version} publishes no checksum for \
+             {asset}; refusing to install bytes the release does not vouch \
+             for."
+        );
+        return 1;
+    };
+
+    let Some(url) = sidecar_url(&version, &target) else {
+        eprintln!("clud symbols: no sidecar URL for {target}");
+        return 1;
+    };
+    println!("clud symbols: fetching {url}");
+    let bytes = match fetch(&url) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("clud symbols: cannot fetch {url}: {err}");
+            return 1;
+        }
+    };
+
+    let actual = sha256_hex(&bytes);
+    if actual != expected {
+        // Nothing is written. A sidecar that is not the published one would
+        // symbolicate to confident, wrong line numbers -- worse than not
+        // symbolicating, which is the whole argument in #1016 item 3.
+        eprintln!(
+            "clud symbols: checksum mismatch for {asset}\n  expected {expected}\n  got      {actual}\nRefusing to install."
+        );
+        return 1;
+    }
+
+    if let Some(parent) = destination.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!("clud symbols: cannot create {}: {err}", parent.display());
+            return 1;
+        }
+    }
+    // Write beside and rename, so a reader never sees a half-written sidecar
+    // and an interrupted install leaves no file that looks complete.
+    let staging = destination.with_extension("part");
+    if let Err(err) = fs::write(&staging, &bytes) {
+        eprintln!("clud symbols: cannot write {}: {err}", staging.display());
+        return 1;
+    }
+    if let Err(err) = fs::rename(&staging, &destination) {
+        let _ = fs::remove_file(&staging);
+        eprintln!(
+            "clud symbols: cannot place {}: {err}",
+            destination.display()
+        );
+        return 1;
+    }
+    println!(
+        "clud symbols: installed {} ({} bytes, sha256 verified)",
+        destination.display(),
+        bytes.len()
+    );
+    0
+}
+
 /// Dispatch entry called from `main.rs`. Returns a process exit code.
 pub fn run(_args: &Args, subcommand: Option<SymbolsSubcommand>) -> i32 {
     let dir = match crate::crash_report::crashes_dir() {
@@ -209,9 +404,10 @@ pub fn run(_args: &Args, subcommand: Option<SymbolsSubcommand>) -> i32 {
     };
     match subcommand {
         None => print_summary(&dir, &reports),
-        Some(SymbolsSubcommand::Install) => {
-            verify(&reports, /*all=*/ false)
-        }
+        // #1016: `install` now installs. It used to be an alias for `verify`,
+        // which was honest while there were no sidecars to fetch and became
+        // wrong the moment `split-debuginfo = "packed"` shipped them.
+        Some(SymbolsSubcommand::Install) => install(&reports),
         Some(SymbolsSubcommand::Verify { all }) => verify(&reports, all),
     }
 }
@@ -543,5 +739,209 @@ mod tests {
             checksum_manifest_url("2.7.9"),
             "https://github.com/zackees/clud/releases/download/2.7.9/SHA256SUMS"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #1016: `clud symbols install` actually fetches.
+    // -----------------------------------------------------------------
+
+    use std::cell::RefCell;
+
+    /// A report on disk, as `install_with` will read it.
+    fn write_report(dir: &Path, version: &str, target: &str) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join("1700000000000-crash.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": version,
+                "target": target,
+                "backtrace": "0: main\n",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    /// Records every URL asked for, so a test can assert that nothing was
+    /// fetched at all — "did not touch the network" is a property worth
+    /// pinning, not just "returned the right code".
+    struct FakeNet {
+        manifest: String,
+        payload: Vec<u8>,
+        seen: RefCell<Vec<String>>,
+    }
+
+    impl FakeNet {
+        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+            self.seen.borrow_mut().push(url.to_string());
+            if url.ends_with(CHECKSUM_MANIFEST) {
+                Ok(self.manifest.clone().into_bytes())
+            } else {
+                Ok(self.payload.clone())
+            }
+        }
+    }
+
+    const LINUX: &str = "x86_64-unknown-linux-gnu";
+
+    fn net_for(payload: &[u8]) -> FakeNet {
+        let asset = sidecar_asset_name(LINUX).unwrap();
+        FakeNet {
+            manifest: format!("{}  ./{asset}\n", sha256_hex(payload)),
+            payload: payload.to_vec(),
+            seen: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_verified_sidecar_is_installed_into_the_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"dwarf package bytes");
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 0);
+        let installed = cache.join("2.8.0").join(sidecar_asset_name(LINUX).unwrap());
+        assert!(installed.is_file(), "sidecar was not cached");
+        assert_eq!(fs::read(&installed).unwrap(), b"dwarf package bytes");
+    }
+
+    /// The refusal that matters. A sidecar that is not the published one
+    /// symbolicates to confident, wrong line numbers — worse than not
+    /// symbolicating at all, which is #1016's own argument.
+    #[test]
+    fn a_checksum_mismatch_installs_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let mut net = net_for(b"the published bytes");
+        net.payload = b"something else entirely".to_vec();
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 1);
+        let asset = sidecar_asset_name(LINUX).unwrap();
+        assert!(
+            !cache.join("2.8.0").join(&asset).exists(),
+            "a file that failed verification was left on disk"
+        );
+        assert!(
+            !cache.join("2.8.0").join(format!("{asset}.part")).exists(),
+            "the staging file was left behind"
+        );
+    }
+
+    /// A release that does not list the asset vouches for nothing, so there is
+    /// nothing to check the bytes against. Refuse before downloading them.
+    #[test]
+    fn an_asset_absent_from_the_manifest_is_refused_before_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = FakeNet {
+            manifest: "deadbeef  ./some-other-file.tar.gz\n".to_string(),
+            payload: b"never requested".to_vec(),
+            seen: RefCell::new(Vec::new()),
+        };
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 1);
+        let seen = net.seen.borrow();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the payload must not be fetched when nothing can verify it: {seen:?}"
+        );
+    }
+
+    /// Windows and macOS publish no `.dwp`. Reporting that is the correct
+    /// answer, and it must not cost a request that would 404.
+    #[test]
+    fn a_target_with_no_published_sidecar_touches_no_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(
+            &tmp.path().join("crashes"),
+            "2.8.0",
+            "x86_64-pc-windows-msvc",
+        );
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"unused");
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 0, "not an error: no such asset is published");
+        assert!(net.seen.borrow().is_empty(), "{:?}", net.seen.borrow());
+    }
+
+    /// Second run is free and offline. Re-downloading 85 MB because the user
+    /// typed the command twice would be its own bug.
+    #[test]
+    fn an_already_installed_sidecar_is_not_fetched_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"dwarf package bytes");
+
+        assert_eq!(
+            install_with(std::slice::from_ref(&report), &|url| net.fetch(url), &cache),
+            0
+        );
+        let after_first = net.seen.borrow().len();
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+
+        assert_eq!(
+            net.seen.borrow().len(),
+            after_first,
+            "the cached sidecar was fetched a second time"
+        );
+    }
+
+    /// Reports written before #1016 carry no version/target, so the asset
+    /// cannot be named. Say that rather than guessing at one.
+    #[test]
+    fn a_report_without_version_or_target_is_not_guessed_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("crashes");
+        fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("1700000000000-crash.json");
+        fs::write(&report, r#"{"backtrace":"0: main\n"}"#).unwrap();
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"unused");
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 1);
+        assert!(net.seen.borrow().is_empty());
+    }
+
+    /// No reports is a normal state, not a failure, and not a reason to fetch.
+    #[test]
+    fn no_reports_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let net = net_for(b"unused");
+
+        assert_eq!(install_with(&[], &|url| net.fetch(url), tmp.path()), 0);
+        assert!(net.seen.borrow().is_empty());
+    }
+
+    /// The URLs are built from the report, not from whatever this binary
+    /// happens to be — a report copied from another machine still resolves to
+    /// its own release.
+    #[test]
+    fn the_fetched_urls_name_the_reports_own_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "1.2.3", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"payload");
+
+        install_with(&[report], &|url| net.fetch(url), &cache);
+
+        let seen = net.seen.borrow();
+        assert_eq!(seen[0], checksum_manifest_url("1.2.3"));
+        assert_eq!(seen[1], sidecar_url("1.2.3", LINUX).unwrap());
     }
 }
