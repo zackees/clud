@@ -256,6 +256,65 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// How many release versions' sidecars the cache keeps.
+///
+/// Two: the release you are running and the one you just upgraded from, which
+/// is the pair a crash report in hand can plausibly need. A `.dwp` is ~85 MB,
+/// so this is a bound of roughly 170 MB rather than an unbounded tree.
+///
+/// #1016 asks for an eviction rule specifically because of #1014 -- nothing
+/// sweeps `~/.clud/state/`, and adding a directory that only grows would be
+/// repeating the mistake that issue was filed about.
+const MAX_CACHED_VERSIONS: usize = 2;
+
+/// Drop all but the newest [`MAX_CACHED_VERSIONS`] version directories.
+///
+/// Runs after a successful install rather than on a timer: the cache only
+/// grows when something is added to it, so the moment of adding is the only
+/// moment a bound can be crossed. That also keeps this out of the daemon's
+/// periodic work, which #542 asks not to grow.
+///
+/// Newest by directory mtime, not by parsing versions: a version string is not
+/// reliably ordered (`2.8.0` vs `2.10.0` needs semver, and a fork may not use
+/// semver at all), whereas "the one I fetched least recently" is exactly the
+/// thing worth dropping and is what mtime records.
+///
+/// Failures are non-fatal. A cache that could not be pruned is a disk-space
+/// problem; an install that reported failure because pruning failed would be a
+/// correctness problem, and the sidecar is already safely in place by now.
+fn prune_cache(cache_root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(cache_root) else {
+        return 0;
+    };
+    let mut versions: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            Some((mtime, entry.path()))
+        })
+        .collect();
+    if versions.len() <= MAX_CACHED_VERSIONS {
+        return 0;
+    }
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut removed = 0;
+    for (_, path) in versions.into_iter().skip(MAX_CACHED_VERSIONS) {
+        // Audit before acting (#893). These are large files clud fetched
+        // rather than the user's own data, but the audit line is what proves
+        // afterwards what was removed and under which rule.
+        crate::gc::delete_audit::record(
+            "gc.symbols-cache",
+            &path,
+            &format!("symbols-cache keep-newest>{MAX_CACHED_VERSIONS}"),
+        );
+        if fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// `clud symbols install` — fetch the sidecar this machine's most recent crash
 /// report needs, verify it against the release manifest, and cache it.
 ///
@@ -383,6 +442,13 @@ pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32
         destination.display(),
         bytes.len()
     );
+    let pruned = prune_cache(cache_root);
+    if pruned > 0 {
+        println!(
+            "clud symbols: dropped {pruned} older sidecar version(s), keeping \
+             the newest {MAX_CACHED_VERSIONS}"
+        );
+    }
     0
 }
 
@@ -943,5 +1009,107 @@ mod tests {
         let seen = net.seen.borrow();
         assert_eq!(seen[0], checksum_manifest_url("1.2.3"));
         assert_eq!(seen[1], sidecar_url("1.2.3", LINUX).unwrap());
+    }
+
+    // -----------------------------------------------------------------
+    // #1016: the cache is bounded (#1014's lesson).
+    // -----------------------------------------------------------------
+
+    /// Make `count` version dirs, oldest first, each holding a file. Returns
+    /// them in creation order.
+    fn seed_versions(cache: &Path, names: &[&str]) -> Vec<PathBuf> {
+        let mut made = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            let dir = cache.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("clud-x.dwp"), b"payload").unwrap();
+            // Explicit, increasing mtimes: creation order alone is not a
+            // guarantee at filesystem timestamp granularity, and a test that
+            // depends on it fails on a fast machine rather than a slow one.
+            let when = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 + index as u64 * 60);
+            filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(when)).unwrap();
+            made.push(dir);
+        }
+        made
+    }
+
+    #[test]
+    fn the_cache_keeps_only_the_newest_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let dirs = seed_versions(cache, &["2.6.0", "2.7.0", "2.8.0", "2.9.0"]);
+
+        let removed = prune_cache(cache);
+
+        assert_eq!(removed, dirs.len() - MAX_CACHED_VERSIONS);
+        assert!(!dirs[0].exists(), "oldest should have gone");
+        assert!(!dirs[1].exists());
+        assert!(
+            dirs[2].exists(),
+            "newest {MAX_CACHED_VERSIONS} must survive"
+        );
+        assert!(dirs[3].exists());
+    }
+
+    /// Ordering is by mtime, not by version string. `2.10.0` sorts before
+    /// `2.9.0` lexically, so a name-ordered prune would drop the newer one --
+    /// and a fork need not use semver at all.
+    #[test]
+    fn pruning_is_by_recency_not_by_version_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        // Created oldest-to-newest, so "2.10.0" is the most recent.
+        let dirs = seed_versions(cache, &["2.8.0", "2.9.0", "2.10.0"]);
+
+        prune_cache(cache);
+
+        assert!(!dirs[0].exists(), "2.8.0 is the least recently fetched");
+        assert!(dirs[1].exists());
+        assert!(
+            dirs[2].exists(),
+            "2.10.0 is newest by mtime and must survive a lexical sort"
+        );
+    }
+
+    #[test]
+    fn a_cache_within_the_bound_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let dirs = seed_versions(cache, &["2.8.0", "2.9.0"]);
+
+        assert_eq!(prune_cache(cache), 0);
+        assert!(dirs.iter().all(|d| d.exists()));
+    }
+
+    #[test]
+    fn pruning_a_missing_cache_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(prune_cache(&tmp.path().join("never-created")), 0);
+    }
+
+    /// End to end: installing into a cache that is already at the bound
+    /// evicts, so the tree cannot grow one release at a time.
+    #[test]
+    fn installing_prunes_the_cache_it_just_grew() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "9.9.9", LINUX);
+        let cache = tmp.path().join("symbols");
+        let old = seed_versions(&cache, &["1.0.0", "2.0.0"]);
+        let net = net_for(b"dwarf package bytes");
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+
+        assert!(
+            cache.join("9.9.9").is_file()
+                || cache
+                    .join("9.9.9")
+                    .join(sidecar_asset_name(LINUX).unwrap())
+                    .is_file(),
+            "the new sidecar must be installed"
+        );
+        assert!(!old[0].exists(), "the oldest version was not evicted");
+        let kept = fs::read_dir(&cache).unwrap().count();
+        assert_eq!(kept, MAX_CACHED_VERSIONS, "cache exceeded its bound");
     }
 }
