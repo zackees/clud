@@ -589,6 +589,35 @@ pub(super) fn candidate_identity_is_live(decision: &ReapDecision) -> bool {
         .is_some_and(|observed| crate::process_tree::automatic_identity_matches(recorded, observed))
 }
 
+/// Mark `process` exited, stamping the eviction clock (#892).
+///
+/// Both halves, always. `purge` only considers an identity evictable when
+/// `exited_at_ms` is set:
+///
+/// ```text
+/// .filter(|process| process.exited_at_ms.is_some_and(|at| ... >= EVICTION_GRACE_MS))
+/// ```
+///
+/// so a process marked `alive = false` *without* a stamp is unevictable
+/// forever. The exit-notification path always stamped it; the host-scan
+/// liveness refresh did not, and every process whose exit was noticed by a
+/// scan rather than a notification therefore accumulated in `known` for the
+/// life of the session.
+///
+/// That is the reported unbounded growth: 115,173 tracked processes over 45
+/// hours, with `pending_exit_pids` walking `known.values()` on every reconcile
+/// pass — so per-pass cost grew with processes-ever-seen rather than with
+/// current activity, and the CPU that cost starved Docker Desktop's WSL2 VM.
+///
+/// A function rather than two lines at each site, because the bug was that the
+/// two sites disagreed. `get_or_insert` keeps the first observation
+/// authoritative, so a later scan cannot restart a grace window that a
+/// notification already started.
+pub(super) fn mark_exited(process: &mut ProcessMeta, now_ms: u64) {
+    process.alive = false;
+    process.exited_at_ms.get_or_insert(now_ms);
+}
+
 pub(super) fn pending_exit_pids(
     known: &HashMap<u32, ProcessMeta>,
     processed_exits: &HashSet<(u32, u64)>,
@@ -642,11 +671,10 @@ pub(super) fn record_process_exit(
     // a retry can still resolve into a real boundary) are allowed to block.
     let metadata_failed = unresolved_new_pids.remove(&pid);
     if let Some(process) = known.get_mut(&pid) {
-        process.alive = false;
         // Creation time cannot serve as the eviction clock, so record when the
         // exit was *observed*. Only the first observation counts: a replayed
         // notification must not restart the grace window.
-        process.exited_at_ms.get_or_insert(now_ms);
+        mark_exited(process, now_ms);
     }
     metadata_failed
 }
@@ -1491,12 +1519,22 @@ mod imp {
             // recorded identities: a PID absent from it has exited, and a PID
             // present under a *different* identity is a recycled number that
             // must not inherit the old process's place in the tree.
+            let observed_at_ms = now_ms();
             for process in tracker.known.values_mut() {
                 if !live.contains_key(&process.pid) {
-                    process.alive = false;
+                    // #892: stamp the eviction clock, not just the flag. Without
+                    // the stamp `purge` can never evict this identity, and every
+                    // exit noticed by a scan rather than a notification stayed in
+                    // `known` for the life of the session.
+                    super::mark_exited(process, observed_at_ms);
                 } else if process.alive {
-                    process.alive =
-                        crate::process_identity::start_time_of(process.pid) == process.start_time;
+                    let recycled =
+                        crate::process_identity::start_time_of(process.pid) != process.start_time;
+                    if recycled {
+                        // The number is live but belongs to someone else, so the
+                        // recorded identity is gone and needs the same stamp.
+                        super::mark_exited(process, observed_at_ms);
+                    }
                 }
             }
 
@@ -2947,6 +2985,79 @@ mod lifecycle_tests {
         process.alive = false;
         process.exited_at_ms = Some(at_ms);
         process
+    }
+
+    // ---- #892: an exit noticed by a scan must be evictable ----
+
+    /// A dead process with no `exited_at_ms` is unevictable **forever**, and
+    /// that is the leak: `purge` gates on the stamp, so an unstamped identity
+    /// survives every sweep no matter how much time passes.
+    ///
+    /// Worth stating as its own test because the state was previously
+    /// unrepresentable in this suite — `process()` fills the stamp in whenever
+    /// `alive` is false, and `exited()` sets both — so no fixture could
+    /// produce what the host-scan path was actually producing in the field.
+    #[test]
+    fn a_dead_process_without_an_exit_stamp_is_never_evicted() {
+        let mut dead = process(10, 1, "git.exe", false);
+        dead.exited_at_ms = None;
+        let mut tracker = tracker_of(vec![dead]);
+
+        // A year later, and still there.
+        let evicted = tracker.purge(365 * 24 * 60 * 60 * 1000);
+
+        assert_eq!(evicted, 0);
+        assert!(
+            tracker.known.contains_key(&10),
+            "an unstamped exit is unevictable, which is how `known` grew to \
+             115,173 entries over 45 hours"
+        );
+    }
+
+    /// The fix: `mark_exited` sets both halves, so the same process becomes
+    /// evictable once its grace window elapses.
+    #[test]
+    fn mark_exited_makes_a_scan_observed_exit_evictable() {
+        let mut alive = process(10, 1, "git.exe", true);
+        super::mark_exited(&mut alive, 1_000);
+        let mut tracker = tracker_of(vec![alive]);
+
+        assert_eq!(
+            tracker.purge(1_000 + super::EVICTION_GRACE_MS - 1),
+            0,
+            "the grace window must still be respected"
+        );
+        assert_eq!(tracker.purge(1_000 + super::EVICTION_GRACE_MS), 1);
+        assert!(!tracker.known.contains_key(&10));
+    }
+
+    /// The stamp is the *first* observation. A scan that re-notices an already
+    /// exited process must not restart its grace window, or a process seen by
+    /// repeated scans would never age out — the same leak by a slower route.
+    #[test]
+    fn a_second_observation_does_not_restart_the_grace_window() {
+        let mut process_meta = process(10, 1, "git.exe", true);
+        super::mark_exited(&mut process_meta, 1_000);
+        super::mark_exited(&mut process_meta, 9_000);
+
+        assert_eq!(process_meta.exited_at_ms, Some(1_000));
+    }
+
+    /// Both paths agree. The notification path always stamped; the scan path
+    /// did not, and the two disagreeing is what the shared helper removes.
+    #[test]
+    fn both_exit_paths_produce_the_same_shape() {
+        let mut via_scan = process(10, 1, "git.exe", true);
+        super::mark_exited(&mut via_scan, 4_242);
+
+        let mut known = HashMap::new();
+        known.insert(11, process(11, 1, "git.exe", true));
+        let mut unresolved = HashSet::new();
+        super::record_process_exit(&mut known, &mut unresolved, 11, None, 4_242);
+        let via_notification = &known[&11];
+
+        assert_eq!(via_scan.alive, via_notification.alive);
+        assert_eq!(via_scan.exited_at_ms, via_notification.exited_at_ms);
     }
 
     /// The headline bound. 500 short-lived **non-shell** exits are the traffic
