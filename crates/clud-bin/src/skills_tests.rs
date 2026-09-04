@@ -850,3 +850,58 @@ fn local_loop_skills_settle_their_scope_boundary() {
         "and it must say why they do not overlap"
     );
 }
+
+/// #563's safety criteria, pinned.
+///
+/// This skill tells an agent how to attach a debugger to a running process, so the
+/// lines that say *not* to defeat the OS when it refuses are the ones that must
+/// survive editing. Each string below corresponds to an acceptance criterion:
+/// elevation is explicit and consent-based, nothing is installed, and a refusal
+/// ends the attempt rather than starting a workaround.
+/// Prose wraps. Collapsing whitespace means these assertions pin the *words*
+/// rather than the line breaks, so reflowing a paragraph cannot fail the build
+/// and — more importantly — cannot silently stop pinning the guarantee.
+fn flattened(skill_name: &str) -> String {
+    let skill = BUNDLED_SKILLS
+        .iter()
+        .find(|s| s.name == skill_name)
+        .unwrap_or_else(|| panic!("{skill_name} must be bundled"))
+        .skill_md;
+    skill.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn os_debug_skill_keeps_its_privilege_boundaries() {
+    let skill = flattened("clud-os-debug");
+    let skill = skill.as_str();
+
+    for required in [
+        // Never weaken a policy to make a diagnosis convenient.
+        "ptrace_scope",
+        "SIP",
+        "stop if the user declines",
+        "It installs nothing.",
+        // The Windows toolkit is a privileged machine-wide change; propose, do
+        // not perform.
+        "do not launch an installer unattended",
+        // The three instruments must stay distinguishable (#563's last criterion).
+        "Live stack dump",
+        "Debugger attach",
+        "Sampled profile",
+        // Reporting contract: an artifact nobody can locate is not evidence.
+        "artifact path",
+    ] {
+        assert!(
+            skill.contains(required),
+            "clud-os-debug lost a required safety or reporting guarantee: {required:?}"
+        );
+    }
+}
+
+/// Attaching suspends the target. A skill that omits that will get an agent to
+/// freeze a user-facing service to answer a question a stack dump would have
+/// answered without stopping anything.
+#[test]
+fn os_debug_skill_warns_that_attaching_suspends_the_target() {
+    assert!(flattened("clud-os-debug").contains("suspends the target"));
+}
