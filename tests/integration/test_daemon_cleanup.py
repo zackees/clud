@@ -54,7 +54,15 @@ class TestDaemonCentralizedCleanup:
         pids = wait_for_tree_pids(tree_log, 3)
 
         kill_process(metadata["daemon_pid"])
-        wait_for_pids_to_exit(pids)
+        # #1142: the worker itself, not just the helper tree it spawned.
+        #
+        # This test is named for the tree dying with the daemon and asserted
+        # only that, so a worker that reaped its children and then sat in its
+        # accept loop forever passed it. Two such workers were found alive 8
+        # and 15 hours after their daemons died, reparented to init and
+        # ignoring SIGTERM — leaked by this very test, which had been green
+        # every run.
+        wait_for_pids_to_exit([*pids, metadata["worker_pid"]])
 
     @pytest.mark.xfail(
         sys.platform == "win32",
