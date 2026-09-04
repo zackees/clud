@@ -45,6 +45,7 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
         repeat_run_command: None,
         backlog_bytes: Some(256 * 1024),
         transcript_path: None,
+        client_env: Vec::new(),
     }
 }
 

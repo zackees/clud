@@ -38,7 +38,7 @@ fn cross_route_plan() -> LaunchPlan {
 
 #[test]
 fn worker_cross_route_runtime_exposes_bridge_only_to_the_child_environment() {
-    let runtime = start_worker_runtime(&cross_route_plan()).unwrap();
+    let runtime = start_worker_runtime(&cross_route_plan(), &[]).unwrap();
     let env = runtime.env();
     assert!(env.iter().any(|(key, _)| key == "ANTHROPIC_BASE_URL"));
     assert!(env.iter().any(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN"));

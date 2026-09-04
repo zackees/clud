@@ -223,6 +223,21 @@ pub(super) struct WorkerLaunchSpec {
     /// before exiting.
     #[serde(default)]
     pub(super) transcript_path: Option<PathBuf>,
+    /// The session initiator's environment, shipped with the request (#933).
+    ///
+    /// The daemon's own environment is frozen at first-start -- inherited once
+    /// from whichever client happened to auto-start it, and never refreshed.
+    /// A daemon from yesterday hands today's agent yesterday's `PATH`, so a
+    /// tool installed since is invisible to a daemon-hosted session while
+    /// working fine in a foreground one. That makes behaviour depend on which
+    /// path the user happened to hit, which is the worst kind of bug to
+    /// reproduce.
+    ///
+    /// `#[serde(default)]`, so a spec written by an older client (or a spec
+    /// file on disk from before this field existed) still deserializes and
+    /// simply falls back to the daemon's own environment.
+    #[serde(default)]
+    pub(super) client_env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

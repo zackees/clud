@@ -8,7 +8,63 @@ use serde::{Deserialize, Serialize};
 
 use super::types::ENV_BACKLOG_BYTES;
 
+/// Merge the session initiator's environment over the daemon's own (#933).
+///
+/// Layering, lowest first:
+///
+/// 1. **the daemon's environment** — kept as the floor because it carries keys
+///    only the daemon knows (state dir, wire markers, anything a future
+///    daemon-side policy adds). Dropping it would trade one silent divergence
+///    for another.
+/// 2. **the client's environment** — highest precedence, because it is by
+///    definition "what the session initiator sees". This is what makes a tool
+///    installed after the daemon started visible to the session.
+///
+/// `PATH` is a straight client-wins replacement rather than a union of the
+/// two. #933 leaves that open and notes replacement is the more predictable
+/// reading, and it is also the one that actually fixes the reported bug: a
+/// union would keep the daemon's stale entries on the front of the path,
+/// where a shadowing old binary still wins the lookup.
+///
+/// An empty `client_env` means the request came from a client older than this
+/// field, so the daemon's environment is used unchanged — the previous
+/// behaviour, rather than an empty environment.
+fn session_base(client_env: &[(String, String)]) -> Vec<(String, String)> {
+    merge_env(std::env::vars().collect(), client_env)
+}
+
+/// The merge itself, with the daemon side passed in.
+///
+/// A parameter rather than a read of `std::env::vars()` so the rule is a pure
+/// function: the tests below assert it without mutating this process's
+/// environment, which every test in the binary shares. An earlier draft did
+/// mutate it, and a concurrent test changing the environment between two
+/// reads made the comparison fail for reasons that had nothing to do with the
+/// merge.
+fn merge_env(
+    mut daemon: Vec<(String, String)>,
+    client_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    if client_env.is_empty() {
+        return daemon;
+    }
+    for (key, value) in client_env {
+        match daemon.iter_mut().find(|(existing, _)| existing == key) {
+            Some(slot) => slot.1 = value.clone(),
+            None => daemon.push((key.clone(), value.clone())),
+        }
+    }
+    daemon
+}
+
+/// The daemon's own environment as the base — for call sites with no session
+/// in hand (the API turn controller, diagnostics).
 pub(super) fn child_env() -> Vec<(String, String)> {
+    child_env_from(&[])
+}
+
+/// [`child_env`], with the session initiator's environment layered in.
+pub(super) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, String)> {
     let originator_key = running_process::ORIGINATOR_ENV_VAR;
     // Issue #509: session temp redirect. Strip any inherited TMPDIR/TMP/TEMP
     // so the override below isn't shadowed by a stale value carried in from
@@ -27,7 +83,8 @@ pub(super) fn child_env() -> Vec<(String, String)> {
     // sessions silently miss it, and a safety default that is only sometimes
     // present is the worst of both.
     let nounset = crate::shell::nounset::env_overrides();
-    let mut env: Vec<(String, String)> = std::env::vars()
+    let mut env: Vec<(String, String)> = session_base(client_env)
+        .into_iter()
         .filter(|(key, _)| key != "IN_CLUD" && key != originator_key)
         .filter(|(key, _)| {
             !strip_temp || !crate::gc::session_tmp::OVERRIDDEN_KEYS.contains(&key.as_str())
@@ -453,5 +510,123 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // #933: the daemon's env is frozen at first-start; the initiator's is not.
+    // -----------------------------------------------------------------
+
+    fn pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    fn value_of<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// The reported bug, as a unit: a daemon started yesterday hands today's
+    /// agent yesterday's `PATH`, so a tool installed since is invisible to a
+    /// daemon-hosted session while working fine in a foreground one.
+    #[test]
+    fn the_clients_path_wins_over_the_daemons_frozen_one() {
+        let daemon = pairs(&[("PATH", "/from/yesterday")]);
+        let client = pairs(&[("PATH", "/installed/today")]);
+
+        let merged = merge_env(daemon, &client);
+
+        assert_eq!(value_of(&merged, "PATH"), Some("/installed/today"));
+        assert_eq!(
+            merged.iter().filter(|(key, _)| key == "PATH").count(),
+            1,
+            "PATH must be replaced, not appended alongside the stale one"
+        );
+    }
+
+    /// Replacement, not union. #933 leaves this open; a union would keep the
+    /// daemon's stale entries on the path, where a shadowing old binary still
+    /// wins the lookup — which is the bug, not a mitigation of it.
+    #[test]
+    fn path_is_replaced_rather_than_unioned() {
+        let daemon = pairs(&[("PATH", "/stale/bin")]);
+        let client = pairs(&[("PATH", "/fresh/bin")]);
+
+        let merged = merge_env(daemon, &client);
+
+        assert_eq!(value_of(&merged, "PATH"), Some("/fresh/bin"));
+        assert!(
+            !value_of(&merged, "PATH").unwrap().contains("/stale/bin"),
+            "the stale entry survived into the merged PATH"
+        );
+    }
+
+    /// A key only the daemon knows survives. Dropping the daemon's
+    /// environment entirely would trade one silent divergence for another.
+    #[test]
+    fn daemon_only_keys_survive_the_merge() {
+        let daemon = pairs(&[("CLUD_DAEMON_STATE_DIR", "/state"), ("PATH", "/old")]);
+        let client = pairs(&[("PATH", "/new")]);
+
+        let merged = merge_env(daemon, &client);
+
+        assert_eq!(value_of(&merged, "CLUD_DAEMON_STATE_DIR"), Some("/state"));
+    }
+
+    /// A client older than this field ships nothing. That must mean "behave
+    /// exactly as before", not "spawn with an empty environment" — the latter
+    /// would break every session launched by a mismatched pair during a
+    /// rolling upgrade.
+    #[test]
+    fn an_empty_client_env_leaves_the_daemon_env_untouched() {
+        let daemon = pairs(&[("PATH", "/only"), ("HOME", "/root")]);
+
+        assert_eq!(merge_env(daemon.clone(), &[]), daemon);
+    }
+
+    /// Keys the client sets that the daemon has never heard of must arrive: a
+    /// venv or toolchain activated after the daemon started is this shape.
+    #[test]
+    fn client_only_keys_are_added() {
+        let daemon = pairs(&[("PATH", "/p")]);
+        let client = pairs(&[("VIRTUAL_ENV", "/proj/.venv")]);
+
+        let merged = merge_env(daemon, &client);
+
+        assert_eq!(value_of(&merged, "VIRTUAL_ENV"), Some("/proj/.venv"));
+        assert_eq!(value_of(&merged, "PATH"), Some("/p"));
+    }
+
+    /// Later client entries win over earlier ones for the same key, so a
+    /// duplicate in the shipped list cannot resurrect a stale value.
+    #[test]
+    fn the_last_client_value_for_a_key_wins() {
+        let merged = merge_env(
+            pairs(&[("PATH", "/daemon")]),
+            &pairs(&[("PATH", "/first"), ("PATH", "/second")]),
+        );
+
+        assert_eq!(value_of(&merged, "PATH"), Some("/second"));
+        assert_eq!(merged.iter().filter(|(k, _)| k == "PATH").count(), 1);
+    }
+
+    /// #933's duplicate-builder warning, asserted rather than assumed: with
+    /// the client's env supplied, the daemon path must agree with the
+    /// foreground path on the value the user actually has. The two builders
+    /// have drifted before (#753, #1066). `PATH` is read ambiently rather than
+    /// set, so this does not mutate the shared process environment.
+    #[test]
+    fn the_daemon_path_agrees_with_the_runner_once_the_client_env_is_supplied() {
+        let client: Vec<(String, String)> = std::env::vars().collect();
+
+        let daemon = child_env_from(&client);
+        let runner = crate::runner::child_env();
+
+        assert_eq!(
+            value_of(&daemon, "PATH"),
+            value_of(&runner, "PATH"),
+            "daemon and foreground disagree on PATH with the client env supplied"
+        );
     }
 }
