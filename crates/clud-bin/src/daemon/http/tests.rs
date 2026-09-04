@@ -5,6 +5,25 @@ use crate::gc::Registry;
 use crate::launch_log::LaunchRecord;
 use std::io::Write;
 
+/// Assert an HTTP status line carries `expected`, showing what it actually
+/// carried when it does not (#1160).
+///
+/// `assert!(status.contains("200"))` prints nothing but the source line. On a
+/// flaky lane that discards the one piece of evidence worth having: it cannot
+/// distinguish "the response was empty or timed out" from "the response came
+/// back with a different status", and those point at different bugs.
+///
+/// Observed twice on the windows-x64 unit lane in one evening, on two PRs that
+/// touched neither this module nor Rust at all, and each occurrence produced
+/// nothing to reason about beyond the assertion's own text.
+#[track_caller]
+fn assert_status(actual: &str, expected: &str) {
+    assert!(
+        actual.contains(expected),
+        "expected status {expected}, got: {actual:?}"
+    );
+}
+
 fn write_fake_session(state_dir: &Path, id: &str, snap: SessionSnapshot) {
     let dir = state_dir.join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
@@ -134,7 +153,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         Some(&create),
     )
     .unwrap();
-    assert!(status.contains("201"));
+    assert_status(&status, "201");
     let record: serde_json::Value = serde_json::from_str(&body).unwrap();
     let id = record["id"].as_str().unwrap();
     assert!(record["cwd"]
@@ -151,7 +170,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         None,
     )
     .unwrap();
-    assert!(status.contains("200"));
+    assert_status(&status, "200");
     assert!(list.contains(id));
     let (status, headers, body) = fetch_api_request(
         port,
@@ -163,7 +182,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         None,
     )
     .unwrap();
-    assert!(status.contains("200"));
+    assert_status(&status, "200");
     assert!(!headers
         .to_ascii_lowercase()
         .contains("access-control-allow-origin"));
@@ -178,7 +197,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         None,
     )
     .unwrap();
-    assert!(status.contains("409"));
+    assert_status(&status, "409");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
         "session_not_running"
@@ -193,7 +212,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         None,
     )
     .unwrap();
-    assert!(status.contains("404"));
+    assert_status(&status, "404");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
         "not_found"
@@ -224,7 +243,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
             None,
         )
         .unwrap();
-        assert!(status.contains("400"));
+        assert_status(&status, "400");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
             "invalid_cursor"
@@ -240,7 +259,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
         None,
     )
     .unwrap();
-    assert!(status.contains("200"));
+    assert_status(&status, "200");
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["events"].as_array().unwrap().len(), 1);
     assert_eq!(page["retention_gap"], true);
@@ -263,7 +282,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
             None,
         )
         .unwrap();
-        assert!(status.contains("401"));
+        assert_status(&status, "401");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
             "unauthorized"
@@ -288,7 +307,7 @@ fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
             Some(&body),
         )
         .unwrap();
-        assert!(status.contains("400"));
+        assert_status(&status, "400");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"],
             "invalid_request"
@@ -586,7 +605,7 @@ fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity()
         Some(&create),
     )
     .unwrap();
-    assert!(status.contains("201"));
+    assert_status(&status, "201");
     let created: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
         created["cwd"],
@@ -603,7 +622,7 @@ fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity()
         Some(r#"{"message":"first"}"#),
     )
     .unwrap();
-    assert!(status.contains("202"));
+    assert_status(&status, "202");
     assert!(activity.snapshot(std::time::Instant::now()).active_jobs > 0);
     wait_for_api_generation_to_finish(&store, &id, 1);
     wait_for_no_activity(&activity);
@@ -636,7 +655,7 @@ fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity()
         Some(r#"{"message":"resume"}"#),
     )
     .unwrap();
-    assert!(status.contains("202"));
+    assert_status(&status, "202");
     wait_for_api_generation_to_finish(&store, &id, 2);
     let resumed_raw = std::fs::read_to_string(
         temp.path()
@@ -817,7 +836,7 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
         Some(r#"{"message":"first"}"#),
     )
     .unwrap();
-    assert!(first.contains("202"));
+    assert_status(&first, "202");
     wait_for_idempotency_key(&store, &id, "replay-key");
     wait_for_provider_session_id(&store, &id);
     let (replayed, _, replay_body) = fetch_api_request_with_headers(
@@ -831,7 +850,7 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
         Some(r#"{"message":"first"}"#),
     )
     .unwrap();
-    assert!(replayed.contains("200"));
+    assert_status(&replayed, "200");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&first_body).unwrap()["turn_id"],
         serde_json::from_str::<serde_json::Value>(&replay_body).unwrap()["turn_id"]
@@ -861,7 +880,7 @@ fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
         Some(r#"{"message":"replacement","interrupt_running":true}"#),
     )
     .unwrap();
-    assert!(replaced.contains("202"));
+    assert_status(&replaced, "202");
     wait_for_api_state(
         &store,
         &id,
