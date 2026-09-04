@@ -13,17 +13,27 @@
 //! frame and function names still come from `.symtab`, but the expanded
 //! inline caller chain does not. CI attaches the `.dwp` to the GitHub
 //! release, so the "fetch sidecars on first unsymbolicated report" path
-//! from the original issue is now implementable rather than a no-op;
-//! #1016 tracks it. This module does not fetch anything today — it is
-//! kept as an opportunistic verifier over what the running binary can
-//! already resolve on its own:
+//! from the original issue is real work again rather than a no-op.
 //!
 //! - `clud symbols` (bare) prints a five-line summary of the crash-
 //!   reports directory.
-//! - `clud symbols install` verifies that the running binary resolves
-//!   the most-recent crash report's backtrace. Exits 1 if it can't.
-//! - `clud symbols verify [--all]` is the same but explicit. `--all`
-//!   widens the scope from the most recent to every report.
+//! - `clud symbols install` fetches the sidecar the most recent report
+//!   needs, checks it against the release's `SHA256SUMS`, and caches it
+//!   under `~/.clud/state/symbols/<version>/`. It used to be an alias
+//!   for `verify`, which was honest while no sidecars existed and became
+//!   wrong the moment `split-debuginfo = "packed"` shipped them.
+//! - `clud symbols verify [--all]` checks that the running binary can
+//!   resolve a report's backtrace. Exits 1 if it can't. `--all` widens
+//!   the scope from the most recent report to every report.
+//!
+//! # Network
+//!
+//! `install` is the only thing here that reaches the network, and only
+//! when a person types it. The crash path does not fetch — the process is
+//! already dying and may be in a signal handler where allocation is
+//! unsafe — the startup notice does not fetch, and `verify` does not
+//! fetch. Air-gapped hosts therefore keep working, with local
+//! unsymbolicated output as the fallback (#1016).
 //!
 //! The opportunistic startup notice (see [`crate::crash_report::install`])
 //! prints a one-line hint pointing at `clud symbols verify` when a fresh
@@ -191,6 +201,257 @@ fn read_report_backtrace(path: &Path) -> Option<(String, String, u128)> {
     Some((backtrace, role, ts))
 }
 
+/// Turn a URL into bytes.
+///
+/// A seam, so the install path below is exercised without a network: an 85 MB
+/// `.dwp` is not something a test suite should be downloading, and a test that
+/// needs the real release to exist would fail for reasons that have nothing to
+/// do with the code.
+pub type Fetch<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
+
+/// The real fetcher. `ureq` is already this crate's HTTP client (`codex_auth`,
+/// `codex_bridge`).
+fn ureq_fetch(url: &str) -> Result<Vec<u8>, String> {
+    let response = ureq::get(url).call().map_err(|err| err.to_string())?;
+    let mut bytes = Vec::new();
+    // `into_reader`, not `into_string`: the payload is a binary sidecar tens
+    // of megabytes long, and `into_string` both caps at 10 MB and would mangle
+    // it as UTF-8.
+    std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
+        .map_err(|err| err.to_string())?;
+    Ok(bytes)
+}
+
+/// Where fetched sidecars live: `~/.clud/state/symbols/<version>/<asset>`.
+///
+/// Beside `~/.clud/state/crashes/`, as #1016 suggested. Keyed by version
+/// because that is what the asset is keyed by -- see [`expected_sha256`] for
+/// why a build-id cannot be the key here.
+fn cache_root() -> std::io::Result<PathBuf> {
+    let dir = crate::crash_report::crashes_dir()?
+        .parent()
+        .ok_or_else(|| std::io::Error::other("crashes dir has no parent"))?
+        .join("symbols");
+    Ok(dir)
+}
+
+/// The `(version, target)` a report was written by, or `None` if it does not
+/// say. Older reports predate both fields.
+fn read_report_identity(path: &Path) -> Option<(String, String)> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let version = value.get("version")?.as_str()?.to_string();
+    let target = value.get("target")?.as_str()?.to_string();
+    Some((version, target))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// How many release versions' sidecars the cache keeps.
+///
+/// Two: the release you are running and the one you just upgraded from, which
+/// is the pair a crash report in hand can plausibly need. A `.dwp` is ~85 MB,
+/// so this is a bound of roughly 170 MB rather than an unbounded tree.
+///
+/// #1016 asks for an eviction rule specifically because of #1014 -- nothing
+/// sweeps `~/.clud/state/`, and adding a directory that only grows would be
+/// repeating the mistake that issue was filed about.
+const MAX_CACHED_VERSIONS: usize = 2;
+
+/// Drop all but the newest [`MAX_CACHED_VERSIONS`] version directories.
+///
+/// Runs after a successful install rather than on a timer: the cache only
+/// grows when something is added to it, so the moment of adding is the only
+/// moment a bound can be crossed. That also keeps this out of the daemon's
+/// periodic work, which #542 asks not to grow.
+///
+/// Newest by directory mtime, not by parsing versions: a version string is not
+/// reliably ordered (`2.8.0` vs `2.10.0` needs semver, and a fork may not use
+/// semver at all), whereas "the one I fetched least recently" is exactly the
+/// thing worth dropping and is what mtime records.
+///
+/// Failures are non-fatal. A cache that could not be pruned is a disk-space
+/// problem; an install that reported failure because pruning failed would be a
+/// correctness problem, and the sidecar is already safely in place by now.
+fn prune_cache(cache_root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(cache_root) else {
+        return 0;
+    };
+    let mut versions: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            Some((mtime, entry.path()))
+        })
+        .collect();
+    if versions.len() <= MAX_CACHED_VERSIONS {
+        return 0;
+    }
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut removed = 0;
+    for (_, path) in versions.into_iter().skip(MAX_CACHED_VERSIONS) {
+        // Audit before acting (#893). These are large files clud fetched
+        // rather than the user's own data, but the audit line is what proves
+        // afterwards what was removed and under which rule.
+        crate::gc::delete_audit::record(
+            "gc.symbols-cache",
+            &path,
+            &format!("symbols-cache keep-newest>{MAX_CACHED_VERSIONS}"),
+        );
+        if fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// `clud symbols install` — fetch the sidecar this machine's most recent crash
+/// report needs, verify it against the release manifest, and cache it.
+///
+/// # Network happens here and nowhere else
+///
+/// #1016 is explicit that a tool which phones a release host after a crash
+/// will surprise people, and that some environments are air-gapped. So the
+/// only thing that ever reaches the network is this subcommand, typed by a
+/// person. The crash path does not fetch, the startup notice does not fetch,
+/// and `verify` does not fetch. That also keeps the fetch out of a dying
+/// process where allocation may be unsafe.
+pub fn install(reports: &[PathBuf]) -> i32 {
+    let cache = match cache_root() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("clud symbols: cannot resolve the symbol cache: {err}");
+            return 1;
+        }
+    };
+    install_with(reports, &ureq_fetch, &cache)
+}
+
+/// Test seam for [`install`].
+pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32 {
+    let Some(report) = reports.first() else {
+        println!("clud symbols: no crash reports, so no sidecar to fetch.");
+        return 0;
+    };
+    let Some((version, target)) = read_report_identity(report) else {
+        eprintln!(
+            "clud symbols: {} records no version/target, so the matching \
+             sidecar cannot be named. Reports written before #1016 do not \
+             carry them.",
+            report.display()
+        );
+        return 1;
+    };
+    let Some(asset) = sidecar_asset_name(&target) else {
+        // Not a failure of this machine: no such asset is published. Saying
+        // so beats a 404 the user has to interpret.
+        println!(
+            "clud symbols: no sidecar is published for {target}. Debug info \
+             for that target is not split out of the wheel, so there is \
+             nothing to fetch."
+        );
+        return 0;
+    };
+
+    let destination = cache_root.join(&version).join(&asset);
+    if destination.is_file() {
+        println!(
+            "clud symbols: already have {} ({})",
+            asset,
+            destination.display()
+        );
+        return 0;
+    }
+
+    let manifest_url = checksum_manifest_url(&version);
+    let manifest = match fetch(&manifest_url) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(err) => {
+            eprintln!("clud symbols: cannot fetch {manifest_url}: {err}");
+            return 1;
+        }
+    };
+    // The expected digest is read *before* the payload, so there is never a
+    // window where a downloaded file exists with nothing to check it against.
+    let Some(expected) = expected_sha256(&manifest, &asset) else {
+        eprintln!(
+            "clud symbols: release {version} publishes no checksum for \
+             {asset}; refusing to install bytes the release does not vouch \
+             for."
+        );
+        return 1;
+    };
+
+    let Some(url) = sidecar_url(&version, &target) else {
+        eprintln!("clud symbols: no sidecar URL for {target}");
+        return 1;
+    };
+    println!("clud symbols: fetching {url}");
+    let bytes = match fetch(&url) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("clud symbols: cannot fetch {url}: {err}");
+            return 1;
+        }
+    };
+
+    let actual = sha256_hex(&bytes);
+    if actual != expected {
+        // Nothing is written. A sidecar that is not the published one would
+        // symbolicate to confident, wrong line numbers -- worse than not
+        // symbolicating, which is the whole argument in #1016 item 3.
+        eprintln!(
+            "clud symbols: checksum mismatch for {asset}\n  expected {expected}\n  got      {actual}\nRefusing to install."
+        );
+        return 1;
+    }
+
+    if let Some(parent) = destination.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!("clud symbols: cannot create {}: {err}", parent.display());
+            return 1;
+        }
+    }
+    // Write beside and rename, so a reader never sees a half-written sidecar
+    // and an interrupted install leaves no file that looks complete.
+    let staging = destination.with_extension("part");
+    if let Err(err) = fs::write(&staging, &bytes) {
+        eprintln!("clud symbols: cannot write {}: {err}", staging.display());
+        return 1;
+    }
+    if let Err(err) = fs::rename(&staging, &destination) {
+        let _ = fs::remove_file(&staging);
+        eprintln!(
+            "clud symbols: cannot place {}: {err}",
+            destination.display()
+        );
+        return 1;
+    }
+    println!(
+        "clud symbols: installed {} ({} bytes, sha256 verified)",
+        destination.display(),
+        bytes.len()
+    );
+    let pruned = prune_cache(cache_root);
+    if pruned > 0 {
+        println!(
+            "clud symbols: dropped {pruned} older sidecar version(s), keeping \
+             the newest {MAX_CACHED_VERSIONS}"
+        );
+    }
+    0
+}
+
 /// Dispatch entry called from `main.rs`. Returns a process exit code.
 pub fn run(_args: &Args, subcommand: Option<SymbolsSubcommand>) -> i32 {
     let dir = match crate::crash_report::crashes_dir() {
@@ -209,9 +470,10 @@ pub fn run(_args: &Args, subcommand: Option<SymbolsSubcommand>) -> i32 {
     };
     match subcommand {
         None => print_summary(&dir, &reports),
-        Some(SymbolsSubcommand::Install) => {
-            verify(&reports, /*all=*/ false)
-        }
+        // #1016: `install` now installs. It used to be an alias for `verify`,
+        // which was honest while there were no sidecars to fetch and became
+        // wrong the moment `split-debuginfo = "packed"` shipped them.
+        Some(SymbolsSubcommand::Install) => install(&reports),
         Some(SymbolsSubcommand::Verify { all }) => verify(&reports, all),
     }
 }
@@ -543,5 +805,311 @@ mod tests {
             checksum_manifest_url("2.7.9"),
             "https://github.com/zackees/clud/releases/download/2.7.9/SHA256SUMS"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #1016: `clud symbols install` actually fetches.
+    // -----------------------------------------------------------------
+
+    use std::cell::RefCell;
+
+    /// A report on disk, as `install_with` will read it.
+    fn write_report(dir: &Path, version: &str, target: &str) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join("1700000000000-crash.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": version,
+                "target": target,
+                "backtrace": "0: main\n",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    }
+
+    /// Records every URL asked for, so a test can assert that nothing was
+    /// fetched at all — "did not touch the network" is a property worth
+    /// pinning, not just "returned the right code".
+    struct FakeNet {
+        manifest: String,
+        payload: Vec<u8>,
+        seen: RefCell<Vec<String>>,
+    }
+
+    impl FakeNet {
+        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+            self.seen.borrow_mut().push(url.to_string());
+            if url.ends_with(CHECKSUM_MANIFEST) {
+                Ok(self.manifest.clone().into_bytes())
+            } else {
+                Ok(self.payload.clone())
+            }
+        }
+    }
+
+    const LINUX: &str = "x86_64-unknown-linux-gnu";
+
+    fn net_for(payload: &[u8]) -> FakeNet {
+        let asset = sidecar_asset_name(LINUX).unwrap();
+        FakeNet {
+            manifest: format!("{}  ./{asset}\n", sha256_hex(payload)),
+            payload: payload.to_vec(),
+            seen: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_verified_sidecar_is_installed_into_the_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"dwarf package bytes");
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 0);
+        let installed = cache.join("2.8.0").join(sidecar_asset_name(LINUX).unwrap());
+        assert!(installed.is_file(), "sidecar was not cached");
+        assert_eq!(fs::read(&installed).unwrap(), b"dwarf package bytes");
+    }
+
+    /// The refusal that matters. A sidecar that is not the published one
+    /// symbolicates to confident, wrong line numbers — worse than not
+    /// symbolicating at all, which is #1016's own argument.
+    #[test]
+    fn a_checksum_mismatch_installs_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let mut net = net_for(b"the published bytes");
+        net.payload = b"something else entirely".to_vec();
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 1);
+        let asset = sidecar_asset_name(LINUX).unwrap();
+        assert!(
+            !cache.join("2.8.0").join(&asset).exists(),
+            "a file that failed verification was left on disk"
+        );
+        assert!(
+            !cache.join("2.8.0").join(format!("{asset}.part")).exists(),
+            "the staging file was left behind"
+        );
+    }
+
+    /// A release that does not list the asset vouches for nothing, so there is
+    /// nothing to check the bytes against. Refuse before downloading them.
+    #[test]
+    fn an_asset_absent_from_the_manifest_is_refused_before_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = FakeNet {
+            manifest: "deadbeef  ./some-other-file.tar.gz\n".to_string(),
+            payload: b"never requested".to_vec(),
+            seen: RefCell::new(Vec::new()),
+        };
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 1);
+        let seen = net.seen.borrow();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the payload must not be fetched when nothing can verify it: {seen:?}"
+        );
+    }
+
+    /// Windows and macOS publish no `.dwp`. Reporting that is the correct
+    /// answer, and it must not cost a request that would 404.
+    #[test]
+    fn a_target_with_no_published_sidecar_touches_no_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(
+            &tmp.path().join("crashes"),
+            "2.8.0",
+            "x86_64-pc-windows-msvc",
+        );
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"unused");
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 0, "not an error: no such asset is published");
+        assert!(net.seen.borrow().is_empty(), "{:?}", net.seen.borrow());
+    }
+
+    /// Second run is free and offline. Re-downloading 85 MB because the user
+    /// typed the command twice would be its own bug.
+    #[test]
+    fn an_already_installed_sidecar_is_not_fetched_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"dwarf package bytes");
+
+        assert_eq!(
+            install_with(std::slice::from_ref(&report), &|url| net.fetch(url), &cache),
+            0
+        );
+        let after_first = net.seen.borrow().len();
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+
+        assert_eq!(
+            net.seen.borrow().len(),
+            after_first,
+            "the cached sidecar was fetched a second time"
+        );
+    }
+
+    /// Reports written before #1016 carry no version/target, so the asset
+    /// cannot be named. Say that rather than guessing at one.
+    #[test]
+    fn a_report_without_version_or_target_is_not_guessed_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("crashes");
+        fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("1700000000000-crash.json");
+        fs::write(&report, r#"{"backtrace":"0: main\n"}"#).unwrap();
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"unused");
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 1);
+        assert!(net.seen.borrow().is_empty());
+    }
+
+    /// No reports is a normal state, not a failure, and not a reason to fetch.
+    #[test]
+    fn no_reports_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let net = net_for(b"unused");
+
+        assert_eq!(install_with(&[], &|url| net.fetch(url), tmp.path()), 0);
+        assert!(net.seen.borrow().is_empty());
+    }
+
+    /// The URLs are built from the report, not from whatever this binary
+    /// happens to be — a report copied from another machine still resolves to
+    /// its own release.
+    #[test]
+    fn the_fetched_urls_name_the_reports_own_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "1.2.3", LINUX);
+        let cache = tmp.path().join("symbols");
+        let net = net_for(b"payload");
+
+        install_with(&[report], &|url| net.fetch(url), &cache);
+
+        let seen = net.seen.borrow();
+        assert_eq!(seen[0], checksum_manifest_url("1.2.3"));
+        assert_eq!(seen[1], sidecar_url("1.2.3", LINUX).unwrap());
+    }
+
+    // -----------------------------------------------------------------
+    // #1016: the cache is bounded (#1014's lesson).
+    // -----------------------------------------------------------------
+
+    /// Make `count` version dirs, oldest first, each holding a file. Returns
+    /// them in creation order.
+    fn seed_versions(cache: &Path, names: &[&str]) -> Vec<PathBuf> {
+        let mut made = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            let dir = cache.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("clud-x.dwp"), b"payload").unwrap();
+            // Explicit, increasing mtimes: creation order alone is not a
+            // guarantee at filesystem timestamp granularity, and a test that
+            // depends on it fails on a fast machine rather than a slow one.
+            let when = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 + index as u64 * 60);
+            filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(when)).unwrap();
+            made.push(dir);
+        }
+        made
+    }
+
+    #[test]
+    fn the_cache_keeps_only_the_newest_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let dirs = seed_versions(cache, &["2.6.0", "2.7.0", "2.8.0", "2.9.0"]);
+
+        let removed = prune_cache(cache);
+
+        assert_eq!(removed, dirs.len() - MAX_CACHED_VERSIONS);
+        assert!(!dirs[0].exists(), "oldest should have gone");
+        assert!(!dirs[1].exists());
+        assert!(
+            dirs[2].exists(),
+            "newest {MAX_CACHED_VERSIONS} must survive"
+        );
+        assert!(dirs[3].exists());
+    }
+
+    /// Ordering is by mtime, not by version string. `2.10.0` sorts before
+    /// `2.9.0` lexically, so a name-ordered prune would drop the newer one --
+    /// and a fork need not use semver at all.
+    #[test]
+    fn pruning_is_by_recency_not_by_version_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        // Created oldest-to-newest, so "2.10.0" is the most recent.
+        let dirs = seed_versions(cache, &["2.8.0", "2.9.0", "2.10.0"]);
+
+        prune_cache(cache);
+
+        assert!(!dirs[0].exists(), "2.8.0 is the least recently fetched");
+        assert!(dirs[1].exists());
+        assert!(
+            dirs[2].exists(),
+            "2.10.0 is newest by mtime and must survive a lexical sort"
+        );
+    }
+
+    #[test]
+    fn a_cache_within_the_bound_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        let dirs = seed_versions(cache, &["2.8.0", "2.9.0"]);
+
+        assert_eq!(prune_cache(cache), 0);
+        assert!(dirs.iter().all(|d| d.exists()));
+    }
+
+    #[test]
+    fn pruning_a_missing_cache_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(prune_cache(&tmp.path().join("never-created")), 0);
+    }
+
+    /// End to end: installing into a cache that is already at the bound
+    /// evicts, so the tree cannot grow one release at a time.
+    #[test]
+    fn installing_prunes_the_cache_it_just_grew() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = write_report(&tmp.path().join("crashes"), "9.9.9", LINUX);
+        let cache = tmp.path().join("symbols");
+        let old = seed_versions(&cache, &["1.0.0", "2.0.0"]);
+        let net = net_for(b"dwarf package bytes");
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+
+        assert!(
+            cache.join("9.9.9").is_file()
+                || cache
+                    .join("9.9.9")
+                    .join(sidecar_asset_name(LINUX).unwrap())
+                    .is_file(),
+            "the new sidecar must be installed"
+        );
+        assert!(!old[0].exists(), "the oldest version was not evicted");
+        let kept = fs::read_dir(&cache).unwrap().count();
+        assert_eq!(kept, MAX_CACHED_VERSIONS, "cache exceeded its bound");
     }
 }
