@@ -129,8 +129,15 @@ fn symbols_verify_all_fails_when_any_report_is_unsymbolicated() {
     );
 }
 
+/// `verify`, not `install`, is what inspects.
+///
+/// This test used to drive `install`, which was correct while `install` was an
+/// alias for `verify`. #1016 gave `install` its own job — fetch the sidecar
+/// the newest report needs — so the inspect-only-the-newest property now
+/// belongs to `verify`, and asserting it through `install` would be asserting
+/// the alias rather than the behaviour.
 #[test]
-fn symbols_install_inspects_only_most_recent_report() {
+fn symbols_verify_inspects_only_most_recent_report() {
     let tmp = TempDir::new().unwrap();
     let state_dir = tmp.path().join("state");
     let crashes_dir = state_dir.join("crashes");
@@ -148,7 +155,7 @@ fn symbols_install_inspects_only_most_recent_report() {
         "   0: clud::main::h1234\n             at /home/u/clud/src/main.rs:42:5\n",
     );
 
-    let (exit, output) = run_clud(&["symbols", "install"], &state_dir);
+    let (exit, output) = run_clud(&["symbols", "verify"], &state_dir);
     assert_eq!(exit, 0, "expected exit 0; output: {output}");
     assert!(
         output.contains("999-test-new.json"),
@@ -188,4 +195,46 @@ fn symbols_bare_prints_summary() {
         output.contains("reports without file:line frames: 1"),
         "got: {output}"
     );
+}
+
+/// `install` on a report that predates #1016 says so rather than guessing.
+///
+/// The version and target are what name the release asset; without them there
+/// is no sidecar to ask for. Guessing at this binary's own version would fetch
+/// symbols for the wrong build, which mis-symbolicates with confident, wrong
+/// line numbers — the failure #1016 argues is worse than none.
+#[test]
+fn symbols_install_reports_a_pre_1016_report_rather_than_guessing() {
+    let tmp = TempDir::new().unwrap();
+    let state_dir = tmp.path().join("state");
+    let crashes_dir = state_dir.join("crashes");
+    fs::create_dir_all(&crashes_dir).unwrap();
+    // `write_report` writes no version/target, which is exactly the shape of
+    // a report written before those fields existed.
+    write_report(
+        &crashes_dir,
+        "999-test-new.json",
+        "   0: clud::main::h1234\n             at /home/u/clud/src/main.rs:42:5\n",
+    );
+
+    let (exit, output) = run_clud(&["symbols", "install"], &state_dir);
+
+    assert_eq!(exit, 1, "expected exit 1; output: {output}");
+    assert!(
+        output.contains("version/target"),
+        "the reason must name what is missing; got: {output}"
+    );
+}
+
+/// No reports at all is a normal state, and `install` must not treat it as a
+/// failure or reach for the network to find out.
+#[test]
+fn symbols_install_with_no_reports_is_not_an_error() {
+    let tmp = TempDir::new().unwrap();
+    let state_dir = tmp.path().join("state");
+    fs::create_dir_all(state_dir.join("crashes")).unwrap();
+
+    let (exit, output) = run_clud(&["symbols", "install"], &state_dir);
+
+    assert_eq!(exit, 0, "expected exit 0; output: {output}");
 }
