@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +23,75 @@ def _cargo(subcommand: list[str]) -> list[str]:
     from ci.env import cargo_argv, clean_env
 
     return cargo_argv(subcommand, env=clean_env())
+
+
+# How many read-only artifacts to look at before concluding the tree is
+# cache-linked. The check runs before every lint, so it stops at the first hit
+# in the common (healthy) case and never walks the whole tree.
+_READONLY_PROBE_LIMIT = 4000
+
+
+def _readonly_artifact(target: Path) -> Path | None:
+    """First read-only file under `target/debug/deps`, or None.
+
+    soldr's target-tree cache hardlinks artifacts in read-only -- they are
+    shared inodes, so making them writable would corrupt the cache for every
+    other consumer. That is correct, and `soldr cargo` handles it. A plain
+    cargo run against the same tree cannot, and fails trying to write one.
+    """
+    deps = target / "debug" / "deps"
+    if not deps.is_dir():
+        return None
+    seen = 0
+    try:
+        for entry in deps.iterdir():
+            seen += 1
+            if seen > _READONLY_PROBE_LIMIT:
+                return None
+            try:
+                if entry.is_file() and not os.access(entry, os.W_OK):
+                    return entry
+            except OSError:
+                continue
+    except OSError:
+        return None
+    return None
+
+
+def explain_readonly_failure(argv: list[str]) -> None:
+    """Add the missing sentence after a lint step has already failed (#1158).
+
+    **Explains, never gates.** An earlier draft of this checked the same
+    condition *before* running and returned non-zero, and that was wrong:
+    `soldr cargo build` repopulates the read-only hardlinks on every build, so
+    the condition is close to permanent in a soldr-driven tree -- while
+    `fmt` does not compile anything and usually succeeds against it anyway.
+    Predicting failure from it blocks lint runs that would have passed, which
+    is worse than the confusing message this exists to explain.
+
+    So it runs only after a real non-zero exit, and only adds context:
+
+        error: output file .../libserde_core-<hash>.rmeta is not writeable
+
+    names whichever dependency compiled first, changes run to run, and reads
+    as a permissions problem in your checkout rather than a toolchain-routing
+    one. That cost three separate diagnoses in one session, and once let a
+    formatter-dirty commit reach CI because the failure was read as
+    environmental.
+    """
+    if argv and "soldr" in Path(argv[0]).name:
+        return
+    offender = _readonly_artifact(ROOT / "target")
+    if offender is None:
+        return
+    print(
+        f"\nlint: if the failure above says \"is not writeable\", this is why:\n"
+        f"  {offender} is read-only.\n"
+        f"  soldr's target-tree cache hardlinks artifacts in read-only, and the\n"
+        f"  cargo resolved here is not soldr's, so it cannot rewrite them.\n"
+        f"  Re-run the step through soldr, e.g. `soldr cargo clippy --workspace`.\n",
+        file=sys.stderr,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,13 +139,20 @@ def main(argv: list[str] | None = None) -> int:
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the
     # checked formatting contract explicitly so local and CI layout agree.
     fmt_args = ["fmt", "--all", "--check", "--", "--config-path", ".rustfmt.toml"]
-    if run(_cargo(fmt_args)) != 0:
+    fmt_argv = _cargo(fmt_args)
+    if run(fmt_argv) != 0:
+        # #1158: the toolchain's own message names an arbitrary dependency.
+        explain_readonly_failure(fmt_argv)
         return 1
 
     if static_only:
         return 0
     clippy = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
-    return 1 if run(_cargo(clippy)) else 0
+    clippy_argv = _cargo(clippy)
+    if run(clippy_argv) != 0:
+        explain_readonly_failure(clippy_argv)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
