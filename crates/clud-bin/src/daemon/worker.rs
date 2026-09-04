@@ -18,7 +18,7 @@ use crate::process_identity::{self, ProcessIdentity};
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
-use super::io_helpers::{child_env, read_json_file};
+use super::io_helpers::{child_env_from, read_json_file};
 use super::paths::spec_path;
 use super::process_utils::identity_is_alive;
 use super::types::{
@@ -128,7 +128,7 @@ pub(super) fn run_worker(
     // Keep this value in the worker scope until the session exits: its
     // environment is handed only to the harness child and BridgeHandle drops
     // (closing its listener and discarding its bearer) on every exit path.
-    let launch_runtime = match start_worker_runtime(&spec.plan) {
+    let launch_runtime = match start_worker_runtime(&spec.plan, &spec.client_env) {
         Ok(runtime) => runtime,
         Err(err) => {
             eprintln!("[clud] failed to start cross-route runtime: {}", err);
@@ -262,8 +262,12 @@ pub(super) fn run_worker(
     0
 }
 
-fn start_worker_runtime(plan: &crate::command::LaunchPlan) -> io::Result<ForegroundRuntime> {
-    ForegroundRuntime::start(plan, child_env()).map_err(|err| io::Error::other(err.to_string()))
+fn start_worker_runtime(
+    plan: &crate::command::LaunchPlan,
+    client_env: &[(String, String)],
+) -> io::Result<ForegroundRuntime> {
+    ForegroundRuntime::start(plan, child_env_from(client_env))
+        .map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn run_repeat_worker(
@@ -417,7 +421,7 @@ fn run_repeat_once(
     let process = Arc::new(NativeProcess::new(ProcessConfig {
         command: subprocess::command_spec_for_subprocess(command.to_vec()),
         cwd: spec.plan.cwd.as_ref().map(PathBuf::from),
-        env: Some(child_env()),
+        env: Some(child_env_from(&spec.client_env)),
         capture: true,
         stderr_mode: StderrMode::Stdout,
         // Issue #55: repeat-job runs are invisible by design — stdio is

@@ -901,6 +901,9 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             repeat_run_command,
             backlog_bytes,
             transcript_path,
+            // #933: what the initiator sees, captured now rather than
+            // whenever the daemon happened to start.
+            client_env: std::env::vars().collect(),
         }),
     };
     let response = match send_daemon_request(&state_dir, &request) {
