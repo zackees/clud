@@ -122,6 +122,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "clud-docker-recover",
         skill_md: include_str!("../assets/skills/clud-docker-recover/SKILL.md"),
     },
+    BundledSkill {
+        name: "clud-os-debug",
+        skill_md: include_str!("../assets/skills/clud-os-debug/SKILL.md"),
+    },
 ];
 
 /// Bundled skills that have been retired. Entries stay here after the
