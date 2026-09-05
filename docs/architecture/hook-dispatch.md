@@ -166,6 +166,17 @@ The inversion is scoped to that env var and to `PreToolUse`: an ungated session
 keeps the fail-open behavior described above. See DD-056 and
 `block_bad_cmd_gate.rs`.
 
+**Exception 3: the recursive-delegation guard.** When
+`CLUD_BLOCK_RECURSIVE_AGENTS` is set to an enabling value, `run_for_event`
+refuses an `Agent` or `Workflow` call whose payload carries an `agent_id`. The
+harness sets that field only for a call made from inside a subagent, so its
+presence is the whole depth signal: the primary session keeps delegating, a
+subagent may not. The check runs before the command rules — an `Agent` call has
+no command for them to inspect — and it only fires if the hook is registered
+with a `*` matcher, since a `Bash` matcher never delivers an `Agent` event.
+Workflow-internal `agent()` calls emit no blocking event and stay uncovered.
+See DD-069 and `recursive_agent_decision` in `block_bad_cmd.rs`.
+
 ## Which event an invocation serves, and who dispatches
 
 A bare `clud-cmd-scan` means `PreToolUse`. That is what every already-installed
