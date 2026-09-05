@@ -21,6 +21,13 @@ The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
 `clud grind`
 
+`grind` is intended to open one normal interactive PTY session and seed its
+prompt with the harness-native `/loop` instruction. The harness owns all
+repetition; clud must not relaunch the agent, impose an iteration ceiling, or
+use DONE/BLOCKED marker files for `grind`. See the
+[grind contract](docs/architecture/grind.md). The current release does not yet
+meet that contract; it still uses clud's external loop runner.
+
 [![CI](https://github.com/zackees/clud/actions/workflows/ci.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/ci.yml)
 [![Auto Release](https://github.com/zackees/clud/actions/workflows/auto-release.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/auto-release.yml)
 

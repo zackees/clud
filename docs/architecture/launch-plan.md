@@ -6,7 +6,12 @@ Every code path that decides "what would clud actually run" funnels through
 provider/harness compatibility and focused tests; cross-route production code
 must pass a resolved target. No other place in the binary reconstructs backend
 argv, iteration budget, working directory, repeat schedule, DONE/BLOCKED
-marker paths, or stream-json injection.
+marker paths, or stream-json injection. `grind` is an exception to the loop
+semantics described here: its required design is one interactive PTY prompt
+seeded with the harness-native `/loop`; the harness, not `LaunchPlan`'s
+external-loop fields, owns repetition. See [grind.md](grind.md). The current
+implementation still configures the external loop runner for `grind` and is a
+known mismatch.
 
 Daemon-managed native sessions use the same construction path through the
 typed `command::build_headless_turn_plan` helper. Its request carries only a
@@ -74,7 +79,9 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
    the caller did not override it.
 3. **Selects the Codex subcommand.** Explicit `-p` prompts and `loop` use
    `exec`; the built-ins (`do`, `up`, `rebase`, `fix`, and `grind`) seed the
-   interactive TUI without a subcommand.
+   interactive TUI without a subcommand. For `grind`, the intended plan is one
+   normal PTY prompt seeded with `/loop`; see [grind.md](grind.md) for its
+   separate contract and the current mismatch.
    Continuation requests use `resume`; for interactive built-ins, `--last` or
    the explicit session ID is emitted before the generated prompt. Bare
    `--resume` is rejected for those built-ins because its session picker cannot
@@ -86,7 +93,9 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
 5. **Builds the selected task.** For `loop`, repeat duration is parsed first,
    then DONE/BLOCKED marker policy and paths are resolved, the task text is
    loaded, the marker contract is appended, and the prompt is pushed. `up`,
-   `rebase`, and `fix` use their prompt builders; a direct launch handles
+   `rebase`, and `fix` use their prompt builders. `grind` must only build and
+   push its `/loop` seed, without loop markers or external repetition; the
+   current code has not yet reached that behavior. A direct launch handles
    prompt/message/continue/resume arguments in harness-specific form.
 6. **Forwards unknown flags** from `args.passthrough` after task-specific
    arguments.
@@ -131,7 +140,7 @@ construction. Model-provider selection is carried separately by
 
 | Concern | Claude harness | Codex harness | DeepSeek harness |
 |---|---|---|---|
-| Subcommand keyword | (none) | `exec` for `-p`/`loop`; none for interactive built-ins; `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
+| Subcommand keyword | (none) | `exec` for `-p`/`loop`; none for interactive built-ins (including intended `grind`); `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
 | YOLO flag | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | none; DSH owns permissions |
 | Model flag | `--model <id>` | `-m <id>` | unsupported; DSH owns provider/model profiles |
 | Prompt delivery | `-p <prompt>` | bare positional | bare positional after the headless profile |
@@ -205,6 +214,7 @@ bearing reason this invariant holds, and downstream tooling depends on it.
 ## See also
 
 - [loop-subsystem.md](loop-subsystem.md) — spec → plan → iteration → marker → artifact cycle.
+- [grind.md](grind.md) — separate one-PTY `/loop` handoff contract; it does not use clud's external loop subsystem.
 - [daemon-ipc.md](daemon-ipc.md) — how `WorkerLaunchSpec { plan, ... }` rides the wire.
 - [`../../crates/clud-bin/src/command/README.md`](../../crates/clud-bin/src/command/README.md) — file-level map of the `command/` submodules.
 - [`../DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md) — DD-002 (YOLO default + `--safe`), DD-005 (single source of truth for backend argv).

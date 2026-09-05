@@ -408,7 +408,11 @@ pub enum Command {
     Do {
         target: Option<String>,
     },
-    /// Grind the current repo's issues page under the `/loop` contract.
+    /// Grind the current repo's issues page with `/loop`.
+    // Intended: insert that prompt into one ordinary interactive PTY session
+    // and let the harness own repetition. External relaunches, marker files, a
+    // turn cap, and headless prompting are legacy runtime defects; see
+    // docs/architecture/grind.md.
     ///
     /// With no argument, resolves the `origin` remote and maps it to the
     /// forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues`

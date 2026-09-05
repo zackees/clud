@@ -258,6 +258,9 @@ fn deepseek_harness_one_shot_builtins_keep_headless_profile() {
 }
 
 #[test]
+// Legacy-defect coverage: current DeepSeek `grind` incorrectly selects a
+// headless profile. The intended contract is one ordinary interactive PTY with
+// an injected `/loop` prompt; see docs/architecture/grind.md.
 fn deepseek_harness_generated_grind_prompt_uses_headless_profile() {
     let args = parse(&[
         "clud",
@@ -1164,6 +1167,10 @@ fn test_build_grind_prompt_substitutes_url() {
     assert!(!prompt.contains("{url}"));
 }
 
+/// Legacy-defect coverage: this test records the current marker-based external
+/// loop behavior. It must be replaced when `grind` uses one ordinary interactive
+/// PTY with an injected `/loop` prompt and harness-owned repetition; see
+/// docs/architecture/grind.md.
 #[test]
 fn test_grind_command_uses_loop_contract() {
     let p = plan(&["clud", "grind", "https://github.com/zackees/clud/issues"]);
@@ -1190,6 +1197,9 @@ fn test_grind_command_uses_loop_contract() {
     );
 }
 
+/// Legacy-defect coverage: the retained 200-iteration and marker assertions
+/// describe the current runtime bug, not `grind`'s intended interactive-PTY
+/// contract. See docs/architecture/grind.md.
 #[test]
 fn test_codex_grind_seeds_interactive_session_and_keeps_loop_contract() {
     let plan = plan(&[
@@ -1402,11 +1412,10 @@ fn test_claude_loop_subprocess_injects_stream_json() {
     );
 }
 
-/// Issue #897: `grind` drives the same `/loop` contract and pushes its prompt
-/// with `push_prompt`, so on Claude it gets `-p` and buffers for the whole
-/// iteration — the exact silence the stream-json injection above exists to
-/// fix. It was excluded only because the guard matched `Command::Loop`
-/// literally, while `is_loop` (the launch-mode input) already covered it.
+/// Legacy-defect coverage: `grind` currently enters the external-loop
+/// stream-json path on Claude because it is prompted with `-p`. Its intended
+/// contract is one ordinary interactive PTY with an injected `/loop` prompt;
+/// the harness, not clud, owns repetition. See docs/architecture/grind.md.
 #[test]
 fn test_claude_grind_subprocess_injects_stream_json() {
     let p = plan(&[

@@ -1,19 +1,19 @@
-//! `clud grind` — derive the current repo's issues page and grind it under
-//! the `/loop` contract.
+//! `clud grind` — derive the current repo's issues page and inject a `/loop`
+//! prompt into one ordinary interactive PTY session.
 //!
 //! `clud grind` with no argument resolves the git `origin` remote, maps it to
 //! the forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues` for
-//! GitLab), prints a green notice, and drives the URL through the `/loop`
-//! contract. An explicit URL argument is used verbatim.
+//! GitLab), prints a green notice, and inserts the resulting `/loop` prompt
+//! into that session. An explicit URL argument is used verbatim.
 //!
-//! Issue #897: this deliberately does **not** reuse `clud do <target>`'s `/goal`
-//! flow. `/goal` is single-shot — it resolves once and stops — whereas
-//! grinding an issues page is iterative: one issue per iteration, ending only
-//! when every issue is done. So `grind` builds its own prompt
-//! (`command::prompts::build_grind_prompt`) and terminates via the loop
-//! subsystem's DONE/BLOCKED markers rather than a Stop hook. Native Codex
-//! seeds that contract into its interactive TUI; Claude and DeepSeek keep their
-//! existing headless prompt paths.
+//! `grind` deliberately does **not** reuse `clud do <target>`'s `/goal` flow.
+//! Its harness-owned `/loop` prompt works through the issues page inside the
+//! interactive session. The intended contract is documented in
+//! [`docs/architecture/grind.md`](../../../docs/architecture/grind.md): clud
+//! must neither relaunch the harness nor use DONE/BLOCKED markers, a 200-turn
+//! cap, or a headless prompt path. The current implementation still does those
+//! things for some backends; that is a legacy runtime defect pending correction,
+//! not this module's directive.
 
 use std::path::Path;
 use std::time::Duration;
@@ -109,7 +109,7 @@ pub fn git_remote_url(cwd: &Path) -> Option<String> {
     }
 }
 
-/// Resolve the URL `clud grind` hands to the `/loop` contract.
+/// Resolve the URL `clud grind` inserts into its interactive `/loop` prompt.
 ///
 /// An explicit `url` is returned verbatim (parity with `clud do`). Otherwise
 /// the `origin` remote in `cwd` is mapped to its issues page. `Err` carries a
