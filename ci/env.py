@@ -234,9 +234,7 @@ def activate() -> None:
     current_path = os.environ.get("PATH", "")
     path_parts = current_path.split(os.pathsep) if current_path else []
     normalized_cargo_bin = os.path.normcase(os.path.normpath(str(bin_dir)))
-    normalized_parts = {
-        os.path.normcase(os.path.normpath(part)) for part in path_parts if part
-    }
+    normalized_parts = {os.path.normcase(os.path.normpath(part)) for part in path_parts if part}
     if _soldr_shims_requested(os.environ):
         filtered_parts = [
             part

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ci import env as ci_env
 from ci import test as ci_test
 
 
@@ -70,6 +71,10 @@ def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(ci_test, "_installed_script", fake_installed_script)
     monkeypatch.setattr(ci_test, "ROOT", tmp_path)
+    # Routing is `test_ci_env.py`'s subject, not this test's: pin soldr off so
+    # the argv does not depend on what the host PATH happens to hold (the
+    # exec runners plant a decoy `soldr` that fails on invocation).
+    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: None)
 
     def fake_run(cmd: list[str], *, env=None) -> int:
         captured.append(cmd)
@@ -102,6 +107,7 @@ def test_prepare_pytest_binaries_builds_clud_without_installed_script(
 
     monkeypatch.setattr(ci_test, "_installed_script", lambda name: None)
     monkeypatch.setattr(ci_test, "ROOT", tmp_path)
+    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: None)
 
     def fake_run(cmd: list[str], *, env=None) -> int:
         captured.append(cmd)
