@@ -24,9 +24,12 @@ const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
 /// Returns true when this harness consumes the launch prompt headlessly.
 ///
 /// `loop` and explicit `-p` prompts are orchestrated/unattended for every
-/// harness. The built-in verbs (including `grind`) seed Codex's interactive TUI;
-/// Claude keeps its existing behavior (`do` interactive, the others `-p`) and
-/// DeepSeek keeps its existing headless profile for every generated prompt.
+/// harness. Most built-in verbs follow their backend-specific legacy behavior.
+/// `grind` is the exception in the intended design: it must always seed one
+/// ordinary interactive PTY with its `/loop` prompt; the harness owns
+/// repetition. The current backend split below is a legacy runtime defect
+/// (including the Claude/DeepSeek headless paths), not the `grind` directive.
+/// See `docs/architecture/grind.md`.
 pub fn interactive_builtin_resume_error(args: &Args, backend: Backend) -> Option<&'static str> {
     let is_builtin = matches!(
         args.command,
@@ -553,10 +556,10 @@ fn build_launch_plan_for_target_at(
             unreachable!("wasm execution is handled directly in main")
         }
         Some(Command::Grind { url }) => {
-            // `grind` uses the `/loop` contract with DONE/BLOCKED markers.
-            // Native Codex hosts that contract in its interactive TUI; the
-            // existing Claude/DeepSeek headless paths keep clud's re-invocation.
-            // When all issues are done the agent writes DONE and terminates.
+            // Intended: inject one `/loop` prompt into an ordinary interactive
+            // PTY and let the harness repeat. The marker setup, 200-turn cap,
+            // and any external relaunch below are legacy runtime defects pending
+            // correction, not the `grind` contract. See docs/architecture/grind.md.
             if seed_interactive_builtin {
                 let url = url.as_deref().unwrap_or("");
                 let git_root = git_root_from(cwd);
@@ -572,7 +575,7 @@ fn build_launch_plan_for_target_at(
                     done_path: marker_paths.done.to_string_lossy().to_string(),
                     blocked_path: marker_paths.blocked.to_string_lossy().to_string(),
                 });
-                iterations = 200; // high ceiling — terminates via DONE/BLOCKED
+                iterations = 200; // Legacy defect: external loop cap; remove with runtime correction.
                 push_prompt(&mut cmd, backend, final_prompt);
             }
         }
@@ -633,11 +636,11 @@ fn build_launch_plan_for_target_at(
 
     cmd.extend(args.passthrough.iter().cloned());
 
-    // `grind` belongs here too (issue #897): it drives the same `/loop`
-    // contract, sets `loop_markers`, and pushes its prompt with `push_prompt`
-    // — so on Claude it gets `-p` and buffers exactly like `clud loop` did
-    // before the stream-json fix below. `is_loop` (the launch-mode input) is
-    // already true for it; only this narrower check had been left behind.
+    // Legacy defect: `grind` is included in the external-loop stream-json path
+    // because it currently sets `loop_markers` and prompts Claude with `-p`.
+    // Its intended path is one ordinary interactive PTY with a `/loop` prompt;
+    // the harness owns repetition. Remove this inclusion with the runtime fix;
+    // see docs/architecture/grind.md.
     let is_loop_cmd = matches!(
         &args.command,
         Some(Command::Loop { .. }) | Some(Command::Grind { .. })

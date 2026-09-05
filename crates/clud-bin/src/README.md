@@ -564,8 +564,8 @@ Diagnostics and misc:
   `WorkspaceTrust::{Trusted, Untrusted, Unknown}` — `Unknown` for a missing or
   unparseable file, so a relocated config never warns a user that a trusted
   workspace is untrusted. `warn_if_workspace_untrusted` prints one stderr
-  notice, called from `main.rs` above the `launch_mode` match so an unattended
-  `clud grind` gets one line rather than one per iteration; it is silent
+  notice, called from `main.rs` above the `launch_mode` match so the legacy
+  external-loop `clud grind` gets one line rather than one per iteration; it is silent
   unless the backend is Claude, the workspace is untrusted, **and** the repo
   actually has a `.claude/settings*.json` for that decision to suppress. Never
   writes the trust flag — see
@@ -616,11 +616,12 @@ Quick lookup, which file owns a given subcommand:
 - `clud grind [url]` -> `grind.rs` resolves the repo's `origin` remote to its
   forge issues page (GitHub `<repo>/issues`, GitLab `<repo>/-/issues`), prints
   the green notice, and keeps the `Grind` command (issue #897 — it no longer
-  rewrites to `Do`). `command/builder.rs` then builds the `/loop` prompt via
-  `build_grind_prompt` and arms the loop subsystem's DONE/BLOCKED markers, so
-  grinding iterates one issue at a time instead of running `/goal`'s
-  single-shot flow. Native Codex seeds this contract into the interactive TUI;
-  Claude and DeepSeek keep their existing headless prompt paths. An explicit URL
+  rewrites to `Do`). `command/builder.rs` builds the `/loop` seed prompt.
+  The intended contract is one ordinary interactive PTY prompt, with the
+  harness owning repetition; it has no clud DONE/BLOCKED markers, relaunches,
+  headless path, or iteration ceiling. The current implementation still arms
+  clud's external loop runner, so it does not meet that contract. See the
+  [grind architecture](../../../docs/architecture/grind.md). An explicit URL
   is passed through verbatim.
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.
@@ -636,6 +637,9 @@ Subsystems that span multiple files have their own topic docs under
 
 - **Loop subsystem** (`command/`, `loop_spec`, `loop_check`, `loop_artifacts`,
   `stream_json`, `runner`) -> [docs/architecture/loop-subsystem.md](../../../docs/architecture/loop-subsystem.md)
+- **Grind** (`grind`, `command`, `runner`) ->
+  [docs/architecture/grind.md](../../../docs/architecture/grind.md) — intended
+  one-PTY `/loop` handoff and the current implementation mismatch.
 - **Daemon IPC** (everything under `daemon/`) -> [docs/architecture/daemon-ipc.md](../../../docs/architecture/daemon-ipc.md)
 - **Session lifecycle** (`session`, `console_*`, `capture`, `dnd` injection,
   `voice` hooks) -> [docs/architecture/session-lifecycle.md](../../../docs/architecture/session-lifecycle.md)

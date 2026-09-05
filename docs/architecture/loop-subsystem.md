@@ -1,5 +1,11 @@
 # Loop Subsystem
 
+This document owns the external `clud loop` subsystem only. Its marker files,
+iteration budget, subprocess rendering, and runner relaunch lifecycle do not
+apply to `clud grind`. The separate [`grind.md`](grind.md) contract requires
+one interactive PTY session and delegates looping to the harness-native
+`/loop` command.
+
 `clud loop <task>` runs the backend agent repeatedly against the same task
 until either (a) the agent writes a `DONE` or `BLOCKED` marker file under
 `<git-root>/.clud/loop/`, (b) the agent emits a `<<<CLUD_LOOP_DONE: ...>>>`

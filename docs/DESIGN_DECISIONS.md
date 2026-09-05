@@ -3126,3 +3126,42 @@ same policy, since non-interactive bash reads `BASH_ENV` for script files too,
 not only for `-c`. The generated file is written atomically and only when its
 content differs, so concurrent launches cannot hand a shell a half-written
 file and leave it silently unarmed.
+
+---
+
+## DD-068: `grind` delegates looping to the interactive harness
+
+**Status:** Accepted
+
+**Context:** `grind` was mistakenly implemented as an external clud loop:
+clud added a completion-marker prompt, chose a fixed iteration count, and
+relaunched the backend after each turn. That design made a harness-native
+`/loop` request look like a request for clud orchestration. It also produced
+headless and stream-rendered variants that are not a normal terminal session.
+Issue #897 and PRs #950 and #1045 contain this obsolete guidance or preserve
+parts of it. They do not define the current contract.
+
+**Decision:** `clud grind` launches exactly one normal foreground interactive
+PTY session and places a generated `/loop ...` request in that harness prompt.
+The selected harness owns repetition, completion, blocked state, and the rest
+of the session lifecycle. clud does not inject or poll DONE/BLOCKED markers,
+apply an iteration cap, relaunch or re-prompt the harness, use headless
+`-p`/`exec`, invoke the repeat worker, or enable stream-json rendering.
+
+Only a harness that supports `/loop` in its normal interactive prompt supports
+`grind`. A harness without that capability fails explicitly before launch;
+clud must not substitute its own external loop. The full execution contract is
+owned by [architecture/grind.md](architecture/grind.md).
+
+**Rationale:** The interactive harness already owns the user experience and
+knows how its `/loop` command should continue and stop. Adding a second owner
+creates conflicting lifecycle rules, hides interactive controls, and causes
+future maintenance to preserve stale clud behavior because tests and old plans
+appear to require it.
+
+**Consequences:** `clud loop` remains the distinct external-loop command and
+retains its marker, artifact, iteration, and repeat semantics. Legacy `grind`
+tests that expect markers, repeated launches, a 200-turn cap, headless argv,
+or stream-json setup are specifications of the defect and must be replaced.
+The replacement tests assert one PTY backend launch, a `/loop` prompt, and no
+external loop state or renderer.

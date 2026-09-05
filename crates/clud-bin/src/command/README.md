@@ -1,8 +1,14 @@
 # command/
 
-Builds the `LaunchPlan` that downstream runners execute: effective-harness-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`, `do`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring, and Claude `stream-json` progress injection for subprocess-mode loops.
+Builds the `LaunchPlan` that downstream runners execute: effective-harness-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`, `do`, `grind`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring for `clud loop`, and Claude `stream-json` progress injection for subprocess-mode loops.
 
 The `LaunchPlan` contract (construction pipeline, consumers, `--dry-run` JSON) is documented at [docs/architecture/launch-plan.md](../../../../docs/architecture/launch-plan.md); the DONE/BLOCKED contract and `--repeat` no-overlap scheduler at [docs/architecture/loop-subsystem.md](../../../../docs/architecture/loop-subsystem.md).
+`grind` is distinct: its intended contract is one normal interactive PTY prompt
+seeded with `/loop`, after which the harness owns repetition. It must not use
+the clud loop marker contract, a headless launch, an iteration ceiling, or
+external relaunching. See [grind.md](../../../../docs/architecture/grind.md).
+The current implementation still violates that contract by configuring the
+external loop runner.
 Provider/harness resolution happens before construction and is documented at
 [docs/architecture/launch-targets.md](../../../../docs/architecture/launch-targets.md).
 Provider-neutral model/effort/context normalization and direct-vs-unified
@@ -12,7 +18,7 @@ routing are documented at
 ## Files
 
 - `mod.rs` — module facade; re-exports the resolved-target production builder, the native compatibility builder, supporting helpers, and the `LaunchPlan` / `LoopMarkers` / `RepeatSchedule` types.
-- `builder.rs` — core `build_launch_plan_for_target` orchestrator, the native `build_launch_plan` compatibility wrapper, typed daemon-headless turn plans, backend-aware interactive/headless prompt classification, and repeat/task helpers. Headless turns retain shared model/safety policy while producing Claude stream-json session argv or Codex `exec [resume] --json` argv. Also owns the `--disallowedTools` policy: `bridge_suppresses_plan_mode` strips `EnterPlanMode` on every Codex-provider / Claude-harness launch (the model can otherwise enter plan mode unprompted — see [DD-033](../../../../docs/DESIGN_DECISIONS.md#dd-033-plan-mode-is-disabled-unconditionally-on-the-codex-to-claude-bridge)), `--unattended` / `clud loop` additionally strip `AskUserQuestion`, and `plan_mode_suppression_notice` emits the green TTY-only override hint.
+- `builder.rs` — core `build_launch_plan_for_target` orchestrator, the native `build_launch_plan` compatibility wrapper, typed daemon-headless turn plans, backend-aware interactive/headless prompt classification, and repeat/task helpers. It also builds the `/loop` seed for `grind`; the required one-PTY handoff is specified in [grind.md](../../../../docs/architecture/grind.md), while the current external-loop configuration is a known mismatch. Headless turns retain shared model/safety policy while producing Claude stream-json session argv or Codex `exec [resume] --json` argv. Also owns the `--disallowedTools` policy: `bridge_suppresses_plan_mode` strips `EnterPlanMode` on every Codex-provider / Claude-harness launch (the model can otherwise enter plan mode unprompted — see [DD-033](../../../../docs/DESIGN_DECISIONS.md#dd-033-plan-mode-is-disabled-unconditionally-on-the-codex-to-claude-bridge)), `--unattended` / `clud loop` additionally strip `AskUserQuestion`, and `plan_mode_suppression_notice` emits the green TTY-only override hint.
 - `do_input.rs` — resolves `clud do`'s optional URL/free-form target before backend setup or spawn; prompts only on a foreground TTY and returns deterministic errors for dry-run, pipe, and background modes.
 - `loop_task.rs` — resolves the `clud loop` positional (GH issue/PR URL, `#42` shortform, file path, or literal) into prompt text, with `gh`-backed cache under `.clud/loop/`.
 - `prompts.rs` — static prompt templates (`FIX_PROMPT`, `GITHUB_FIX_TEMPLATE`, `DO_GOAL_TEMPLATE`, `REBASE_PROMPT`, `UP_PROMPT`) and the backend-aware `push_prompt`, `build_up_prompt`, `build_fix_prompt`, `build_do_prompt` builders.

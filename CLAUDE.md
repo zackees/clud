@@ -69,6 +69,18 @@ end-to-end daemon/client performance change.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — index of subsystem topic docs (each ~150–400 lines, self-contained).
 - [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — 10 ADRs covering the non-obvious choices below and more.
 
+### `grind` directive
+
+[`docs/architecture/grind.md`](docs/architecture/grind.md) is the single
+owner of the `clud grind` execution contract. `grind` opens one normal
+interactive PTY session and places its generated `/loop ...` request in that
+harness prompt. The harness owns repetition and termination. Do not implement,
+restore, or emulate an external clud prompt/relaunch loop for `grind`: no
+DONE/BLOCKED markers, iteration cap, headless `-p`/`exec`, or stream-json
+renderer. A harness without native interactive `/loop` support must fail
+explicitly; it must not fall back to clud-managed looping. This supersedes the
+external-orchestration guidance in issue #897 and PRs #950 and #1045.
+
 ## Where to put new docs
 
 Tiered to keep agent context windows small and prevent duplication:
