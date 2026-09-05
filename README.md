@@ -511,6 +511,35 @@ which looks like it does this but does not: that flag exits 0 with empty output
 outside a submodule, so the `||` fallback never runs and `cd ""` silently does
 nothing.
 
+### Stop a subagent from spawning more agents
+
+One request can become hundreds of agents when a subagent delegates again: a
+deep-research run created 101 agents before it was stopped, and an upstream
+`/code-review` created 877 descendants *despite* a five-level nesting ceiling.
+A depth ceiling does not help, because fan-out at every level is what makes the
+total exponential.
+
+`clud-cmd-scan` can refuse the second level outright. With the guard on, the
+primary session may still create subagents, but a subagent's own `Agent` or
+`Workflow` call is denied before the descendant is allocated:
+
+```bash
+export CLUD_BLOCK_RECURSIVE_AGENTS=1
+```
+
+The denial is tagged `clud_agent_depth_exceeded` and tells the agent to do the
+work itself or hand it back to the session that started it. The guard is off by
+default — refusing agent creation changes what an agent may do, and a wrong
+default would break legitimate orchestration silently.
+
+Two things to know:
+
+- The hook must be registered with `"matcher": "*"` (the config above), not
+  `"Bash"`. A `Bash`-only matcher never sees an `Agent` call.
+- Only tool-visible creation is covered. The `agent()` calls a workflow script
+  makes internally emit no blocking hook event, so they remain uncontrolled
+  (anthropics/claude-code#79953 tracks the upstream gap).
+
 ### Let clud run your project's hooks
 
 Project hooks are usually written as repo-relative script paths, which is why a

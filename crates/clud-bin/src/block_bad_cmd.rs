@@ -119,6 +119,13 @@ pub struct HookPayloadView {
     pub command: String,
     pub cwd: PathBuf,
     pub tool_input: Option<Value>,
+    /// The subagent that made this call, when one did (#812).
+    ///
+    /// The harness sets it **only** for a call originating inside a subagent,
+    /// so its presence is the depth signal: absent means the primary session,
+    /// present means a child. That is the whole basis for the recursive-
+    /// delegation guard below — there is no depth counter to read.
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +362,21 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         payload.cwd.to_string_lossy(),
         payload.command
     ));
+
+    // #812: refuse a subagent creating another agent, before the descendant is
+    // allocated or reaches the bridge. Checked ahead of the command rules
+    // because an `Agent` call has no command for them to inspect — the
+    // question here is who is asking, not what they are running.
+    if let Decision::Deny { reason } = recursive_agent_decision(
+        &payload.tool_name,
+        payload.agent_id.as_deref(),
+        recursive_agent_guard_enabled(),
+    ) {
+        append_log(&format!("RECURSIVE-AGENT-BLOCKED: {reason}"));
+        println!("{}", deny_json(&reason));
+        eprintln!("[clud] {reason}");
+        return 2;
+    }
 
     // #1086: a shell-shaped tool whose command could not be extracted (an
     // unrecognized command key, or a non-string/non-array shape) yields an
@@ -994,6 +1016,87 @@ fn report_git_path_capture_to_daemon(capture: &GitPathCapture, repo_root: Option
     }
 }
 
+/// Env opt-in for the recursive-delegation guard (#812).
+///
+/// Off by default, deliberately. Denying agent creation changes what an agent
+/// is allowed to do, and a wrong default breaks legitimate orchestration
+/// silently — the same reasoning that shipped `disable_powershell` off.
+/// Turning it on is a policy choice about how much fan-out a session may
+/// spend.
+pub const RECURSIVE_AGENT_GUARD_ENV: &str = "CLUD_BLOCK_RECURSIVE_AGENTS";
+
+/// The rule id an operator sees, and can search for.
+pub const RECURSIVE_AGENT_RULE_ID: &str = "clud_agent_depth_exceeded";
+
+/// Tools that create agents. `Workflow` is here because its *outer* call is
+/// tool-visible; the `agent()` calls a workflow script makes internally are
+/// not, and this cannot see them (#812 is explicit that Workflow-internal
+/// fan-out remains uncontrolled, and the upstream gap is anthropics/claude-code#79953).
+fn creates_agents(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "agent" | "workflow"
+    )
+}
+
+/// Should this agent-creating call be refused?
+///
+/// The rule is one line — a subagent may not create a descendant — and the
+/// depth signal is the presence of `agent_id`, which the harness sets only
+/// for a call made from inside a subagent. The primary session has none, so
+/// it keeps creating agents normally; effective direct-delegation depth is 1.
+///
+/// # Why a depth ceiling was not enough
+///
+/// #812 records a deep-research run that created 101 agents, and an upstream
+/// `/code-review` that created **877** descendants *despite* a five-level
+/// nesting ceiling. A ceiling bounds depth; fan-out at each level is what
+/// makes the total exponential, so a depth limit large enough to be useful is
+/// already large enough to be ruinous. Refusing the second level outright is
+/// the only bound that does not depend on the branching factor.
+///
+/// # What it does not cover
+///
+/// Only tool-visible creation. A workflow's internal `agent()` calls emit no
+/// blocking `PreToolUse` event, so this cannot see or stop them, and saying
+/// otherwise would be the dangerous kind of wrong — an operator who believes
+/// fan-out is capped will not go looking when it is not.
+#[must_use]
+pub fn recursive_agent_decision(
+    tool_name: &str,
+    agent_id: Option<&str>,
+    guard_enabled: bool,
+) -> Decision {
+    if !guard_enabled || !creates_agents(tool_name) {
+        return Decision::Allow;
+    }
+    match agent_id {
+        None => Decision::Allow,
+        Some(agent) => Decision::Deny {
+            reason: format!(
+                "[{RECURSIVE_AGENT_RULE_ID}] subagent {agent} may not create another agent. \
+                 clud allows the primary session to delegate, but not a subagent to delegate \
+                 again — recursive delegation is how one request becomes hundreds. Do this \
+                 work in the current agent, or hand it back to the session that started you. \
+                 Unset {RECURSIVE_AGENT_GUARD_ENV} to disable this guard."
+            ),
+        },
+    }
+}
+
+/// Whether the guard is switched on for this process.
+#[must_use]
+pub fn recursive_agent_guard_enabled() -> bool {
+    std::env::var(RECURSIVE_AGENT_GUARD_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub fn parse_payload(raw: &str, process_cwd: &Path) -> Option<HookPayloadView> {
     let value = serde_json::from_str::<Value>(raw).ok()?;
     parse_payload_value(&value, process_cwd)
@@ -1023,6 +1126,15 @@ pub fn parse_payload_value(value: &Value, process_cwd: &Path) -> Option<HookPayl
             .get("tool_input")
             .or_else(|| object.get("toolInput"))
             .cloned(),
+        // Both spellings, as with every other field here: the harness has
+        // shipped camelCase and snake_case payloads at different versions and
+        // a guard that reads only one silently stops guarding.
+        agent_id: object
+            .get("agent_id")
+            .or_else(|| object.get("agentId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -3609,6 +3721,7 @@ mod tests {
             command: r#"C:\tools\clud-manual-bad-command.exe --example"#.to_string(),
             cwd: std::path::PathBuf::from(r#"C:\repo"#),
             tool_input: None,
+            agent_id: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, r#"C:\py\clud-block-bad-cmd.exe"#);
         assert_eq!(event["event"], "bad_cmd_denied");
@@ -3648,6 +3761,7 @@ mod tests {
             command: "wget http://x".to_string(),
             cwd: std::path::PathBuf::from("/tmp"),
             tool_input: None,
+            agent_id: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, "");
         assert_eq!(event["match_mode"], "regex");
@@ -5835,5 +5949,122 @@ mod tests {
         let targets = tier_b_fire_targets(&roots, &[named.join("x.rs")]);
         assert_eq!(targets.len(), 1);
         assert!(!extern_trust_gated(&repo, &targets[0]));
+    }
+
+    // ---- #812: recursive delegation ----
+
+    fn payload_with_agent(tool: &str, agent_id: Option<&str>) -> HookPayloadView {
+        let mut object = serde_json::Map::new();
+        object.insert("tool_name".into(), serde_json::json!(tool));
+        if let Some(agent) = agent_id {
+            object.insert("agent_id".into(), serde_json::json!(agent));
+        }
+        parse_payload_value(&Value::Object(object), Path::new("/tmp")).expect("payload parses")
+    }
+
+    /// The rule. A subagent asking for another agent is the second level, and
+    /// the second level is where fan-out becomes exponential.
+    #[test]
+    fn a_subagent_may_not_create_another_agent() {
+        let decision = recursive_agent_decision("Agent", Some("agent-7"), true);
+
+        match decision {
+            Decision::Deny { reason } => {
+                assert!(reason.contains(RECURSIVE_AGENT_RULE_ID));
+                assert!(
+                    reason.contains("agent-7"),
+                    "the reason must name the caller"
+                );
+                assert!(
+                    reason.contains(RECURSIVE_AGENT_GUARD_ENV),
+                    "an operator must be able to find the switch from the denial"
+                );
+            }
+            Decision::Allow => panic!("a subagent creating an agent must be denied"),
+        }
+    }
+
+    /// The primary session keeps delegating. The harness omits `agent_id` for
+    /// it, and that absence is the entire depth signal — there is no counter.
+    #[test]
+    fn the_primary_session_may_still_create_agents() {
+        assert_eq!(
+            recursive_agent_decision("Agent", None, true),
+            Decision::Allow
+        );
+    }
+
+    /// The outer `Workflow` call is tool-visible and creates agents, so it is
+    /// covered on the same terms.
+    #[test]
+    fn workflow_is_covered_and_matched_case_insensitively() {
+        assert!(matches!(
+            recursive_agent_decision("workflow", Some("agent-1"), true),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            recursive_agent_decision("AGENT", Some("agent-1"), true),
+            Decision::Deny { .. }
+        ));
+    }
+
+    /// Everything else a subagent does is untouched. A guard that denied Bash
+    /// from a subagent would break every subagent instead of bounding fan-out.
+    #[test]
+    fn other_tools_from_a_subagent_are_untouched() {
+        for tool in ["Bash", "Edit", "Read", "Grep"] {
+            assert_eq!(
+                recursive_agent_decision(tool, Some("agent-7"), true),
+                Decision::Allow,
+                "{tool} must not be affected by the delegation guard"
+            );
+        }
+    }
+
+    /// Off by default. Denying agent creation changes what an agent may do,
+    /// and a wrong default breaks legitimate orchestration silently.
+    #[test]
+    fn the_guard_is_inert_until_switched_on() {
+        assert_eq!(
+            recursive_agent_decision("Agent", Some("agent-7"), false),
+            Decision::Allow
+        );
+    }
+
+    /// Both spellings. The harness has shipped camelCase and snake_case
+    /// payloads at different versions, and a guard that reads only one
+    /// silently stops guarding rather than failing.
+    #[test]
+    fn agent_id_is_read_from_either_spelling() {
+        assert_eq!(
+            payload_with_agent("Agent", Some("agent-7"))
+                .agent_id
+                .as_deref(),
+            Some("agent-7")
+        );
+
+        let camel = serde_json::json!({"toolName": "Agent", "agentId": "agent-9"});
+        assert_eq!(
+            parse_payload_value(&camel, Path::new("/tmp"))
+                .expect("payload parses")
+                .agent_id
+                .as_deref(),
+            Some("agent-9")
+        );
+    }
+
+    /// An empty `agent_id` is not a subagent. Treating `""` as one would deny
+    /// the primary session, which is the failure that makes a guard get
+    /// switched off and left off.
+    #[test]
+    fn an_empty_agent_id_reads_as_the_primary_session() {
+        let payload = serde_json::json!({"tool_name": "Agent", "agent_id": ""});
+        let view = parse_payload_value(&payload, Path::new("/tmp")).expect("payload parses");
+
+        assert_eq!(view.agent_id, None);
+        assert_eq!(
+            recursive_agent_decision(&view.tool_name, view.agent_id.as_deref(), true),
+            Decision::Allow
+        );
     }
 }

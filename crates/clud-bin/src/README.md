@@ -321,7 +321,12 @@ which test tier a change belongs in — lives in
   (`hook_health/codex_trust.rs`) and extern roots behind `hook_trust.rs`
   (DD-060/DD-061). A `CwdChanged` event bypasses the scanner entirely: it is
   handed to `block_bad_cmd_cwd_changed.rs` (see below), the #967 Phase 5
-  backstop that reacts to drift the PreToolUse scan cannot see.
+  backstop that reacts to drift the PreToolUse scan cannot see. Also the
+  opt-in recursive-delegation guard (#812, DD-069): with
+  `CLUD_BLOCK_RECURSIVE_AGENTS` set, `recursive_agent_decision` denies an
+  `Agent`/`Workflow` call whose payload carries an `agent_id` (the harness sets
+  it only inside a subagent), so effective direct-delegation depth is 1. Runs
+  ahead of the command rules because an `Agent` call has no command to scan.
 - `clud_hooks.rs` - `.clud/hooks.json` schema, discovery, and matcher
   semantics (#967 Phase 2), plus the Tier B source for sub-repos (#967 Phase 4,
   D4): `from_frontend_settings` reads `.claude/settings.json`,

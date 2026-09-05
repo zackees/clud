@@ -3165,3 +3165,44 @@ tests that expect markers, repeated launches, a 200-turn cap, headless argv,
 or stream-json setup are specifications of the defect and must be replaced.
 The replacement tests assert one PTY backend launch, a `/loop` prompt, and no
 external loop state or renderer.
+
+---
+
+## DD-069: the recursive-delegation guard refuses depth 2 outright, and is opt-in
+
+**Status:** Accepted
+
+**Context:** #812 records a deep-research run that created 101 agents before
+it was stopped, and an upstream `/code-review` that created 877 descendants
+despite a five-level nesting ceiling (anthropics/claude-code#77361). The
+bridge's `Task` block (#796) and `DEFAULT_MAX_CONCURRENCY = 1` only observe
+the overload after the agents exist; they returned `503 bridge busy` to
+requests that had already been created. Claude Code offers no invocation-wide
+agent budget and no depth setting (anthropics/claude-code#79953).
+
+**Decision:** `clud-cmd-scan` gains a rule with no depth counter: a call to
+`Agent` or `Workflow` whose `PreToolUse` payload carries an `agent_id` is
+denied. The harness sets that field only for a call made inside a subagent, so
+absence means the primary session and presence means a child. Effective
+direct-delegation depth is 1. The guard is off unless
+`CLUD_BLOCK_RECURSIVE_AGENTS` is set to an enabling value, and the denial names
+the caller, the rule id `clud_agent_depth_exceeded`, and the switch.
+
+**Rationale:** A ceiling bounds depth, but fan-out at each level is what makes
+the total exponential, so any ceiling large enough to be useful is already
+large enough to be ruinous — 877 descendants happened *under* one. Refusing the
+second level is the only bound that does not depend on the branching factor.
+It lives in the existing hook rather than a per-launch injected settings
+document because clud already runs that hook on every tool call under a `*`
+matcher, and a second hook would be a second thing to trust, migrate, and keep
+in step (DD-039's lesson about two installers). Opt-in for the same reason
+`shell.disable_powershell` shipped off: denying agent creation changes what an
+agent may do, and a wrong default breaks legitimate orchestration silently.
+
+**Consequences:** Only tool-visible creation is bounded. A workflow script's
+internal `agent()` calls emit no blocking event and remain uncontrolled; the
+docs say so plainly, because an operator who believes fan-out is capped will
+not go looking when it is not. A `Bash`-only matcher never delivers an `Agent`
+event, so the README's `*` matcher is a requirement, not a suggestion. An
+empty `agent_id` reads as the primary session, so a harness that emits `""`
+cannot lock the top-level session out of delegating.
