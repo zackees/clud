@@ -446,6 +446,28 @@ None of this is exercised by `ci.yml` — `_build-target.yml` refuses
 ever proven by a real tag. Treat `manylinux_wheel_env`'s unit tests in
 `tests/test_ci_xbuild.py` as the standing contract.
 
+### Reproducing a wheel locally
+
+The same driver builds a wheel on a developer machine (#1017):
+
+```
+python -m ci.xbuild wheel --target x86_64-unknown-linux-gnu --strategy soldr --profile release
+```
+
+Module form only: `python ci/xbuild.py` is rejected at entry, because running
+the file by path shadows `ci/` with any `ci` distribution in site-packages.
+
+CI persists the target toolchain env with `soldr prepare --target <t>
+--github-env "$GITHUB_ENV"` in `setup-build`, a mechanism with no local
+counterpart. So outside GitHub Actions, `ci/xbuild.py::prepare_toolchain_locally`
+runs that same `soldr prepare` into a temporary file and applies every exported
+variable in-process before dispatching, which every cargo/soldr/maturin child
+then inherits. It is inert under `GITHUB_ACTIONS=true`, skippable with
+`CLUD_XBUILD_SKIP_PREPARE=1`, and silently absent when no `soldr` is on PATH —
+in which case `cross_toolchain_preflight` names the missing cross compiler at
+entry rather than letting `ring`'s build script discover it minutes later.
+Wheel sizes are then checked by `python -m ci.check_wheel_size --dist-dir dist/`.
+
 ## Deduplicated checks
 
 | Check | Before | After |
