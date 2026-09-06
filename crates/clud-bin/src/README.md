@@ -582,7 +582,7 @@ Diagnostics and misc:
   `CLUD_EXIT_TIMING`) as each stage begins and ends, so the integration
   harness can name the stage a killed process was in (#594, #1168). Used by
   `main.rs` (exit stages, post-run drops) and `runner.rs` (`child_wait`,
-  `child_teardown`, `runtime_drop`). See `docs/architecture/ci.md`.
+  `child_teardown`, `runtime_drop`, `cpu_banner_stop`). See `docs/architecture/ci.md`.
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.

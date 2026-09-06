@@ -291,9 +291,11 @@ pub fn run_plan_subprocess(
 ) -> i32 {
     use std::path::PathBuf;
 
-    // Issue #466: CPU-burn banner. Watcher thread joins on drop at function
-    // exit. Inert when cfg.enabled = false (no thread spawned).
-    let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
+    // Issue #466: CPU-burn banner. Inert when cfg.enabled = false (no thread
+    // spawned). Stopped explicitly below under a `cpu_banner_stop` stage on
+    // the normal exit path; the early returns rely on `Drop`, which performs
+    // the same bounded stop (#1172).
+    let mut cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
 
     let runtime = match crate::foreground_runtime::ForegroundRuntime::start(
         plan,
@@ -478,6 +480,22 @@ pub fn run_plan_subprocess(
         "runtime_drop",
         || drop(runtime),
     );
+    // #1172: the #1168 trace isolated a Windows `clud -p` wedge to the window
+    // after `runtime_drop`, where this was the only untraced step -- an
+    // unbounded join on the banner thread. The stop is bounded now, and it
+    // has a breadcrumb so the next stall names it or clears it.
+    let outcome = stage_trace::scoped(
+        trace_enabled,
+        stage_trace::Phase::Launch,
+        "cpu_banner_stop",
+        || cpu_banner.stop(),
+    );
+    if outcome == cpu_banner::StopOutcome::Detached {
+        stage_trace::trace(
+            trace_enabled,
+            "launch-stage note cpu_banner_stop detached the sampler thread mid-refresh",
+        );
+    }
     last_exit
 }
 

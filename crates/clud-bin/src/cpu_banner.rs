@@ -26,8 +26,8 @@
 //!   (rustc/node swarms, several concurrent clud sessions) can't turn
 //!   the banner meant to report CPU burn into a measurable contributor.
 //! - [`BannerWatcher`] — background thread that joins the two on a
-//!   `tick` cadence and writes banners to stderr. Drop joins the
-//!   thread.
+//!   `tick` cadence and writes banners to stderr. Drop stops the
+//!   thread with a bounded wait ([`STOP_JOIN_BUDGET`], #1172).
 //!
 //! Suppression: caller (in `main.rs`) constructs `CpuBannerCfg` with
 //! `enabled = false` for `--no-cpu-banner`, `--dry-run`, `--detach`,
@@ -611,10 +611,43 @@ fn collect_subtree_from_children(children: &HashMap<Pid, Vec<Pid>>, root: Pid) -
     out
 }
 
-/// Background watcher. Joins on `Drop`; call [`BannerWatcher::stop`] for
-/// explicit shutdown if you want to bound the join.
+/// How long [`BannerWatcher::stop`] waits for the watcher thread to
+/// acknowledge before detaching it (#1172).
+///
+/// The thread spends most of its life in `recv_timeout`, where it notices
+/// the stop within microseconds. The rest is one `sysinfo` refresh, which on
+/// a loaded Windows runner has taken longer than the whole `clud -p`
+/// integration budget. Half a second is far more than an acknowledgement
+/// needs and far less than a user notices at exit.
+pub const STOP_JOIN_BUDGET: Duration = Duration::from_millis(500);
+
+/// What [`BannerWatcher::stop`] did with the thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// No thread was ever spawned (`enabled = false`), or `stop` already ran.
+    Inert,
+    /// The thread acknowledged within [`STOP_JOIN_BUDGET`] and was joined.
+    Joined,
+    /// The thread was still inside a refresh at the deadline and was left to
+    /// finish on its own; process exit reaps it.
+    Detached,
+}
+
+/// Background watcher. Stops on `Drop`; call [`BannerWatcher::stop`] for an
+/// explicit shutdown that also reports what happened.
+///
+/// #1172: the stop is **bounded**. An unbounded `join` here held a finished
+/// `clud -p` past its 30 s CI budget on Windows, after the backend had exited
+/// and every other teardown stage had completed -- the #1168 trace isolated
+/// the stall to this drop. Nothing downstream depends on the join: the
+/// thread only prints banners, and a banner printed after the session is
+/// over is exactly what the stop signal prevents.
 pub struct BannerWatcher {
     stop_tx: Option<mpsc::Sender<()>>,
+    /// Closed by the thread when its body returns, so a `recv_timeout` here
+    /// is "wait for the thread to finish, with a deadline" -- something
+    /// `JoinHandle::join` cannot express.
+    finished_rx: Option<mpsc::Receiver<()>>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -623,36 +656,80 @@ impl BannerWatcher {
     /// no thread, no banners.
     pub fn spawn(cfg: CpuBannerCfg) -> Self {
         if !cfg.enabled {
-            return Self {
-                stop_tx: None,
-                handle: None,
-            };
+            return Self::inert();
         }
-        let (tx, rx) = mpsc::channel();
+        Self::spawn_body(move |rx| run_watcher_loop(cfg, rx))
+    }
+
+    fn inert() -> Self {
+        Self {
+            stop_tx: None,
+            finished_rx: None,
+            handle: None,
+        }
+    }
+
+    /// Spawn `body` as the watcher thread. Split from [`Self::spawn`] so a
+    /// test can stand in a body that ignores the stop signal, which is the
+    /// one behaviour of the real loop (`sysinfo` mid-refresh) that matters
+    /// for the bounded stop and cannot be provoked on demand.
+    fn spawn_body(body: impl FnOnce(mpsc::Receiver<()>) + Send + 'static) -> Self {
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel::<()>();
         let handle = thread::Builder::new()
             .name("clud-cpu-banner".into())
-            .spawn(move || run_watcher_loop(cfg, rx))
+            .spawn(move || {
+                // Moved in so it drops -- closing `finished_rx` -- exactly
+                // when the body returns, panic or not.
+                let _finished = finished_tx;
+                body(stop_rx);
+            })
             .ok();
         Self {
-            stop_tx: Some(tx),
+            stop_tx: Some(stop_tx),
+            finished_rx: Some(finished_rx),
             handle,
         }
     }
 
     /// Explicit shutdown. Idempotent; safe to call before `Drop`.
-    pub fn stop(&mut self) {
+    ///
+    /// Signals the thread, waits up to [`STOP_JOIN_BUDGET`] for it to
+    /// finish, and joins it if it did. A thread still busy at the deadline
+    /// is detached rather than waited for (#1172).
+    pub fn stop(&mut self) -> StopOutcome {
+        self.stop_within(STOP_JOIN_BUDGET)
+    }
+
+    fn stop_within(&mut self, budget: Duration) -> StopOutcome {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        let Some(handle) = self.handle.take() else {
+            return StopOutcome::Inert;
+        };
+        let finished = match self.finished_rx.take() {
+            // `Disconnected` is the thread having returned; `Timeout` is the
+            // thread still running. A value is never sent.
+            Some(rx) => matches!(
+                rx.recv_timeout(budget),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            ),
+            None => false,
+        };
+        if finished {
+            let _ = handle.join();
+            StopOutcome::Joined
+        } else {
+            drop(handle);
+            StopOutcome::Detached
         }
     }
 }
 
 impl Drop for BannerWatcher {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 

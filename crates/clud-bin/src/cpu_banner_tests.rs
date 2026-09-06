@@ -589,3 +589,57 @@ fn bench_sampler_cost_50_procs() {
         let _ = c.wait(Some(Duration::from_secs(2)));
     }
 }
+
+// -- #1172: the stop is bounded ------------------------------------------
+
+#[test]
+fn a_disabled_watcher_stops_inert() {
+    let mut watcher = BannerWatcher::spawn(CpuBannerCfg::disabled());
+    assert_eq!(watcher.stop(), StopOutcome::Inert);
+    assert_eq!(watcher.stop(), StopOutcome::Inert, "idempotent");
+}
+
+#[test]
+fn a_responsive_thread_is_joined() {
+    let mut watcher = BannerWatcher::spawn_body(|stop_rx| {
+        let _ = stop_rx.recv();
+    });
+    let started = Instant::now();
+    assert_eq!(watcher.stop(), StopOutcome::Joined);
+    assert!(started.elapsed() < STOP_JOIN_BUDGET, "{:?}", started.elapsed());
+    assert_eq!(watcher.stop(), StopOutcome::Inert, "idempotent");
+}
+
+/// The #1172 failure shape: the thread is inside a refresh and cannot see
+/// the stop signal until it returns. The old unbounded join waited for the
+/// whole refresh; a `clud -p` exit must not.
+#[test]
+fn a_thread_that_misses_the_deadline_is_detached_not_waited_for() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let mut watcher = BannerWatcher::spawn_body(move |_stop_rx| {
+        // Stand-in for a sysinfo refresh that outlives the budget.
+        let _ = release_rx.recv();
+    });
+    let budget = Duration::from_millis(50);
+    let started = Instant::now();
+    assert_eq!(watcher.stop_within(budget), StopOutcome::Detached);
+    let waited = started.elapsed();
+    assert!(waited >= budget, "{waited:?}");
+    assert!(
+        waited < budget * 10,
+        "detach must not wait on the thread: {waited:?}"
+    );
+    // Let the detached thread finish so the test process exits cleanly.
+    let _ = release_tx.send(());
+    assert_eq!(watcher.stop(), StopOutcome::Inert, "nothing left to stop");
+}
+
+#[test]
+fn a_body_that_panics_still_counts_as_finished() {
+    let mut watcher = BannerWatcher::spawn_body(|_stop_rx| {
+        panic!("sampler exploded");
+    });
+    // The `finished` channel closes on unwind, so this is a join, not a
+    // budget-long wait followed by a detach.
+    assert_eq!(watcher.stop(), StopOutcome::Joined);
+}

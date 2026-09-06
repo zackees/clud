@@ -553,7 +553,7 @@ survived. Two things close it:
 On the clud side, `CLUD_EXIT_TIMING_FILE` (set by the integration harness on
 every launch, see `tests/integration/_daemon_helpers.py::run_clud`) records
 `launch-stage` breadcrumbs (`backend_run`, `child_wait`, `child_teardown`,
-`runtime_drop`, …) ahead of the `exit-stage` ones from #594, so a process the
+`runtime_drop`, `cpu_banner_stop`, …) ahead of the `exit-stage` ones from #594, so a process the
 harness had to kill names the stage it was in; implementation in
 `crates/clud-bin/src/stage_trace.rs`.
 
