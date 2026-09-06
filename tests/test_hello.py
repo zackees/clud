@@ -449,7 +449,6 @@ def test_dry_run_codex() -> None:
         ("up", None, "codeup"),
         ("rebase", None, "git fetch"),
         ("fix", None, "linting"),
-        ("grind", "https://github.com/zackees/clud/issues", "/loop look at https://"),
     ],
 )
 def test_codex_builtins_seed_interactive_dry_run(
@@ -467,6 +466,28 @@ def test_codex_builtins_seed_interactive_dry_run(
     assert data["launch_mode"] == "pty"
     assert "exec" not in data["command"]
     assert prompt_fragment in data["command"][-1]
+
+
+def test_grind_seeds_the_native_loop_on_the_claude_harness() -> None:
+    """#1173: `grind` is one interactive Claude-harness PTY session whose
+    prompt is the harness's own `/loop`; clud adds no loop machinery."""
+    result = _run("--dry-run", "grind", "https://github.com/zackees/clud/issues")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["effective_harness"] == "claude"
+    assert data["launch_mode"] == "pty"
+    assert data["command"][-1].startswith("/loop look at https://")
+    assert "-p" not in data["command"]
+    assert data["iterations"] == 1
+
+
+def test_grind_is_refused_on_the_codex_harness() -> None:
+    """Codex has no native interactive `/loop`; #1173 fails the launch rather
+    than falling back to a clud-managed loop."""
+    result = _run("--dry-run", "--codex", "grind", "https://github.com/zackees/clud/issues")
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "requires the Claude harness" in result.stderr
 
 
 def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:

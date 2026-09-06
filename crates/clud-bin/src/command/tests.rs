@@ -1,6 +1,6 @@
 use super::builder::{
-    build_launch_plan, build_launch_plan_at, build_launch_plan_for_target,
-    grind_launch_error, interactive_builtin_resume_error, next_run_at_millis, parse_repeat_interval,
+    build_launch_plan, build_launch_plan_at, build_launch_plan_for_target, grind_launch_error,
+    interactive_builtin_resume_error, next_run_at_millis, parse_repeat_interval,
     plan_mode_suppression_notice, repeat_implies_no_done_warning,
 };
 use super::prompts::{
@@ -974,8 +974,12 @@ fn bare_resume_with_interactive_codex_builtin_is_rejected_and_plan_safe() {
     assert!(!plan.command.iter().any(|arg| arg.starts_with("/goal")));
 }
 
+/// #1173: `grind` is one interactive Claude-harness session. On the Codex
+/// harness it is refused outright by `grind_launch_error` -- not by the
+/// headless-builtin `--resume` check, which no longer applies to it -- and
+/// the plan carries none of clud's own loop machinery.
 #[test]
-fn bare_resume_with_codex_grind_is_rejected_and_withholds_prompt() {
+fn bare_resume_with_codex_grind_is_refused_by_the_harness_check() {
     let args = parse(&[
         "clud",
         "--codex",
@@ -983,13 +987,21 @@ fn bare_resume_with_codex_grind_is_rejected_and_withholds_prompt() {
         "grind",
         "https://github.com/zackees/clud/issues",
     ]);
-    assert!(interactive_builtin_resume_error(&args, Backend::Codex).is_some());
+    assert!(interactive_builtin_resume_error(&args, Backend::Codex).is_none());
+    let codex_harness = ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Direct,
+        model_provider: ModelProvider::Codex,
+        requested_harness: HarnessSelection::Codex,
+        effective_harness: Backend::Codex,
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    };
+    let error = grind_launch_error(&args, codex_harness).expect("grind needs the Claude harness");
+    assert!(error.contains("requires the Claude harness"), "{error}");
     let plan = build_launch_plan(&args, Backend::Codex, "codex");
-    assert!(plan.command.iter().any(|arg| arg == "resume"));
-    assert!(!plan.command.iter().any(|arg| arg.starts_with("/loop")));
     assert_eq!(plan.iterations, 1);
     assert!(plan.loop_markers.is_none());
-    assert!(plan.task_summary.is_none());
+    assert!(plan.repeat_schedule.is_none());
 }
 
 #[test]
@@ -1204,7 +1216,10 @@ fn grind_rejects_subprocess_and_detached_modes() {
         ],
     ] {
         let args = parse(&argv);
-        assert!(grind_launch_error(&args, bridge_target()).is_some(), "argv={argv:?}");
+        assert!(
+            grind_launch_error(&args, bridge_target()).is_some(),
+            "argv={argv:?}"
+        );
     }
 }
 

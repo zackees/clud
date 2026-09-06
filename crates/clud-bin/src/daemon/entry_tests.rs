@@ -174,10 +174,12 @@ fn backend_prompt_classification_drives_centralized_session_kind() {
             crate::backend::Backend::Codex,
             true,
         ),
+        // #1173: `grind` is one interactive PTY session on every harness; the
+        // harness-support check happens in `main`, not here.
         (
             vec!["clud", "grind", "https://github.com/zackees/clud/issues"],
             crate::backend::Backend::Claude,
-            false,
+            true,
         ),
         (
             vec!["clud", "do", "https://github.com/zackees/clud/issues/1036"],
