@@ -606,7 +606,11 @@ fn a_responsive_thread_is_joined() {
     });
     let started = Instant::now();
     assert_eq!(watcher.stop(), StopOutcome::Joined);
-    assert!(started.elapsed() < STOP_JOIN_BUDGET, "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < STOP_JOIN_BUDGET,
+        "{:?}",
+        started.elapsed()
+    );
     assert_eq!(watcher.stop(), StopOutcome::Inert, "idempotent");
 }
 
