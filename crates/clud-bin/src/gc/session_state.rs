@@ -59,6 +59,8 @@ const AMBIENT_EVENTS: &[&str] = &[
     "admission_acquired",
     "admission_queued",
     "catalog_advertised",
+    // #1007: a `/model` pick the bridge served with the launch selection.
+    "model_substituted",
 ];
 
 /// Read-only view of [`AMBIENT_EVENTS`], so the daemon-side drift test can

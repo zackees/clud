@@ -269,7 +269,7 @@ tiny; the cost is directory-listing time and a tree nobody can search by hand du
 Two windows, because the whole point of #998 and #1011 is that a failure trail survives to be read
 afterwards. `crate::gc::session_state::classify` reads the directory's `bridge.jsonl` and calls it
 **ambient** if every record is one the bridge wrote through `record_ambient` (`catalog_advertised`,
-`admission_queued`, `admission_acquired` — see `AMBIENT_EVENTS`), **notable** otherwise. Ambient
+`admission_queued`, `admission_acquired`, `model_substituted` — see `AMBIENT_EVENTS`), **notable** otherwise. Ambient
 directories go at 48h, notable ones at 30d. Anything unreadable, unparseable, or carrying an
 unrecognized event counts as notable: drift and corruption both fail toward *keeping* the trail,
 since deleting a forensic log on a parse guess is the only unrecoverable mistake available here.
