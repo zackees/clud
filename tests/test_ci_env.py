@@ -7,8 +7,24 @@ import os
 from ci import env as ci_env
 
 
-def test_cargo_argv_prefers_explicit_cargo(monkeypatch) -> None:
-    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: "soldr")
+def test_cargo_argv_routes_through_soldr_when_no_shim(monkeypatch) -> None:
+    """#1158: soldr present, no shim, explicit `CARGO` -> `soldr cargo`.
+
+    This is the local developer. soldr's cache hardlinks `target/` artifacts
+    read-only, and only soldr's own driver can rewrite them; a plain cargo
+    (which is what an explicit `CARGO` names) fails with "not writeable".
+    """
+    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: "/opt/soldr")
+
+    assert ci_env.cargo_argv(["check"], env={"CARGO": r"C:\rust\bin\cargo.exe"}) == [
+        "/opt/soldr",
+        "cargo",
+        "check",
+    ]
+
+
+def test_cargo_argv_prefers_explicit_cargo_without_soldr(monkeypatch) -> None:
+    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: None)
 
     assert ci_env.cargo_argv(["check"], env={"CARGO": r"C:\rust\bin\cargo.exe"}) == [
         r"C:\rust\bin\cargo.exe",
@@ -16,11 +32,19 @@ def test_cargo_argv_prefers_explicit_cargo(monkeypatch) -> None:
     ]
 
 
-def test_cargo_argv_uses_path_when_soldr_shims_requested() -> None:
+def test_cargo_argv_uses_path_when_soldr_shims_requested(monkeypatch) -> None:
+    """A CI lane keeps exactly the argv it has today: the shim check runs
+    before the soldr rung, so a soldr on PATH cannot change it."""
+    monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: "/opt/soldr")
+
     assert ci_env.cargo_argv(
         ["check"],
         env={"CARGO": r"C:\rust\bin\cargo.exe", "CLUD_USE_SOLDR_SHIMS": "1"},
     ) == ["cargo", "check"]
+    assert ci_env.cargo_argv(["check"], env={"CLUD_USE_SOLDR_SHIMS": "1"}) == [
+        "cargo",
+        "check",
+    ]
 
 
 def test_activate_preserves_soldr_shims_ahead_of_cargo_bin(monkeypatch, tmp_path) -> None:
@@ -58,10 +82,10 @@ def test_activate_moves_existing_cargo_bin_behind_soldr_shims(monkeypatch, tmp_p
     assert path_parts == [str(shims_dir), str(cargo_bin)]
 
 
-def test_cargo_argv_uses_bare_cargo_when_no_explicit_cargo(monkeypatch) -> None:
+def test_cargo_argv_uses_soldr_when_no_explicit_cargo(monkeypatch) -> None:
     monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: "soldr")
 
-    assert ci_env.cargo_argv(["check"], env={}) == ["cargo", "check"]
+    assert ci_env.cargo_argv(["check"], env={}) == ["soldr", "cargo", "check"]
 
 
 def test_cargo_argv_falls_back_to_bare_cargo(monkeypatch) -> None:
