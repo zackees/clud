@@ -289,7 +289,9 @@ launch-time selection, so the turn runs on a Codex model, the substitution
 [DD-038](../DESIGN_DECISIONS.md#dd-038-the-codex-picker-gets-one-honest-row-always-carrying-the-catalog)
 already recorded. Since zackees/clud#1007 it is no longer *quiet*: the cross
 route launches the harness with `--model <discovery-id>`, so a non-haiku
-`claude*` main model can only be a post-launch pick, and the bridge
+`claude*` main model can only have been chosen after launch — a `/model` pick,
+or a subagent's `model: opus` / `model: sonnet` alias that the harness resolves
+to its built-in id — and the bridge
 (`codex_bridge::is_anthropic_main_model_pick`) prints one line per session
 naming the model actually served and records an ambient `model_substituted`
 event in the bridge log. The harness's own `claude-*-haiku*` side-model calls

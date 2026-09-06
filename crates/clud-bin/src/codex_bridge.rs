@@ -2346,20 +2346,25 @@ fn warn_once_on_terminal_failure(error: &PipelineError) {
     eprintln!("\x07[clud] codex bridge: {}", error.client_message());
 }
 
-/// Whether a `claude*` id on the direct Codex route is a user's pick from the
-/// built-in Anthropic lineup rather than the harness's own traffic (#1007).
+/// Whether a `claude*` id on the direct Codex route names a built-in
+/// Anthropic model that something chose *after* launch, as opposed to the
+/// harness's own background traffic (#1007).
 ///
 /// Two facts make the prefix alone insufficient and this predicate possible:
 ///
 /// - The cross route launches the harness with `--model <discovery-id>`
 ///   (`command::builder::gateway_model_selection`), so an ordinary foreground
 ///   turn arrives as `clud-claude-codex-*`, not `claude*`. A `claude*` main
-///   model was therefore chosen after launch, from the rows Claude Code merges
-///   into `/model` behind clud's back (DD-054).
+///   model was therefore selected later: by the user, from the rows Claude
+///   Code merges into `/model` behind clud's back (DD-054), or by a subagent
+///   whose `model: opus` / `model: sonnet` alias the harness resolves to its
+///   built-in id -- `apply_cross_route_overlay` deliberately does not pin the
+///   `ANTHROPIC_DEFAULT_*_MODEL` tiers, the hijacking DD-054 rejects. Either
+///   way the request is served by the launch selection and the user should
+///   hear which.
 /// - The harness's side-model calls (titles, summaries, the small fast model)
 ///   keep their built-in `claude-*-haiku*` ids regardless of `--model`. Those
-///   are not a pick and are excluded by name; nothing else the harness sends
-///   on its own is `claude*`-shaped here.
+///   are routine and are excluded by name.
 fn is_anthropic_main_model_pick(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     lower.starts_with("claude") && !lower.contains("haiku")
@@ -2380,9 +2385,9 @@ fn warn_once_on_anthropic_pick(requested: &str, served: &str) {
         .take(MAX_LOGGED_MODEL_CHARS)
         .collect::<String>();
     eprintln!(
-        "[clud] codex bridge: '{requested}' is an Anthropic model this Codex session cannot \
-         serve; it is running on {served} instead. Pick a \"Codex\" row in /model to change \
-         models."
+        "[clud] codex bridge: '{requested}' is a built-in Anthropic model this Codex session \
+         cannot serve; requests naming it (a /model pick, or a subagent's `model:` alias) run \
+         on {served} instead. Use a \"Codex\" row in /model to change models."
     );
 }
 
