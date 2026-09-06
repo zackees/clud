@@ -112,6 +112,24 @@ pub(super) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, St
     env
 }
 
+/// Replace `path` with the JSON encoding of `value` without ever leaving the
+/// name unbound.
+///
+/// The temp file is renamed **over** the target in one step. An earlier
+/// version deleted the target first and then renamed, which opened a window
+/// where the file simply did not exist. Any concurrent reader landing in that
+/// window got `NotFound`, which the API session store translated into a
+/// `404 session not found` for a session that was very much alive. The
+/// per-session turn controller rewrites the record for every provider event
+/// while HTTP handlers read it unlocked, so the window was hit on the loaded
+/// Windows unit lane (#1160). `rename` replacing an existing file is atomic
+/// with respect to the namespace on POSIX and NTFS alike: a reader sees the
+/// old bytes or the new bytes, never a missing file.
+///
+/// If the direct replace fails anyway (Windows can refuse when another
+/// process holds the target without `FILE_SHARE_DELETE`), fall back to the
+/// old delete-then-rename so the write still lands; that path is the
+/// exception, not the default.
 pub(super) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let parent = path
         .parent()
@@ -123,10 +141,13 @@ pub(super) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> io::Resul
         serde_json::to_vec_pretty(value)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?,
     )?;
-    if path.exists() {
-        let _ = fs::remove_file(path);
+    match fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = fs::remove_file(path);
+            fs::rename(&temp_path, path)
+        }
     }
-    fs::rename(temp_path, path)
 }
 
 pub(super) fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<T> {
@@ -628,5 +649,47 @@ mod tests {
             value_of(&runner, "PATH"),
             "daemon and foreground disagree on PATH with the client env supplied"
         );
+    }
+
+    /// #1160: a reader racing a writer must never observe the record missing.
+    /// The old delete-then-rename left the name unbound between the two
+    /// calls; on the Windows unit lane a concurrent `store.get` fell into that
+    /// gap and the idempotent replay came back `404`.
+    #[test]
+    fn write_json_file_never_leaves_the_target_missing_for_a_concurrent_reader() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("record.json");
+        write_json_file(&path, &0_u64).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut reads = 0_u64;
+            while !reader_stop.load(Ordering::SeqCst) {
+                match read_json_file::<u64>(&reader_path) {
+                    Ok(_) => reads += 1,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                        panic!("reader observed the record missing after {reads} reads: {err}")
+                    }
+                    // A replace in flight may momentarily refuse the open on
+                    // Windows; that is a retryable condition, not a missing
+                    // file, and not what this test guards.
+                    Err(_) => {}
+                }
+            }
+            reads
+        });
+
+        for value in 1..=500_u64 {
+            write_json_file(&path, &value).unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        let reads = reader.join().expect("reader must never see NotFound");
+        assert!(reads > 0, "the reader never got a look at the record");
+        assert_eq!(read_json_file::<u64>(&path).unwrap(), 500);
     }
 }
