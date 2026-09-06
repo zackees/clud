@@ -49,6 +49,16 @@ def test_exit_stage_file_records_each_stage_as_it_runs(clud_binary, mock_env):
         assert "exit-stage done scan_and_report=" in body, body
         assert "exit-stage begin tracker_drop" in body, body
 
+        # #1168: the launch phase leaves breadcrumbs too, and they precede
+        # the exit stages so a trace ending at `child_wait` reads as "the
+        # backend never came back" rather than "never reached the exit path".
+        for stage in ("backend_run", "child_wait", "child_teardown", "runtime_drop"):
+            assert f"launch-stage begin {stage}" in body, body
+            assert f"launch-stage done {stage}=" in body, body
+        assert body.index("launch-stage begin child_wait") < body.index(
+            "exit-stage begin scan_and_report"
+        )
+
         # Every stage entered on a clean run must also complete; an unmatched
         # begin here would mean the trace itself is lying.
         assert "STALLED IN" not in _read_exit_stages(trace)
@@ -105,11 +115,39 @@ def test_read_exit_stages_flags_an_unterminated_stage():
             os.unlink(trace)
 
 
+def test_read_exit_stages_pairs_launch_stages_too():
+    """#1168's trace: the backend finished, clud never exited, file empty.
+
+    With launch breadcrumbs the same run reads as a stall in a named launch
+    stage. A `launch-stage begin` with no `done` must be flagged exactly like
+    an exit stage, and a completed launch stage must not be.
+    """
+    fd, trace = tempfile.mkstemp(prefix="clud-launch-stage-stall-", suffix=".log")
+    os.close(fd)
+    try:
+        with open(trace, "w", encoding="utf-8") as handle:
+            handle.write(
+                "launch-stage begin backend_run\n"
+                "launch-stage begin child_wait\n"
+                "launch-stage done child_wait=812ms\n"
+                "launch-stage begin child_teardown\n"
+            )
+        rendered = _read_exit_stages(trace)
+        assert "STALLED IN: backend_run, child_teardown" in rendered
+        assert "child_wait" not in rendered.split("STALLED IN")[1]
+    finally:
+        if os.path.exists(trace):
+            os.unlink(trace)
+
+
 def test_read_exit_stages_handles_a_process_that_never_reached_teardown():
+    """An empty file now means the process died before `backend_run` began
+    (#1168 moved the first breadcrumb ahead of the launch), not merely before
+    the exit path."""
     fd, trace = tempfile.mkstemp(prefix="clud-exit-stage-empty-", suffix=".log")
     os.close(fd)
     try:
-        assert "never reached the exit path" in _read_exit_stages(trace)
+        assert "never reached the launch path" in _read_exit_stages(trace)
     finally:
         if os.path.exists(trace):
             os.unlink(trace)

@@ -31,6 +31,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from running_process import RunningProcess
+
 from ci import process
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -211,9 +213,45 @@ def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
     return 0
 
 
-def run_pytest(marker: str, env: dict[str, str], extra: list[str]) -> int:
+LOG_DIR = ROOT / "logs"
+
+
+def pytest_log_path(suite: str) -> Path:
+    """Where `run_pytest` tees the suite's output; uploaded by `_run-tests.yml`."""
+    return LOG_DIR / f"pytest-{suite}.log"
+
+
+def run_streamed(argv: list[str], env: dict[str, str], log_path: Path) -> int:
+    """Run `argv`, echoing each output line as it arrives and teeing it to a file.
+
+    #1168: when the Windows integration job wedged past the 20-minute ceiling,
+    the cancelled step's log was empty -- GitHub keeps no log for a cancelled
+    step -- so nothing named the test that hung. The step's own stdout cannot
+    survive that. A file can: `_run-tests.yml` uploads `logs/` with
+    `if: always()`, which does run on cancellation, so the partial output
+    (including any faulthandler stack dump, which lands on stderr and is
+    merged in here) reaches the artifact even though the log did not.
+
+    running-process streams the child's stdout and stderr as one line
+    sequence, so the tee sees output in arrival order with no buffering of
+    its own; `flush=True` on the echo and `PYTHONUNBUFFERED` on the child
+    close the other two buffers between pytest and the file.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    child_env = dict(env)
+    child_env["PYTHONUNBUFFERED"] = "1"
+    proc = RunningProcess(argv, cwd=ROOT, env=child_env)
+    with log_path.open("w", encoding="utf-8", errors="replace") as log:
+        for line in proc.line_iter(timeout=None):
+            print(line, flush=True)
+            log.write(line + "\n")
+            log.flush()
+    return proc.wait()
+
+
+def run_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str) -> int:
     argv = [sys.executable, "-m", "pytest", "-m", marker, *extra]
-    return process.run(argv, cwd=ROOT, env=env).returncode
+    return run_streamed(argv, env, pytest_log_path(suite))
 
 
 def report_pytest_exit(returncode: int) -> bool:
@@ -245,7 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.suite == "unit":
         if run_harnesses(bundle, manifest, env) != 0:
             return 1
-        return 0 if report_pytest_exit(run_pytest("not integration", env, args.pytest_args)) else 1
+        rc = run_pytest("not integration", env, args.pytest_args, suite="unit")
+        return 0 if report_pytest_exit(rc) else 1
 
     if install_wheel(bundle, env) != 0:
         return 1
@@ -270,7 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     env["CLUD_NO_UNLOCK"] = "1"
     # `-v` prints each test name before it runs, so a hang is pinned to an exact
     # test rather than showing up as silent dead air before the job timeout.
-    return 0 if report_pytest_exit(run_pytest("integration", env, ["-v", *args.pytest_args])) else 1
+    return (
+        0
+        if report_pytest_exit(
+            run_pytest("integration", env, ["-v", *args.pytest_args], suite="integration")
+        )
+        else 1
+    )
 
 
 if __name__ == "__main__":

@@ -143,9 +143,11 @@ def _read_exit_stages(path: str) -> str:
     except OSError as err:
         return f"<unreadable: {err}>"
     if not lines:
-        return "<none recorded — never reached the exit path>"
-    started = [ln.split()[-1] for ln in lines if ln.startswith("exit-stage begin ")]
-    finished = [ln.split()[-1].split("=")[0] for ln in lines if ln.startswith("exit-stage done ")]
+        return "<none recorded — never reached the launch path>"
+    # `launch-stage` (spawn/wait/teardown, #1168) and `exit-stage` (#594)
+    # share the file; a begin pairs with the done carrying the same name.
+    started = [ln.split()[-1] for ln in lines if "-stage begin " in ln]
+    finished = [ln.split()[-1].split("=")[0] for ln in lines if "-stage done " in ln]
     rendered = "\n".join(lines)
     stuck = [name for name in started if name not in finished]
     if stuck:

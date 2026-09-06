@@ -26,9 +26,11 @@ jobs:
     name: ${{ inputs.target }} ${{ inputs.suite }}
     runs-on: ${{ inputs.runs-on }}
     # Tighter than the old 45: this job only executes prebuilt binaries, and
-    # pytest's own per-test `timeout = 90` (pyproject.toml:72) should catch a
+    # pytest's own per-test `timeout = 90` (pyproject.toml) should catch a
     # hang long before this does. A lower ceiling halves what a wedged job
-    # costs in scarce macOS/Windows runner time.
+    # costs in scarce macOS/Windows runner time. When it does fire, the
+    # per-line tee in ci/run_bundle.py plus the always()-uploaded artifact
+    # below are what name the wedged test (#1168).
     timeout-minutes: 20
     env:
       RUST_BACKTRACE: "1"
@@ -71,8 +73,12 @@ jobs:
           echo "::endgroup::"
           echo "::group::Memory snapshot"; free -h; echo "::endgroup::"
 
+      # `always()`, not `failure()`: a job cancelled at the ceiling above is
+      # neither, and its step log is discarded, so `logs/pytest-<suite>.log`
+      # (teed by ci/run_bundle.py) is the only record of which test wedged
+      # (#1168). Skips itself when there is nothing to upload.
       - name: Upload failure logs
-        if: ${{ failure() }}
+        if: ${{ always() && (failure() || cancelled()) }}
         uses: actions/upload-artifact@v4
         with:
           name: failure-logs-${{ inputs.suite }}-${{ inputs.target }}
