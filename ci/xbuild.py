@@ -53,6 +53,8 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
+from collections.abc import MutableMapping
 from pathlib import Path
 
 
@@ -126,7 +128,7 @@ def _run_argv(argv: list[str]) -> list[str]:
     """
     if platform.system() != "Linux":
         return argv
-    return ["bash", "-c", "ulimit -v 13000000; exec \"$@\"", "clud-xbuild", *argv]
+    return ["bash", "-c", 'ulimit -v 13000000; exec "$@"', "clud-xbuild", *argv]
 
 
 def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, str]:
@@ -598,15 +600,102 @@ def cmd_wheel(args: argparse.Namespace) -> int:
 def _host_triple() -> str | None:
     """This machine's Rust target triple, via rustc. `None` if unavailable."""
     try:
-        result = process.run(
-            ["rustc", "-vV"], capture_output=True, text=True, check=False
-        )
+        result = process.run(["rustc", "-vV"], capture_output=True, text=True, check=False)
     except OSError:
         return None
     for line in (result.stdout or "").splitlines():
         if line.startswith("host: "):
             return line.removeprefix("host: ").strip()
     return None
+
+
+def parse_github_env(text: str) -> dict[str, str]:
+    """Parse a `$GITHUB_ENV`-format file into a mapping.
+
+    GitHub's format is `KEY=VALUE` per line, plus the heredoc shape
+    `KEY<<DELIM` ... `DELIM` for multi-line values. `soldr prepare
+    --github-env` writes the former today; the latter is accepted so a future
+    multi-line export does not silently corrupt the environment.
+    """
+    env: dict[str, str] = {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if not line.strip():
+            continue
+        if "<<" in line and "=" not in line.split("<<", 1)[0]:
+            key, delim = line.split("<<", 1)
+            if not delim:
+                raise ValueError(f"heredoc with an empty delimiter: {line!r}")
+            body: list[str] = []
+            while i < len(lines) and lines[i] != delim:
+                body.append(lines[i])
+                i += 1
+            if i >= len(lines):
+                raise ValueError(f"unterminated heredoc for {key.strip()!r}")
+            i += 1  # skip the closing delimiter
+            env[key.strip()] = "\n".join(body)
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            raise ValueError(f"unparseable $GITHUB_ENV line: {line!r}")
+        env[key.strip()] = value
+    return env
+
+
+def prepare_toolchain_locally(
+    target: str, env: MutableMapping[str, str] | None = None
+) -> list[str] | None:
+    """Run `soldr prepare` and apply its exported env in-process (#1017).
+
+    CI's `.github/actions/setup-build` runs `soldr prepare --target <t>
+    --github-env "$GITHUB_ENV"`, which persists the target toolchain env for
+    every later step. That mechanism has no local counterpart, which is why a
+    release wheel could not be reproduced on a developer machine: the build
+    proceeded as if the variables were present and died inside `ring`.
+
+    This is the local counterpart. Outside GitHub Actions it runs the same
+    `prepare` into a temporary file and applies every `KEY=VALUE` it wrote to
+    this process's environment, which every child (cargo, soldr build,
+    maturin) inherits -- the same env, by the same command, as CI.
+
+    Returns the list of keys applied, or `None` when nothing ran: in CI (the
+    env is already there), when `CLUD_XBUILD_SKIP_PREPARE` is set, or when no
+    soldr is on PATH or in the repo `.venv` (the preflight then explains
+    what is missing).
+    """
+    if env is None:
+        env = os.environ
+    if env.get("GITHUB_ACTIONS") == "true" or env.get("CLUD_XBUILD_SKIP_PREPARE"):
+        return None
+    from ci.env import soldr_path
+
+    soldr = env.get("SOLDR_BINARY") or soldr_path(dict(env))
+    if soldr is None:
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="clud-xbuild-prepare-") as tmp:
+        env_file = Path(tmp) / "github.env"
+        command = [soldr, "prepare", "--target", target, "--github-env", str(env_file)]
+        print(f"+ {' '.join(command)}", flush=True)
+        result = process.run(command, cwd=ROOT, env=dict(env), check=False)
+        if result.returncode != 0:
+            raise SystemExit(
+                f"error: `soldr prepare --target {target}` exited {result.returncode}; "
+                "the target toolchain is not prepared, so the build would fail "
+                "later inside a dependency. Fix the prepare failure above first."
+            )
+        exported = parse_github_env(env_file.read_text(encoding="utf-8"))
+
+    for key, value in exported.items():
+        env[key] = value
+    print(
+        f"soldr prepare: applied {len(exported)} exported variable(s) for {target}",
+        flush=True,
+    )
+    return list(exported)
 
 
 def cross_toolchain_preflight(target: str) -> str | None:
@@ -627,9 +716,10 @@ def cross_toolchain_preflight(target: str) -> str | None:
     `prepare`, and only documents that those variables "are exported by"
     it -- so the build proceeds as if they were.
 
-    This does not fix that; it makes the gap legible at the point of entry
-    rather than as a cc-rs error inside a dependency, which is what sent the
-    issue looking in two wrong places.
+    `prepare_toolchain_locally` closes that gap when soldr is installed; this
+    preflight is what remains for a machine without it, making the gap legible
+    at the point of entry rather than as a cc-rs error inside a dependency,
+    which is what sent the issue looking in two wrong places.
 
     Returns an explanation, or `None` when there is nothing to warn about.
     """
@@ -657,12 +747,13 @@ def cross_toolchain_preflight(target: str) -> str | None:
         f"  `{gcc}` is not on PATH and neither {env_key} nor TARGET_CC is set,\n"
         f"  so cc-rs will fail inside a dependency (ring) rather than here.\n"
         f"\n"
-        f"  CI gets this from `soldr prepare --target {target} --github-env \"$GITHUB_ENV\"`\n"
-        f"  in .github/actions/setup-build, which persists the toolchain env for\n"
-        f"  later steps. There is no local equivalent yet -- see #1017 blocker 2.\n"
+        f'  CI gets this from `soldr prepare --target {target} --github-env "$GITHUB_ENV"`\n'
+        f"  in .github/actions/setup-build. This driver runs the same `soldr prepare`\n"
+        f"  locally when `soldr` is on PATH (#1017 blocker 2), and it did not run\n"
+        f"  or did not export a compiler for this target.\n"
         f"\n"
-        f"  Either install {gcc} and re-run, or export {env_key} to a working\n"
-        f"  cross compiler."
+        f"  Either install soldr (`./install --global`) and re-run, install {gcc},\n"
+        f"  or export {env_key} to a working cross compiler."
     )
 
 
@@ -694,6 +785,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.strategy == "soldr":
+        prepare_toolchain_locally(args.target)
     problem = cross_toolchain_preflight(args.target)
     if problem is not None:
         print(problem, file=sys.stderr)

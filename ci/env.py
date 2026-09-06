@@ -280,7 +280,19 @@ def soldr_path(env: dict[str, str] | None = None) -> str | None:
     consulted when `CLUD_USE_SOLDR_SHIMS` or a shim on PATH is detected.
     """
     path = None if env is None else env.get("PATH")
-    return shutil.which("soldr", path=path)
+    found = shutil.which("soldr", path=path)
+    if found:
+        return found
+    # `./install` (the documented default) puts soldr in the repo's .venv,
+    # which is not on PATH for `.venv/bin/python -m ci.xbuild ...` run without
+    # activating the venv. Probe it so the local path does not silently miss
+    # the repo's own recommended install (#1017).
+    scripts = "Scripts" if os.name == "nt" else "bin"
+    binary = "soldr.exe" if os.name == "nt" else "soldr"
+    candidate = repo_root() / ".venv" / scripts / binary
+    if candidate.is_file():
+        return str(candidate)
+    return None
 
 
 def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
