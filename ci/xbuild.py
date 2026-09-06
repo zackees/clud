@@ -627,10 +627,14 @@ def parse_github_env(text: str) -> dict[str, str]:
             continue
         if "<<" in line and "=" not in line.split("<<", 1)[0]:
             key, delim = line.split("<<", 1)
+            if not delim:
+                raise ValueError(f"heredoc with an empty delimiter: {line!r}")
             body: list[str] = []
             while i < len(lines) and lines[i] != delim:
                 body.append(lines[i])
                 i += 1
+            if i >= len(lines):
+                raise ValueError(f"unterminated heredoc for {key.strip()!r}")
             i += 1  # skip the closing delimiter
             env[key.strip()] = "\n".join(body)
             continue
@@ -659,13 +663,16 @@ def prepare_toolchain_locally(
 
     Returns the list of keys applied, or `None` when nothing ran: in CI (the
     env is already there), when `CLUD_XBUILD_SKIP_PREPARE` is set, or when no
-    soldr is on PATH (the preflight then explains what is missing).
+    soldr is on PATH or in the repo `.venv` (the preflight then explains
+    what is missing).
     """
     if env is None:
         env = os.environ
     if env.get("GITHUB_ACTIONS") == "true" or env.get("CLUD_XBUILD_SKIP_PREPARE"):
         return None
-    soldr = env.get("SOLDR_BINARY") or shutil.which("soldr", path=env.get("PATH"))
+    from ci.env import soldr_path
+
+    soldr = env.get("SOLDR_BINARY") or soldr_path(dict(env))
     if soldr is None:
         return None
 

@@ -8,6 +8,7 @@ counterpart: same command, same exported variables, applied in-process.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,12 +41,47 @@ def test_parse_rejects_a_line_that_is_neither_shape() -> None:
         parse_github_env("just words\n")
 
 
-def _fake_soldr(monkeypatch: pytest.MonkeyPatch, *, returncode: int = 0) -> list[list[str]]:
-    """Stand in for `soldr prepare`: record argv and write a canned env file."""
-    calls: list[list[str]] = []
+def test_parse_rejects_a_broken_heredoc() -> None:
+    """Swallowing the rest of the file into one key would drop later exports
+    silently, which is exactly what this parser exists to avoid."""
+    with pytest.raises(ValueError, match="unterminated"):
+        parse_github_env("A<<EOF\nx\nB=1\n")
+    with pytest.raises(ValueError, match="empty delimiter"):
+        parse_github_env("A<<\nx\n\n")
 
-    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+
+def test_without_soldr_on_path_it_finds_the_repo_venv_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`./install` puts soldr in `.venv/{bin,Scripts}`, which is not on PATH
+    for an unactivated `.venv/bin/python -m ci.xbuild` run."""
+    calls = _fake_soldr(monkeypatch)
+    monkeypatch.setattr("ci.env.shutil.which", lambda _name, path=None: None)
+    monkeypatch.setattr("ci.env.repo_root", lambda: tmp_path)
+    venv_bin = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    venv_bin.mkdir(parents=True)
+    soldr = venv_bin / ("soldr.exe" if os.name == "nt" else "soldr")
+    soldr.write_text("", encoding="utf-8")
+
+    assert prepare_toolchain_locally("x86_64-unknown-linux-gnu", {"PATH": "/nowhere"})
+    assert calls[0][0] == str(soldr)
+
+
+class _Calls(list[list[str]]):
+    """Recorded `process.run` argv lists, plus the kwargs each was given."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kwargs: list[dict[str, object]] = []
+
+
+def _fake_soldr(monkeypatch: pytest.MonkeyPatch, *, returncode: int = 0) -> _Calls:
+    """Stand in for `soldr prepare`: record argv and write a canned env file."""
+    calls = _Calls()
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append(command)
+        calls.kwargs.append(kwargs)
         env_file = Path(command[command.index("--github-env") + 1])
         env_file.write_text(
             "CC_aarch64_unknown_linux_gnu=/tc/bin/aarch64-linux-gnu-gcc\nPATH=/tc/bin:/usr/bin\n",
@@ -67,6 +103,11 @@ def test_it_runs_soldr_prepare_and_applies_the_exported_env(
 
     assert calls[0][:4] == ["/opt/soldr", "prepare", "--target", "aarch64-unknown-linux-gnu"]
     assert "--github-env" in calls[0]
+    # A non-zero exit must reach our own SystemExit, not running-process's
+    # CalledProcessError, and the caller's env is what prepare runs under.
+    kwargs = calls.kwargs[0]
+    assert kwargs["check"] is False
+    assert kwargs["env"]["SOLDR_BINARY"] == "/opt/soldr"
     assert applied == ["CC_aarch64_unknown_linux_gnu", "PATH"]
     # The same variables CI's later steps see, now visible to every child.
     assert env["CC_aarch64_unknown_linux_gnu"] == "/tc/bin/aarch64-linux-gnu-gcc"
@@ -92,9 +133,12 @@ def test_it_can_be_skipped_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == []
 
 
-def test_without_soldr_it_defers_to_the_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_without_soldr_it_defers_to_the_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     calls = _fake_soldr(monkeypatch)
-    monkeypatch.setattr("ci.xbuild.shutil.which", lambda _name, path=None: None)
+    monkeypatch.setattr("ci.env.shutil.which", lambda _name, path=None: None)
+    monkeypatch.setattr("ci.env.repo_root", lambda: tmp_path)
     env = {"PATH": "/nowhere"}
 
     assert prepare_toolchain_locally("x86_64-unknown-linux-gnu", env) is None
