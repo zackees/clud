@@ -85,6 +85,7 @@ pub mod shim_session;
 pub mod shim_uv;
 pub mod skills;
 pub mod soldr_activate;
+pub mod stage_trace;
 pub mod startup;
 pub mod stream_json;
 pub mod subprocess;

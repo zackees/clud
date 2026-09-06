@@ -3,9 +3,9 @@ use clud::{
     console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover, gc,
     graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
     launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth,
-    runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli,
-    tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm,
-    workspace_trust, worktrees,
+    runner, runtime_cache, settings_tui, soldr_activate, stage_trace, startup, symbols,
+    test_runtime, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
+    verbose_log, wasm, webterm, workspace_trust, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -1127,6 +1127,12 @@ fn run(mut args: args::Args) {
         );
     }
 
+    // #1168: the same trace file the exit stages below write to was empty on
+    // a wedged `clud -p` whose backend had already finished, so the launch
+    // phase gets breadcrumbs too. Computed here rather than with the exit
+    // stages because both phases share the stderr opt-in.
+    let exit_timing = stage_trace::stderr_enabled(args.verbose);
+    let launch_started = stage_trace::begin(exit_timing, stage_trace::Phase::Launch, "backend_run");
     let exit_code = if centralized {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
     } else {
@@ -1150,15 +1156,41 @@ fn run(mut args: args::Args) {
             ),
         }
     };
+    stage_trace::done(
+        exit_timing,
+        stage_trace::Phase::Launch,
+        "backend_run",
+        launch_started,
+    );
     if let Some(handle) = &launch_log {
-        handle.finish(exit_code);
+        stage_trace::scoped(
+            exit_timing,
+            stage_trace::Phase::Launch,
+            "launch_log_finish",
+            || handle.finish(exit_code),
+        );
     }
     if let Some(session) = loop_session.as_mut() {
         let (summary, err) = runner::summarize_loop_outcome(exit_code);
-        session.on_loop_end(summary, err);
+        stage_trace::scoped(
+            exit_timing,
+            stage_trace::Phase::Launch,
+            "loop_session_end",
+            || session.on_loop_end(summary, err),
+        );
     }
-    drop(_session_guard);
-    drop(_dnd_subprocess_guard);
+    stage_trace::scoped(
+        exit_timing,
+        stage_trace::Phase::Launch,
+        "session_guard_drop",
+        || drop(_session_guard),
+    );
+    stage_trace::scoped(
+        exit_timing,
+        stage_trace::Phase::Launch,
+        "dnd_guard_drop",
+        || drop(_dnd_subprocess_guard),
+    );
     // Issue #340: detect env-tagged orphans we are about to leave behind and
     // (unless --keep-orphans) reap them. Skip for detached / detachable
     // sessions — those descendants are intentionally outliving us and are
@@ -1170,43 +1202,19 @@ fn run(mut args: args::Args) {
     // none of them is currently attributable from a timed-out run.
     //
     // Opt-in only: `verbose_log::log` writes to stderr, and an unconditional
-    // line there would break every test that asserts clean stderr — the exact
+    // line there would break every test that asserts clean stderr -- the exact
     // failure mode #594 already documents. Default runs emit nothing.
-    let exit_timing = args.verbose || std::env::var_os("CLUD_EXIT_TIMING").is_some();
-    let mut exit_stages: Vec<(&'static str, u128)> = Vec::new();
-
+    //
     // Breadcrumbs are emitted as each stage starts and finishes, not batched
     // into the summary at the end of this block. The summary only prints on a
     // run that survives every stage -- and the case #594 needs attributed is
     // exactly the one that does not, because the harness kills the process at
     // the timeout. A `begin` with no matching `done` in the captured partial
     // stderr names the stage that held the process open; the summary alone
-    // would say nothing at all about it.
-    //
-    // Two sinks, deliberately. stderr stays behind the opt-in above, because
-    // an unconditional line there would break every test asserting clean
-    // stderr. `CLUD_EXIT_TIMING_FILE` is the sink the integration harness
-    // uses: it never touches stderr, so the harness can enable attribution on
-    // *every* launch without perturbing a single assertion, and still recover
-    // the trace from a process it had to kill.
-    fn exit_stage_trace(enabled: bool, line: &str) {
-        if enabled {
-            verbose_log::log(format_args!("[clud] {line}"));
-        }
-        if let Some(path) = std::env::var_os("CLUD_EXIT_TIMING_FILE") {
-            use std::io::Write as _;
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                let _ = writeln!(file, "{line}");
-                let _ = file.flush();
-            }
-        }
-    }
-    fn exit_stage_begin(enabled: bool, name: &str) {
-        exit_stage_trace(enabled, &format!("exit-stage begin {name}"));
+    // would say nothing at all about it. Sinks and format: `stage_trace`.
+    let mut exit_stages: Vec<(&'static str, u128)> = Vec::new();
+    fn exit_stage_begin(enabled: bool, name: &str) -> std::time::Instant {
+        stage_trace::begin(enabled, stage_trace::Phase::Exit, name)
     }
     fn exit_stage_done(
         enabled: bool,
@@ -1214,9 +1222,8 @@ fn run(mut args: args::Args) {
         name: &'static str,
         started: std::time::Instant,
     ) {
-        let ms = started.elapsed().as_millis();
+        let ms = stage_trace::done(enabled, stage_trace::Phase::Exit, name, started);
         stages.push((name, ms));
-        exit_stage_trace(enabled, &format!("exit-stage done {name}={ms}ms"));
     }
     if !args.detach && !args.detachable {
         // #673 Phase 2d: exits the job tracker gave up on at runtime get one
@@ -1227,8 +1234,7 @@ fn run(mut args: args::Args) {
         // paths, where those descendants are outliving us on purpose.
         if let Some(tracker) = job_orphan_reaper.as_ref() {
             if !args.keep_orphans {
-                exit_stage_begin(exit_timing, "sweep_abandoned_at_exit");
-                let started = std::time::Instant::now();
+                let started = exit_stage_begin(exit_timing, "sweep_abandoned_at_exit");
                 let swept = tracker.sweep_abandoned_at_exit();
                 exit_stage_done(
                     exit_timing,
@@ -1245,8 +1251,7 @@ fn run(mut args: args::Args) {
             // #673 Phase 5: reaping is destructive and was silent, which is
             // how #651 could be closed while the same symptom kept growing.
             // Suppressed entirely when nothing was tracked.
-            exit_stage_begin(exit_timing, "finish_and_report");
-            let started = std::time::Instant::now();
+            let started = exit_stage_begin(exit_timing, "finish_and_report");
             let report_lines = tracker.finish_and_report(args.verbose);
             exit_stage_done(exit_timing, &mut exit_stages, "finish_and_report", started);
             for line in report_lines {
@@ -1262,8 +1267,7 @@ fn run(mut args: args::Args) {
             quiet: args.quiet_orphans,
             explain: args.explain_orphans,
         };
-        exit_stage_begin(exit_timing, "scan_and_report");
-        let started = std::time::Instant::now();
+        let started = exit_stage_begin(exit_timing, "scan_and_report");
         let outcome = orphan_reaper::scan_and_report(std::process::id(), &opts);
         exit_stage_done(exit_timing, &mut exit_stages, "scan_and_report", started);
         if args.verbose && outcome.found > 0 {
@@ -1282,8 +1286,7 @@ fn run(mut args: args::Args) {
         // `clud slay` does the synchronous version.
         if !args.keep_orphans {
             if let Ok(state_dir) = daemon::default_state_dir() {
-                exit_stage_begin(exit_timing, "request_orphan_reap");
-                let started = std::time::Instant::now();
+                let started = exit_stage_begin(exit_timing, "request_orphan_reap");
                 let _ = daemon::try_request_orphan_reap(&state_dir);
                 exit_stage_done(
                     exit_timing,
@@ -1302,8 +1305,7 @@ fn run(mut args: args::Args) {
     // stall inside an implicit drop is invisible to every stage above. Line 786
     // is the last read of `job_orphan_reaper`, so this only makes the existing
     // drop point explicit; it does not move work.
-    exit_stage_begin(exit_timing, "tracker_drop");
-    let started = std::time::Instant::now();
+    let started = exit_stage_begin(exit_timing, "tracker_drop");
     // `ForegroundJobTracker`'s `Drop` lives in `#[cfg(windows)] mod imp`, so on
     // every other platform this type has no destructor and clippy's
     // `drop_non_drop` correctly reports the call as a no-op. Suppressed rather

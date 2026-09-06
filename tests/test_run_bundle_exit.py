@@ -10,7 +10,10 @@ An exit code carries more than that if it is read.
 
 from __future__ import annotations
 
-from ci.run_bundle import _pytest_ok, describe_pytest_exit
+import sys
+from pathlib import Path
+
+from ci.run_bundle import _pytest_ok, describe_pytest_exit, pytest_log_path, run_streamed
 
 
 def test_pytest_own_codes_are_named() -> None:
@@ -69,3 +72,45 @@ def test_success_codes_are_unchanged() -> None:
     assert _pytest_ok(5)
     assert not _pytest_ok(1)
     assert not _pytest_ok(-11)
+
+
+def test_run_streamed_tees_output_to_the_log_as_it_arrives(tmp_path: Path, capsys) -> None:
+    """#1168: the cancelled job's step log was empty, so the tee is the record.
+
+    Both streams land in the file (each in its own order -- running-process
+    reads them on separate threads, so cross-stream order is not pinned), the
+    file is flushed per line so a process killed later still leaves the
+    earlier lines, the echo still reaches the step log, and the exit code is
+    the child's."""
+    log = tmp_path / "nested" / "pytest-unit.log"
+    script = (
+        "import sys; print('collected 3 items'); "
+        "print('E   AssertionError', file=sys.stderr); print('1 failed'); sys.exit(1)"
+    )
+    rc = run_streamed([sys.executable, "-c", script], {}, log)
+    assert rc == 1
+    body = log.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    assert "collected 3 items" in lines
+    assert "E   AssertionError" in lines
+    assert "1 failed" in lines
+    assert lines.index("collected 3 items") < lines.index("1 failed")
+    assert len(lines) == 3, body
+    assert "collected 3 items" in capsys.readouterr().out
+
+
+def test_run_streamed_forces_an_unbuffered_child(tmp_path: Path) -> None:
+    """A wedged pytest with a block-buffered stdout tees nothing useful;
+    the child must be unbuffered so each `-v` line reaches the file."""
+    log = tmp_path / "pytest.log"
+    rc = run_streamed(
+        [sys.executable, "-c", "import os; print(os.environ.get('PYTHONUNBUFFERED'))"], {}, log
+    )
+    assert rc == 0
+    assert log.read_text(encoding="utf-8") == "1\n"
+
+
+def test_pytest_log_path_is_under_the_uploaded_logs_dir() -> None:
+    """`_run-tests.yml` uploads `logs/*`; the tee has to land there."""
+    assert pytest_log_path("integration").parent.name == "logs"
+    assert pytest_log_path("unit").name == "pytest-unit.log"

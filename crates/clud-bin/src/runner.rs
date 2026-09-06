@@ -21,6 +21,7 @@ use crate::loop_check::{
 };
 use crate::process_tree;
 use crate::session;
+use crate::stage_trace;
 use crate::stream_json;
 use crate::subprocess;
 use crate::verbose_log;
@@ -314,6 +315,7 @@ pub fn run_plan_subprocess(
         }
     };
     let mut last_exit = 0i32;
+    let trace_enabled = stage_trace::stderr_enabled(verbose);
 
     for iteration in 0..plan.iterations {
         // Re-check the interrupted flag at the top of every iteration. A
@@ -387,6 +389,16 @@ pub fn run_plan_subprocess(
         // to the user's terminal and we never see the bytes — the token
         // fallback is unavailable there.
         let mut captured_output = String::new();
+        // #1168: a wedged `clud -p` on the Windows lanes left an empty stage
+        // trace with the backend already finished, so the wait and the
+        // per-iteration teardown get breadcrumbs. `child_wait` covers polling
+        // the backend to exit (and, on Windows, its Job Object closing);
+        // `child_teardown` covers joining the wedge watchdog and dropping the
+        // process handle, which is where a descendant-held pipe would hold
+        // us. An unmatched `begin` in the harness's rendering of the trace
+        // names the one that did not come back.
+        let wait_started =
+            stage_trace::begin(trace_enabled, stage_trace::Phase::Launch, "child_wait");
         let exit_code = if plan.stream_json_progress {
             run_with_stream_json_renderer(
                 &process,
@@ -397,6 +409,21 @@ pub fn run_plan_subprocess(
         } else {
             run_with_inherited_stdio(&process, interrupted, batch_wrapped)
         };
+        stage_trace::done(
+            trace_enabled,
+            stage_trace::Phase::Launch,
+            "child_wait",
+            wait_started,
+        );
+        stage_trace::scoped(
+            trace_enabled,
+            stage_trace::Phase::Launch,
+            "child_teardown",
+            || {
+                drop(_wedge_watchdog);
+                drop(process);
+            },
+        );
         match exit_code {
             ProcessOutcome::Exited(code) => {
                 last_exit = code;
@@ -445,6 +472,12 @@ pub fn run_plan_subprocess(
     }
 
     note_silent_bridge(&runtime, last_exit);
+    stage_trace::scoped(
+        trace_enabled,
+        stage_trace::Phase::Launch,
+        "runtime_drop",
+        || drop(runtime),
+    );
     last_exit
 }
 

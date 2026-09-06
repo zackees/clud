@@ -512,6 +512,28 @@ Deleted: 24 `{linux,macos,windows}-{x86,arm}-{build,lint,unit-test,integration-t
 plus `_lint.yml`, `_unit-test.yml`, `_integration-test.yml`, `_build.yml`,
 `dylint.yml`.
 
+### When a job hits the 20-minute ceiling
+
+`_run-tests.yml` caps every exec job at 20 minutes, on the assumption that
+pytest-timeout (`timeout = 90`, thread method, plus `faulthandler_timeout`)
+names a hung test long before that. #1168 showed the gap: a wedged Windows
+integration job was cancelled at the ceiling and GitHub kept **no log at all**
+for the cancelled step, so neither the `-v` progress nor any stack dump
+survived. Two things close it:
+
+- `ci/run_bundle.py::run_streamed` runs pytest through running-process,
+  echoes each line and tees it to `logs/pytest-<suite>.log`, flushed per
+  line, with `PYTHONUNBUFFERED=1` on the child.
+- The `Upload failure logs` step runs on `failure() || cancelled()`, so that
+  file reaches the artifact even when the step log did not.
+
+On the clud side, `CLUD_EXIT_TIMING_FILE` (set by the integration harness on
+every launch, see `tests/integration/_daemon_helpers.py::run_clud`) records
+`launch-stage` breadcrumbs (`backend_run`, `child_wait`, `child_teardown`,
+`runtime_drop`, …) ahead of the `exit-stage` ones from #594, so a process the
+harness had to kill names the stage it was in; implementation in
+`crates/clud-bin/src/stage_trace.rs`.
+
 ### Two traps worth naming
 
 **Never use `uv run` in a workflow step.** `pyproject.toml` sets
