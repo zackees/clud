@@ -1462,7 +1462,19 @@ mod tests {
             panic!("no attempt succeeded across 5 tries; last error: {last_error:?}")
         });
 
-        assert_eq!(outcome.attempts, 1);
+        // The client's own pre-commit retry is allowed to fire here: on the
+        // same loaded runners the first loopback connect can be refused, the
+        // client classifies that as transient, and attempt 2 succeeds — that
+        // is the retry policy working, and it delivered exactly one healthy
+        // frame (run 33827259075 saw `attempts == 2` with a clean payload).
+        // What must hold is that the frame arrived and nothing was committed
+        // twice; `streams_chunks_to_the_sink_in_order` pins the single-attempt
+        // count against a server that never refuses.
+        assert!(
+            outcome.attempts >= 1 && outcome.attempts <= fast_config().max_attempts,
+            "attempts must stay within the transient budget: {}",
+            outcome.attempts
+        );
         assert_eq!(seen, b"data: healthy\n\n");
         done.store(true, Ordering::SeqCst);
         server.join().unwrap();
