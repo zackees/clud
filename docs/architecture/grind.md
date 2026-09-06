@@ -34,11 +34,11 @@ daemon repeat worker, or add headless stream-json rendering.
 
 ## Harness support
 
-`grind` is available only when the selected harness can accept `/loop` in a
-normal interactive PTY prompt. If a harness lacks that capability, clud must
-report that `grind` is unsupported for that harness before launch. It must not
-silently substitute `clud loop`, headless prompting, marker polling, or any
-other external loop.
+`grind` is available only on the Claude harness, which accepts `/loop` in its
+normal interactive PTY prompt. For a Codex or DeepSeek model, select it with
+`--harness claude`. Other harnesses must report `grind` as unsupported before
+launch; clud must not silently substitute `clud loop`, headless prompting,
+marker polling, or any other external loop.
 
 ## Boundary with `clud loop`
 

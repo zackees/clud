@@ -435,6 +435,10 @@ fn run(mut args: args::Args) {
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
+    if let Some(error) = command::grind_launch_error(&args, launch_target) {
+        eprintln!("[clud] error: {error}");
+        std::process::exit(2);
+    }
     if launch_target.effective_harness == backend::Backend::DeepSeek {
         if let Some(option) = args.unsupported_deepseek_harness_option() {
             eprintln!(
@@ -571,8 +575,9 @@ fn run(mut args: args::Args) {
 
     // `clud grind` resolves the current repo's issues page from the `origin`
     // remote (GitHub `<repo>/issues`, GitLab `<repo>/-/issues`), prints a green
-    // notice, then seeds a `/loop` contract that iterates issue-by-issue with
-    // DONE/BLOCKED markers. An explicit URL argument is passed through verbatim.
+    // notice, then seeds its native interactive `/loop` prompt. The harness
+    // owns repetition and completion. An explicit URL argument is passed through
+    // verbatim.
     if let Some(args::Command::Grind { url }) = args.command.clone() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         match grind::resolve_grind_target(&cwd, url.as_deref()) {

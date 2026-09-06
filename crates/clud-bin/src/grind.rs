@@ -11,9 +11,8 @@
 //! interactive session. The intended contract is documented in
 //! [`docs/architecture/grind.md`](../../../docs/architecture/grind.md): clud
 //! must neither relaunch the harness nor use DONE/BLOCKED markers, a 200-turn
-//! cap, or a headless prompt path. The current implementation still does those
-//! things for some backends; that is a legacy runtime defect pending correction,
-//! not this module's directive.
+//! cap, or a headless prompt path. It requires the Claude harness, which owns
+//! the native `/loop` command; other harnesses fail before launch.
 
 use std::path::Path;
 use std::time::Duration;
