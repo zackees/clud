@@ -751,6 +751,16 @@ fn effort_for(request: &MessagesRequest, spec: &ModelSpec) -> Result<Effort, Tra
 /// A selection that does not parse is a **400, not a fallback**. Silently
 /// substituting the default for `/model tera` would bill a model the user did
 /// not choose and give them no way to notice.
+///
+/// The `claude*` branch is the deliberate exception to that rule (#1007). It
+/// cannot be a 400: the harness's own side-model calls carry built-in
+/// `claude-*` ids no matter what was launched, so refusing the prefix would
+/// break every session. The cost is that a user's pick from the built-in
+/// Anthropic lineup lands here looking the same and is served by the default.
+/// The bridge reports that case instead of failing it --
+/// `codex_bridge::is_anthropic_main_model_pick` warns once and logs a
+/// `model_substituted` event -- because the picker cannot be constrained from
+/// clud's side (DD-054).
 pub fn resolve_selection(
     requested: Option<&str>,
     default: &ModelSpec,

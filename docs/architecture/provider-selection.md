@@ -283,11 +283,17 @@ What the bridge does with an ID it never advertised is owned by
 [Claude Code merges discovery with its built-in
 catalog](#claude-code-merges-discovery-with-its-built-in-catalog) above. One
 point belongs here because it is what this investigation could *not* establish:
-a built-in Anthropic pick on the direct Codex route does **not** fail loudly —
-`resolve_selection` (`codex_translate.rs:748`) maps any `claude*` ID onto the
-launch-time selection, so the turn quietly runs on a Codex model, the
-substitution [DD-038](../DESIGN_DECISIONS.md#dd-038-the-codex-picker-gets-one-honest-row-always-carrying-the-catalog)
-already recorded. **The mechanism of the `claude-opus-5[1m]` session wedge in
+a built-in Anthropic pick on the direct Codex route does **not** fail —
+`resolve_selection` (`codex_translate.rs`) maps any `claude*` ID onto the
+launch-time selection, so the turn runs on a Codex model, the substitution
+[DD-038](../DESIGN_DECISIONS.md#dd-038-the-codex-picker-gets-one-honest-row-always-carrying-the-catalog)
+already recorded. Since zackees/clud#1007 it is no longer *quiet*: the cross
+route launches the harness with `--model <discovery-id>`, so a non-haiku
+`claude*` main model can only be a post-launch pick, and the bridge
+(`codex_bridge::is_anthropic_main_model_pick`) prints one line per session
+naming the model actually served and records an ambient `model_substituted`
+event in the bridge log. The harness's own `claude-*-haiku*` side-model calls
+are excluded by name. **The mechanism of the `claude-opus-5[1m]` session wedge in
 zackees/clud#995 is therefore unrecorded**: that launch left nothing on disk but
 `"exit_code": 1`. Making it observable is the point of zackees/clud#998 and
 #999. Do not infer a cause from this document.

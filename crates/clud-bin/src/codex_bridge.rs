@@ -2130,6 +2130,24 @@ fn serve_codex_discovery_messages(
         let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
         return;
     }
+    // #1007: a built-in Anthropic row picked in `/model` arrives here as a
+    // `claude*` id and is served by the launch selection -- silently, until
+    // now. The picker cannot be constrained (DD-054), so the remedy is to
+    // detect and report: one terminal line per session, one log event per
+    // request. The substitution itself is unchanged; refusing would break the
+    // harness's own side-model calls, which share the prefix.
+    if is_anthropic_main_model_pick(base) {
+        let served = config.default_model.as_ref().map_or_else(
+            || {
+                provider_catalog::reviewed_default_model(ModelProvider::Codex)
+                    .map_or("the Codex default", |entry| entry.wire_id)
+                    .to_string()
+            },
+            ModelSpec::display,
+        );
+        warn_once_on_anthropic_pick(base, &served);
+        record_model_substitution(log, base, &served);
+    }
     if let Some(entry) = discovered {
         let wire_model = effort.map_or_else(
             || entry.wire_id.to_string(),
@@ -2326,6 +2344,65 @@ fn warn_once_on_terminal_failure(error: &PipelineError) {
     // The leading `\x07` is a terminal bell: this is the failure most likely
     // to be waiting on a user who has looked away from an unattended run.
     eprintln!("\x07[clud] codex bridge: {}", error.client_message());
+}
+
+/// Whether a `claude*` id on the direct Codex route is a user's pick from the
+/// built-in Anthropic lineup rather than the harness's own traffic (#1007).
+///
+/// Two facts make the prefix alone insufficient and this predicate possible:
+///
+/// - The cross route launches the harness with `--model <discovery-id>`
+///   (`command::builder::gateway_model_selection`), so an ordinary foreground
+///   turn arrives as `clud-claude-codex-*`, not `claude*`. A `claude*` main
+///   model was therefore chosen after launch, from the rows Claude Code merges
+///   into `/model` behind clud's back (DD-054).
+/// - The harness's side-model calls (titles, summaries, the small fast model)
+///   keep their built-in `claude-*-haiku*` ids regardless of `--model`. Those
+///   are not a pick and are excluded by name; nothing else the harness sends
+///   on its own is `claude*`-shaped here.
+fn is_anthropic_main_model_pick(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.starts_with("claude") && !lower.contains("haiku")
+}
+
+/// The one line a user gets when their `/model` pick is not what runs (#1007).
+///
+/// Once per process, like [`warn_once_on_terminal_failure`]: every turn after
+/// the pick would repeat it, and the useful information -- which model is
+/// actually being billed, and how to change it -- does not change.
+fn warn_once_on_anthropic_pick(requested: &str, served: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let requested = requested
+        .chars()
+        .take(MAX_LOGGED_MODEL_CHARS)
+        .collect::<String>();
+    eprintln!(
+        "[clud] codex bridge: '{requested}' is an Anthropic model this Codex session cannot \
+         serve; it is running on {served} instead. Pick a \"Codex\" row in /model to change \
+         models."
+    );
+}
+
+/// The forensic half of #1007: which id the harness asked for and which one
+/// the bridge served in its place. Ambient, not notable -- the terminal line
+/// already carries the user's attention, and a session that keeps working on
+/// the substitute should not end with a "problems were recorded" hint.
+fn record_model_substitution(log: Option<&SharedBridgeLog>, requested: &str, served: &str) {
+    if let Some(log) = log {
+        let requested = requested
+            .chars()
+            .take(MAX_LOGGED_MODEL_CHARS)
+            .collect::<String>();
+        lock_log(log).record_ambient(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "model_substituted",
+            "requested": requested,
+            "served": served,
+        }));
+    }
 }
 
 /// Opt-in diagnostics. The bridge answers the harness with a sanitized error,
@@ -3550,6 +3627,10 @@ Connection: close
         }
     }
 
+    /// A turn on the model the session was launched with has nothing to
+    /// record. (A turn on a *substituted* model does -- #1007 -- which is why
+    /// this uses the discovery id the harness really sends rather than
+    /// `PROBE_BODY`'s `claude-x` placeholder.)
     #[test]
     fn successful_turn_creates_no_forensic_log() {
         let upstream = FakeResponses::start();
@@ -3557,9 +3638,10 @@ Connection: close
         let log_path = tmp.path().join("bridge.jsonl");
         let mut bridge =
             BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+        let body = PROBE_BODY.replace("claude-x", "clud-claude-codex-terra");
         let response = request(
             bridge.socket_addr(),
-            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
         );
         assert_eq!(status(&response), 200);
         bridge.shutdown().unwrap();
@@ -3812,6 +3894,75 @@ Connection: close
         let sent_body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
         let json: serde_json::Value = serde_json::from_str(sent_body).expect("JSON body");
         assert_eq!(json["model"], "gpt-5.7-nova", "{sent_body}");
+    }
+
+    /// #1007: a built-in Anthropic row picked from `/model` still runs on the
+    /// launch selection (the picker cannot be constrained, DD-054), but the
+    /// substitution is now recorded instead of silent.
+    #[test]
+    fn an_anthropic_pick_on_the_codex_route_is_served_by_the_default_and_recorded() {
+        let upstream = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_default_model(Some(ModelSpec::parse("sol@xhigh").unwrap()))
+                .with_log_path(log_path.clone()),
+        )
+        .unwrap();
+        let body = PROBE_BODY.replace("claude-x", "claude-opus-5");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        let sent = upstream.requests().remove(0);
+        let sent_body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
+        let json: serde_json::Value = serde_json::from_str(sent_body).expect("JSON body");
+        assert_eq!(json["model"], "gpt-5.6-sol", "{sent_body}");
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(text.contains(r#""event":"model_substituted""#), "{text}");
+        assert!(text.contains(r#""requested":"claude-opus-5""#), "{text}");
+        assert!(text.contains(r#""served":"gpt-5.6-sol@xhigh""#), "{text}");
+        // Ambient: the session kept working, so it must not end on a
+        // "problems were recorded" hint the terminal line already covered.
+        let log = bridge.log.as_ref().expect("configured log");
+        assert!(!lock_log(log).has_notable_records(), "{text}");
+    }
+
+    /// The harness's own side-model calls share the `claude` prefix and must
+    /// not be reported as a pick, or every session would warn on its first
+    /// title generation.
+    #[test]
+    fn a_haiku_side_call_is_not_reported_as_an_anthropic_pick() {
+        let upstream = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+        let body = PROBE_BODY.replace("claude-x", "claude-haiku-4-5-20251001");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        bridge.shutdown().unwrap();
+
+        // A log with nothing to say is never created, which is the point.
+        let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(!text.contains("model_substituted"), "{text}");
+    }
+
+    #[test]
+    fn anthropic_pick_predicate_keys_on_prefix_and_excludes_haiku() {
+        assert!(is_anthropic_main_model_pick("claude-opus-5"));
+        assert!(is_anthropic_main_model_pick("Claude-Sonnet-4-5[1m]"));
+        assert!(!is_anthropic_main_model_pick("claude-haiku-4-5"));
+        assert!(!is_anthropic_main_model_pick("claude-3-5-haiku-latest"));
+        assert!(!is_anthropic_main_model_pick("clud-claude-codex-sol"));
+        assert!(!is_anthropic_main_model_pick("gpt-5.6-sol"));
     }
 
     /// The narrowness is the whole design, so it gets its own test.
