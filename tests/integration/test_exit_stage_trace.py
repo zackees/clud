@@ -52,7 +52,13 @@ def test_exit_stage_file_records_each_stage_as_it_runs(clud_binary, mock_env):
         # #1168: the launch phase leaves breadcrumbs too, and they precede
         # the exit stages so a trace ending at `child_wait` reads as "the
         # backend never came back" rather than "never reached the exit path".
-        for stage in ("backend_run", "child_wait", "child_teardown", "runtime_drop"):
+        for stage in (
+            "backend_run",
+            "child_wait",
+            "child_teardown",
+            "runtime_drop",
+            "cpu_banner_stop",
+        ):
             assert f"launch-stage begin {stage}" in body, body
             assert f"launch-stage done {stage}=" in body, body
         assert body.index("launch-stage begin child_wait") < body.index(

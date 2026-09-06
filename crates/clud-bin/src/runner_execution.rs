@@ -108,8 +108,8 @@ pub fn run_plan_pty(
     cpu_banner_cfg: cpu_banner::CpuBannerCfg,
 ) -> i32 {
     // Issue #466: CPU-burn banner. Same shape as the subprocess runner —
-    // background thread joins on drop at function exit. Inert when
-    // cfg.enabled = false.
+    // background thread is stopped on drop at function exit, with a bounded
+    // wait (#1172). Inert when cfg.enabled = false.
     let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
 
     // Issue #79 / #65 / #66: register the console IDropTarget for PTY
