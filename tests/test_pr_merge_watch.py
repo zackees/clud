@@ -1060,3 +1060,69 @@ def test_a_run_with_no_error_line_yields_empty_not_a_false_positive(watcher) -> 
         "2026-09-03T21:30:48.3499037Z test result: ok. 2 passed; 0 failed\n"
     )
     assert watcher.first_error_line(watcher.normalize_log(passing)) == ""
+
+
+# -- #1175: gh() streams are never None, and a failed cancel is reported -----
+
+
+def _opts(**overrides):
+    base = dict(
+        on={"fail"},
+        mode="runs",
+        timeout=30,
+        require=False,
+        dry_run=False,
+        ignore_permission_errors=True,
+        no_retry=False,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_gh_asks_for_stderr_separately_and_never_returns_none_streams(
+    watcher, monkeypatch
+) -> None:
+    """running-process merges stderr into stdout unless `stderr=PIPE` is
+    passed; without it every `GhResult.stderr` was None and the first failed
+    cancel crashed on `"HTTP 403" in None` (#1175)."""
+    seen: dict[str, object] = {}
+
+    class Done:
+        returncode = 1
+        stdout = None
+        stderr = None
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return Done()
+
+    monkeypatch.setattr(watcher.RunningProcess, "run", fake_run)
+    res = watcher.gh("api", "-X", "POST", "repos/o/r/actions/runs/1/cancel")
+    assert seen["argv"][0] == "gh"
+    assert seen["kwargs"]["stderr"] is watcher.PIPE
+    assert res.stdout == ""
+    assert res.stderr == ""
+    assert not res.ok
+
+
+@pytest.mark.parametrize(
+    ("stderr", "status"),
+    [
+        ("HTTP 403: Resource not accessible by integration", "permission_denied"),
+        ("gh: HTTP 422: Cannot cancel a workflow run that is completed", "already_completed"),
+        ("", "error"),
+    ],
+)
+def test_a_failed_cancel_is_classified_and_never_raises(
+    watcher, capsys, stderr: str, status: str
+) -> None:
+    watcher._report_cancel(
+        123,
+        watcher.GhResult(1, "", stderr),
+        watcher.CancelOptions(**_opts()),
+        None,
+        "runs",
+    )
+    out = capsys.readouterr().out
+    assert f"CANCEL  id=123 status={status}" in out

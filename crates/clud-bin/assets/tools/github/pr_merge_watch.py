@@ -49,7 +49,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
-from running_process import RunningProcess
+from running_process import PIPE, RunningProcess
 
 EXIT_GREEN = 0
 EXIT_REQUIRED_FAIL = 1
@@ -241,14 +241,20 @@ def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResul
     fail-fast exit is abandoned and reported as a failed call.
     """
     try:
+        # #1175: running-process merges stderr into stdout unless it is asked
+        # for separately, and `capture_output=True` alone is not asking.
+        # Without `stderr=PIPE` every `GhResult.stderr` was `None`, so the
+        # first failed cancel crashed `_report_cancel` on `"HTTP 403" in None`.
         res = RunningProcess.run(
-            ["gh", *args], capture_output=True, text=True, timeout=timeout
+            ["gh", *args], capture_output=True, stderr=PIPE, text=True, timeout=timeout
         )
     except TimeoutError:
         return GhResult(124, "", f"gh {' '.join(args)} timed out after {timeout}s")
+    stdout = res.stdout or ""
+    stderr = res.stderr or ""
     if check and res.returncode != 0:
-        raise RuntimeError(f"gh {' '.join(args)} failed: {res.stderr.strip()}")
-    return GhResult(res.returncode, res.stdout, res.stderr)
+        raise RuntimeError(f"gh {' '.join(args)} failed: {stderr.strip()}")
+    return GhResult(res.returncode, stdout, stderr)
 
 
 def gh_json(*args: str) -> object | None:
@@ -1021,9 +1027,10 @@ def _report_cancel(
         if log:
             log.emit("cancel_item", mode=mode, item_id=item_id, status="cancelled")
         return
-    err = (res.stderr or "").strip().splitlines()
+    stderr = res.stderr or ""
+    err = stderr.strip().splitlines()
     err_first = err[0] if err else "unknown"
-    if "HTTP 403" in res.stderr or "Resource not accessible" in res.stderr:
+    if "HTTP 403" in stderr or "Resource not accessible" in stderr:
         print(f"CANCEL  id={item_id} status=permission_denied  ({err_first})")
         if log:
             log.emit(
@@ -1033,7 +1040,7 @@ def _report_cancel(
                 status="permission_denied",
                 required=opts.require,
             )
-    elif "HTTP 404" in res.stderr or "HTTP 422" in res.stderr:
+    elif "HTTP 404" in stderr or "HTTP 422" in stderr:
         print(f"CANCEL  id={item_id} status=already_completed")
         if log:
             log.emit("cancel_item", mode=mode, item_id=item_id, status="already_completed")
