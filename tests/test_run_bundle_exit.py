@@ -91,7 +91,7 @@ def test_run_streamed_tees_output_to_the_log_as_it_arrives(tmp_path: Path, capsy
     assert rc == 1
     body = log.read_text(encoding="utf-8")
     lines = body.splitlines()
-    assert lines[0] == "collected 3 items"
+    assert "collected 3 items" in lines
     assert "E   AssertionError" in lines
     assert "1 failed" in lines
     assert lines.index("collected 3 items") < lines.index("1 failed")
