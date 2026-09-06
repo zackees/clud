@@ -750,6 +750,15 @@ fn run_watcher_loop(cfg: CpuBannerCfg, stop_rx: mpsc::Receiver<()>) {
             return;
         }
         let sample = sampler.tick(cfg.originator_pid);
+        // #1172: a stop that arrived during the refresh means the session is
+        // over; a banner now would land after clud's final output, and the
+        // stop was `Detached` for this very case.
+        if matches!(
+            stop_rx.try_recv(),
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected)
+        ) {
+            return;
+        }
         interval = sample_interval(sample.proc_count);
         if let Some(line) = state.poll(sample, &cfg) {
             eprintln!("{}", line.render());
