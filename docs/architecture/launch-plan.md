@@ -9,9 +9,8 @@ argv, iteration budget, working directory, repeat schedule, DONE/BLOCKED
 marker paths, or stream-json injection. `grind` is an exception to the loop
 semantics described here: its required design is one interactive PTY prompt
 seeded with the harness-native `/loop`; the harness, not `LaunchPlan`'s
-external-loop fields, owns repetition. See [grind.md](grind.md). The current
-implementation still configures the external loop runner for `grind` and is a
-known mismatch.
+external-loop fields, owns repetition. See [grind.md](grind.md). `grind`
+requires the Claude harness and otherwise fails before launch.
 
 Daemon-managed native sessions use the same construction path through the
 typed `command::build_headless_turn_plan` helper. Its request carries only a
@@ -78,10 +77,10 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
    override is emitted first, followed by the project-document fallback when
    the caller did not override it.
 3. **Selects the Codex subcommand.** Explicit `-p` prompts and `loop` use
-   `exec`; the built-ins (`do`, `up`, `rebase`, `fix`, and `grind`) seed the
-   interactive TUI without a subcommand. For `grind`, the intended plan is one
-   normal PTY prompt seeded with `/loop`; see [grind.md](grind.md) for its
-   separate contract and the current mismatch.
+   `exec`; the built-ins `do`, `up`, `rebase`, and `fix` seed the interactive
+   TUI without a subcommand. `grind` instead requires one normal Claude-harness
+   PTY prompt seeded with `/loop`; see [grind.md](grind.md) for its separate
+   contract.
    Continuation requests use `resume`; for interactive built-ins, `--last` or
    the explicit session ID is emitted before the generated prompt. Bare
    `--resume` is rejected for those built-ins because its session picker cannot
@@ -94,8 +93,7 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
    then DONE/BLOCKED marker policy and paths are resolved, the task text is
    loaded, the marker contract is appended, and the prompt is pushed. `up`,
    `rebase`, and `fix` use their prompt builders. `grind` must only build and
-   push its `/loop` seed, without loop markers or external repetition; the
-   current code has not yet reached that behavior. A direct launch handles
+   push its `/loop` seed, without loop markers or external repetition. A direct launch handles
    prompt/message/continue/resume arguments in harness-specific form.
 6. **Forwards unknown flags** from `args.passthrough` after task-specific
    arguments.

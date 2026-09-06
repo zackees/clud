@@ -505,11 +505,11 @@ unit-tested predicates decide the shape of that check:
   true only for a genuine interactive foreground launch: both streams are a
   real tty, the effective harness classifies the prompt as interactive, not
   `--detach`/`--detachable`, and not a `--repeat` loop. Prompt classification is
-  backend-aware: Codex built-ins (including `grind`) are interactive, while
-  `-p` and `loop` remain headless and DeepSeek retains its headless prompt profile.
-  `grind`'s intended interaction is one normal PTY prompt seeded with `/loop`,
-  with repetition owned by the harness; see [grind.md](grind.md). The current
-  external-loop configuration remains a documented mismatch.
+  backend-aware: Codex built-ins are interactive, while `-p` and `loop` remain
+  headless and DeepSeek retains its headless prompt profile.
+  `grind` uses one normal Claude-harness PTY prompt seeded with `/loop`, with
+  repetition owned by the harness; see [grind.md](grind.md). Other harnesses
+  reject `grind` before launch.
 
 A missing key may be entered via hidden terminal input only when
 `launch_is_interactive` is true. Every other case — noninteractive,

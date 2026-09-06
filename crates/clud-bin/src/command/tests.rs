@@ -1,6 +1,6 @@
 use super::builder::{
     build_launch_plan, build_launch_plan_at, build_launch_plan_for_target,
-    interactive_builtin_resume_error, next_run_at_millis, parse_repeat_interval,
+    grind_launch_error, interactive_builtin_resume_error, next_run_at_millis, parse_repeat_interval,
     plan_mode_suppression_notice, repeat_implies_no_done_warning,
 };
 use super::prompts::{
@@ -258,10 +258,7 @@ fn deepseek_harness_one_shot_builtins_keep_headless_profile() {
 }
 
 #[test]
-// Legacy-defect coverage: current DeepSeek `grind` incorrectly selects a
-// headless profile. The intended contract is one ordinary interactive PTY with
-// an injected `/loop` prompt; see docs/architecture/grind.md.
-fn deepseek_harness_generated_grind_prompt_uses_headless_profile() {
+fn grind_rejects_harnesses_without_native_loop() {
     let args = parse(&[
         "clud",
         "--harness",
@@ -269,9 +266,12 @@ fn deepseek_harness_generated_grind_prompt_uses_headless_profile() {
         "grind",
         "https://github.com/zackees/clud/issues",
     ]);
-    let plan = build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh");
-    assert_eq!(&plan.command[..3], ["dsh", "--profile", "headless"]);
-    assert!(plan.command.last().unwrap().starts_with("/loop "));
+    assert_eq!(
+        grind_launch_error(&args, deepseek_harness_target()),
+        Some(
+            "`clud grind` requires the Claude harness, whose interactive prompt supports `/loop`; use `--harness claude`"
+        )
+    );
 }
 
 #[test]
@@ -1167,14 +1167,10 @@ fn test_build_grind_prompt_substitutes_url() {
     assert!(!prompt.contains("{url}"));
 }
 
-/// Legacy-defect coverage: this test records the current marker-based external
-/// loop behavior. It must be replaced when `grind` uses one ordinary interactive
-/// PTY with an injected `/loop` prompt and harness-owned repetition; see
-/// docs/architecture/grind.md.
 #[test]
-fn test_grind_command_uses_loop_contract() {
+fn grind_uses_one_interactive_harness_session_without_external_loop_state() {
     let p = plan(&["clud", "grind", "https://github.com/zackees/clud/issues"]);
-    let prompt = prompt_from_plan(&p);
+    let prompt = last_arg(&p);
     assert!(
         prompt.starts_with("/loop "),
         "grind prompt must start with /loop; got: {prompt:?}"
@@ -1183,39 +1179,50 @@ fn test_grind_command_uses_loop_contract() {
         prompt.contains("https://github.com/zackees/clud/issues"),
         "grind prompt must contain the URL; got: {prompt:?}"
     );
-    assert!(
-        prompt.contains(".clud/loop/DONE") || prompt.contains(".clud\\loop\\DONE"),
-        "grind prompt missing DONE marker path: {prompt}"
-    );
-    assert!(
-        prompt.contains(".clud/loop/BLOCKED") || prompt.contains(".clud\\loop\\BLOCKED"),
-        "grind prompt missing BLOCKED marker path: {prompt}"
-    );
-    assert!(
-        p.loop_markers.is_some(),
-        "grind must set loop_markers (DONE/BLOCKED paths)"
-    );
+    assert!(!p.command.iter().any(|arg| arg == "-p"));
+    assert_eq!(p.launch_mode, LaunchMode::Pty);
+    assert_eq!(p.iterations, 1);
+    assert!(p.loop_markers.is_none());
+    assert!(p.repeat_schedule.is_none());
+    assert!(!p.stream_json_progress);
 }
 
-/// Legacy-defect coverage: the retained 200-iteration and marker assertions
-/// describe the current runtime bug, not `grind`'s intended interactive-PTY
-/// contract. See docs/architecture/grind.md.
 #[test]
-fn test_codex_grind_seeds_interactive_session_and_keeps_loop_contract() {
-    let plan = plan(&[
+fn grind_rejects_subprocess_and_detached_modes() {
+    for argv in [
+        vec![
+            "clud",
+            "--subprocess",
+            "grind",
+            "https://github.com/zackees/clud/issues",
+        ],
+        vec![
+            "clud",
+            "--detach",
+            "grind",
+            "https://github.com/zackees/clud/issues",
+        ],
+    ] {
+        let args = parse(&argv);
+        assert!(grind_launch_error(&args, bridge_target()).is_some(), "argv={argv:?}");
+    }
+}
+
+#[test]
+fn grind_through_claude_harness_seeds_native_loop_interactively() {
+    let args = parse(&[
         "clud",
         "--codex",
+        "--harness",
+        "claude",
         "grind",
         "https://github.com/zackees/clud/issues",
     ]);
-    assert!(
-        !plan.command.iter().any(|arg| arg == "exec"),
-        "Codex grind must seed the interactive TUI; cmd={:?}",
-        plan.command
-    );
+    let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(!plan.command.iter().any(|arg| arg == "-p"));
     assert_eq!(plan.launch_mode, LaunchMode::Pty);
-    assert_eq!(plan.iterations, 200);
-    assert!(plan.loop_markers.is_some());
+    assert_eq!(plan.iterations, 1);
+    assert!(plan.loop_markers.is_none());
     assert!(plan.command.last().is_some_and(|prompt| {
         prompt.starts_with("/loop ") && prompt.contains("zackees/clud/issues")
     }));
@@ -1412,42 +1419,19 @@ fn test_claude_loop_subprocess_injects_stream_json() {
     );
 }
 
-/// Legacy-defect coverage: `grind` currently enters the external-loop
-/// stream-json path on Claude because it is prompted with `-p`. Its intended
-/// contract is one ordinary interactive PTY with an injected `/loop` prompt;
-/// the harness, not clud, owns repetition. See docs/architecture/grind.md.
 #[test]
-fn test_claude_grind_subprocess_injects_stream_json() {
+fn grind_never_enables_external_loop_stream_json() {
     let p = plan(&[
         "clud",
         "--subprocess",
         "grind",
         "https://github.com/zackees/clud/issues",
     ]);
-    assert_eq!(p.launch_mode, LaunchMode::Subprocess);
-    let idx = expect_arg(&p.command, "stream-json");
-    assert_eq!(
-        p.command[idx - 1],
-        "--output-format",
-        "stream-json must follow --output-format; cmd={:?}",
-        p.command
-    );
-    assert!(
-        p.command.iter().any(|a| a == "--verbose"),
-        "stream-json requires --verbose per claude's CLI contract; cmd={:?}",
-        p.command
-    );
-    assert!(
-        p.stream_json_progress,
-        "grind must signal the runtime to parse stream-json, like loop"
-    );
-    // The prompt must stay last — downstream tooling and the dry-run JSON
-    // contract depend on `command[-1]` being the prompt body.
-    assert!(
-        p.command.last().is_some_and(|a| a.starts_with("/loop")),
-        "grind prompt must remain the final argument; cmd={:?}",
-        p.command
-    );
+    assert_eq!(p.launch_mode, LaunchMode::Pty);
+    assert!(!p.command.iter().any(|arg| arg == "stream-json"));
+    assert!(!p.command.iter().any(|arg| arg == "--verbose"));
+    assert!(!p.stream_json_progress);
+    assert!(p.command.last().is_some_and(|arg| arg.starts_with("/loop")));
 }
 
 #[test]

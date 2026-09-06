@@ -629,10 +629,9 @@ Quick lookup, which file owns a given subcommand:
   the green notice, and keeps the `Grind` command (issue #897 — it no longer
   rewrites to `Do`). `command/builder.rs` builds the `/loop` seed prompt.
   The intended contract is one ordinary interactive PTY prompt, with the
-  harness owning repetition; it has no clud DONE/BLOCKED markers, relaunches,
-  headless path, or iteration ceiling. The current implementation still arms
-  clud's external loop runner, so it does not meet that contract. See the
-  [grind architecture](../../../docs/architecture/grind.md). An explicit URL
+  Claude harness owning repetition; it has no clud DONE/BLOCKED markers,
+  relaunches, headless path, or iteration ceiling. Other harnesses fail before
+  launch. See the [grind architecture](../../../docs/architecture/grind.md). An explicit URL
   is passed through verbatim.
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.

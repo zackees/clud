@@ -21,15 +21,31 @@ const CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG: &str = r#"project_doc_fallback_filen
 const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
     r#"project_doc_fallback_filenames=["CLAUDE.md"]"#;
 
+/// Return a launch error when `grind` cannot honor its interactive-harness
+/// contract. Claude is the only harness that supplies a native `/loop` command.
+pub fn grind_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&'static str> {
+    if !matches!(&args.command, Some(Command::Grind { .. })) {
+        return None;
+    }
+    if !matches!(target.effective_harness, Backend::Claude) {
+        return Some(
+            "`clud grind` requires the Claude harness, whose interactive prompt supports `/loop`; use `--harness claude`",
+        );
+    }
+    if args.subprocess {
+        return Some("`clud grind` requires an interactive PTY; remove `--subprocess`");
+    }
+    if args.detach || args.detachable {
+        return Some("`clud grind` requires a foreground interactive PTY; remove `--detach` or `--detachable`");
+    }
+    None
+}
+
 /// Returns true when this harness consumes the launch prompt headlessly.
 ///
 /// `loop` and explicit `-p` prompts are orchestrated/unattended for every
-/// harness. Most built-in verbs follow their backend-specific legacy behavior.
-/// `grind` is the exception in the intended design: it must always seed one
-/// ordinary interactive PTY with its `/loop` prompt; the harness owns
-/// repetition. The current backend split below is a legacy runtime defect
-/// (including the Claude/DeepSeek headless paths), not the `grind` directive.
-/// See `docs/architecture/grind.md`.
+/// harness. `grind` is always an interactive Claude-harness session, validated
+/// by [`grind_launch_error`], with harness-owned `/loop` repetition.
 pub fn interactive_builtin_resume_error(args: &Args, backend: Backend) -> Option<&'static str> {
     let is_builtin = matches!(
         args.command,
@@ -37,7 +53,6 @@ pub fn interactive_builtin_resume_error(args: &Args, backend: Backend) -> Option
             | Some(Command::Rebase)
             | Some(Command::Fix { .. })
             | Some(Command::Do { .. })
-            | Some(Command::Grind { .. })
     );
     (matches!(backend, Backend::Codex) && is_builtin && matches!(args.resume, Some(None)))
         .then_some(
@@ -52,7 +67,7 @@ pub fn has_noninteractive_prompt(args: &Args, backend: Backend) -> bool {
     }
     match &args.command {
         Some(Command::Loop { .. }) => true,
-        Some(Command::Grind { .. }) => !matches!(backend, Backend::Codex),
+        Some(Command::Grind { .. }) => false,
         Some(Command::Do { target }) => {
             target
                 .as_deref()
@@ -556,28 +571,12 @@ fn build_launch_plan_for_target_at(
             unreachable!("wasm execution is handled directly in main")
         }
         Some(Command::Grind { url }) => {
-            // Intended: inject one `/loop` prompt into an ordinary interactive
-            // PTY and let the harness repeat. The marker setup, 200-turn cap,
-            // and any external relaunch below are legacy runtime defects pending
-            // correction, not the `grind` contract. See docs/architecture/grind.md.
-            if seed_interactive_builtin {
-                let url = url.as_deref().unwrap_or("");
-                let git_root = git_root_from(cwd);
-                let marker_paths = resolve_marker_paths(cwd, &git_root, None);
-                let prompt_text = build_grind_prompt(url);
-                let final_prompt = format!(
-                    "{}{}",
-                    prompt_text,
-                    done_marker_contract(&marker_paths.done, &marker_paths.blocked)
-                );
-                task_summary = Some(format!("grind {url}"));
-                loop_markers = Some(LoopMarkers {
-                    done_path: marker_paths.done.to_string_lossy().to_string(),
-                    blocked_path: marker_paths.blocked.to_string_lossy().to_string(),
-                });
-                iterations = 200; // Legacy defect: external loop cap; remove with runtime correction.
-                push_prompt(&mut cmd, backend, final_prompt);
-            }
+            // `main` rejects harnesses without native interactive `/loop`
+            // support. Keep this plan free of every clud loop mechanism: the
+            // harness owns all continuation and completion decisions.
+            let url = url.as_deref().unwrap_or("");
+            task_summary = Some(format!("grind {url}"));
+            push_prompt_interactive(&mut cmd, build_grind_prompt(url));
         }
         Some(Command::Auth { .. })
         | Some(Command::CodexAuth { .. })
@@ -636,25 +635,21 @@ fn build_launch_plan_for_target_at(
 
     cmd.extend(args.passthrough.iter().cloned());
 
-    // Legacy defect: `grind` is included in the external-loop stream-json path
-    // because it currently sets `loop_markers` and prompts Claude with `-p`.
-    // Its intended path is one ordinary interactive PTY with a `/loop` prompt;
-    // the harness owns repetition. Remove this inclusion with the runtime fix;
-    // see docs/architecture/grind.md.
-    let is_loop_cmd = matches!(
-        &args.command,
-        Some(Command::Loop { .. }) | Some(Command::Grind { .. })
-    );
+    let is_loop_cmd = matches!(&args.command, Some(Command::Loop { .. }));
     let is_loop = loop_markers.is_some() && repeat_schedule.is_none();
     let parent_has_tty = crate::session::terminals_are_interactive();
-    let launch_mode = crate::backend::resolve_launch_mode(
-        args.pty,
-        args.subprocess,
-        backend,
-        codex_uses_exec,
-        is_loop,
-        parent_has_tty,
-    );
+    let launch_mode = if matches!(&args.command, Some(Command::Grind { .. })) {
+        LaunchMode::Pty
+    } else {
+        crate::backend::resolve_launch_mode(
+            args.pty,
+            args.subprocess,
+            backend,
+            codex_uses_exec,
+            is_loop,
+            parent_has_tty,
+        )
+    };
 
     // Issue: subprocess-mode loops on claude went silent until the iteration
     // finished, because `claude -p` buffers its single final response. Inject

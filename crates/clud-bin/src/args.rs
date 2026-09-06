@@ -409,10 +409,9 @@ pub enum Command {
         target: Option<String>,
     },
     /// Grind the current repo's issues page with `/loop`.
-    // Intended: insert that prompt into one ordinary interactive PTY session
-    // and let the harness own repetition. External relaunches, marker files, a
-    // turn cap, and headless prompting are legacy runtime defects; see
-    // docs/architecture/grind.md.
+    // It requires the Claude harness's native interactive `/loop`; clud never
+    // emulates it with external relaunches, markers, a turn cap, or a headless
+    // prompt path. See docs/architecture/grind.md.
     ///
     /// With no argument, resolves the `origin` remote and maps it to the
     /// forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues`
