@@ -1015,6 +1015,19 @@ def test_a_timed_out_probe_is_a_failed_call_not_a_crash(watcher, monkeypatch) ->
     assert "timed out" in res.stderr
 
 
+def test_running_process_own_timeout_is_a_failed_call_too(watcher, monkeypatch) -> None:
+    """What running-process actually raises is `TimeoutExpired`, which is not
+    a `TimeoutError`; the builtin-only catch let a hung probe escape (#1175)."""
+
+    def boom(*args, **kwargs):
+        raise watcher.TimeoutExpired(["gh", "api"], 1.0)
+
+    monkeypatch.setattr(watcher.RunningProcess, "run", boom)
+    res = watcher.gh("api", "whatever", timeout=1.0)
+    assert not res.ok
+    assert "timed out" in res.stderr
+
+
 # Verbatim from the Windows unit job of run 33807762372, prefixes intact. The
 # harness aborted rather than reporting a failed test, so the ONLY line that
 # explains the red is GitHub's step annotation at the very end.

@@ -49,7 +49,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
-from running_process import PIPE, RunningProcess
+from running_process import PIPE, RunningProcess, TimeoutExpired
 
 EXIT_GREEN = 0
 EXIT_REQUIRED_FAIL = 1
@@ -248,7 +248,10 @@ def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResul
         res = RunningProcess.run(
             ["gh", *args], capture_output=True, stderr=PIPE, text=True, timeout=timeout
         )
-    except TimeoutError:
+    except (TimeoutError, TimeoutExpired):
+        # running-process raises its own `TimeoutExpired` (a
+        # `subprocess.TimeoutExpired`, not a `TimeoutError`); catching only
+        # the builtin let a hung probe escape as a crash (#1175 review).
         return GhResult(124, "", f"gh {' '.join(args)} timed out after {timeout}s")
     stdout = res.stdout or ""
     stderr = res.stderr or ""
