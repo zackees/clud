@@ -2,13 +2,13 @@
 //! `pip` / etc. inside a clud session. Slice 1 of #406 / #409.
 //!
 //! Flow (happy path):
-//!   1. Read CLUD_DAEMON_SOCKET env var.
-//!   2. Connect to the daemon over the local socket / named pipe.
-//!   3. Send a `ResolveInterpreter` JSON line: `{"want": "python", "argv": [...]}`.
-//!   4. Read one JSON line back: `{"path": "/usr/bin/python3"}` or
-//!      `{"status": "not_available", "reason": "..."}`.
-//!   5. `exec` the resolved path with the same argv (Unix) /
+//!   1. Read the real interpreter selected by clud startup from
+//!      `CLUD_PYTHON_SHIM_TARGET`.
+//!   2. `exec` the resolved path with the same argv (Unix) /
 //!      `CreateProcess` + propagate exit code (Windows).
+//!
+//! The older daemon-resolution protocol remains as a compatibility fallback
+//! for callers that provide `CLUD_DAEMON_SOCKET` instead.
 //!
 //! Six degenerate-case error paths (this is the slice-1 public contract):
 //!
@@ -99,14 +99,23 @@ impl<T: Write + io::Read> ShimStream for T {}
 /// process exit code. Public so integration tests can drive it without
 /// spawning a subprocess.
 pub fn shim_run(env: &impl ShimEnv, connect: ConnectFn, exec: ExecFn, err: &mut dyn Write) -> i32 {
+    let argv = env.args();
+    let tail: Vec<String> = argv.iter().skip(1).cloned().collect();
+    if let Some(path) = env.var(clud::shim_install::SHIM_TARGET_ENV_VAR) {
+        return match exec(&path, &tail) {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = writeln!(err, "clud python shim: failed to exec {path}: {e}");
+                EXIT_EXEC_FAILED
+            }
+        };
+    }
     let Some(socket) = env.var("CLUD_DAEMON_SOCKET") else {
         let _ = writeln!(err, "{STDERR_NO_SESSION}");
         return EXIT_NO_SESSION;
     };
 
-    let argv = env.args();
     let want = current_exe_basename(&argv);
-    let tail: Vec<String> = argv.iter().skip(1).cloned().collect();
 
     let mut stream = match connect(&socket) {
         Ok(s) => s,
@@ -362,6 +371,24 @@ mod tests {
             captured_stderr(|buf| shim_run(&env, connect_failing, fake_exec_success, buf));
         assert_eq!(code, EXIT_NO_SESSION);
         assert!(err.contains(STDERR_NO_SESSION), "stderr was: {err}");
+    }
+
+    #[test]
+    fn prepared_target_executes_without_daemon_socket() {
+        let mut env = make_env_no_socket();
+        env.vars.insert(
+            clud::shim_install::SHIM_TARGET_ENV_VAR.to_string(),
+            "/usr/bin/python3".to_string(),
+        );
+        env.argv = vec!["python".to_string(), "hook.py".to_string()];
+        thread_local_helper::set_exec_result(Ok(0));
+
+        let (code, err) =
+            captured_stderr(|err| shim_run(&env, connect_failing, fake_exec_success, err));
+
+        assert_eq!(code, 0);
+        assert!(err.is_empty());
+        assert_eq!(thread_local_helper::taken_exec_path(), "/usr/bin/python3");
     }
 
     #[test]
