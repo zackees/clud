@@ -6,18 +6,17 @@
 //! shared across all sessions and concurrent clud processes for that
 //! user — extracted once, hash-gated for drift detection at upgrade.
 //!
-//! Slice 4 ships the extraction logic + drift detection. The CI-side
-//! 6-platform size-gate (≤ 500 KiB stripped) and the wheel-side
-//! `include_bytes!` bundling of the prebuilt shim are deferred to a
-//! follow-up: those need the maturin packaging + GitHub Actions matrix
-//! changes that live outside `crates/clud-bin`. The extraction surface
-//! here is the contract the bundling layer plugs into.
+//! The installed wheel places `clud-shim` beside `clud`; startup copies it to
+//! the alias directory, resolves the real Python before rewriting PATH, and
+//! exports that target for the shim to execute without recursive lookup.
 //!
 //! Mirrors the bundled-skill installer pattern in `skills.rs`:
 //! managed copies carry the `# managed-by: clud` marker so user-edited
 //! files are preserved across upgrades.
 
 use std::path::{Path, PathBuf};
+
+pub const SHIM_TARGET_ENV_VAR: &str = "CLUD_PYTHON_SHIM_TARGET";
 
 /// Subdirectory under the user's `~/.clud/state/` where shim aliases
 /// live. Joined to the resolved state root by [`shims_dir`].
@@ -74,6 +73,77 @@ pub fn extract_shims_at(home_root: &Path, shim_source: &Path) -> std::io::Result
     }
     write_hash_sentinel(&shims_dir, &source_hash)?;
     Ok(installed)
+}
+
+fn native_binary_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Install the interpreter aliases and make them authoritative for one child
+/// environment. The real interpreter is resolved before PATH is rewritten so
+/// the shim can never select itself recursively.
+pub fn prepare_session_shims_at(
+    home_root: &Path,
+    current_exe: &Path,
+    env: &mut Vec<(String, String)>,
+) -> std::io::Result<bool> {
+    let Some(bin_dir) = current_exe.parent() else {
+        return Ok(false);
+    };
+    let source = bin_dir.join(native_binary_name("clud-shim"));
+    if !source.is_file() {
+        return Ok(false);
+    }
+    let inherited_target = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(SHIM_TARGET_ENV_VAR))
+        .map(|(_, value)| PathBuf::from(value))
+        .filter(|path| path.is_file());
+    let target = match inherited_target {
+        Some(path) => path,
+        None => {
+            let path = env
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("");
+            let Some(path) = crate::shim_resolve::which_python_default("python", path) else {
+                return Ok(false);
+            };
+            path
+        }
+    };
+
+    extract_shims_at(home_root, &source)?;
+    let installed = home_root.join(SHIMS_SUBDIR);
+    crate::shim_session::prepend_to_path(env, &installed);
+    crate::shim_session::set_env(env, SHIM_TARGET_ENV_VAR, &target.to_string_lossy());
+    Ok(true)
+}
+
+/// Best-effort startup wiring for the current process. This runs before clud
+/// creates worker threads, so updating PATH here is safe and every foreground
+/// and daemon launch path inherits the same aliases.
+pub fn prepare_current_session() -> std::io::Result<bool> {
+    let Some(home) = home_dir() else {
+        return Ok(false);
+    };
+    let current_exe = std::env::current_exe()?;
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    if !prepare_session_shims_at(&home, &current_exe, &mut env)? {
+        return Ok(false);
+    }
+    for key in ["PATH", SHIM_TARGET_ENV_VAR] {
+        if let Some((_, value)) = env.iter().find(|(candidate, _)| candidate == key) {
+            // SAFETY: startup is still single-threaded when this function is called.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+    Ok(true)
 }
 
 /// Reuse the daemon's existing BLAKE3 wrapper from `sha2` is overkill;
@@ -299,5 +369,52 @@ mod tests {
             let s = p.to_string_lossy();
             assert!(s.ends_with("shims") || s.contains("shims"), "got {s}");
         }
+    }
+
+    #[test]
+    fn prepare_session_shims_extracts_aliases_and_prepends_path() {
+        let home = TempDir::new().unwrap();
+        let bin = home.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let current_exe = bin.join(native_binary_name("clud"));
+        let shim = bin.join(native_binary_name("clud-shim"));
+        let python = bin.join(native_binary_name("python3"));
+        fs::write(&current_exe, b"clud").unwrap();
+        fs::write(&shim, b"shim").unwrap();
+        fs::write(&python, b"python").unwrap();
+        let mut env = vec![("PATH".to_string(), bin.to_string_lossy().into_owned())];
+
+        let prepared = prepare_session_shims_at(home.path(), &current_exe, &mut env).unwrap();
+
+        assert!(prepared);
+        let installed = home.path().join(SHIMS_SUBDIR);
+        for alias in alias_names() {
+            assert!(installed.join(alias).is_file(), "missing {alias}");
+        }
+        let path = env
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .unwrap()
+            .1
+            .as_str();
+        assert!(
+            path.starts_with(installed.to_string_lossy().as_ref()),
+            "got {path}"
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == SHIM_TARGET_ENV_VAR)
+                .map(|(_, value)| value.as_str()),
+            Some(python.to_string_lossy().as_ref())
+        );
+
+        assert!(prepare_session_shims_at(home.path(), &current_exe, &mut env).unwrap());
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == SHIM_TARGET_ENV_VAR)
+                .map(|(_, value)| value.as_str()),
+            Some(python.to_string_lossy().as_ref()),
+            "a nested clud launch must not resolve the alias back to itself"
+        );
     }
 }
