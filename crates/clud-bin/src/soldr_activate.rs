@@ -184,21 +184,22 @@ fn run_soldr_shims_json() -> Result<ShimInfo, String> {
         "shims".to_string(),
         "--json".to_string(),
     ];
-    let (exit_code, combined) = match run_capturing(argv, SOLDR_SHIMS_TIMEOUT) {
-        Ok(t) => t,
-        Err(SubprocError::Spawn(err)) => {
-            return Err(format!("failed to spawn `soldr shims --json`: {err}"));
-        }
-        Err(SubprocError::Timeout) => {
-            return Err(format!(
-                "soldr shims --json timed out after {}s",
-                SOLDR_SHIMS_TIMEOUT.as_secs()
-            ));
-        }
-        Err(SubprocError::Wait(err)) => {
-            return Err(format!("waiting on `soldr shims --json` failed: {err}"));
-        }
-    };
+    let (exit_code, combined) =
+        match run_capturing_with_env(argv, SOLDR_SHIMS_TIMEOUT, read_only_soldr_env()) {
+            Ok(t) => t,
+            Err(SubprocError::Spawn(err)) => {
+                return Err(format!("failed to spawn `soldr shims --json`: {err}"));
+            }
+            Err(SubprocError::Timeout) => {
+                return Err(format!(
+                    "soldr shims --json timed out after {}s",
+                    SOLDR_SHIMS_TIMEOUT.as_secs()
+                ));
+            }
+            Err(SubprocError::Wait(err)) => {
+                return Err(format!("waiting on `soldr shims --json` failed: {err}"));
+            }
+        };
 
     if exit_code != 0 {
         let lower = combined.to_lowercase();
@@ -513,11 +514,45 @@ enum SubprocError {
 /// Spawn `argv[0] argv[1..]`, capture combined stdout+stderr (per the
 /// `StderrMode::Stdout` convention used elsewhere in this crate), and
 /// return `(exit_code, combined_output)`. Kills the child on timeout.
+/// soldr's front door spawns a per-`HOME` broker for every command it
+/// serves. `soldr shims --json` never needs one -- it prints a directory --
+/// and every clud integration test runs under a fresh temporary `HOME`, so
+/// without this each test left a broker process behind (soldr#3193; 350 of
+/// them on one host). `SOLDR_BROKER_AUTOSPAWN=0` is soldr's opt-out;
+/// older soldr versions ignore it.
+pub(crate) const SOLDR_BROKER_AUTOSPAWN_ENV: &str = "SOLDR_BROKER_AUTOSPAWN";
+
+/// The inherited environment plus the read-only opt-out, for soldr calls
+/// that never need a daemon.
+fn read_only_soldr_env() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars()
+        .filter(|(key, _)| key != SOLDR_BROKER_AUTOSPAWN_ENV)
+        .collect();
+    env.push((SOLDR_BROKER_AUTOSPAWN_ENV.to_string(), "0".to_string()));
+    env
+}
+
 fn run_capturing(argv: Vec<String>, deadline: Duration) -> Result<(i32, String), SubprocError> {
+    run_capturing_impl(argv, deadline, None)
+}
+
+fn run_capturing_with_env(
+    argv: Vec<String>,
+    deadline: Duration,
+    env: Vec<(String, String)>,
+) -> Result<(i32, String), SubprocError> {
+    run_capturing_impl(argv, deadline, Some(env))
+}
+
+fn run_capturing_impl(
+    argv: Vec<String>,
+    deadline: Duration,
+    env: Option<Vec<(String, String)>>,
+) -> Result<(i32, String), SubprocError> {
     let config = ProcessConfig {
         command: subprocess::command_spec_for_subprocess(argv),
         cwd: None,
-        env: None,
+        env,
         capture: true,
         stderr_mode: StderrMode::Stdout,
         creationflags: invisible_helper_creationflags(),
@@ -573,6 +608,23 @@ fn extract_json_object(combined: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// soldr#3193: the shims probe must never leave a broker behind.
+    #[test]
+    fn read_only_soldr_env_opts_out_of_broker_autospawn_and_keeps_the_rest() {
+        let env = read_only_soldr_env();
+        let opt_outs: Vec<_> = env
+            .iter()
+            .filter(|(key, _)| key == SOLDR_BROKER_AUTOSPAWN_ENV)
+            .collect();
+        assert_eq!(opt_outs.len(), 1);
+        assert_eq!(opt_outs[0].1, "0");
+        if let Ok(path) = std::env::var("PATH") {
+            assert!(env
+                .iter()
+                .any(|(key, value)| key == "PATH" && *value == path));
+        }
+    }
+
     use super::*;
     use crate::repo_clud_config::RustConfig;
 
