@@ -248,6 +248,9 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
     home.mkdir()
     env["HOME"] = str(home)
+    # soldr#3193: clud probes `soldr shims --json` at startup; under a
+    # throwaway HOME that would leave one soldr-broker process per test.
+    env["SOLDR_BROKER_AUTOSPAWN"] = "0"
     env["USERPROFILE"] = str(home)
     env["LOCALAPPDATA"] = str(home / "local-app-data")
     env["XDG_STATE_HOME"] = str(home / ".local" / "state")
