@@ -205,6 +205,10 @@ Console and terminal:
   overwrite it.
 - `console_title_osc.rs` - stream-resumable OSC 0/2 filter used by the PTY
   output path; re-exported through `console_title` to preserve its call sites.
+- `codex_lf.rs` - Codex-only stream-resumable bare-LF→CRLF filter chained
+  after the OSC stripper on the PTY output reader (#1181, DD-070); masks
+  Codex's goal-cell rendering bug on Linux/macOS the way the Windows console
+  does natively. Never enabled for other backends.
 - `capture.rs` - server-side terminal emulator (`vt100` + `vte` sticky-mode
   sniffer) that lets the daemon synthesize a repaint when a mid-session client
   attaches.

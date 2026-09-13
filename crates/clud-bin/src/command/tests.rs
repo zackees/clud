@@ -745,9 +745,9 @@ fn test_codex_prompt_goes_through_exec_subcommand() {
 fn test_codex_interactive_defaults_to_pty_without_tty() {
     // Under `cargo test` there is no controlling terminal, so
     // `parent_has_tty` is false and the interactive TUI gets a PTY.
-    // With a real TTY (normal user invocation), codex runs as a
-    // subprocess that inherits the terminal directly — see
-    // `backend::test_codex_interactive_with_tty_uses_subprocess`.
+    // With a real TTY (normal user invocation) the answer is
+    // platform-split (#1181): PTY on Linux/macOS, subprocess on
+    // Windows — see `backend::test_codex_interactive_with_tty_*`.
     let p = plan(&["clud", "--codex"]);
     assert_eq!(
         p.command,

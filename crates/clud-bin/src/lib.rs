@@ -21,6 +21,7 @@ pub mod codex_auth;
 pub mod codex_bridge;
 pub mod codex_history;
 pub mod codex_hook_normalize;
+pub mod codex_lf;
 pub mod codex_model;
 pub mod codex_pipeline;
 pub mod codex_sse;
