@@ -113,6 +113,12 @@ fn run(mut args: args::Args) {
         std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
     }
 
+    if let Err(error) = clud::shim_install::prepare_current_session() {
+        if args.verbose {
+            eprintln!("[clud] note: could not prepare Python aliases: {error}");
+        }
+    }
+
     verbose_log::init_launch_clock();
 
     // #333: the daemon and worker roles are exempt — on Windows the hop cannot
