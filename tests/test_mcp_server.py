@@ -2,13 +2,16 @@
 
 The bridge is opt-in (``clud[mcp]``); these tests skip when the ``mcp`` SDK
 is absent. No real clud binary or daemon is exercised — tools that spawn clud
-run against a fake ``CLUD_BIN`` script.
+run against a fake ``CLUD_BIN`` script. The async session surface is covered by
+``tests/test_mcp_bridge_sessions.py`` against a fake daemon API.
+
+The ``bridge`` fixture lives in ``tests/conftest.py`` (shared with the session
+tests).
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import os
 import sys
@@ -20,21 +23,6 @@ pytest.importorskip("mcp")
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src" / "clud" / "mcp_server.py"
-
-
-@pytest.fixture
-def bridge():
-    name = "clud_test_mcp_server"
-    spec = importlib.util.spec_from_file_location(name, SCRIPT)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    try:
-        yield module
-    finally:
-        sys.modules.pop(name, None)
 
 
 class _FakeCtx:
@@ -139,6 +127,47 @@ def test_extract_text_joins_result_and_assistant_text(bridge) -> None:
         {"kind": "other", "data": {"line": json.dumps({"type": "result", "result": "skipped"})}},
     ]
     assert bridge._extract_text(events) == "done\npart1"
+
+
+def test_extract_text_collapses_the_result_echo(bridge) -> None:
+    """A headless run repeats its answer in the trailing `result` line."""
+    answer = "the final answer"
+    events = [
+        {
+            "kind": "raw_jsonl",
+            "data": {
+                "line": json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": answer}]},
+                    }
+                )
+            },
+        },
+        {"kind": "raw_jsonl", "data": {"line": json.dumps({"type": "result", "result": answer})}},
+    ]
+    assert bridge._extract_text(events) == answer
+    # Prose genuinely repeated across turns (separated by other text) survives.
+    events.append(
+        {
+            "kind": "raw_jsonl",
+            "data": {
+                "line": json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": "middle"}]},
+                    }
+                )
+            },
+        }
+    )
+    events.append(
+        {
+            "kind": "raw_jsonl",
+            "data": {"line": json.dumps({"type": "result", "result": answer})},
+        }
+    )
+    assert bridge._extract_text(events) == f"{answer}\nmiddle\n{answer}"
 
 
 def test_dry_run_returns_the_launch_plan_json(bridge, tmp_path: Path, monkeypatch) -> None:

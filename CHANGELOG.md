@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The bundled MCP bridge (`src/clud/mcp_server.py`) exposes clud's durable
+  `/v1/sessions` lifecycle as async tools — `session_start` returns a
+  `session_id` immediately (optional `wait_seconds` for a synchronous answer
+  with an early return), plus `session_status`, `session_result` (safe mid-run,
+  cursor-paged), `session_wait` (blocks until the turn seals, returns
+  partial text on a budget overrun instead of erroring), and `session_kill`.
+  A client-side tool-call deadline can no longer orphan a run: the daemon owns
+  it and the session id is the handle. `run_json` is rewired onto the same
+  helpers and now reports the session id when it stops waiting; `run` and
+  `dry_run` are unchanged. The text extractor also stops printing a headless
+  run's answer twice (the trailing `result` line echoes the last assistant
+  message).
 - Native Codex built-ins (`do`, `up`, `rebase`, `fix`, and `grind`) now seed the
   interactive TUI instead of routing through `codex exec`, keeping progress and
   follow-up input live. `clud do` also accepts an optional URL or free-form goal:
