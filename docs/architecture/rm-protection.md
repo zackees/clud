@@ -20,7 +20,8 @@ Both hook binaries use `block_bad_cmd_rm_identity`. Before allowing shell
 commands they call the Rust `shim_resolve::which(name, path_env)` helper and
 compare the selected executable's bytes with the packaged sibling. Missing,
 unreadable, empty or replaced binaries deny with exit 2 and JSON. Relative or
-empty PATH entries deny because their meaning depends on shell cwd. Commands
+empty PATH entries deny because their meaning depends on shell cwd. The packaged `tap` wrapper is transparent only after its own bytes match the
+packaged sibling; its argv forwarding preserves the environment. Commands
 that visibly bypass or change resolution also deny; command text is never
 executed to investigate resolution.
 
@@ -36,7 +37,8 @@ long equivalents, `--preserve-root` and `--one-file-system`. Unsupported options
 and missing operands fail closed. It validates every operand before any removal.
 The normalized deletion-base policy is shared with source analysis; existing
 ancestors are canonicalized for nonexistent operands. Resolution errors,
-protected roots, home roots and mount boundaries deny. Execution is supported
+protected roots, home roots and mount boundaries deny. Final symlink operands
+are refused rather than changing unlink semantics into referent deletion. Execution is supported
 only on Linux; other platforms fail closed.
 
 `CLUD_RM_DRY_RUN=1` reports the decision without spawning. The real executor is

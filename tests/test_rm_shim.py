@@ -77,8 +77,15 @@ def test_hook_rm_identity(shim: Path, tmp_path: Path, state: str) -> None:
         target.write_text("replaced")
         target.chmod(0o755)
     elif state == "system":
-        system = Path("/bin/rm")
-        if not system.exists():
+        system = next(
+            (
+                Path(p)
+                for p in ("/bin/rm", "/usr/bin/rm", "/run/current-system/sw/bin/rm")
+                if Path(p).is_file()
+            ),
+            None,
+        )
+        if system is None:
             pytest.skip("no Unix system rm")
         shutil.copyfile(system, target)
         target.chmod(0o755)

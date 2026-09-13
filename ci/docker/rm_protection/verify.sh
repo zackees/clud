@@ -41,6 +41,7 @@ failures=""
 while IFS= read -r payload; do
   [ -z "$payload" ] && continue
   deny_total=$((deny_total + 1))
+  if (( deny_total % 500 == 0 )); then echo "checked ${deny_total} hazardous JSON payloads"; fi
   out="$(printf '%s' "$payload" | "$BIN" 2>/dev/null)"
   rc=$?
   case "$rc:$out" in

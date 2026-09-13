@@ -161,6 +161,11 @@ mod tests {
         let exe_name = if cfg!(windows) { "uv.exe" } else { "uv" };
         let uv_path = bin.join(exe_name);
         File::create(&uv_path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&uv_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let path_env = bin.to_string_lossy().to_string();
         let state_root = tmp.path().join("state");
         let found = discover_uv(&path_env, &state_root);

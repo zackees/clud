@@ -31,6 +31,18 @@ pub(super) fn source_reason(command: &str) -> Result<(), String> {
 
 fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String> {
     let refuse = || "rm identity: command changes or bypasses provable shim resolution".to_string();
+    // A single plain subshell inherits PATH. Check every inner statement with
+    // the same rules; extra/nested parentheses remain unsupported.
+    if let Some(inner) = command
+        .trim()
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        if inner.contains(['(', ')']) {
+            return Err(refuse());
+        }
+        return source_reason_with_tap(inner, trusted_tap);
+    }
     // Substitutions and process substitutions execute in contexts whose
     // environment/startup state this PATH contract cannot establish.
     if command.contains("$(")
@@ -90,6 +102,14 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
                 | "complete"
                 | "compgen"
                 | "fc"
+                | "read"
+                | "mapfile"
+                | "readarray"
+                | "getopts"
+                | "declare"
+                | "typeset"
+                | "local"
+                | "let"
         ) {
             return Err(refuse());
         }
@@ -105,24 +125,34 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
                 | "mapfile"
                 | "readarray"
                 | "getopts"
-        ) {
-            if words[index + 1..].iter().any(|w| {
-                w.contains('$')
-                    || resolution_variable(
-                        w.split('=')
-                            .next()
-                            .unwrap_or_default()
-                            .trim_end_matches('+'),
-                    )
-                    || (w.starts_with('-') && w.contains('n'))
-            }) {
+        ) && words[index + 1..].iter().any(|w| {
+            w.contains(['$', '[', ']'])
+                || resolution_variable(
+                    w.split('=')
+                        .next()
+                        .unwrap_or_default()
+                        .trim_end_matches('+'),
+                )
+                || (w.starts_with('-') && w.contains('n'))
+        }) {
+            return Err(refuse());
+        }
+        // printf -v and %n assign shell variables, including PATH. Only a
+        // statically known format with ordinary output conversions is provable.
+        if base == "printf" {
+            let format_index = index
+                + if words.get(index + 1).is_some_and(|w| w == "--") {
+                    2
+                } else {
+                    1
+                };
+            if words[index + 1..].iter().any(|w| w.starts_with("-v"))
+                || !words
+                    .get(format_index)
+                    .is_some_and(|w| printf_format_is_output_only(w))
+            {
                 return Err(refuse());
             }
-        }
-        // printf -v assigns to a computed variable; namerefs and array syntax
-        // make even a seemingly unrelated destination unprovable here.
-        if base == "printf" && words[index + 1..].iter().any(|w| w == "-v") {
-            return Err(refuse());
         }
         if !matches!(base.as_str(), "echo" | "printf")
             && words[index + 1..].iter().any(|w| {
@@ -133,7 +163,9 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
             return Err(refuse());
         }
         if matches!(base.as_str(), "env" | "exec" | "sudo" | "su")
-            && words[index + 1..].iter().any(|w| w.contains('$'))
+            && words[index + 1..]
+                .iter()
+                .any(|w| w.contains(['$', '[', ']']))
         {
             return Err(refuse());
         }
@@ -159,6 +191,34 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
     Ok(())
 }
 
+fn printf_format_is_output_only(format: &str) -> bool {
+    if format.contains(['$', '*', '?', '[', ']', '{', '}', '~']) {
+        return false;
+    }
+    let mut chars = format.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        let Some(mut conversion) = chars.next() else {
+            return false;
+        };
+        if conversion == '%' {
+            continue;
+        }
+        while conversion.is_ascii_digit() || " -+#.".contains(conversion) {
+            let Some(next) = chars.next() else {
+                return false;
+            };
+            conversion = next;
+        }
+        if !"bcdiouxXeEfFgGaAsqQ".contains(conversion) {
+            return false;
+        }
+    }
+    true
+}
+
 fn resolution_variable(name: &str) -> bool {
     matches!(
         name,
@@ -177,7 +237,6 @@ fn resolution_variable(name: &str) -> bool {
 
 pub(super) fn check(command: &str, path_env: &str) -> Result<(), String> {
     let trusted = crate::shim_install::packaged_shim().map_err(|e| format!("rm identity: {e}"))?;
-    identity_reason(path_env, &trusted)?;
     let trusted_tap = if command.contains("tap") {
         let name = if cfg!(windows) { "tap.exe" } else { "tap" };
         let packaged = trusted.with_file_name(name);
@@ -188,7 +247,10 @@ pub(super) fn check(command: &str, path_env: &str) -> Result<(), String> {
     } else {
         false
     };
-    source_reason_with_tap(command, trusted_tap)
+    // Refusing opaque source needs no binary IO. Every allowed command still
+    // reaches the full byte comparison; there is no identity cache or bypass.
+    source_reason_with_tap(command, trusted_tap)?;
+    identity_reason(path_env, &trusted)
 }
 
 #[cfg(test)]
@@ -221,8 +283,11 @@ mod tests {
             "rm -rf ./build",
             "V=/tmp/safe; rm -rf \"$V\"/",
             "echo 'rm -rf /'",
+            "printf '%s' \"$V\"",
+            "printf '%%n' PATH",
             "git rm -r --cached foo",
             "docker run --rm ubuntu",
+            "(cd src && ls)",
         ] {
             assert!(source_reason(source).is_ok(), "{source}");
         }
@@ -247,9 +312,19 @@ mod tests {
             "NAME=PATH; export \"$NAME=/bin\"; rm ./build",
             "env BASH_ENV=/tmp/setup bash -c true",
             "printf -v PATH /bin; rm ./build",
+            "OPT=-vPATH; printf \"$OPT\" /bin; rm ./build",
+            "printf '%n' PATH; rm ./build",
+            "printf '%5n' PATH; rm ./build",
+            "printf -vPATH /bin; rm ./build",
+            "read 'PATH[0]' <<< /bin; rm ./build",
+            "read -aPATH <<< /bin; rm ./build",
+            "declare -i P=0; P=PATH++; rm ./build",
             "declare -n P=PATH; P=/bin; rm ./build",
             "echo ok & /bin/rm ./build",
             "echo \"$(/bin/rm ./build)\"",
+            "(cd src && /bin/rm ./build)",
+            "(PATH=/bin; rm ./build)",
+            "(echo ok) && (/bin/rm ./build)",
         ] {
             assert!(source_reason(source).is_err(), "{source}");
         }

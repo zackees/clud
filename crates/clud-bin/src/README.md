@@ -691,3 +691,11 @@ for why the single-instantiation pattern matters.
 - Top-level project docs and CI matrix: [`../../../CLAUDE.md`](../../../CLAUDE.md).
 
 Session rm activation and hook identity checks: [rm protection](../../../docs/architecture/rm-protection.md).
+
+- `rm_guard.rs` — argv decisions, canonical operands and execution-gate facts;
+  it contains no removal implementation. `bin/clud_shim.rs` owns the production
+  executor under `cfg(not(test))` and argv[0] rm dispatch.
+- `deletion_policy.rs` — normalized deletion-base semantics shared by source
+  interpretation and the shim.
+- `block_bad_cmd_rm_identity.rs` — effective-PATH byte identity and source
+  resolution checks, shared by both hook entrypoints.
