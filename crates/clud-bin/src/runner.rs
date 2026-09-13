@@ -129,6 +129,7 @@ pub fn child_env() -> Vec<(String, String)> {
         push_or_replace(&mut env, &key, &value);
     }
 
+    crate::shim_session::activate_rm(&mut env);
     env
 }
 

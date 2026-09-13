@@ -689,3 +689,5 @@ for why the single-instantiation pattern matters.
 
 - Parent crate overview: [`../README.md`](../README.md).
 - Top-level project docs and CI matrix: [`../../../CLAUDE.md`](../../../CLAUDE.md).
+
+Session rm activation and hook identity checks: [rm protection](../../../docs/architecture/rm-protection.md).

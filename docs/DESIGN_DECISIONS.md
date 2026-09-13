@@ -3251,3 +3251,14 @@ the pump's 5 ms idle stdin poll (#691's cost table). The Windows guard is
 which runs on the Windows exec lane; its Linux/macOS twin asserts PTY. Python
 `--dry-run` tests are unaffected because they run without a TTY, where Codex
 was already PTY.
+
+## DD-071: rm uses a PATH identity backstop and a post-expansion shim
+
+Issue #1183's owner authorized validating executable lookup on the effective
+PATH. The hook compares actual bytes to the packaged shim, while the executable
+validates expanded operands. Neither layer replaces the other: expansion loses
+source provenance and the executable cannot intercept non-rm deletions.
+
+Real removal deliberately requires CI plus detected Docker. Unit-test builds
+exclude the real executor. See [rm protection](architecture/rm-protection.md) for
+the contract, supported platforms, retirement rationale and residual boundary.

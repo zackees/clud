@@ -77,3 +77,5 @@ fi
 
 echo
 echo "OK: every hazardous rm shape was refused, every benign command survived."
+
+/opt/venv/bin/python /opt/rm-protection/verify_stub.py

@@ -129,9 +129,7 @@ fn render_not_available(reason: &str) -> String {
 
 /// Walk `path_env` for the first interpreter whose basename matches
 /// `want`. On Windows we also try `.exe` and `.cmd` extensions; on
-/// Unix the file must be present (mode bits are not checked here —
-/// `exec` will surface a permissions error if the agent picks the
-/// wrong thing).
+/// Unix the file must have executable permission.
 ///
 /// Matches the family of `want` to the platform Python convention:
 ///
@@ -140,26 +138,24 @@ fn render_not_available(reason: &str) -> String {
 /// - `python3` / `python3.X` → tries only that name.
 /// - Anything else is treated as a literal basename.
 pub fn which_python_default(want: &str, path_env: &str) -> Option<PathBuf> {
-    let names = candidate_names(want);
-    let exts = candidate_extensions();
-    for dir in path_env.split(path_sep()) {
-        if dir.is_empty() {
-            continue;
-        }
-        for name in &names {
-            for ext in &exts {
-                let candidate = if ext.is_empty() {
-                    Path::new(dir).join(name)
-                } else {
-                    Path::new(dir).join(format!("{name}{ext}"))
-                };
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+    for dir in path_env.split(path_sep()).filter(|p| !p.is_empty()) {
+        for name in candidate_names(want) {
+            if let Some(path) = which(&name, dir) {
+                return Some(path);
             }
         }
     }
     None
+}
+
+/// Resolve the first executable basename on an explicitly supplied PATH.
+/// Empty PATH means not found; this never falls back to the process PATH.
+/// Guards must reject relative/empty entries when the shell cwd is unproven.
+pub fn which(name: &str, path_env: &str) -> Option<PathBuf> {
+    if path_env.is_empty() || name.is_empty() || Path::new(name).components().count() != 1 {
+        return None;
+    }
+    which::which_in(name, Some(path_env), std::env::current_dir().ok()?).ok()
 }
 
 /// Candidate basenames to probe, in priority order, for a given
@@ -176,17 +172,6 @@ pub fn candidate_names(want: &str) -> Vec<String> {
         v
     } else {
         vec![want.to_string()]
-    }
-}
-
-fn candidate_extensions() -> Vec<&'static str> {
-    #[cfg(windows)]
-    {
-        vec![".exe", ".cmd", ""]
-    }
-    #[cfg(not(windows))]
-    {
-        vec![""]
     }
 }
 
@@ -207,6 +192,30 @@ mod tests {
     use std::fs::File;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn which_explicit_path_contract() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let name = if cfg!(windows) { "rm.exe" } else { "rm" };
+        for dir in [&a, &b] {
+            let file = dir.join(name);
+            std::fs::write(&file, b"shim").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let path = std::env::join_paths([&a, &b]).unwrap();
+        assert_eq!(which("rm", path.to_str().unwrap()), Some(a.join(name)));
+        assert_eq!(which("rm", b.to_str().unwrap()), Some(b.join(name)));
+        assert_eq!(which("missing", path.to_str().unwrap()), None);
+        assert_eq!(which("rm", ""), None);
+    }
 
     fn empty_which(_: &str, _: &str) -> Option<PathBuf> {
         None
@@ -311,6 +320,11 @@ mod tests {
         };
         let py_in_b = b.join(exe_name);
         File::create(&py_in_b).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&py_in_b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let path_env = format!(
             "{}{}{}",

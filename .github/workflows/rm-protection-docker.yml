@@ -1,27 +1,9 @@
 name: RM protection (Docker)
 
-# Proves, inside a container, that the cmd-scan hook refuses every shape of
-# `rm -rf $VAR/` that would expand to `rm -rf /`.
-#
-# ## The container never runs a removal
-#
-# Each case is a JSON tool-call payload piped to the hook on stdin. The hook
-# parses it and prints a verdict; the command text inside is never expanded,
-# evaluated, or handed to a shell. So there is nothing to execute even though
-# thousands of the payloads literally read `rm -rf /`.
-#
-# The container is defense in depth for that property, not a licence to relax
-# it. Do not add a step that runs a case to "see what really happens" — the
-# whole point is that the command is rejected before anything runs, and the
-# guard is verified by asking the guard, not by testing the blast radius.
-#
-# Manual by design (`workflow_dispatch`): it is a focused check on one
-# subsystem, and the exhaustive version of this corpus already runs on every
-# PR as `block_bad_cmd_rm_vars` unit tests. `workflow_call` lets ci.yml adopt
-# it later without restructuring.
-#
-# Background: #1064 (the incident and the fail-closed fix), #963 (the
-# interpreter), #1068 (the stress corpus this mirrors).
+# Inert JSON corpus + dry-run operands + disposable-file execution gate.
+# Hazardous shell command text is never evaluated. The only execution check
+# removes its own disposable file, with both CI and actual Docker evidence.
+# Manual/reusable; the source corpus also runs in every PR's Rust unit lane.
 
 on:
   workflow_dispatch: {}
@@ -48,17 +30,17 @@ jobs:
           strategy: native
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Only the hook binary, not the workspace. `ci.xbuild compile` builds
+      # Only the hook and shim binaries, not the workspace. `ci.xbuild compile` builds
       # `--workspace --bins`, which on a standard runner exhausts memory and
       # gets the compiler killed by the OOM reaper (soldr#2781). This check
-      # needs exactly one binary, so it asks for exactly one, and caps
+      # needs exactly two binaries, so it asks for those, and caps
       # parallelism so a burst of codegen units cannot reach the same limit.
       # Still routed through soldr, per the repo's toolchain rule.
-      - name: Build the hook binary
+      - name: Build the hook and shim binaries
         env:
           CARGO_BUILD_JOBS: "2"
           SOLDR_JOBS: "2"
-        run: soldr cargo build -p clud --bin clud-block-bad-cmd
+        run: soldr cargo build -p clud --bin clud-block-bad-cmd --bin clud-shim
 
       - name: Locate the hook binary
         id: binary
@@ -69,6 +51,7 @@ jobs:
             target/x86_64-unknown-linux-gnu/debug/clud-block-bad-cmd; do
             if [ -x "$candidate" ]; then
               echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              echo "shim=$(dirname "$candidate")/clud-shim" >> "$GITHUB_OUTPUT"
               echo "using $candidate"
               exit 0
             fi
@@ -85,11 +68,13 @@ jobs:
           -f ci/docker/rm_protection/Dockerfile
           --build-arg BASE=ubuntu:24.04
           --build-arg BINARY=${{ steps.binary.outputs.path }}
+          --build-arg SHIM_BINARY=${{ steps.binary.outputs.shim }}
           -t clud-rm-protection:ci
           .
 
       # No network, read-only root, unprivileged, all capabilities dropped,
-      # and a tmpfs for the only writable path. Nothing of the checkout is
+      # and disposable tmpfs paths. /work permits fixture executables; no host
+      # directory is writable. Nothing of the checkout is
       # mounted, so the container has nothing to lose even in the failure mode
       # this check exists to prevent.
       - name: Verify every rm shape is refused
@@ -99,7 +84,7 @@ jobs:
           --read-only
           --cap-drop ALL
           --security-opt no-new-privileges
-          --tmpfs /tmp:rw,noexec,nosuid
-          --tmpfs /work:rw,noexec,nosuid
-          --tmpfs /home/checker:rw,noexec,nosuid
+          --tmpfs /tmp:rw,exec,nosuid,mode=1777
+          --tmpfs /work:rw,exec,nosuid,uid=10001,gid=10001,mode=0700
+          --tmpfs /home/checker:rw,noexec,nosuid,uid=10001,gid=10001,mode=0700
           clud-rm-protection:ci

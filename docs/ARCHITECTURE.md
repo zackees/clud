@@ -61,3 +61,5 @@ choices these subsystems embody.
 
 Release-manager evidence for the optional cross-route is tracked separately in
 [release-codex-via-claude.md](release-codex-via-claude.md).
+
+- **rm safety and shim identity** -> [rm-protection.md](architecture/rm-protection.md)

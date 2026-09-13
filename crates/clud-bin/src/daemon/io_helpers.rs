@@ -109,6 +109,7 @@ pub(super) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, St
     env.extend(overrides);
     env.extend(completion);
     env.extend(nounset);
+    crate::shim_session::activate_rm(&mut env);
     env
 }
 
