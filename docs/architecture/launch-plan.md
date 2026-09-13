@@ -98,7 +98,9 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
 6. **Forwards unknown flags** from `args.passthrough` after task-specific
    arguments.
 7. **Resolves launch mode** from `--pty`/`--subprocess`, the effective harness,
-   whether Codex uses `exec`, loop state, and parent-TTY detection.
+   whether Codex uses `exec`, loop state, and parent-TTY detection. Interactive
+   Codex is PTY everywhere except Windows-with-a-TTY, which inherits the
+   console (DD-070, #1181).
 8. **Injects stream-json progress flags** for Claude subprocess-mode loops.
    They are spliced immediately before `-p` so the prompt remains at
    `command[-1]`.

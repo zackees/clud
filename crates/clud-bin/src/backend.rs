@@ -489,12 +489,20 @@ pub fn saved_harness_override_notice(
 ///   take long enough that the subprocess-default's silent-until-EOF buffering
 ///   makes it impossible to tell if the agent is working or hung; see #32.
 /// - Codex `exec` (non-interactive) always uses subprocess.
-/// - Codex interactive TUI uses subprocess when clud is already running in
-///   a real terminal so the child inherits that TTY directly. The terminal
-///   emulator answers DSR/cursor queries natively, avoiding the ConPTY-wrapped
-///   hang where codex's Ink TUI writes `\x1b[6n` on startup and never gets a
-///   reply. When clud has no TTY (piped stdin or headless host), we still wrap
-///   the child in a PTY so the TUI has some pseudo-console to talk to.
+/// - Codex interactive TUI (#1181, [DD-070]): on Linux/macOS it runs through
+///   the PTY pump even when clud already has a real terminal, so clud owns
+///   the byte stream and can apply the Codex-only bare-LF normalizer
+///   (`codex_lf.rs`). On Windows with a real terminal it still runs as a
+///   subprocess inheriting that console: ConPTY adds its own repaint layer
+///   (#515) and the console's LF->CRLF output processing already masks the
+///   Codex rendering bug, so there is nothing to gain from wrapping. When
+///   clud has no TTY on any platform (piped stdin or headless host), the
+///   child is wrapped in a PTY so the TUI has a pseudo-console to talk to.
+///   History: PR #47 (titled `(#46)`, but #46 is an unrelated CI issue —
+///   see #737) introduced "Codex + TTY => subprocess" because the old
+///   crossterm event loop dropped Codex's startup `\x1b[6n` reply; the same
+///   PR replaced that loop with the raw byte pump that forwards replies
+///   verbatim, which removed the hang's mechanism.
 pub fn resolve_launch_mode(
     pty: bool,
     subprocess: bool,
@@ -545,7 +553,7 @@ fn resolve_launch_mode_with_pty_default(
         Backend::Claude if is_loop && !cfg!(target_os = "windows") => LaunchMode::Pty,
         Backend::Claude => LaunchMode::Subprocess,
         Backend::Codex if codex_uses_exec => LaunchMode::Subprocess,
-        Backend::Codex if parent_has_tty => LaunchMode::Subprocess,
+        Backend::Codex if parent_has_tty && cfg!(target_os = "windows") => LaunchMode::Subprocess,
         Backend::Codex => LaunchMode::Pty,
         Backend::DeepSeek => LaunchMode::Subprocess,
     }
@@ -1027,21 +1035,43 @@ mod tests {
         );
     }
 
+    /// Windows keeps inheriting the real console (#1181): ConPTY brings its
+    /// own repaint layer (#515) and the console already translates LF to
+    /// CRLF, so the Codex goal-cell rendering bug never shows there. This
+    /// test runs on the Windows exec lane and is the guard that the flip
+    /// for Linux/macOS did not change Windows behavior.
+    ///
+    /// Cite PR #47, not issue #46, for the original rule. The PR is titled
+    /// `... (#46)`, so the number is not wrong -- but the *issue* is "CI:
+    /// macos-15-intel integration test can't locate mock-agent", which
+    /// concluded it was not a PTY regression (#737).
+    #[cfg(windows)]
     #[test]
-    fn test_codex_interactive_with_tty_uses_subprocess() {
-        // When clud already runs in a real terminal, inherit that TTY
-        // directly instead of wrapping in ConPTY. The terminal answers DSR
-        // queries natively; the ConPTY path was leaving codex's Ink TUI
-        // hung on startup waiting for a reply.
-        //
-        // Cite PR #47, not issue #46. The PR is titled `... (#46)`, so the
-        // number is not wrong -- but the *issue* is "CI: macos-15-intel
-        // integration test can't locate mock-agent", which concluded it was
-        // not a PTY regression. A reader chasing #46 for this mechanism finds
-        // a CI path bug and reasonably concludes the comment is nonsense. The
-        // fix that made TTY inheritance correct is PR #47.
+    fn test_codex_interactive_with_tty_uses_subprocess_on_windows() {
         assert_eq!(
             resolve_launch_mode(false, false, Backend::Codex, false, false, true),
+            LaunchMode::Subprocess
+        );
+    }
+
+    /// Linux/macOS run interactive Codex through the PTY pump even with a
+    /// real terminal (#1181), so clud is in the byte path and
+    /// `codex_lf::CodexLfNormalizer` can mask Codex's bare-LF goal cell.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_codex_interactive_with_tty_uses_pty_off_windows() {
+        assert_eq!(
+            resolve_launch_mode(false, false, Backend::Codex, false, false, true),
+            LaunchMode::Pty
+        );
+    }
+
+    /// Explicit `--subprocess` still wins for Codex with a TTY on every
+    /// platform, so the old inherit-the-console behavior stays reachable.
+    #[test]
+    fn test_codex_interactive_with_tty_explicit_subprocess_wins() {
+        assert_eq!(
+            resolve_launch_mode(false, true, Backend::Codex, false, false, true),
             LaunchMode::Subprocess
         );
     }

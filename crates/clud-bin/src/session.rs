@@ -512,6 +512,36 @@ where
     H: InteractiveHooks,
     R: std::io::Read + Send + 'static,
 {
+    run_raw_pty_pump_with_extra_rx_verbose_and_graphics_and_filters(
+        process,
+        interrupted,
+        hooks,
+        stdin_source,
+        extra_rx,
+        verbose,
+        graphics,
+        false,
+    )
+}
+
+/// Production pump entry that also selects backend-specific output filters.
+/// `normalize_bare_lf` chains `codex_lf::CodexLfNormalizer` after the OSC
+/// title stripper; pass it only for the Codex backend (#1181).
+#[allow(clippy::too_many_arguments)]
+pub fn run_raw_pty_pump_with_extra_rx_verbose_and_graphics_and_filters<H, R>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    verbose: bool,
+    graphics: Option<GraphicsConfig>,
+    normalize_bare_lf: bool,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+{
     let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u16, u16)>();
     spawn_os_resize_watcher(resize_tx);
     run_raw_pty_pump_full_verbose(
@@ -521,7 +551,11 @@ where
         stdin_source,
         resize_rx,
         extra_rx,
-        PumpOptions { verbose, graphics },
+        PumpOptions {
+            verbose,
+            graphics,
+            normalize_bare_lf,
+        },
     )
 }
 
@@ -661,6 +695,10 @@ where
 struct PumpOptions {
     verbose: bool,
     graphics: Option<GraphicsConfig>,
+    /// Chain `codex_lf::CodexLfNormalizer` after the OSC stripper on the
+    /// output reader (#1181). Only the Codex backend sets this; see that
+    /// module for why the filter must never run for other TUIs.
+    normalize_bare_lf: bool,
 }
 
 /// Idle poll cadence for the main loop's stdin wait when nothing is
@@ -868,14 +906,27 @@ where
         // bytes sent here actually reach the user's terminal. `main.rs`
         // set `process.set_echo(false)` so the library's built-in
         // stdout writer is silent — we own forwarding now.
+        let normalize_bare_lf = options.normalize_bare_lf;
         scope.spawn(move || {
             let mut osc_strip = OscTitleStripper::new();
+            // Codex-only (#1181): rewrites bare LF to CRLF after the OSC
+            // strip. `None` for every other backend so the filter can
+            // never touch a TUI that relies on bare LF inside a scroll
+            // region.
+            let mut lf_normalize = normalize_bare_lf.then(crate::codex_lf::CodexLfNormalizer::new);
+            let mut filter = move |chunk: &[u8]| -> Vec<u8> {
+                let stripped = osc_strip.process(chunk);
+                match lf_normalize.as_mut() {
+                    Some(lf) => lf.process(&stripped),
+                    None => stripped,
+                }
+            };
             loop {
                 if stop_reader.load(Ordering::Acquire) {
                     // Final non-blocking drain so a chunk that arrived
                     // right before shutdown isn't lost.
                     while let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.0)) {
-                        let filtered = osc_strip.process(&chunk);
+                        let filtered = filter(&chunk);
                         if !filtered.is_empty() {
                             let _ = output_tx.send(filtered);
                         }
@@ -884,14 +935,14 @@ where
                 }
                 match process.read_chunk_impl(Some(OUTPUT_READER_POLL_SECS)) {
                     Ok(Some(chunk)) => {
-                        let mut filtered = osc_strip.process(&chunk);
+                        let mut filtered = filter(&chunk);
                         // Coalesce clud-side: drain whatever else is
                         // already queued without blocking, so a
                         // chatty child's burst becomes one send (and,
                         // downstream, one write+flush) instead of one
                         // per chunk.
                         while let Ok(Some(more)) = process.read_chunk_impl(Some(0.0)) {
-                            filtered.extend_from_slice(&osc_strip.process(&more));
+                            filtered.extend_from_slice(&filter(&more));
                         }
                         if !filtered.is_empty() {
                             let _ = output_tx.send(filtered);

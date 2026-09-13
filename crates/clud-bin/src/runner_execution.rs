@@ -306,7 +306,10 @@ pub fn run_plan_pty(
         // native keyboard receiver above is fresh on every iteration.
         let dnd_for_iteration = if iteration == 0 { dnd_rx.take() } else { None };
         let extra_rx = merge_extra_rx(dnd_for_iteration, console_input_rx);
-        let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose_and_graphics(
+        // #1181: only Codex gets the bare-LF -> CRLF output filter; see
+        // `codex_lf.rs` for why it must stay off for every other backend.
+        let normalize_bare_lf = matches!(plan.backend, crate::backend::Backend::Codex);
+        let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose_and_graphics_and_filters(
             &process,
             interrupted,
             &mut hooks,
@@ -314,6 +317,7 @@ pub fn run_plan_pty(
             extra_rx,
             verbose,
             graphics_resize,
+            normalize_bare_lf,
         );
         drop(_raw_guard);
         drop(_console_guard);

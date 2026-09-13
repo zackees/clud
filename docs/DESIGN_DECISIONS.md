@@ -3206,3 +3206,48 @@ not go looking when it is not. A `Bash`-only matcher never delivers an `Agent`
 event, so the README's `*` matcher is a requirement, not a suggestion. An
 empty `agent_id` reads as the primary session, so a harness that emits `""`
 cannot lock the top-level session out of delegating.
+
+## DD-070: interactive Codex runs through the PTY pump on Linux/macOS and inherits the console on Windows
+
+**Status:** Accepted
+
+**Context:** #1181. Codex's TUI writes every history line with an explicit
+`\r\n`, but its `/goal` status cell hands the whole objective to one span
+(`codex-rs/tui/src/goal_display.rs::goal_usage_summary`), so a pasted
+multi-line objective reaches the terminal with bare `\n` while the terminal is
+in raw mode with `OPOST` off. Each line starts where the previous one ended.
+The Windows console masks this with its LF→CRLF output processing; Linux and
+macOS terminals do not. Present in codex 0.154.0 and at upstream HEAD, and it
+reproduces with plain `codex`, so clud is not the cause.
+
+clud could not mask it either: since PR #47 the rule was "Codex with a parent
+TTY runs as a subprocess inheriting the terminal", so no Codex bytes passed
+through the pump. That rule was written because the old crossterm event loop
+dropped Codex's startup `\x1b[6n` reply and Codex hung. The same PR replaced
+that loop with the raw byte pump, which forwards query replies verbatim, so
+the hang's mechanism was already gone. (The PR is titled `(#46)`, but #46 is
+an unrelated CI issue; see #737.)
+
+**Decision:** `resolve_launch_mode` picks PTY for interactive Codex on every
+platform except Windows-with-a-TTY, which keeps subprocess. The pump chains a
+stream-resumable bare-LF→CRLF filter (`codex_lf::CodexLfNormalizer`) after
+the OSC title stripper, enabled only when the backend is Codex. `--subprocess`
+and `--pty` still override the rule on every platform.
+
+**Rationale:** Being in the byte path is the only way clud can give
+Linux/macOS what the Windows console gives for free. Windows stays on
+subprocess because ConPTY adds its own repaint layer (#515) and the console
+already masks the bug, so wrapping there costs and gains nothing. The filter
+is Codex-gated rather than global because a TUI may legitimately emit a bare
+LF inside a scroll region and rely on the column staying put; Codex never does
+in its own writes. Masking in clud rather than waiting for upstream because
+until Codex ships the one-line fix every Linux/macOS user hits this on every
+multi-line `/goal`.
+
+**Consequences:** PTY mode also turns on clud's PTY-only features for Codex on
+Linux/macOS (drag-drop path normalization, Ctrl+V image paste, F3 voice) and
+the pump's 5 ms idle stdin poll (#691's cost table). The Windows guard is
+`backend::tests::test_codex_interactive_with_tty_uses_subprocess_on_windows`,
+which runs on the Windows exec lane; its Linux/macOS twin asserts PTY. Python
+`--dry-run` tests are unaffected because they run without a TTY, where Codex
+was already PTY.
