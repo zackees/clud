@@ -2,6 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Command; // running-process: command-builder
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +12,6 @@ use fs4::fs_std::FileExt;
 use sysinfo::Signal;
 
 use crate::gc::InsertInput;
-use crate::trampoline;
 
 use super::io_helpers::read_json_file;
 use super::paths::{
@@ -233,12 +233,7 @@ pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
 }
 
 fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
-    let args = vec![
-        "__daemon".to_string(),
-        "--state-dir".to_string(),
-        state_dir.to_string_lossy().to_string(),
-    ];
-    trampoline::spawn_detached_self(&args)?;
+    spawn_detached_daemon(state_dir)?;
 
     let started = Instant::now();
     let our_pid = std::process::id();
@@ -257,6 +252,40 @@ fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Start `clud __daemon --state-dir <state_dir>` as a detached daemon (#1186).
+///
+/// Goes through running-process's daemon spawn rather than a hand-rolled
+/// detach, which buys three things the old trampoline lacked:
+///
+/// - **No inherited descriptors.** Unix sweeps every fd above 2; Windows
+///   whitelists exactly the three NUL stdio handles. A launcher's leaked pipe
+///   can no longer be pinned open for the daemon's whole lifetime.
+/// - **`RUNNING_PROCESS_IS_DAEMON`.** The cooperative spare signal the reapers
+///   read (DD-021, DD-023), which still protects the daemon when a supervisor
+///   refused job breakaway and left it inside a Job Object.
+/// - **Breakaway with the same refusal retry**: `CREATE_BREAKAWAY_FROM_JOB`,
+///   retried without it on `ERROR_ACCESS_DENIED`; `setsid` on Unix.
+///
+/// `EnvironmentPolicy::Inherit` keeps today's environment exactly: the daemon
+/// uses its own environment as the base for every worker (see
+/// `io_helpers::child_env_from`), and changing that model is #933's to decide.
+/// The originator tag is removed because the free spawn functions do not
+/// strip it — only `ContainedProcessGroup::spawn_daemon` does (#683) — and a
+/// daemon started lazily from inside an agent session would otherwise carry
+/// that session's tag for as long as it lives.
+fn spawn_detached_daemon(state_dir: &Path) -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut command = Command::new(exe); // running-process: command-builder
+    command.arg("__daemon").arg("--state-dir").arg(state_dir);
+    command.env_remove(running_process::ORIGINATOR_ENV_VAR);
+    // Dropping a `DaemonChild` does not terminate the process.
+    let _daemon = running_process::spawn_daemon_breaking_away_with_env_policy(
+        &mut command,
+        running_process::EnvironmentPolicy::Inherit,
+    )?;
+    Ok(())
 }
 
 pub(super) fn probe_existing(state_dir: &Path) -> Option<DaemonInfo> {

@@ -10,8 +10,9 @@
 //! The hop originally spawned through `NativeProcess`, which wraps every
 //! Windows child in a `KILL_ON_JOB_CLOSE` Job Object. Job membership is
 //! inherited, so the relayed clud's *own* children joined that job too — and
-//! `spawn_detached_self`'s `__daemon` does not request
-//! `CREATE_BREAKAWAY_FROM_JOB`. Closing the relay's job handle on exit
+//! the `__daemon` the trampoline started at the time did not request
+//! `CREATE_BREAKAWAY_FROM_JOB` (it does now, through running-process's daemon
+//! spawn, #1186). Closing the relay's job handle on exit
 //! therefore killed the daemon it had just started, which is why
 //! `CLUD_USE_RUNTIME_CACHE=1` failed 31 integration tests on Windows with a
 //! `daemon.json` naming a dead PID.

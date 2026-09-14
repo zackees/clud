@@ -940,8 +940,9 @@ mod tests {
         // Still gated to non-Windows, but NOT for the reason this comment
         // used to give. It cited #38's "Windows ConPTY handle-inheritance",
         // and #38 is closed (2026-04-19) and was about `clud attach` hanging
-        // on *daemon-worker* PTY sessions spawned through
-        // `spawn_detached_self(bInheritHandles=TRUE)` — a different code path
+        // on *daemon-worker* PTY sessions spawned through the old
+        // `trampoline::spawn_detached_self(bInheritHandles=TRUE)` (replaced by
+        // running-process's daemon spawn in #1186) — a different code path
         // from this foreground pump, which inherits nothing. So the gate has
         // no verified justification on record; whether Windows loop-PTY
         // actually misbehaves is untested. #691 owns re-testing it.
