@@ -15,7 +15,9 @@ use crate::verbose_log;
 
 #[path = "session_output.rs"]
 mod session_output;
-use session_output::{redraw_graphics_header_for_resize, run_output_writer};
+#[cfg(test)]
+use session_output::run_output_writer;
+use session_output::{redraw_graphics_header_for_resize, run_output_writer_composited, OutputMsg};
 #[path = "session_stdin.rs"]
 mod session_stdin;
 use session_stdin::{
@@ -555,6 +557,51 @@ where
             verbose,
             graphics,
             normalize_bare_lf,
+            toasts: None,
+        },
+    )
+}
+
+/// Optional pump features, grouped so the entry-point signature stops growing
+/// one positional flag per feature.
+#[derive(Default)]
+pub struct PumpExtras {
+    /// Sixel header to redraw on resize.
+    pub graphics: Option<GraphicsConfig>,
+    /// Codex-only bare-LF normalizer (#1181).
+    pub normalize_bare_lf: bool,
+    /// In-terminal toast compositor (#1189).
+    pub toasts: Option<crate::toast::compositor::ToastPumpOptions>,
+}
+
+/// Production pump entry with every optional feature.
+pub fn run_raw_pty_pump_with_extras<H, R>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    verbose: bool,
+    extras: PumpExtras,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+{
+    let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u16, u16)>();
+    spawn_os_resize_watcher(resize_tx);
+    run_raw_pty_pump_full_verbose(
+        process,
+        interrupted,
+        hooks,
+        stdin_source,
+        resize_rx,
+        extra_rx,
+        PumpOptions {
+            verbose,
+            graphics: extras.graphics,
+            normalize_bare_lf: extras.normalize_bare_lf,
+            toasts: extras.toasts,
         },
     )
 }
@@ -663,6 +710,39 @@ where
 /// flushes). Not part of the stable public API — production code
 /// always goes through the `io::stdout()`-bound `run_raw_pty_pump*`
 /// family above.
+/// Test-only seam (#1189): the writer-injection pump with a toast
+/// compositor, so PTY integration tests on every platform can assert the
+/// composited byte stream a real terminal would receive.
+#[doc(hidden)]
+pub fn run_raw_pty_pump_with_toasts_for_test<H, R, W>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    resize_rx: std::sync::mpsc::Receiver<(u16, u16)>,
+    writer: W,
+    toasts: crate::toast::compositor::ToastPumpOptions,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+    W: std::io::Write + Send,
+{
+    run_raw_pty_pump_full_verbose_with_writer(
+        process,
+        interrupted,
+        hooks,
+        stdin_source,
+        resize_rx,
+        None,
+        PumpOptions {
+            toasts: Some(toasts),
+            ..PumpOptions::default()
+        },
+        writer,
+    )
+}
+
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_raw_pty_pump_full_with_writer_for_test<H, R, W>(
@@ -695,6 +775,8 @@ where
 struct PumpOptions {
     verbose: bool,
     graphics: Option<GraphicsConfig>,
+    /// In-terminal toast compositor for the writer thread (#1189).
+    toasts: Option<crate::toast::compositor::ToastPumpOptions>,
     /// Chain `codex_lf::CodexLfNormalizer` after the OSC stripper on the
     /// output reader (#1181). Only the Codex backend sets this; see that
     /// module for why the filter must never run for other TUIs.
@@ -868,6 +950,9 @@ where
     // normalize that path BEFORE forwarding so all backends see a
     // canonical form, regardless of which terminal produced the drop.
     let mut paste = BracketedPasteNormalizer::new();
+    // #1189: swallows clicks on a visible toast's close button; a byte-exact
+    // pass-through whenever no toast is armed.
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
 
     // Issue #538: output reading/filtering/writing now happens on two
     // dedicated threads (reader + writer) instead of inline in this
@@ -880,7 +965,19 @@ where
     let reader_closed = AtomicBool::new(false);
 
     std::thread::scope(|scope| {
-        let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
+        let (output_tx, output_rx) = mpsc::channel::<OutputMsg>();
+        // #1189: the compositor lives on the writer thread; the stdin path
+        // shares its close-button hit rect and the hub for dismissal.
+        let compositor = options
+            .toasts
+            .clone()
+            .map(crate::toast::compositor::Compositor::new);
+        let toast_input = compositor.as_ref().map(|c| c.input());
+        let toast_hub = options
+            .toasts
+            .as_ref()
+            .map(|toasts| std::sync::Arc::clone(&toasts.hub));
+        let resize_out = output_tx.clone();
         let stop_reader = &stop_reader;
         let reader_closed = &reader_closed;
 
@@ -891,7 +988,7 @@ where
         // it had. That ordering is the "flush remaining chunks first"
         // shutdown guarantee.
         scope.spawn(move || {
-            run_output_writer(output_rx, writer);
+            run_output_writer_composited(output_rx, writer, compositor);
         });
 
         // Reader thread: never blocks the writer or the main loop.
@@ -928,7 +1025,7 @@ where
                     while let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.0)) {
                         let filtered = filter(&chunk);
                         if !filtered.is_empty() {
-                            let _ = output_tx.send(filtered);
+                            let _ = output_tx.send(OutputMsg::Child(filtered));
                         }
                     }
                     break;
@@ -945,7 +1042,7 @@ where
                             filtered.extend_from_slice(&filter(&more));
                         }
                         if !filtered.is_empty() {
-                            let _ = output_tx.send(filtered);
+                            let _ = output_tx.send(OutputMsg::Child(filtered));
                         }
                     }
                     Ok(None) => {}
@@ -971,6 +1068,12 @@ where
                     .unwrap_or(rows);
                 if let Err(err) = resize_pty(process, pty_rows, cols) {
                     eprintln!("[clud] warning: failed to resize pty: {}", err);
+                }
+                if toast_input.is_some() {
+                    let _ = resize_out.send(OutputMsg::Resize {
+                        rows: pty_rows,
+                        cols,
+                    });
                 }
             }
 
@@ -1034,7 +1137,27 @@ where
                     // 6-byte prefix matcher); paste bodies are
                     // buffered and rewritten in place.
                     let outgoing = paste.process(chunk.as_ref());
-                    if let Err(err) = process.write_impl(&outgoing, false) {
+                    // #1189: a click on the toast's close button is clud's,
+                    // not the child's.
+                    let outgoing = match toast_input.as_ref() {
+                        Some(input) => {
+                            let (filtered, dismissed) =
+                                mouse.process(&outgoing, input.close_rect());
+                            if dismissed {
+                                if let Some(hub) = toast_hub.as_ref() {
+                                    hub.dismiss_visible(std::time::Instant::now());
+                                }
+                            }
+                            filtered
+                        }
+                        None => outgoing,
+                    };
+                    let write_result = if outgoing.is_empty() {
+                        Ok(())
+                    } else {
+                        process.write_impl(&outgoing, false)
+                    };
+                    if let Err(err) = write_result {
                         eprintln!("[clud] warning: failed to forward stdin to pty: {}", err);
                     } else if hooks.intercept_f3() {
                         // F3 detection runs over the outgoing user
@@ -1071,7 +1194,16 @@ where
                         break interrupt_pty_process(process, options.verbose);
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // #1189: release a partial report the mouse filter held
+                    // (e.g. a lone Esc keypress) once input goes idle.
+                    if toast_input.is_some() {
+                        let pending = mouse.flush_pending();
+                        if !pending.is_empty() {
+                            let _ = process.write_impl(&pending, false);
+                        }
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     // No stdin producer (EOF already hit, or the
                     // byte-stream reader was never spawned because

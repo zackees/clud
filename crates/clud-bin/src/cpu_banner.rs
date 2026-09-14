@@ -2,12 +2,19 @@
 //! terminal.
 //!
 //! When the foreground `clud` session's subtree (self + descendants) burns
-//! meaningful CPU, this module periodically prints a one-line status banner
-//! to stderr so the user notices before they hear the fan:
+//! meaningful CPU, this module surfaces a live toast so the user notices
+//! before they hear the fan:
 //!
 //! ```text
-//! [clud] cpu 287 % · 2.9 / 12 cores · rss 1.42 GiB · 24 procs · 7 m
+//! cpu 287 % · 2.9 / 12 cores · rss 1.42 GiB · 24 procs · 7 m
 //! ```
+//!
+//! #1189: the banner used to `eprintln!` onto the terminal the harness TUI
+//! was drawing on, which interleaved with the child's redraws and corrupted
+//! the screen. It now publishes [`crate::toast::ToastEvent`]s to a
+//! [`crate::toast::ToastSink`]; the sink decides whether they render in the
+//! terminal grid, Claude Code's status line, or nowhere. This module must
+//! never write to stdout or stderr (guarded by a source test).
 //!
 //! Three pieces:
 //!
@@ -26,8 +33,8 @@
 //!   (rustc/node swarms, several concurrent clud sessions) can't turn
 //!   the banner meant to report CPU burn into a measurable contributor.
 //! - [`BannerWatcher`] — background thread that joins the two on a
-//!   `tick` cadence and writes banners to stderr. Drop stops the
-//!   thread with a bounded wait ([`STOP_JOIN_BUDGET`], #1172).
+//!   `tick` cadence and publishes toast events ([`toast_events`]). Drop
+//!   stops the thread with a bounded wait ([`STOP_JOIN_BUDGET`], #1172).
 //!
 //! Suppression: caller (in `main.rs`) constructs `CpuBannerCfg` with
 //! `enabled = false` for `--no-cpu-banner`, `--dry-run`, `--detach`,
@@ -39,6 +46,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+use crate::toast::{Severity, Toast, ToastEvent, ToastSink};
+
+/// Topic key of the CPU toast. One live toast per session, replaced in place.
+pub const CPU_TOAST_KEY: &str = "cpu";
+
+/// How long "cpu back to normal" stays visible before expiring (#1189).
+pub const CLEAR_TOAST_TTL: Duration = Duration::from_secs(10);
 
 /// Default tick cadence. 2 s matches the parent #463 default. Crossover
 /// fires after `DEFAULT_SUSTAINED_TICKS * DEFAULT_TICK` (= 6 s), which is
@@ -305,6 +320,26 @@ impl BannerLine {
         }
     }
 
+    /// Toast text: the plain rendering without the `[clud] ` prefix, which
+    /// every toast surface already labels.
+    pub fn toast_text(&self) -> String {
+        let plain = self.render_plain();
+        plain
+            .strip_prefix("[clud] ")
+            .map(str::to_string)
+            .unwrap_or(plain)
+    }
+
+    /// Toast severity: the clear notice is informational; an episode is a
+    /// warning until it reaches 4x the trigger.
+    pub fn severity(&self) -> Severity {
+        match self.style() {
+            Style::None => Severity::Info,
+            Style::Dim | Style::Yellow => Severity::Warn,
+            Style::Red => Severity::Alert,
+        }
+    }
+
     /// Unstyled rendering. Used by tests and any non-TTY caller.
     pub fn render_plain(&self) -> String {
         match self.kind {
@@ -369,6 +404,19 @@ pub struct CpuBannerState {
 }
 
 impl CpuBannerState {
+    /// Whether an episode (sustained CPU above trigger) is in progress.
+    pub fn in_episode(&self) -> bool {
+        self.in_episode
+    }
+
+    /// The live reading for the current episode, for a toast that tracks the
+    /// subtree tick by tick instead of only at heartbeats. `None` outside an
+    /// episode.
+    pub fn live_line(&self, sample: Sample, cfg: &CpuBannerCfg) -> Option<BannerLine> {
+        self.in_episode
+            .then(|| self.make_line(BannerKind::Sustained, sample, cfg))
+    }
+
     /// Feed one tick. Returns `Some(BannerLine)` when the state machine
     /// has crossed a threshold and the caller should print; otherwise
     /// `None`.
@@ -654,11 +702,11 @@ pub struct BannerWatcher {
 impl BannerWatcher {
     /// Spawn the watcher. `enabled = false` returns an inert handle —
     /// no thread, no banners.
-    pub fn spawn(cfg: CpuBannerCfg) -> Self {
+    pub fn spawn(cfg: CpuBannerCfg, sink: ToastSink) -> Self {
         if !cfg.enabled {
             return Self::inert();
         }
-        Self::spawn_body(move |rx| run_watcher_loop(cfg, rx))
+        Self::spawn_body(move |rx| run_watcher_loop(cfg, rx, sink))
     }
 
     fn inert() -> Self {
@@ -733,7 +781,42 @@ impl Drop for BannerWatcher {
     }
 }
 
-fn run_watcher_loop(cfg: CpuBannerCfg, stop_rx: mpsc::Receiver<()>) {
+/// Toast events for one tick (#1189). Pure so every transition is testable:
+///
+/// - a Clear banner shows "cpu back to normal", expiring after
+///   [`CLEAR_TOAST_TTL`];
+/// - while an episode runs, the live reading replaces the toast every tick;
+/// - an episode that ended silently (shorter than the clear threshold)
+///   closes the toast.
+pub fn toast_events(
+    was_in_episode: bool,
+    line: Option<&BannerLine>,
+    live: Option<&BannerLine>,
+    now: Instant,
+) -> Vec<ToastEvent> {
+    if let Some(line) = line.filter(|line| line.kind == BannerKind::Clear) {
+        return vec![ToastEvent::Show(
+            Toast::new(CPU_TOAST_KEY, line.toast_text(), line.severity(), now)
+                .expiring_after(CLEAR_TOAST_TTL),
+        )];
+    }
+    if let Some(live) = live {
+        return vec![ToastEvent::Show(Toast::new(
+            CPU_TOAST_KEY,
+            live.toast_text(),
+            live.severity(),
+            now,
+        ))];
+    }
+    if was_in_episode {
+        return vec![ToastEvent::Close {
+            key: CPU_TOAST_KEY.to_string(),
+        }];
+    }
+    Vec::new()
+}
+
+fn run_watcher_loop(cfg: CpuBannerCfg, stop_rx: mpsc::Receiver<()>, sink: ToastSink) {
     let mut sampler = Sampler::new();
     let mut state = CpuBannerState::default();
     // Prime: sysinfo needs two refreshes for non-zero cpu_usage. Do one
@@ -760,8 +843,11 @@ fn run_watcher_loop(cfg: CpuBannerCfg, stop_rx: mpsc::Receiver<()>) {
             return;
         }
         interval = sample_interval(sample.proc_count);
-        if let Some(line) = state.poll(sample, &cfg) {
-            eprintln!("{}", line.render());
+        let was_in_episode = state.in_episode();
+        let line = state.poll(sample, &cfg);
+        let live = state.live_line(sample, &cfg);
+        for event in toast_events(was_in_episode, line.as_ref(), live.as_ref(), sample.at) {
+            sink.publish(event);
         }
     }
 }

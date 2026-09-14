@@ -4,7 +4,7 @@ use clud::{
     graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
     launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth,
     runner, runtime_cache, settings_tui, soldr_activate, stage_trace, startup, symbols,
-    test_runtime, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
+    test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
     verbose_log, wasm, webterm, workspace_trust, worktrees,
 };
 
@@ -47,6 +47,21 @@ fn run(mut args: args::Args) {
     // utility and internal dispatch has returned.
     unsafe {
         std::env::remove_var(daemon::ENV_ALLOW_DAEMON_SPAWN);
+    }
+    // #1189: Claude Code runs `clud statusline` as its statusLine command
+    // every couple of seconds. Like `clud tool`, it must not touch the daemon,
+    // the runtime cache, or any launch machinery.
+    if let Some(args::Command::Statusline {
+        session_pid,
+        state_dir,
+        chain_b64,
+    }) = &args.command
+    {
+        std::process::exit(toast::statusline::run(&toast::statusline::RunArgs {
+            session_pid: *session_pid,
+            state_dir: state_dir.clone(),
+            chain_b64: chain_b64.clone(),
+        }));
     }
     // Fast tool path. Detect `clud tool ...` before
     // normal clud startup so hook/tool invocations do not connect to the
@@ -1118,6 +1133,8 @@ fn run(mut args: args::Args) {
     // `[foreground.cpu_banner] enabled = false` settings toggle. Builds an
     // inert cfg in any of those cases so `BannerWatcher::spawn` is a no-op.
     let cpu_banner_cfg = build_cpu_banner_cfg(&args, &plan);
+    // #1189: where the banner's toasts render; off whenever the banner is.
+    let toast_cfg = build_toast_launch_cfg(&cpu_banner_cfg);
 
     // Issue #1102: say once, here, that the harness has no trust decision for
     // this workspace and will therefore ignore its `.claude/settings*.json`.
@@ -1149,6 +1166,7 @@ fn run(mut args: args::Args) {
                 interrupted.as_ref(),
                 loop_session.as_mut(),
                 cpu_banner_cfg,
+                toast_cfg,
             ),
             backend::LaunchMode::Pty => runner::run_plan_pty(
                 &plan,
@@ -1158,6 +1176,7 @@ fn run(mut args: args::Args) {
                 startup::should_register_drop_target(&args),
                 loop_session.as_mut(),
                 cpu_banner_cfg,
+                toast_cfg,
             ),
         }
     };
@@ -1346,4 +1365,7 @@ fn run(mut args: args::Args) {
 
 #[path = "main_helpers.rs"]
 mod main_helpers;
-use main_helpers::{build_cpu_banner_cfg, flush_ctrl_c_exit_event, record_repo_visit_best_effort};
+use main_helpers::{
+    build_cpu_banner_cfg, build_toast_launch_cfg, flush_ctrl_c_exit_event,
+    record_repo_visit_best_effort,
+};

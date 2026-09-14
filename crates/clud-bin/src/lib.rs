@@ -95,6 +95,7 @@ pub(crate) mod test_env;
 
 pub mod symbols;
 pub mod test_runtime;
+pub mod toast;
 pub mod tool_cli;
 pub mod tool_info;
 pub mod tool_install;

@@ -3251,3 +3251,59 @@ the pump's 5 ms idle stdin poll (#691's cost table). The Windows guard is
 which runs on the Windows exec lane; its Linux/macOS twin asserts PTY. Python
 `--dry-run` tests are unaffected because they run without a TTY, where Codex
 was already PTY.
+
+## DD-071: toasts are composited inside the terminal stream, not drawn in an external window
+
+**Status:** Accepted
+
+**Context:** #1189. clud's mid-session messages (the CPU banner) were
+`eprintln!`ed onto the terminal a harness TUI was drawing on, with no
+positioning, erasure, expiry or serialisation against the child's redraws, and
+visibly corrupted Claude Code's footer. The ask was a semi-transparent toast,
+anchored to the terminal, with a close button, that expires when no longer
+relevant.
+
+Two families were researched. **External overlay windows** (a layer-shell or
+X11 surface positioned over the terminal window) work on KDE, Hyprland, Sway,
+niri, COSMIC and X11, but need a geometry adapter per compositor (Hyprland and
+Sway only by polling), cannot tell a single-instance terminal's windows apart
+without title tricks (all kitty OS windows share one pid and class on KWin),
+float over unrelated apps unless occlusion is tracked, need a Shell extension
+on GNOME, and cannot work over SSH. **Compositing into the PTY stream** needs
+clud to own the child's bytes (PTY mode), but is anchored by construction on
+every desktop and over SSH.
+
+**Decision:** Toasts are composited by the PTY pump's writer thread in tiers:
+kitty graphics where the terminal fully supports it (kitty, Ghostty, WezTerm),
+styled text cells on the alternate screen elsewhere, and a fallback surface
+otherwise — Claude Code's own `statusLine` (clud composes one that chains the
+user's existing status line) or the terminal title. Subprocess-mode Claude
+launches use the status line. Sixel is not used. The external overlay window
+is deferred.
+
+**Rationale:** kitty graphics blend real alpha over text on a separate layer,
+so removing a toast is deleting a placement — no repaint, no divergence from
+the child's text model. Sixel has 1-bit transparency and replaces cells, so it
+costs the same repaint as a text toast while only adding looks. Text cells are
+restricted to the alternate screen because on the main screen a scroll pushes
+them into the terminal's native scrollback permanently. The status line is the
+only anchored surface Claude Code offers to an external process, and chaining
+preserves the user's own line. clud never enables mouse tracking, because that
+takes selection and wheel scrollback away from inline TUIs; the close button
+is clickable only when the child already reports SGR mouse events.
+
+**Consequences:**
+
+- With toasts enabled, every Claude launch carries a launch-scoped
+  `--settings` source for the `statusLine`. This deliberately breaks the
+  earlier "a repo that has not opted in sees an identical launch" rule
+  (`clud_hooks_compile.rs`); `[foreground.toasts] claude_statusline = false`
+  restores the old argv.
+- In PTY mode every child byte also feeds a `vt100` shadow and an escape
+  tracker while toasts are enabled.
+- Claude on Linux/macOS sees in-grid toasts only in PTY mode until #691 flips
+  its default; Codex already gets them (DD-070).
+- Konsole and iTerm2 stay on text cells until their kitty graphics support is
+  validated; `CLUD_TOAST_TIER` overrides the choice.
+- Subprocess-mode Codex (Windows) has no toast surface.
+

@@ -5,6 +5,7 @@ Compile-time-embedded resources bundled directly into the `clud-bin` binary. Fil
 ## Layout
 
 - [`skills/`](skills/README.md) - slash-command skill definitions (`SKILL.md` files) installed per-backend into `.claude/skills/` or `.codex/skills/` on first run.
+- `fonts/` - `DejaVuSansMono.ttf` for rasterizing toast text into the kitty-graphics toast image (#1189, `src/toast/raster.rs`, embedded with `include_bytes!`). Bundled so the wheel needs no system font library; its license is `fonts/DejaVu-LICENSE.txt`.
 
 ## Embedding mechanism
 

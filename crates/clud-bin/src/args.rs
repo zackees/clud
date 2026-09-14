@@ -636,6 +636,18 @@ pub enum Command {
         #[arg(long = "list")]
         list: bool,
     },
+    /// Internal (#1189): print clud's toast inside Claude Code's status line.
+    /// Claude Code runs this as the injected `statusLine` command.
+    #[command(name = "statusline", hide = true)]
+    Statusline {
+        #[arg(long = "session-pid")]
+        session_pid: u32,
+        #[arg(long = "state-dir")]
+        state_dir: PathBuf,
+        /// The user's own status-line command, base64url, run first.
+        #[arg(long = "chain-b64")]
+        chain_b64: Option<String>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1107,6 +1119,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "codex-auth",
     "deepseek-auth",
     "run",
+    "statusline",
     "__daemon",
     "__worker",
 ];
@@ -1191,6 +1204,9 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         // Issue #469: `clud log --cmd "..."` arg.
         "--cmd",
         "--set-web-term",
+        // #1189: hidden `clud statusline` arguments.
+        "--session-pid",
+        "--chain-b64",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
