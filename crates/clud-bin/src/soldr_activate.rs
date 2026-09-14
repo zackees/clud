@@ -611,6 +611,9 @@ mod tests {
     /// soldr#3193: the shims probe must never leave a broker behind.
     #[test]
     fn read_only_soldr_env_opts_out_of_broker_autospawn_and_keeps_the_rest() {
+        // Reads PATH twice, so it must hold the same guard as the tests that
+        // mutate PATH; otherwise a parallel case can change it between reads.
+        let _g = isolate_path_env();
         let env = read_only_soldr_env();
         let opt_outs: Vec<_> = env
             .iter()

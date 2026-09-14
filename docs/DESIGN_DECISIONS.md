@@ -3307,3 +3307,89 @@ is clickable only when the child already reports SGR mouse events.
   validated; `CLUD_TOAST_TIER` overrides the choice.
 - Subprocess-mode Codex (Windows) has no toast surface.
 
+## DD-072: server-side settings are one baked-in JSON document with per-section last-known-good
+
+**Status:** Accepted
+
+**Context:** #1192. DeepSeek renames API model names in place.
+`deepseek-v4-flash` became `deepseek-flash` with V4.1-Flash. clud compiled the
+DeepSeek names into the binary, so following a rename required a clud release
+and an upgrade. The first draft served a DeepSeek-only file. Review asked for a
+general mechanism instead: settings baked into clud, plus robustness, so a
+malformed server copy never breaks a client and clients carry on with what they
+last had.
+
+**Decision:** `crates/clud-bin/assets/server-settings.json` holds a
+`schema_version` and a set of independently validated `sections`. The build
+embeds the file as the built-in copy, and installed builds fetch the same path
+from `main`.
+
+- **Resolution.** Each section takes the first valid value among the copy served
+  now, the last cached valid copy, and the built-in copy.
+- **Section errors.** A present but invalid section keeps its last good value.
+  An absent or `null` section resets to built-in.
+- **Document errors.** A whole-document failure (bad JSON, a root that is not an
+  object, an unsupported `schema_version`, `sections` missing) leaves the cache
+  untouched.
+- **Refresh.** A cache younger than 15 minutes is used without a request.
+  Otherwise a background thread fetches, merges, and writes the cache
+  atomically. The launch waits for it for at most 750 ms. After a failed
+  attempt, clud does not retry for 15 minutes.
+- **Parsing.** Strict: no duplicate keys, no trailing content, UTF-8 only,
+  64 KiB cap, and nesting depth bounded.
+
+**Rationale:**
+
+- **Isolation per section.** One malformed setting cannot freeze or break
+  another. [Firefox Remote Settings](https://firefox-source-docs.mozilla.org/services/settings/index.html)
+  isolates collections for the same reason.
+- **Last-known-good over rollback.** A broken edit on `main` leaves clients on
+  the value they last validated, much like Chromium's variations "safe seed". A
+  deliberate reset is still possible by removing the section.
+- **One file for both copies.** The built-in copy cannot drift from the served
+  one, and guard tests reject a document that is not strict JSON or that lacks
+  a valid value for a registered section. So a broken edit fails CI before it
+  can reach `main`.
+- **Bounded latency.** On a healthy network an edit applies within one launch.
+  Offline, the cost is at most 750 ms per 15 minutes.
+- **Strict parsing.** `serde_json` silently keeps the last of duplicate keys,
+  which is the wrong answer for hand-edited configuration served to every
+  install.
+
+**Alternatives rejected:**
+
+- **One typed struct for the whole file.** One bad field would invalidate every
+  setting.
+- **One file per setting.** It costs N requests per refresh and allows partial
+  updates across files.
+- **A signed manifest with per-section blobs.** It needs key management and a
+  publishing pipeline, which is disproportionate for a few settings served over
+  TLS from this repository. Deferred.
+- **A synchronous fetch on first read.** It adds up to 2 s to a launch whenever
+  the cache is stale.
+- **Pure stale-while-revalidate.** Edits land one launch late, and short-lived
+  commands can exit before the refresh finishes.
+- **A daemon-owned refresh.** The daemon is not always running, and #542 asks
+  that the daemon not grow new fixed-interval work.
+- **A jsDelivr mirror.** It caches branches for 12 hours with no purge, so it
+  can serve an older document than the local cache and roll values back.
+- **ETag revalidation.** The document is under 1 KiB, so a 304 saves nothing
+  measurable. Deferred.
+
+**Consequences:**
+
+- **Changes ship on merge, not release.** An edit to the JSON on `main` reaches
+  installed builds within about 20 minutes (a 5-minute CDN cache plus 15 minutes
+  of local freshness).
+- **Adding a setting** takes a `Section` type, one `SECTIONS` entry, and its
+  built-in value. The guard tests fail until all three agree.
+- **Unknown sections are kept in the cache**, so a newer clud sharing
+  `~/.clud/cache` still sees them. Bumping `schema_version` makes older builds
+  ignore the whole document, so additive changes must not bump it.
+- **Controls:** `CLUD_SERVER_SETTINGS=0` uses the built-in copy only;
+  `CLUD_SERVER_SETTINGS_URL` points at a draft and bypasses the cache;
+  `CLUD_VERBOSE_SERVER_SETTINGS=1` explains fallbacks.
+- **Tests stay offline.** Library unit tests never fetch, and the subprocess
+  test harnesses set `CLUD_SERVER_SETTINGS=0`.
+- **A served DeepSeek default is visible**: `--dry-run` reports it as
+  `model_source: server_default`.

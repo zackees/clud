@@ -537,10 +537,13 @@ fn apply_anthropic_compat_overlay(
         .and_then(|selection| selection.wire_model.as_deref())
         .unwrap_or(default_wire_model);
     let role_models = descriptor.role_models;
+    // A served subagent name (#1192) replaces the descriptor's compiled-in one.
+    let subagent_wire_id = crate::server_settings::provider_subagent_model(descriptor.provider)
+        .unwrap_or(descriptor.subagent_wire_id);
     let opus_model = role_models.map_or(model, |roles| roles.opus);
     let sonnet_model = role_models.map_or(model, |roles| roles.sonnet);
-    let haiku_model = role_models.map_or(descriptor.subagent_wire_id, |roles| roles.haiku);
-    let subagent_model = role_models.map_or(descriptor.subagent_wire_id, |roles| roles.subagent);
+    let haiku_model = role_models.map_or(subagent_wire_id, |roles| roles.haiku);
+    let subagent_model = role_models.map_or(subagent_wire_id, |roles| roles.subagent);
     env.extend([
         (
             "ANTHROPIC_BASE_URL".to_string(),
@@ -1499,23 +1502,23 @@ mod tests {
                 ),
                 (
                     "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
@@ -1523,7 +1526,7 @@ mod tests {
                 ),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash".to_string()
                 ),
             ]
         );
@@ -1571,7 +1574,7 @@ mod tests {
                 ),
                 (
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
@@ -1584,7 +1587,7 @@ mod tests {
                 ("ANTHROPIC_MODEL".to_string(), "deepseek-v4-pro".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash".to_string()
                 ),
             ]
         );
@@ -1639,7 +1642,7 @@ mod tests {
                     // This slot is scrubbed AND re-set by the overlay itself
                     // (the new FABLE pin), so its post-overlay value is the
                     // overlay's own model, not `None` and not the ambient value.
-                    Some("deepseek-v4-pro[1m]")
+                    Some("deepseek-flash[1m]")
                 } else {
                     None
                 },
@@ -1675,11 +1678,11 @@ mod tests {
         );
         assert_eq!(
             lookup(&child, "ANTHROPIC_MODEL"),
-            Some("deepseek-v4-pro[1m]")
+            Some("deepseek-flash[1m]")
         );
         assert_eq!(
             lookup(&child, "CLAUDE_CODE_SUBAGENT_MODEL"),
-            Some("deepseek-v4-flash")
+            Some("deepseek-flash")
         );
         assert_eq!(
             lookup(&child, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),

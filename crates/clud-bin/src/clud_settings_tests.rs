@@ -988,6 +988,24 @@ fn provider_profile_rejects_non_canonical_model() {
     ));
 }
 
+/// #1192: a profile saved before DeepSeek renamed `deepseek-v4-flash` keeps
+/// loading, normalized to the successor's canonical ID.
+#[test]
+fn provider_profile_normalizes_a_retired_canonical_model_id() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"providers":{"deepseek":{"model":"deepseek-v4-flash"}}}"#,
+    );
+    let snapshot = load_launch_preferences_read_only_at(home.path()).unwrap();
+    assert_eq!(
+        snapshot
+            .profile(ModelProvider::DeepSeek)
+            .and_then(|p| p.model.as_deref()),
+        Some("deepseek-flash")
+    );
+}
+
 #[test]
 fn provider_profile_rejects_cross_provider_model() {
     let home = tempdir().unwrap();
