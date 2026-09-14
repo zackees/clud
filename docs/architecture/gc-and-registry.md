@@ -128,7 +128,7 @@ PID, and if alive + accepting TCP, returns. Otherwise it acquires `<state_dir>/d
 (issue #138 — serializes concurrent bringup so two `clud` startups don't both spawn a daemon and
 race on the TCP bind), **re-probes** under the lock, and only spawns if still absent.
 
-Spawn is `clud __daemon --state-dir <state_dir>` detached via `trampoline::spawn_detached_self`
+Spawn is `clud __daemon --state-dir <state_dir>` detached via `daemon::client::spawn_detached_daemon` (running-process's daemon spawn, #1186)
 with `invisible_helper_creationflags()` on Windows. Caller polls up to 5 seconds for the info
 file plus a successful TCP connect.
 

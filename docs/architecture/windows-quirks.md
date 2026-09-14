@@ -51,21 +51,25 @@ the codebase stays portable.
   `clud.exe`. The running process continues executing from the
   `.old.<rand>` file (which is now the locked one), while `Scripts/clud.exe`
   becomes a fresh, unlocked copy that `pip` can overwrite. A background
-  thread GCs stale `.old.*` files on the next launch. The detached-spawn
-  helper additionally strips `HANDLE_FLAG_INHERIT` from the parent's three
-  stdio handles around `CreateProcess` so the child cannot keep a pipe
-  writer alive past EOF — that was the root cause of the 45-minute Windows
-  GHA cancellation investigated in issue #37.
+  thread GCs stale `.old.*` files on the next launch. The runtime-cache relay
+  (`relay_child_and_wait`) additionally strips `HANDLE_FLAG_INHERIT` from the
+  parent's three stdio handles around `CreateProcess` so no detached
+  descendant can keep a pipe writer alive past EOF — the class of bug behind
+  the 45-minute Windows GHA cancellation investigated in issue #37. The
+  daemon detach no longer lives here: since #1186 it goes through
+  running-process's daemon spawn, whose `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+  whitelists only the three stdio handles.
 
-- **File**: `crates/clud-bin/src/trampoline.rs:141` (`unlock_exe`); detached
-  spawn at `:39` (`spawn_detached_self`); the RAII handle-flag guard at
-  `:75` (`windows_stdio::NonInheritableStdioGuard`).
+- **File**: `crates/clud-bin/src/trampoline.rs` (`unlock_exe`,
+  `relay_child_and_wait`, and the RAII handle-flag guard
+  `windows_stdio::NonInheritableStdioGuard`). The daemon detach is
+  `spawn_detached_daemon` in `crates/clud-bin/src/daemon/client.rs`.
 
 - **POSIX behavior**: No-op. Unix lets you `unlink` a running binary; the
   rename dance is unnecessary, so `unlock_exe()` returns immediately on the
-  `cfg!(target_os = "windows")` check at `:142`. The detached-spawn helper
-  also has a `#[cfg(unix)]` branch at `:55` that uses `setsid()` instead
-  of the Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` flags.
+  `cfg!(target_os = "windows")` check. The daemon detach uses
+  running-process's Unix path: `setsid()` plus a sweep of every fd above 2,
+  instead of the Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` flags.
 
 ### (b) BatBadBat: `.cmd`/`.bat` rewrite (CVE-2024-24576)
 
@@ -507,8 +511,8 @@ the codebase stays portable.
     (`dnd/console_drop_target.rs:333`) revokes each registered window
     and calls `OleUninitialize` on the same STA thread.
   - `trampoline::windows_stdio::NonInheritableStdioGuard`
-    (`trampoline.rs:75`) restores `HANDLE_FLAG_INHERIT` on the three
-    stdio handles after the detached spawn returns.
+    (`trampoline.rs`) restores `HANDLE_FLAG_INHERIT` on the three
+    stdio handles after the runtime-cache relay's spawn returns.
 
 - **Single decision point for the `.cmd` rewrite.** `subprocess.rs` is the
   *only* file that knows about BatBadBat. Every backend spawn goes

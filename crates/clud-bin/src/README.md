@@ -468,6 +468,9 @@ Platform glue:
 
 - `trampoline.rs` - Windows-only rename-self-and-copy-back trick so
   `pip install` can always overwrite `Scripts/clud.exe`. No-op on POSIX.
+  Also hosts `relay_child_and_wait`, the runtime-cache relay that must stay
+  raw `std::process` (#333). The daemon detach moved to
+  `daemon/client.rs::spawn_detached_daemon` (#1186).
 - `win_creation_flags.rs` - `invisible_helper_creationflags()` returns
   `CREATE_NO_WINDOW` on Windows for daemon-helper spawns; `0` elsewhere so call
   sites stay portable.
