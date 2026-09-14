@@ -1338,3 +1338,90 @@ fn test_clean_worktrees_with_yes_and_force() {
 
 #[path = "args_tests/commands.rs"]
 mod commands;
+
+// ── `clud --deepseek <API_KEY>` ─────────────────────────────────────────────
+
+fn parse_inline_key_argv(argv: &[&str]) -> Args {
+    Args::parse_from_raw(argv.iter().map(|s| (*s).to_string()).collect())
+}
+
+const DEEPSEEK_SHAPED_KEY: &str = "sk-0123456789abcdef0123456789abcdef";
+
+/// RED on 2.8.1: the key stayed in `passthrough` and was forwarded to Claude
+/// Code as its opening prompt, so it was never stored as a credential.
+#[test]
+fn an_api_key_after_deepseek_is_lifted_out_of_the_backend_argv() {
+    let args = parse_inline_key_argv(&["clud", "--deepseek", DEEPSEEK_SHAPED_KEY]);
+    assert!(args.deepseek);
+    assert_eq!(
+        args.inline_api_key.as_ref().map(InlineApiKey::expose),
+        Some(DEEPSEEK_SHAPED_KEY)
+    );
+    assert!(
+        args.passthrough.iter().all(|t| t != DEEPSEEK_SHAPED_KEY),
+        "the key must never reach the backend argv: {:?}",
+        args.passthrough
+    );
+}
+
+#[test]
+fn a_prompt_after_the_key_is_still_forwarded() {
+    let args = parse_inline_key_argv(&["clud", "--deepseek", DEEPSEEK_SHAPED_KEY, "fix the bug"]);
+    assert!(args.inline_api_key.is_some());
+    assert_eq!(args.passthrough, vec!["fix the bug".to_string()]);
+}
+
+#[test]
+fn inline_api_keys_are_recognised_for_kimi_openrouter_and_provider() {
+    let openrouter_key = "sk-or-v1-0123456789abcdef0123456789abcdef";
+    for argv in [
+        vec!["clud", "--kimi", DEEPSEEK_SHAPED_KEY],
+        vec!["clud", "--openrouter", openrouter_key],
+        vec!["clud", "--provider", "deepseek", DEEPSEEK_SHAPED_KEY],
+    ] {
+        let args = parse_inline_key_argv(&argv);
+        assert!(args.inline_api_key.is_some(), "{argv:?}");
+        assert!(
+            args.passthrough.is_empty(),
+            "{argv:?}: {:?}",
+            args.passthrough
+        );
+    }
+}
+
+#[test]
+fn ordinary_prompts_and_non_api_key_providers_are_left_alone() {
+    let prompt = parse_inline_key_argv(&["clud", "--deepseek", "summarize sk-notes"]);
+    assert!(prompt.inline_api_key.is_none());
+    assert_eq!(prompt.passthrough, vec!["summarize sk-notes".to_string()]);
+
+    let short = parse_inline_key_argv(&["clud", "--deepseek", "sk-short"]);
+    assert!(short.inline_api_key.is_none());
+
+    for argv in [
+        vec!["clud", DEEPSEEK_SHAPED_KEY],
+        vec!["clud", "--codex", DEEPSEEK_SHAPED_KEY],
+        vec!["clud", "--claude", DEEPSEEK_SHAPED_KEY],
+    ] {
+        let args = parse_inline_key_argv(&argv);
+        assert!(args.inline_api_key.is_none(), "{argv:?}");
+    }
+}
+
+#[test]
+fn the_inline_key_never_appears_in_debug_output() {
+    let args = parse_inline_key_argv(&["clud", "--deepseek", DEEPSEEK_SHAPED_KEY]);
+    let rendered = format!("{:?}", args.inline_api_key);
+    assert!(!rendered.contains("0123456789abcdef"), "{rendered}");
+    assert!(rendered.contains("redacted"));
+}
+
+#[test]
+fn api_key_shape_detection() {
+    assert!(looks_like_api_key(DEEPSEEK_SHAPED_KEY));
+    assert!(looks_like_api_key(&format!("  {DEEPSEEK_SHAPED_KEY}\r\n")));
+    assert!(looks_like_api_key("sk-or-v1-0123456789abcdef"));
+    assert!(!looks_like_api_key("sk-has spaces 0123456789"));
+    assert!(!looks_like_api_key("pk-0123456789abcdef0123"));
+    assert!(!looks_like_api_key("sk-12345"));
+}

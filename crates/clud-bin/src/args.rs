@@ -258,6 +258,13 @@ pub struct Args {
     #[arg(last = true, id = "BACKEND_ARGS")]
     pub passthrough: Vec<String>,
 
+    /// API key typed after an API-key provider flag
+    /// (`clud --deepseek <API_KEY>`), lifted out of `passthrough` at parse time
+    /// so it is stored in the native vault instead of being sent to the model
+    /// as the session's first prompt.
+    #[arg(skip)]
+    pub inline_api_key: Option<InlineApiKey>,
+
     /// Runtime Codex `-c` config overrides loaded from ~/.clud/settings.json.
     #[arg(skip)]
     pub codex_config_overrides: Vec<String>,
@@ -318,6 +325,30 @@ impl Args {
     /// Return only provider intent that came from the command line. Model
     /// inference and saved defaults are resolved later so source metadata does
     /// not accidentally label `--provider` as a global setting.
+    /// Lift an API key out of the backend argv when an API-key provider
+    /// (`--deepseek`, `--kimi`, `--openrouter`, or `--provider` naming one)
+    /// was selected. Before this, `clud --deepseek <API_KEY>` forwarded the
+    /// key to Claude Code as its opening prompt: with no stored key the
+    /// preflight then asked for one and the typed key was never used (the
+    /// common case on fresh Windows installs), and with a stored key the key
+    /// was sent to the model.
+    pub fn extract_inline_api_key(&mut self) {
+        let Some(provider) = self.explicit_model_provider() else {
+            return;
+        };
+        if crate::provider_registry::descriptor_for(provider).is_none() {
+            return;
+        }
+        if let Some(index) = self
+            .passthrough
+            .iter()
+            .position(|token| looks_like_api_key(token))
+        {
+            let key = self.passthrough.remove(index);
+            self.inline_api_key = Some(InlineApiKey::new(key.trim()));
+        }
+    }
+
     pub fn explicit_model_provider(&self) -> Option<ModelProvider> {
         if self.deepseek {
             Some(ModelProvider::DeepSeek)
@@ -1129,6 +1160,7 @@ impl Args {
             args.resume = Some(None);
         }
         args.passthrough.extend(unknown);
+        args.extract_inline_api_key();
         args.raw_argv = raw;
         args
     }
@@ -1335,3 +1367,43 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 #[path = "args_tests.rs"]
 mod tests;
+
+/// A provider API key passed on the command line. `Debug` never prints it, so
+/// verbose logging of [`Args`] cannot leak it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct InlineApiKey(String);
+
+impl InlineApiKey {
+    pub fn new(key: &str) -> Self {
+        Self(key.to_string())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for InlineApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InlineApiKey(<redacted>)")
+    }
+}
+
+impl Drop for InlineApiKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
+/// Whether a bare argv token is an API key rather than a prompt. DeepSeek,
+/// Kimi and OpenRouter keys all start `sk-` and contain no spaces; no
+/// plausible opening prompt looks like that.
+pub fn looks_like_api_key(token: &str) -> bool {
+    let token = token.trim();
+    token.len() >= 20
+        && token.starts_with("sk-")
+        && token[3..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}

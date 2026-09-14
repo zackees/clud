@@ -601,6 +601,32 @@ fn run(mut args: args::Args) {
     // Anthropic-compat-provider (DeepSeek today) work is accepted. Dry-runs
     // intentionally remain vault-free -- `launch_preflight_target` returns
     // `None` for every dry run regardless of provider.
+    //
+    // `clud --deepseek <API_KEY>` (and `--kimi` / `--openrouter`): the key was
+    // lifted out of the backend argv at parse time, so it is never sent to the
+    // model as a prompt. Store it before the preflight looks for one. A dry
+    // run never touches the vault.
+    if let Some(key) = args.inline_api_key.take() {
+        let descriptor = args
+            .explicit_model_provider()
+            .and_then(clud::provider_registry::descriptor_for);
+        if let (Some(descriptor), false) = (descriptor, args.dry_run) {
+            match provider_auth::store_inline_api_key(descriptor, key.expose()) {
+                Ok(true) => eprintln!(
+                    "[clud] {} API key stored in the native credential vault",
+                    descriptor.display_name
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "{}: could not store the API key passed on the command line: {error}",
+                        descriptor.settings_id
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
     if launch_target.effective_harness != backend::Backend::DeepSeek {
         if let Some(descriptor) =
             provider_auth::launch_preflight_target(launch_target.model_provider, args.dry_run)

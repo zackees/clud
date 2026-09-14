@@ -540,6 +540,44 @@ def test_dry_run_deepseek() -> None:
     assert "sk-" not in result.stderr
 
 
+_INLINE_DEEPSEEK_KEY = "sk-" + "0123456789abcdef" * 2
+
+
+def test_dry_run_deepseek_inline_key_is_never_forwarded() -> None:
+    """`clud --deepseek <API_KEY>` must not hand the key to the backend as a
+    prompt (the 2.8.1 bug: Windows users' keys were never recognized). A dry
+    run also never touches the vault, so the key appears nowhere."""
+    result = _run("--dry-run", "--deepseek", _INLINE_DEEPSEEK_KEY)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_provider"] == "deepseek"
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout
+    assert _INLINE_DEEPSEEK_KEY not in result.stderr
+    assert all(_INLINE_DEEPSEEK_KEY not in part for part in data["command"])
+
+
+def test_dry_run_deepseek_inline_key_keeps_the_real_prompt() -> None:
+    result = _run("--dry-run", "--deepseek", _INLINE_DEEPSEEK_KEY, "fix the bug")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["command"][-1] == "fix the bug"
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("flag", "key"),
+    [
+        ("--kimi", "sk-" + "a1b2c3d4" * 4),
+        ("--openrouter", "sk-or-v1-" + "0123456789abcdef" * 2),
+    ],
+)
+def test_dry_run_inline_keys_for_other_api_key_providers(flag: str, key: str) -> None:
+    result = _run("--dry-run", flag, key)
+    assert result.returncode == 0, result.stderr
+    assert key not in result.stdout
+    assert key not in result.stderr
+
+
 def test_dry_run_openrouter_is_keyless_and_uses_stable_provider_identity() -> None:
     result = _run("--dry-run", "--openrouter", "-p", "hello")
     assert result.returncode == 0, result.stderr
