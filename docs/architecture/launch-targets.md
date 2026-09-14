@@ -462,6 +462,17 @@ profile rather than passthrough configuration. Both rejections happen in
 `backend::resolve_launch_target` / `backend::validate_provider_options`
 before any launch work is accepted.
 
+An API key may be passed inline: `clud --deepseek <API_KEY>` (likewise
+`--kimi`, `--openrouter`, or `--provider` naming one). `Args::parse_from_raw`
+lifts the first `sk-…`-shaped token out of the backend argv
+(`Args::extract_inline_api_key`), and `main.rs` stores it in the provider's
+native-vault record before the credential preflight runs, so the preflight
+finds it and never prompts. The key is never forwarded to Claude Code — before
+this, 2.8.1 passed it through as the session's opening prompt, which left fresh
+installs (typically Windows) unable to use the key at all and sent it to the
+model where a key was already stored. `--dry-run` strips the key but never
+touches the vault.
+
 This is deliberately **not** a Codex-style bridge. There is no local HTTP
 listener, no request translation, no `BridgeHandle`. DeepSeek publishes an
 Anthropic-compatible endpoint directly, so `ForegroundRuntime::start` routes

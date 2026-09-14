@@ -311,6 +311,29 @@ impl PreflightError {
     }
 }
 
+/// Store an API key passed on the command line (`clud --deepseek <API_KEY>`)
+/// in `descriptor`'s native-vault record. Returns whether the stored value
+/// changed, so the caller only announces a real update.
+pub fn store_inline_api_key(
+    descriptor: &'static AnthropicCompatProvider,
+    key: &str,
+) -> Result<bool, SecretStoreError> {
+    let store = NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)?;
+    store_inline_api_key_with(&store, key)
+}
+
+fn store_inline_api_key_with(store: &dyn SecretStore, key: &str) -> Result<bool, SecretStoreError> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Ok(false);
+    }
+    if store.get()?.as_deref() == Some(key) {
+        return Ok(false);
+    }
+    store.set(key)?;
+    Ok(true)
+}
+
 /// Returns the descriptor of the provider needing a credential preflight
 /// before this launch may proceed, or `None` when no preflight applies:
 /// `--dry-run` (which must make zero vault calls) or a provider with no
@@ -673,6 +696,54 @@ mod tests {
             0
         );
         assert_eq!(store.get().unwrap(), None);
+    }
+
+    #[test]
+    fn an_inline_key_is_stored_trimmed_and_reported_only_when_it_changes() {
+        let store = InMemorySecretStore::default();
+        let key = "sk-0123456789abcdef0123456789abcdef";
+        assert!(store_inline_api_key_with(&store, &format!("  {key}\r\n")).unwrap());
+        assert_eq!(store.get().unwrap().as_deref(), Some(key));
+        assert!(
+            !store_inline_api_key_with(&store, key).unwrap(),
+            "re-passing the same key is not a change"
+        );
+        assert!(store_inline_api_key_with(&store, "sk-ffffffffffffffffffffffff").unwrap());
+        assert!(!store_inline_api_key_with(&store, "   ").unwrap());
+        assert_eq!(
+            store.get().unwrap().as_deref(),
+            Some("sk-ffffffffffffffffffffffff")
+        );
+
+        // The preflight then finds the key and never prompts.
+        assert_eq!(preflight_with(&store, true, || unreachable!()), Ok(()));
+
+        let broken = InMemorySecretStore {
+            unavailable: true,
+            ..InMemorySecretStore::default()
+        };
+        assert_eq!(
+            store_inline_api_key_with(&broken, key),
+            Err(SecretStoreError::Unavailable)
+        );
+    }
+
+    /// Windows stores keys through Credential Manager directly (not the
+    /// `keyring` crate). Round-trip a key through the real API so a Windows
+    /// regression in the storage path fails CI rather than a user's launch.
+    #[cfg(windows)]
+    #[test]
+    fn windows_credential_manager_round_trips_an_api_key() {
+        let target = format!("clud.test-inline-api-key/{}", std::process::id());
+        let key = "sk-0123456789abcdef0123456789abcdef";
+        if let Err(error) = windows_vault::set(&target, key) {
+            eprintln!("SKIP: Credential Manager unavailable on this runner: {error}");
+            return;
+        }
+        let read = windows_vault::get(&target);
+        let _ = windows_vault::delete(&target);
+        assert_eq!(read, Ok(Some(key.to_string())));
+        assert_eq!(windows_vault::get(&target), Ok(None));
     }
 
     #[test]
