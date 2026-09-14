@@ -28,6 +28,7 @@ re-explaining.
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
 | [architecture/provider-failover.md](architecture/provider-failover.md) | ~200 | Surviving provider exhaustion mid-session (#968): routing OpenRouter through the gateway, the route-health failure taxonomy, the cost-labeled failover ladder, pre-commit request replay versus post-commit degradation, and cooldown recovery |
 | [architecture/test-runtime-memory.md](architecture/test-runtime-memory.md) | ~220 | **Design proposal (#405, not yet implemented):** `.clud/`-local test-runtime histogram — append-only JSONL over redb/SQLite and why, raw `(duration, cpu_load)` with query-time normalization, count-based compaction, and the run-all-vs-targeted recommendation policy |
+| [architecture/toasts.md](architecture/toasts.md) | ~200 | In-terminal toasts (#1189): toast model and hub, tier selection (kitty graphics, alternate-screen text cells, status line/title fallback), the PTY writer-thread compositor and its safe-injection rules, Claude `statusLine` chaining, click-to-dismiss |
 | [architecture/web-terminal.md](architecture/web-terminal.md) | ~30 | Desktop web-terminal preference, companion launch/recursion guard, tab PTYs, and wheel packaging |
 
 ## Quick Reference

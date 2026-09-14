@@ -835,6 +835,32 @@ fn cpu_banner_reads_heartbeat_override() {
 }
 
 #[test]
+fn toast_settings_default_to_enabled_with_the_claude_status_line() {
+    let home = tempdir().unwrap();
+    let got = load_toast_settings_at(home.path()).unwrap();
+    assert_eq!(got, ToastSettings::default());
+    assert!(got.enabled && got.claude_statusline);
+}
+
+#[test]
+fn toast_settings_read_both_switches_independently() {
+    let home = tempdir().unwrap();
+    let path = settings_path_at(home.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        r#"{"foreground":{"toasts":{"claude_statusline":false}}}"#,
+    )
+    .unwrap();
+    let got = load_toast_settings_at(home.path()).unwrap();
+    assert!(got.enabled, "default enabled preserved");
+    assert!(!got.claude_statusline);
+    fs::write(&path, r#"{"foreground":{"toasts":{"enabled":false}}}"#).unwrap();
+    let got = load_toast_settings_at(home.path()).unwrap();
+    assert!(!got.enabled);
+}
+
+#[test]
 fn provider_profile_round_trips_through_save_and_load() {
     let home = tempdir().unwrap();
     save_settings_patch_at(

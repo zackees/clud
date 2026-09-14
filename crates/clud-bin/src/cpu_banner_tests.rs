@@ -338,7 +338,7 @@ fn sampler_returns_at_least_self() {
 /// handle that no-ops on `stop()` and `Drop`.
 #[test]
 fn disabled_watcher_is_inert() {
-    let mut w = BannerWatcher::spawn(CpuBannerCfg::disabled());
+    let mut w = BannerWatcher::spawn(CpuBannerCfg::disabled(), crate::toast::ToastSink::Discard);
     w.stop();
     // Drop is fine — should not panic / hang.
 }
@@ -594,7 +594,8 @@ fn bench_sampler_cost_50_procs() {
 
 #[test]
 fn a_disabled_watcher_stops_inert() {
-    let mut watcher = BannerWatcher::spawn(CpuBannerCfg::disabled());
+    let mut watcher =
+        BannerWatcher::spawn(CpuBannerCfg::disabled(), crate::toast::ToastSink::Discard);
     assert_eq!(watcher.stop(), StopOutcome::Inert);
     assert_eq!(watcher.stop(), StopOutcome::Inert, "idempotent");
 }
@@ -646,4 +647,129 @@ fn a_body_that_panics_still_counts_as_finished() {
     // The `finished` channel closes on unwind, so this is a join, not a
     // budget-long wait followed by a detach.
     assert_eq!(watcher.stop(), StopOutcome::Joined);
+}
+
+// ── #1189: the banner publishes toasts, never terminal output ──────────────
+
+/// RED on main: the watcher printed banners with `eprintln!` straight onto the
+/// terminal the harness TUI draws on. The banner must only publish toasts.
+#[test]
+fn the_banner_module_never_writes_to_stdout_or_stderr() {
+    let source = include_str!("cpu_banner.rs");
+    for forbidden in [
+        "eprintln!(",
+        "println!(",
+        "eprint!(",
+        "print!(",
+        "io::stderr()",
+        "io::stdout()",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "cpu_banner.rs must publish toasts, not write `{forbidden}` onto the child's terminal"
+        );
+    }
+}
+
+// ── #1189: toast events ──────────────────────────────────────────────────
+
+fn line(kind: BannerKind, cpu: f32, trigger: f32) -> BannerLine {
+    BannerLine {
+        kind,
+        cpu_pct: cpu,
+        rss_bytes: 1_500_000_000,
+        proc_count: 24,
+        age: Duration::from_secs(420),
+        num_cpus: 12,
+        trigger_pct: trigger,
+    }
+}
+
+#[test]
+fn a_running_episode_shows_a_live_toast_without_the_clud_prefix() {
+    let now = Instant::now();
+    let live = line(BannerKind::Sustained, 287.0, 240.0);
+    let events = toast_events(true, None, Some(&live), now);
+    let [crate::toast::ToastEvent::Show(toast)] = events.as_slice() else {
+        panic!("expected one Show, got {events:?}");
+    };
+    assert_eq!(toast.key, CPU_TOAST_KEY);
+    assert!(toast.text.starts_with("cpu 287 %"), "{}", toast.text);
+    assert!(!toast.text.contains("[clud]"));
+    assert_eq!(
+        toast.expires_at, None,
+        "an episode toast lives until the episode ends"
+    );
+    assert_eq!(toast.severity, crate::toast::Severity::Warn);
+}
+
+#[test]
+fn severity_escalates_to_alert_at_four_times_the_trigger() {
+    let hot = line(BannerKind::Sustained, 1000.0, 240.0);
+    assert_eq!(hot.severity(), crate::toast::Severity::Alert);
+    let clear = line(BannerKind::Clear, 10.0, 240.0);
+    assert_eq!(clear.severity(), crate::toast::Severity::Info);
+}
+
+#[test]
+fn the_clear_banner_becomes_an_expiring_back_to_normal_toast() {
+    let now = Instant::now();
+    let clear = line(BannerKind::Clear, 12.0, 240.0);
+    let events = toast_events(true, Some(&clear), None, now);
+    let [crate::toast::ToastEvent::Show(toast)] = events.as_slice() else {
+        panic!("expected one Show, got {events:?}");
+    };
+    assert!(
+        toast.text.starts_with("cpu back to normal"),
+        "{}",
+        toast.text
+    );
+    assert_eq!(toast.expires_at, Some(now + CLEAR_TOAST_TTL));
+}
+
+#[test]
+fn a_silent_episode_end_closes_the_toast_and_idle_ticks_publish_nothing() {
+    let now = Instant::now();
+    assert_eq!(
+        toast_events(true, None, None, now),
+        vec![crate::toast::ToastEvent::Close {
+            key: CPU_TOAST_KEY.to_string()
+        }]
+    );
+    assert!(toast_events(false, None, None, now).is_empty());
+}
+
+/// Drives the real state machine through crossover, sustain, and a short
+/// episode ending, collecting events the way the watcher loop does.
+#[test]
+fn the_state_machine_drives_show_then_close_for_a_short_episode() {
+    let cfg = cfg_with(1);
+    let mut state = CpuBannerState::default();
+    let start = Instant::now();
+    let mut events = Vec::new();
+    for tick in 0..6u64 {
+        let at = start + Duration::from_secs(tick * 2);
+        let cpu = if tick < 4 { 90.0 } else { 5.0 };
+        let s = sample(at, cpu, 1_000, 3);
+        let was = state.in_episode();
+        let banner = state.poll(s, &cfg);
+        let live = state.live_line(s, &cfg);
+        events.extend(toast_events(was, banner.as_ref(), live.as_ref(), at));
+    }
+    assert!(matches!(
+        events.first(),
+        Some(crate::toast::ToastEvent::Show(_))
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(crate::toast::ToastEvent::Close { .. })
+    ));
+    assert!(
+        events
+            .iter()
+            .filter(|e| matches!(e, crate::toast::ToastEvent::Show(_)))
+            .count()
+            >= 2,
+        "the live toast refreshes every tick of the episode"
+    );
 }

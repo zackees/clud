@@ -21,7 +21,7 @@ moves on; the RAII guards restore console mode on drop.
 | File | Role in the session |
 |---|---|
 | `crates/clud-bin/src/runner.rs` | `run_plan_pty` allocates the PTY, holds `_console_guard` + `_raw_guard` + dnd registration for the iteration, calls `run_raw_pty_pump_with_extra_rx_verbose`. |
-| `crates/clud-bin/src/session.rs` | The pump (reader thread + `run_output_writer` writer thread + main loop, issue #538), `F3Observer`, `resize_pty`, `spawn_os_resize_watcher`, `RawTerminalGuard`. |
+| `crates/clud-bin/src/session.rs` | The pump (reader thread + writer thread + main loop, issue #538), `F3Observer`, `resize_pty`, `spawn_os_resize_watcher`, `RawTerminalGuard`. With toasts enabled (#1189) the writer thread runs the toast compositor and the stdin path the close-button mouse filter — see [toasts.md](toasts.md). |
 | `crates/clud-bin/src/session/interrupt.rs` | `interrupt_pty_process`, `reap_pty_exit`. |
 | `crates/clud-bin/src/session/bracketed_paste.rs` | `BracketedPasteNormalizer`. |
 | `crates/clud-bin/src/console_setup.rs` | `ConsoleVtGuard` RAII for `ENABLE_VIRTUAL_TERMINAL_INPUT`. |

@@ -31,6 +31,7 @@ crates/                    → see crates/README.md
       daemon/              → see crates/clud-bin/src/daemon/README.md
       dnd/                 → see crates/clud-bin/src/dnd/README.md
       test_runtime/        → see crates/clud-bin/src/test_runtime/README.md
+      toast/               → see crates/clud-bin/src/toast/README.md
       voice/               → see crates/clud-bin/src/voice/README.md
     tests/                 → see crates/clud-bin/tests/README.md
     assets/                → see crates/clud-bin/assets/README.md
