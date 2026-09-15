@@ -540,8 +540,8 @@ overlaid: the catalog's `low` default rides the harness's `--effort` session
 flag so `/effort` stays live (DD-059). The default model and the
 haiku/subagent model come from the
 [served DeepSeek model names](provider-selection.md#served-deepseek-model-names);
-today that is `deepseek-flash[1m]` (DeepSeek-V4.1-Flash), with `deepseek-flash`
-in the haiku/subagent slots. Explicit Pro/Flash and
+today that is `deepseek-flash[1m]` (DeepSeek-V4.1-Flash) in every slot,
+including haiku/subagent. Explicit Pro/Flash and
 auto/1m selections are applied as documented in
 [provider selection](provider-selection.md). The 1m compaction threshold is
 emitted only for a 1m wire profile. Every conflicting inherited Anthropic/profile

@@ -3,7 +3,7 @@
   "sections": {
     "deepseek": {
       "default_model": "deepseek-flash",
-      "subagent_model": "deepseek-flash"
+      "subagent_model": "deepseek-flash[1m]"
     }
   }
 }

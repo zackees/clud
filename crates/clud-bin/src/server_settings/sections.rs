@@ -122,7 +122,7 @@ mod tests {
         );
         assert_eq!(
             provider_subagent_model(ModelProvider::DeepSeek),
-            Some("deepseek-flash")
+            Some("deepseek-flash[1m]")
         );
         for provider in ModelProvider::ALL
             .iter()

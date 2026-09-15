@@ -1506,7 +1506,7 @@ mod tests {
                 ),
                 (
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    "deepseek-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
@@ -1526,7 +1526,7 @@ mod tests {
                 ),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-                    "deepseek-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
             ]
         );
@@ -1574,7 +1574,7 @@ mod tests {
                 ),
                 (
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    "deepseek-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
@@ -1587,7 +1587,7 @@ mod tests {
                 ("ANTHROPIC_MODEL".to_string(), "deepseek-v4-pro".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-                    "deepseek-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
             ]
         );
@@ -1682,7 +1682,7 @@ mod tests {
         );
         assert_eq!(
             lookup(&child, "CLAUDE_CODE_SUBAGENT_MODEL"),
-            Some("deepseek-flash")
+            Some("deepseek-flash[1m]")
         );
         assert_eq!(
             lookup(&child, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
