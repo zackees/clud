@@ -20,7 +20,7 @@ https://raw.githubusercontent.com/zackees/clud/main/crates/clud-bin/assets/serve
 {
   "schema_version": 1,
   "sections": {
-    "deepseek": { "default_model": "deepseek-flash", "subagent_model": "deepseek-flash" }
+    "deepseek": { "default_model": "deepseek-flash", "subagent_model": "deepseek-flash[1m]" }
   }
 }
 ```

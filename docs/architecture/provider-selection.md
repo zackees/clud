@@ -76,8 +76,10 @@ of 2026-09-14, DeepSeek's Models & Pricing page lists `deepseek-flash`
 (DeepSeek-V4.1-Flash, 1M context) and `deepseek-v4-pro`
 (`DeepSeek-V4-Pro-0813`). `deepseek-v4-flash` is a retired name that DeepSeek
 still routes for compatibility. The `deepseek-flash` row is DeepSeek's reviewed
-default, with the `deepseek-flash[1m]` wire ID and `deepseek-flash` in the
-haiku/subagent slots, matching DeepSeek's documented Claude Code profile. The
+default, with the `deepseek-flash[1m]` wire ID in every Claude Code slot, including
+haiku/subagent. DeepSeek's guide uses the auto-context `deepseek-flash` for
+those two slots. clud uses the 1m model there too, because it is cheap enough
+to use everywhere. The
 retired `deepseek-v4-flash` spelling and `clud-claude-deepseek-v4-flash`
 discovery ID remain aliases of that row, so saved profiles, failover ladders and
 cached picker rows follow the rename. For Pro, the catalog display name and
@@ -91,8 +93,10 @@ already-selected picker rows.
 
 DeepSeek's default and haiku/subagent model names come from the `deepseek`
 section of the [server-side settings](server-settings.md) (#1192). A DeepSeek
-rename therefore reaches installed builds without a release. Both are
-currently `deepseek-flash`. The section may only name `deepseek-*` IDs
+rename therefore reaches installed builds without a release. Currently
+`default_model` is `deepseek-flash`, which the catalog resolves to
+`deepseek-flash[1m]`, and `subagent_model` is `deepseek-flash[1m]`. The section
+may only name `deepseek-*` IDs
 (`[A-Za-z0-9._-]{1,64}`, optionally suffixed `[1m]`).
 
 For a direct DeepSeek launch, the default model is chosen in this order:
