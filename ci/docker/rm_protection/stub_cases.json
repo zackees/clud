@@ -1,0 +1,14 @@
+[
+  {"argv": ["-rf", "/"], "decision": "deny"},
+  {"argv": ["-rf", ""], "decision": "deny"},
+  {"argv": ["-rf", "/tmp"], "decision": "deny"},
+  {"argv": ["-rf", "//server/share"], "decision": "deny"},
+  {"argv": ["-rf", "C:/"], "decision": "deny"},
+  {"argv": ["-rf", "../escape"], "decision": "deny"},
+  {"argv": ["--no-preserve-root", "/"], "decision": "deny"},
+  {"argv": ["-z", "leaf"], "decision": "deny"},
+  {"argv": ["-rf", "leaf", "/"], "decision": "deny"},
+  {"argv": ["-rf", "/home/checker"], "decision": "deny"},
+  {"argv": ["-rf", "./missing"], "decision": "allow"},
+  {"argv": ["--recursive", "--force", "--", "-leaf"], "decision": "allow"}
+]

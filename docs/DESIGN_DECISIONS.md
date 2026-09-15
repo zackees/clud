@@ -3464,3 +3464,14 @@ than a second key loop.
   is now indented like other footer lines.
 - Ctrl-C and Ctrl-D close the frame the same way a normal exit does, then return
   `Interrupted`.
+
+## DD-074: rm uses a PATH identity backstop and a post-expansion shim
+
+Issue #1183's owner authorized validating executable lookup on the effective
+PATH. The hook compares actual bytes to the packaged shim, while the executable
+validates expanded operands. Neither layer replaces the other: expansion loses
+source provenance and the executable cannot intercept non-rm deletions.
+
+Real removal deliberately requires CI plus detected Docker. Unit-test builds
+exclude the real executor. See [rm protection](architecture/rm-protection.md) for
+the contract, supported platforms, retirement rationale and residual boundary.

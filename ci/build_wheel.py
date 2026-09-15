@@ -7,8 +7,11 @@ import base64
 import contextlib
 import hashlib
 import json
+import os
 import platform
+import shutil
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Literal
@@ -224,6 +227,17 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
         )
         return 1
 
+    # Hook smoke tests need the same trusted rm PATH contract as a session.
+    # Never invoke this alias: the only payloads below are inert hook JSON.
+    with tempfile.TemporaryDirectory(prefix="clud-wheel-rm-") as directory:
+        alias = Path(directory) / _script_name("rm")
+        shutil.copyfile(_installed_script("clud-shim"), alias)
+        alias.chmod(0o755)
+        smoke_env = env | {"PATH": directory + os.pathsep + env.get("PATH", "")}
+        return _verify_installed_smokes(env=smoke_env, target=target)
+
+
+def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
     guard = _installed_script("clud-block-bad-cmd")
     deny_payload = json.dumps(
         {

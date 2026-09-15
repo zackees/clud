@@ -30,11 +30,11 @@ pub const SHIMS_SUBDIR: &str = ".clud/state/shims";
 pub fn alias_names() -> Vec<&'static str> {
     #[cfg(windows)]
     {
-        vec!["python.exe", "python3.exe"]
+        vec!["python.exe", "python3.exe", "rm.exe"]
     }
     #[cfg(not(windows))]
     {
-        vec!["python", "python3"]
+        vec!["python", "python3", "rm"]
     }
 }
 
@@ -64,15 +64,11 @@ pub fn extract_shims_at(home_root: &Path, shim_source: &Path) -> std::io::Result
     let mut installed = 0;
     for alias in alias_names() {
         let target = shims_dir.join(alias);
-        if needs_refresh(&target, &source_hash) {
-            std::fs::write(&target, &source_bytes)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perm = std::fs::metadata(&target)?.permissions();
-                perm.set_mode(0o755);
-                std::fs::set_permissions(&target, perm)?;
-            }
+        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink())
+            || needs_refresh(&target, &source_hash)
+            || std::fs::read(&target).ok().as_deref() != Some(source_bytes.as_slice())
+        {
+            write_alias(&shims_dir, &target, &source_bytes)?;
             installed += 1;
         }
     }
@@ -132,6 +128,58 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+fn write_alias(dir: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+    temp.write_all(bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    }
+    temp.persist(target).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Trusted packaged sibling, never resolved through PATH or an env override.
+pub fn packaged_shim() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| std::io::Error::other("executable has no parent"))?;
+    Ok(dir.join(if cfg!(windows) {
+        "clud-shim.exe"
+    } else {
+        "clud-shim"
+    }))
+}
+
+/// Session activation installs only rm, keeping unfinished Python relays off PATH.
+/// A separate directory also avoids activating previously extracted Python aliases.
+pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
+    let bytes = std::fs::read(source)?;
+    if bytes.is_empty() {
+        return Err(std::io::Error::other("packaged shim is empty"));
+    }
+    let dir = home.join(".clud/state/rm-shim");
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join(if cfg!(windows) { "rm.exe" } else { "rm" });
+    // Replace the directory entry, never write through a replaced symlink.
+    // NamedTempFile persists atomically and supports concurrent installers.
+    if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink())
+        || std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice())
+    {
+        write_alias(&dir, &target, &bytes)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +191,29 @@ mod tests {
         let src = tmp.path().join("clud-shim");
         fs::write(&src, content).unwrap();
         (tmp, src)
+    }
+
+    #[test]
+    fn repairs_replaced_bytes_even_with_matching_sentinel() {
+        let home = TempDir::new().unwrap();
+        let (_source_dir, source) = make_source(b"trusted");
+        extract_shims_at(home.path(), &source).unwrap();
+        let target = home.path().join(SHIMS_SUBDIR).join(alias_names()[0]);
+        fs::write(&target, b"replaced").unwrap();
+        assert_eq!(extract_shims_at(home.path(), &source).unwrap(), 1);
+        assert_eq!(fs::read(target).unwrap(), b"trusted");
+    }
+
+    #[test]
+    fn session_installs_only_rm_and_repairs_replacement() {
+        let home = TempDir::new().unwrap();
+        let (_source_dir, source) = make_source(b"trusted");
+        let dir = install_rm_at(home.path(), &source).unwrap();
+        let target = dir.join(if cfg!(windows) { "rm.exe" } else { "rm" });
+        fs::write(&target, b"replacement").unwrap();
+        install_rm_at(home.path(), &source).unwrap();
+        assert_eq!(fs::read(target).unwrap(), b"trusted");
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
     }
 
     #[test]
