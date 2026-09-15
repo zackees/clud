@@ -289,6 +289,7 @@ pub fn run_plan_subprocess(
     interrupted: &AtomicBool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
     cpu_banner_cfg: cpu_banner::CpuBannerCfg,
+    toast_cfg: crate::toast::ToastLaunchCfg,
 ) -> i32 {
     use std::path::PathBuf;
 
@@ -296,11 +297,25 @@ pub fn run_plan_subprocess(
     // spawned). Stopped explicitly below under a `cpu_banner_stop` stage on
     // the normal exit path; the early returns rely on `Drop`, which performs
     // the same bounded stop (#1172).
-    let mut cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
+    //
+    // #1189: subprocess mode cannot draw into the terminal the child owns.
+    // Claude's injected status line shows the toast instead, fed by this
+    // session's state file; other harnesses get no toast surface.
+    let status_writer = crate::toast::launch::statusline_writer(plan, toast_cfg);
+    let banner_sink = status_writer
+        .clone()
+        .map(crate::toast::ToastSink::StatusFile)
+        .unwrap_or_default();
+    crate::toast::launch::publish_demo_toast(&banner_sink);
+    let mut cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg, banner_sink);
 
-    let runtime = match crate::foreground_runtime::ForegroundRuntime::start(
+    let statusline = status_writer
+        .as_deref()
+        .and_then(crate::toast::launch::injection_for);
+    let runtime = match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
         plan,
         child_env_for_backend(plan.backend),
+        statusline.as_ref(),
     ) {
         Ok(runtime) => runtime,
         Err(error) => {

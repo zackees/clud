@@ -60,7 +60,7 @@ and why it matters.
   never spikes it was never created — `classify_snapshot` returned `Absent`
   forever and the 15 s "older daemon" fallback was the *steady state* on the
   current daemon.
-- `client.rs` — client-side daemon RPC: `ensure_daemon` (idempotent fs4-locked auto-spawn), forward-only daemon replacement (an older client refuses a newer daemon with a yellow exit-1 error), foreground-client lease acquisition/release, `send_daemon_request`, `request_session_termination`, `gc_client_*` IPC wrappers for the four `clud gc` ops, stale-state cleanup.
+- `client.rs` — client-side daemon RPC: `ensure_daemon` (idempotent fs4-locked auto-spawn; the detach itself is `spawn_detached_daemon`, running-process's daemon spawn with `EnvironmentPolicy::Inherit` and the originator tag removed, #1186), forward-only daemon replacement (an older client refuses a newer daemon with a yellow exit-1 error), foreground-client lease acquisition/release, `send_daemon_request`, `request_session_termination`, `gc_client_*` IPC wrappers for the four `clud gc` ops, stale-state cleanup.
 - `client_compat.rs` — version-skew helpers shared by client bringup and server-side shutdown authorization, including SemVer precedence and old-daemon connection signatures.
 - `client_leases.rs` — daemon-owned foreground-client lease registry keyed by PID plus process start time. Acquires and releases are idempotent, and one batched PID refresh prunes clients that exit without releasing.
 - `runtime_config.rs` — typed, startup-only daemon policy. `CLUD_DAEMON_TEST_MODE=1` enables the scanner-free self-expiring integration profile; production ignores test lifetime overrides.

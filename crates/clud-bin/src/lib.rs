@@ -75,6 +75,8 @@ pub mod repo_clud_config;
 pub mod route_health;
 pub mod runner;
 pub mod runtime_cache;
+pub mod selector;
+pub mod server_settings;
 pub mod session;
 pub mod session_index;
 pub mod session_registry;
@@ -95,6 +97,7 @@ pub(crate) mod test_env;
 
 pub mod symbols;
 pub mod test_runtime;
+pub mod toast;
 pub mod tool_cli;
 pub mod tool_info;
 pub mod tool_install;

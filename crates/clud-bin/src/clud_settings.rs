@@ -413,19 +413,23 @@ fn provider_profile_from_document(
 
     let model = read_string("model")?
         .map(|value| {
-            let entry = provider_catalog::model_by_cli_id(value).ok_or_else(|| {
-                invalid_provider_profile(
-                    provider,
-                    format!("model '{value}' is not a canonical catalog ID"),
-                )
-            })?;
+            // A canonical ID retired by a provider rename (#1192) still loads,
+            // normalized to its successor; wire IDs and shorthand stay rejected.
+            let entry = provider_catalog::model_by_cli_id(value)
+                .or_else(|| provider_catalog::model_by_retired_cli_id(value))
+                .ok_or_else(|| {
+                    invalid_provider_profile(
+                        provider,
+                        format!("model '{value}' is not a canonical catalog ID"),
+                    )
+                })?;
             if entry.provider != provider {
                 return Err(invalid_provider_profile(
                     provider,
                     format!("model '{value}' belongs to provider '{}'", entry.provider),
                 ));
             }
-            Ok(value.to_string())
+            Ok(entry.cli_id.to_string())
         })
         .transpose()?;
     let harness = read_string("harness")?
@@ -953,6 +957,56 @@ pub fn load_cpu_banner_settings_at(home: &Path) -> Result<CpuBannerSettings, Set
     }
     if let Some(secs) = section.get("heartbeat_secs").and_then(Value::as_u64) {
         out.heartbeat_secs = secs;
+    }
+    Ok(out)
+}
+
+/// `[foreground.toasts]` (#1189): in-terminal toasts and the Claude
+/// status-line surface.
+///
+/// ```json
+/// { "foreground": { "toasts": { "enabled": true, "claude_statusline": true } } }
+/// ```
+///
+/// `enabled = false` restores silent sessions (no compositor, no status-line
+/// injection). `claude_statusline = false` keeps in-terminal toasts but stops
+/// clud from composing a `statusLine` into Claude launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToastSettings {
+    pub enabled: bool,
+    pub claude_statusline: bool,
+}
+
+impl Default for ToastSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            claude_statusline: true,
+        }
+    }
+}
+
+pub fn load_toast_settings() -> Result<ToastSettings, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_toast_settings_at(&home)
+}
+
+pub fn load_toast_settings_at(home: &Path) -> Result<ToastSettings, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    let mut out = ToastSettings::default();
+    let Some(section) = document
+        .get("foreground")
+        .and_then(|item| item.get("toasts"))
+    else {
+        return Ok(out);
+    };
+    if let Some(enabled) = section.get("enabled").and_then(Value::as_bool) {
+        out.enabled = enabled;
+    }
+    if let Some(statusline) = section.get("claude_statusline").and_then(Value::as_bool) {
+        out.claude_statusline = statusline;
     }
     Ok(out)
 }

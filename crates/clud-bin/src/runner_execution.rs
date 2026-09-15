@@ -98,6 +98,7 @@ fn emit_rendered_line(bytes: &[u8], captured_output: &mut String) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_plan_pty(
     plan: &command::LaunchPlan,
     job_tracker: Option<&crate::job_orphan_reaper::ForegroundJobTracker>,
@@ -106,11 +107,22 @@ pub fn run_plan_pty(
     dnd_enabled: bool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
     cpu_banner_cfg: cpu_banner::CpuBannerCfg,
+    toast_cfg: crate::toast::ToastLaunchCfg,
 ) -> i32 {
+    // #1189: one toast hub for the whole launch. Every PTY iteration builds a
+    // compositor over it, so the banner thread safely outlives iterations.
+    let toast_hub = crate::toast::ToastHub::new();
+    let status_writer = crate::toast::launch::statusline_writer(plan, toast_cfg);
+    let banner_sink = if toast_cfg.enabled {
+        crate::toast::ToastSink::Hub(std::sync::Arc::clone(&toast_hub))
+    } else {
+        crate::toast::ToastSink::Discard
+    };
     // Issue #466: CPU-burn banner. Same shape as the subprocess runner —
     // background thread is stopped on drop at function exit, with a bounded
     // wait (#1172). Inert when cfg.enabled = false.
-    let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
+    crate::toast::launch::publish_demo_toast(&banner_sink);
+    let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg, banner_sink);
 
     // Issue #79 / #65 / #66: register the console IDropTarget for PTY
     // launches. The injector writes into `dnd_rx` which the pump drains
@@ -129,9 +141,13 @@ pub fn run_plan_pty(
         (None, None)
     };
 
-    let runtime = match crate::foreground_runtime::ForegroundRuntime::start(
+    let statusline = status_writer
+        .as_deref()
+        .and_then(crate::toast::launch::injection_for);
+    let runtime = match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
         plan,
         child_env_for_backend(plan.backend),
+        statusline.as_ref(),
     ) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -157,6 +173,22 @@ pub fn run_plan_pty(
             "[clud] graphics: {} ({})",
             graphics_decision.reason,
             crate::graphics::capability_summary(terminal_capabilities.as_ref())
+        ));
+    }
+    let toast_tier = if toast_cfg.enabled {
+        let env = |name: &str| std::env::var(name).ok();
+        crate::toast::tier::decide(terminal_capabilities.as_ref(), &env, false)
+    } else {
+        crate::toast::tier::TierDecision {
+            tier: crate::toast::tier::ToastTier::Off,
+            reason: "toasts disabled".to_string(),
+        }
+    };
+    let toast_fallback = crate::toast::launch::fallback_for(plan, status_writer.as_ref());
+    if verbose {
+        verbose_log::log(format_args!(
+            "[clud] toasts: tier={:?} fallback={:?} ({})",
+            toast_tier.tier, toast_fallback, toast_tier.reason
         ));
     }
 
@@ -309,15 +341,34 @@ pub fn run_plan_pty(
         // #1181: only Codex gets the bare-LF -> CRLF output filter; see
         // `codex_lf.rs` for why it must stay off for every other backend.
         let normalize_bare_lf = matches!(plan.backend, crate::backend::Backend::Codex);
-        let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose_and_graphics_and_filters(
+        let toasts = toast_cfg
+            .enabled
+            .then(|| crate::toast::compositor::ToastPumpOptions {
+                hub: std::sync::Arc::clone(&toast_hub),
+                // The Sixel header owns a scroll region the compositor does
+                // not model; keep toasts out of the grid while it is shown.
+                tier: if header.is_some() {
+                    crate::toast::tier::ToastTier::Fallback
+                } else {
+                    toast_tier.tier
+                },
+                fallback: toast_fallback.clone(),
+                rows,
+                cols,
+                image_id: crate::toast::kitty::image_id_for_process(std::process::id()),
+            });
+        let exit_code = session::run_raw_pty_pump_with_extras(
             &process,
             interrupted,
             &mut hooks,
             io::stdin(),
             extra_rx,
             verbose,
-            graphics_resize,
-            normalize_bare_lf,
+            session::PumpExtras {
+                graphics: graphics_resize,
+                normalize_bare_lf,
+                toasts,
+            },
         );
         drop(_raw_guard);
         drop(_console_guard);

@@ -213,6 +213,107 @@ impl ForegroundRuntime {
         })
     }
 
+    /// [`Self::start`] plus a chained Claude `statusLine` that shows clud's
+    /// toasts (#1189). `None` behaves exactly like `start`.
+    pub fn start_with_statusline(
+        plan: &LaunchPlan,
+        env: Vec<(String, String)>,
+        statusline: Option<&crate::toast::launch::StatuslineInjection>,
+    ) -> Result<Self, BridgeError> {
+        let mut runtime = Self::start(plan, env)?;
+        if let Some(injection) = statusline {
+            let home = dirs::home_dir();
+            runtime.inject_statusline(plan, injection, home.as_deref())?;
+        }
+        Ok(runtime)
+    }
+
+    /// Compose clud's `statusLine` into this launch's Claude settings (#1189).
+    ///
+    /// The user's effective status line (explicit `--settings`, then project,
+    /// then `~/.claude`) is chained, not replaced: `clud statusline` runs it
+    /// first and appends the toast. The setting reaches Claude through the
+    /// same single launch-scoped `--settings` source hooks use — merged into
+    /// that file when one exists, or into the user's own `--settings`
+    /// document, which then replaces the user's argument.
+    ///
+    /// This is a deliberate exception to "a repo that has not opted in sees an
+    /// identical launch": with toasts enabled every Claude launch carries
+    /// `--settings`. `[foreground.toasts] claude_statusline = false` restores
+    /// the old argv (DD-071).
+    pub(crate) fn inject_statusline(
+        &mut self,
+        plan: &LaunchPlan,
+        injection: &crate::toast::launch::StatuslineInjection,
+        home: Option<&Path>,
+    ) -> Result<(), BridgeError> {
+        use crate::toast::statusline;
+
+        if plan.effective_harness() != Backend::Claude {
+            return Ok(());
+        }
+        let project_dir = plan
+            .cwd
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let compose = |document: &mut serde_json::Value| -> bool {
+            let user = statusline::discover_user_statusline(Some(&*document), &project_dir, home);
+            let chain = statusline::chained_command(user.as_ref());
+            let Some(command) = statusline::statusline_command(
+                &injection.exe,
+                injection.session_pid,
+                &injection.state_dir,
+                chain.as_deref(),
+                cfg!(windows),
+            ) else {
+                return false;
+            };
+            let Some(object) = document.as_object_mut() else {
+                return false;
+            };
+            object.insert(
+                "statusLine".to_string(),
+                statusline::compose_setting(user.as_ref(), command),
+            );
+            true
+        };
+
+        if let Some(existing) = &self.claude_settings {
+            let text = std::fs::read_to_string(&existing.value).map_err(|error| {
+                BridgeError::Settings(format!(
+                    "failed to read launch-scoped Claude settings: {error}"
+                ))
+            })?;
+            let mut document: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                BridgeError::Settings(format!(
+                    "failed to parse launch-scoped Claude settings: {error}"
+                ))
+            })?;
+            if compose(&mut document) {
+                std::fs::write(&existing.value, document.to_string()).map_err(|error| {
+                    BridgeError::Settings(format!(
+                        "failed to write launch-scoped Claude settings: {error}"
+                    ))
+                })?;
+            }
+            return Ok(());
+        }
+
+        let (mut document, replaces_user_argument) = match user_settings_argument(&plan.command)? {
+            Some(argument) => (read_user_settings(argument, plan.cwd.as_deref())?, true),
+            None => (serde_json::json!({}), false),
+        };
+        if compose(&mut document) {
+            self.claude_settings = Some(write_launch_scoped_settings(
+                document,
+                replaces_user_argument,
+            )?);
+        }
+        Ok(())
+    }
+
     pub fn env(&self) -> &[(String, String)] {
         &self.env
     }
@@ -436,10 +537,13 @@ fn apply_anthropic_compat_overlay(
         .and_then(|selection| selection.wire_model.as_deref())
         .unwrap_or(default_wire_model);
     let role_models = descriptor.role_models;
+    // A served subagent name (#1192) replaces the descriptor's compiled-in one.
+    let subagent_wire_id = crate::server_settings::provider_subagent_model(descriptor.provider)
+        .unwrap_or(descriptor.subagent_wire_id);
     let opus_model = role_models.map_or(model, |roles| roles.opus);
     let sonnet_model = role_models.map_or(model, |roles| roles.sonnet);
-    let haiku_model = role_models.map_or(descriptor.subagent_wire_id, |roles| roles.haiku);
-    let subagent_model = role_models.map_or(descriptor.subagent_wire_id, |roles| roles.subagent);
+    let haiku_model = role_models.map_or(subagent_wire_id, |roles| roles.haiku);
+    let subagent_model = role_models.map_or(subagent_wire_id, |roles| roles.subagent);
     env.extend([
         (
             "ANTHROPIC_BASE_URL".to_string(),
@@ -1398,23 +1502,23 @@ mod tests {
                 ),
                 (
                     "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_MODEL".to_string(),
-                    "deepseek-v4-pro[1m]".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
@@ -1422,7 +1526,7 @@ mod tests {
                 ),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
             ]
         );
@@ -1470,7 +1574,7 @@ mod tests {
                 ),
                 (
                     "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
                 (
                     "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
@@ -1483,7 +1587,7 @@ mod tests {
                 ("ANTHROPIC_MODEL".to_string(), "deepseek-v4-pro".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-                    "deepseek-v4-flash".to_string()
+                    "deepseek-flash[1m]".to_string()
                 ),
             ]
         );
@@ -1538,7 +1642,7 @@ mod tests {
                     // This slot is scrubbed AND re-set by the overlay itself
                     // (the new FABLE pin), so its post-overlay value is the
                     // overlay's own model, not `None` and not the ambient value.
-                    Some("deepseek-v4-pro[1m]")
+                    Some("deepseek-flash[1m]")
                 } else {
                     None
                 },
@@ -1574,11 +1678,11 @@ mod tests {
         );
         assert_eq!(
             lookup(&child, "ANTHROPIC_MODEL"),
-            Some("deepseek-v4-pro[1m]")
+            Some("deepseek-flash[1m]")
         );
         assert_eq!(
             lookup(&child, "CLAUDE_CODE_SUBAGENT_MODEL"),
-            Some("deepseek-v4-flash")
+            Some("deepseek-flash[1m]")
         );
         assert_eq!(
             lookup(&child, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
@@ -2734,5 +2838,161 @@ mod tests {
 
         assert_eq!(settings_argument(&runtime), None);
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
+    }
+
+    // ── #1189: Claude status-line injection ────────────────────────────────
+
+    fn statusline_injection(dir: &Path) -> crate::toast::launch::StatuslineInjection {
+        crate::toast::launch::StatuslineInjection {
+            exe: PathBuf::from("/opt/clud/bin/clud"),
+            session_pid: 4242,
+            state_dir: dir.join("state"),
+        }
+    }
+
+    fn settings_document(runtime: &ForegroundRuntime) -> Option<serde_json::Value> {
+        runtime.claude_settings.as_ref().map(|settings| {
+            serde_json::from_str(&std::fs::read_to_string(&settings.value).unwrap()).unwrap()
+        })
+    }
+
+    fn chain_of(document: &serde_json::Value) -> Option<String> {
+        let command = document["statusLine"]["command"].as_str()?;
+        let encoded = command.split("--chain-b64 ").nth(1)?;
+        crate::toast::statusline::decode_chain(encoded)
+    }
+
+    fn claude_plan_in(dir: &Path) -> LaunchPlan {
+        let mut plan = plan(ModelProvider::Claude, Backend::Claude);
+        plan.cwd = Some(dir.to_string_lossy().into_owned());
+        plan
+    }
+
+    #[test]
+    fn statusline_injection_gives_a_plain_claude_launch_a_settings_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let plan = claude_plan_in(dir.path());
+        let mut runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
+                .unwrap();
+        assert!(
+            runtime.claude_settings.is_none(),
+            "precondition: nothing declared"
+        );
+
+        runtime
+            .inject_statusline(&plan, &statusline_injection(dir.path()), Some(home.path()))
+            .unwrap();
+
+        let document = settings_document(&runtime).expect("settings source created");
+        let command = document["statusLine"]["command"].as_str().unwrap();
+        assert!(
+            command.contains(" statusline --session-pid 4242 "),
+            "{command}"
+        );
+        assert_eq!(
+            document["statusLine"]["refreshInterval"],
+            crate::toast::statusline::REFRESH_INTERVAL_SECS
+        );
+        assert_eq!(chain_of(&document), None, "no user status line to chain");
+        assert!(
+            !runtime
+                .claude_settings
+                .as_ref()
+                .unwrap()
+                .replaces_user_argument
+        );
+    }
+
+    #[test]
+    fn statusline_injection_chains_the_status_line_from_the_users_own_settings_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut plan = claude_plan_in(dir.path());
+        plan.command.push("--settings".to_string());
+        plan.command.push(
+            r#"{"model":"opus","statusLine":{"type":"command","command":"~/bin/mine.sh","padding":1}}"#
+                .to_string(),
+        );
+        let mut runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
+                .unwrap();
+        runtime
+            .inject_statusline(&plan, &statusline_injection(dir.path()), Some(home.path()))
+            .unwrap();
+
+        let settings = runtime.claude_settings.as_ref().unwrap();
+        assert!(
+            settings.replaces_user_argument,
+            "Claude accepts one --settings source"
+        );
+        let document = settings_document(&runtime).unwrap();
+        assert_eq!(
+            document["model"], "opus",
+            "the user's other settings survive"
+        );
+        assert_eq!(document["statusLine"]["padding"], 1);
+        assert_eq!(chain_of(&document).as_deref(), Some("~/bin/mine.sh"));
+    }
+
+    #[test]
+    fn statusline_injection_chains_a_project_status_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        std::fs::write(
+            dir.path().join(".claude/settings.json"),
+            r#"{"statusLine":{"type":"command","command":"npx ccstatusline"}}"#,
+        )
+        .unwrap();
+        let plan = claude_plan_in(dir.path());
+        let mut runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
+                .unwrap();
+        runtime
+            .inject_statusline(&plan, &statusline_injection(dir.path()), Some(home.path()))
+            .unwrap();
+        let document = settings_document(&runtime).unwrap();
+        assert_eq!(chain_of(&document).as_deref(), Some("npx ccstatusline"));
+    }
+
+    #[test]
+    fn statusline_injection_merges_into_the_hooks_settings_file() {
+        let repo = repo_declaring(r#"{"hooks":{"Stop":[{"command":"guard"}]}}"#);
+        let home = tempfile::tempdir().unwrap();
+        let plan = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        let mut runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
+                .unwrap();
+        let before = settings_document(&runtime).expect("hooks produce a settings source");
+        assert!(before.get("hooks").is_some());
+        let path_before = runtime.claude_settings.as_ref().unwrap().value.clone();
+
+        runtime
+            .inject_statusline(&plan, &statusline_injection(repo.path()), Some(home.path()))
+            .unwrap();
+
+        assert_eq!(
+            runtime.claude_settings.as_ref().unwrap().value,
+            path_before,
+            "one settings source, updated in place"
+        );
+        let after = settings_document(&runtime).unwrap();
+        assert_eq!(after["hooks"], before["hooks"], "hooks survive the merge");
+        assert!(after["statusLine"]["command"].is_string());
+    }
+
+    #[test]
+    fn statusline_injection_never_touches_a_codex_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan(ModelProvider::Codex, Backend::Codex);
+        let mut runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
+                .unwrap();
+        runtime
+            .inject_statusline(&plan, &statusline_injection(dir.path()), Some(dir.path()))
+            .unwrap();
+        assert!(runtime.claude_settings.is_none());
     }
 }

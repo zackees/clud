@@ -111,6 +111,9 @@ def copied_clud_env(_source: Path) -> dict[str, str]:
     # trampoline brings zero benefit here (the tmpdir binary is
     # never `pip install`'d at this path). See issues #331, #333.
     env["CLUD_NO_UNLOCK"] = "1"
+    # Pin the built-in server settings so a launch never
+    # fetches the served copy from GitHub during a test (#1192).
+    env["CLUD_SERVER_SETTINGS"] = "0"
     return env
 
 
@@ -532,12 +535,91 @@ def test_dry_run_deepseek() -> None:
     assert data["requested_harness"] == "default"
     assert data["effective_harness"] == "claude"
     assert data["provider_source"] == "cli"
+    # #1192: the served DeepSeek model name (built-in copy here, because the
+    # harness sets CLUD_SERVER_SETTINGS=0) selects DeepSeek V4.1 Flash.
+    assert data["model_selection"]["model"] == "deepseek-flash"
+    assert data["model_selection"]["wire_model"] == "deepseek-flash[1m]"
+    assert data["model_selection"]["model_source"] == "server_default"
+    assert data["model_selection"]["context_window"] == "1m"
     # --dry-run must never touch the native credential vault: this isolated
     # HOME has no stored key, and a vault read/prompt would either hang on
     # stdin (killed by _run's timeout) or surface a vault error instead of a
     # clean dry-run JSON payload.
     assert "sk-" not in result.stdout
     assert "sk-" not in result.stderr
+
+
+_INLINE_DEEPSEEK_KEY = "sk-" + "0123456789abcdef" * 2
+
+
+def test_dry_run_deepseek_inline_key_is_never_forwarded() -> None:
+    """`clud --deepseek <API_KEY>` must not hand the key to the backend as a
+    prompt (the 2.8.1 bug: Windows users' keys were never recognized). A dry
+    run also never touches the vault, so the key appears nowhere."""
+    result = _run("--dry-run", "--deepseek", _INLINE_DEEPSEEK_KEY)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_provider"] == "deepseek"
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout
+    assert _INLINE_DEEPSEEK_KEY not in result.stderr
+    assert all(_INLINE_DEEPSEEK_KEY not in part for part in data["command"])
+
+
+def test_dry_run_deepseek_inline_key_keeps_the_real_prompt() -> None:
+    result = _run("--dry-run", "--deepseek", _INLINE_DEEPSEEK_KEY, "fix the bug")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["command"][-1] == "fix the bug"
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("flag", "key"),
+    [
+        ("--kimi", "sk-" + "a1b2c3d4" * 4),
+        ("--openrouter", "sk-or-v1-" + "0123456789abcdef" * 2),
+    ],
+)
+def test_dry_run_inline_keys_for_other_api_key_providers(flag: str, key: str) -> None:
+    result = _run("--dry-run", flag, key)
+    assert result.returncode == 0, result.stderr
+    assert key not in result.stdout
+    assert key not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("flag", "key", "provider"),
+    [
+        ("--deepseek", _INLINE_DEEPSEEK_KEY, "deepseek"),
+        ("--kimi", "sk-" + "a1b2c3d4" * 4, "kimi"),
+        ("--openrouter", "sk-or-v1-" + "0123456789abcdef" * 2, "openrouter"),
+    ],
+)
+def test_dry_run_inline_key_equals_form_matches_the_space_form(
+    flag: str, key: str, provider: str
+) -> None:
+    """#1197: `--deepseek=<key>` launched plain Claude and forwarded the key to
+    the harness as an unknown flag."""
+    spaced = _run("--dry-run", flag, key, "-p", "hi")
+    equals = _run("--dry-run", f"{flag}={key}", "-p", "hi")
+    assert spaced.returncode == 0, spaced.stderr
+    assert equals.returncode == 0, equals.stderr
+    spaced_data = json.loads(spaced.stdout)
+    equals_data = json.loads(equals.stdout)
+    assert equals_data["model_provider"] == provider
+    assert equals_data["model_selection"] == spaced_data["model_selection"]
+    assert equals_data["command"][-2:] == ["-p", "hi"]
+    assert all(key not in part for part in equals_data["command"])
+    assert key not in equals.stdout
+    assert key not in equals.stderr
+
+
+def test_dry_run_inline_key_equals_form_rejects_a_non_key_value() -> None:
+    result = _run("--dry-run", "--deepseek=not-a-key", "-p", "hi")
+    assert result.returncode == 2, result.stderr
+    assert "--deepseek does not take a value" in result.stderr
+    assert "not-a-key" not in result.stderr
+    assert "not-a-key" not in result.stdout
 
 
 def test_dry_run_openrouter_is_keyless_and_uses_stable_provider_identity() -> None:

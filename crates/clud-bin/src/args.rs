@@ -258,6 +258,13 @@ pub struct Args {
     #[arg(last = true, id = "BACKEND_ARGS")]
     pub passthrough: Vec<String>,
 
+    /// API key typed after an API-key provider flag
+    /// (`clud --deepseek <API_KEY>`), lifted out of `passthrough` at parse time
+    /// so it is stored in the native vault instead of being sent to the model
+    /// as the session's first prompt.
+    #[arg(skip)]
+    pub inline_api_key: Option<InlineApiKey>,
+
     /// Runtime Codex `-c` config overrides loaded from ~/.clud/settings.json.
     #[arg(skip)]
     pub codex_config_overrides: Vec<String>,
@@ -318,6 +325,30 @@ impl Args {
     /// Return only provider intent that came from the command line. Model
     /// inference and saved defaults are resolved later so source metadata does
     /// not accidentally label `--provider` as a global setting.
+    /// Lift an API key out of the backend argv when an API-key provider
+    /// (`--deepseek`, `--kimi`, `--openrouter`, or `--provider` naming one)
+    /// was selected. Before this, `clud --deepseek <API_KEY>` forwarded the
+    /// key to Claude Code as its opening prompt: with no stored key the
+    /// preflight then asked for one and the typed key was never used (the
+    /// common case on fresh Windows installs), and with a stored key the key
+    /// was sent to the model.
+    pub fn extract_inline_api_key(&mut self) {
+        let Some(provider) = self.explicit_model_provider() else {
+            return;
+        };
+        if crate::provider_registry::descriptor_for(provider).is_none() {
+            return;
+        }
+        if let Some(index) = self
+            .passthrough
+            .iter()
+            .position(|token| looks_like_api_key(token))
+        {
+            let key = self.passthrough.remove(index);
+            self.inline_api_key = Some(InlineApiKey::new(key.trim()));
+        }
+    }
+
     pub fn explicit_model_provider(&self) -> Option<ModelProvider> {
         if self.deepseek {
             Some(ModelProvider::DeepSeek)
@@ -635,6 +666,18 @@ pub enum Command {
         /// Print current settings and exit; no TUI, no raw terminal mode.
         #[arg(long = "list")]
         list: bool,
+    },
+    /// Internal (#1189): print clud's toast inside Claude Code's status line.
+    /// Claude Code runs this as the injected `statusLine` command.
+    #[command(name = "statusline", hide = true)]
+    Statusline {
+        #[arg(long = "session-pid")]
+        session_pid: u32,
+        #[arg(long = "state-dir")]
+        state_dir: PathBuf,
+        /// The user's own status-line command, base64url, run first.
+        #[arg(long = "chain-b64")]
+        chain_b64: Option<String>,
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
@@ -1107,6 +1150,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "codex-auth",
     "deepseek-auth",
     "run",
+    "statusline",
     "__daemon",
     "__worker",
 ];
@@ -1119,6 +1163,15 @@ impl Args {
 
     pub fn parse_from_raw(raw: Vec<String>) -> Self {
         let normalized = normalize_bare_resume_before_subcommand(&raw);
+        let normalized = match split_inline_key_assignments(&normalized) {
+            Ok(normalized) => normalized,
+            Err(message) => {
+                use clap::CommandFactory;
+                Args::command()
+                    .error(clap::error::ErrorKind::InvalidValue, message)
+                    .exit()
+            }
+        };
         let (known, unknown) = split_known_unknown(&normalized);
         let mut args = Args::parse_from(known);
         if args
@@ -1129,6 +1182,7 @@ impl Args {
             args.resume = Some(None);
         }
         args.passthrough.extend(unknown);
+        args.extract_inline_api_key();
         args.raw_argv = raw;
         args
     }
@@ -1156,6 +1210,43 @@ fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
         }
     }
     normalized
+}
+
+/// Provider flags that accept an inline API key.
+const INLINE_KEY_PROVIDER_FLAGS: &[&str] = &["--deepseek", "--kimi", "--openrouter"];
+
+/// `--deepseek=<API_KEY>` must behave exactly like `--deepseek <API_KEY>`
+/// (#1197). The provider flags are on/off switches, so the splitter never
+/// matched the `=` form: it forwarded the whole token, key included, to the
+/// harness as an unknown flag and launched plain Claude. A key-shaped value is
+/// split into its own token, where [`Args::extract_inline_api_key`] lifts it
+/// out. Any other value is an error rather than a passthrough token, so nothing
+/// typed after `=` can reach the harness argv; the message never echoes it.
+fn split_inline_key_assignments(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut normalized = Vec::with_capacity(raw.len() + 1);
+    let mut in_clud_flags = true;
+    for (index, arg) in raw.iter().enumerate() {
+        if index > 0 && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str())) {
+            in_clud_flags = false;
+        }
+        let assignment = arg.split_once('=').filter(|(flag, _)| {
+            in_clud_flags && index > 0 && INLINE_KEY_PROVIDER_FLAGS.contains(flag)
+        });
+        match assignment {
+            Some((flag, value)) if looks_like_api_key(value) => {
+                normalized.push(flag.to_string());
+                normalized.push(value.trim().to_string());
+            }
+            Some((flag, _)) => {
+                return Err(format!(
+                    "{flag} does not take a value; pass an API key as `{flag} <API_KEY>` or \
+                     `{flag}=<API_KEY>` (keys start with `sk-`)"
+                ));
+            }
+            None => normalized.push(arg.clone()),
+        }
+    }
+    Ok(normalized)
 }
 
 fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
@@ -1191,6 +1282,9 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         // Issue #469: `clud log --cmd "..."` arg.
         "--cmd",
         "--set-web-term",
+        // #1189: hidden `clud statusline` arguments.
+        "--session-pid",
+        "--chain-b64",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
@@ -1335,3 +1429,43 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 #[path = "args_tests.rs"]
 mod tests;
+
+/// A provider API key passed on the command line. `Debug` never prints it, so
+/// verbose logging of [`Args`] cannot leak it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct InlineApiKey(String);
+
+impl InlineApiKey {
+    pub fn new(key: &str) -> Self {
+        Self(key.to_string())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for InlineApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InlineApiKey(<redacted>)")
+    }
+}
+
+impl Drop for InlineApiKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
+/// Whether a bare argv token is an API key rather than a prompt. DeepSeek,
+/// Kimi and OpenRouter keys all start `sk-` and contain no spaces; no
+/// plausible opening prompt looks like that.
+pub fn looks_like_api_key(token: &str) -> bool {
+    let token = token.trim();
+    token.len() >= 20
+        && token.starts_with("sk-")
+        && token[3..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}

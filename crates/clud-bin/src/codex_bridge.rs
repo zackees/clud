@@ -4195,7 +4195,7 @@ Connection: close
         // The recorded set must be the one actually served, not the whole
         // catalog: DeepSeek and Codex are credentialed here, Claude never is.
         assert!(text.contains("clud-claude-codex-terra"), "{text}");
-        assert!(text.contains("clud-claude-deepseek-v4-flash"), "{text}");
+        assert!(text.contains("clud-claude-deepseek-flash"), "{text}");
         // Claude rows are never advertised through the unified catalog, so
         // their absence is part of the contract this record captures.
         assert!(!text.contains("clud-claude-openrouter"), "{text}");
@@ -4338,7 +4338,7 @@ Connection: close
                 "clud-claude-codex-terra",
                 "clud-claude-codex-luna",
                 "clud-claude-deepseek-v4-pro-0813",
-                "clud-claude-deepseek-v4-flash",
+                "clud-claude-deepseek-flash",
             ],
             "catalog ordering is part of the picker contract"
         );
@@ -4351,7 +4351,7 @@ Connection: close
                 "Codex Terra (OpenAI)",
                 "Codex Luna (OpenAI)",
                 "DeepSeek V4 Pro 0813",
-                "DeepSeek V4 Flash",
+                "DeepSeek V4.1 Flash",
             ]
         );
         for secret in [bridge.bearer_token(), "deepseek-test-secret"] {
@@ -4433,7 +4433,7 @@ Connection: close
             "clud-claude-codex-terra",
             "clud-claude-codex-luna",
             "clud-claude-deepseek-v4-pro-0813",
-            "clud-claude-deepseek-v4-flash",
+            "clud-claude-deepseek-flash",
         ] {
             let response = request(
                 bridge.socket_addr(),
@@ -4481,7 +4481,7 @@ Connection: close
         assert_eq!(deepseek_requests.len(), 2);
         for (raw, wire_id) in deepseek_requests
             .iter()
-            .zip(["deepseek-v4-pro[1m]", "deepseek-v4-flash"])
+            .zip(["deepseek-v4-pro[1m]", "deepseek-flash[1m]"])
         {
             assert!(raw.starts_with("POST /v1/messages "));
             assert!(raw.contains(wire_id), "{raw}");
@@ -4550,7 +4550,7 @@ Connection: close
             bridge.socket_addr(),
             &unified_message_request(
                 &bridge,
-                "clud-claude-deepseek-v4-flash",
+                "clud-claude-deepseek-flash",
                 "failover-session",
                 "native-claude-oauth-canary",
             ),
@@ -4579,7 +4579,7 @@ Connection: close
             "the replay must carry the rung's model: {replayed}"
         );
         assert!(
-            replayed.contains("route clud-claude-deepseek-v4-flash"),
+            replayed.contains("route clud-claude-deepseek-flash"),
             "the replay must carry the caller's original transcript: {replayed}"
         );
         assert!(
@@ -4654,7 +4654,7 @@ Connection: close
             UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
                 .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
                 .with_failover(
-                    FailoverLadder::parse("claude-opus-4-1,deepseek-v4-flash", false).unwrap(),
+                    FailoverLadder::parse("claude-opus-4-1,deepseek-flash", false).unwrap(),
                 ),
         );
         let bridge = BridgeHandle::start(config).unwrap();
@@ -4690,7 +4690,7 @@ Connection: close
             addr,
             &unified_message_request(
                 &bridge,
-                "clud-claude-deepseek-v4-flash",
+                "clud-claude-deepseek-flash",
                 "status-session",
                 "native-claude-oauth-canary",
             ),
@@ -4759,7 +4759,7 @@ Connection: close
                 addr,
                 &unified_message_request(
                     &bridge,
-                    "clud-claude-deepseek-v4-flash",
+                    "clud-claude-deepseek-flash",
                     session,
                     "native-claude-oauth-canary",
                 ),
@@ -4825,7 +4825,7 @@ Connection: close
             bridge.socket_addr(),
             &unified_message_request(
                 &bridge,
-                "clud-claude-deepseek-v4-flash",
+                "clud-claude-deepseek-flash",
                 "fatal-session",
                 "native-claude-oauth-canary",
             ),
@@ -4858,7 +4858,7 @@ Connection: close
             bridge.socket_addr(),
             &unified_message_request(
                 &bridge,
-                "clud-claude-deepseek-v4-flash",
+                "clud-claude-deepseek-flash",
                 "no-ladder-session",
                 "native-claude-oauth-canary",
             ),
@@ -5046,7 +5046,7 @@ Connection: close
         );
         assert_eq!(status(&first_codex), 200, "{first_codex}");
         let switched_deepseek = turn(
-            "clud-claude-deepseek-v4-flash",
+            "clud-claude-deepseek-flash",
             serde_json::json!([
                 {"role": "user", "content": "first claude prompt"},
                 {"role": "assistant", "content": "first claude visible answer"},
@@ -5232,7 +5232,7 @@ Connection: close
         let bridge = BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
         let models = [
             ("clud-claude-deepseek-v4-pro-0813", "deepseek-v4-pro[1m]"),
-            ("clud-claude-deepseek-v4-flash", "deepseek-v4-flash"),
+            ("clud-claude-deepseek-flash", "deepseek-flash[1m]"),
         ];
         // DeepSeek, not clud, owns this compatibility mapping. Assert both the
         // unchanged gateway payload and the provider-documented effective
@@ -5298,7 +5298,7 @@ Connection: close
             }
         }
 
-        let future = r#"{"model":"clud-claude-deepseek-v4-flash","messages":[{"role":"user","content":"future effort"}],"output_config":{"effort":"future-provider-level"},"stream":false}"#;
+        let future = r#"{"model":"clud-claude-deepseek-flash","messages":[{"role":"user","content":"future effort"}],"output_config":{"effort":"future-provider-level"},"stream":false}"#;
         assert_eq!(
             status(&unified_request(&bridge, future, "deepseek-future", None)),
             200
@@ -5404,7 +5404,7 @@ Connection: close
         );
 
         let agent = turn(
-            "clud-claude-deepseek-v4-flash",
+            "clud-claude-deepseek-flash",
             serde_json::json!([{"role": "user", "content": "agent override"}]),
             "xhigh",
         );

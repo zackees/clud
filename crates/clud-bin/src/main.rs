@@ -4,7 +4,7 @@ use clud::{
     graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
     launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth,
     runner, runtime_cache, settings_tui, soldr_activate, stage_trace, startup, symbols,
-    test_runtime, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
+    test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
     verbose_log, wasm, webterm, workspace_trust, worktrees,
 };
 
@@ -47,6 +47,21 @@ fn run(mut args: args::Args) {
     // utility and internal dispatch has returned.
     unsafe {
         std::env::remove_var(daemon::ENV_ALLOW_DAEMON_SPAWN);
+    }
+    // #1189: Claude Code runs `clud statusline` as its statusLine command
+    // every couple of seconds. Like `clud tool`, it must not touch the daemon,
+    // the runtime cache, or any launch machinery.
+    if let Some(args::Command::Statusline {
+        session_pid,
+        state_dir,
+        chain_b64,
+    }) = &args.command
+    {
+        std::process::exit(toast::statusline::run(&toast::statusline::RunArgs {
+            session_pid: *session_pid,
+            state_dir: state_dir.clone(),
+            chain_b64: chain_b64.clone(),
+        }));
     }
     // Fast tool path. Detect `clud tool ...` before
     // normal clud startup so hook/tool invocations do not connect to the
@@ -447,20 +462,32 @@ fn run(mut args: args::Args) {
             std::process::exit(2);
         }
     }
-    args.resolved_model_selection = match clud::provider_catalog::resolve_for_launch(
-        launch_target.model_provider,
-        args.model.as_deref(),
-        args.effort.as_deref(),
-        args.context_window.as_deref(),
-        provider_profile.map(clud_settings::ProviderProfile::selection_defaults),
-        launch_target.routing_mode == backend::RoutingMode::Direct,
-    ) {
-        Ok(selection) => selection,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    };
+    let saved_selection = provider_profile.map(clud_settings::ProviderProfile::selection_defaults);
+    let direct_launch = launch_target.routing_mode == backend::RoutingMode::Direct;
+    // Only a launch that would otherwise fall back to the catalog default asks
+    // for the served model name, so an explicit or saved model never waits on
+    // the network (#1192).
+    let server_default = (direct_launch
+        && args.model.is_none()
+        && saved_selection.and_then(|saved| saved.model).is_none())
+    .then(|| clud::server_settings::provider_default_model(launch_target.model_provider))
+    .flatten();
+    args.resolved_model_selection =
+        match clud::provider_catalog::resolve_for_launch_with_server_default(
+            launch_target.model_provider,
+            args.model.as_deref(),
+            args.effort.as_deref(),
+            args.context_window.as_deref(),
+            saved_selection,
+            direct_launch,
+            server_default,
+        ) {
+            Ok(selection) => selection,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
     if launch_target.routing_mode == backend::RoutingMode::Unified {
         if let Some(selection) = args
             .resolved_model_selection
@@ -601,6 +628,32 @@ fn run(mut args: args::Args) {
     // Anthropic-compat-provider (DeepSeek today) work is accepted. Dry-runs
     // intentionally remain vault-free -- `launch_preflight_target` returns
     // `None` for every dry run regardless of provider.
+    //
+    // `clud --deepseek <API_KEY>` (and `--kimi` / `--openrouter`): the key was
+    // lifted out of the backend argv at parse time, so it is never sent to the
+    // model as a prompt. Store it before the preflight looks for one. A dry
+    // run never touches the vault.
+    if let Some(key) = args.inline_api_key.take() {
+        let descriptor = args
+            .explicit_model_provider()
+            .and_then(clud::provider_registry::descriptor_for);
+        if let (Some(descriptor), false) = (descriptor, args.dry_run) {
+            match provider_auth::store_inline_api_key(descriptor, key.expose()) {
+                Ok(true) => eprintln!(
+                    "[clud] {} API key stored in the native credential vault",
+                    descriptor.display_name
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "{}: could not store the API key passed on the command line: {error}",
+                        descriptor.settings_id
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
     if launch_target.effective_harness != backend::Backend::DeepSeek {
         if let Some(descriptor) =
             provider_auth::launch_preflight_target(launch_target.model_provider, args.dry_run)
@@ -1118,6 +1171,8 @@ fn run(mut args: args::Args) {
     // `[foreground.cpu_banner] enabled = false` settings toggle. Builds an
     // inert cfg in any of those cases so `BannerWatcher::spawn` is a no-op.
     let cpu_banner_cfg = build_cpu_banner_cfg(&args, &plan);
+    // #1189: where the banner's toasts render; off whenever the banner is.
+    let toast_cfg = build_toast_launch_cfg(&cpu_banner_cfg);
 
     // Issue #1102: say once, here, that the harness has no trust decision for
     // this workspace and will therefore ignore its `.claude/settings*.json`.
@@ -1149,6 +1204,7 @@ fn run(mut args: args::Args) {
                 interrupted.as_ref(),
                 loop_session.as_mut(),
                 cpu_banner_cfg,
+                toast_cfg,
             ),
             backend::LaunchMode::Pty => runner::run_plan_pty(
                 &plan,
@@ -1158,6 +1214,7 @@ fn run(mut args: args::Args) {
                 startup::should_register_drop_target(&args),
                 loop_session.as_mut(),
                 cpu_banner_cfg,
+                toast_cfg,
             ),
         }
     };
@@ -1346,4 +1403,7 @@ fn run(mut args: args::Args) {
 
 #[path = "main_helpers.rs"]
 mod main_helpers;
-use main_helpers::{build_cpu_banner_cfg, flush_ctrl_c_exit_event, record_repo_visit_best_effort};
+use main_helpers::{
+    build_cpu_banner_cfg, build_toast_launch_cfg, flush_ctrl_c_exit_event,
+    record_repo_visit_best_effort,
+};

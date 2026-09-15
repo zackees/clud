@@ -68,18 +68,52 @@ Known compatibility spellings normalize immediately:
 - `terra@high` -> model `codex-terra`, effort `high`;
 - `gpt-5.6-terra` -> model `codex-terra`, wire ID unchanged;
 - `deepseek-v4-pro[1m]` -> model `deepseek-v4-pro`, context window `1m`;
+- `deepseek-v4-flash` -> model `deepseek-flash`, wire ID `deepseek-flash[1m]`;
 - `opus` -> model `claude-opus`, wire alias `opus`.
 
-DeepSeek upgrades its stable API aliases in place. As of 2026-08-12,
-DeepSeek's live Models & Pricing page identifies the stable alias as
-`DeepSeek-V4-Pro-0813`; it continues to use `deepseek-v4-pro` (or
-`deepseek-v4-pro[1m]` for Claude Code), rather than a version-suffixed API
-model ID. The catalog display name and clud-owned discovery ID
-(`clud-claude-deepseek-v4-pro-0813`) record the served checkpoint so stale
-catalog metadata is visible in model-picker and settings UIs, while the CLI
-and wire IDs stay on DeepSeek's documented stable aliases. The retired
+DeepSeek upgrades its API aliases in place and occasionally renames them. As
+of 2026-09-14, DeepSeek's Models & Pricing page lists `deepseek-flash`
+(DeepSeek-V4.1-Flash, 1M context) and `deepseek-v4-pro`
+(`DeepSeek-V4-Pro-0813`). `deepseek-v4-flash` is a retired name that DeepSeek
+still routes for compatibility. The `deepseek-flash` row is DeepSeek's reviewed
+default, with the `deepseek-flash[1m]` wire ID in every Claude Code slot, including
+haiku/subagent. DeepSeek's guide uses the auto-context `deepseek-flash` for
+those two slots. clud uses the 1m model there too, because it is cheap enough
+to use everywhere. The
+retired `deepseek-v4-flash` spelling and `clud-claude-deepseek-v4-flash`
+discovery ID remain aliases of that row, so saved profiles, failover ladders and
+cached picker rows follow the rename. For Pro, the catalog display name and
+clud-owned discovery ID (`clud-claude-deepseek-v4-pro-0813`) record the served
+checkpoint, so stale catalog metadata is visible in model-picker and settings
+UIs, while the CLI and wire IDs stay on DeepSeek's stable alias. The retired
 `clud-claude-deepseek-v4-pro` discovery ID remains routable for cached or
 already-selected picker rows.
+
+### Served DeepSeek model names
+
+DeepSeek's default and haiku/subagent model names come from the `deepseek`
+section of the [server-side settings](server-settings.md) (#1192). A DeepSeek
+rename therefore reaches installed builds without a release. Currently
+`default_model` is `deepseek-flash`, which the catalog resolves to
+`deepseek-flash[1m]`, and `subagent_model` is `deepseek-flash[1m]`. The section
+may only name `deepseek-*` IDs
+(`[A-Za-z0-9._-]{1,64}`, optionally suffixed `[1m]`).
+
+For a direct DeepSeek launch, the default model is chosen in this order:
+
+1. `--model`;
+2. saved `providers.deepseek.model`;
+3. the served `default_model`, reported as `model_source: server_default`;
+4. the catalog's reviewed default.
+
+The served settings are read only when neither of the first two is set.
+`subagent_model` fills `ANTHROPIC_DEFAULT_HAIKU_MODEL` and
+`CLAUDE_CODE_SUBAGENT_MODEL`. Unified-gateway discovery rows stay static catalog
+data.
+
+A served name that the catalog does not know still launches, but it gets no
+catalog effort default or compaction window. Spell its context as `name[1m]`
+in the served value. Adding a catalog row restores that metadata.
 
 An unknown future `gpt-*` wire ID remains directly reachable for backwards
 compatibility. Its normalized selection records Codex as the provider while

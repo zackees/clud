@@ -21,6 +21,8 @@ fn run_isolated(home: &std::path::Path, args: &[&str]) -> (i32, Vec<u8>) {
     let home = home.to_string_lossy().into_owned();
     env.push(("HOME".to_string(), home.clone()));
     env.push(("USERPROFILE".to_string(), home));
+    // Never fetch server settings during a test (#1192).
+    env.push(("CLUD_SERVER_SETTINGS".to_string(), "0".to_string()));
 
     let process = NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(argv),

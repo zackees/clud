@@ -30,6 +30,14 @@ the integration tests.
 - [dnd/](dnd/README.md) - drag-and-drop into the terminal: cross-platform
   path-string normalizer plus Windows-only `IDropTarget` adapter with
   per-launch-mode injectors.
+- [server_settings/](server_settings/README.md) - server-side settings (#1192):
+  the `assets/server-settings.json` baked into the binary and refreshed from
+  `main`, falling back section by section to the last valid value, plus a strict
+  JSON parser. See `docs/architecture/server-settings.md`.
+- [toast/](toast/README.md) - in-terminal toasts (#1189): toast model and
+  hub, the PTY writer-thread compositor (kitty graphics, alternate-screen text
+  cells, title/status-line fallback), Claude `statusLine` chaining, and
+  click-to-dismiss. See `docs/architecture/toasts.md`.
 - [voice/](voice/README.md) - F3 push-to-talk voice mode: mic capture,
   start/stop cues, `whisper-rs` worker thread, transcript injection into the
   backend PTY.
@@ -185,6 +193,11 @@ CLI surface and backend resolution:
 - `provider_catalog.rs` - the single registry mapping stable clud model IDs,
   gateway discovery IDs, provider wire IDs, compatibility aliases, and
   independent effort/context capability metadata.
+- `selector.rs` - the one inline terminal selector (#1195, DD-073). It owns
+  raw mode, cursor hide/show, pending-input draining, key decoding, CRLF-only
+  rendering with wrap-aware row counts, and redraw/erase. The launch-scope
+  prompt, the harness picker, and `clud settings` each implement its
+  `Selector` trait and render through it.
 - `preference.rs` - shared pure typed-choice state machine used by launch
   scope and global settings selectors.
 - `subprocess.rs` - single decision point for the Windows `.cmd`/`.bat`
@@ -217,7 +230,10 @@ Console and terminal:
   PTY master. Since issue #538 the pump splits output onto a dedicated
   reader thread + stdout-writer thread (`run_output_writer`) so a slow
   terminal flush never delays stdin forwarding — see
-  `docs/architecture/session-lifecycle.md` and DD-018.
+  `docs/architecture/session-lifecycle.md` and DD-018. Since #1189 the writer
+  thread optionally runs the toast compositor
+  (`session_output.rs::run_output_writer_composited`) and the stdin path runs
+  the toast close-button mouse filter; see `docs/architecture/toasts.md`.
 
 Loop subsystem (`clud loop`):
 
@@ -468,6 +484,9 @@ Platform glue:
 
 - `trampoline.rs` - Windows-only rename-self-and-copy-back trick so
   `pip install` can always overwrite `Scripts/clud.exe`. No-op on POSIX.
+  Also hosts `relay_child_and_wait`, the runtime-cache relay that must stay
+  raw `std::process` (#333). The daemon detach moved to
+  `daemon/client.rs::spawn_detached_daemon` (#1186).
 - `win_creation_flags.rs` - `invisible_helper_creationflags()` returns
   `CREATE_NO_WINDOW` on Windows for daemon-helper spawns; `0` elsewhere so call
   sites stay portable.
@@ -528,8 +547,9 @@ Diagnostics and misc:
 
 - `cpu_banner.rs` - issue #466: foreground CPU-burn banner. Spawns one
   background `sysinfo` sampler that ticks every 2 s, sums `cpu_usage()` +
-  `memory()` over the parent-PID subtree rooted at our originator, and emits
-  `[clud] cpu N % · X.Y / Z cores · …` to stderr when subtree CPU crosses
+  `memory()` over the parent-PID subtree rooted at our originator, and
+  publishes a `cpu N % · X.Y / Z cores · …` toast (#1189: never stderr, which
+  corrupted the harness TUI; see [toast/](toast/README.md)) when subtree CPU crosses
   `max(50 %, 0.20 × num_cpus × 100 %)` for 3 sustained ticks. Hysteretic
   drop-out at 0.7×; 30 s heartbeat while sustained; clear-banner only after
   ≥ 60 s episodes. Wired into `runner::run_plan_subprocess` and

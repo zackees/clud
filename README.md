@@ -66,6 +66,7 @@ clud                              # Launch Claude in YOLO mode via subprocess
 clud --codex                      # Use Codex as the backend
 clud --claude                     # Use Claude as the backend (default)
 clud --deepseek                   # Use DeepSeek through the Claude harness
+clud --deepseek sk-...            # Same, storing that API key in the native credential vault first
 clud --kimi                       # Use Kimi through the Claude harness
 clud --openrouter                 # Use Claude through OpenRouter
 clud --pty                        # Force PTY launch mode

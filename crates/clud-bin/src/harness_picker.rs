@@ -1,13 +1,11 @@
 //! Installed-harness discovery and the bare-launch countdown picker.
 
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
-
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal;
+use std::time::Duration;
 
 use crate::args::Args;
 use crate::backend::Backend;
+use crate::selector::{self, check_marker, Key, Note, OnExit, Row, Selector, Step, View};
 
 pub const DEFAULT_COUNTDOWN: Duration = Duration::from_secs(3);
 
@@ -65,25 +63,23 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerEvent {
-    Up,
-    Down,
-    Enter,
-    Cancel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerOutcome {
     Selected(Backend),
     Cancelled,
 }
 
+/// How often the countdown wakes to redraw its seconds.
+const COUNTDOWN_TICK: Duration = Duration::from_millis(100);
+
+/// The picker's state. Terminal I/O belongs to [`crate::selector`] (#1195).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerModel {
     options: Vec<Backend>,
     selected: usize,
     countdown: Duration,
     countdown_active: bool,
+    /// The seconds value last drawn, so a tick redraws only on a change.
+    shown_seconds: u64,
 }
 
 impl PickerModel {
@@ -93,12 +89,15 @@ impl PickerModel {
             .iter()
             .position(|backend| *backend == default)
             .unwrap_or(0);
-        Self {
+        let mut picker = Self {
             options,
             selected,
             countdown,
             countdown_active: true,
-        }
+            shown_seconds: 0,
+        };
+        picker.shown_seconds = picker.remaining_seconds(Duration::ZERO);
+        picker
     }
 
     pub fn selected(&self) -> Backend {
@@ -117,58 +116,84 @@ impl PickerModel {
         remaining.as_millis().div_ceil(1_000) as u64
     }
 
-    pub fn handle(&mut self, event: PickerEvent) -> Option<PickerOutcome> {
-        match event {
-            PickerEvent::Up => {
-                self.countdown_active = false;
-                self.selected = self.selected.saturating_sub(1);
-                None
-            }
-            PickerEvent::Down => {
-                self.countdown_active = false;
-                if self.selected + 1 < self.options.len() {
-                    self.selected += 1;
-                }
-                None
-            }
-            PickerEvent::Enter => Some(PickerOutcome::Selected(self.selected())),
-            PickerEvent::Cancel => Some(PickerOutcome::Cancelled),
-        }
-    }
-
     pub fn tick(&self, elapsed: Duration) -> Option<PickerOutcome> {
         (self.countdown_active && elapsed >= self.countdown)
             .then(|| PickerOutcome::Selected(self.selected()))
     }
+}
 
-    fn rendered_lines(&self) -> usize {
-        self.options.len() + 4
+impl Selector for PickerModel {
+    type Outcome = PickerOutcome;
+
+    fn view(&self, elapsed: Duration) -> View {
+        let hint = if self.countdown_active {
+            format!(
+                "Auto-launching in {}s  |  Up/Down choose, Enter launch",
+                self.remaining_seconds(elapsed)
+            )
+        } else {
+            "Up/Down choose, Enter launch, Esc cancel".to_string()
+        };
+        View {
+            title: "Select an agent harness".to_string(),
+            hints: vec![hint],
+            gap: true,
+            rows: self
+                .options
+                .iter()
+                .map(|backend| {
+                    let current = *backend == self.selected();
+                    Row {
+                        current,
+                        marker: check_marker(current).to_string(),
+                        label: display_name(*backend).to_string(),
+                        note: Note::None,
+                    }
+                })
+                .collect(),
+            footer: vec!["Last choice is remembered".to_string()],
+        }
     }
 
-    fn render<W: Write>(&self, out: &mut W, elapsed: Duration) -> io::Result<()> {
-        writeln!(out, "Select an agent harness")?;
-        if self.countdown_active {
-            writeln!(
-                out,
-                "  Auto-launching in {}s  |  Up/Down choose, Enter launch",
-                self.remaining_seconds(elapsed)
-            )?;
+    fn on_key(&mut self, key: Key) -> Step<PickerOutcome> {
+        match key {
+            Key::Up => {
+                self.countdown_active = false;
+                self.selected = self.selected.saturating_sub(1);
+                Step::Redraw
+            }
+            Key::Down => {
+                self.countdown_active = false;
+                if self.selected + 1 < self.options.len() {
+                    self.selected += 1;
+                }
+                Step::Redraw
+            }
+            Key::Enter => Step::Done(PickerOutcome::Selected(self.selected())),
+            Key::Escape => Step::Done(PickerOutcome::Cancelled),
+            Key::Space | Key::Char(_) => Step::Stay,
+        }
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        self.countdown_active.then_some(COUNTDOWN_TICK)
+    }
+
+    fn on_tick(&mut self, elapsed: Duration) -> Step<PickerOutcome> {
+        if let Some(outcome) = self.tick(elapsed) {
+            return Step::Done(outcome);
+        }
+        let remaining = self.remaining_seconds(elapsed);
+        if self.countdown_active && remaining != self.shown_seconds {
+            self.shown_seconds = remaining;
+            Step::Redraw
         } else {
-            writeln!(out, "  Up/Down choose, Enter launch, Esc cancel")?;
+            Step::Stay
         }
-        writeln!(out)?;
-        for backend in &self.options {
-            let selected = *backend == self.selected();
-            writeln!(
-                out,
-                "{} {} {}",
-                if selected { ">" } else { " " },
-                if selected { "[x]" } else { "[ ]" },
-                display_name(*backend)
-            )?;
-        }
-        writeln!(out, "  Last choice is remembered")?;
-        out.flush()
+    }
+
+    fn on_exit(&self) -> OnExit {
+        OnExit::Erase
     }
 }
 
@@ -180,109 +205,17 @@ pub fn display_name(backend: Backend) -> &'static str {
     }
 }
 
+/// Show the picker until a harness is chosen, the countdown confirms the
+/// highlighted one, or the user cancels with Esc, Ctrl-C or Ctrl-D.
 pub fn prompt<W: Write>(
     out: &mut W,
     options: Vec<Backend>,
     default: Backend,
 ) -> io::Result<PickerOutcome> {
-    let _raw = RawModeGuard::enable()?;
-    write!(out, "\x1b[?25l")?;
-    out.flush()?;
-
-    let result = prompt_inner(out, options, default);
-    let restore = write!(out, "\x1b[?25h").and_then(|_| out.flush());
-    match result {
-        Ok(value) => restore.map(|_| value),
-        Err(error) => {
-            let _ = restore;
-            Err(error)
-        }
-    }
-}
-
-fn prompt_inner<W: Write>(
-    out: &mut W,
-    options: Vec<Backend>,
-    default: Backend,
-) -> io::Result<PickerOutcome> {
-    drain_pending_terminal_events()?;
-    let started = Instant::now();
     let mut picker = PickerModel::new(options, default, DEFAULT_COUNTDOWN);
-    picker.render(out, Duration::ZERO)?;
-    let mut rendered_seconds = picker.remaining_seconds(Duration::ZERO);
-
-    loop {
-        let elapsed = started.elapsed();
-        if let Some(outcome) = picker.tick(elapsed) {
-            clear_render(out, picker.rendered_lines())?;
-            return Ok(outcome);
-        }
-
-        if !event::poll(Duration::from_millis(100))? {
-            let remaining = picker.remaining_seconds(elapsed);
-            if picker.countdown_active() && remaining != rendered_seconds {
-                redraw(out, &picker, elapsed)?;
-                rendered_seconds = remaining;
-            }
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        let input = match key.code {
-            KeyCode::Up | KeyCode::Char('k') => Some(PickerEvent::Up),
-            KeyCode::Down | KeyCode::Char('j') => Some(PickerEvent::Down),
-            KeyCode::Enter => Some(PickerEvent::Enter),
-            KeyCode::Esc => Some(PickerEvent::Cancel),
-            KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(PickerEvent::Cancel)
-            }
-            _ => None,
-        };
-        let Some(input) = input else {
-            continue;
-        };
-        if let Some(outcome) = picker.handle(input) {
-            clear_render(out, picker.rendered_lines())?;
-            return Ok(outcome);
-        }
-        redraw(out, &picker, elapsed)?;
-        rendered_seconds = picker.remaining_seconds(elapsed);
-    }
-}
-
-fn redraw<W: Write>(out: &mut W, picker: &PickerModel, elapsed: Duration) -> io::Result<()> {
-    write!(out, "\x1b[{}A\x1b[J", picker.rendered_lines())?;
-    picker.render(out, elapsed)
-}
-
-fn clear_render<W: Write>(out: &mut W, rendered_lines: usize) -> io::Result<()> {
-    write!(out, "\x1b[{}A\x1b[J", rendered_lines)?;
-    out.flush()
-}
-
-fn drain_pending_terminal_events() -> io::Result<()> {
-    while event::poll(Duration::ZERO)? {
-        let _ = event::read()?;
-    }
-    Ok(())
-}
-
-struct RawModeGuard;
-
-impl RawModeGuard {
-    fn enable() -> io::Result<Self> {
-        terminal::enable_raw_mode()?;
-        Ok(Self)
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
+    match selector::run(out, &mut picker) {
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(PickerOutcome::Cancelled),
+        result => result,
     }
 }
 
@@ -368,13 +301,14 @@ mod tests {
             Backend::Claude,
             Duration::from_secs(3),
         );
-        assert_eq!(picker.handle(PickerEvent::Down), None);
+        assert_eq!(picker.on_key(Key::Down), Step::Redraw);
         assert_eq!(picker.selected(), Backend::Codex);
         assert!(!picker.countdown_active());
+        assert_eq!(picker.tick_interval(), None, "no countdown, no ticks");
         assert_eq!(picker.tick(Duration::from_secs(30)), None);
         assert_eq!(
-            picker.handle(PickerEvent::Enter),
-            Some(PickerOutcome::Selected(Backend::Codex))
+            picker.on_key(Key::Enter),
+            Step::Done(PickerOutcome::Selected(Backend::Codex))
         );
     }
 
@@ -385,15 +319,44 @@ mod tests {
             Backend::Codex,
             Duration::from_secs(3),
         );
-        let mut output = Vec::new();
-        picker.render(&mut output, Duration::ZERO).unwrap();
-        let output = String::from_utf8(output).unwrap();
+        let output = selector::render(&picker.view(Duration::ZERO), 0).text();
 
         assert!(output.contains("Select an agent harness"));
         assert!(output.contains("Auto-launching in 3s"));
         assert!(output.contains("> [x] Codex CLI"));
         assert!(output.contains("  [ ] Claude Code"));
         assert!(output.contains("  [ ] DeepSeek Harness"));
+        selector::testing::assert_crlf_only(&output);
+    }
+
+    /// #1195: the picker used to draw with `writeln!` under raw mode, so each
+    /// row started where the previous one ended on Linux and macOS.
+    #[test]
+    fn countdown_redraws_each_second_then_erases_and_auto_selects() {
+        use selector::testing::ScriptedTerminal;
+
+        let mut picker = PickerModel::new(
+            vec![Backend::Claude, Backend::Codex],
+            Backend::Codex,
+            Duration::from_secs(3),
+        );
+        let mut terminal = ScriptedTerminal::new(std::iter::repeat_n(None, 30), COUNTDOWN_TICK, 80);
+        let mut out = Vec::new();
+        let outcome = selector::drive(&mut out, &mut picker, &mut terminal).unwrap();
+        assert_eq!(outcome, PickerOutcome::Selected(Backend::Codex));
+
+        let text = String::from_utf8(out).unwrap();
+        for seconds in ["3s", "2s", "1s"] {
+            assert!(
+                text.contains(&format!("Auto-launching in {seconds}")),
+                "{text:?}"
+            );
+        }
+        // Title, hint, gap, two rows and the footer are six rows: two redraws
+        // at the second boundaries and the final erase each move back six.
+        assert_eq!(text.matches("\x1b[6A\x1b[J").count(), 3, "{text:?}");
+        assert!(text.ends_with("\x1b[6A\x1b[J"), "the picker erases itself");
+        selector::testing::assert_crlf_only(&text);
     }
 
     #[test]
@@ -404,8 +367,8 @@ mod tests {
             Duration::from_secs(3),
         );
         assert_eq!(
-            picker.handle(PickerEvent::Cancel),
-            Some(PickerOutcome::Cancelled)
+            picker.on_key(Key::Escape),
+            Step::Done(PickerOutcome::Cancelled)
         );
     }
 }

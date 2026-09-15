@@ -20,6 +20,7 @@ re-explaining.
 | [architecture/launch-plan.md](architecture/launch-plan.md) | ~180 | `LaunchPlan` as the single source of truth: construction, consumers, `--dry-run` JSON |
 | [architecture/launch-targets.md](architecture/launch-targets.md) | ~540 | Independent model-provider and harness resolution, sticky settings, foreground bridge lifecycle, compatibility; DeepSeek direct provider (credential trust boundary, preflight, child overlay, no bridge) |
 | [architecture/provider-selection.md](architecture/provider-selection.md) | ~120 | #900's compatible launch grammar, direct-vs-unified routing mode, provider-neutral model catalog, modifier normalization, and plan/repeat propagation |
+| [architecture/server-settings.md](architecture/server-settings.md) | ~130 | Server-side settings (#1192): the baked-in `server-settings.json` refreshed from `main`, per-section last-known-good merge, bounded-wait refresh and backoff, strict JSON parsing, controls, and how to change or add a setting |
 | [architecture/unified-gateway.md](architecture/unified-gateway.md) | ~130 | #898/#899's authenticated foreground multiplexer: version gate, discovery, provider routing, route epochs, token counting, credential isolation, and cross-provider effort contract |
 | [architecture/codex-via-claude.md](architecture/codex-via-claude.md) | ~120 | Canonical cross-route ownership: resolution, bridge protocol, credentials, security boundary, rollback |
 | [architecture/hook-dispatch.md](architecture/hook-dispatch.md) | ~340 | clud running a repo's own hooks instead of the harness: `.clud/hooks.json` declaration, the rooting contract (cwd + `CLUD_PROJECT_DIR` = the declaring repo), the exit-code contract and why it fails open, the per-root firing matrix (parent/child/extern, Tier B source from frontend settings), extern trust via `clud extern trust` (DD-060/DD-061/DD-062), Phase 5's three-level `"auto"` `bash.block_cd` relaxation and the capability-gated `CwdChanged` backstop (DD-063/DD-064), and delivery by compiling settings into CLI args rather than writing config files (#966/#967/#977) |
@@ -28,6 +29,7 @@ re-explaining.
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
 | [architecture/provider-failover.md](architecture/provider-failover.md) | ~200 | Surviving provider exhaustion mid-session (#968): routing OpenRouter through the gateway, the route-health failure taxonomy, the cost-labeled failover ladder, pre-commit request replay versus post-commit degradation, and cooldown recovery |
 | [architecture/test-runtime-memory.md](architecture/test-runtime-memory.md) | ~220 | **Design proposal (#405, not yet implemented):** `.clud/`-local test-runtime histogram — append-only JSONL over redb/SQLite and why, raw `(duration, cpu_load)` with query-time normalization, count-based compaction, and the run-all-vs-targeted recommendation policy |
+| [architecture/toasts.md](architecture/toasts.md) | ~200 | In-terminal toasts (#1189): toast model and hub, tier selection (kitty graphics, alternate-screen text cells, status line/title fallback), the PTY writer-thread compositor and its safe-injection rules, Claude `statusLine` chaining, click-to-dismiss |
 | [architecture/web-terminal.md](architecture/web-terminal.md) | ~30 | Desktop web-terminal preference, companion launch/recursion guard, tab PTYs, and wheel packaging |
 
 ## Quick Reference
@@ -48,6 +50,7 @@ re-explaining.
 - **"Where does the argv that clud runs come from?"** -> [launch-plan.md](architecture/launch-plan.md)
 - **"How do provider and harness preferences resolve?"** -> [launch-targets.md](architecture/launch-targets.md)
 - **"Which model ID is stable, and how do effort/context reach a worker?"** -> [provider-selection.md](architecture/provider-selection.md)
+- **"How do I change a value in installed builds without a release?"** -> [server-settings.md](architecture/server-settings.md)
 - **"How does one Claude session switch safely among providers?"** -> [unified-gateway.md](architecture/unified-gateway.md)
 - **"How does Codex run through Claude, and how do I roll it back?"** -> [codex-via-claude.md](architecture/codex-via-claude.md)
 - **"Why did a project hook stop working after the agent `cd`'d, and who runs hooks now?"** -> [hook-dispatch.md](architecture/hook-dispatch.md)

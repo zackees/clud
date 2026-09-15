@@ -288,8 +288,11 @@ def main() -> int:
         print("No crates/ directory found, skipping banned import check.", file=sys.stderr)
         return 0
 
-    # trampoline.rs is exempt — it must use std::process::Command to re-exec
-    # before running-process is involved.
+    # trampoline.rs is exempt — `relay_child_and_wait` must spawn the cached
+    # clud with raw std::process::Command, because NativeProcess's
+    # kill-on-close Job Object would capture everything the relayed clud
+    # starts (#333). The daemon detach that used to live there now goes
+    # through running_process::spawn_daemon_* (#1186).
     #
     # process_tree.rs is exempt — production code uses sysinfo (no subprocess
     # spawning), but the #[cfg(test)] tests deliberately use std::process::
@@ -350,6 +353,11 @@ def main() -> int:
     # fixture must spawn a descendant before any containment is attached. The
     # production side of the same test goes through ManagedSubprocess; using it
     # for the fixture would make the test green even if the race returned.
+    # daemon_spawn_hygiene.rs is exempt (#1186) — it hands `clud` a
+    # deliberately inheritable pipe fd to prove the daemon does not keep it
+    # open. NativeProcess sweeps every fd above 2 in the child, which would
+    # remove that descriptor before `clud` ever saw it and make the test pass
+    # whether or not the daemon leaks.
     exempt = {
         "trampoline.rs",
         "process_identity.rs",
@@ -364,6 +372,7 @@ def main() -> int:
         "cpu_banner.rs",
         "tool_shell_lifecycle_windows.rs",
         "subprocess_capture_lifecycle_windows.rs",
+        "daemon_spawn_hygiene.rs",
     }
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0

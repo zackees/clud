@@ -32,6 +32,20 @@ pub(super) fn build_cpu_banner_cfg(
     cfg
 }
 
+/// #1189: toasts ride on a producer. With the CPU banner off there is
+/// nothing to show, so the compositor and the Claude status-line injection
+/// stay off too. `[foreground.toasts]` can turn either off independently.
+pub(super) fn build_toast_launch_cfg(banner: &cpu_banner::CpuBannerCfg) -> toast::ToastLaunchCfg {
+    if !banner.enabled {
+        return toast::ToastLaunchCfg::disabled();
+    }
+    let settings = clud_settings::load_toast_settings().unwrap_or_default();
+    toast::ToastLaunchCfg {
+        enabled: settings.enabled,
+        claude_statusline: settings.enabled && settings.claude_statusline,
+    }
+}
+
 /// Write the cross-path Ctrl+C exit-timing event (issue: `clud ui` ctrl-c
 /// tracking) if a Ctrl+C was observed during this process's lifetime.
 /// Best-effort: resolves the state dir lazily so an unreadable home dir

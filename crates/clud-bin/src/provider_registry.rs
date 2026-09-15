@@ -78,7 +78,11 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         vault_account: crate::provider_auth::DEEPSEEK_VAULT_ACCOUNT,
         anthropic_base_url: "https://api.deepseek.com/anthropic",
         login_command: "clud auth login deepseek",
-        subagent_wire_id: "deepseek-v4-flash",
+        // The 1m Flash model fills the haiku/subagent slots too, rather than
+        // the auto-context `deepseek-flash` DeepSeek's guide suggests: it is
+        // cheap enough to use everywhere. This is the compiled-in fallback;
+        // `server_settings` serves the live name (#1192).
+        subagent_wire_id: "deepseek-flash[1m]",
         role_models: None,
         explicitly_empty_anthropic_api_key: false,
         enable_gateway_model_discovery: false,
@@ -92,9 +96,9 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         vault_account: crate::provider_auth::KIMI_VAULT_ACCOUNT,
         anthropic_base_url: "https://api.moonshot.ai/anthropic",
         login_command: "clud auth login kimi",
-        // Unlike DeepSeek (which points haiku/subagent at a cheaper flash
-        // model), Kimi's official Claude Code profile points the haiku AND
-        // subagent slots at the same main model: kimi-k3[1m].
+        // Like DeepSeek's slots in clud, Kimi's official Claude Code profile
+        // points the haiku AND subagent slots at the same main model:
+        // kimi-k3[1m].
         subagent_wire_id: "kimi-k3[1m]",
         role_models: None,
         explicitly_empty_anthropic_api_key: false,
@@ -213,17 +217,24 @@ mod tests {
     }
 
     #[test]
-    fn kimi_subagent_wire_id_points_at_the_same_model_unlike_deepseek() {
-        // Kimi's official Claude Code profile is deliberately different from
-        // DeepSeek's: haiku/subagent slots point at the SAME model as the
-        // main model, not a cheaper flash variant.
+    fn kimi_and_deepseek_put_their_main_1m_model_in_every_role_slot() {
+        // Both point the haiku AND subagent slots at the same 1m wire ID as
+        // the main model. For DeepSeek that is clud's choice over DeepSeek's
+        // documented profile, which uses the auto-context `deepseek-flash`
+        // there: the 1m Flash model is cheap enough to use everywhere.
         let deepseek = descriptor_for(ModelProvider::DeepSeek).unwrap();
         let kimi = descriptor_for(ModelProvider::Kimi).unwrap();
         assert_eq!(kimi.subagent_wire_id, "kimi-k3[1m]");
-        // DeepSeek's subagent slot is a cheaper flash model, not its main
-        // model -- Kimi's is the same model, which is the documented
-        // asymmetry between the two profiles.
-        assert_ne!(deepseek.subagent_wire_id, "deepseek-v4-pro[1m]");
-        assert_ne!(kimi.subagent_wire_id, deepseek.subagent_wire_id);
+        assert_eq!(deepseek.subagent_wire_id, "deepseek-flash[1m]");
+        for descriptor in [deepseek, kimi] {
+            assert_eq!(
+                descriptor.subagent_wire_id,
+                crate::provider_catalog::reviewed_default_model(descriptor.provider)
+                    .unwrap()
+                    .wire_id,
+                "{}",
+                descriptor.display_name
+            );
+        }
     }
 }

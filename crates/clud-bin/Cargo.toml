@@ -75,6 +75,10 @@ running-process = { version = "4.9.0", default-features = false, features = ["te
 # types are identical across the API boundary.
 interprocess = "2"
 icy_sixel = "0.5"
+# #1189: rasterizes toast text into the kitty-graphics toast image. Pure Rust,
+# no system font library, so manylinux wheels stay self-contained; the font
+# itself is bundled from assets/fonts/.
+fontdue = { version = "0.9", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 zeroize = "1"
 prost = "0.14"

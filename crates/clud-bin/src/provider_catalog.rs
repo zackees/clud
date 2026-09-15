@@ -175,24 +175,36 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_OR_1M_CONTEXT,
         default_effort: Some(EffortLevel::Low),
         default_context_window: Some("1m"),
-        provider_default: true,
+        // Still served, but no longer the default: DeepSeek's documented
+        // Claude Code profile moved to V4.1 Flash (#1192).
+        provider_default: false,
         claude_max_context_tokens: None,
         claude_compact_window: Some(786_432),
     },
     CatalogModel {
-        cli_id: "deepseek-v4-flash",
+        cli_id: "deepseek-flash",
         provider: ModelProvider::DeepSeek,
-        wire_id: "deepseek-v4-flash",
-        discovery_id: Some("clud-claude-deepseek-v4-flash"),
-        display_name: "DeepSeek V4 Flash",
-        legacy_aliases: &[],
+        wire_id: "deepseek-flash[1m]",
+        discovery_id: Some("clud-claude-deepseek-flash"),
+        // DeepSeek-V4.1-Flash. DeepSeek renamed the slug from
+        // `deepseek-v4-flash`, which it still routes for compatibility, so the
+        // old spelling and discovery ID stay aliases of this row.
+        display_name: "DeepSeek V4.1 Flash",
+        legacy_aliases: &[
+            "deepseek-flash[1m]",
+            "deepseek-v4-flash",
+            "clud-claude-deepseek-v4-flash",
+        ],
         supported_efforts: ANTHROPIC_EFFORTS,
-        supported_context_windows: AUTO_CONTEXT,
+        supported_context_windows: AUTO_OR_1M_CONTEXT,
         default_effort: Some(EffortLevel::Low),
-        default_context_window: None,
-        provider_default: false,
+        default_context_window: Some("1m"),
+        // The compiled-in default. A direct launch normally takes the served
+        // name from `server_settings` first, which the guard test there keeps
+        // equal to this row.
+        provider_default: true,
         claude_max_context_tokens: None,
-        claude_compact_window: None,
+        claude_compact_window: Some(786_432),
     },
     CatalogModel {
         cli_id: "kimi-k3",
@@ -283,6 +295,9 @@ pub enum SelectionSource {
     Cli,
     LegacyModelSuffix,
     ProviderSetting,
+    /// A served model name (`server_settings`, #1192): the live, cached, or
+    /// embedded copy of `assets/server-settings.json`.
+    ServerDefault,
     CatalogDefault,
 }
 
@@ -409,6 +424,19 @@ fn catalog_match(value: &str) -> Option<CatalogModel> {
 
 pub fn model_by_cli_id(value: &str) -> Option<CatalogModel> {
     MODELS.iter().copied().find(|entry| entry.cli_id == value)
+}
+
+/// Canonical CLI IDs retired by a provider rename, mapped to the successor
+/// row's CLI ID. Settings written before the rename store the old canonical ID,
+/// so settings validation accepts these while still rejecting wire IDs and
+/// shorthand aliases (#1192).
+const RETIRED_CLI_IDS: &[(&str, &str)] = &[("deepseek-v4-flash", "deepseek-flash")];
+
+pub fn model_by_retired_cli_id(value: &str) -> Option<CatalogModel> {
+    RETIRED_CLI_IDS
+        .iter()
+        .find(|(retired, _)| *retired == value)
+        .and_then(|(_, current)| model_by_cli_id(current))
 }
 
 /// Exact wire-ID lookup, deliberately narrower than [`catalog_match`] (which
@@ -777,14 +805,42 @@ pub fn resolve_for_launch(
     saved: Option<ProviderSelectionDefaults<'_>>,
     use_catalog_default: bool,
 ) -> Result<Option<ResolvedModelSelection>, SelectionError> {
+    resolve_for_launch_with_server_default(
+        provider,
+        cli_model,
+        cli_effort,
+        cli_context_window,
+        saved,
+        use_catalog_default,
+        None,
+    )
+}
+
+/// As [`resolve_for_launch`], with a served default model (`server_settings`,
+/// #1192) ranked below a saved profile model and above the catalog default.
+/// It applies only to a direct launch (`use_catalog_default`). A served model
+/// the catalog does not know keeps its own wire ID and `[1m]` suffix rather
+/// than inheriting the catalog default row's effort and context.
+pub fn resolve_for_launch_with_server_default(
+    provider: ModelProvider,
+    cli_model: Option<&str>,
+    cli_effort: Option<&str>,
+    cli_context_window: Option<&str>,
+    saved: Option<ProviderSelectionDefaults<'_>>,
+    use_catalog_default: bool,
+    server_default: Option<&str>,
+) -> Result<Option<ResolvedModelSelection>, SelectionError> {
     let catalog_default = use_catalog_default
         .then(|| reviewed_default_model(provider))
         .flatten();
+    let server_default = server_default.filter(|_| use_catalog_default);
     let saved = saved.unwrap_or_default();
     let (model, model_source) = if let Some(model) = cli_model {
         (Some(model), Some(SelectionSource::Cli))
     } else if let Some(model) = saved.model {
         (Some(model), Some(SelectionSource::ProviderSetting))
+    } else if let Some(model) = server_default {
+        (Some(model), Some(SelectionSource::ServerDefault))
     } else if let Some(model) = catalog_default {
         (Some(model.cli_id), Some(SelectionSource::CatalogDefault))
     } else {
@@ -812,6 +868,12 @@ pub fn resolve_for_launch(
         return Ok(None);
     };
     selection.model_source = model_source;
+    let served = model_source == Some(SelectionSource::ServerDefault);
+    // A served `name[1m]` is the served file's context choice, not a legacy
+    // spelling the user typed.
+    if served && selection.context_window_source == Some(SelectionSource::LegacyModelSuffix) {
+        selection.context_window_source = Some(SelectionSource::ServerDefault);
+    }
     if saved_effort.is_some() {
         selection.effort_source = Some(SelectionSource::ProviderSetting);
     }
@@ -824,7 +886,7 @@ pub fn resolve_for_launch(
             .model
             .as_deref()
             .and_then(model_by_cli_id)
-            .or(catalog_default);
+            .or(catalog_default.filter(|_| !served));
         if selection.effort.is_none() {
             if let Some(effort) = selected_catalog.and_then(|entry| entry.default_effort) {
                 selection.effort = Some(effort);
@@ -1241,9 +1303,9 @@ mod tests {
             .unwrap()
             .unwrap();
         let default = reviewed_default_model(ModelProvider::DeepSeek).unwrap();
-        assert_eq!(default.display_name, "DeepSeek V4 Pro 0813");
-        assert_eq!(selection.model.as_deref(), Some("deepseek-v4-pro"));
-        assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro[1m]"));
+        assert_eq!(default.display_name, "DeepSeek V4.1 Flash");
+        assert_eq!(selection.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(selection.wire_model.as_deref(), Some("deepseek-flash[1m]"));
         assert_eq!(selection.effort, Some(EffortLevel::Low));
         assert_eq!(
             selection.effort_source,
@@ -1253,6 +1315,169 @@ mod tests {
         assert_eq!(
             selection.context_window_source,
             Some(SelectionSource::CatalogDefault)
+        );
+    }
+
+    /// #1192: DeepSeek renamed `deepseek-v4-flash` to `deepseek-flash`; every
+    /// older spelling a user or picker may still hold keeps resolving.
+    #[test]
+    fn retired_deepseek_flash_spellings_resolve_to_v4_1_flash() {
+        for spelling in [
+            "deepseek-flash",
+            "deepseek-flash[1m]",
+            "deepseek-v4-flash",
+            "clud-claude-deepseek-flash",
+            "clud-claude-deepseek-v4-flash",
+        ] {
+            let selection = resolve(None, Some(spelling), None, None).unwrap().unwrap();
+            assert_eq!(selection.provider, ModelProvider::DeepSeek, "{spelling}");
+            assert_eq!(
+                selection.model.as_deref(),
+                Some("deepseek-flash"),
+                "{spelling}"
+            );
+            assert_eq!(
+                selection.wire_model.as_deref(),
+                Some("deepseek-flash[1m]"),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            model_by_discovery_id("clud-claude-deepseek-v4-flash").map(|model| model.cli_id),
+            Some("deepseek-flash")
+        );
+        let auto = resolve(None, Some("deepseek-v4-flash"), None, Some("auto"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(auto.wire_model.as_deref(), Some("deepseek-flash"));
+        let pro = resolve(None, Some("deepseek-v4-pro[1m]"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pro.model.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn retired_cli_ids_name_a_successor_that_still_aliases_them() {
+        for (retired, current) in RETIRED_CLI_IDS {
+            assert!(
+                model_by_cli_id(retired).is_none(),
+                "{retired} is not retired"
+            );
+            let successor = model_by_retired_cli_id(retired).unwrap();
+            assert_eq!(successor.cli_id, *current);
+            assert!(successor.legacy_aliases.contains(retired), "{retired}");
+        }
+        assert!(model_by_retired_cli_id("gpt-5.6-terra").is_none());
+    }
+
+    #[test]
+    fn launch_server_default_ranks_below_saved_and_cli_models_and_above_the_catalog() {
+        let served = resolve_for_launch_with_server_default(
+            ModelProvider::DeepSeek,
+            None,
+            None,
+            None,
+            None,
+            true,
+            Some("deepseek-flash"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(served.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(served.wire_model.as_deref(), Some("deepseek-flash[1m]"));
+        assert_eq!(served.model_source, Some(SelectionSource::ServerDefault));
+        assert_eq!(served.effort, Some(EffortLevel::Low));
+        assert_eq!(served.context_window.as_deref(), Some("1m"));
+
+        let saved = ProviderSelectionDefaults {
+            model: Some("deepseek-v4-pro"),
+            ..ProviderSelectionDefaults::default()
+        };
+        let saved_wins = resolve_for_launch_with_server_default(
+            ModelProvider::DeepSeek,
+            None,
+            None,
+            None,
+            Some(saved),
+            true,
+            Some("deepseek-flash"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(saved_wins.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(
+            saved_wins.model_source,
+            Some(SelectionSource::ProviderSetting)
+        );
+
+        let cli_wins = resolve_for_launch_with_server_default(
+            ModelProvider::DeepSeek,
+            Some("deepseek-v4-pro"),
+            None,
+            None,
+            Some(saved),
+            true,
+            Some("deepseek-flash"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cli_wins.model_source, Some(SelectionSource::Cli));
+
+        // Unified launches never import direct-provider policy, served or not.
+        assert_eq!(
+            resolve_for_launch_with_server_default(
+                ModelProvider::DeepSeek,
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("deepseek-flash"),
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_uncataloged_server_default_keeps_its_own_wire_and_context() {
+        let with_context = resolve_for_launch_with_server_default(
+            ModelProvider::DeepSeek,
+            None,
+            None,
+            None,
+            None,
+            true,
+            Some("deepseek-flash-2[1m]"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(with_context.model.as_deref(), Some("deepseek-flash-2"));
+        assert_eq!(
+            with_context.wire_model.as_deref(),
+            Some("deepseek-flash-2[1m]")
+        );
+        assert_eq!(with_context.context_window.as_deref(), Some("1m"));
+        assert_eq!(
+            with_context.context_window_source,
+            Some(SelectionSource::ServerDefault)
+        );
+
+        let auto = resolve_for_launch_with_server_default(
+            ModelProvider::DeepSeek,
+            None,
+            None,
+            None,
+            None,
+            true,
+            Some("deepseek-flash-2"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(auto.wire_model.as_deref(), Some("deepseek-flash-2"));
+        assert_eq!(
+            auto.context_window, None,
+            "must not inherit the catalog default row's 1m context"
         );
     }
 
