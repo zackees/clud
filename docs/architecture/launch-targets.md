@@ -54,6 +54,7 @@ A command-less launch on a real input and error terminal discovers `claude`,
 immediately. Multiple installed harnesses open the crossterm selector, whose
 highlighted row auto-launches after three seconds. Up/Down or j/k moves the
 highlight and disables the timeout; Enter confirms and Esc/Ctrl-C cancels.
+Like every clud selector, it renders through `selector.rs` (#1195, DD-073).
 
 The confirmed choice is stored as `launcher.last_harness` in
 `~/.clud/settings.json`. This is launcher history only and does not alter

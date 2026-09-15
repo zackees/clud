@@ -193,6 +193,11 @@ CLI surface and backend resolution:
 - `provider_catalog.rs` - the single registry mapping stable clud model IDs,
   gateway discovery IDs, provider wire IDs, compatibility aliases, and
   independent effort/context capability metadata.
+- `selector.rs` - the one inline terminal selector (#1195, DD-073). It owns
+  raw mode, cursor hide/show, pending-input draining, key decoding, CRLF-only
+  rendering with wrap-aware row counts, and redraw/erase. The launch-scope
+  prompt, the harness picker, and `clud settings` each implement its
+  `Selector` trait and render through it.
 - `preference.rs` - shared pure typed-choice state machine used by launch
   scope and global settings selectors.
 - `subprocess.rs` - single decision point for the Windows `.cmd`/`.bat`

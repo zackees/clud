@@ -3393,3 +3393,74 @@ from `main`.
   test harnesses set `CLUD_SERVER_SETTINGS=0`.
 - **A served DeepSeek default is visible**: `--dry-run` reports it as
   `model_source: server_default`.
+
+## DD-073: every inline selector renders through one component
+
+**Status:** Accepted
+
+**Context:** #1195. clud has three inline terminal selectors: the launch-setup
+scope prompt, the bare-launch harness picker, and `clud settings`. Each owned
+its own copy of the terminal plumbing:
+
+- the raw-mode guard and cursor hide/show;
+- draining pending input;
+- key decoding;
+- redraw arithmetic;
+- line endings.
+
+#1063 found that `writeln!` under raw mode walks diagonally on Linux and macOS,
+because raw mode clears `OPOST` and a bare `\n` stops returning to column
+zero. #1106 fixed only the scope prompt's copy, so the harness picker (#943)
+and `clud settings` still shipped the bug. The copies had drifted in other ways
+too:
+
+- Only the picker ignored key releases, which crossterm reports as separate
+  events on Windows.
+- Each copy kept a hand-maintained line count for its cursor-up redraw.
+- None of them counted rows that wrap at the terminal width.
+
+**Decision:** `crates/clud-bin/src/selector.rs` owns all terminal I/O for inline
+selectors:
+
+- raw mode and cursor hide/show;
+- draining pending input;
+- one key decoder that ignores releases;
+- the tick loop;
+- CRLF-only rendering from a declarative `View`;
+- physical row counts that include wraps;
+- redraw and erase;
+- a keep-or-erase exit.
+
+A selector implements `Selector`: a view, a key handler, an optional tick, and
+its exit style. The settings save prompt is a mode of the settings menu rather
+than a second key loop.
+
+**Rationale:**
+
+- **Fixed once.** A rendering or input fix lands once and reaches every
+  selector.
+- **Derived row counts.** They come from the rendered frame rather than being
+  maintained next to it, so a new row or a long wrapped note cannot desync the
+  redraw.
+- **Testable.** Terminal behaviour runs against a scripted terminal and a fake
+  clock: countdown redraws, redraw arithmetic, and save-prompt flow.
+- **Guarded.** A compile-time test forbids the migrated modules from enabling
+  raw mode, reading events, or writing escape sequences themselves.
+
+**Alternatives rejected:**
+
+- **CRLF edits in each file.** That is the fix that already regressed.
+- **A shared line-writer helper only.** The key loops and redraw arithmetic
+  would keep diverging.
+- **A TUI crate (`inquire`, `dialoguer`, `ratatui`).** A heavy dependency with a
+  different look, usually an alternate screen, no countdown or value-cycling
+  UX, and extra cross-build and wheel cost.
+
+**Consequences:**
+
+- A new inline selector implements `selector::Selector` and is added to
+  `migrated_selectors_never_drive_the_terminal_themselves`.
+- Hint, footer and note indentation is uniform. The `clud settings` save prompt
+  is now indented like other footer lines.
+- Ctrl-C and Ctrl-D close the frame the same way a normal exit does, then return
+  `Interrupted`.
