@@ -1163,6 +1163,15 @@ impl Args {
 
     pub fn parse_from_raw(raw: Vec<String>) -> Self {
         let normalized = normalize_bare_resume_before_subcommand(&raw);
+        let normalized = match split_inline_key_assignments(&normalized) {
+            Ok(normalized) => normalized,
+            Err(message) => {
+                use clap::CommandFactory;
+                Args::command()
+                    .error(clap::error::ErrorKind::InvalidValue, message)
+                    .exit()
+            }
+        };
         let (known, unknown) = split_known_unknown(&normalized);
         let mut args = Args::parse_from(known);
         if args
@@ -1201,6 +1210,43 @@ fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
         }
     }
     normalized
+}
+
+/// Provider flags that accept an inline API key.
+const INLINE_KEY_PROVIDER_FLAGS: &[&str] = &["--deepseek", "--kimi", "--openrouter"];
+
+/// `--deepseek=<API_KEY>` must behave exactly like `--deepseek <API_KEY>`
+/// (#1197). The provider flags are on/off switches, so the splitter never
+/// matched the `=` form: it forwarded the whole token, key included, to the
+/// harness as an unknown flag and launched plain Claude. A key-shaped value is
+/// split into its own token, where [`Args::extract_inline_api_key`] lifts it
+/// out. Any other value is an error rather than a passthrough token, so nothing
+/// typed after `=` can reach the harness argv; the message never echoes it.
+fn split_inline_key_assignments(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut normalized = Vec::with_capacity(raw.len() + 1);
+    let mut in_clud_flags = true;
+    for (index, arg) in raw.iter().enumerate() {
+        if index > 0 && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str())) {
+            in_clud_flags = false;
+        }
+        let assignment = arg.split_once('=').filter(|(flag, _)| {
+            in_clud_flags && index > 0 && INLINE_KEY_PROVIDER_FLAGS.contains(flag)
+        });
+        match assignment {
+            Some((flag, value)) if looks_like_api_key(value) => {
+                normalized.push(flag.to_string());
+                normalized.push(value.trim().to_string());
+            }
+            Some((flag, _)) => {
+                return Err(format!(
+                    "{flag} does not take a value; pass an API key as `{flag} <API_KEY>` or \
+                     `{flag}=<API_KEY>` (keys start with `sk-`)"
+                ));
+            }
+            None => normalized.push(arg.clone()),
+        }
+    }
+    Ok(normalized)
 }
 
 fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
