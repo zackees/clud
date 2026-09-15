@@ -1389,6 +1389,60 @@ fn inline_api_keys_are_recognised_for_kimi_openrouter_and_provider() {
     }
 }
 
+/// #1197: `--deepseek=<key>` was an unknown flag, so clud launched plain
+/// Claude and forwarded the key to the harness argv.
+#[test]
+fn the_equals_form_of_an_inline_key_matches_the_space_form() {
+    let openrouter_key = "sk-or-v1-0123456789abcdef0123456789abcdef";
+    for (flag, key) in [
+        ("--deepseek", DEEPSEEK_SHAPED_KEY),
+        ("--kimi", DEEPSEEK_SHAPED_KEY),
+        ("--openrouter", openrouter_key),
+    ] {
+        let equals = format!("{flag}={key}");
+        let args = parse_inline_key_argv(&["clud", equals.as_str(), "-p", "hi"]);
+        let spaced = parse_inline_key_argv(&["clud", flag, key, "-p", "hi"]);
+        assert!(args.explicit_model_provider().is_some(), "{flag}");
+        assert_eq!(
+            args.explicit_model_provider(),
+            spaced.explicit_model_provider(),
+            "{flag}"
+        );
+        assert_eq!(
+            args.inline_api_key.as_ref().map(InlineApiKey::expose),
+            Some(key),
+            "{flag}"
+        );
+        assert!(
+            args.passthrough.iter().all(|token| !token.contains(key)),
+            "{flag}: the key must never reach the backend argv: {:?}",
+            args.passthrough
+        );
+    }
+}
+
+#[test]
+fn a_non_key_value_after_a_provider_equals_sign_is_rejected_without_echoing_it() {
+    for arg in ["--deepseek=not-a-key", "--kimi=", "--openrouter=sk-short"] {
+        let raw = vec!["clud".to_string(), arg.to_string()];
+        let error = split_inline_key_assignments(&raw).unwrap_err();
+        assert!(error.contains("does not take a value"), "{arg}: {error}");
+        let value = arg.split_once('=').unwrap().1;
+        assert!(value.is_empty() || !error.contains(value), "{arg}: {error}");
+    }
+}
+
+#[test]
+fn equals_assignments_after_the_separator_or_a_subcommand_are_untouched() {
+    for argv in [
+        ["clud", "--", "--deepseek=not-a-key"],
+        ["clud", "settings", "--deepseek=not-a-key"],
+    ] {
+        let raw: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
+        assert_eq!(split_inline_key_assignments(&raw).unwrap(), raw, "{argv:?}");
+    }
+}
+
 #[test]
 fn ordinary_prompts_and_non_api_key_providers_are_left_alone() {
     let prompt = parse_inline_key_argv(&["clud", "--deepseek", "summarize sk-notes"]);

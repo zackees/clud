@@ -587,6 +587,41 @@ def test_dry_run_inline_keys_for_other_api_key_providers(flag: str, key: str) ->
     assert key not in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("flag", "key", "provider"),
+    [
+        ("--deepseek", _INLINE_DEEPSEEK_KEY, "deepseek"),
+        ("--kimi", "sk-" + "a1b2c3d4" * 4, "kimi"),
+        ("--openrouter", "sk-or-v1-" + "0123456789abcdef" * 2, "openrouter"),
+    ],
+)
+def test_dry_run_inline_key_equals_form_matches_the_space_form(
+    flag: str, key: str, provider: str
+) -> None:
+    """#1197: `--deepseek=<key>` launched plain Claude and forwarded the key to
+    the harness as an unknown flag."""
+    spaced = _run("--dry-run", flag, key, "-p", "hi")
+    equals = _run("--dry-run", f"{flag}={key}", "-p", "hi")
+    assert spaced.returncode == 0, spaced.stderr
+    assert equals.returncode == 0, equals.stderr
+    spaced_data = json.loads(spaced.stdout)
+    equals_data = json.loads(equals.stdout)
+    assert equals_data["model_provider"] == provider
+    assert equals_data["model_selection"] == spaced_data["model_selection"]
+    assert equals_data["command"][-2:] == ["-p", "hi"]
+    assert all(key not in part for part in equals_data["command"])
+    assert key not in equals.stdout
+    assert key not in equals.stderr
+
+
+def test_dry_run_inline_key_equals_form_rejects_a_non_key_value() -> None:
+    result = _run("--dry-run", "--deepseek=not-a-key", "-p", "hi")
+    assert result.returncode == 2, result.stderr
+    assert "--deepseek does not take a value" in result.stderr
+    assert "not-a-key" not in result.stderr
+    assert "not-a-key" not in result.stdout
+
+
 def test_dry_run_openrouter_is_keyless_and_uses_stable_provider_identity() -> None:
     result = _run("--dry-run", "--openrouter", "-p", "hello")
     assert result.returncode == 0, result.stderr

@@ -192,16 +192,21 @@ fn physical_rows(chars: usize, columns: usize) -> usize {
     }
 }
 
-/// Lay out `view` for a terminal `columns` wide.
+/// Lay out `view` for a terminal `columns` wide, drawing every option row.
 pub fn render(view: &View, columns: usize) -> Frame {
-    let mut frame = Frame::new(columns);
-    frame.line(&view.title);
-    for hint in &view.hints {
-        frame.line(&format!("{TEXT_INDENT}{hint}"));
-    }
-    if view.gap {
-        frame.line("");
-    }
+    render_within(view, columns, 0)
+}
+
+/// Lay out `view` for a terminal `columns` wide and `rows` tall. `0` rows
+/// means the height is unknown, and every option row is drawn.
+///
+/// A frame taller than the viewport cannot be redrawn: its top rows scroll into
+/// scrollback, where cursor-up cannot reach, so each redraw would stack a new
+/// copy (#1198). The title, hints and footer always show. When the option rows
+/// do not fit, they become a window that keeps the current row visible, with a
+/// line saying how many rows are hidden above and below. The frame stays within
+/// `rows - 1` physical rows, so its last line feed never scrolls the top away.
+pub fn render_within(view: &View, columns: usize, rows: usize) -> Frame {
     let inline_width = view
         .rows
         .iter()
@@ -210,29 +215,115 @@ pub fn render(view: &View, columns: usize) -> Frame {
         .max()
         .unwrap_or(0)
         + INLINE_NOTE_GAP;
-    for row in &view.rows {
-        let lead = format!(
-            "{} {} {}",
-            if row.current { ">" } else { " " },
-            row.marker,
-            row.label
-        );
-        match &row.note {
-            Note::None => frame.line(&lead),
-            Note::Inline(note) => {
-                let pad = inline_width.saturating_sub(row.label.chars().count());
-                frame.line(&format!("{lead}{}{note}", " ".repeat(pad)));
-            }
-            Note::Below(note) => {
-                frame.line(&lead);
-                frame.line(&format!("{NOTE_INDENT}{note}"));
-            }
+    let row_lines: Vec<Vec<String>> = view
+        .rows
+        .iter()
+        .map(|row| lines_for_row(row, inline_width))
+        .collect();
+
+    let mut head: Vec<String> = vec![view.title.clone()];
+    head.extend(view.hints.iter().map(|hint| format!("{TEXT_INDENT}{hint}")));
+    if view.gap {
+        head.push(String::new());
+    }
+    let tail: Vec<String> = view
+        .footer
+        .iter()
+        .map(|line| format!("{TEXT_INDENT}{line}"))
+        .collect();
+
+    let window = if rows == 0 {
+        0..row_lines.len()
+    } else {
+        let fixed = lines_rows(&head, columns) + lines_rows(&tail, columns);
+        let budget = rows.saturating_sub(1).saturating_sub(fixed);
+        let heights: Vec<usize> = row_lines
+            .iter()
+            .map(|lines| lines_rows(lines, columns))
+            .collect();
+        let current = view.rows.iter().position(|row| row.current).unwrap_or(0);
+        visible_rows(&heights, current, budget)
+    };
+
+    let mut frame = Frame::new(columns);
+    for line in &head {
+        frame.line(line);
+    }
+    if window.start > 0 {
+        frame.line(&format!("{TEXT_INDENT}... {} more above", window.start));
+    }
+    for lines in &row_lines[window.clone()] {
+        for line in lines {
+            frame.line(line);
         }
     }
-    for line in &view.footer {
-        frame.line(&format!("{TEXT_INDENT}{line}"));
+    if window.end < row_lines.len() {
+        frame.line(&format!(
+            "{TEXT_INDENT}... {} more below",
+            row_lines.len() - window.end
+        ));
+    }
+    for line in &tail {
+        frame.line(line);
     }
     frame
+}
+
+/// The terminal lines one option row draws.
+fn lines_for_row(row: &Row, inline_width: usize) -> Vec<String> {
+    let lead = format!(
+        "{} {} {}",
+        if row.current { ">" } else { " " },
+        row.marker,
+        row.label
+    );
+    match &row.note {
+        Note::None => vec![lead],
+        Note::Inline(note) => {
+            let pad = inline_width.saturating_sub(row.label.chars().count());
+            vec![format!("{lead}{}{note}", " ".repeat(pad))]
+        }
+        Note::Below(note) => vec![lead, format!("{NOTE_INDENT}{note}")],
+    }
+}
+
+/// Physical rows `lines` occupy, counted exactly as [`Frame::line`] draws them.
+fn lines_rows(lines: &[String], columns: usize) -> usize {
+    let mut frame = Frame::new(columns);
+    for line in lines {
+        frame.line(line);
+    }
+    frame.rows()
+}
+
+/// The option rows to draw: every row when they fit `budget`, otherwise a
+/// contiguous range around `current`, grown alternately downward and upward.
+/// Two rows of the budget are reserved for the "more above" and "more below"
+/// lines once windowing starts, so the frame fits whichever side is hidden.
+fn visible_rows(heights: &[usize], current: usize, budget: usize) -> std::ops::Range<usize> {
+    if heights.is_empty() || heights.iter().sum::<usize>() <= budget {
+        return 0..heights.len();
+    }
+    let available = budget.saturating_sub(2);
+    let current = current.min(heights.len() - 1);
+    let (mut start, mut end) = (current, current + 1);
+    let mut used = heights[current];
+    loop {
+        let mut grew = false;
+        if end < heights.len() && used + heights[end] <= available {
+            used += heights[end];
+            end += 1;
+            grew = true;
+        }
+        if start > 0 && used + heights[start - 1] <= available {
+            start -= 1;
+            used += heights[start];
+            grew = true;
+        }
+        if !grew {
+            return start..end;
+        }
+    }
 }
 
 /// Where a selector's input, clock and width come from. [`run`] uses the real
@@ -244,6 +335,10 @@ pub trait Terminal {
     fn elapsed(&self) -> Duration;
     /// Terminal width in columns; `0` when unknown.
     fn columns(&self) -> usize;
+    /// Terminal height in rows; `0` when unknown, which draws every option row.
+    fn rows(&self) -> usize {
+        0
+    }
 }
 
 /// Run `selector` on the real terminal, writing its frames to `out`.
@@ -252,6 +347,10 @@ pub trait Terminal {
 /// frame is closed the same way a normal exit closes it.
 pub fn run<S: Selector, W: Write>(out: &mut W, selector: &mut S) -> io::Result<S::Outcome> {
     let _raw = RawModeGuard::enable()?;
+    // Raw mode changes input only. A legacy Windows console also needs VT
+    // output processing, or every escape sequence below prints as literal text.
+    #[cfg(windows)]
+    let _ = crossterm::ansi_support::supports_ansi();
     out.write_all(HIDE_CURSOR)?;
     out.flush()?;
     let mut terminal = CrosstermTerminal {
@@ -273,7 +372,12 @@ where
     T: Terminal,
 {
     terminal.drain_pending()?;
-    let mut drawn = draw(out, &selector.view(terminal.elapsed()), terminal.columns())?;
+    let mut drawn = draw(
+        out,
+        &selector.view(terminal.elapsed()),
+        terminal.columns(),
+        terminal.rows(),
+    )?;
     loop {
         let step = match terminal.next_input(selector.tick_interval())? {
             Some(Input::Interrupt) => {
@@ -290,7 +394,12 @@ where
             Step::Stay => {}
             Step::Redraw => {
                 erase(out, drawn)?;
-                drawn = draw(out, &selector.view(terminal.elapsed()), terminal.columns())?;
+                drawn = draw(
+                    out,
+                    &selector.view(terminal.elapsed()),
+                    terminal.columns(),
+                    terminal.rows(),
+                )?;
             }
             Step::Done(outcome) => {
                 close(out, selector.on_exit(), drawn)?;
@@ -300,8 +409,8 @@ where
     }
 }
 
-fn draw<W: Write>(out: &mut W, view: &View, columns: usize) -> io::Result<usize> {
-    let frame = render(view, columns);
+fn draw<W: Write>(out: &mut W, view: &View, columns: usize, rows: usize) -> io::Result<usize> {
+    let frame = render_within(view, columns, rows);
     out.write_all(frame.bytes())?;
     out.flush()?;
     Ok(frame.rows())
@@ -382,6 +491,10 @@ impl Terminal for CrosstermTerminal {
     fn columns(&self) -> usize {
         terminal::size().map_or(0, |(columns, _)| usize::from(columns))
     }
+
+    fn rows(&self) -> usize {
+        terminal::size().map_or(0, |(_, rows)| usize::from(rows))
+    }
 }
 
 fn drain_pending_events<P, R>(mut poll: P, mut read: R) -> io::Result<usize>
@@ -426,6 +539,7 @@ pub(crate) mod testing {
         now: Duration,
         tick: Duration,
         columns: usize,
+        rows: usize,
         pub(crate) drained: bool,
     }
 
@@ -440,8 +554,15 @@ pub(crate) mod testing {
                 now: Duration::ZERO,
                 tick,
                 columns,
+                rows: 0,
                 drained: false,
             }
+        }
+
+        /// Give the scripted terminal a height, so frames are windowed to it.
+        pub(crate) fn with_rows(mut self, rows: usize) -> Self {
+            self.rows = rows;
+            self
         }
     }
 
@@ -475,6 +596,10 @@ pub(crate) mod testing {
 
         fn columns(&self) -> usize {
             self.columns
+        }
+
+        fn rows(&self) -> usize {
+            self.rows
         }
     }
 
@@ -553,6 +678,131 @@ mod tests {
             label: label.to_string(),
             note,
         }
+    }
+
+    fn tall_view(count: usize, current: usize) -> View {
+        View {
+            title: "Tall".to_string(),
+            hints: vec!["hint".to_string()],
+            gap: true,
+            rows: (0..count)
+                .map(|index| {
+                    row(
+                        index == current,
+                        &format!("item-{index}"),
+                        Note::Below(format!("note {index}")),
+                    )
+                })
+                .collect(),
+            footer: vec!["footer".to_string()],
+        }
+    }
+
+    #[test]
+    fn a_frame_that_fits_the_viewport_is_rendered_unchanged() {
+        let view = tall_view(4, 1);
+        assert_eq!(render_within(&view, 80, 100), render(&view, 80));
+        assert_eq!(render_within(&view, 80, 0), render(&view, 80));
+    }
+
+    /// #1198: a frame taller than the terminal left its top rows in
+    /// scrollback, where the cursor-up redraw cannot reach, so `clud settings`
+    /// stacked a new copy on every keypress in a 30-row terminal.
+    #[test]
+    fn a_tall_frame_windows_its_rows_around_the_current_row_within_the_viewport() {
+        for current in [0, 7, 20, 39] {
+            let frame = render_within(&tall_view(40, current), 80, 12);
+            let text = frame.text();
+            assert!(
+                frame.rows() <= 11,
+                "current {current}: {} rows\n{text}",
+                frame.rows()
+            );
+            assert!(
+                text.contains(&format!("> [x] item-{current}\r\n")),
+                "current {current}:\n{text}"
+            );
+            assert!(text.starts_with("Tall\r\n  hint\r\n\r\n"), "{text}");
+            assert!(text.ends_with("  footer\r\n"), "{text}");
+            assert_eq!(
+                text.contains("more above"),
+                current > 0,
+                "current {current}:\n{text}"
+            );
+            assert_eq!(
+                text.contains("more below"),
+                current < 39,
+                "current {current}:\n{text}"
+            );
+            assert_crlf_only(&text);
+        }
+    }
+
+    #[test]
+    fn wrapped_notes_count_toward_the_window() {
+        let mut view = tall_view(10, 5);
+        for row in &mut view.rows {
+            row.note = Note::Below("x".repeat(45));
+        }
+        // At 20 columns each row is its label plus a note wrapping to 3 rows.
+        let frame = render_within(&view, 20, 14);
+        assert!(
+            frame.rows() <= 13,
+            "{} rows\n{}",
+            frame.rows(),
+            frame.text()
+        );
+        assert!(
+            frame.text().contains("> [x] item-5\r\n"),
+            "{}",
+            frame.text()
+        );
+    }
+
+    #[test]
+    fn redraws_in_a_short_terminal_never_move_back_past_the_viewport() {
+        struct List {
+            current: usize,
+        }
+
+        impl Selector for List {
+            type Outcome = usize;
+
+            fn view(&self, _elapsed: Duration) -> View {
+                tall_view(40, self.current)
+            }
+
+            fn on_key(&mut self, key: Key) -> Step<usize> {
+                match key {
+                    Key::Down => {
+                        self.current = (self.current + 1).min(39);
+                        Step::Redraw
+                    }
+                    Key::Enter => Step::Done(self.current),
+                    _ => Step::Stay,
+                }
+            }
+        }
+
+        let script = std::iter::repeat_n(key(Key::Down), 25).chain([key(Key::Enter)]);
+        let mut terminal = ScriptedTerminal::new(script, Duration::ZERO, 80).with_rows(12);
+        let mut out = Vec::new();
+        let chosen = drive(&mut out, &mut List { current: 0 }, &mut terminal).unwrap();
+        assert_eq!(chosen, 25);
+
+        let text = String::from_utf8(out).unwrap();
+        let moves: Vec<usize> = text
+            .split("\x1b[J")
+            .filter_map(|chunk| {
+                chunk
+                    .rsplit_once("\x1b[")
+                    .and_then(|(_, tail)| tail.strip_suffix('A'))
+                    .and_then(|rows| rows.parse().ok())
+            })
+            .collect();
+        assert_eq!(moves.len(), 25, "{text:?}");
+        assert!(moves.iter().all(|rows| *rows <= 11), "{moves:?}");
+        assert!(text.contains("> [x] item-25\r\n"), "{text:?}");
     }
 
     #[test]
