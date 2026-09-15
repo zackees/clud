@@ -537,10 +537,11 @@ about to spawn the child, foreground or worker — and builds a DeepSeek-only
 overlay for the Claude child: the documented Anthropic-compatible endpoint,
 auth token, and the resolved model and context profile. Effort is not
 overlaid: the catalog's `low` default rides the harness's `--effort` session
-flag so `/effort` stays live (DD-059). The reviewed
-default remains the stable `deepseek-v4-pro[1m]` alias. As of
-2026-08-12, DeepSeek's live Models & Pricing page identifies that alias as
-`DeepSeek-V4-Pro-0813`; the API slug did not change. Explicit Pro/Flash and
+flag so `/effort` stays live (DD-059). The default model and the
+haiku/subagent model come from the
+[served DeepSeek model names](provider-selection.md#served-deepseek-model-names);
+today that is `deepseek-flash[1m]` (DeepSeek-V4.1-Flash), with `deepseek-flash`
+in the haiku/subagent slots. Explicit Pro/Flash and
 auto/1m selections are applied as documented in
 [provider selection](provider-selection.md). The 1m compaction threshold is
 emitted only for a 1m wire profile. Every conflicting inherited Anthropic/profile

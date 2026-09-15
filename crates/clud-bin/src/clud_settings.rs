@@ -413,19 +413,23 @@ fn provider_profile_from_document(
 
     let model = read_string("model")?
         .map(|value| {
-            let entry = provider_catalog::model_by_cli_id(value).ok_or_else(|| {
-                invalid_provider_profile(
-                    provider,
-                    format!("model '{value}' is not a canonical catalog ID"),
-                )
-            })?;
+            // A canonical ID retired by a provider rename (#1192) still loads,
+            // normalized to its successor; wire IDs and shorthand stay rejected.
+            let entry = provider_catalog::model_by_cli_id(value)
+                .or_else(|| provider_catalog::model_by_retired_cli_id(value))
+                .ok_or_else(|| {
+                    invalid_provider_profile(
+                        provider,
+                        format!("model '{value}' is not a canonical catalog ID"),
+                    )
+                })?;
             if entry.provider != provider {
                 return Err(invalid_provider_profile(
                     provider,
                     format!("model '{value}' belongs to provider '{}'", entry.provider),
                 ));
             }
-            Ok(value.to_string())
+            Ok(entry.cli_id.to_string())
         })
         .transpose()?;
     let harness = read_string("harness")?

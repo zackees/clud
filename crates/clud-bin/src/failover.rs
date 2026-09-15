@@ -151,8 +151,12 @@ impl FailoverLadder {
     }
 
     fn rung(name: &str) -> Result<FailoverRung, LadderError> {
+        // Aliases count too: a ladder saved before a provider rename
+        // (`deepseek-v4-flash` -> `deepseek-flash`, #1192) must keep naming the
+        // provider route instead of being forwarded to Anthropic verbatim.
         let catalog = provider_catalog::model_by_cli_id(name)
-            .or_else(|| provider_catalog::model_by_wire_id(name));
+            .or_else(|| provider_catalog::model_by_wire_id(name))
+            .or_else(|| provider_catalog::model_by_any_id(name));
         match catalog {
             // A catalog row that is not Claude names a provider namespace clud
             // owns, so the replayed body must carry that row's wire ID.
@@ -261,11 +265,11 @@ mod tests {
 
     #[test]
     fn a_catalog_rung_carries_its_provider_wire_id_and_an_unknown_id_stays_claude() {
-        let ladder = FailoverLadder::parse("deepseek-v4-flash,claude-opus-4-1", true).unwrap();
+        let ladder = FailoverLadder::parse("deepseek-flash,claude-opus-4-1", true).unwrap();
         let rungs = ladder.rungs();
         assert_eq!(rungs[0].provider, ModelProvider::DeepSeek);
         assert_eq!(rungs[0].route, ConversationRoute::DeepSeek);
-        assert_eq!(rungs[0].wire_id, "deepseek-v4-flash");
+        assert_eq!(rungs[0].wire_id, "deepseek-flash[1m]");
         assert_eq!(rungs[0].cost, CostOwner::Metered);
 
         // Anthropic owns its inventory: a model clud has never heard of must
@@ -400,7 +404,7 @@ mod tests {
     fn a_rung_on_the_route_already_in_use_is_not_a_fallback() {
         let now = Instant::now();
         let ledger = RouteLedger::new();
-        let ladder = FailoverLadder::parse("deepseek-v4-flash", true).unwrap();
+        let ladder = FailoverLadder::parse("deepseek-flash", true).unwrap();
         assert!(
             ladder.next_available(None, &ledger, now).is_some(),
             "it is a real rung for any other route"
@@ -414,7 +418,19 @@ mod tests {
 
     #[test]
     fn a_rung_label_names_the_cost_owner_and_never_a_credential() {
+        let ladder = FailoverLadder::parse("deepseek-flash", true).unwrap();
+        assert_eq!(ladder.rungs()[0].label(), "deepseek-flash (metered)");
+    }
+
+    /// #1192: a ladder saved before DeepSeek renamed `deepseek-v4-flash` must
+    /// still descend onto DeepSeek, not be forwarded to Anthropic verbatim.
+    #[test]
+    fn a_retired_catalog_alias_still_names_its_provider_route() {
         let ladder = FailoverLadder::parse("deepseek-v4-flash", true).unwrap();
-        assert_eq!(ladder.rungs()[0].label(), "deepseek-v4-flash (metered)");
+        let rung = &ladder.rungs()[0];
+        assert_eq!(rung.provider, ModelProvider::DeepSeek);
+        assert_eq!(rung.route, ConversationRoute::DeepSeek);
+        assert_eq!(rung.wire_id, "deepseek-flash[1m]");
+        assert_eq!(rung.spec, "deepseek-v4-flash");
     }
 }

@@ -111,6 +111,9 @@ def copied_clud_env(_source: Path) -> dict[str, str]:
     # trampoline brings zero benefit here (the tmpdir binary is
     # never `pip install`'d at this path). See issues #331, #333.
     env["CLUD_NO_UNLOCK"] = "1"
+    # Pin the built-in server settings so a launch never
+    # fetches the served copy from GitHub during a test (#1192).
+    env["CLUD_SERVER_SETTINGS"] = "0"
     return env
 
 
@@ -532,6 +535,12 @@ def test_dry_run_deepseek() -> None:
     assert data["requested_harness"] == "default"
     assert data["effective_harness"] == "claude"
     assert data["provider_source"] == "cli"
+    # #1192: the served DeepSeek model name (built-in copy here, because the
+    # harness sets CLUD_SERVER_SETTINGS=0) selects DeepSeek V4.1 Flash.
+    assert data["model_selection"]["model"] == "deepseek-flash"
+    assert data["model_selection"]["wire_model"] == "deepseek-flash[1m]"
+    assert data["model_selection"]["model_source"] == "server_default"
+    assert data["model_selection"]["context_window"] == "1m"
     # --dry-run must never touch the native credential vault: this isolated
     # HOME has no stored key, and a vault read/prompt would either hang on
     # stdin (killed by _run's timeout) or surface a vault error instead of a

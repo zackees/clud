@@ -27,6 +27,8 @@ fn run(home: &std::path::Path, path: &std::path::Path, args: &[String]) -> (i32,
     env.push(("HOME".to_string(), home.clone()));
     env.push(("USERPROFILE".to_string(), home));
     env.push(("PATH".to_string(), path.to_string_lossy().into_owned()));
+    // Never fetch server settings during a test (#1192).
+    env.push(("CLUD_SERVER_SETTINGS".to_string(), "0".to_string()));
 
     let process = NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(argv),

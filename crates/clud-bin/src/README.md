@@ -30,6 +30,10 @@ the integration tests.
 - [dnd/](dnd/README.md) - drag-and-drop into the terminal: cross-platform
   path-string normalizer plus Windows-only `IDropTarget` adapter with
   per-launch-mode injectors.
+- [server_settings/](server_settings/README.md) - server-side settings (#1192):
+  the `assets/server-settings.json` baked into the binary and refreshed from
+  `main`, falling back section by section to the last valid value, plus a strict
+  JSON parser. See `docs/architecture/server-settings.md`.
 - [toast/](toast/README.md) - in-terminal toasts (#1189): toast model and
   hub, the PTY writer-thread compositor (kitty graphics, alternate-screen text
   cells, title/status-line fallback), Claude `statusLine` chaining, and

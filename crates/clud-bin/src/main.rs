@@ -462,20 +462,32 @@ fn run(mut args: args::Args) {
             std::process::exit(2);
         }
     }
-    args.resolved_model_selection = match clud::provider_catalog::resolve_for_launch(
-        launch_target.model_provider,
-        args.model.as_deref(),
-        args.effort.as_deref(),
-        args.context_window.as_deref(),
-        provider_profile.map(clud_settings::ProviderProfile::selection_defaults),
-        launch_target.routing_mode == backend::RoutingMode::Direct,
-    ) {
-        Ok(selection) => selection,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    };
+    let saved_selection = provider_profile.map(clud_settings::ProviderProfile::selection_defaults);
+    let direct_launch = launch_target.routing_mode == backend::RoutingMode::Direct;
+    // Only a launch that would otherwise fall back to the catalog default asks
+    // for the served model name, so an explicit or saved model never waits on
+    // the network (#1192).
+    let server_default = (direct_launch
+        && args.model.is_none()
+        && saved_selection.and_then(|saved| saved.model).is_none())
+    .then(|| clud::server_settings::provider_default_model(launch_target.model_provider))
+    .flatten();
+    args.resolved_model_selection =
+        match clud::provider_catalog::resolve_for_launch_with_server_default(
+            launch_target.model_provider,
+            args.model.as_deref(),
+            args.effort.as_deref(),
+            args.context_window.as_deref(),
+            saved_selection,
+            direct_launch,
+            server_default,
+        ) {
+            Ok(selection) => selection,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
     if launch_target.routing_mode == backend::RoutingMode::Unified {
         if let Some(selection) = args
             .resolved_model_selection
