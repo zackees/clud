@@ -8,12 +8,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal;
-
 use crate::args::Args;
 use crate::backend::{Backend, HarnessSelection, ModelProvider};
 use crate::preference::{ChoiceOption, ChoiceSelector};
+use crate::selector::{self, check_marker, Key, Note, Row, Selector, Step, View};
 use crate::{codex_hook_normalize, skills};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,14 +37,6 @@ impl LaunchSetupScope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectorEvent {
-    Up,
-    Down,
-    Enter,
-    Cancel,
-}
-
 const SCOPE_OPTIONS: [ChoiceOption<LaunchSetupScope>; 2] = [
     ChoiceOption {
         value: LaunchSetupScope::SessionOnly,
@@ -60,6 +50,8 @@ const SCOPE_OPTIONS: [ChoiceOption<LaunchSetupScope>; 2] = [
     },
 ];
 
+/// The launch-scope choice. Terminal I/O belongs to [`crate::selector`]
+/// (#1195), which also owns the CRLF rendering #1063 first fixed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeSelector {
     choice: ChoiceSelector<LaunchSetupScope>,
@@ -78,65 +70,51 @@ impl Default for ScopeSelector {
 }
 
 impl ScopeSelector {
-    const RENDERED_LINES: usize = 4;
-
     pub fn selected(&self) -> LaunchSetupScope {
         self.choice.selected()
     }
+}
 
-    pub fn handle(&mut self, event: SelectorEvent) -> Option<LaunchSetupScope> {
-        match event {
-            SelectorEvent::Up => self.choice.previous(),
-            SelectorEvent::Down => self.choice.next(),
-            SelectorEvent::Enter => return Some(self.choice.confirm()),
-            SelectorEvent::Cancel => return Some(self.choice.cancel()),
+impl Selector for ScopeSelector {
+    type Outcome = LaunchSetupScope;
+
+    fn view(&self, _elapsed: Duration) -> View {
+        View {
+            title: "Launch setup scope".to_string(),
+            hints: vec!["Up/Down move, Enter select, Esc session-only".to_string()],
+            gap: false,
+            rows: self
+                .choice
+                .options()
+                .iter()
+                .map(|option| {
+                    let current = option.value == self.selected();
+                    Row {
+                        current,
+                        marker: check_marker(current).to_string(),
+                        label: option.label.to_string(),
+                        note: Note::Inline(option.note.to_string()),
+                    }
+                })
+                .collect(),
+            footer: Vec::new(),
         }
-        None
     }
 
-    /// Draw the four selector rows.
-    ///
-    /// **Every line ends `\r\n`, never a bare `\n` (#1063).** The caller holds
-    /// a [`RawModeGuard`], and raw mode clears `OPOST` on POSIX, so the kernel
-    /// stops translating line feed into carriage-return + line feed. A bare
-    /// `\n` then moves down one row and leaves the cursor in the column it was
-    /// already in, so each row starts where the previous one ended and the menu
-    /// walks diagonally off to the right. Windows keeps translating `\n` in its
-    /// console layer, which is why this only ever showed on Linux and macOS.
-    ///
-    /// `every_rendered_line_ends_in_crlf` fails if a `writeln!` creeps back in.
-    pub fn render<W: Write>(&self, out: &mut W) -> io::Result<()> {
-        write!(out, "Launch setup scope\r\n")?;
-        write!(out, "  Up/Down move, Enter select, Esc session-only\r\n")?;
-        write!(
-            out,
-            "{} {} Session only   this launch\r\n",
-            cursor(self.selected() == LaunchSetupScope::SessionOnly),
-            marker(self.selected() == LaunchSetupScope::SessionOnly)
-        )?;
-        write!(
-            out,
-            "{} {} Globally       remember launch preferences\r\n",
-            cursor(self.selected() == LaunchSetupScope::Global),
-            marker(self.selected() == LaunchSetupScope::Global)
-        )?;
-        out.flush()
-    }
-}
-
-fn cursor(selected: bool) -> &'static str {
-    if selected {
-        ">"
-    } else {
-        " "
-    }
-}
-
-fn marker(selected: bool) -> &'static str {
-    if selected {
-        "[x]"
-    } else {
-        "[ ]"
+    fn on_key(&mut self, key: Key) -> Step<LaunchSetupScope> {
+        match key {
+            Key::Up => {
+                self.choice.previous();
+                Step::Redraw
+            }
+            Key::Down => {
+                self.choice.next();
+                Step::Redraw
+            }
+            Key::Enter => Step::Done(self.choice.confirm()),
+            Key::Escape => Step::Done(self.choice.cancel()),
+            Key::Space | Key::Char(_) => Step::Stay,
+        }
     }
 }
 
@@ -198,89 +176,10 @@ pub fn should_persist_prompted_default_backend(args: &Args, scope: LaunchSetupSc
         && matches!(scope, LaunchSetupScope::Global)
 }
 
+/// Ask for the launch-setup scope. Ctrl-C and Ctrl-D return an
+/// [`io::ErrorKind::Interrupted`] error.
 pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
-    let _raw = RawModeGuard::enable()?;
-    write!(out, "\x1b[?25l")?;
-    out.flush()?;
-
-    let result = prompt_scope_inner(out);
-    let restore_result = write!(out, "\x1b[?25h").and_then(|_| out.flush());
-    match result {
-        Ok(scope) => restore_result.map(|_| scope),
-        Err(error) => {
-            let _ = restore_result;
-            Err(error)
-        }
-    }
-}
-
-fn prompt_scope_inner<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
-    let mut selector = ScopeSelector::default();
-    selector.render(out)?;
-    let _ = drain_pending_terminal_events();
-
-    loop {
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        let event = match key.code {
-            KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "launch setup cancelled",
-                ));
-            }
-            KeyCode::Up => SelectorEvent::Up,
-            KeyCode::Down => SelectorEvent::Down,
-            KeyCode::Char('k') => SelectorEvent::Up,
-            KeyCode::Char('j') => SelectorEvent::Down,
-            KeyCode::Enter => SelectorEvent::Enter,
-            KeyCode::Esc => SelectorEvent::Cancel,
-            _ => continue,
-        };
-        if let Some(scope) = selector.handle(event) {
-            // Still inside `RawModeGuard`, so this closing line needs the same
-            // CRLF the rows do — a bare `\n` would leave whatever clud prints
-            // next starting in the selector's last column (#1063).
-            write!(out, "\r\n")?;
-            out.flush()?;
-            return Ok(scope);
-        }
-        write!(out, "\x1b[{}A\x1b[J", ScopeSelector::RENDERED_LINES)?;
-        selector.render(out)?;
-    }
-}
-
-fn drain_pending_terminal_events() -> io::Result<usize> {
-    drain_pending_events(|| event::poll(Duration::from_millis(0)), event::read)
-}
-
-fn drain_pending_events<P, R>(mut poll: P, mut read: R) -> io::Result<usize>
-where
-    P: FnMut() -> io::Result<bool>,
-    R: FnMut() -> io::Result<Event>,
-{
-    let mut drained = 0;
-    while poll()? {
-        let _ = read()?;
-        drained += 1;
-    }
-    Ok(drained)
-}
-
-struct RawModeGuard;
-
-impl RawModeGuard {
-    fn enable() -> io::Result<Self> {
-        terminal::enable_raw_mode()?;
-        Ok(Self)
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
-    }
+    selector::run(out, &mut ScopeSelector::default())
 }
 
 #[derive(Debug)]
@@ -480,90 +379,56 @@ mod tests {
     fn selector_defaults_to_session_only() {
         let selector = ScopeSelector::default();
         assert_eq!(selector.selected(), LaunchSetupScope::SessionOnly);
-
-        let mut out = Vec::new();
-        selector.render(&mut out).unwrap();
         assert_eq!(
-            String::from_utf8(out).unwrap(),
+            selector::render(&selector.view(Duration::ZERO), 0).text(),
             "Launch setup scope\r\n  Up/Down move, Enter select, Esc session-only\r\n> [x] Session only   this launch\r\n  [ ] Globally       remember launch preferences\r\n"
         );
     }
 
-    /// Issue #1063: the selector renders under `RawModeGuard`, where `OPOST`
-    /// is off and a bare `\n` moves down without returning to column zero —
-    /// each row started where the last ended and the menu ran diagonally off
-    /// the screen on Linux and macOS.
-    ///
-    /// Asserted structurally rather than against fixed text so a future row,
-    /// or a `writeln!` reintroduced anywhere in `render`, fails here too.
+    /// Issue #1063: the selector renders under raw mode, where `OPOST` is off
+    /// and a bare `\n` moves down without returning to column zero. The shared
+    /// renderer owns that now (#1195); this pins the scope prompt's frame and
+    /// the redraw that moves back over it.
     #[test]
-    fn every_rendered_line_ends_in_crlf() {
-        for selected in [LaunchSetupScope::SessionOnly, LaunchSetupScope::Global] {
-            let mut selector = ScopeSelector::default();
-            if selected == LaunchSetupScope::Global {
-                selector.handle(SelectorEvent::Down);
-            }
-            let mut out = Vec::new();
-            selector.render(&mut out).unwrap();
-            let rendered = String::from_utf8(out).unwrap();
+    fn navigating_redraws_the_four_rows_and_enter_keeps_the_frame() {
+        use crate::selector::testing::{assert_crlf_only, key, ScriptedTerminal};
 
-            assert_eq!(
-                rendered.matches('\n').count(),
-                rendered.matches("\r\n").count(),
-                "every line feed must be a CRLF while raw mode is on: {rendered:?}"
-            );
-            assert_eq!(
-                rendered.matches("\r\n").count(),
-                ScopeSelector::RENDERED_LINES,
-                "the cursor-up redraw moves {} rows, so render must emit exactly that many: {rendered:?}",
-                ScopeSelector::RENDERED_LINES
-            );
-        }
+        let mut selector = ScopeSelector::default();
+        let mut terminal =
+            ScriptedTerminal::new([key(Key::Down), key(Key::Enter)], Duration::ZERO, 80);
+        let mut out = Vec::new();
+        let scope = selector::drive(&mut out, &mut selector, &mut terminal).unwrap();
+        assert_eq!(scope, LaunchSetupScope::Global);
+
+        let text = String::from_utf8(out).unwrap();
+        assert_crlf_only(&text);
+        assert_eq!(text.matches("\x1b[4A\x1b[J").count(), 1, "{text:?}");
+        assert!(text.contains("> [x] Globally       remember launch preferences\r\n"));
+        assert!(text.ends_with("\r\n\r\n"), "the frame stays in scrollback");
     }
 
     #[test]
     fn selector_navigation_and_enter() {
         let mut selector = ScopeSelector::default();
-        assert_eq!(selector.handle(SelectorEvent::Down), None);
+        assert_eq!(selector.on_key(Key::Down), Step::Redraw);
         assert_eq!(selector.selected(), LaunchSetupScope::Global);
-        assert_eq!(selector.handle(SelectorEvent::Up), None);
+        assert_eq!(selector.on_key(Key::Up), Step::Redraw);
         assert_eq!(selector.selected(), LaunchSetupScope::SessionOnly);
         assert_eq!(
-            selector.handle(SelectorEvent::Enter),
-            Some(LaunchSetupScope::SessionOnly)
+            selector.on_key(Key::Enter),
+            Step::Done(LaunchSetupScope::SessionOnly)
         );
     }
 
     #[test]
     fn selector_escape_chooses_session_only() {
         let mut selector = ScopeSelector::default();
-        assert_eq!(selector.handle(SelectorEvent::Down), None);
+        assert_eq!(selector.on_key(Key::Down), Step::Redraw);
         assert_eq!(selector.selected(), LaunchSetupScope::Global);
         assert_eq!(
-            selector.handle(SelectorEvent::Cancel),
-            Some(LaunchSetupScope::SessionOnly)
+            selector.on_key(Key::Escape),
+            Step::Done(LaunchSetupScope::SessionOnly)
         );
-    }
-
-    #[test]
-    fn pending_input_is_drained_before_prompt_accepts_input() {
-        use crossterm::event::{KeyEvent, KeyModifiers};
-        use std::cell::RefCell;
-        use std::collections::VecDeque;
-
-        let events = RefCell::new(VecDeque::from([
-            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        ]));
-
-        let drained = drain_pending_events(
-            || Ok(!events.borrow().is_empty()),
-            || Ok(events.borrow_mut().pop_front().unwrap()),
-        )
-        .unwrap();
-
-        assert_eq!(drained, 2);
-        assert!(events.borrow().is_empty());
     }
 
     #[test]

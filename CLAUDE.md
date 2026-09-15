@@ -141,6 +141,8 @@ Several features have a "single source of truth" registry that must be updated a
 
 - **New server-side setting** (`crates/clud-bin/assets/server-settings.json`) → a `Section` type plus one `SectionSpec::of::<T>()` entry in `SECTIONS` (`crates/clud-bin/src/server_settings/sections.rs`), and its built-in value in the JSON. *Gotcha*: that JSON file is also what every installed build fetches from `main`, so an edit ships to users when it merges, not when a release is cut. The guard tests fail if the file is not strict JSON, or if a registered section is missing, invalid, or unregistered. Never bump `schema_version` for an additive change: older builds would ignore the whole document. See [`docs/architecture/server-settings.md`](docs/architecture/server-settings.md).
 
+- **New interactive selector / picker** → implement `selector::Selector` (`crates/clud-bin/src/selector.rs`): supply a `View` and handle `Key`s, and let `selector::run` own the terminal. *Gotcha*: never enable raw mode, read events, or write `writeln!`/escape sequences in the selector's own module. Raw mode clears `OPOST` on POSIX, so a bare `\n` walks the menu diagonally, and this bug shipped twice from per-module copies (#1063, #1195). Add the module to `migrated_selectors_never_drive_the_terminal_themselves` in `selector.rs`. See [DD-073](docs/DESIGN_DECISIONS.md#dd-073-every-inline-selector-renders-through-one-component).
+
 - **Changing reap/spare logic** → decisions must be expressible against injected
   `ProcessFacts` (unit-testable, cross-platform). Add the case to the Tier 1
   decision table in `job_orphan_reaper`'s `lifecycle_tests` first, asserting

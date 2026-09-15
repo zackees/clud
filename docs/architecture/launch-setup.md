@@ -16,8 +16,10 @@ Launch setup scope
   [ ] Globally       remember launch preferences
 ```
 
-The selector stays in the normal terminal scrollback: no alternate screen, no
-graphics mode. It hides the hardware cursor while active and uses the visible
+The selector renders through the shared inline selector
+(`crates/clud-bin/src/selector.rs`, #1195, DD-073), which owns raw mode, CRLF
+output, redraw, and key decoding for every clud selector. It stays in the
+normal terminal scrollback: no alternate screen, no graphics mode. It hides the hardware cursor while active and uses the visible
 `>` marker as the selection cursor. The default is session-only unless
 `~/.clud/settings.json` already stores a backend-level global preference, for
 example:

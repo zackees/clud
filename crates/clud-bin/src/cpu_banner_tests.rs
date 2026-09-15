@@ -645,8 +645,16 @@ fn a_body_that_panics_still_counts_as_finished() {
         panic!("sampler exploded");
     });
     // The `finished` channel closes on unwind, so this is a join, not a
-    // budget-long wait followed by a detach.
-    assert_eq!(watcher.stop(), StopOutcome::Joined);
+    // detach. The budget is deliberately generous rather than
+    // `STOP_JOIN_BUDGET`: the panic hook prints (and, under CI's
+    // `RUST_BACKTRACE`, symbolizes a backtrace) before the unwind drops the
+    // channel, and on a loaded Windows runner that alone outlasted 500 ms
+    // (#1195). What is under test is that an unwind counts as finished, not
+    // how fast Windows captures a backtrace.
+    assert_eq!(
+        watcher.stop_within(Duration::from_secs(30)),
+        StopOutcome::Joined
+    );
 }
 
 // ── #1189: the banner publishes toasts, never terminal output ──────────────

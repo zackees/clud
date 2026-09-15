@@ -1,24 +1,20 @@
-//! `clud settings` — a small, cross-platform TUI checkbox menu over the
-//! typed settings in `~/.clud/settings.json`.
+//! `clud settings` — a small, cross-platform TUI menu over the typed settings
+//! in `~/.clud/settings.json`.
 //!
-//! Split the same way `launch_setup.rs`'s `ScopeSelector` is: a pure,
-//! unit-tested state machine (`Menu`) plus a thin impure terminal-I/O shell
-//! (`run_interactive`/`run_interactive_inner`) built on the same crossterm
-//! primitives (raw-mode RAII guard, raw-ANSI cursor hide/show, redraw via
-//! cursor-up + clear-to-end) already proven cross-platform in this repo.
+//! `Menu` is a pure, unit-tested state machine. All terminal I/O (raw mode,
+//! keys, CRLF rendering, redraw) belongs to the shared [`crate::selector`]
+//! (#1195), as it does for the launch-scope selector and the harness picker.
 //! Provider and harness choice rows share `preference::ChoiceSelector` with
 //! the inline launch-scope selector; all rows save in one atomic patch.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::time::Duration;
-
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal;
 
 use crate::backend::{HarnessSelection, ModelProvider};
 use crate::clud_settings;
 use crate::preference::{ChoiceOption, ChoiceSelector};
 use crate::provider_catalog::{self, EffortLevel};
+use crate::selector::{self, Key, Note, Row, Selector, Step, View};
 
 /// One selector row per [`ModelProvider::ALL`] entry, built at call time
 /// (rather than a `const` array) so a new registered provider needs no
@@ -353,25 +349,20 @@ pub fn run(list_only: bool) -> i32 {
     }
 }
 
+/// How the menu closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MenuEvent {
-    Up,
-    Down,
-    Toggle,
-    Quit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MenuAction {
-    Redraw,
-    RequestSaveDecision,
-    ExitClean,
+enum MenuExit {
+    Unchanged,
+    Save,
+    Discard,
 }
 
 struct Menu {
     items: Vec<SettingItem>,
     original: Vec<SettingValue>,
     cursor: usize,
+    /// Quitting with unsaved changes asks `[Y/n]` under the rows.
+    confirming: bool,
 }
 
 impl Menu {
@@ -381,6 +372,7 @@ impl Menu {
             items,
             original,
             cursor: 0,
+            confirming: false,
         }
     }
 
@@ -390,175 +382,81 @@ impl Menu {
             .map(|item| &item.value)
             .ne(self.original.iter())
     }
+}
 
-    fn handle(&mut self, event: MenuEvent) -> MenuAction {
-        match event {
-            MenuEvent::Up => {
+impl Selector for Menu {
+    type Outcome = MenuExit;
+
+    fn view(&self, _elapsed: Duration) -> View {
+        View {
+            title: "clud settings".to_string(),
+            hints: vec!["Space toggle, q quit".to_string()],
+            gap: true,
+            rows: self
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| Row {
+                    current: index == self.cursor,
+                    marker: item.value.marker(),
+                    label: item.label.to_string(),
+                    note: Note::Below(item.note.to_string()),
+                })
+                .collect(),
+            footer: if self.confirming {
+                vec!["Unsaved changes. Save before exiting? [Y/n]".to_string()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn on_key(&mut self, key: Key) -> Step<MenuExit> {
+        if self.confirming {
+            return match key {
+                Key::Enter | Key::Char('y' | 'Y') => Step::Done(MenuExit::Save),
+                Key::Char('n' | 'N') => Step::Done(MenuExit::Discard),
+                Key::Escape => {
+                    self.confirming = false;
+                    Step::Redraw
+                }
+                _ => Step::Stay,
+            };
+        }
+        match key {
+            Key::Up => {
                 self.cursor = self.cursor.saturating_sub(1);
-                MenuAction::Redraw
+                Step::Redraw
             }
-            MenuEvent::Down => {
+            Key::Down => {
                 if self.cursor + 1 < self.items.len() {
                     self.cursor += 1;
                 }
-                MenuAction::Redraw
+                Step::Redraw
             }
-            MenuEvent::Toggle => {
+            Key::Space => {
                 if let Some(item) = self.items.get_mut(self.cursor) {
                     item.value.cycle();
                 }
-                MenuAction::Redraw
+                Step::Redraw
             }
-            MenuEvent::Quit => {
-                if self.is_dirty() {
-                    MenuAction::RequestSaveDecision
-                } else {
-                    MenuAction::ExitClean
-                }
+            Key::Char('q') if self.is_dirty() => {
+                self.confirming = true;
+                Step::Redraw
             }
+            Key::Char('q') => Step::Done(MenuExit::Unchanged),
+            _ => Step::Stay,
         }
-    }
-
-    /// Title + hint + blank separator, then a fixed 2-line unit per item
-    /// (label line + always-visible note line) — keeping this a trivial
-    /// constant is what makes the cursor-up-N redraw trick work as more
-    /// settings are added later.
-    fn rendered_lines(&self) -> usize {
-        3 + self.items.len() * 2
-    }
-
-    fn render<W: Write>(&self, out: &mut W) -> io::Result<()> {
-        writeln!(out, "clud settings")?;
-        writeln!(out, "  Space toggle, q quit")?;
-        writeln!(out)?;
-        for (index, item) in self.items.iter().enumerate() {
-            writeln!(
-                out,
-                "{} {} {}",
-                cursor_marker(index == self.cursor),
-                item.value.marker(),
-                item.label
-            )?;
-            writeln!(out, "      {}", item.note)?;
-        }
-        out.flush()
-    }
-}
-
-fn cursor_marker(selected: bool) -> &'static str {
-    if selected {
-        ">"
-    } else {
-        " "
-    }
-}
-
-fn menu_event_for_key(code: KeyCode) -> Option<MenuEvent> {
-    match code {
-        KeyCode::Up | KeyCode::Char('k') => Some(MenuEvent::Up),
-        KeyCode::Down | KeyCode::Char('j') => Some(MenuEvent::Down),
-        KeyCode::Char(' ') => Some(MenuEvent::Toggle),
-        KeyCode::Char('q') => Some(MenuEvent::Quit),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SaveDecision {
-    Save,
-    Discard,
-    Cancel,
-}
-
-fn save_decision_for_key(code: KeyCode) -> Option<SaveDecision> {
-    match code {
-        KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(SaveDecision::Save),
-        KeyCode::Char('n' | 'N') => Some(SaveDecision::Discard),
-        KeyCode::Esc => Some(SaveDecision::Cancel),
-        _ => None,
-    }
-}
-
-fn is_ctrl_c_or_d(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    matches!(code, KeyCode::Char('c' | 'd')) && modifiers.contains(KeyModifiers::CONTROL)
-}
-
-struct RawModeGuard;
-
-impl RawModeGuard {
-    fn enable() -> io::Result<Self> {
-        terminal::enable_raw_mode()?;
-        Ok(Self)
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
     }
 }
 
 fn run_interactive(items: Vec<SettingItem>) -> io::Result<()> {
-    let mut out = io::stdout();
-    let _raw = RawModeGuard::enable()?;
-    write!(out, "\x1b[?25l")?;
-    out.flush()?;
-
-    let result = run_interactive_inner(&mut out, items);
-
-    let restore_result = write!(out, "\x1b[?25h").and_then(|_| out.flush());
-    match result {
-        Ok(()) => restore_result,
-        Err(error) => {
-            let _ = restore_result;
-            Err(error)
-        }
-    }
-}
-
-fn run_interactive_inner<W: Write>(out: &mut W, items: Vec<SettingItem>) -> io::Result<()> {
     let mut menu = Menu::new(items);
-    menu.render(out)?;
-    let _ = drain_pending_terminal_events();
-
-    loop {
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if is_ctrl_c_or_d(key.code, key.modifiers) {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "clud settings cancelled",
-            ));
-        }
-        let Some(event) = menu_event_for_key(key.code) else {
-            continue;
-        };
-        match menu.handle(event) {
-            MenuAction::Redraw => redraw(out, &menu)?,
-            MenuAction::ExitClean => {
-                writeln!(out)?;
-                return Ok(());
-            }
-            MenuAction::RequestSaveDecision => match prompt_save_decision(out)? {
-                SaveDecision::Save => {
-                    let patch = patch_from_menu(&menu);
-                    clud_settings::save_settings_patch(patch)
-                        .map_err(|error| io::Error::other(format!("saving settings: {error}")))?;
-                    writeln!(out)?;
-                    return Ok(());
-                }
-                SaveDecision::Discard => {
-                    writeln!(out)?;
-                    return Ok(());
-                }
-                SaveDecision::Cancel => {
-                    // `prompt_save_decision` already erased its own prompt
-                    // line; the menu above it is untouched, nothing to redraw.
-                }
-            },
-        }
+    if selector::run(&mut io::stdout(), &mut menu)? == MenuExit::Save {
+        clud_settings::save_settings_patch(patch_from_menu(&menu))
+            .map_err(|error| io::Error::other(format!("saving settings: {error}")))?;
     }
+    Ok(())
 }
 
 fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
@@ -631,42 +529,6 @@ fn provider_from_profile_key(key: &str) -> Option<ModelProvider> {
     ModelProvider::from_settings_str(provider)
 }
 
-fn redraw<W: Write>(out: &mut W, menu: &Menu) -> io::Result<()> {
-    write!(out, "\x1b[{}A\x1b[J", menu.rendered_lines())?;
-    menu.render(out)
-}
-
-fn prompt_save_decision<W: Write>(out: &mut W) -> io::Result<SaveDecision> {
-    writeln!(out, "Unsaved changes. Save before exiting? [Y/n]")?;
-    out.flush()?;
-    loop {
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if is_ctrl_c_or_d(key.code, key.modifiers) {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "clud settings cancelled",
-            ));
-        }
-        if let Some(decision) = save_decision_for_key(key.code) {
-            if decision == SaveDecision::Cancel {
-                write!(out, "\x1b[1A\x1b[J")?;
-            }
-            return Ok(decision);
-        }
-    }
-}
-
-fn drain_pending_terminal_events() -> io::Result<usize> {
-    let mut drained = 0;
-    while event::poll(Duration::from_millis(0))? {
-        let _ = event::read()?;
-        drained += 1;
-    }
-    Ok(drained)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,7 +546,7 @@ mod tests {
     fn toggle_flips_value_and_marks_dirty() {
         let mut menu = Menu::new(vec![item(false)]);
         assert!(!menu.is_dirty());
-        assert_eq!(menu.handle(MenuEvent::Toggle), MenuAction::Redraw);
+        assert_eq!(menu.on_key(Key::Space), Step::Redraw);
         assert_eq!(menu.items[0].value, SettingValue::Bool(true));
         assert!(menu.is_dirty());
     }
@@ -692,8 +554,8 @@ mod tests {
     #[test]
     fn toggle_twice_returns_to_clean() {
         let mut menu = Menu::new(vec![item(false)]);
-        menu.handle(MenuEvent::Toggle);
-        menu.handle(MenuEvent::Toggle);
+        menu.on_key(Key::Space);
+        menu.on_key(Key::Space);
         assert_eq!(menu.items[0].value, SettingValue::Bool(false));
         assert!(!menu.is_dirty());
     }
@@ -701,36 +563,60 @@ mod tests {
     #[test]
     fn quit_with_no_changes_exits_clean() {
         let mut menu = Menu::new(vec![item(false)]);
-        assert_eq!(menu.handle(MenuEvent::Quit), MenuAction::ExitClean);
+        assert_eq!(menu.on_key(Key::Char('q')), Step::Done(MenuExit::Unchanged));
     }
 
     #[test]
-    fn quit_with_changes_requests_save_decision() {
+    fn quit_with_changes_asks_to_save_and_escape_returns_to_the_menu() {
         let mut menu = Menu::new(vec![item(false)]);
-        menu.handle(MenuEvent::Toggle);
+        menu.on_key(Key::Space);
+        assert_eq!(menu.on_key(Key::Char('q')), Step::Redraw);
+        assert!(menu.confirming);
+        assert!(menu.view(Duration::ZERO).footer[0].contains("[Y/n]"));
         assert_eq!(
-            menu.handle(MenuEvent::Quit),
-            MenuAction::RequestSaveDecision
+            menu.on_key(Key::Space),
+            Step::Stay,
+            "no editing while asked"
         );
+        assert_eq!(menu.on_key(Key::Escape), Step::Redraw);
+        assert!(!menu.confirming);
+        assert!(menu.view(Duration::ZERO).footer.is_empty());
+    }
+
+    #[test]
+    fn save_prompt_keys_choose_save_or_discard() {
+        for (key, outcome) in [
+            (Key::Char('y'), MenuExit::Save),
+            (Key::Char('Y'), MenuExit::Save),
+            (Key::Enter, MenuExit::Save),
+            (Key::Char('n'), MenuExit::Discard),
+            (Key::Char('N'), MenuExit::Discard),
+        ] {
+            let mut menu = Menu::new(vec![item(false)]);
+            menu.on_key(Key::Space);
+            menu.on_key(Key::Char('q'));
+            assert_eq!(menu.on_key(Key::Char('z')), Step::Stay);
+            assert_eq!(menu.on_key(key), Step::Done(outcome), "{key:?}");
+        }
     }
 
     #[test]
     fn cursor_clamps_at_list_ends() {
         let mut menu = Menu::new(vec![item(false), item(true)]);
         assert_eq!(menu.cursor, 0);
-        menu.handle(MenuEvent::Up);
+        menu.on_key(Key::Up);
         assert_eq!(menu.cursor, 0, "cannot move above the first row");
-        menu.handle(MenuEvent::Down);
+        menu.on_key(Key::Down);
         assert_eq!(menu.cursor, 1);
-        menu.handle(MenuEvent::Down);
+        menu.on_key(Key::Down);
         assert_eq!(menu.cursor, 1, "cannot move below the last row");
     }
 
     #[test]
     fn toggle_only_affects_the_highlighted_row() {
         let mut menu = Menu::new(vec![item(false), item(false)]);
-        menu.handle(MenuEvent::Down);
-        menu.handle(MenuEvent::Toggle);
+        menu.on_key(Key::Down);
+        menu.on_key(Key::Space);
         assert_eq!(menu.items[0].value, SettingValue::Bool(false));
         assert_eq!(menu.items[1].value, SettingValue::Bool(true));
     }
@@ -847,70 +733,38 @@ mod tests {
         );
     }
 
+    /// #1195: the menu used to draw with `writeln!` under raw mode, so on
+    /// Linux and macOS every row and note walked diagonally. Drives a full
+    /// session: toggle, quit, back out of the save prompt, quit, save.
     #[test]
-    fn rendered_lines_matches_actual_render_output() {
-        let menu = Menu::new(vec![item(false), item(true)]);
-        let mut buf = Vec::new();
-        menu.render(&mut buf).unwrap();
-        let text = String::from_utf8(buf).unwrap();
-        assert_eq!(
-            text.lines().count(),
-            menu.rendered_lines(),
-            "rendered_lines() must track render()'s actual line count for the redraw math"
-        );
-    }
+    fn a_full_session_renders_crlf_frames_and_redraws_exactly_what_was_drawn() {
+        use crate::selector::testing::{assert_crlf_only, key, ScriptedTerminal};
 
-    #[test]
-    fn key_mapping_covers_navigation_toggle_and_quit() {
-        assert_eq!(menu_event_for_key(KeyCode::Up), Some(MenuEvent::Up));
-        assert_eq!(menu_event_for_key(KeyCode::Char('k')), Some(MenuEvent::Up));
-        assert_eq!(menu_event_for_key(KeyCode::Down), Some(MenuEvent::Down));
-        assert_eq!(
-            menu_event_for_key(KeyCode::Char('j')),
-            Some(MenuEvent::Down)
+        let mut menu = Menu::new(vec![item(false), item(true)]);
+        let mut terminal = ScriptedTerminal::new(
+            [
+                key(Key::Space),
+                key(Key::Char('q')),
+                key(Key::Escape),
+                key(Key::Char('q')),
+                key(Key::Char('y')),
+            ],
+            Duration::ZERO,
+            80,
         );
-        assert_eq!(
-            menu_event_for_key(KeyCode::Char(' ')),
-            Some(MenuEvent::Toggle)
-        );
-        assert_eq!(
-            menu_event_for_key(KeyCode::Char('q')),
-            Some(MenuEvent::Quit)
-        );
-        assert_eq!(menu_event_for_key(KeyCode::Char('x')), None);
-    }
+        let mut out = Vec::new();
+        let outcome = selector::drive(&mut out, &mut menu, &mut terminal).unwrap();
+        assert_eq!(outcome, MenuExit::Save);
 
-    #[test]
-    fn save_decision_key_mapping() {
-        assert_eq!(
-            save_decision_for_key(KeyCode::Char('y')),
-            Some(SaveDecision::Save)
-        );
-        assert_eq!(
-            save_decision_for_key(KeyCode::Char('Y')),
-            Some(SaveDecision::Save)
-        );
-        assert_eq!(
-            save_decision_for_key(KeyCode::Enter),
-            Some(SaveDecision::Save)
-        );
-        assert_eq!(
-            save_decision_for_key(KeyCode::Char('n')),
-            Some(SaveDecision::Discard)
-        );
-        assert_eq!(
-            save_decision_for_key(KeyCode::Esc),
-            Some(SaveDecision::Cancel)
-        );
-        assert_eq!(save_decision_for_key(KeyCode::Char('z')), None);
-    }
-
-    #[test]
-    fn ctrl_c_and_ctrl_d_are_detected_regardless_of_other_keys() {
-        assert!(is_ctrl_c_or_d(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(is_ctrl_c_or_d(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(!is_ctrl_c_or_d(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(!is_ctrl_c_or_d(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        let text = String::from_utf8(out).unwrap();
+        assert_crlf_only(&text);
+        // Title, hint and gap plus two rows of two lines is seven rows; the
+        // save prompt adds an eighth. Space and both q presses move back over
+        // seven rows; Escape moves back over the eight with the prompt.
+        assert_eq!(text.matches("\x1b[7A\x1b[J").count(), 3, "{text:?}");
+        assert_eq!(text.matches("\x1b[8A\x1b[J").count(), 1, "{text:?}");
+        assert!(text.contains("  Unsaved changes. Save before exiting? [Y/n]\r\n"));
+        assert!(text.contains("> [x] Test setting\r\n      note\r\n"));
     }
 
     #[test]
