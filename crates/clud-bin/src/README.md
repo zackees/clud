@@ -160,9 +160,10 @@ Entry and orchestration:
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
   bridge or unified gateway, preflights direct Codex bridge credentials before
   creating a listener or child (including daemon admission), applies child-local
-  overlays, emits sanitized
-  optional-provider notices, registers launch-scoped authenticated `PreCompact`
-  and `SessionStart(clear)` HTTP hooks, and tears the listener down on every
+  overlays, emits sanitized optional-provider notices and the image-capability
+  notice for a model whose endpoint drops pasted images upstream (#1200),
+  registers launch-scoped authenticated `PreCompact` and
+  `SessionStart(clear)` HTTP hooks, and tears the listener down on every
   runner return path. Unified mode enables discovery while preserving Claude
   credentials and ambient session effort; the direct Codex route enables the
   same protocol with a Codex-only catalog and child-local 1.05M context

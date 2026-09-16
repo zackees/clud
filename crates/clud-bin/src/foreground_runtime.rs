@@ -41,7 +41,7 @@ pub struct ForegroundRuntime {
     env: Vec<(String, String)>,
     bridge: Option<BridgeHandle>,
     claude_settings: Option<ClaudeSettings>,
-    startup_notices: Vec<&'static str>,
+    startup_notices: Vec<String>,
 }
 
 struct ClaudeSettings {
@@ -107,7 +107,7 @@ impl ForegroundRuntime {
         mut env: Vec<(String, String)>,
         store: &dyn crate::provider_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
-        let (bridge, claude_settings, startup_notices) = if is_unified(plan) {
+        let (bridge, claude_settings, mut startup_notices) = if is_unified(plan) {
             // Optional routes must never block native Claude. Resolve only
             // availability metadata here; the actual credentials stay inside
             // the launch-scoped bridge and are not serialized into the plan.
@@ -132,7 +132,8 @@ impl ForegroundRuntime {
             if openrouter_key.is_none() {
                 startup_notices.push(
                     "[clud] unified: OpenRouter is not configured; \
-                     run `clud auth login openrouter` to add its route",
+                     run `clud auth login openrouter` to add its route"
+                        .to_string(),
                 );
             }
             // An unroutable rung fails the launch rather than a turn: by the
@@ -146,7 +147,8 @@ impl ForegroundRuntime {
             if !failover.withheld_for_consent().is_empty() {
                 startup_notices.push(
                     "[clud] failover: metered rungs are listed but will not be taken; \
-                     pass --failover-allow-metered to consent",
+                     pass --failover-allow-metered to consent"
+                        .to_string(),
                 );
             }
             let bridge = BridgeHandle::start(
@@ -190,6 +192,11 @@ impl ForegroundRuntime {
         } else {
             (None, declared_hooks_settings(plan)?, Vec::new())
         };
+        // Route-independent: a vision-less model warns on every launch shape
+        // that can reach it, direct or through the unified gateway (#1200).
+        if let Some(notice) = image_capability_notice(plan) {
+            startup_notices.push(notice);
+        }
         // #967 Phase 2b: tell the hook binary that compiled dispatcher lines
         // are registered for this session, so the bare `clud-cmd-scan` line
         // stops running declared hooks itself and each one fires exactly once.
@@ -447,16 +454,18 @@ fn is_unified(plan: &LaunchPlan) -> bool {
     plan.routing_mode == RoutingMode::Unified && plan.effective_harness() == Backend::Claude
 }
 
-fn unified_startup_notices(codex_available: bool, deepseek_available: bool) -> Vec<&'static str> {
+fn unified_startup_notices(codex_available: bool, deepseek_available: bool) -> Vec<String> {
     let mut notices = Vec::new();
     if !codex_available {
         notices.push(
-            "[clud] unified gateway: Codex models unavailable; set OPENAI_API_KEY or run `clud auth login codex`",
+            "[clud] unified gateway: Codex models unavailable; set OPENAI_API_KEY or run `clud auth login codex`"
+                .to_string(),
         );
     }
     if !deepseek_available {
         notices.push(
-            "[clud] unified gateway: DeepSeek models unavailable; run `clud auth login deepseek`",
+            "[clud] unified gateway: DeepSeek models unavailable; run `clud auth login deepseek`"
+                .to_string(),
         );
     }
     notices
@@ -498,6 +507,73 @@ const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
 ];
+
+/// The catalog row a launch will actually bill, when clud knows it.
+///
+/// The selection's `model` (a catalog CLI ID) is checked first, because the
+/// wire spelling is not always the row's `wire_id`: an auto-context DeepSeek
+/// selection is billed as `deepseek-v4-pro` while that row's `wire_id` carries
+/// the `[1m]` suffix, so a wire-only lookup would miss it (#1200 review).
+///
+/// A selection that names no catalog row yields `None` -- clud has no
+/// capability data for a model it does not know, and a model-less selection
+/// (one that pins only effort) is no exception. Only a plan with *no*
+/// selection at all falls through to the descriptor's reviewed default, which
+/// is the row `apply_anthropic_compat_overlay` bills in that case.
+fn billed_catalog_row(plan: &LaunchPlan) -> Option<crate::provider_catalog::CatalogModel> {
+    if let Some(selection) = plan.model_selection.as_ref() {
+        return selection
+            .model
+            .as_deref()
+            .and_then(crate::provider_catalog::model_by_cli_id)
+            .or_else(|| {
+                selection
+                    .wire_model
+                    .as_deref()
+                    .and_then(crate::provider_catalog::model_by_wire_id)
+            });
+    }
+    crate::provider_registry::descriptor_for(plan.model_provider())
+        .and_then(|descriptor| crate::provider_catalog::reviewed_default_model(descriptor.provider))
+}
+
+/// The image-capability warning for a launch whose model cannot accept images,
+/// or `None` when there is nothing to warn about (#1200).
+///
+/// Silent, not loud: DeepSeek's endpoint replaces an image block with a
+/// literal `[Unsupported Image]` placeholder and still answers `200`, so the
+/// user sees a model that claims it cannot see the picture and no failure
+/// anywhere. Naming the offending model is the whole point -- the harness
+/// reports the reply, and only this line connects it to the model choice.
+fn image_capability_notice(plan: &LaunchPlan) -> Option<String> {
+    // Only a Claude-harness launch routes through an Anthropic-compat overlay
+    // or the unified gateway. A native harness (`--harness deepseek`) owns its
+    // own provider configuration and never reads this catalog, so telling that
+    // session about a dropped image would describe a request clud does not
+    // send. The docs scope the warning the same way.
+    if plan.effective_harness() != Backend::Claude {
+        return None;
+    }
+    let entry = billed_catalog_row(plan)?;
+    if entry.supports_images {
+        return None;
+    }
+    // The same invariant `apply_anthropic_compat_overlay` asserts: a
+    // descriptor-backed provider has a reviewed default to name. A row marked
+    // as dropping images is unpublishable without one, and
+    // `deepseek_pro_is_the_only_row_verified_to_drop_images` pins that.
+    let alternative = crate::provider_catalog::reviewed_default_model(entry.provider)
+        .expect(
+            "a row marked as dropping images must belong to a provider with a reviewed default \
+             to name as the alternative -- add a `provider_default: true` row in provider_catalog.rs",
+        )
+        .cli_id;
+    Some(format!(
+        "[clud] {} cannot accept images: pasted screenshots are dropped upstream with no error. \
+         Use `--model {alternative}` for image work.",
+        entry.cli_id
+    ))
+}
 
 /// Provider-neutral child-env overlay for any Anthropic-compatible API-key
 /// provider (#936/#937 Phase 2, replacing the DeepSeek-only
@@ -1356,6 +1432,141 @@ mod tests {
         assert!(notices[1].contains("clud auth login deepseek"));
         assert!(!notices.join(" ").to_ascii_lowercase().contains("secret"));
         assert!(unified_startup_notices(true, true).is_empty());
+    }
+
+    fn deepseek_plan_with(model: &str) -> LaunchPlan {
+        let mut route = plan(ModelProvider::DeepSeek, Backend::Claude);
+        route.model_selection = Some(
+            crate::provider_catalog::resolve(
+                Some(ModelProvider::DeepSeek),
+                Some(model),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        route
+    }
+
+    /// #1200: a Pro launch must say, once, that the model cannot accept
+    /// images. The degradation is silent -- the endpoint answers `200` and the
+    /// model replies that it cannot see the picture -- so this line is the
+    /// only thing connecting that reply to the model choice.
+    #[test]
+    fn deepseek_pro_launch_warns_that_images_are_dropped_upstream() {
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &deepseek_plan_with("deepseek-v4-pro"),
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        let notices = runtime.startup_notices.join(" ");
+        assert!(notices.contains("deepseek-v4-pro"), "{notices}");
+        assert!(notices.contains("cannot accept images"), "{notices}");
+        assert!(notices.contains("--model deepseek-flash"), "{notices}");
+    }
+
+    /// #1200 review finding: an auto-context selection is billed as the same
+    /// model under a suffix-free spelling (`deepseek-v4-pro`, not
+    /// `deepseek-v4-pro[1m]` -- `AUTO_OR_1M_CONTEXT`), so the notice has to
+    /// resolve the catalog row rather than the literal wire string. Missing
+    /// this spelling is the same silent drop #1200 exists to surface, on a
+    /// supported `--context-window` value.
+    #[test]
+    fn deepseek_pro_auto_context_launch_still_warns_about_images() {
+        let mut route = plan(ModelProvider::DeepSeek, Backend::Claude);
+        route.model_selection = Some(
+            crate::provider_catalog::resolve(
+                Some(ModelProvider::DeepSeek),
+                Some("deepseek-v4-pro"),
+                None,
+                Some("auto"),
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert!(
+            runtime
+                .startup_notices
+                .join(" ")
+                .contains("cannot accept images"),
+            "{:?}",
+            runtime.startup_notices
+        );
+    }
+
+    /// The warning is evidence-backed, not a family-wide caveat: Flash reads
+    /// images correctly on the same endpoint, so a session on it must stay
+    /// quiet.
+    #[test]
+    fn deepseek_flash_launch_says_nothing_about_images() {
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &deepseek_plan_with("deepseek-flash"),
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert!(
+            !runtime
+                .startup_notices
+                .join(" ")
+                .contains("cannot accept images"),
+            "{:?}",
+            runtime.startup_notices
+        );
+    }
+
+    /// The native DeepSeek harness owns its provider configuration and never
+    /// reads the Anthropic-compat overlay, so a Pro selection there must stay
+    /// silent: the notice would describe a request clud never sends.
+    #[test]
+    fn native_deepseek_harness_says_nothing_about_images() {
+        let mut route = plan(ModelProvider::DeepSeek, Backend::DeepSeek);
+        route.model_selection = Some(
+            crate::provider_catalog::resolve(
+                Some(ModelProvider::DeepSeek),
+                Some("deepseek-v4-pro"),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert!(
+            runtime.startup_notices.is_empty(),
+            "{:?}",
+            runtime.startup_notices
+        );
+    }
+
+    /// No descriptor resolves for Claude, so the native route can never carry
+    /// a provider-capability warning.
+    #[test]
+    fn claude_launch_says_nothing_about_images() {
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Claude, Backend::Claude),
+            Vec::new(),
+            &FakeSecretStore(Some("claude-secret".to_string())),
+        )
+        .unwrap();
+        assert!(
+            runtime.startup_notices.is_empty(),
+            "{:?}",
+            runtime.startup_notices
+        );
     }
 
     #[test]
