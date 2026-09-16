@@ -113,6 +113,18 @@ pub struct CatalogModel {
     /// leave the variable unset. Replaces a hardcoded `model.ends_with("[1m]")`
     /// check with catalog data (#937 Phase 2).
     pub claude_compact_window: Option<u32>,
+    /// Whether the provider's endpoint accepts Anthropic `image` content
+    /// blocks for this model (#1200).
+    ///
+    /// A silently-dropped image is the failure this guards against: the
+    /// endpoint can answer `200` with the image replaced by a text
+    /// placeholder, so no status code and no stream event reveals it. `false`
+    /// therefore means *verified to drop* — it is evidence-backed, and it is
+    /// what raises the launch notice. `true` means no such drop has been
+    /// observed for the row; it is not a promise about a model nobody has
+    /// probed. Do not flip a row to `false` to silence a warning you have not
+    /// reproduced against the live endpoint.
+    pub supports_images: bool,
 }
 
 pub const MODELS: &[CatalogModel] = &[
@@ -130,6 +142,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: false,
         claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
+        supports_images: true,
     },
     CatalogModel {
         cli_id: "codex-terra",
@@ -145,6 +158,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: true,
         claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
+        supports_images: true,
     },
     CatalogModel {
         cli_id: "codex-luna",
@@ -160,6 +174,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: false,
         claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
+        supports_images: true,
     },
     CatalogModel {
         cli_id: "deepseek-v4-pro",
@@ -180,6 +195,11 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: false,
         claude_max_context_tokens: None,
         claude_compact_window: Some(786_432),
+        // Verified against the live endpoint (#1200): DeepSeek's anthropic
+        // surface replaces an image block with a literal `[Unsupported Image]`
+        // placeholder for this model and still answers 200, so the drop is
+        // invisible to every caller. Do not flip this without a live probe.
+        supports_images: false,
     },
     CatalogModel {
         cli_id: "deepseek-flash",
@@ -205,6 +225,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: true,
         claude_max_context_tokens: None,
         claude_compact_window: Some(786_432),
+        supports_images: true,
     },
     CatalogModel {
         cli_id: "kimi-k3",
@@ -220,6 +241,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: true,
         claude_max_context_tokens: None,
         claude_compact_window: Some(1_048_576),
+        supports_images: true,
     },
     CatalogModel {
         cli_id: "openrouter-claude-sonnet",
@@ -239,6 +261,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: true,
         claude_max_context_tokens: None,
         claude_compact_window: None,
+        supports_images: true,
     },
     // Claude tier aliases are compatibility rows. Versioned Claude inventory
     // can be added without changing the stable provider-qualified grammar.
@@ -256,6 +279,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: false,
         claude_max_context_tokens: None,
         claude_compact_window: None,
+        supports_images: true,
     },
     CatalogModel {
         cli_id: "claude-sonnet",
@@ -271,6 +295,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: false,
         claude_max_context_tokens: None,
         claude_compact_window: None,
+        supports_images: true,
     },
     CatalogModel {
         cli_id: "claude-haiku",
@@ -286,6 +311,7 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: false,
         claude_max_context_tokens: None,
         claude_compact_window: None,
+        supports_images: true,
     },
 ];
 
@@ -974,6 +1000,35 @@ mod tests {
         );
         assert!(models_for_provider(ModelProvider::Codex)
             .all(|entry| entry.claude_max_context_tokens == Some(1_050_000)));
+    }
+
+    /// #1200: the only row whose endpoint silently drops images, pinned so a
+    /// later catalog edit cannot lose the capability signal and the launch
+    /// notice's input cannot drift from the evidence. `deepseek-v4-pro`
+    /// answers `200` with the image replaced by an `[Unsupported Image]`
+    /// placeholder; `deepseek-flash` ingests the same body correctly.
+    #[test]
+    fn deepseek_pro_is_the_only_row_verified_to_drop_images() {
+        assert!(!model_by_cli_id("deepseek-v4-pro").unwrap().supports_images);
+        assert!(model_by_cli_id("deepseek-flash").unwrap().supports_images);
+
+        let droppers: Vec<&str> = MODELS
+            .iter()
+            .filter(|entry| !entry.supports_images)
+            .map(|entry| entry.cli_id)
+            .collect();
+        assert_eq!(
+            droppers,
+            vec!["deepseek-v4-pro"],
+            "a row marked as dropping images changes when the launch notice fires"
+        );
+    }
+
+    /// The native provider must never carry the warning: a `false` here would
+    /// tell a Claude session that its own endpoint cannot accept images.
+    #[test]
+    fn every_claude_row_accepts_images() {
+        assert!(models_for_provider(ModelProvider::Claude).all(|entry| entry.supports_images));
     }
 
     /// Guardrail: `apply_anthropic_compat_overlay` (foreground_runtime.rs)

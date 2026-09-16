@@ -120,13 +120,33 @@ compatibility. Its normalized selection records Codex as the provider while
 the model and wire values remain byte-for-byte (for example,
 `gpt-5.7-nova`).
 
+### Image support
+
+A catalog row declares `supports_images` because the failure it guards against
+is invisible: an endpoint can accept a request that carries an image and answer
+`200` with the image replaced by a text placeholder, so neither the status nor
+the stream reveals the loss (#1200). `false` means *verified to drop* — it is
+evidence-backed from a live probe, and it is what raises the launch notice
+(`image_capability_notice`, `foreground_runtime.rs`). `true` means no drop has
+been observed for the row. The flag gates a warning, never a refusal: a
+text-only turn is legitimate, and replayed history can carry images the user
+did not just paste.
+
+`deepseek-v4-pro` is the one row marked `false`. DeepSeek's Anthropic-compatible
+endpoint replaces image blocks with a literal `[Unsupported Image]` placeholder
+for that model, and the model then answers that it cannot see the picture.
+`deepseek-flash[1m]`, the served default, ingests the same request correctly.
+Pro stays reachable through `--model deepseek-v4-pro`, the unified `/model`
+row, and a `providers.deepseek.model` saved before #1192 moved the default —
+each of those launches now prints the warning at startup.
+
 ### Adding a cataloged model
 
 For an additional model of an existing provider, the only production model
 mapping edit is one `CatalogModel` row. That row must declare its stable clud
 ID, provider wire ID, optional Claude discovery ID, display name, legacy
 aliases, effort/context capabilities and defaults, provider-default status,
-and any Claude context/compaction metadata. Existing adapters then select the
+image support, and any Claude context/compaction metadata. Existing adapters then select the
 appropriate namespace:
 
 - clud settings and command lines use `cli_id`;
