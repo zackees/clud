@@ -73,6 +73,56 @@ fn our_own_path_is_never_chained_to_itself() {
 }
 
 #[test]
+fn a_differently_spelled_path_to_our_own_shim_is_not_chained() {
+    // The self-loop guard compares strings, so a value that canonicalizes to
+    // our shim but is spelled differently (a `..` segment, a symlink, a
+    // trailing slash) is treated as "not ours" and chained back to itself.
+    // bash then sources the shim, which sources itself, recursively (#1201).
+    let tmp = tempdir().unwrap();
+    // Write the shim, then address it through a `..` segment so the guard's
+    // string comparison would fail but canonicalization must succeed.
+    env_overrides_at(tmp.path(), false, None);
+
+    let sub = tmp.path().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let dotted = sub.join("..").join(FILE_NAME);
+
+    let second = env_overrides_at(tmp.path(), false, Some(dotted.display().to_string()));
+
+    assert!(
+        !second.iter().any(|(key, _)| key == PREV_KEY),
+        "a path to our shim spelled with a `..` segment must not be chained"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_spelling_does_not_source_recursively() {
+    let tmp = tempdir().unwrap();
+    let first = env_overrides_at(tmp.path(), false, None);
+    let ours = first
+        .iter()
+        .find(|(key, _)| key == BASH_ENV_KEY)
+        .map(|(_, value)| value.clone())
+        .unwrap();
+
+    let link = tmp.path().join("alias.sh");
+    std::os::unix::fs::symlink(&ours, &link).unwrap();
+
+    let mut env = stock_env();
+    env.extend(env_overrides_at(
+        tmp.path(),
+        false,
+        Some(link.display().to_string()),
+    ));
+
+    assert!(!env.iter().any(|(key, _)| key == PREV_KEY));
+
+    let (code, output) = bash_under(env, "true");
+    assert_eq!(code, 0, "bash must not recurse sourcing the shim: {output}");
+}
+
+#[test]
 fn an_empty_inherited_value_is_not_chained() {
     let tmp = tempdir().unwrap();
     let overrides = env_overrides_at(tmp.path(), false, Some(String::new()));

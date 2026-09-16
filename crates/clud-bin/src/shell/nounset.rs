@@ -171,11 +171,25 @@ pub fn env_overrides_at(
     };
     let mut overrides = vec![(BASH_ENV_KEY.to_string(), path.display().to_string())];
     // Only chain a value that is not already ours, so relaunching inside a
-    // clud session cannot build a self-sourcing loop.
-    if let Some(prev) = inherited.filter(|value| !value.is_empty() && Path::new(value) != path) {
+    // clud session cannot build a self-sourcing loop. The comparison resolves
+    // both sides to canonical files so a symlink, `..` segment, or relative
+    // spelling of the shim is still recognized as ours (#1201).
+    if let Some(prev) = inherited.filter(|value| !value.is_empty() && !same_file(value, &path)) {
         overrides.push((PREV_KEY.to_string(), prev));
     }
     overrides
+}
+
+/// Whether `value` names the same file as `path`, comparing canonical paths so
+/// a symlink, `..` segment, relative spelling, or trailing slash still matches.
+/// Falls back to a literal path comparison when either side cannot be
+/// canonicalized (a stale or missing inherited value), which mirrors the
+/// shell's own `-r` readability test that already skips a missing file.
+fn same_file(value: &str, path: &Path) -> bool {
+    match (std::fs::canonicalize(value), std::fs::canonicalize(path)) {
+        (Ok(canonical_value), Ok(canonical_path)) => canonical_value == canonical_path,
+        _ => Path::new(value) == path,
+    }
 }
 
 #[cfg(test)]
