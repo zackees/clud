@@ -52,6 +52,26 @@ pub const EXIT_EXEC_FAILED: i32 = 126;
 pub const STDERR_NO_SESSION: &str = "clud python shim invoked outside a clud session; run via clud";
 
 fn main() {
+    let argv: Vec<_> = env::args_os().collect();
+    let is_rm = argv
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_name())
+        .is_some_and(|name| name == "rm" || name == "rm.exe");
+    if is_rm {
+        let args: Option<Vec<String>> = argv
+            .into_iter()
+            .skip(1)
+            .map(|a| a.into_string().ok())
+            .collect();
+        let Some(args) = args else {
+            println!(
+                "{}",
+                serde_json::json!({"decision":"deny", "reason":"non-UTF8 rm arguments"})
+            );
+            exit(2);
+        };
+        exit(run_rm(&args));
+    }
     let env = RealEnv;
     let outcome = shim_run(&env, connect_real, exec_real, &mut io::stderr().lock());
     exit(outcome);
@@ -210,6 +230,79 @@ fn exec_real(path: &str, args: &[String]) -> io::Result<i32> {
     {
         let status = std::process::Command::new(path).args(args).status()?;
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+fn run_rm(args: &[String]) -> i32 {
+    match clud::rm_guard::prepare(args) {
+        Ok((approved, action)) => finish_rm(approved, action),
+        Err(reason) => clud::rm_guard::deny(&reason),
+    }
+}
+
+fn finish_rm(approved: clud::rm_guard::Approved, action: clud::rm_guard::Action) -> i32 {
+    #[cfg(not(test))]
+    if action == clud::rm_guard::Action::Execute {
+        return real_execute(approved);
+    }
+    clud::rm_guard::report_dry_run(approved, action)
+}
+
+#[cfg(test)]
+#[test]
+fn rm_binary_unit_build_cannot_execute_even_with_both_gate_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("must-survive");
+    std::fs::write(&file, b"unit tests never remove").unwrap();
+    let approved = clud::rm_guard::Approved {
+        operands: vec![file.clone()],
+        recursive: true,
+        force: true,
+        verbose: false,
+    };
+    assert_eq!(
+        finish_rm(approved, clud::rm_guard::gate(false, true, true)),
+        0
+    );
+    assert!(file.exists());
+}
+
+/// The only removal implementation. Absent from unit-test builds, with no
+/// callback seam that could smuggle a removal into a unit test.
+#[cfg(not(test))]
+fn real_execute(approved: clud::rm_guard::Approved) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        let mut argv = vec![
+            "/bin/rm".to_string(),
+            "--preserve-root=all".into(),
+            "--one-file-system".into(),
+        ];
+        if approved.recursive {
+            argv.push("-r".into());
+        }
+        if approved.force {
+            argv.push("-f".into());
+        }
+        if approved.verbose {
+            argv.push("-v".into());
+        }
+        argv.push("--".into());
+        argv.extend(
+            approved
+                .operands
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned()),
+        );
+        match clud::subprocess::ManagedSubprocess::start_inheriting_env(argv, None, false, None) {
+            Ok(child) => child.wait(None).unwrap_or(2),
+            Err(e) => clud::rm_guard::deny(&format!("system rm failed: {e}")),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = approved;
+        clud::rm_guard::deny("real rm is unsupported on this platform")
     }
 }
 

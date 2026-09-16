@@ -122,3 +122,6 @@ pub mod wedge_watchdog;
 pub mod win_creation_flags;
 pub mod workspace_trust;
 pub mod worktrees;
+
+pub mod deletion_policy;
+pub mod rm_guard;

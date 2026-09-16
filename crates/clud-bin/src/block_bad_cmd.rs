@@ -412,6 +412,18 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
+    if event == PRE_TOOL_USE_EVENT
+        && (block_bad_cmd_gate::gates_tool(&payload.tool_name)
+            || !payload.command.trim().is_empty())
+    {
+        let path = std::env::var("PATH").unwrap_or_default();
+        if let Err(reason) = block_bad_cmd_rm_identity::check(&payload.command, &path) {
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud rm shim] {reason}");
+            return 2;
+        }
+    }
+
     let config =
         crate::repo_clud_config::discover_effective_clud_config(&payload.cwd).unwrap_or_default();
 
@@ -3283,6 +3295,8 @@ use block_bad_cmd_shell::*;
 #[path = "block_bad_cmd_gate.rs"]
 mod block_bad_cmd_gate;
 
+#[path = "block_bad_cmd_rm_identity.rs"]
+mod block_bad_cmd_rm_identity;
 #[path = "block_bad_cmd_rm_vars.rs"]
 mod block_bad_cmd_rm_vars;
 use block_bad_cmd_rm_vars::*;

@@ -62,9 +62,14 @@ pub fn prepend_to_path(env: &mut Vec<(String, String)>, dir: &Path) -> bool {
     let sep = path_sep();
     for (key, value) in env.iter_mut() {
         if key.eq_ignore_ascii_case(PATH_ENV_VAR) {
-            if value.split(sep).any(|p| p == dir_str) {
+            if value.split(sep).next() == Some(dir_str.as_str()) {
                 return false; // already present
             }
+            *value = value
+                .split(sep)
+                .filter(|p| *p != dir_str)
+                .collect::<Vec<_>>()
+                .join(&sep.to_string());
             let new = if value.is_empty() {
                 dir_str.clone()
             } else {
@@ -103,6 +108,28 @@ fn path_sep() -> char {
     }
 }
 
+/// Both foreground and daemon call this after assembling the effective child env.
+/// Installation errors remain visible and the mandatory hook identity check denies.
+pub fn activate_rm(env: &mut Vec<(String, String)>) {
+    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let result = env
+        .iter()
+        .find(|(k, _)| k == home_key)
+        .ok_or_else(|| std::io::Error::other("missing session home"))
+        .and_then(|(_, home)| {
+            crate::shim_install::packaged_shim()
+                .and_then(|source| crate::shim_install::install_rm_at(Path::new(home), &source))
+        });
+    match result {
+        Ok(dir) => {
+            prepend_to_path(env, &dir);
+        }
+        Err(error) => {
+            eprintln!("[clud rm shim] installation failed; shell identity guard will deny: {error}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +140,14 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn moves_existing_later_entry_to_front() {
+        let sep = path_sep();
+        let mut e = env(&[("PATH", &format!("/system{sep}/shims{sep}/last"))]);
+        assert!(prepend_to_path(&mut e, Path::new("/shims")));
+        assert_eq!(e[0].1, format!("/shims{sep}/system{sep}/last"));
     }
 
     #[test]
