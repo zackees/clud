@@ -677,6 +677,16 @@ fn run(mut args: args::Args) {
         std::process::exit(exit_code);
     }
 
+    // Prepare the Python shim aliases only after the Ctrl+C handler is in
+    // place. The extract writes ~150 MB of aliases into a cold HOME, which is
+    // slow enough to push the SIGINT handler past the interactive test's
+    // 0.5 s budget when it runs before the handler is installed (#1180).
+    if let Err(error) = clud::shim_install::prepare_current_session() {
+        if args.verbose {
+            eprintln!("[clud] note: could not prepare Python aliases: {error}");
+        }
+    }
+
     // zackees/clud#343: backend launches from repos with `.clud/settings.json`
     // and `rust.use_soldr = true` route cargo / rustc / rustfmt /
     // clippy-driver / rustdoc through soldr by prepending soldr's shim
