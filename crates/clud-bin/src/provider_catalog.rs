@@ -1024,14 +1024,21 @@ mod tests {
         );
 
         // `image_capability_notice` names the provider's reviewed default as
-        // the alternative and `.expect()`s that one exists, so a dropper whose
-        // provider offers nothing image-capable would panic at launch instead
-        // of warning. Pin the precondition here rather than discovering it in
-        // the field.
+        // the alternative and `.expect()`s one exists, so a dropper whose
+        // provider offers nothing image-capable would either panic at launch
+        // or recommend a model that drops images too. Pin both halves here
+        // rather than discovering them in the field.
         for entry in MODELS.iter().filter(|entry| !entry.supports_images) {
+            let alternative = reviewed_default_model(entry.provider);
             assert!(
-                reviewed_default_model(entry.provider).is_some(),
+                alternative.is_some(),
                 "{} drops images, but its provider has no reviewed default to name",
+                entry.cli_id
+            );
+            assert!(
+                alternative.is_some_and(|default| default.supports_images),
+                "{} drops images, and its provider's reviewed default does too -- \
+                 the notice would recommend a model that also drops them",
                 entry.cli_id
             );
         }

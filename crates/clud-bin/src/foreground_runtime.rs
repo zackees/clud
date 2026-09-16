@@ -515,8 +515,11 @@ const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
 /// selection is billed as `deepseek-v4-pro` while that row's `wire_id` carries
 /// the `[1m]` suffix, so a wire-only lookup would miss it (#1200 review).
 ///
-/// With no selection, the direct Anthropic-compat overlay falls back to the
-/// descriptor's reviewed catalog default, so that row is what gets billed.
+/// A selection that names no catalog row yields `None` -- clud has no
+/// capability data for a model it does not know, and a model-less selection
+/// (one that pins only effort) is no exception. Only a plan with *no*
+/// selection at all falls through to the descriptor's reviewed default, which
+/// is the row `apply_anthropic_compat_overlay` bills in that case.
 fn billed_catalog_row(plan: &LaunchPlan) -> Option<crate::provider_catalog::CatalogModel> {
     if let Some(selection) = plan.model_selection.as_ref() {
         return selection
@@ -543,6 +546,14 @@ fn billed_catalog_row(plan: &LaunchPlan) -> Option<crate::provider_catalog::Cata
 /// anywhere. Naming the offending model is the whole point -- the harness
 /// reports the reply, and only this line connects it to the model choice.
 fn image_capability_notice(plan: &LaunchPlan) -> Option<String> {
+    // Only a Claude-harness launch routes through an Anthropic-compat overlay
+    // or the unified gateway. A native harness (`--harness deepseek`) owns its
+    // own provider configuration and never reads this catalog, so telling that
+    // session about a dropped image would describe a request clud does not
+    // send. The docs scope the warning the same way.
+    if plan.effective_harness() != Backend::Claude {
+        return None;
+    }
     let entry = billed_catalog_row(plan)?;
     if entry.supports_images {
         return None;
@@ -1507,6 +1518,35 @@ mod tests {
                 .startup_notices
                 .join(" ")
                 .contains("cannot accept images"),
+            "{:?}",
+            runtime.startup_notices
+        );
+    }
+
+    /// The native DeepSeek harness owns its provider configuration and never
+    /// reads the Anthropic-compat overlay, so a Pro selection there must stay
+    /// silent: the notice would describe a request clud never sends.
+    #[test]
+    fn native_deepseek_harness_says_nothing_about_images() {
+        let mut route = plan(ModelProvider::DeepSeek, Backend::DeepSeek);
+        route.model_selection = Some(
+            crate::provider_catalog::resolve(
+                Some(ModelProvider::DeepSeek),
+                Some("deepseek-v4-pro"),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert!(
+            runtime.startup_notices.is_empty(),
             "{:?}",
             runtime.startup_notices
         );

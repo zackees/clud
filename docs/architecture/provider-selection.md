@@ -138,13 +138,16 @@ Anthropic-compatible endpoint replaces image blocks with a literal
 that it cannot see the picture. `deepseek-flash[1m]`, the served default,
 ingests the same request correctly.
 
-At launch, the warning prints whenever the resolved model is that row — a
-direct `--model deepseek-v4-pro` (including the auto-context spelling, which
-is billed under the suffix-free name), a saved `providers.deepseek.model`, and
-`--unified --model deepseek-v4-pro`. It does **not** cover a mid-session
-`/model` pick of the Pro row in an otherwise Claude-provider unified session:
-no launch-time signal can see a choice made after launch, so that gap needs a
-gateway-side check and is tracked as a follow-up in #1200.
+At launch, a clud-routed Claude-harness launch warns when the model it
+resolves is that row: a direct `--model deepseek-v4-pro` (including the
+auto-context spelling, which is billed under the suffix-free name), a saved
+`providers.deepseek.model`, and `--unified --model deepseek-v4-pro`.
+
+Two shapes stay silent. A mid-session `/model` pick of the Pro row in an
+otherwise Claude-provider unified session — no launch-time signal can see a
+choice made after launch, so that gap needs a gateway-side check. And the
+native DeepSeek harness (`--harness deepseek`, `dsh`), which owns its own
+provider configuration and takes no `--model`; clud emits no notice there.
 
 ### Adding a cataloged model
 
