@@ -382,6 +382,11 @@ mod tests {
         fs::write(&current_exe, b"clud").unwrap();
         fs::write(&shim, b"shim").unwrap();
         fs::write(&python, b"python").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let mut env = vec![("PATH".to_string(), bin.to_string_lossy().into_owned())];
 
         let prepared = prepare_session_shims_at(home.path(), &current_exe, &mut env).unwrap();
