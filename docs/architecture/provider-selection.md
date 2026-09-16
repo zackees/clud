@@ -132,13 +132,19 @@ been observed for the row. The flag gates a warning, never a refusal: a
 text-only turn is legitimate, and replayed history can carry images the user
 did not just paste.
 
-`deepseek-v4-pro` is the one row marked `false`. DeepSeek's Anthropic-compatible
-endpoint replaces image blocks with a literal `[Unsupported Image]` placeholder
-for that model, and the model then answers that it cannot see the picture.
-`deepseek-flash[1m]`, the served default, ingests the same request correctly.
-Pro stays reachable through `--model deepseek-v4-pro`, the unified `/model`
-row, and a `providers.deepseek.model` saved before #1192 moved the default —
-each of those launches now prints the warning at startup.
+`deepseek-v4-pro` is the one row marked `false`. DeepSeek's
+Anthropic-compatible endpoint replaces image blocks with a literal
+`[Unsupported Image]` placeholder for that model, and the model then answers
+that it cannot see the picture. `deepseek-flash[1m]`, the served default,
+ingests the same request correctly.
+
+At launch, the warning prints whenever the resolved model is that row — a
+direct `--model deepseek-v4-pro` (including the auto-context spelling, which
+is billed under the suffix-free name), a saved `providers.deepseek.model`, and
+`--unified --model deepseek-v4-pro`. It does **not** cover a mid-session
+`/model` pick of the Pro row in an otherwise Claude-provider unified session:
+no launch-time signal can see a choice made after launch, so that gap needs a
+gateway-side check and is tracked as a follow-up in #1200.
 
 ### Adding a cataloged model
 
@@ -146,8 +152,9 @@ For an additional model of an existing provider, the only production model
 mapping edit is one `CatalogModel` row. That row must declare its stable clud
 ID, provider wire ID, optional Claude discovery ID, display name, legacy
 aliases, effort/context capabilities and defaults, provider-default status,
-image support, and any Claude context/compaction metadata. Existing adapters then select the
-appropriate namespace:
+image support, and any Claude context/compaction metadata. Image support is a
+capability like the others: see the section above. Existing adapters then
+select the appropriate namespace:
 
 - clud settings and command lines use `cli_id`;
 - the provider-native harness/API uses `wire_id`;

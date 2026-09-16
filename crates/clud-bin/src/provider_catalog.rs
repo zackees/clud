@@ -1020,8 +1020,21 @@ mod tests {
         assert_eq!(
             droppers,
             vec!["deepseek-v4-pro"],
-            "a row marked as dropping images changes when the launch notice fires"
+            "a new dropper needs its own notice decision, and its own live evidence"
         );
+
+        // `image_capability_notice` names the provider's reviewed default as
+        // the alternative and `.expect()`s that one exists, so a dropper whose
+        // provider offers nothing image-capable would panic at launch instead
+        // of warning. Pin the precondition here rather than discovering it in
+        // the field.
+        for entry in MODELS.iter().filter(|entry| !entry.supports_images) {
+            assert!(
+                reviewed_default_model(entry.provider).is_some(),
+                "{} drops images, but its provider has no reviewed default to name",
+                entry.cli_id
+            );
+        }
     }
 
     /// The native provider must never carry the warning: a `false` here would

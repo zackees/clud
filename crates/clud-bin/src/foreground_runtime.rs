@@ -508,24 +508,30 @@ const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
 ];
 
-/// The wire model a Claude-child Anthropic-compat launch actually sends.
+/// The catalog row a launch will actually bill, when clud knows it.
 ///
-/// Shared by the overlay that writes it into the child environment and the
-/// launch notice that reports what it can do (#1200), so the two can never
-/// disagree about which catalog row's capabilities apply.
-fn anthropic_compat_wire_model<'a>(
-    descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
-    selection: Option<&'a crate::provider_catalog::ResolvedModelSelection>,
-) -> &'a str {
-    let default_wire_model = crate::provider_catalog::reviewed_default_model(descriptor.provider)
-        .expect(
-            "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
-             -- add a `provider_default: true` row in provider_catalog.rs",
-        )
-        .wire_id;
-    selection
-        .and_then(|selection| selection.wire_model.as_deref())
-        .unwrap_or(default_wire_model)
+/// The selection's `model` (a catalog CLI ID) is checked first, because the
+/// wire spelling is not always the row's `wire_id`: an auto-context DeepSeek
+/// selection is billed as `deepseek-v4-pro` while that row's `wire_id` carries
+/// the `[1m]` suffix, so a wire-only lookup would miss it (#1200 review).
+///
+/// With no selection, the direct Anthropic-compat overlay falls back to the
+/// descriptor's reviewed catalog default, so that row is what gets billed.
+fn billed_catalog_row(plan: &LaunchPlan) -> Option<crate::provider_catalog::CatalogModel> {
+    if let Some(selection) = plan.model_selection.as_ref() {
+        return selection
+            .model
+            .as_deref()
+            .and_then(crate::provider_catalog::model_by_cli_id)
+            .or_else(|| {
+                selection
+                    .wire_model
+                    .as_deref()
+                    .and_then(crate::provider_catalog::model_by_wire_id)
+            });
+    }
+    crate::provider_registry::descriptor_for(plan.model_provider())
+        .and_then(|descriptor| crate::provider_catalog::reviewed_default_model(descriptor.provider))
 }
 
 /// The image-capability warning for a launch whose model cannot accept images,
@@ -537,18 +543,24 @@ fn anthropic_compat_wire_model<'a>(
 /// anywhere. Naming the offending model is the whole point -- the harness
 /// reports the reply, and only this line connects it to the model choice.
 fn image_capability_notice(plan: &LaunchPlan) -> Option<String> {
-    let descriptor = crate::provider_registry::descriptor_for(plan.model_provider())?;
-    let wire_model = anthropic_compat_wire_model(descriptor, plan.model_selection.as_ref());
-    let entry = crate::provider_catalog::model_by_wire_id(wire_model)?;
+    let entry = billed_catalog_row(plan)?;
     if entry.supports_images {
         return None;
     }
-    let alternative = crate::provider_catalog::reviewed_default_model(descriptor.provider)
-        .map(|entry| entry.cli_id)
-        .unwrap_or(wire_model);
+    // The same invariant `apply_anthropic_compat_overlay` asserts: a
+    // descriptor-backed provider has a reviewed default to name. A row marked
+    // as dropping images is unpublishable without one, and
+    // `deepseek_pro_is_the_only_row_verified_to_drop_images` pins that.
+    let alternative = crate::provider_catalog::reviewed_default_model(entry.provider)
+        .expect(
+            "a row marked as dropping images must belong to a provider with a reviewed default \
+             to name as the alternative -- add a `provider_default: true` row in provider_catalog.rs",
+        )
+        .cli_id;
     Some(format!(
-        "[clud] {wire_model} cannot accept images: pasted screenshots are dropped upstream \
-         with no error. Use `--model {alternative}` for image work."
+        "[clud] {} cannot accept images: pasted screenshots are dropped upstream with no error. \
+         Use `--model {alternative}` for image work.",
+        entry.cli_id
     ))
 }
 
@@ -580,7 +592,15 @@ fn apply_anthropic_compat_overlay(
     if descriptor.provider == ModelProvider::OpenRouter {
         env.retain(|(key, _)| !key.eq_ignore_ascii_case("OPENROUTER_API_KEY"));
     }
-    let model = anthropic_compat_wire_model(descriptor, selection);
+    let default_wire_model = crate::provider_catalog::reviewed_default_model(descriptor.provider)
+        .expect(
+            "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
+             -- add a `provider_default: true` row in provider_catalog.rs",
+        )
+        .wire_id;
+    let model = selection
+        .and_then(|selection| selection.wire_model.as_deref())
+        .unwrap_or(default_wire_model);
     let role_models = descriptor.role_models;
     // A served subagent name (#1192) replaces the descriptor's compiled-in one.
     let subagent_wire_id = crate::server_settings::provider_subagent_model(descriptor.provider)
@@ -1434,6 +1454,41 @@ mod tests {
         assert!(notices.contains("deepseek-v4-pro"), "{notices}");
         assert!(notices.contains("cannot accept images"), "{notices}");
         assert!(notices.contains("--model deepseek-flash"), "{notices}");
+    }
+
+    /// #1200 review finding: an auto-context selection is billed as the same
+    /// model under a suffix-free spelling (`deepseek-v4-pro`, not
+    /// `deepseek-v4-pro[1m]` -- `AUTO_OR_1M_CONTEXT`), so the notice has to
+    /// resolve the catalog row rather than the literal wire string. Missing
+    /// this spelling is the same silent drop #1200 exists to surface, on a
+    /// supported `--context-window` value.
+    #[test]
+    fn deepseek_pro_auto_context_launch_still_warns_about_images() {
+        let mut route = plan(ModelProvider::DeepSeek, Backend::Claude);
+        route.model_selection = Some(
+            crate::provider_catalog::resolve(
+                Some(ModelProvider::DeepSeek),
+                Some("deepseek-v4-pro"),
+                None,
+                Some("auto"),
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert!(
+            runtime
+                .startup_notices
+                .join(" ")
+                .contains("cannot accept images"),
+            "{:?}",
+            runtime.startup_notices
+        );
     }
 
     /// The warning is evidence-backed, not a family-wide caveat: Flash reads
