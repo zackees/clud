@@ -125,9 +125,10 @@ pub fn prepare_session_shims_at(
     Ok(true)
 }
 
-/// Best-effort startup wiring for the current process. This runs before clud
-/// creates worker threads, so updating PATH here is safe and every foreground
-/// and daemon launch path inherits the same aliases.
+/// Best-effort startup wiring for the current process. Called after the Ctrl+C
+/// handler is installed so a cold-HOME shim extract cannot delay SIGINT
+/// delivery, but before the backend is spawned so every launch path inherits
+/// the same aliases.
 pub fn prepare_current_session() -> std::io::Result<bool> {
     let Some(home) = home_dir() else {
         return Ok(false);
@@ -139,7 +140,8 @@ pub fn prepare_current_session() -> std::io::Result<bool> {
     }
     for key in ["PATH", SHIM_TARGET_ENV_VAR] {
         if let Some((_, value)) = env.iter().find(|(candidate, _)| candidate == key) {
-            // SAFETY: startup is still single-threaded when this function is called.
+            // SAFETY: startup-only write to PATH/SHIM_TARGET, before the backend
+            // is spawned and before any thread that reads the environment runs.
             unsafe { std::env::set_var(key, value) };
         }
     }

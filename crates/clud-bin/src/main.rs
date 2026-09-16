@@ -128,12 +128,6 @@ fn run(mut args: args::Args) {
         std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
     }
 
-    if let Err(error) = clud::shim_install::prepare_current_session() {
-        if args.verbose {
-            eprintln!("[clud] note: could not prepare Python aliases: {error}");
-        }
-    }
-
     verbose_log::init_launch_clock();
 
     // #333: the daemon and worker roles are exempt — on Windows the hop cannot
@@ -681,6 +675,16 @@ fn run(mut args: args::Args) {
     if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
         flush_ctrl_c_exit_event(ctrl_c_track::InvocationKind::Attach, exit_code);
         std::process::exit(exit_code);
+    }
+
+    // Prepare the Python shim aliases only after the Ctrl+C handler is in
+    // place. The extract writes ~150 MB of aliases into a cold HOME, which is
+    // slow enough to push the SIGINT handler past the interactive test's
+    // 0.5 s budget when it runs before the handler is installed (#1180).
+    if let Err(error) = clud::shim_install::prepare_current_session() {
+        if args.verbose {
+            eprintln!("[clud] note: could not prepare Python aliases: {error}");
+        }
     }
 
     // zackees/clud#343: backend launches from repos with `.clud/settings.json`
