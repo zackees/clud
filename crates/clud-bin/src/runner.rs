@@ -71,26 +71,78 @@ fn merge_extra_rx(
     }
 }
 
-/// Build the child environment: inherit parent env + inject tracking vars.
-/// Deduplicates keys so we never pass the same var twice.
+/// The two keys that force UTF-8 on any Python helper the agent shells
+/// out to. Public so the daemon-side drift guard can assert against the
+/// same list rather than restating it (#1209).
+pub const WINDOWS_STDIO_KEYS: &[&str] = &["PYTHONIOENCODING", "PYTHONUTF8"];
+
+/// Every environment key the child-env policy owns, in one list.
 ///
-/// On Windows, also forces UTF-8 for any Python helper the agent shells
-/// out to (Codex / Claude tool scripts, MCP servers, install probes …)
-/// so output doesn't mojibake against the user's OEM codepage. Paired
-/// with the `chcp 65001` prefix in `subprocess::render_windows_batch_command`
-/// (issue #168). Node itself respects the console codepage and needs no
-/// dedicated env var.
-pub fn child_env() -> Vec<(String, String)> {
+/// The Windows stdio pair is included on **every** platform on purpose:
+/// the daemon/runner drift guard compares the two builders key by key, so
+/// a platform-neutral list lets it assert "both builders agree on this
+/// key's value" (absent == absent off Windows, `1`/`utf-8` == `1`/`utf-8`
+/// on Windows). `PATH` is deliberately absent — `activate_rm` prepends to
+/// whatever the base carried rather than owning the value.
+pub fn child_env_policy_keys() -> Vec<&'static str> {
+    let mut keys = vec!["IN_CLUD", running_process::ORIGINATOR_ENV_VAR];
+    keys.extend(crate::gc::session_tmp::OVERRIDDEN_KEYS.iter().copied());
+    keys.push(crate::shell::completion_guard::SUPPRESS_KEY);
+    keys.push(crate::shell::nounset::BASH_ENV_KEY);
+    keys.push(crate::shell::nounset::PREV_KEY);
+    keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
+    keys
+}
+
+/// Apply every child-env policy layer to `base`: inject tracking vars,
+/// and — when `windows_stdio` is set — force UTF-8 for any Python helper
+/// the agent shells out to (Codex / Claude tool scripts, MCP servers,
+/// install probes …) so output doesn't mojibake against the user's OEM
+/// codepage. Paired with the `chcp 65001` prefix in
+/// `subprocess::render_windows_batch_command` (issue #168). Node itself
+/// respects the console codepage and needs no dedicated env var.
+///
+/// Then layers in, in order:
+/// - Issue #509: points the backend agent's temp dir at ~/.clud/tmp so its
+///   scatter of temp files lands where the daemon can reclaim them. Empty
+///   when disabled (CLUD_SESSION_TMP=0) or the dir can't be created, in
+///   which case the child keeps the OS temp dir.
+/// - Issue #753: keeps Git-Bash completion functions out of the backend's
+///   shell snapshot. Without this, every Bash tool call re-sources ~85
+///   base64-decoded function definitions (~170 process spawns) before it
+///   runs anything. See shell::completion_guard.
+/// - Issue #1066: arms `set -u` in every non-interactive bash the backend
+///   spawns, so an unset expansion aborts instead of silently becoming
+///   empty. `push_or_replace` is what chains rather than duplicates: the
+///   module has already stashed any inherited BASH_ENV under
+///   CLUD_PREV_BASH_ENV, and the generated file sources it.
+/// - Finally, activates the `rm` shim session.
+///
+/// This is now the ONE builder: [`child_env`] calls it with
+/// `std::env::vars()`, and `daemon::io_helpers::child_env_from` calls it
+/// with the daemon+client merged base — the merge #1209 introduced after
+/// the Windows stdio pair had drifted into only one of the two builders.
+pub fn apply_child_env_policy(base: Vec<(String, String)>) -> Vec<(String, String)> {
+    apply_child_env_policy_with(base, cfg!(windows))
+}
+
+/// Test seam — `windows_stdio` is `cfg!(windows)` in production. Passed in
+/// rather than read so the Windows UTF-8 layer (the layer that actually
+/// drifted) is assertable on a Linux CI lane.
+pub fn apply_child_env_policy_with(
+    base: Vec<(String, String)>,
+    windows_stdio: bool,
+) -> Vec<(String, String)> {
     let originator_key = running_process::ORIGINATOR_ENV_VAR;
 
-    let utf8_keys: &[&str] = if cfg!(windows) {
-        &["IN_CLUD", originator_key, "PYTHONIOENCODING", "PYTHONUTF8"]
-    } else {
-        &["IN_CLUD", originator_key]
-    };
+    let mut strip_keys: Vec<&str> = vec!["IN_CLUD", originator_key];
+    if windows_stdio {
+        strip_keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
+    }
 
-    let mut env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| !utf8_keys.contains(&k.as_str()))
+    let mut env: Vec<(String, String)> = base
+        .into_iter()
+        .filter(|(k, _)| !strip_keys.contains(&k.as_str()))
         .collect();
 
     env.push(("IN_CLUD".to_string(), "1".to_string()));
@@ -98,7 +150,7 @@ pub fn child_env() -> Vec<(String, String)> {
     let originator_value = format!("CLUD:{}", std::process::id());
     env.push((originator_key.to_string(), originator_value));
 
-    if cfg!(windows) {
+    if windows_stdio {
         env.push(("PYTHONIOENCODING".to_string(), "utf-8".to_string()));
         env.push(("PYTHONUTF8".to_string(), "1".to_string()));
     }
@@ -123,14 +175,20 @@ pub fn child_env() -> Vec<(String, String)> {
     // spawns, so an unset expansion aborts instead of silently becoming empty.
     // `push_or_replace` is what chains rather than duplicates: the module has
     // already stashed any inherited BASH_ENV under CLUD_PREV_BASH_ENV, and the
-    // generated file sources it. Kept in step with the daemon's copy in
-    // `daemon::io_helpers::child_env`.
+    // generated file sources it. There is no daemon-side copy to keep in step
+    // with any more; `daemon::io_helpers::child_env_from` calls this builder.
     for (key, value) in crate::shell::nounset::env_overrides() {
         push_or_replace(&mut env, &key, &value);
     }
 
     crate::shim_session::activate_rm(&mut env);
     env
+}
+
+/// Build the child environment for a foreground launch: the parent env
+/// plus every policy layer in [`apply_child_env_policy`].
+pub fn child_env() -> Vec<(String, String)> {
+    apply_child_env_policy(std::env::vars().collect())
 }
 
 /// Wrap [`child_env`] with the per-backend shell policy from
