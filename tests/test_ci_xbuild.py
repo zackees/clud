@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -100,31 +101,37 @@ def test_release_linux_wheel_builds_without_zig() -> None:
     assert "CARGO_ZIGBUILD_PYTHON_PATH" not in source
 
 
-def test_static_cxx_runtime_env_appends_to_encoded_rustflags() -> None:
-    """gcc-13's libstdc++ is too new for manylinux_2_17, so the C++ runtime is
-    linked statically. The flags append to soldr's exported
-    CARGO_ENCODED_RUSTFLAGS so its sysroot flags survive.
-    """
-    prepared = {"CARGO_ENCODED_RUSTFLAGS": "-Clink-arg=--sysroot=/soldr/sysroot"}
-    env = xbuild.static_cxx_runtime_env("x86_64-unknown-linux-gnu", prepared)
-    parts = env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")
-    assert "-Clink-arg=--sysroot=/soldr/sysroot" in parts, "soldr's sysroot flag must survive"
-    assert "-Clink-arg=-static-libstdc++" in parts
-    assert "-Clink-arg=-static-libgcc" in parts
-    # The load-bearing half: whisper-rs-sys links stdc++ statically.
-    assert env["WHISPER_LINK_CXX_STATIC"] == "1"
-    # The caller's dict is untouched.
-    assert prepared["CARGO_ENCODED_RUSTFLAGS"] == "-Clink-arg=--sysroot=/soldr/sysroot"
+def test_release_linux_wheel_env_sets_no_whisper_vars(monkeypatch) -> None:
+    """The release manylinux wheel no longer carries whisper's static C++ link
+    mechanism (#1207).
 
-
-def test_static_cxx_runtime_env_falls_back_to_target_rustflags() -> None:
-    """With no encoded rustflags set, the flags land on the target-scoped
-    RUSTFLAGS in spelled `-C link-arg=` form.
+    whisper-rs was removed, and with it the only C++ `-sys` crate in the graph:
+    `Cargo.lock`'s native deps are `ring` and `blake3`, both C. Nothing emits
+    `cargo:rustc-link-lib=dylib=stdc++` any more, so `WHISPER_LINK_CXX_STATIC`
+    has no directive to flip and `-static-libstdc++` has no libstdc++ to
+    bundle. soldr's catalogue sysroot (gcc-13.3.0-glibc-2.17-1, soldr#2238) is
+    the whole manylinux_2_17 floor now.
     """
-    env = xbuild.static_cxx_runtime_env("x86_64-unknown-linux-gnu", {})
-    value = env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"]
-    assert "-C link-arg=-static-libstdc++" in value
-    assert "-C link-arg=-static-libgcc" in value
+    monkeypatch.delenv("WHISPER_LINK_CXX_STATIC", raising=False)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(argv: list[str], env: dict[str, str]) -> int:
+        calls.append((argv, env))
+        # Stop before maturin actually runs -- the env is the whole assertion.
+        return 1
+
+    monkeypatch.setattr(xbuild, "run", fake_run)
+    args = argparse.Namespace(
+        target="x86_64-unknown-linux-gnu", strategy="soldr", profile="release"
+    )
+    assert xbuild.cmd_wheel(args) == 1
+
+    assert len(calls) == 1, "the GNU release wheel is a single maturin invocation"
+    argv, env = calls[0]
+    assert "maturin" in argv
+    assert "WHISPER_LINK_CXX_STATIC" not in env
+    offenders = {key: value for key, value in env.items() if "static-libstdc++" in value}
+    assert not offenders, f"static-libstdc++ RUSTFLAGS survived: {offenders}"
 
 
 def test_gnu_linux_test_verb_stays_on_prepared_cargo() -> None:

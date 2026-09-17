@@ -374,61 +374,6 @@ def _project_version() -> str:
         return tomllib.load(project)["project"]["version"]
 
 
-#: Rustc flags that link the C++ and unwind runtimes statically into clud's
-#: binary. In CARGO_ENCODED_RUSTFLAGS each is one NUL/US-delimited token.
-_STATIC_CXX_RUSTFLAGS = ("-Clink-arg=-static-libstdc++", "-Clink-arg=-static-libgcc")
-
-
-def static_cxx_runtime_env(target: str, env: dict[str, str]) -> dict[str, str]:
-    """Bundle the C++ runtime so a manylinux wheel carries no external libstdc++.
-
-    soldr's blessed catalogue GNU toolchain (soldr#2238) pins the *glibc* floor
-    at 2.17 via its sysroot, so libc/libm/libpthread symbols audit clean. It
-    does not, however, pin the *C++* runtime: the catalogue compiler is
-    gcc-13.3.0, whose libstdc++.so.6 exports GLIBCXX_3.4.20-3.4.29 and
-    CXXABI_1.3.9 -- far newer than manylinux_2_17 permits. whisper.cpp's C++
-    (which dominates this build) links against it, so the wheel failed the audit
-    with, e.g.:
-
-        not manylinux_2_17 ... too-recent versioned symbols:
-        ["libstdc++.so.6 offending symbols: _ZSt28__throw_bad_array_new_lengthv
-          @GLIBCXX_3.4.29, _ZdlPvm@CXXABI_1.3.9, ..."]
-
-    `-static-libstdc++`/`-static-libgcc` link the C++ standard library and the
-    GCC unwind runtime *into* clud's binary (maturin `bindings = "bin"`), so
-    those versioned symbols become internal and only glibc -- pinned 2.17 --
-    is imported dynamically. This is the blessed-path replacement for the old
-    zig-based wheel build, which bundled an old C++ runtime the same way.
-
-    soldr enforcing this floor itself is tracked upstream (see soldr#2299); the
-    static-link decision is legitimately clud's since whisper.cpp is clud's
-    dependency. Applied by appending to soldr's exported
-    CARGO_ENCODED_RUSTFLAGS so the sysroot flags it set are preserved.
-
-    WHISPER_LINK_CXX_STATIC is the load-bearing half: whisper-rs-sys otherwise
-    emits `cargo:rustc-link-lib=dylib=stdc++`, an explicit dynamic link that
-    `-static-libstdc++` (a driver flag for the *implicit* libstdc++) cannot
-    override. The env var flips that directive to `static=stdc++`
-    (vendor/whisper-rs-sys/build.rs). `-static-libgcc` still bundles the GCC
-    unwind runtime, which is added implicitly.
-    """
-    env = env.copy()
-    env["WHISPER_LINK_CXX_STATIC"] = "1"
-    encoded = env.get("CARGO_ENCODED_RUSTFLAGS")
-    if encoded is not None:
-        parts = [part for part in encoded.split("\x1f") if part]
-        parts += _STATIC_CXX_RUSTFLAGS
-        env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(parts)
-    else:
-        key = f"CARGO_TARGET_{target.upper().replace('-', '_')}_RUSTFLAGS"
-        existing = env.get(key, "")
-        spelled = " ".join(
-            flag.replace("-Clink-arg=", "-C link-arg=") for flag in _STATIC_CXX_RUSTFLAGS
-        )
-        env[key] = " ".join(filter(None, (existing, spelled)))
-    return env
-
-
 #: Where `cmd_wheel` stages sidecar debug info. Deliberately NOT `dist/`:
 #: `_build-target.yml` uploads `dist/*` as the `wheels-*` artifact, which
 #: `publish-pypi` feeds straight to twine as `packages-dir`. A non-package file
@@ -543,9 +488,6 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         print(f"packaged soldr-built Windows wheel: {wheel}")
         collect_debuginfo(args.target, profile)
         return 0
-    if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
-        # Bundle the C++ runtime so the manylinux_2_17 audit sees only glibc.
-        env = static_cxx_runtime_env(args.target, env)
     subcommand = [
         "build",
         "--target",
@@ -569,10 +511,12 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             # No --zig. soldr's blessed catalogue GNU toolchain
             # (gcc-13.3.0-glibc-2.17-1, soldr#2238) is prepared by `soldr
             # prepare --target <triple>` in setup-build and supplies the pinned
-            # glibc-2.17 floor for every object -- Rust and the whisper.cpp
-            # C/C++ alike -- so maturin's manylinux2014 audit passes without
-            # zig. This replaces the `maturin --zig` path and the env-scrub
-            # denylist it required. See docs/architecture/ci.md and soldr#2299.
+            # glibc-2.17 floor for every object, so maturin's manylinux2014
+            # audit passes without zig -- and, since #1207, without the static
+            # C++/unwind link flags whisper-rs-sys needed: no C++ `-sys` crate
+            # is left in the graph (`ring` and `blake3` are C). This replaces
+            # the `maturin --zig` path and the env-scrub denylist it required.
+            # See docs/architecture/ci.md and soldr#2299.
             subcommand += ["--compatibility", "manylinux2014"]
         else:
             subcommand += ["--compatibility", "pypi"]
