@@ -282,29 +282,12 @@ fn randomish_hex(now: std::time::Duration) -> String {
 }
 
 fn timestamp_utcish(unix_secs: i64) -> String {
-    let days = unix_secs.div_euclid(86_400);
-    let seconds_of_day = unix_secs.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let second = seconds_of_day % 60;
+    // Format only. This string names quarantine directories that already
+    // exist on disk, so it must stay byte-for-byte identical; the calendar
+    // arithmetic lives in `crate::civil_time` (#1206).
+    let (year, month, day, hour, minute, second) =
+        crate::civil_time::civil_from_unix_secs(unix_secs);
     format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
-}
-
-fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    if month <= 2 {
-        year += 1;
-    }
-    (year, month, day)
 }
 
 fn copy_path(source: &Path, dest: &Path, metadata: &std::fs::Metadata) -> Result<(), TrashError> {

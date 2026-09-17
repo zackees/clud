@@ -638,6 +638,19 @@ Diagnostics and misc:
 - `wasm.rs` - `wasmi`-based runner that loads a WASM module, registers a
   minimal `host.log` import, invokes a named export, and propagates the integer
   exit code.
+- `civil_time.rs` - issue #1206: the crate's one civil-date algorithm.
+  `civil_from_unix_secs(unix_secs: i64) -> (year, month, day, hour, minute,
+  second)` is Howard Hinnant's public-domain `civil_from_days` plus a
+  euclidean seconds-of-day split, so pre-epoch timestamps land on the
+  previous day rather than truncating toward zero. It replaced four drifted
+  copies (`loop_artifacts::unix_to_ymd_hms`,
+  `command::loop_task::unix_to_ymd_hms`, `trash::civil_from_days`,
+  `tool_query::days_to_string`). Scope is the calendar arithmetic **only**:
+  each caller keeps its own `format!` string, because those strings are
+  already baked into data on disk — `trash` names quarantine directories
+  `YYYYMMDDTHHMMSSZ` and `loop_artifacts` writes ISO-8601 into persisted
+  `info.json` / `log.txt`. Do not fold formatting into this module. No
+  `chrono` / `time` dependency.
 
 Quick lookup, which file owns a given subcommand:
 

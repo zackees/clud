@@ -331,38 +331,14 @@ pub fn resolve_ref(
     Err(ResolveError::Malformed(reference.to_string()))
 }
 
-/// Convert milliseconds since epoch to a fixed-width "YYYY-MM-DD HH:MM"
-/// string for the list table. We avoid a chrono dep — for V1 the
-/// approximation `secs -> calendar via /86400 + epoch` is accurate
-/// enough for sortable display.
+/// Convert milliseconds since epoch to a fixed-width `YYYY-MM-DD HH:MM`
+/// UTC string for the list table. We avoid a chrono dep; the calendar
+/// arithmetic lives in `crate::civil_time` (#1206), so this is no longer
+/// an approximation — only the seconds are dropped, deliberately, because
+/// the column exists for sortable display.
 pub fn format_started_at(ms: u128) -> String {
-    // Convert to seconds + delegate the calendar arithmetic to the
-    // OS via SystemTime + a small formatter. We hand-roll instead of
-    // chrono to keep deps minimal.
     let secs = (ms / 1000) as i64;
-    days_to_string(secs)
-}
-
-fn days_to_string(unix_secs: i64) -> String {
-    // Civil-from-days algorithm by Howard Hinnant (public domain).
-    // Returns `YYYY-MM-DD HH:MM`.
-    let secs_in_day = 86_400i64;
-    let mut secs = unix_secs;
-    let mut days = secs.div_euclid(secs_in_day);
-    secs = secs.rem_euclid(secs_in_day);
-    let hour = (secs / 3600) as u32;
-    let minute = ((secs % 3600) / 60) as u32;
-
-    days += 719_468;
-    let era = days.div_euclid(146_097);
-    let doe = days.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
+    let (y, m, d, hour, minute, _) = crate::civil_time::civil_from_unix_secs(secs);
     format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hour, minute)
 }
 
