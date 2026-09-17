@@ -3175,10 +3175,11 @@ external loop state or renderer.
 **Context:** #812 records a deep-research run that created 101 agents before
 it was stopped, and an upstream `/code-review` that created 877 descendants
 despite a five-level nesting ceiling (anthropics/claude-code#77361). The
-bridge's `Task` block (#796) and `DEFAULT_MAX_CONCURRENCY = 1` only observe
-the overload after the agents exist; they returned `503 bridge busy` to
-requests that had already been created. Claude Code offers no invocation-wide
-agent budget and no depth setting (anthropics/claude-code#79953).
+bridge's `Task` block (#796) and `DEFAULT_MAX_CONCURRENCY` (1 at the time, 2
+since #989) only observe the overload after the agents exist; they returned
+`503 bridge busy` to requests that had already been created. Claude Code offers
+no invocation-wide agent budget and no depth setting
+(anthropics/claude-code#79953).
 
 **Decision:** `clud-cmd-scan` gains a rule with no depth counter: a call to
 `Agent` or `Workflow` whose `PreToolUse` payload carries an `agent_id` is

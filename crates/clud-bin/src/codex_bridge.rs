@@ -57,15 +57,29 @@ const DEFAULT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(300);
 /// background side-model calls and any subagents. The bound still exists, but
 /// exceeding it now queues in the listen backlog rather than failing.
 ///
-/// Set to 1: a single worker keeps the bridge's host footprint flat no matter
-/// how many bridges a process stands up. Forensics captured 15 bridges
-/// constructed inside one millisecond in a single pid, each advertising a
-/// 16-worker ceiling; the ceilings are lazy, but the advertised total is the
-/// number an operator has to reason about when the host is already saturated.
+/// Set to 2, the smallest bound under which two connections can be in flight
+/// at once: one slot for the foreground turn and one for anything else, be it
+/// a background side-model call or a subagent. At 1, any second request had
+/// to wait for the foreground turn's connection to release the sole worker,
+/// so a subagent could not put a frame on the wire until the turn finished
+/// and the wait was indistinguishable from a hang. Two is not sufficient in
+/// every case -- a subagent can still queue behind a background side-model
+/// call, and if that happens the next question is which request it queued
+/// behind, where the answer may be a separate admission lane rather than a
+/// larger pool. The only guarantee the bound makes is that a second
+/// connection can be in flight at the same time as the first.
+///
+/// The footprint argument from #778 still bounds the total: forensics
+/// captured 15 bridges constructed inside one millisecond in a single pid,
+/// each advertising a 16-worker ceiling; the ceilings are lazy, but the
+/// advertised total is the number an operator has to reason about when the
+/// host is already saturated. At 2 (#989) that arithmetic is 15 x 2 = 30
+/// advertised workers instead of 15 x 16 = 240, so the per-bridge footprint
+/// stays flat and small no matter how many bridges a process stands up.
 /// Excess connections wait in the listen backlog until a worker becomes
 /// available or the bridge shuts down. This keeps local contention out of the
 /// harness-visible API surface without accepting or buffering their bodies.
-const DEFAULT_MAX_CONCURRENCY: usize = 1;
+const DEFAULT_MAX_CONCURRENCY: usize = 2;
 const ACCEPT_POLL: Duration = Duration::from_millis(5);
 /// Upper bound on a single blocking read. Reads are resumed until their phase
 /// deadline expires; the cap exists so a worker parked on a quiet socket still
@@ -5912,6 +5926,11 @@ Connection: close
         let mut bridge = BridgeHandle::start(
             BridgeConfig {
                 header_timeout: Duration::from_secs(10),
+                // Pinned, not defaulted: since #989 the default admits two
+                // workers, and this test needs a saturated listener so the
+                // second socket is still in the backlog at shutdown. It owns
+                // teardown and shutdown idempotency, not the default bound.
+                max_concurrency: 1,
                 ..BridgeConfig::default()
             }
             .with_admission_notifier(admitted_tx),
@@ -5926,8 +5945,9 @@ Connection: close
             .recv_timeout(Duration::from_secs(30))
             .expect("request worker admission signal");
         assert_eq!(bridge.active_requests(), 1);
-        // This connection remains in the kernel backlog: the sole worker is
-        // blocked on the slow header above and must not create a second worker.
+        // This connection remains in the kernel backlog: the sole worker (see
+        // the pinned bound above) is blocked on the slow header and must not
+        // create a second worker.
         let mut queued = TcpStream::connect(addr).unwrap();
         queued
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -6465,6 +6485,75 @@ Connection: close
         bridge.shutdown().unwrap();
         let log = std::fs::read_to_string(log_path).unwrap_or_default();
         assert!(!log.contains("admission_queued"), "{log}");
+        assert!(!log.contains("admission_acquired"), "{log}");
+    }
+
+    /// #989 RED: the default must admit a second connection while the first
+    /// is still held. At `DEFAULT_MAX_CONCURRENCY == 1` the later socket sat
+    /// in the listen backlog and the accept loop logged `admission_queued`;
+    /// the assertion here is the *absence* of admission events rather than a
+    /// wall-clock threshold, because a timing threshold is flaky across exec
+    /// lanes.
+    #[test]
+    fn two_concurrent_requests_are_admitted_under_the_default_concurrency() {
+        assert_eq!(
+            BridgeConfig::default().max_concurrency,
+            2,
+            "the default must leave one slot for the foreground turn and one for anything else"
+        );
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("bridge.jsonl");
+        let upstream = FakeResponses::start();
+        let mut bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_request_hold(Duration::from_secs(2))
+                .with_admission_notifier(admitted_tx)
+                .with_log_path(log_path.clone()),
+        )
+        .unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        let first_token = token.clone();
+        let first = thread::spawn(move || {
+            request(
+                addr,
+                &authorized("POST", "/v1/messages", &first_token, PROBE_BODY),
+            )
+        });
+        admitted_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("first request admitted");
+
+        let second_token = token.clone();
+        let second = thread::spawn(move || {
+            request(
+                addr,
+                &authorized("POST", "/v1/messages", &second_token, PROBE_BODY),
+            )
+        });
+
+        let first = first.join().expect("first request thread");
+        let second = second.join().expect("second request thread");
+        assert_eq!(status(&first), 200, "first request: {first}");
+        assert_eq!(status(&second), 200, "second request: {second}");
+        assert_eq!(
+            upstream
+                .requests()
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            2,
+            "both requests must reach upstream once each"
+        );
+
+        bridge.shutdown().unwrap();
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        assert!(
+            !log.contains("admission_queued"),
+            "the second connection must not wait in the backlog: {log}"
+        );
         assert!(!log.contains("admission_acquired"), "{log}");
     }
 

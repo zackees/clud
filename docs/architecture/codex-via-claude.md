@@ -9,16 +9,37 @@ rollback boundary.
 
 ## Admission and retries
 
-The bridge admits exactly one request worker at a time. When that worker is
-occupied, later TCP connections remain in the operating system listener
-backlog until the slot opens or the foreground bridge shuts down. clud does not
-accept those sockets early, buffer their request bodies, create waiter threads,
-or return a local `503 bridge busy` for ordinary contention. The original socket
-is admitted once into the normal pipeline, so local contention cannot duplicate
-a model request or canonical-history commit. The upstream client may still make
-its existing classified retries after that admission.
+The bridge admits two request workers at a time (`DEFAULT_MAX_CONCURRENCY`),
+the smallest bound under which two connections can be in flight at once: one
+slot for the foreground turn and one for anything else, such as a background
+side-model call or a subagent. A single worker meant every later request
+waited for the foreground turn's connection to release the sole worker, so a
+subagent put nothing on the wire until the turn finished and was
+indistinguishable from a hang (#989). Two is not sufficient in every case: a
+subagent can still queue behind a background side-model call, and if that
+happens the question is which request it queued behind, where the answer may
+be a separate admission lane rather than a larger pool. The bound only makes
+a second in-flight connection possible; it is not a throughput change and
+does not make subagents or parallel work faster.
 
-The occupied worker retains the existing five-minute first-frame and
+The per-bridge advertised worker count stays flat and small however many
+bridges a process stands up, preserving #778's host-footprint cap: forensics
+captured 15 bridges constructed inside one millisecond in a single pid, each
+advertising a 16-worker ceiling, for 15 x 16 = 240 advertised workers. At two
+workers per bridge that arithmetic is 15 x 2 = 30 advertised workers instead,
+so the same host stays legible to an operator reasoning about it while
+already saturated.
+
+When both workers are occupied, later TCP connections remain in the
+operating system listener backlog until a slot opens or the foreground
+bridge shuts down. clud does not accept those sockets early, buffer their
+request bodies, create waiter threads, or return a local `503 bridge busy`
+for ordinary contention. The original socket is admitted once into the
+normal pipeline, so local contention cannot duplicate a model request or
+canonical-history commit. The upstream client may still make its existing
+classified retries after that admission.
+
+An occupied worker retains the existing five-minute first-frame and
 stream-idle protections; a healthy stream may run longer and its backlog age is
 not itself a failure. Shutdown closes active connections and the listener, so
 both an active worker and queued clients are released promptly. Bridge forensic
