@@ -57,60 +57,31 @@ fn merge_env(
     daemon
 }
 
-/// The daemon's own environment as the base — for call sites with no session
-/// in hand (the API turn controller, diagnostics).
-pub(super) fn child_env() -> Vec<(String, String)> {
-    child_env_from(&[])
+/// The child environment for a daemon-launched session: the daemon's own
+/// environment with the session initiator's layered over it, then every policy
+/// layer [`crate::runner::apply_child_env_policy`] owns.
+///
+/// An empty `client_env` is the documented fallback — the daemon's own
+/// environment unchanged — and is what a call site with no session initiator in
+/// hand (the API turn controller, diagnostics) passes. The zero-argument
+/// `child_env()` this module also used to expose is gone: it had exactly one
+/// non-test caller, and that caller wanted the client env (#1209).
+pub(super) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, String)> {
+    child_env_with_base(session_base(client_env))
 }
 
-/// [`child_env`], with the session initiator's environment layered in.
-pub(super) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, String)> {
-    let originator_key = running_process::ORIGINATOR_ENV_VAR;
-    // Issue #509: session temp redirect. Strip any inherited TMPDIR/TMP/TEMP
-    // so the override below isn't shadowed by a stale value carried in from
-    // the parent env.
-    let overrides = crate::gc::session_tmp::env_overrides();
-    let strip_temp = !overrides.is_empty();
-    // Issue #753: same Git-Bash completion suppression the foreground runner
-    // applies (see shell::completion_guard). This builder is a deliberate
-    // duplicate of `runner::child_env` for the daemon-launched path — any
-    // policy added to one belongs in both, or daemon sessions silently miss
-    // it.
-    let completion = crate::shell::completion_guard::env_overrides();
-    // Issue #1066: arm `set -u` in every non-interactive bash the backend
-    // spawns. Wired here as well as in `runner::child_env` for the reason the
-    // comment above gives — a policy in one and not the other means daemon
-    // sessions silently miss it, and a safety default that is only sometimes
-    // present is the worst of both.
-    let nounset = crate::shell::nounset::env_overrides();
-    let mut env: Vec<(String, String)> = session_base(client_env)
-        .into_iter()
-        .filter(|(key, _)| key != "IN_CLUD" && key != originator_key)
-        .filter(|(key, _)| {
-            !strip_temp || !crate::gc::session_tmp::OVERRIDDEN_KEYS.contains(&key.as_str())
-        })
-        // Strip any inherited value so the override below is the only one.
-        .filter(|(key, _)| !completion.iter().any(|(k, _)| k == key))
-        // Strip only the keys nounset is actually replacing — the same shape
-        // as the line above, and load-bearing for the same reason. Filtering a
-        // fixed key list instead would delete a user's inherited BASH_ENV in
-        // the cases where `env_overrides` returns nothing (opted out, no home,
-        // unwritable state dir), since nothing would then put it back. The
-        // runner's `push_or_replace` is inert when the overrides are empty;
-        // this has to be too, or opting out means something different
-        // depending on which builder launched you.
-        .filter(|(key, _)| !nounset.iter().any(|(k, _)| k == key))
-        .collect();
-    env.push(("IN_CLUD".to_string(), "1".to_string()));
-    env.push((
-        originator_key.to_string(),
-        format!("CLUD:{}", std::process::id()),
-    ));
-    env.extend(overrides);
-    env.extend(completion);
-    env.extend(nounset);
-    crate::shim_session::activate_rm(&mut env);
-    env
+/// The daemon half of the merged builder (#1209): compute the base, then
+/// hand it to the single policy owner.
+///
+/// A named seam rather than an inlined call so the guard test below can
+/// pin "the daemon path really is the same function" against a synthetic
+/// base, without mutating this process's environment. This module used to
+/// re-implement the IN_CLUD/originator tag, session temp (#509),
+/// completion guard (#753), nounset (#1066) and `activate_rm` layers
+/// itself, and the Windows UTF-8 stdio pair had already drifted into the
+/// runner only, so Windows daemon sessions lost UTF-8 stdio.
+fn child_env_with_base(base: Vec<(String, String)>) -> Vec<(String, String)> {
+    crate::runner::apply_child_env_policy(base)
 }
 
 /// Replace `path` with the JSON encoding of `value` without ever leaving the
@@ -250,7 +221,7 @@ mod tests {
         use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
 
         let guard = EnvGuard::unset(OPT_OUT_KEY);
-        let env = child_env();
+        let env = child_env_from(&[]);
         drop(guard);
 
         let hits: Vec<_> = env.iter().filter(|(k, _)| k == SUPPRESS_KEY).collect();
@@ -270,7 +241,7 @@ mod tests {
         use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
 
         let opt_out = EnvGuard::set(OPT_OUT_KEY, "1");
-        let env = child_env();
+        let env = child_env_from(&[]);
         drop(opt_out);
 
         // Inherited ambient value (if any) is all that may remain; we must not
@@ -280,16 +251,16 @@ mod tests {
         assert!(!injected, "{OPT_OUT_KEY}=1 must suppress the injection");
     }
 
-    /// Issue #1066, same drift risk as the #753 pair above and the reason the
-    /// comment in `child_env` says a policy belongs in both builders: assert
-    /// the daemon path arms nounset identically to `runner::child_env`,
-    /// rather than assuming the two edits stayed in step.
+    /// Issue #1066, same drift risk as the #753 pair above — the risk #1209
+    /// closed by routing both paths through one builder: assert the daemon
+    /// path arms nounset identically to `runner::child_env`, rather than
+    /// assuming the two stayed in step.
     #[test]
     fn child_env_arms_nounset_exactly_like_the_runner() {
         use crate::shell::nounset::{BASH_ENV_KEY, OPT_OUT_KEY};
 
         let guard = EnvGuard::set_all(&[(OPT_OUT_KEY, None), (BASH_ENV_KEY, None)]);
-        let daemon = child_env();
+        let daemon = child_env_from(&[]);
         let runner = crate::runner::child_env();
         drop(guard);
 
@@ -323,7 +294,7 @@ mod tests {
 
         let theirs = "/home/someone/their-bash-env.sh";
         let guard = EnvGuard::set_all(&[(OPT_OUT_KEY, Some("1")), (BASH_ENV_KEY, Some(theirs))]);
-        let daemon = child_env();
+        let daemon = child_env_from(&[]);
         let runner = crate::runner::child_env();
         drop(guard);
 
@@ -649,6 +620,61 @@ mod tests {
             value_of(&daemon, "PATH"),
             value_of(&runner, "PATH"),
             "daemon and foreground disagree on PATH with the client env supplied"
+        );
+    }
+
+    /// RED for #1209: the two builders applied the same policy layers by
+    /// hand, and had drifted - the Windows UTF-8 stdio pair existed only in
+    /// `runner::child_env`, so Windows daemon sessions spawned without it.
+    /// Asserted against `runner::child_env_policy_keys()`, which lists the
+    /// Windows pair on every platform, so the assertion is the same sentence
+    /// on a Linux lane (absent == absent) as on Windows (`1` == `1`) and
+    /// fails on `main` on Windows.
+    #[test]
+    fn both_builders_agree_on_every_policy_key() {
+        let guard = EnvGuard::set_all(&[
+            (crate::shell::nounset::OPT_OUT_KEY, None),
+            (crate::shell::completion_guard::OPT_OUT_KEY, None),
+        ]);
+        let client: Vec<(String, String)> = std::env::vars().collect();
+        let daemon = child_env_from(&client);
+        let runner = crate::runner::child_env();
+        drop(guard);
+
+        for key in crate::runner::child_env_policy_keys() {
+            assert_eq!(
+                value_of(&daemon, key),
+                value_of(&runner, key),
+                "policy key {key} drifted between the daemon and runner child-env builders"
+            );
+        }
+    }
+
+    /// #1209: one builder, not two that happen to agree today. Compared
+    /// against a synthetic base so the assertion does not depend on this
+    /// process's environment. Paired with the forced-`windows_stdio` tests in
+    /// `runner_execution.rs`: those prove the shared builder applies the
+    /// Windows stdio layer, and this proves the daemon path is that builder,
+    /// which together cover "daemon sessions get UTF-8 stdio" on a Linux lane.
+    ///
+    /// Holds the `EnvGuard` mutex without changing anything: both calls read
+    /// the process environment through `nounset`/`session_tmp`, so a
+    /// concurrent test flipping an opt-out between them would make the two
+    /// sides differ for a reason that is not drift.
+    #[test]
+    fn the_daemon_path_is_the_shared_builder() {
+        let _env_lock = EnvGuard::set_all(&[]);
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path().to_string_lossy().to_string();
+        let base = pairs(&[
+            ("PATH", "/client/only/bin"),
+            ("HOME", home_path.as_str()),
+            ("USERPROFILE", home_path.as_str()),
+        ]);
+
+        assert_eq!(
+            child_env_with_base(base.clone()),
+            crate::runner::apply_child_env_policy(base)
         );
     }
 

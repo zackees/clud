@@ -29,16 +29,44 @@ const RAW_LOG_MAX_BYTES: u64 = 1024 * 1024;
 const EVENT_LINE_MAX_BYTES: usize = 8 * 1024;
 
 /// Captured API turns do not post dashboard telemetry. Never pass the
-/// dashboard capability to a subprocess whose complete output is persisted
-/// in an API-readable raw log.
-fn api_turn_env() -> Vec<(String, String)> {
-    super::io_helpers::child_env()
+/// dashboard capability to a subprocess whose complete output is
+/// persisted in an API-readable raw log.
+///
+/// `client_env` is the creating client's environment, layered over the
+/// daemon's by `io_helpers::child_env_from` (#933/#1157). An empty slice
+/// is the documented fallback and is what every call site passes today:
+/// an API session is created over HTTP and its durable record carries no
+/// environment, so there is nothing to forward yet. #933 owns adding the
+/// field; until then this is byte-for-byte the previous behaviour.
+fn api_turn_env(client_env: &[(String, String)]) -> Vec<(String, String)> {
+    super::io_helpers::child_env_from(client_env)
         .into_iter()
         .filter(|(key, _)| {
             key != crate::log_event::ENV_DAEMON_HTTP_TOKEN
                 && key != crate::log_event::ENV_DAEMON_HTTP_SERVER
         })
         .collect()
+}
+
+/// The exact `ProcessConfig` a captured turn spawns with. Extracted so
+/// the client-env routing is testable: this is the value handed to
+/// `NativeProcess::new`, not a reconstruction of it.
+fn turn_process_config(
+    command: Vec<String>,
+    cwd: std::path::PathBuf,
+    client_env: &[(String, String)],
+) -> ProcessConfig {
+    ProcessConfig {
+        command: crate::subprocess::command_spec_for_subprocess(command),
+        cwd: Some(cwd),
+        env: Some(api_turn_env(client_env)),
+        capture: true,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: invisible_helper_creationflags(),
+        create_process_group: false,
+        stdin_mode: StdinMode::Null,
+        nice: None,
+    }
 }
 
 #[derive(Debug)]
@@ -72,10 +100,28 @@ impl std::error::Error for ApiTurnLaunchError {}
 /// Starts a subprocess-only API turn. `plan` must be produced by the typed
 /// headless adapter; this boundary rejects a missing or mismatched cwd rather
 /// than inheriting the daemon's working directory.
+///
+/// Forwards no client environment: [`launch_captured_turn_with_client_env`]
+/// with an empty slice, i.e. the pre-#1209 daemon-env behaviour.
 pub fn launch_captured_turn(
     store: ApiSessionStore,
     session_id: &str,
     plan: LaunchPlan,
+) -> Result<Arc<NativeProcess>, ApiTurnLaunchError> {
+    launch_captured_turn_with_client_env(store, session_id, plan, &[])
+}
+
+/// [`launch_captured_turn`], with the creating client's environment layered
+/// over the daemon's (#933/#1157). A caller with no client env in hand
+/// passes `&[]` and gets the pre-#1209 daemon-env behaviour unchanged; the
+/// live wiring waits on #933 adding an env to the durable API session
+/// record, since that record is the only place a client env could come
+/// from once the HTTP request that created it has returned.
+pub fn launch_captured_turn_with_client_env(
+    store: ApiSessionStore,
+    session_id: &str,
+    plan: LaunchPlan,
+    client_env: &[(String, String)],
 ) -> Result<Arc<NativeProcess>, ApiTurnLaunchError> {
     let session = store.get(session_id)?;
     let plan_cwd = plan.cwd.as_ref().map(Path::new).ok_or_else(|| {
@@ -101,17 +147,36 @@ pub fn launch_captured_turn(
         unix_millis_now()
     );
     let turn = store.begin_turn(session_id, turn_id)?;
-    launch_claimed_turn(store, session_id, plan, turn)
+    launch_claimed_turn_with_client_env(store, session_id, plan, turn, client_env)
 }
 
 /// Starts an already-durably-claimed generation.  Lifecycle admission must
 /// claim before process creation so duplicate concurrent requests cannot spawn
 /// two children between an idempotency check and ledger write.
+///
+/// Forwards no client environment: [`launch_claimed_turn_with_client_env`]
+/// with an empty slice, i.e. the pre-#1209 daemon-env behaviour.
 pub fn launch_claimed_turn(
     store: ApiSessionStore,
     session_id: &str,
     plan: LaunchPlan,
     turn: ApiTurnRecord,
+) -> Result<Arc<NativeProcess>, ApiTurnLaunchError> {
+    launch_claimed_turn_with_client_env(store, session_id, plan, turn, &[])
+}
+
+/// [`launch_claimed_turn`], with the creating client's environment layered
+/// over the daemon's (#933/#1157). A caller with no client env in hand
+/// passes `&[]` and gets the pre-#1209 daemon-env behaviour unchanged; the
+/// live wiring waits on #933 adding an env to the durable API session
+/// record, since that record is the only place a client env could come
+/// from once the HTTP request that created it has returned.
+pub fn launch_claimed_turn_with_client_env(
+    store: ApiSessionStore,
+    session_id: &str,
+    plan: LaunchPlan,
+    turn: ApiTurnRecord,
+    client_env: &[(String, String)],
 ) -> Result<Arc<NativeProcess>, ApiTurnLaunchError> {
     let session = store.get(session_id)?;
     let plan_cwd = plan.cwd.as_ref().map(Path::new).ok_or_else(|| {
@@ -136,17 +201,11 @@ pub fn launch_claimed_turn(
             "claimed API turn is no longer current".to_string(),
         ));
     }
-    let process = Arc::new(NativeProcess::new(ProcessConfig {
-        command: crate::subprocess::command_spec_for_subprocess(plan.command),
-        cwd: Some(session.cwd.clone()),
-        env: Some(api_turn_env()),
-        capture: true,
-        stderr_mode: StderrMode::Stdout,
-        creationflags: invisible_helper_creationflags(),
-        create_process_group: false,
-        stdin_mode: StdinMode::Null,
-        nice: None,
-    }));
+    let process = Arc::new(NativeProcess::new(turn_process_config(
+        plan.command,
+        session.cwd.clone(),
+        client_env,
+    )));
     if let Err(error) = process.start() {
         let _ = store.finish_turn(
             session_id,
@@ -412,9 +471,78 @@ mod tests {
 
     #[test]
     fn captured_api_turn_environment_excludes_dashboard_capabilities() {
-        assert!(!api_turn_env()
+        assert!(!api_turn_env(&[])
             .iter()
             .any(|(key, _)| key == crate::log_event::ENV_DAEMON_HTTP_TOKEN
                 || key == crate::log_event::ENV_DAEMON_HTTP_SERVER));
+    }
+
+    fn value_of<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// A literal pair list as the owned shape a client env is carried in.
+    fn pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    /// RED for #1209: `api_turn_env` called `io_helpers::child_env()` with
+    /// no client env, so an API turn spawned with the daemon's frozen
+    /// environment even when the creating client's was known. Asserted on
+    /// the `ProcessConfig` that is literally handed to `NativeProcess`.
+    #[test]
+    fn an_api_turn_created_with_a_client_env_spawns_with_that_envs_path() {
+        let home = TempDir::new().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let client = pairs(&[
+            ("PATH", "/client/only/bin"),
+            ("HOME", home_str.as_str()),
+            ("USERPROFILE", home_str.as_str()),
+            ("CLUD_TEST_CLIENT_ONLY", "1"),
+        ]);
+        let cwd = home.path().to_path_buf();
+        let config = turn_process_config(vec!["claude".to_string()], cwd, &client);
+        // Borrowed, not moved out: a partial move of `config.env` would stop
+        // compiling the day `ProcessConfig` grows a `Drop` impl upstream.
+        let env = config
+            .env
+            .as_deref()
+            .expect("captured turns pass an explicit env");
+        let path = value_of(env, "PATH").expect("PATH must be present");
+        assert!(
+            path.ends_with("/client/only/bin"),
+            "the client's PATH must reach the turn; got {path}"
+        );
+        assert_eq!(value_of(env, "CLUD_TEST_CLIENT_ONLY"), Some("1"));
+        let token = crate::log_event::ENV_DAEMON_HTTP_TOKEN;
+        let server = crate::log_event::ENV_DAEMON_HTTP_SERVER;
+        assert_eq!(value_of(env, token), None);
+        assert_eq!(value_of(env, server), None);
+    }
+
+    /// The empty slice must mean "exactly today's behaviour", not "empty
+    /// environment" - every call site passes it until #933 gives the
+    /// durable API session record an env. The assertion below scans all
+    /// values instead of doing an exact-match `PATH` lookup — the live
+    /// environment's PATH key is spelled `Path` on Windows, and
+    /// `shim_session::prepend_to_path` matches it case-insensitively, so an
+    /// exact-match `PATH` entry is absent there.
+    #[test]
+    fn no_client_env_falls_back_to_the_daemon_environment() {
+        let temp = TempDir::new().unwrap();
+        let cwd = temp.path().to_path_buf();
+        let config = turn_process_config(vec!["claude".to_string()], cwd, &[]);
+        let env = config
+            .env
+            .as_deref()
+            .expect("captured turns pass an explicit env");
+        assert_eq!(value_of(env, "IN_CLUD"), Some("1"));
+        assert!(
+            !env.iter().any(|(_, v)| v.contains("/client/only/bin")),
+            "the empty slice must not pick up the sibling test's synthetic client PATH"
+        );
     }
 }

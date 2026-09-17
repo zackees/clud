@@ -650,4 +650,150 @@ mod tests {
             "Codex with null override should still inherit top-level true"
         );
     }
+
+    /// Turns a literal pair list into the `Vec<(String, String)>` shape the
+    /// policy builders take, so the tests below read as plain data.
+    fn env_pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    /// Borrowing lookup helper. Named distinctly from the `env_lookup` fn and
+    /// the inline `lookup` closure the Windows tests above use, so neither is
+    /// shadowed and the returned borrow needs no clone.
+    fn value_of<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// #1209 RED, platform-neutral: the Windows UTF-8 stdio pair existed only
+    /// in the runner's copy of the policy, so Windows daemon sessions spawned
+    /// without it. `windows_stdio` is injected rather than read from `cfg!`
+    /// precisely so a Linux lane can assert the layer at all.
+    #[test]
+    fn forcing_windows_stdio_sets_the_python_utf8_pair_exactly_once() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let base = env_pairs(&[
+            ("HOME", home_str.as_str()),
+            ("USERPROFILE", home_str.as_str()),
+            ("PATH", "/base/bin"),
+            ("PYTHONUTF8", "0"),
+            ("PYTHONIOENCODING", "latin-1"),
+        ]);
+
+        let env = apply_child_env_policy_with(base, true);
+
+        assert_eq!(value_of(&env, "PYTHONIOENCODING"), Some("utf-8"));
+        assert_eq!(value_of(&env, "PYTHONUTF8"), Some("1"));
+        assert_eq!(
+            env.iter().filter(|(k, _)| k == "PYTHONIOENCODING").count(),
+            1,
+            "stale PYTHONIOENCODING must be replaced, not shadowed by a second entry"
+        );
+        assert_eq!(
+            env.iter().filter(|(k, _)| k == "PYTHONUTF8").count(),
+            1,
+            "stale PYTHONUTF8 must be replaced, not shadowed by a second entry"
+        );
+    }
+
+    /// Off Windows the pair is not ours to touch: an inherited value must
+    /// survive untouched. Merging the two builders must not start deleting it.
+    #[test]
+    fn without_windows_stdio_an_inherited_python_setting_survives() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let base = env_pairs(&[
+            ("HOME", home_str.as_str()),
+            ("USERPROFILE", home_str.as_str()),
+            ("PATH", "/base/bin"),
+            ("PYTHONUTF8", "0"),
+        ]);
+
+        let env = apply_child_env_policy_with(base, false);
+
+        assert_eq!(value_of(&env, "PYTHONUTF8"), Some("0"));
+        assert_eq!(
+            env.iter().filter(|(k, _)| k == "PYTHONUTF8").count(),
+            1,
+            "PYTHONUTF8 must appear exactly once"
+        );
+        assert_eq!(value_of(&env, "PYTHONIOENCODING"), None);
+    }
+
+    /// The IN_CLUD/originator tag is a replacement, not an addition: a
+    /// relaunch inside a clud session must not hand the child two values.
+    #[test]
+    fn the_clud_tag_replaces_any_inherited_one() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let base = env_pairs(&[
+            ("HOME", home_str.as_str()),
+            ("USERPROFILE", home_str.as_str()),
+            ("PATH", "/base/bin"),
+            ("IN_CLUD", "stale"),
+            (running_process::ORIGINATOR_ENV_VAR, "OTHER:1"),
+        ]);
+
+        let env = apply_child_env_policy(base);
+
+        let in_clud: Vec<&str> = env
+            .iter()
+            .filter(|(k, _)| k == "IN_CLUD")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(in_clud, vec!["1"], "IN_CLUD must be exactly one 1");
+
+        let originator: Vec<&str> = env
+            .iter()
+            .filter(|(k, _)| k == running_process::ORIGINATOR_ENV_VAR)
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(originator.len(), 1, "exactly one originator entry");
+        assert!(
+            originator[0].starts_with("CLUD:"),
+            "originator value must start with CLUD:, got {}",
+            originator[0]
+        );
+    }
+
+    /// `child_env_policy_keys()` is what the daemon/runner drift guard in
+    /// `daemon/io_helpers.rs` compares over, so a policy key missing from the
+    /// list would make that guard silently blind. Assert the list covers every
+    /// key the builder actually adds or changes.
+    #[test]
+    fn the_policy_key_list_covers_every_key_the_builder_touches() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let base = env_pairs(&[
+            ("HOME", home_str.as_str()),
+            ("USERPROFILE", home_str.as_str()),
+            ("PATH", "/base/bin"),
+        ]);
+
+        let before = base.clone();
+        let env = apply_child_env_policy_with(before, true);
+        let policy_keys = child_env_policy_keys();
+
+        for (key, value) in &env {
+            let unchanged = value_of(&base, key) == Some(value.as_str());
+            if unchanged {
+                continue;
+            }
+            assert!(
+                policy_keys.contains(&key.as_str()) || key == "PATH",
+                "policy touched {key:?} but child_env_policy_keys() doesn't list it \
+                 (add it there so the daemon/runner drift guard can see it)"
+            );
+        }
+
+        for &key in WINDOWS_STDIO_KEYS {
+            assert!(
+                policy_keys.contains(&key),
+                "child_env_policy_keys() must include the Windows stdio key {key:?}"
+            );
+        }
+    }
 }
