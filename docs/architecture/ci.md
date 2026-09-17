@@ -218,8 +218,10 @@ test install install.sh install.ps1 publish` and `.cargo/config.toml` — 302
 files as of this writing. `crates/` covers the product source and not just the
 asset scripts under it: clud shells out to build commands, so a `cargo xwin` in
 Rust is a real vector. `vendor/` stays out — third-party source we do not
-author, where `whisper-rs-sys/build.rs` legitimately reasons about zig's C++
-runtime for the Linux lanes. `.claude/hooks` rather than `.claude` because the
+author. It held `whisper-rs-sys`, whose `build.rs` legitimately reasoned about
+zig's C++ runtime for the Linux lanes; that tree is gone, but the exclusion
+stays so a future vendored dependency is not linted for invariants that are
+ours. `.claude/hooks` rather than `.claude` because the
 latter also holds `worktrees/`, an ignored second checkout.
 
 **Escape hatch.** Comments are stripped so prose explaining the ban stays legal.
@@ -414,7 +416,9 @@ five would put ~900 MB of near-duplicate DWARF on every release page.
 
 ### The manylinux glibc floor is `--compatibility`, not `--target`
 
-`ci/xbuild.py::manylinux_wheel_env` owns this and is the only place that should.
+The release branch of `ci/xbuild.py::cmd_wheel` owns this and is the only place
+that should.
+
 Three traps, all of which shipped a red release run before being understood:
 
 1. **The floor cannot be spelled on `--target`.** `cargo zigbuild` accepts
@@ -432,7 +436,9 @@ Three traps, all of which shipped a red release run before being understood:
    toolchain — Rust at 2.17, the whisper.cpp C/C++ at soldr's default — and the
    audit rejected it for `GLIBC_2.25/2.27/2.28`. The fix is to drop those
    variables for the wheel build, which is safe only because no `*-sys` crate
-   needs the prepared sysroot on Linux (`cpal` is cfg'd off there).
+   needs the prepared sysroot on Linux (`cpal` is cfg'd off there). (The C++
+   half of that split no longer exists — see "The static C++ runtime link is
+   gone" below.)
 3. **Only the cross lanes get a zig on PATH.** cargo-zigbuild resolves zig as
    `which(python3) -m ziglang` then `which(zig)`. On the native `x86_64` lane
    `python3` is the hosted-tool interpreter (no `ziglang`) and `soldr prepare`
@@ -443,8 +449,38 @@ Three traps, all of which shipped a red release run before being understood:
 
 None of this is exercised by `ci.yml` — `_build-target.yml` refuses
 `profile: release` outside Auto Release — so the release wheel path is only
-ever proven by a real tag. Treat `manylinux_wheel_env`'s unit tests in
-`tests/test_ci_xbuild.py` as the standing contract.
+ever proven by a real tag. Treat the release-wheel unit tests in
+`tests/test_ci_xbuild.py` — `test_release_linux_wheel_builds_without_zig` and
+`test_release_linux_wheel_env_sets_no_whisper_vars` — as the standing contract.
+
+#### The static C++ runtime link is gone (#1207)
+
+soldr's catalogue GNU toolchain pins *glibc* at 2.17 through its sysroot but
+does not pin the *C++* runtime, so while whisper.cpp was in the graph the
+release wheel appended `-static-libstdc++`/`-static-libgcc` to soldr's
+exported `CARGO_ENCODED_RUSTFLAGS` and set `WHISPER_LINK_CXX_STATIC=1` — the
+load-bearing half, because whisper-rs-sys emitted an explicit
+`cargo:rustc-link-lib=dylib=stdc++` that a driver flag for the *implicit*
+libstdc++ cannot override. whisper-rs was removed (and `vendor/` with it), and
+`Cargo.lock`'s only native dependencies are now `ring` and `blake3`, both C.
+Nothing links libstdc++, so the whole mechanism was inert and is deleted.
+
+What remains dynamic is Rust's own unwinder importing `libgcc_s.so.1`, which
+the manylinux_2_17 policy whitelists at the `GCC_3.x`/`GCC_4.2.0` symbol
+versions Rust references. Nothing here is taken on faith, and nothing here is
+provable by unit test either: the release wheel build audits itself
+(`--compatibility manylinux2014`), so a green
+
+```
+python -m ci.xbuild wheel --target x86_64-unknown-linux-gnu --strategy soldr --profile release
+```
+
+is the gate — for #1207's removal of `-static-libgcc` and for any later change
+to these flags. `_build-target.yml` refuses `profile: release` outside Auto
+Release, so CI will not run it for you; run it before merging such a change.
+If the audit ever rejects a too-new `libgcc_s` import, restore `-static-libgcc`
+alone — never `WHISPER_LINK_CXX_STATIC`, which has no build script left to
+talk to — and amend this subsection.
 
 ### Reproducing a wheel locally
 
