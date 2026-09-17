@@ -34,6 +34,7 @@ use running_process::{
 use serde::Serialize;
 
 use crate::log_event::{ENV_DAEMON_HTTP_SERVER, ENV_DAEMON_HTTP_TOKEN};
+use crate::process_identity::{start_time_of, UNKNOWN_START_TIME};
 use crate::session_index::{
     allocate_next_id, append_event, unix_millis_now, IndexEvent, SessionContext,
 };
@@ -273,6 +274,19 @@ fn run_with_session(
     });
     process.start().map_err(io::Error::other)?;
 
+    // #1204: record the child's real OS PID and its start time so
+    // `clud tool log --pid` / `clud tool info --pid` can match this
+    // invocation. `NativeProcess::pid()` is only valid while the wrapper
+    // still owns the child, so read it here -- before the poll-drain
+    // loop -- and fall back to 0 / UNKNOWN_START_TIME when the platform
+    // or a just-reaped child gives us nothing.
+    let pid = process.pid().unwrap_or(0);
+    let pid_start_time = if pid == 0 {
+        UNKNOWN_START_TIME
+    } else {
+        start_time_of(pid)
+    };
+
     let started_at_ms = unix_millis_now();
     let _ = append_event(
         ctx,
@@ -280,11 +294,8 @@ fn run_with_session(
             tool_id,
             tool: rel_path.to_string(),
             args: args.to_vec(),
-            // The actual subprocess PID/start_time come from the daemon's
-            // process-tree view; capturing them through running_process
-            // would need a dedicated API. For now record what we know.
-            pid: 0,
-            pid_start_time: 0,
+            pid,
+            pid_start_time,
             started_at_ms,
         },
     );
