@@ -97,6 +97,63 @@ fn a_differently_spelled_path_to_our_own_shim_is_not_chained() {
 
 #[cfg(unix)]
 #[test]
+fn chaining_through_another_clud_shim_does_not_recurse_forever() {
+    // Two clud sessions with different state dirs (e.g. a nested session
+    // whose CLUD_DAEMON_STATE_DIR points at a pytest fixture directory,
+    // #1201's actual production case) generate two different, but
+    // byte-identical, shim files. same_file() correctly says these are not
+    // the same file, so the inner one's CLUD_PREV_BASH_ENV is chained to the
+    // outer one -- but `.` runs in the same shell, so CLUD_PREV_BASH_ENV is
+    // unchanged when the outer shim's own copy of this exact template
+    // re-reads it, and it sources itself, and so on: true infinite
+    // recursion, unbounded by canonicalization, because the two files are
+    // genuinely distinct on disk. bash dies with SIGSEGV in push_source
+    // (observed in production as a stack-overflowing coredump).
+    let outer = tempdir().unwrap();
+    let outer_overrides = env_overrides_at(outer.path(), false, None);
+    let outer_shim = outer_overrides
+        .iter()
+        .find(|(key, _)| key == BASH_ENV_KEY)
+        .map(|(_, value)| value.clone())
+        .unwrap();
+
+    let inner = tempdir().unwrap();
+    let mut env = stock_env();
+    env.extend(env_overrides_at(inner.path(), false, Some(outer_shim)));
+    assert!(
+        env.iter().any(|(key, _)| key == PREV_KEY),
+        "a genuinely different file must still be chained"
+    );
+
+    let (code, output) = bash_under(env, "true");
+    assert_eq!(
+        code, 0,
+        "bash must not recurse sourcing a distinct-but-identical shim: {output}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_recursion_guard_does_not_leak_into_the_armed_shell() {
+    // CLUD_NOUNSET_ARMED must not still be exported once the shim finishes:
+    // a long-lived launcher process (or a persistent interactive shell) that
+    // ever saw it set would leak it into every later, unrelated subprocess,
+    // silently skipping nounset for all of them.
+    let tmp = tempdir().unwrap();
+    let mut env = stock_env();
+    env.extend(env_overrides_at(tmp.path(), false, None));
+
+    let (code, output) = bash_under(env, r#"echo "[${CLUD_NOUNSET_ARMED:-}]""#);
+
+    assert_eq!(code, 0, "the probe itself must not trip nounset: {output}");
+    assert_eq!(
+        output, "[]",
+        "the guard must be unset again before the shim returns"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_symlink_spelling_does_not_source_recursively() {
     let tmp = tempdir().unwrap();
     let first = env_overrides_at(tmp.path(), false, None);
