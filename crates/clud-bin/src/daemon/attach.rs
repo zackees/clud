@@ -22,6 +22,7 @@ use super::types::{
     SessionSnapshot, WorkerClientMessage, WorkerServerMessage, BACKGROUND_PROMPT_TIMEOUT,
 };
 use super::wire_prost::{daemon_wire_format_from_env, decode_worker_server_line, DaemonWireFormat};
+use crate::ctrl_c_track::CtrlEventKind;
 use crate::session::{InteractiveHooks, PtyInputSink};
 use crate::voice::VoiceMode;
 
@@ -32,17 +33,34 @@ const INTERRUPT_EXIT_GRACE: Duration = Duration::from_millis(500);
 /// moment `attach_to_session`'s interrupt-decision logic observes it, so
 /// the new signal/console-event plumbing added by #517 is visible in real
 /// runs. `site` identifies which of the interrupt-consulting call sites
-/// (`attach_to_session`, `run_remote_interactive` via its
-/// `InterruptRequested` result, `prompt_continue_in_background_terminal`)
-/// triggered the log, without logging on every poll-loop tick — only the
-/// two points where an interrupt actually changes behavior.
+/// (`daemon::commands`' `logs_follow` / `api_logs_follow`, and — via
+/// [`log_interrupt_reason`] — `attach_to_session` and
+/// `prompt_continue_in_background_terminal`) triggered the log, without
+/// logging on every poll-loop tick: only the points where an interrupt
+/// actually changes behavior.
 ///
-/// Deliberately logging only, not deciding: issue #517 explicitly scopes
-/// out changing the background-prompt/skip-prompt *decision* logic based
-/// on the reason — that's a follow-up once the reason has been observed
-/// in practice.
+/// This helper itself is still logging-only, but the follow-up it
+/// anticipated has landed: the skip-the-prompt decision now lives in
+/// [`background_decision_for_reason`] (#1208), which
+/// `attach_to_session` consults before showing the interactive
+/// background prompt, and in [`mid_prompt_decision_for_reason`], which
+/// `prompt_continue_in_background_terminal` consults when a second
+/// interrupt lands mid-prompt. Those two sites read the reason
+/// themselves and log it through [`log_interrupt_reason`] so the logged
+/// value and the decided value are the same read.
 pub(super) fn log_observed_interrupt_reason(site: &str) {
-    match crate::ctrl_c_track::observed_event_kind() {
+    log_interrupt_reason(site, crate::ctrl_c_track::observed_event_kind());
+}
+
+/// Same log line, but for a reason the caller has *already* read out of
+/// [`crate::ctrl_c_track`]. The two decision sites read the reason once
+/// and pass it to both this logger and
+/// [`background_decision_for_reason`], so the logged reason is always
+/// the exact value the decision was made from. Re-reading the
+/// process-global atomic per use could otherwise log one reason and act
+/// on another if a second signal landed in between.
+fn log_interrupt_reason(site: &str, reason: Option<CtrlEventKind>) {
+    match reason {
         Some(kind) => {
             crate::verbose_log::log(format!("[clud] interrupt reason ({site}): {kind:?}"))
         }
@@ -50,6 +68,84 @@ pub(super) fn log_observed_interrupt_reason(site: &str) {
             "[clud] interrupt reason ({site}): unknown (no probe fired)"
         )),
     }
+}
+
+/// Issue #1208: decides whether an observed interrupt [`CtrlEventKind`]
+/// should skip the interactive "continue in the background?" prompt and
+/// background the session directly.
+///
+/// `Some(ContinueInBackground)` covers the supervisor/terminal-loss
+/// reasons (`CtrlClose`, `CtrlLogoff`, `CtrlShutdown`, `Hup`, `Term`).
+/// What unifies them is that nobody is left at a terminal who could
+/// answer the prompt: the console window is closing, the controlling
+/// terminal (or its session leader) is already gone, or a supervisor is
+/// tearing the process down. The prompt would burn its own 5-second
+/// timeout and then background anyway, so we skip straight to the
+/// answer. Windows makes the cost concrete — `CTRL_CLOSE_EVENT` and
+/// friends give the handler only ~5 seconds before the OS kills the
+/// process, which the prompt's timeout would consume entirely. And
+/// backgrounding is the non-destructive choice regardless: it matches
+/// what the prompt's own timeout and the non-interactive path
+/// (`prompt_continue_in_background_noninteractive`) already do.
+///
+/// `None` means "no opinion — keep today's interactive prompt".
+/// `Quit` (SIGQUIT) deliberately keeps the prompt for now: treating it
+/// as an `EndSession` reason is arguable and can be decided later from
+/// logged data. `Unknown` and a missing reason (`None` input) also keep
+/// the prompt, so an unmapped future event never silently changes
+/// behavior.
+///
+/// The match is exhaustive with no wildcard arm on purpose: adding a new
+/// `CtrlEventKind` variant without updating this function is a compile
+/// error here, not a silent "keep prompting" default.
+fn background_decision_for_reason(kind: Option<CtrlEventKind>) -> Option<BackgroundPromptDecision> {
+    match kind? {
+        CtrlEventKind::CtrlClose
+        | CtrlEventKind::CtrlLogoff
+        | CtrlEventKind::CtrlShutdown
+        | CtrlEventKind::Hup
+        | CtrlEventKind::Term => Some(BackgroundPromptDecision::ContinueInBackground),
+        CtrlEventKind::CtrlC
+        | CtrlEventKind::CtrlBreak
+        | CtrlEventKind::Quit
+        | CtrlEventKind::Unknown => None,
+    }
+}
+
+/// Issue #1208: the mid-prompt variant of
+/// [`background_decision_for_reason`], used when a second interrupt
+/// lands while the countdown prompt is already on screen.
+///
+/// There is no "no opinion" case here: the user is being asked a
+/// question and the interrupt *is* an answer. A terminal-loss reason
+/// backgrounds; everything else — a second Ctrl+C, Ctrl+Break, SIGQUIT,
+/// an unmapped future event, or no stamped reason at all — keeps the
+/// pre-#1208 behavior of ending the session. Split out from
+/// `prompt_continue_in_background_terminal` (which needs a real
+/// terminal) so the fallback is table-testable and a future edit cannot
+/// silently flip the default.
+fn mid_prompt_decision_for_reason(kind: Option<CtrlEventKind>) -> BackgroundPromptDecision {
+    background_decision_for_reason(kind).unwrap_or(BackgroundPromptDecision::EndSession)
+}
+
+/// Announce a background prompt that [`background_decision_for_reason`]
+/// skipped (#1208), naming both the observed reason and the decision it
+/// produced. One line, not two: [`crate::verbose_log::log`] already
+/// writes to stderr as well as the log file, so a user who *is* still
+/// watching the terminal sees why no prompt appeared without a second
+/// near-identical `eprintln!`.
+fn announce_skipped_background_prompt(
+    reason: Option<CtrlEventKind>,
+    decision: BackgroundPromptDecision,
+) {
+    let reason = match reason {
+        Some(kind) => format!("{kind:?}"),
+        None => "unknown".to_string(),
+    };
+    crate::verbose_log::log(format!(
+        "[clud] interrupt reason {reason} leaves nobody at the terminal; \
+         skipping the background prompt ({decision:?})"
+    ));
 }
 
 /// `PtyInputSink` impl that forwards bytes to the daemon-owned PTY as a
@@ -302,10 +398,26 @@ pub(super) fn attach_to_session(
     let (local_result, backgrounded) = match local_result {
         LocalAttachResult::Completed(code) => (code, false),
         LocalAttachResult::InterruptRequested(interrupt) => {
-            log_observed_interrupt_reason("attach_to_session");
+            // Read the reason once and reuse it for both the log line and
+            // the #1208 decision, so the two can never disagree.
+            let reason = crate::ctrl_c_track::observed_event_kind();
+            log_interrupt_reason("attach_to_session", reason);
             interrupted.store(false, Ordering::SeqCst);
             if session.detachable {
-                match prompt_continue_in_background(interrupted) {
+                // Issue #1208: a supervisor/terminal-loss reason (window
+                // close, logoff, shutdown, SIGHUP, SIGTERM) means there
+                // is no longer anyone at a terminal to answer the
+                // prompt — and on Windows only ~5s before the OS kills
+                // us — so background directly instead of prompting.
+                // Rationale lives on `background_decision_for_reason`.
+                let decision = match background_decision_for_reason(reason) {
+                    Some(decision) => {
+                        announce_skipped_background_prompt(reason, decision);
+                        decision
+                    }
+                    None => prompt_continue_in_background(interrupted),
+                };
+                match decision {
                     BackgroundPromptDecision::ContinueInBackground => {
                         let _ = shutdown_worker_connection(&writer);
                         eprintln!("[clud] session {} continues in the background", session.id);
@@ -571,9 +683,16 @@ fn prompt_continue_in_background_terminal(interrupted: &AtomicBool) -> Backgroun
             return BackgroundPromptDecision::ContinueInBackground;
         }
         if interrupted.swap(false, Ordering::SeqCst) {
-            log_observed_interrupt_reason("prompt_continue_in_background_terminal");
+            // Close the prompt line first, then log — the guard above
+            // still holds raw mode, so anything written here lands
+            // immediately after the last rendered countdown line.
             eprintln!();
-            return BackgroundPromptDecision::EndSession;
+            let reason = crate::ctrl_c_track::observed_event_kind();
+            log_interrupt_reason("prompt_continue_in_background_terminal", reason);
+            // Issue #1208: a second Ctrl+C while the prompt is up still
+            // ends the session, but a SIGHUP/SIGTERM/window-close
+            // arriving mid-prompt backgrounds instead of killing it.
+            return mid_prompt_decision_for_reason(reason);
         }
         match event::poll(Duration::from_millis(100)) {
             Ok(true) => match event::read() {
@@ -629,5 +748,64 @@ mod tests {
             prompt_continue_in_background_noninteractive(),
             BackgroundPromptDecision::ContinueInBackground
         );
+    }
+
+    /// Issue #1208: table-tests every [`CtrlEventKind`] variant against
+    /// [`background_decision_for_reason`]. The function's `match` is
+    /// exhaustive with no wildcard arm, so a newly added `CtrlEventKind`
+    /// variant that isn't added to this table (and to the function
+    /// itself) is a compile error rather than a silent "keep prompting"
+    /// default.
+    #[test]
+    fn background_decision_for_reason_maps_every_ctrl_event_kind() {
+        let continue_in_background = Some(BackgroundPromptDecision::ContinueInBackground);
+        let table: [(CtrlEventKind, Option<BackgroundPromptDecision>); 9] = [
+            (CtrlEventKind::CtrlClose, continue_in_background),
+            (CtrlEventKind::CtrlLogoff, continue_in_background),
+            (CtrlEventKind::CtrlShutdown, continue_in_background),
+            (CtrlEventKind::Hup, continue_in_background),
+            (CtrlEventKind::Term, continue_in_background),
+            (CtrlEventKind::CtrlC, None),
+            (CtrlEventKind::CtrlBreak, None),
+            (CtrlEventKind::Quit, None),
+            (CtrlEventKind::Unknown, None),
+        ];
+        for (kind, expected) in table {
+            let actual = background_decision_for_reason(Some(kind));
+            assert_eq!(actual, expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn background_decision_for_reason_keeps_the_prompt_when_no_reason_was_stamped() {
+        assert_eq!(background_decision_for_reason(None), None);
+    }
+
+    /// Issue #1208: the mid-prompt fallback has no "no opinion" case, so
+    /// this table covers every [`CtrlEventKind`] variant *plus* the
+    /// no-reason-stamped input. Everything that is not a terminal-loss
+    /// reason must keep the pre-#1208 behavior of ending the session —
+    /// the dangerous direction would be silently backgrounding on a
+    /// second Ctrl+C.
+    #[test]
+    fn mid_prompt_decision_backgrounds_only_on_terminal_loss() {
+        let bg = BackgroundPromptDecision::ContinueInBackground;
+        let end = BackgroundPromptDecision::EndSession;
+        let table: [(Option<CtrlEventKind>, BackgroundPromptDecision); 10] = [
+            (Some(CtrlEventKind::CtrlClose), bg),
+            (Some(CtrlEventKind::CtrlLogoff), bg),
+            (Some(CtrlEventKind::CtrlShutdown), bg),
+            (Some(CtrlEventKind::Hup), bg),
+            (Some(CtrlEventKind::Term), bg),
+            (Some(CtrlEventKind::CtrlC), end),
+            (Some(CtrlEventKind::CtrlBreak), end),
+            (Some(CtrlEventKind::Quit), end),
+            (Some(CtrlEventKind::Unknown), end),
+            (None, end),
+        ];
+        for (reason, expected) in table {
+            let actual = mid_prompt_decision_for_reason(reason);
+            assert_eq!(actual, expected, "{reason:?}");
+        }
     }
 }
