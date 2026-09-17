@@ -10,12 +10,12 @@ fn captured_line_restores_delimiter_for_incremental_readers() {
     assert_eq!(output, b"first\n");
 }
 
-fn incremental_output_fixture_filter() -> String {
+fn fixture_filter(name: &str) -> String {
     let module_path = module_path!();
     let (_, test_module_path) = module_path
         .split_once("::")
         .expect("module_path! includes the crate name and test module");
-    format!("{test_module_path}::incremental_output_fixture_child")
+    format!("{test_module_path}::{name}")
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn captured_subprocess_output_is_forwardable_before_exit() {
             executable.to_string_lossy().into_owned(),
             "--ignored".to_string(),
             "--exact".to_string(),
-            incremental_output_fixture_filter(),
+            fixture_filter("incremental_output_fixture_child"),
             "--nocapture".to_string(),
         ]),
         cwd: None,
@@ -86,6 +86,20 @@ fn incremental_output_fixture_child() {
     eprintln!("second");
     io::stderr().flush().unwrap();
     std::process::exit(7);
+}
+
+#[test]
+#[ignore = "subprocess fixture invoked by session_started_event_records_the_real_child_pid"]
+fn pid_fixture_child() {
+    if std::env::var_os("CLUD_TOOL_PID_FIXTURE_CHILD").is_none() {
+        return;
+    }
+    // Echo our own PID so the parent can prove the recorded PID is the
+    // real one rather than merely non-zero.
+    println!("clud-pid-fixture pid={}", std::process::id());
+    io::stdout().flush().unwrap();
+    thread::sleep(Duration::from_millis(300));
+    std::process::exit(0);
 }
 
 /// Regression: ensure the resolved tool path is exactly
@@ -329,4 +343,120 @@ fn passthrough_abort_payload_names_exact_argv() {
     assert_eq!(value["args"][0], "--flag");
     assert_eq!(value["argv"][0], "uv");
     assert_eq!(value["stderr_tail"], "blocked at sys.stdin.read()");
+}
+
+/// Regression test for #1204: `run_with_session` used to hard-code
+/// `pid: 0` (and `pid_start_time: 0`) in the `Started` event because
+/// capturing the real subprocess PID through `running_process` "would need
+/// a dedicated API" (per the old comment). That placeholder meant
+/// `clud tool log --pid <pid>` / `clud tool info --pid <pid>` could never
+/// resolve a real invocation: `tool_query::resolve_ref` had nothing but a
+/// 0 to match against. This test runs a real short-lived child through the
+/// real session path and asserts the recorded PID is the child's actual
+/// OS PID, and that `resolve_ref` can find the invocation by that PID.
+#[test]
+fn session_started_event_records_the_real_child_pid() {
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    use base64::Engine;
+
+    let tmp = TempDir::new().unwrap();
+    let ctx = crate::session_index::SessionContext::from_state_root(tmp.path(), 4242, 1);
+    let tool_id = crate::session_index::allocate_next_id(&ctx).unwrap();
+
+    let executable = std::env::current_exe().unwrap();
+    let argv = vec![
+        executable.to_string_lossy().into_owned(),
+        "--ignored".to_string(),
+        "--exact".to_string(),
+        fixture_filter("pid_fixture_child"),
+        "--nocapture".to_string(),
+    ];
+    let mut env = std::env::vars().collect::<Vec<_>>();
+    env.push(("CLUD_TOOL_PID_FIXTURE_CHILD".to_string(), "1".to_string()));
+
+    // Build telemetry with no endpoint instead of calling
+    // `ToolTelemetry::start`: that reads the daemon HTTP env vars from the
+    // real environment and would POST a bogus tool event to a developer's
+    // live daemon when the suite runs inside a clud session.
+    let telemetry = ToolTelemetry {
+        server: None,
+        token: None,
+        id: "test-1204".to_string(),
+        name: "tests/pid-fixture".to_string(),
+        start_time_ms: 0,
+    };
+
+    let ran = run_with_session(&ctx, tool_id, "tests/pid-fixture", &[], argv, env, telemetry);
+    assert_eq!(ran.unwrap(), 0, "fixture child must exit 0");
+
+    // The index must carry the child's real PID.
+    let raw = std::fs::read_to_string(ctx.index_path()).unwrap();
+    let started = raw
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|value| value["event"] == "started")
+        .expect("index must contain a started event");
+    let pid = started["pid"]
+        .as_u64()
+        .expect("started event carries a numeric pid") as u32;
+    assert_ne!(
+        pid, 0,
+        "Started event must record the child's real PID, not the 0 placeholder"
+    );
+
+    // ... and it must be the PID the child itself reported. A tee record
+    // is "one captured line or chunk", so decode every record into one
+    // string and search that, rather than requiring the marker to be a
+    // whole record: a chunked read must not turn this assertion into a
+    // silent miss. `TeeWriter::emit_captured_batch` already restored each
+    // record's own `\n`, so concatenating them separator-free reproduces
+    // the child's byte stream exactly; the pid digits are then taken with
+    // `take_while` so the trailing newline and libtest's own output stop
+    // the scan.
+    let stdout_log =
+        std::fs::read_to_string(ctx.tool_log_dir(tool_id).join("stdout.jsonl")).unwrap();
+    let mut joined = String::new();
+    for line in stdout_log.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        let encoded = value["bytes"]
+            .as_str()
+            .expect("tee line carries base64 bytes");
+        let decoded = STANDARD_NO_PAD.decode(encoded).unwrap();
+        joined.push_str(&String::from_utf8_lossy(&decoded));
+    }
+    const MARKER: &str = "clud-pid-fixture pid=";
+    let digits_at = joined
+        .find(MARKER)
+        .expect("fixture child echoed its own pid to stdout")
+        + MARKER.len();
+    let digits: String = joined[digits_at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let reported: u32 = digits
+        .parse()
+        .expect("the marker is followed by the child's decimal pid");
+    assert_eq!(
+        pid, reported,
+        "recorded PID must be the child's real OS PID"
+    );
+
+    // `clud tool log --pid <real pid>` resolves through resolve_ref.
+    // Note: we deliberately do not assert anything about `pid_start_time`
+    // here — the fix records it best-effort, and a hard assertion on it
+    // would be the one thing in this test that could flake under load.
+    let invocations = crate::tool_query::read_invocations(&ctx).unwrap();
+    assert_eq!(
+        invocations.len(),
+        1,
+        "exactly one invocation in this session"
+    );
+    assert_eq!(invocations[0].pid, pid);
+    let resolved =
+        crate::tool_query::resolve_ref(&invocations, ctx.session_pid, None, Some(pid)).unwrap();
+    assert_eq!(
+        resolved, tool_id,
+        "`--pid <real pid>` must resolve to this invocation"
+    );
 }
