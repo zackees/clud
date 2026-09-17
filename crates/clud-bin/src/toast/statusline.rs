@@ -170,7 +170,7 @@ pub fn statusline_command(
     let render = |path: &Path| {
         let text = path.to_string_lossy().into_owned();
         if windows {
-            text.replace('\\', "/")
+            crate::path_norm::slash_separators(&text)
         } else {
             text
         }
