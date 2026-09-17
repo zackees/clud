@@ -19,13 +19,21 @@ use vte::{Params, Parser as VteParser, Perform};
 /// clients); keeping it small bounds memory.
 const SCROLLBACK_LINES: usize = 1024;
 
+/// Upper bound on a persisted window title, in bytes. Titles come from the
+/// child process, which is untrusted input: vte buffers an OSC payload
+/// without a length limit, so an unbounded title would inflate every
+/// snapshot and every reattach payload. 256 bytes is longer than any real
+/// title and keeps `snapshot_bytes` bounded.
+const MAX_TITLE_BYTES: usize = 256;
+
 pub struct TerminalCapture {
     parser: Parser,
     rows: u16,
     cols: u16,
     /// Sticky modes vt100 tracks internally but does not expose / round-trip
-    /// through `state_formatted`. Sniffed from the byte stream in parallel
-    /// with vt100's own parse, then re-emitted in `snapshot_bytes`. See #36.
+    /// through `state_formatted`, plus the window title, which vt100 never
+    /// tracks at all. Sniffed from the byte stream in parallel with vt100's
+    /// own parse, then re-emitted in `snapshot_bytes`. See #36.
     sticky: StickyModes,
     /// Separate vte::Parser driving `sticky` — vt100 already uses vte for
     /// its own state, this one only watches the handful of sequences we
@@ -34,12 +42,46 @@ pub struct TerminalCapture {
 }
 
 /// Modes vt100 0.16 doesn't round-trip through `state_formatted`.
+/// The window title is different: vt100 does not track it at all, so it is
+/// recorded here as well.
 #[derive(Default)]
 struct StickyModes {
     /// DECSTBM (`\x1b[<top>;<bot>r`), 1-indexed. `None` = full screen.
     decstbm: Option<(u16, u16)>,
     /// DECAWM off flag (`\x1b[?7l`). `false` = default (autowrap on).
     decawm_off: bool,
+    /// Latest OSC 0 / OSC 2 window title, already sanitized (control
+    /// characters and undecodable bytes dropped, truncated to
+    /// `MAX_TITLE_BYTES`). `None` = the app
+    /// never set one, so the snapshot leaves the client's title alone.
+    /// `Some("")` = the app explicitly cleared it, which we replay.
+    title: Option<String>,
+}
+
+/// Sanitize an untrusted OSC title payload for later re-emission.
+///
+/// `snapshot_bytes` replays these bytes verbatim into the attaching client's
+/// terminal, so nothing that could end the OSC string early (BEL) or start a
+/// fresh escape sequence (ESC, CSI as a raw C1 byte) may survive. Every
+/// control character is dropped rather than escaped: `char::is_control`
+/// covers C0 (U+0000..=U+001F), DEL (U+007F) and C1 (U+0080..=U+009F).
+/// Invalid UTF-8 becomes U+FFFD through lossy decoding and is dropped as
+/// well — a byte the child could not encode has no business becoming a
+/// glyph in the user's title bar. The result is truncated on a char
+/// boundary so the output is always valid UTF-8 and at most
+/// `MAX_TITLE_BYTES` long.
+fn sanitize_title(raw: &[u8]) -> String {
+    let mut out = String::new();
+    for ch in String::from_utf8_lossy(raw).chars() {
+        if ch.is_control() || ch == char::REPLACEMENT_CHARACTER {
+            continue;
+        }
+        if out.len() + ch.len_utf8() > MAX_TITLE_BYTES {
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 struct StickySniffer<'a> {
@@ -84,6 +126,24 @@ impl<'a> Perform for StickySniffer<'a> {
             }
             _ => {}
         }
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 0 = icon name + window title, OSC 2 = window title. OSC 1
+        // (icon name only) and every other OSC (8 hyperlink, 10/11 colors,
+        // 52 clipboard) is not a window title, so it is ignored.
+        let Some(&kind) = params.first() else {
+            return;
+        };
+        if kind != b"0" && kind != b"2" {
+            return;
+        }
+        // vte splits the payload on `;`, but a title may legitimately
+        // contain one, so rejoin everything after the numeric kind. vte caps
+        // an OSC at 16 params, so a title with 15+ semicolons loses its tail
+        // — an acceptable loss for a cosmetic string.
+        let raw: Vec<u8> = params[1..].join(&b';');
+        self.modes.title = Some(sanitize_title(&raw));
     }
 }
 
@@ -160,6 +220,18 @@ impl TerminalCapture {
             // (e.g. a drawing app using absolute moves) would start wrapping
             // text after reattach — garbled layout.
             out.extend_from_slice(b"\x1b[?7l");
+        }
+
+        // Re-assert the window title. vt100 does not track it at all, so the
+        // sniffer records OSC 0/2 in `feed` and we replay it here, after the
+        // RIS that clears it on a real terminal. Always emitted as OSC 0
+        // (icon + title), BEL-terminated — the form every terminal clud
+        // targets accepts. The payload was sanitized on the way in, so it
+        // cannot close the sequence early or inject another escape.
+        if let Some(title) = self.sticky.title.as_deref() {
+            out.extend_from_slice(b"\x1b]0;");
+            out.extend_from_slice(title.as_bytes());
+            out.push(0x07);
         }
 
         // `state_formatted` = cells + SGR + cursor position/visibility +
@@ -368,8 +440,11 @@ mod adversarial_tests {
     //! it returns the two screens so individual tests can assert only the
     //! properties they care about (cell content, cursor position, specific
     //! cells) rather than full equivalence. Some terminal state that vt100
-    //! doesn't track (titles, OSC-4 palette) will never survive a round-trip;
-    //! the tests for those cases assert the limit, not the wish.
+    //! doesn't track (the OSC-4 palette, the saved-cursor register) will
+    //! never survive a round-trip; the tests for those cases assert the
+    //! limit, not the wish. The window title used to be in that list —
+    //! `StickyModes::title` sniffs it out of the byte stream instead, so it
+    //! now round-trips (#1205).
     use super::*;
     use vt100::Parser;
 
@@ -607,20 +682,197 @@ mod adversarial_tests {
         );
     }
 
-    // ─── Title (OSC 0/2) — known limitation ────────────────────────────────
+    // ─── Title (OSC 0/2) survives a reattach ───────────────────────────────
 
+    /// The RED test from #1205. `main` records no title and emits none, so
+    /// this fails there; with the sniffer + snapshot re-emission it passes.
     #[test]
-    fn window_title_not_persisted_known_limitation() {
-        // vt100 0.16 does not track the window title. The app's OSC 0 / 2
-        // sequences silently vanish across a reattach. Documented in #36;
-        // fix would be either upgrading to a vt100 fork that tracks title or
-        // adding our own title sniffer on top of the raw byte stream.
-        let script = b"\x1b]0;myapp-v1\x07\x1b[1;1Hbody";
-        let (_src, dst) = adv_replay(24, 80, script);
-        // Body text makes it through:
+    fn window_title_is_re_emitted_in_snapshot() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]0;myapp-v1\x07\x1b[1;1Hbody");
+        assert_eq!(
+            cap.sticky.title.as_deref(),
+            Some("myapp-v1"),
+            "sniffer missed OSC 0 title"
+        );
+        let snap = cap.snapshot_bytes();
+        let needle = b"]0;myapp-v1";
+        assert!(
+            snap.windows(needle.len()).any(|w| w == needle),
+            "snapshot missing the window title. bytes: {:?}",
+            String::from_utf8_lossy(&snap)
+        );
+        // The body text still replays — the title must not disturb cells.
+        let (_src, dst) = adv_replay(24, 80, b"\x1b]0;myapp-v1\x07\x1b[1;1Hbody");
         assert!(dst.screen().contents().contains("body"));
-        // But there's no way to observe title in vt100; the assertion is
-        // simply "this compiles and doesn't corrupt other state".
+    }
+
+    /// OSC 2 (window title only) is normalized to OSC 0 on the way out, and
+    /// the ST terminator (`\x1b\\`) is accepted just like BEL.
+    #[test]
+    fn window_title_osc2_st_terminated_is_recorded() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]2;pane-title\x1b\\\x1b[1;1Hx");
+        assert_eq!(cap.sticky.title.as_deref(), Some("pane-title"));
+        let snap = cap.snapshot_bytes();
+        let needle = b"]0;pane-title";
+        assert!(
+            snap.windows(needle.len()).any(|w| w == needle),
+            "snapshot missing normalized title. bytes: {:?}",
+            String::from_utf8_lossy(&snap)
+        );
+    }
+
+    /// A second OSC title overwrites the first — the snapshot must reflect
+    /// only the latest one.
+    #[test]
+    fn window_title_last_write_wins() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]0;first\x07");
+        cap.feed(b"\x1b]2;second\x07");
+        assert_eq!(cap.sticky.title.as_deref(), Some("second"));
+        let snap = cap.snapshot_bytes();
+        let stale = b"]0;first";
+        assert!(
+            !snap.windows(stale.len()).any(|w| w == stale),
+            "snapshot still carries the stale title"
+        );
+    }
+
+    /// The daemon feeds one `feed()` call per PTY read, so an OSC title
+    /// split mid-sequence across two calls must still be recorded whole.
+    #[test]
+    fn window_title_recorded_across_chunk_boundary() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]0;split");
+        cap.feed(b"-title\x07");
+        assert_eq!(cap.sticky.title.as_deref(), Some("split-title"));
+    }
+
+    /// vte splits the OSC payload on `;`, but a title may legitimately
+    /// contain one; `osc_dispatch` rejoins everything after the numeric
+    /// kind so the semicolon survives.
+    #[test]
+    fn window_title_may_contain_semicolons() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]0;proj: a;b\x07");
+        assert_eq!(cap.sticky.title.as_deref(), Some("proj: a;b"));
+    }
+
+    /// vte's OSC-string state only ends the string on 0x07/0x18/0x1A/0x1B and
+    /// swallows the rest of C0 itself, but DEL and the C1 range are in its
+    /// pass-through range and do reach the handler. They must be stripped
+    /// rather than replayed verbatim into the client's terminal.
+    #[test]
+    fn window_title_control_bytes_are_stripped() {
+        // Direct check of the sanitizer: C0 (0x00, 0x08, ESC) and DEL are
+        // dropped, and the lone 0x9b (a C1 CSI byte, and invalid standalone
+        // UTF-8) is lossily decoded to U+FFFD and dropped with it.
+        let raw = b"ok\x00\x08\x1b\x7f\x9b[31m-name";
+        assert_eq!(sanitize_title(raw), "ok[31m-name");
+
+        // End-to-end through vte: DEL survives vte's OSC state machine, so
+        // this really does depend on `sanitize_title` removing it.
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]0;tit\x7fle\x1b\\");
+        assert_eq!(cap.sticky.title.as_deref(), Some("title"));
+        let snap = cap.snapshot_bytes();
+        let prefix = snap
+            .windows(3)
+            .position(|w| w == b"]0;")
+            .expect("snapshot missing title prefix");
+        let start = prefix + 3;
+        let bel = snap[start..]
+            .iter()
+            .position(|&b| b == 0x07)
+            .expect("snapshot missing BEL terminator");
+        let emitted = &snap[start..start + bel];
+        assert_eq!(emitted, b"title", "title in snapshot was not sanitized");
+        assert!(
+            emitted.iter().all(|&b| (0x20..0x7f).contains(&b)),
+            "title in snapshot still carries a control byte"
+        );
+    }
+
+    /// An untrusted OSC payload is bounded to `MAX_TITLE_BYTES` so it can't
+    /// inflate every snapshot and every reattach payload.
+    #[test]
+    fn window_title_is_capped() {
+        let mut script = b"\x1b]0;".to_vec();
+        script.extend_from_slice(&vec![b't'; 4000]);
+        script.push(0x07);
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(&script);
+        assert_eq!(
+            cap.sticky.title.as_ref().unwrap().len(),
+            MAX_TITLE_BYTES,
+            "title was not capped"
+        );
+        let snapshot = cap.snapshot_bytes();
+        assert!(
+            snapshot.len() < 100_000,
+            "snapshot grew unexpectedly: {} bytes",
+            snapshot.len()
+        );
+    }
+
+    /// An explicit empty OSC title (app clearing its title) must be replayed
+    /// as an explicit clear, not silently dropped in favor of a stale one.
+    #[test]
+    fn window_title_cleared_by_empty_osc() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]0;name\x07\x1b]2;\x07");
+        assert_eq!(cap.sticky.title.as_deref(), Some(""));
+        let snap = cap.snapshot_bytes();
+        let clear = b"\x1b]0;\x07";
+        assert!(
+            snap.windows(clear.len()).any(|w| w == clear),
+            "snapshot missing the explicit title clear. bytes: {:?}",
+            String::from_utf8_lossy(&snap)
+        );
+        let stale = b"]0;name";
+        assert!(
+            !snap.windows(stale.len()).any(|w| w == stale),
+            "snapshot still carries the stale title"
+        );
+    }
+
+    /// A session that never set a title must not get one synthesized. The
+    /// snapshot leaves whatever the attaching client already had alone —
+    /// emitting an empty OSC 0 here would blank the user's own title bar.
+    #[test]
+    fn untitled_session_emits_no_osc_title() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b[1;1Hplain output");
+        assert!(cap.sticky.title.is_none(), "title recorded from nothing");
+        let snap = cap.snapshot_bytes();
+        assert!(
+            !snap.windows(3).any(|w| w == b"]0;"),
+            "snapshot invented a window title. bytes: {:?}",
+            String::from_utf8_lossy(&snap)
+        );
+    }
+
+    /// Only OSC 0 and OSC 2 carry a window title. OSC 1 (icon name), OSC 8
+    /// (hyperlink) and OSC 52 (clipboard) must leave the recorded title
+    /// untouched — replaying a clipboard payload into the title bar would be
+    /// both wrong and a way to smuggle attacker-chosen bytes into it.
+    #[test]
+    fn non_title_osc_sequences_are_ignored() {
+        let mut cap = TerminalCapture::new(24, 80);
+        cap.feed(b"\x1b]0;real\x07");
+        cap.feed(b"\x1b]1;icon-only\x07");
+        cap.feed(b"\x1b]52;c;c2VjcmV0\x07");
+        cap.feed(b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07");
+        assert_eq!(cap.sticky.title.as_deref(), Some("real"));
+        let snap = cap.snapshot_bytes();
+        for stale in [&b"icon-only"[..], &b"c2VjcmV0"[..], &b"example.com"[..]] {
+            assert!(
+                !snap.windows(stale.len()).any(|w| w == stale),
+                "non-title OSC payload leaked into the snapshot: {:?}",
+                String::from_utf8_lossy(stale)
+            );
+        }
     }
 
     // ─── Resize during alt-screen ──────────────────────────────────────────
