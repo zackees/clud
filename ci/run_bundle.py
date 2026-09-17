@@ -221,6 +221,14 @@ def pytest_log_path(suite: str) -> Path:
     return LOG_DIR / f"pytest-{suite}.log"
 
 
+def pytest_junit_path(suite: str) -> Path:
+    """Where pytest writes its own junit XML report.
+
+    Same `logs/` dir `_run-tests.yml` already uploads, so no workflow change.
+    """
+    return LOG_DIR / f"pytest-{suite}.xml"
+
+
 def run_streamed(argv: list[str], env: dict[str, str], log_path: Path) -> int:
     """Run `argv`, echoing each output line as it arrives and teeing it to a file.
 
@@ -250,7 +258,28 @@ def run_streamed(argv: list[str], env: dict[str, str], log_path: Path) -> int:
 
 
 def run_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str) -> int:
-    argv = [sys.executable, "-m", "pytest", "-m", marker, *extra]
+    """Run pytest, teed to a log and also writing its own junit XML report.
+
+    #1178: on the Windows integration lane the teed stdout record stopped at
+    27% and never named the failing test, even though the step reported
+    pytest ran to completion. pytest writing its own junit XML gives a
+    second, structured record of the same run, and `junit_logging=all` puts
+    each test's captured stdout/stderr/log into it. That XML is written only
+    at pytest's `sessionfinish`, so it complements the tee (which survives a
+    cancelled job) rather than replacing it. This is a workaround; the
+    truncation's root cause stays unknown and open on #1178.
+    """
+    argv = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-m",
+        marker,
+        f"--junitxml={pytest_junit_path(suite)}",
+        "-o",
+        "junit_logging=all",
+        *extra,
+    ]
     return run_streamed(argv, env, pytest_log_path(suite))
 
 

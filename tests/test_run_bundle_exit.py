@@ -1,11 +1,14 @@
-"""Unit tests for `ci/run_bundle.py`'s pytest exit-code diagnosis.
+"""Unit tests for what `ci/run_bundle.py` leaves behind when a CI lane fails.
 
 Issue #994: the Windows lane exited 1 with no `FAILED` line and no pytest
 summary -- "the process died rather than a test failing" -- and the log said
 only `Process completed with exit code 1`. A reader cannot tell a crash from a
 hang from an ordinary failure, so every occurrence costs a fresh diagnosis.
 
-An exit code carries more than that if it is read.
+An exit code carries more than that if it is read. Two records back it up, both
+under the `logs/*` that `_run-tests.yml` uploads: the teed stdout log, which
+survives a cancelled job (#1168), and pytest's own junit XML, which names the
+failing test when the tee is truncated (#1178).
 """
 
 from __future__ import annotations
@@ -13,7 +16,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from ci.run_bundle import _pytest_ok, describe_pytest_exit, pytest_log_path, run_streamed
+from ci import run_bundle
+from ci.run_bundle import (
+    _pytest_ok,
+    describe_pytest_exit,
+    pytest_junit_path,
+    pytest_log_path,
+    run_pytest,
+    run_streamed,
+)
 
 
 def test_pytest_own_codes_are_named() -> None:
@@ -114,3 +125,49 @@ def test_pytest_log_path_is_under_the_uploaded_logs_dir() -> None:
     """`_run-tests.yml` uploads `logs/*`; the tee has to land there."""
     assert pytest_log_path("integration").parent.name == "logs"
     assert pytest_log_path("unit").name == "pytest-unit.log"
+
+
+def test_pytest_junit_path_is_under_the_uploaded_logs_dir() -> None:
+    """#1178: `_run-tests.yml` already uploads `logs/*`, so a pytest-written
+    junit report needs no workflow change to reach the artifact."""
+    assert pytest_junit_path("integration").parent.name == "logs"
+    assert pytest_junit_path("unit").name == "pytest-unit.xml"
+
+
+def test_run_pytest_asks_pytest_for_its_own_junit_report(monkeypatch) -> None:
+    """#1178: the Windows integration lane's teed stdout log stops at 27% and
+    never names the failing test; the root cause of that truncation is
+    unknown and stays open. A pytest-written junit XML is a workaround --
+    `junit_logging=all` puts the captured stdout/stderr of the failing test
+    into the XML, so a truncated tee still leaves a machine-readable record
+    naming it.
+
+    The new flags must precede the caller's `extra` args so a caller's
+    `pytest_args` can still override them -- pytest takes the last
+    `--junitxml` / `-o` it sees on the command line."""
+    captured: list[tuple[list[str], dict[str, str], Path]] = []
+
+    def fake(argv: list[str], env: dict[str, str], log_path: Path) -> int:
+        captured.append((list(argv), env, log_path))
+        return 0
+
+    monkeypatch.setattr(run_bundle, "run_streamed", fake)
+
+    env = {"CLUD_INTEGRATION_TESTS": "1"}
+    assert run_pytest("integration", env, ["-v"], suite="integration") == 0
+    argv, passed_env, log_path = captured[0]
+
+    junit_flag = f"--junitxml={pytest_junit_path('integration')}"
+    assert junit_flag in argv
+    assert argv[argv.index("-o") + 1] == "junit_logging=all"
+
+    assert argv.index(junit_flag) < argv.index("-v")
+    assert argv.index("-o") < argv.index("-v")
+
+    # The junit report is *additional* to the tee, not a replacement: the XML
+    # only exists at pytest's sessionfinish, so a cancelled job (#1168) still
+    # depends on the teed log. The marker selection and the child env must be
+    # untouched too.
+    assert argv[:5] == [sys.executable, "-m", "pytest", "-m", "integration"]
+    assert log_path == pytest_log_path("integration")
+    assert passed_env == env
