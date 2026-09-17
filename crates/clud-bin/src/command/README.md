@@ -52,4 +52,4 @@ routing are documented at
 - `loop_check.rs` — reads `plan.loop_markers` to poll DONE/BLOCKED after each iteration.
 - `hook_health/prompts.rs` — builds a plan as part of doctor-style health probes.
 - `daemon/entry.rs`, `daemon/types.rs` — persist and re-execute `LaunchPlan` records via the daemon worker.
-- `loop_artifacts.rs` — references the `chrono_like_now` algorithm pattern from `loop_task.rs`.
+- `loop_artifacts.rs` — shares the ISO-8601 format string with `loop_task::chrono_like_now`; both delegate the calendar arithmetic to `crate::civil_time` (#1206).

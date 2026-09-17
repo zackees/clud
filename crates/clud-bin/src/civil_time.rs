@@ -21,6 +21,37 @@
 /// `(year, month, day, hour, minute, second)`.
 pub type CivilFields = (i32, u32, u32, u32, u32, u32);
 
+/// Split a Unix timestamp (seconds since 1970-01-01T00:00:00Z, possibly
+/// negative) into its UTC civil fields `(year, month, day, hour, minute,
+/// second)`, with `month` in 1..=12 and `day` in 1..=31.
+///
+/// The split is euclidean, so pre-epoch timestamps land on the previous
+/// day instead of truncating toward zero: `-1` is 1969-12-31T23:59:59Z.
+/// `trash` and `tool_query` relied on that, so it is part of the contract.
+pub fn civil_from_unix_secs(unix_secs: i64) -> CivilFields {
+    const SECS_PER_DAY: i64 = 86_400;
+    let days = unix_secs.div_euclid(SECS_PER_DAY);
+    let secs_of_day = unix_secs.rem_euclid(SECS_PER_DAY);
+    let hour = (secs_of_day / 3_600) as u32;
+    let minute = ((secs_of_day % 3_600) / 60) as u32;
+    let second = (secs_of_day % 60) as u32;
+
+    // civil_from_days, Howard Hinnant (public domain). Shifting the epoch
+    // so era 0 starts on 0000-03-01 puts the leap day at the end of the
+    // year, which makes the month/day arithmetic branch-free.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // day of era, 0..=146_096
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // 0..=399
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of shifted year, 0..=365
+    let mp = (5 * doy + 2) / 153; // shifted month, 0..=11
+    let day = doy - (153 * mp + 2) / 5 + 1; // 1..=31
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // 1..=12
+    let year = if month <= 2 { y + 1 } else { y };
+    (year as i32, month as u32, day as u32, hour, minute, second)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

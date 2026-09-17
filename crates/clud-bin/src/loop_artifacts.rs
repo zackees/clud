@@ -391,35 +391,18 @@ fn gitignore_covers_loop_dir(content: &str) -> bool {
 }
 
 /// ISO-8601 UTC timestamp via `SystemTime` — avoids adding a chrono dep.
-/// Identical algorithm to `command::chrono_like_now`, duplicated here so
-/// this module doesn't reach across into private command internals.
+/// The calendar arithmetic lives in `crate::civil_time` (#1206); this
+/// function owns only the format string, which is already baked into
+/// persisted `info.json` and `log.txt` and must stay byte-for-byte the
+/// same.
 fn now_iso8601() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let (y, mo, d, h, mi, se) = unix_to_ymd_hms(secs);
+    let (y, mo, d, h, mi, se) = crate::civil_time::civil_from_unix_secs(secs as i64);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z")
-}
-
-fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
-    let se = (secs % 60) as u32;
-    let mi = ((secs / 60) % 60) as u32;
-    let h = ((secs / 3600) % 24) as u32;
-    let days = secs / 86_400;
-    // Civil-from-days, Howard Hinnant.
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if mo <= 2 { y + 1 } else { y } as u32;
-    (y, mo as u32, d as u32, h, mi, se)
 }
 
 #[cfg(test)]
