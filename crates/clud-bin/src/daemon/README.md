@@ -173,7 +173,7 @@ Dead rows are omitted by default. Passing `--since <duration>` sets `include_dea
 - `fn send_daemon_request(&Path, &DaemonRequest)` — `client.rs:168`. Tries the
   `rp_broker` frame lane (named pipe / Unix socket) **first**, falling back to
   loopback TCP on any miss.
-- `fn run_attach(&str, &Path, &AtomicBool) -> i32` — `attach.rs:76`
+- `fn run_attach(&str, &Path, &AtomicBool) -> i32` — `attach.rs:172`
 - `fn run_kill / run_list / run_logs` — `commands.rs:15`, `commands.rs:90`, `commands.rs:167`
 - `fn resolve_session_id(&Path, &str)` — `sessions.rs:20`
 - `struct WorkerShared` (+ `attach_client`, `push_output`, `broadcast_exit`, `evict_dead_client`, log rotation) — `worker_shared.rs:95`

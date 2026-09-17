@@ -3111,10 +3111,11 @@ Three details are load-bearing:
    `yes`, `on`) launches without it. Deliberately not repo-configurable,
    matching the `CLUD_HOOK_DISPATCH` precedent: a repo should not be able to
    switch off a safety default for whoever runs an agent inside it.
-3. **Both child-env builders carry it.** `runner::child_env` and
-   `daemon::io_helpers::child_env` are deliberate duplicates (#933); a policy
-   in one and not the other means daemon sessions silently miss it. A parity
-   test asserts the two agree rather than trusting that both edits happened.
+3. **Both child-env paths carry it.** They were deliberate duplicates when
+   this was written (#933), and the daemon copy had already drifted; #1209
+   collapsed them onto one policy owner, `runner::apply_child_env_policy`, so
+   a policy now reaches both by construction. The parity test stays: it is
+   what would catch a future re-fork of the two paths.
 
 **Consequences:** This is a real behavior change for every clud-launched
 session, which is why it ships alone with its own revert story. A tool call

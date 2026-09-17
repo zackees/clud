@@ -386,7 +386,15 @@ fn session_started_event_records_the_real_child_pid() {
         start_time_ms: 0,
     };
 
-    let ran = run_with_session(&ctx, tool_id, "tests/pid-fixture", &[], argv, env, telemetry);
+    let ran = run_with_session(
+        &ctx,
+        tool_id,
+        "tests/pid-fixture",
+        &[],
+        argv,
+        env,
+        telemetry,
+    );
     assert_eq!(ran.unwrap(), 0, "fixture child must exit 0");
 
     // The index must carry the child's real PID.

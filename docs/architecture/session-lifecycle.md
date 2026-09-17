@@ -187,14 +187,14 @@ thread on a PTY read error) and `poll_pty_process` for child exit.
 
 ## Capture for attach
 
-`TerminalCapture` (`capture.rs:22`) is the daemon worker's emulator. The
+`TerminalCapture` (`capture.rs:29`) is the daemon worker's emulator. The
 worker feeds every PTY output chunk into `TerminalCapture::feed`
-(`capture.rs:101`), which drives a `vt100::Parser` for the cell grid plus a
+(`capture.rs:161`), which drives a `vt100::Parser` for the cell grid plus a
 parallel `vte::Parser` (`StickySniffer`) that tracks two modes vt100 0.16
 doesn't round-trip — `DECSTBM` scroll region and `DECAWM` autowrap-off.
 
 When a `clud attach` client connects mid-session, the daemon calls
-`TerminalCapture::snapshot_bytes` (`capture.rs:132`) to synthesize a repaint:
+`TerminalCapture::snapshot_bytes` (`capture.rs:192`) to synthesize a repaint:
 
 1. `\x1bc` (RIS) to reset SGR, modes, scroll region, cursor style.
 2. `\x1b[?1049h` if the app is on the alternate screen, so the cells land on
@@ -204,9 +204,10 @@ When a `clud attach` client connects mid-session, the daemon calls
    application cursor, application keypad, mouse protocol mode.
 
 A fresh terminal replaying that byte stream ends up at the same final frame
-the source TUI is currently rendering. Known limitations (window title, saved
-cursor register, DEC graphics charset, cursor shape) are documented inline in
-`capture.rs`; see issue #36.
+the source TUI is currently rendering. The OSC 0/2 window title is sniffed off
+the raw byte stream and re-emitted with the snapshot (#1205). Remaining
+limitations (saved cursor register, DEC graphics charset, cursor shape) are
+documented inline in `capture.rs`.
 
 ## Input injection
 
@@ -321,8 +322,8 @@ The resize-watcher thread observes the closed `resize_tx` and exits.
 | `interrupt_pty_process` | `crates/clud-bin/src/session/interrupt.rs:20` |
 | `reap_pty_exit` | `crates/clud-bin/src/session/interrupt.rs:5` |
 | `RawTerminalGuard` | `crates/clud-bin/src/session.rs:303` |
-| `TerminalCapture` | `crates/clud-bin/src/capture.rs:22` |
-| `TerminalCapture::snapshot_bytes` | `crates/clud-bin/src/capture.rs:132` |
+| `TerminalCapture` | `crates/clud-bin/src/capture.rs:29` |
+| `TerminalCapture::snapshot_bytes` | `crates/clud-bin/src/capture.rs:192` |
 | `ConsoleVtGuard` | `crates/clud-bin/src/console_setup.rs:8` |
 | `enable_console_vt_input` | `crates/clud-bin/src/console_setup.rs:26` |
 | `console_input::spawn_console_input_reader` | `crates/clud-bin/src/console_input.rs` |

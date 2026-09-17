@@ -194,12 +194,12 @@ security boundary.
 
 ## Attach flow
 
-`clud attach <key>` walks through `run_attach` (`attach.rs:26`):
+`clud attach <key>` walks through `run_attach` (`attach.rs:172`):
 
 1. `ensure_daemon` — fast-paths if `daemon.json`'s listener answers a probe.
 2. `resolve_session_id` (`sessions.rs:11`) tries exact id, then unique `name` match, then unique prefix match. Ambiguous matches list the candidates so the user can disambiguate.
 3. `DaemonRequest::Session` fetches the current `SessionSnapshot` to read `worker_port`. Reject if `!session.attachable` (repeat jobs cannot be attached).
-4. `attach_to_session` (`attach.rs:70`) opens a `TcpStream` to `worker_port`, writes `WorkerClientMessage::Attach`, reads the first reply. Three cases:
+4. `attach_to_session` (`attach.rs:228`) opens a `TcpStream` to `worker_port`, writes `WorkerClientMessage::Attach`, reads the first reply. Three cases:
    - `Attached { session }` → enter the bidirectional bridge.
    - `Error "session already has an attached client"` → retry for up to 5s (`attach.rs:136`-`142`). Covers the brief window when an old client is still being evicted by the worker's heartbeat.
    - Any other reply (`Error`, premature `Output`, `Exited`) → print and return.
@@ -208,12 +208,12 @@ security boundary.
    - **Subprocess sessions**: the raw backlog — a deque of byte chunks capped at `DEFAULT_BACKLOG_LIMIT_BYTES` (256 KiB, overridable via `--backlog-size` or `CLUD_BACKLOG_BYTES`). Line-oriented output replays cleanly because each line is self-contained.
    - If `snapshot.exit_code` is already set the worker writes a final `Exited` and closes immediately.
 6. The worker spawns a writer thread that drains its per-client mpsc receiver into the TCP stream, and the main connection thread enters a `read_worker_line` loop dispatching `Input` / `Resize` / `Interrupt` to the `SessionRuntime`.
-7. On the client, a reader thread parses `Output` / `Exited` / `Error` and writes to stdout. In parallel, `run_remote_interactive` (`attach.rs:249`) puts the terminal in raw mode (`RawTerminalGuard`, `types.rs:212`), polls `crossterm` events, and runs each `KeyEvent` through `translate_key_event` (`keys.rs:5`):
+7. On the client, a reader thread parses `Output` / `Exited` / `Error` and writes to stdout. In parallel, `run_remote_interactive` (`attach.rs:491`) puts the terminal in raw mode (`RawTerminalGuard`, `types.rs:759`), polls `crossterm` events, and runs each `KeyEvent` through `translate_key_event` (`keys.rs:5`):
    - `KeyAction::Forward(bytes)` → `WorkerClientMessage::Input { submit: bytes == b"\r" }`.
    - `Event::Paste(text)` → `Input { submit: false }`.
    - `Event::Resize(cols, rows)` → `WorkerClientMessage::Resize`.
    - `KeyAction::Interrupt` (Ctrl+C) → break the loop with `LocalAttachResult::InterruptRequested`.
-8. On `InterruptRequested`: if `session.detachable`, show the 5s `BACKGROUND_PROMPT_TIMEOUT` prompt (`attach.rs:342`). Y/Enter/timeout → `shutdown_worker_connection` and return 0 (session continues in background). N/Esc → `request_session_termination` and return 130. If not detachable, send `WorkerClientMessage::Interrupt` to the worker and wait up to 5s for `Exited`.
+8. On `InterruptRequested`: the stamped interrupt reason decides first (`background_decision_for_reason`, #1208) — a window close, logoff, shutdown, `SIGHUP` or `SIGTERM` backgrounds a detachable session immediately rather than spending the shutdown budget on a prompt. Otherwise, if `session.detachable`, show the 5s `BACKGROUND_PROMPT_TIMEOUT` prompt (`prompt_continue_in_background`, `attach.rs:658`). Y/Enter/timeout → `shutdown_worker_connection` and return 0 (session continues in background). N/Esc → `request_session_termination` and return 130. If not detachable, send `WorkerClientMessage::Interrupt` to the worker and wait up to 5s for `Exited`.
 
 ## Snapshot and log persistence
 
@@ -252,9 +252,9 @@ Every `push_output` chunk goes to three sinks (`worker_shared.rs:299`-`331`): th
 - `SessionKind` (`Subprocess` / `Pty`) — `types.rs:36`
 - `WorkerShared` — per-worker shared state, owns the single-client gate — `worker_shared.rs:22`
 - `AttachedClient` — single-client slot (id, mpsc sender, shutdown handle, attach instant) — `types.rs:234`
-- `BacklogState` — bounded chunk deque + total byte count — `types.rs:242`
-- `RawTerminalGuard` — RAII raw-mode guard — `types.rs:212`
-- `LocalAttachResult` / `BackgroundPromptDecision` — attach-flow control enums — `types.rs:201`, `types.rs:207`
+- `BacklogState` — bounded chunk deque + total byte count — `types.rs:799`
+- `RawTerminalGuard` — RAII raw-mode guard — `types.rs:759`
+- `LocalAttachResult` / `BackgroundPromptDecision` — attach-flow control enums — `types.rs:729`, `types.rs:754`
 - `ENV_FEATURE_FLAG = "CLUD_EXPERIMENTAL_DAEMON"` — `types.rs:17`
 - `ENV_STATE_DIR = "CLUD_DAEMON_STATE_DIR"` — `types.rs:18`
 - `ENV_BACKLOG_BYTES = "CLUD_BACKLOG_BYTES"` — `types.rs:19`

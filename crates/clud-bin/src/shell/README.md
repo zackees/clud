@@ -45,9 +45,10 @@ The two enforcement layers live elsewhere:
   pub fn env_overrides() -> Vec<(String, String)>          // policy
   pub fn env_overrides_for(is_windows: bool, opted_out: bool) -> Vec<(String, String)>  // test seam
   ```
-  Applied by **both** `runner::child_env` and `daemon::io_helpers::child_env` —
-  those builders are duplicates and the daemon one has drifted before, so a
-  policy added to one belongs in both. Opt out with
+  Applied once by `runner::apply_child_env_policy`, the single policy owner
+  both paths funnel through: `runner::child_env` passes the process env,
+  `daemon::io_helpers::child_env_from` passes the daemon env with the session
+  initiator's layered on top (#1209). Add a policy there and both get it. Opt out with
   `CLUD_GIT_BASH_COMPLETIONS=1`. Guardrail:
   `tests/cli/shell_completion_guard.rs` asserts a real login shell's **function
   count**, not the env var, because the lever is a Git-for-Windows
