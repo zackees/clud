@@ -505,6 +505,70 @@ fn output_writer_flushes_remaining_chunks_before_exiting() {
 // so the `ctrlc` SIGINT handler could not cover for it. The primary fix is
 // not pushing that flag; the CSI u decoder below is the backstop.
 
+// ─── Keyboard enhancement stack cleanup (issue #1221) ──────────────────
+
+#[test]
+fn interrupted_child_before_keyboard_pop_unwinds_child_then_clud_frame() {
+    // Model the lifecycle that regressed after Codex moved behind a PTY:
+    // caller has one pre-existing frame; clud pushes one; the child pushes
+    // one, then Ctrl+C force-terminates it before its matching pop. The
+    // tracker sees only child output, so cleanup emits exactly the child's
+    // pop; RawTerminalGuard::drop emits the final clud pop. The caller frame
+    // is intentionally not represented in or removed by this tracker.
+    let tracker = KeyboardEnhancementTracker::default();
+    tracker.observe(b"Codex startup\x1b[");
+    tracker.observe(b">2u");
+
+    let child_cleanup = keyboard_enhancement_pop_bytes(tracker.take_unbalanced_pushes());
+    let clud_cleanup = keyboard_enhancement_pop_bytes(1);
+    assert_eq!(child_cleanup, b"\x1b[<1u");
+    assert_eq!(
+        [child_cleanup, clud_cleanup].concat(),
+        b"\x1b[<1u\x1b[<1u",
+        "the two session-owned frames must pop in LIFO order, leaving the caller frame"
+    );
+}
+
+#[test]
+fn keyboard_stack_lifecycle_preserves_caller_frame_after_forced_child_exit() {
+    // The pre-#1221 cleanup had just one pop: it removed the dead child's
+    // top frame and left clud's REPORT_EVENT_TYPES frame active at the shell.
+    let mut pre_fix_stack = vec!["caller", "clud", "child"];
+    pre_fix_stack.pop();
+    assert_eq!(
+        pre_fix_stack,
+        ["caller", "clud"],
+        "the RED lifecycle leaves clud's frame active without child cleanup"
+    );
+
+    // Green lifecycle: the tracker emits one pop for the unbalanced child
+    // push, then RawTerminalGuard drops clud's own frame. The caller's
+    // pre-existing keyboard protocol state remains untouched.
+    let tracker = KeyboardEnhancementTracker::default();
+    tracker.observe(b"\x1b[>7u");
+    let mut fixed_stack = vec!["caller", "clud", "child"];
+    for _ in 0..(tracker.take_unbalanced_pushes() + 1) {
+        fixed_stack.pop();
+    }
+    assert_eq!(fixed_stack, ["caller"]);
+}
+
+#[test]
+fn keyboard_enhancement_tracker_handles_fragmentation_balanced_pops_and_key_events() {
+    let tracker = KeyboardEnhancementTracker::default();
+    tracker.observe(b"\x1b[>1");
+    tracker.observe(b"u\x1b[>2u\x1b[<1u");
+    // CSI-u Ctrl+C is a key event, not a stack operation.
+    tracker.observe(b"\x1b[99;5:3u");
+
+    assert_eq!(
+        tracker.take_unbalanced_pushes(),
+        1,
+        "one child frame remains after it popped only one of two pushes"
+    );
+    assert_eq!(tracker.take_unbalanced_pushes(), 0, "cleanup is idempotent");
+}
+
 #[test]
 fn pushed_flags_exclude_disambiguate_escape_codes() {
     // The whole of issue #1101 is downstream of this one bit. A future
