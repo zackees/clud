@@ -21,7 +21,7 @@ Choose one:\n\
   ChatGPT subscription: clud auth login codex --acknowledge-experimental\n\
   OpenAI API (metered): set OPENAI_API_KEY\n\
 \n\
-A native Codex CLI login is separate and is not imported from ~/.codex/auth.json.\n\
+A native Codex CLI login can be imported after confirmation in an interactive bridge launch.\n\
 To use that login now: clud --codex --harness default",
             ),
             Self::ExpiredOrRevoked => formatter.write_str(
@@ -127,6 +127,7 @@ pub(super) fn resolve_api_key_target(
 #[derive(Clone)]
 pub struct CodexCliCredentials {
     target: UpstreamTarget,
+    record: SubscriptionCredentials,
 }
 
 /// ChatGPT subscription credentials created exclusively by `clud codex-auth`.
@@ -242,6 +243,13 @@ impl CodexCliCredentials {
             .ok_or(UpstreamError::Credentials(
                 "Codex auth.json has no access token",
             ))?;
+        let refresh_token = document
+            .pointer("/tokens/refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.trim().is_empty())
+            .ok_or(UpstreamError::Credentials(
+                "Codex auth.json has no refresh token",
+            ))?;
         // Full refresh is #629's scope. This is only the guardrail: a login
         // that has already expired must fail with an instruction the user can
         // act on, rather than an opaque upstream error a retry cannot fix.
@@ -253,10 +261,42 @@ impl CodexCliCredentials {
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.trim().is_empty())
             .map(str::to_string);
+        let access_claims = token_claims(access_token);
+        // Codex stores the account identity in `id_token`; access tokens also
+        // commonly carry it, so retain that older shape as a fallback.
+        let id_claims = document
+            .pointer("/tokens/id_token")
+            .and_then(serde_json::Value::as_str)
+            .and_then(token_claims);
+        let email = id_claims
+            .as_ref()
+            .or(access_claims.as_ref())
+            .and_then(|claims| claims.get("email"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|email| !email.trim().is_empty())
+            .map(str::to_string);
+        let expires_at_unix = access_claims
+            .as_ref()
+            .and_then(|claims| claims.get("exp"))
+            .and_then(serde_json::Value::as_u64);
+        let record = SubscriptionCredentials {
+            access_token: access_token.to_string(),
+            refresh_token: refresh_token.to_string(),
+            account_id: account_id.clone(),
+            email,
+            expires_at_unix,
+        };
         Ok(Self {
             target: UpstreamTarget::new(CODEX_BACKEND_BASE_URL, format!("Bearer {access_token}"))
                 .with_account_id(account_id),
+            record,
         })
+    }
+
+    /// Copyable representation for clud's own credential store. The caller
+    /// must obtain an explicit user choice before persisting this record.
+    pub fn subscription_record(&self) -> SubscriptionCredentials {
+        self.record.clone()
     }
 }
 
@@ -278,10 +318,15 @@ fn token_is_expired(token: &str, now: SystemTime) -> bool {
 
 /// The `exp` claim of a JWT, if the bearer is one.
 fn token_expiry(token: &str) -> Option<u64> {
+    token_claims(token)?
+        .get("exp")
+        .and_then(serde_json::Value::as_u64)
+}
+
+fn token_claims(token: &str) -> Option<serde_json::Value> {
     let payload = token.split('.').nth(1)?;
     let decoded = base64url_decode(payload)?;
-    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    claims.get("exp").and_then(serde_json::Value::as_u64)
+    serde_json::from_slice(&decoded).ok()
 }
 
 /// Minimal unpadded base64url decoder. A dependency for one claim read would be
@@ -420,7 +465,7 @@ mod preflight_tests {
         assert!(missing.contains("clud auth login codex --acknowledge-experimental"));
         assert!(missing.contains("set OPENAI_API_KEY"));
         assert!(missing.contains("clud --codex --harness default"));
-        assert!(missing.contains("separate and is not imported from ~/.codex/auth.json"));
+        assert!(missing.contains("can be imported after confirmation"));
         assert!(!missing.contains("Bearer "));
 
         let expired = CodexBridgeCredentialError::ExpiredOrRevoked.to_string();
@@ -500,6 +545,29 @@ mod preflight_tests {
                 Err(expected)
             );
         }
+    }
+
+    #[test]
+    fn codex_cli_record_has_every_field_needed_for_a_clud_owned_copy() {
+        let credentials = CodexCliCredentials::from_auth_json(
+            br#"{"tokens":{"access_token":"e30.eyJlbWFpbCI6InBlcnNvbkBleGFtcGxlLnRlc3QiLCJleHAiOjQxMDI0NDQ4MDB9.sig","refresh_token":"refresh-token","account_id":"acct-1"}}"#,
+        )
+        .unwrap()
+        .subscription_record();
+        assert_eq!(credentials.refresh_token, "refresh-token");
+        assert_eq!(credentials.account_id.as_deref(), Some("acct-1"));
+        assert_eq!(credentials.email.as_deref(), Some("person@example.test"));
+        assert_eq!(credentials.expires_at_unix, Some(4_102_444_800));
+    }
+
+    #[test]
+    fn codex_cli_record_reads_email_from_the_canonical_id_token() {
+        let credentials = CodexCliCredentials::from_auth_json(
+            br#"{"tokens":{"access_token":"opaque-access","refresh_token":"refresh-token","id_token":"e30.eyJlbWFpbCI6ImlkQGV4YW1wbGUudGVzdCJ9.sig"}}"#,
+        )
+        .unwrap()
+        .subscription_record();
+        assert_eq!(credentials.email.as_deref(), Some("id@example.test"));
     }
 }
 

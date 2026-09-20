@@ -9,6 +9,18 @@ rollback boundary.
 
 ## Admission and retries
 
+When the direct bridge has no clud-owned subscription record or API key, an
+interactive foreground `clud --codex --harness claude` launch may offer to copy
+a usable Codex CLI login from `~/.codex/auth.json`. The user must choose the
+import; `Not now` preserves the ordinary missing-credential error and `No,
+don't ask again` persists `codex.import_cli_login: "never"` in clud settings.
+`"always"` is an explicit opt-in that skips the prompt. Detached, prompted,
+daemon-managed, and other non-interactive launches never prompt. The copied
+record lives only at `~/.clud/codex-auth.json`, so logout never edits Codex
+CLI state. Since token refresh can rotate the clud copy without updating the
+Codex CLI file, users should retain their Codex login or re-authenticate it if
+the CLI later asks.
+
 The bridge admits two request workers at a time (`DEFAULT_MAX_CONCURRENCY`),
 the smallest bound under which two connections can be in flight at once: one
 slot for the foreground turn and one for anything else, such as a background

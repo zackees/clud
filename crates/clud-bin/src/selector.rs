@@ -993,6 +993,10 @@ mod tests {
         for (name, source) in [
             ("harness_picker.rs", include_str!("harness_picker.rs")),
             ("launch_setup.rs", include_str!("launch_setup.rs")),
+            (
+                "foreground_runtime.rs",
+                include_str!("foreground_runtime.rs"),
+            ),
             ("settings_tui.rs", include_str!("settings_tui.rs")),
         ] {
             // Only production code: tests legitimately assert on the escape

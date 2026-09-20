@@ -33,6 +33,32 @@ pub struct GlobalLaunchPreferences {
     pub harness: Option<HarnessSelection>,
 }
 
+/// How the Claude-harness bridge handles a discovered Codex CLI login.
+/// Absent is intentionally distinct from `Never`: it means ask on an
+/// interactive bridge launch, preserving the explicit-choice boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexCliLoginImport {
+    Never,
+    Always,
+}
+
+impl CodexCliLoginImport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Always => "always",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "never" => Some(Self::Never),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GlobalSettingsPatch {
     pub model_provider: Option<ModelProvider>,
@@ -329,6 +355,29 @@ pub fn save_last_launcher_harness_at(home: &Path, backend: Backend) -> Result<()
                 }
                 .to_string(),
             ),
+        );
+    })
+}
+
+pub fn load_codex_cli_login_import_at(
+    home: &Path,
+) -> Result<Option<CodexCliLoginImport>, SettingsError> {
+    let document = read_settings_or_legacy(home)?;
+    Ok(document
+        .get("codex")
+        .and_then(|value| value.get("import_cli_login"))
+        .and_then(Value::as_str)
+        .and_then(CodexCliLoginImport::from_str))
+}
+
+pub fn save_codex_cli_login_import_at(
+    home: &Path,
+    preference: CodexCliLoginImport,
+) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        object_entry(document, "codex").insert(
+            "import_cli_login".to_string(),
+            Value::String(preference.as_str().to_string()),
         );
     })
 }

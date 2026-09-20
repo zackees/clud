@@ -1125,6 +1125,18 @@ defect no mock could: Claude Code sends `POST /v1/messages?beta=true`, and the
 bridge matched the raw request target, so every real request 404'd. The mock
 probe sends a bare path and had never exercised it.
 
+**Amendment (#1220):** A usable Codex CLI login may be copied into clud's
+separate credential store only after an interactive foreground bridge prompt.
+The prompt is the explicit choice required by this decision; non-interactive,
+daemon, expired, corrupt, and unreadable clud-record paths retain their prior
+failure rather than switching credential sources. `never` records a refusal
+and `always` records an opt-in under `codex.import_cli_login`; neither changes
+the Codex CLI's files, and `clud auth logout codex` still removes only clud's
+copy. The import prompt warns that the two stores are independent: a future
+refresh may rotate the copied refresh token, so the Codex CLI can require its
+own re-login. clud deliberately does not write another application's auth
+file.
+
 ## DD-031: Git-Bash completions are suppressed in the backend's login shell
 
 **Context:** zackees/clud#753. On Windows every Claude Code `Bash` tool call was

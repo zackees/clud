@@ -753,9 +753,16 @@ fn run(mut args: args::Args) {
     // or immediately-dead session when their bridge credential is absent.
     // `--dry-run` intentionally stays credential-free and side-effect-free.
     if !args.dry_run {
-        if let Err(error) =
-            clud::foreground_runtime::ForegroundRuntime::preflight(&bridge_preflight_plan)
-        {
+        let bridge_interactive = provider_auth::launch_is_interactive(
+            &args,
+            launch_target.effective_harness,
+            io::stdin().is_terminal(),
+            io::stderr().is_terminal(),
+        );
+        if let Err(error) = clud::foreground_runtime::admit_codex_bridge_with_cli_import(
+            &bridge_preflight_plan,
+            bridge_interactive,
+        ) {
             launch_log::record_failure_reason(format_args!(
                 "failed to start provider bridge: {error}"
             ));

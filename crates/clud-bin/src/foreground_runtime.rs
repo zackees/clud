@@ -1,11 +1,13 @@
 //! Foreground child runtime for provider/harness cross-routes (issue #626).
 
 use crate::backend::{Backend, ModelProvider, RoutingMode};
+use crate::clud_settings::CodexCliLoginImport;
 use crate::codex_bridge::{
     BridgeConfig, BridgeError, BridgeHandle, UnifiedGatewayConfig, UNIFIED_GATEWAY_TOKEN_HEADER,
 };
 use crate::codex_model::ModelSpec;
 use crate::command::LaunchPlan;
+use crate::selector::{self, Key, Note, Row, Selector, Step, View};
 use crate::subprocess::ManagedSubprocess;
 use running_process::pty::NativePtyProcess;
 use std::fmt;
@@ -15,6 +17,86 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_API_TIMEOUT_MS: &str = "3000000";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexCliImportChoice {
+    Import,
+    NotNow,
+    Never,
+}
+
+#[derive(Debug)]
+struct CodexCliImportSelector {
+    email: String,
+    selected: usize,
+}
+
+impl CodexCliImportSelector {
+    fn new(email: Option<String>) -> Self {
+        Self {
+            email: email.unwrap_or_else(|| "your Codex CLI account".to_string()),
+            selected: 0,
+        }
+    }
+
+    fn choice(&self) -> CodexCliImportChoice {
+        [
+            CodexCliImportChoice::Import,
+            CodexCliImportChoice::NotNow,
+            CodexCliImportChoice::Never,
+        ][self.selected]
+    }
+}
+
+impl Selector for CodexCliImportSelector {
+    type Outcome = CodexCliImportChoice;
+
+    fn view(&self, _elapsed: std::time::Duration) -> View {
+        let labels = [
+            ("Yes, import it", "copies into clud's own store"),
+            ("Not now", "this launch only"),
+            ("No, don't ask again", "persisted"),
+        ];
+        View {
+            title: format!(
+                "Codex CLI login found for {}. Use it for the Claude harness bridge?",
+                self.email
+            ),
+            hints: vec!["Up/Down move, Enter select, Esc not now".to_string()],
+            gap: false,
+            rows: labels
+                .into_iter()
+                .enumerate()
+                .map(|(index, (label, note))| Row {
+                    current: self.selected == index,
+                    marker: String::new(),
+                    label: label.to_string(),
+                    note: Note::Inline(note.to_string()),
+                })
+                .collect(),
+            footer: vec![
+                "Refreshes stay in clud's copy; the Codex CLI may later need a re-login."
+                    .to_string(),
+            ],
+        }
+    }
+
+    fn on_key(&mut self, key: Key) -> Step<Self::Outcome> {
+        match key {
+            Key::Up => {
+                self.selected = self.selected.checked_sub(1).unwrap_or(2);
+                Step::Redraw
+            }
+            Key::Down => {
+                self.selected = (self.selected + 1) % 3;
+                Step::Redraw
+            }
+            Key::Enter => Step::Done(self.choice()),
+            Key::Escape => Step::Done(CodexCliImportChoice::NotNow),
+            Key::Space | Key::Char(_) => Step::Stay,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
@@ -400,6 +482,79 @@ impl ForegroundRuntime {
     ) -> Result<NativePtyProcess, running_process::pty::PtyError> {
         let adapter = NativePtyAdapter { rows, cols };
         self.spawn_with(&adapter, SpawnMode::Pty, command, cwd)
+    }
+}
+
+/// Interactive-only admission for the direct Codex-via-Claude bridge. Daemon
+/// admission and worker startup deliberately keep using [`ForegroundRuntime::preflight`]:
+/// an answer to this selector is an explicit foreground user choice, never a
+/// daemon-side credential fallback.
+pub fn admit_codex_bridge_with_cli_import(
+    plan: &LaunchPlan,
+    interactive: bool,
+) -> Result<(), BridgeError> {
+    if !is_codex_via_claude(plan) || is_unified(plan) {
+        return Ok(());
+    }
+    let preflight = crate::codex_upstream::ResolvedCredentials::preflight_default();
+    match preflight {
+        Ok(()) => Ok(()),
+        Err(error) if should_offer_codex_cli_login_import(error, interactive) => {
+            import_codex_cli_login()?;
+            ForegroundRuntime::preflight(plan)
+        }
+        Err(error) => Err(BridgeError::CodexBridgeCredentials(error)),
+    }
+}
+
+fn should_offer_codex_cli_login_import(
+    error: crate::codex_upstream::CodexBridgeCredentialError,
+    interactive: bool,
+) -> bool {
+    interactive && error == crate::codex_upstream::CodexBridgeCredentialError::Missing
+}
+
+fn missing_codex_bridge_credentials() -> BridgeError {
+    BridgeError::CodexBridgeCredentials(crate::codex_upstream::CodexBridgeCredentialError::Missing)
+}
+
+fn import_codex_cli_login() -> Result<(), BridgeError> {
+    let home =
+        crate::clud_settings::home_dir_path().map_err(|_| missing_codex_bridge_credentials())?;
+    let preference = crate::clud_settings::load_codex_cli_login_import_at(&home)
+        .map_err(|_| missing_codex_bridge_credentials())?;
+    if preference == Some(CodexCliLoginImport::Never) {
+        return Err(missing_codex_bridge_credentials());
+    }
+    let credentials = crate::codex_upstream::CodexCliCredentials::from_codex_home()
+        .map_err(|_| missing_codex_bridge_credentials())?
+        .subscription_record();
+    let choice = match preference {
+        Some(CodexCliLoginImport::Always) => CodexCliImportChoice::Import,
+        Some(CodexCliLoginImport::Never) => unreachable!("handled above"),
+        None => {
+            let mut selector = CodexCliImportSelector::new(credentials.email.clone());
+            selector::run(&mut std::io::stderr(), &mut selector)
+                .unwrap_or(CodexCliImportChoice::NotNow)
+        }
+    };
+    apply_codex_cli_import_choice_at(&home, &credentials, choice)
+}
+
+fn apply_codex_cli_import_choice_at(
+    home: &Path,
+    credentials: &crate::codex_auth::SubscriptionCredentials,
+    choice: CodexCliImportChoice,
+) -> Result<(), BridgeError> {
+    match choice {
+        CodexCliImportChoice::Import => crate::codex_auth::save_at(home, credentials)
+            .map_err(|_| missing_codex_bridge_credentials()),
+        CodexCliImportChoice::NotNow => Err(missing_codex_bridge_credentials()),
+        CodexCliImportChoice::Never => {
+            crate::clud_settings::save_codex_cli_login_import_at(home, CodexCliLoginImport::Never)
+                .map_err(|_| missing_codex_bridge_credentials())?;
+            Err(missing_codex_bridge_credentials())
+        }
     }
 }
 
@@ -3205,5 +3360,72 @@ mod tests {
             .inject_statusline(&plan, &statusline_injection(dir.path()), Some(dir.path()))
             .unwrap();
         assert!(runtime.claude_settings.is_none());
+    }
+
+    fn cli_subscription_record() -> crate::codex_auth::SubscriptionCredentials {
+        crate::codex_upstream::CodexCliCredentials::from_auth_json(
+            br#"{"tokens":{"access_token":"e30.eyJlbWFpbCI6InBlcnNvbkBleGFtcGxlLnRlc3QiLCJleHAiOjQxMDI0NDQ4MDB9.sig","refresh_token":"cli-refresh","account_id":"acct-cli"}}"#,
+        )
+        .unwrap()
+        .subscription_record()
+    }
+
+    #[test]
+    fn cli_login_import_acceptance_copies_only_into_clud_store() {
+        let home = tempfile::tempdir().unwrap();
+        let original = br#"{"tokens":{"access_token":"opaque","refresh_token":"cli-refresh"}}"#;
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::write(home.path().join(".codex/auth.json"), original).unwrap();
+
+        let record = cli_subscription_record();
+        let selector = CodexCliImportSelector::new(record.email.clone());
+        assert!(selector
+            .view(std::time::Duration::ZERO)
+            .title
+            .contains("person@example.test"));
+        apply_codex_cli_import_choice_at(home.path(), &record, CodexCliImportChoice::Import)
+            .unwrap();
+
+        assert_eq!(
+            crate::codex_auth::load_at(home.path()).unwrap(),
+            Some(record)
+        );
+        assert_eq!(
+            std::fs::read(home.path().join(".codex/auth.json")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn noninteractive_and_nonmissing_bridge_failures_never_offer_cli_import() {
+        use crate::codex_upstream::CodexBridgeCredentialError as Error;
+        assert!(!should_offer_codex_cli_login_import(Error::Missing, false));
+        for error in [Error::ExpiredOrRevoked, Error::Corrupt, Error::Unreadable] {
+            assert!(!should_offer_codex_cli_login_import(error, true));
+        }
+    }
+
+    #[test]
+    fn never_choice_persists_and_not_now_leaves_no_clud_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let record = cli_subscription_record();
+        assert!(apply_codex_cli_import_choice_at(
+            home.path(),
+            &record,
+            CodexCliImportChoice::NotNow
+        )
+        .is_err());
+        assert_eq!(crate::codex_auth::load_at(home.path()).unwrap(), None);
+
+        assert!(apply_codex_cli_import_choice_at(
+            home.path(),
+            &record,
+            CodexCliImportChoice::Never
+        )
+        .is_err());
+        assert_eq!(
+            crate::clud_settings::load_codex_cli_login_import_at(home.path()).unwrap(),
+            Some(CodexCliLoginImport::Never)
+        );
     }
 }

@@ -159,7 +159,10 @@ Entry and orchestration:
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
   bridge or unified gateway, preflights direct Codex bridge credentials before
-  creating a listener or child (including daemon admission), applies child-local
+  creating a listener or child (including daemon admission), and on an
+  interactive missing-credential bridge launch can explicitly offer to copy a
+  usable Codex CLI login into clud's own credential store (daemon and
+  non-interactive admission never prompt). It applies child-local
   overlays, emits sanitized optional-provider notices and the image-capability
   notice for a model whose endpoint drops pasted images upstream (#1200),
   registers launch-scoped authenticated `PreCompact` and
