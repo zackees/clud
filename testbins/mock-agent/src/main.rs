@@ -47,6 +47,7 @@ fn main() {
     let mut tool_shell_probe_to: Option<PathBuf> = None;
     let mut bash_nounset_probe_to: Option<PathBuf> = None;
     let mut codex_bridge_probe_to: Option<PathBuf> = None;
+    let mut codex_cache_identity_probe_to: Option<PathBuf> = None;
     // Emit canned `--output-format stream-json` lines from a file (one line
     // each, separated by `--mock-stream-delay-ms`). Used by integration tests
     // that exercise clud's stream-json renderer without needing a real
@@ -189,6 +190,13 @@ fn main() {
         if arg == "--mock-codex-bridge-probe" {
             if let Some(path) = args.get(i + 1) {
                 codex_bridge_probe_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-codex-cache-identity-probe" {
+            if let Some(path) = args.get(i + 1) {
+                codex_cache_identity_probe_to = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -345,6 +353,9 @@ fn main() {
         std::env::var("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY").ok();
     let max_context_tokens = std::env::var("CLAUDE_CODE_MAX_CONTEXT_TOKENS").ok();
     let bridge_probe = codex_bridge_probe_to.as_deref().map(run_codex_bridge_probe);
+    let cache_identity_probe = codex_cache_identity_probe_to
+        .as_deref()
+        .map(run_codex_cache_identity_probe);
     let cwd = std::env::current_dir()
         .ok()
         .map(|path| path.to_string_lossy().to_string());
@@ -374,6 +385,7 @@ fn main() {
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS": max_context_tokens,
         },
         "codex_bridge_probe": bridge_probe,
+        "codex_cache_identity_probe": cache_identity_probe,
     });
 
     let report_str = serde_json::to_string(&report).unwrap();
@@ -451,6 +463,99 @@ fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {
         // #627 step 5: the bridge now translates a real upstream reply, so the
         // probe looks for the text the fake Responses server produced.
         report["bridged_reply_received"] = response.contains("bridged reply").into();
+        Ok(())
+    })();
+    if let Err(error) = result {
+        report["error"] = error.into();
+    }
+    if let Some(parent) = report_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(report_path, serde_json::to_vec(&report).unwrap_or_default());
+    report
+}
+
+/// Production-shaped multi-turn bridge probe for cache-identity coverage.
+///
+/// The report intentionally contains only request status and reply counts. The
+/// integration fake is the wire ledger for headers, bodies, and cache keys;
+/// neither the gateway token nor the fixed Claude session/agent literals may
+/// escape this process.
+fn run_codex_cache_identity_probe(report_path: &Path) -> serde_json::Value {
+    let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    let token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
+    let mut report = serde_json::json!({
+        "attempted": false,
+        "loopback": false,
+        "statuses": [],
+        "bridged_reply_count": 0,
+        "error": null,
+    });
+
+    let result = (|| -> Result<(), String> {
+        let base_url = base_url.as_deref().ok_or("missing bridge URL")?;
+        let token = token.as_deref().ok_or("missing bridge token")?;
+        let address: SocketAddr = base_url
+            .strip_prefix("http://")
+            .ok_or("bridge URL is not HTTP")?
+            .parse()
+            .map_err(|_| "bridge URL is not a socket address")?;
+        report["attempted"] = true.into();
+        report["loopback"] = address.ip().is_loopback().into();
+        let turns = [
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("cache-agent-a"),
+            Some("cache-agent-a"),
+            Some("cache-agent-b"),
+        ];
+        // A large shared prefix makes cache loss observable as a budget
+        // regression, not merely a change in an otherwise opaque key.
+        let fixed_prefix = "cache-prefix ".repeat(1_260);
+        let mut statuses = Vec::new();
+        let mut replies = 0_u64;
+
+        for (index, agent) in turns.into_iter().enumerate() {
+            let body = serde_json::json!({
+                "model": "claude-x",
+                "messages": [{"role": "user", "content": format!("{fixed_prefix}cache-probe-turn-{index}")}],
+                "stream": false,
+            })
+            .to_string();
+            let agent_headers = agent.map_or_else(String::new, |agent| {
+                format!(
+                    "x-claude-code-agent-id: {agent}\r\nx-claude-code-parent-agent-id: cache-main\r\n"
+                )
+            });
+            let request = format!(
+                "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Claude-Code-Session-Id: cache-session\r\n{agent_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+                .map_err(|error| format!("connect failed: {error}"))?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .map_err(|error| format!("read timeout failed: {error}"))?;
+            stream
+                .write_all(request.as_bytes())
+                .map_err(|error| format!("write failed: {error}"))?;
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .map_err(|error| format!("read failed: {error}"))?;
+            let status = response
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<u16>().ok())
+                .ok_or("missing HTTP status")?;
+            statuses.push(status);
+            replies += u64::from(response.contains("bridged reply"));
+        }
+        report["statuses"] = serde_json::json!(statuses);
+        report["bridged_reply_count"] = replies.into();
         Ok(())
     })();
     if let Err(error) = result {

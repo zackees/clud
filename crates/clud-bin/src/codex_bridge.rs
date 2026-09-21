@@ -424,6 +424,13 @@ impl BridgeHandle {
         getrandom::fill(&mut token_bytes)
             .map_err(|error| BridgeError::Random(error.to_string()))?;
         let bearer_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
+        let mut fallback_bytes = [0_u8; 16];
+        getrandom::fill(&mut fallback_bytes)
+            .map_err(|error| BridgeError::Random(error.to_string()))?;
+        // This is intentionally independent from the bearer: it is safe to
+        // send upstream as the root of a headerless conversation but remains
+        // stable only for this bridge listener's lifetime.
+        let fallback_root = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fallback_bytes);
         let base_url = format!("http://{socket_addr}");
         let shutdown = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicUsize::new(0));
@@ -443,6 +450,7 @@ impl BridgeHandle {
         let thread_connections = Arc::clone(&connections);
         let thread_log = log.clone();
         let thread_token = bearer_token.clone();
+        let thread_fallback_root = fallback_root.clone();
         let join = thread::Builder::new()
             .name("clud-codex-bridge".to_string())
             .spawn(move || {
@@ -456,6 +464,7 @@ impl BridgeHandle {
                     thread_conversations,
                     thread_connections,
                     thread_log,
+                    thread_fallback_root,
                 )
             })
             .map_err(BridgeError::Spawn)?;
@@ -552,6 +561,7 @@ fn serve(
     conversations: ConversationStore,
     connections: ActiveConnections,
     log: Option<SharedBridgeLog>,
+    fallback_root: String,
 ) {
     let mut workers = Vec::<JoinHandle<()>>::new();
     let mut next_worker_id = 0_usize;
@@ -625,6 +635,7 @@ fn serve(
                     let worker_config = config.clone();
                     let worker_token = bearer_token.clone();
                     let worker_log = log.clone();
+                    let worker_fallback_root = fallback_root.clone();
                     match thread::Builder::new()
                         .name("clud-codex-bridge-request".to_string())
                         .spawn(move || {
@@ -640,6 +651,7 @@ fn serve(
                                 &worker_shutdown,
                                 &worker_conversations,
                                 worker_log.as_ref(),
+                                &worker_fallback_root,
                             );
                         }) {
                         Ok(worker) => workers.push(worker),
@@ -705,6 +717,7 @@ fn handle_connection(
     shutdown: &AtomicBool,
     conversations: &ConversationStore,
     log: Option<&SharedBridgeLog>,
+    fallback_root: &str,
 ) {
     #[cfg(test)]
     if let Some(notifier) = &config.admission_notifier {
@@ -754,8 +767,11 @@ fn handle_connection(
         let _ = write_error(&mut stream, 401);
         return;
     }
-    let conversation_key =
-        ConversationKey::from_headers(parsed.session_id.as_deref(), parsed.agent_id.as_deref());
+    let conversation_key = conversation_key_from_headers(
+        parsed.session_id.as_deref(),
+        parsed.agent_id.as_deref(),
+        fallback_root,
+    );
 
     // Route on the path alone. Claude Code sends `POST /v1/messages?beta=true`,
     // so matching the raw request target 404s a request that is perfectly
@@ -777,6 +793,7 @@ fn handle_connection(
                 body_deadline,
                 shutdown,
                 ContextControl::Compact,
+                fallback_root,
             ) {
                 Ok(body_key) => serve_context_compact(
                     &mut stream,
@@ -802,6 +819,7 @@ fn handle_connection(
                 body_deadline,
                 shutdown,
                 ContextControl::Clear,
+                fallback_root,
             ) {
                 Ok(body_key) => serve_context_clear(
                     &mut stream,
@@ -824,6 +842,7 @@ fn handle_connection(
                 body_deadline,
                 shutdown,
                 ContextControl::CompactFinished,
+                fallback_root,
             ) {
                 Ok(body_key) => serve_context_compact_finished(
                     &mut stream,
@@ -1176,6 +1195,7 @@ fn read_context_control_body(
     deadline: Instant,
     shutdown: &AtomicBool,
     control: ContextControl,
+    fallback_root: &str,
 ) -> Result<Option<ConversationKey>, u16> {
     let body = read_body(stream, prefix, content_length, deadline, shutdown)?;
     if body.is_empty() {
@@ -1214,7 +1234,18 @@ fn read_context_control_body(
     let session_id = value.get("session_id").and_then(serde_json::Value::as_str);
     let agent_id = value.get("agent_id").and_then(serde_json::Value::as_str);
     Ok((session_id.is_some() || agent_id.is_some())
-        .then(|| ConversationKey::from_headers(session_id, agent_id)))
+        .then(|| conversation_key_from_headers(session_id, agent_id, fallback_root)))
+}
+
+fn conversation_key_from_headers(
+    session_id: Option<&str>,
+    agent_id: Option<&str>,
+    fallback_root: &str,
+) -> ConversationKey {
+    match session_id.filter(|session| !session.is_empty()) {
+        Some(session_id) => ConversationKey::from_headers(Some(session_id), agent_id),
+        None => ConversationKey::bridge_fallback(fallback_root, agent_id),
+    }
 }
 
 fn serve_context_compact(
@@ -1238,7 +1269,9 @@ fn serve_context_compact(
         // transcript, then discard that temporary replay when
         // `SessionStart(compact)` confirms Claude installed its summary.
         let result = crate::codex_pipeline::validate_canonical_history(&snapshot)
-            .and_then(|()| build_pipeline(config, log).map_err(PipelineError::Upstream))
+            .and_then(|()| {
+                build_pipeline(config, log, &conversation_key).map_err(PipelineError::Upstream)
+            })
             .and_then(|pipeline| pipeline.compact_canonical_history(snapshot, shutdown))
             .and_then(|replacement| {
                 history
@@ -1354,6 +1387,7 @@ fn serve_context_clear(
 fn build_pipeline(
     config: &BridgeConfig,
     log: Option<&SharedBridgeLog>,
+    conversation_key: &ConversationKey,
 ) -> Result<Pipeline<ResolvedCredentials>, UpstreamError> {
     let credentials = match config.test_upstream_url.as_deref() {
         Some(base_url) => ResolvedCredentials::ApiKey(ApiKeyCredentials::new(
@@ -1367,7 +1401,11 @@ fn build_pipeline(
         read_timeout: config.stream_idle_timeout,
         ..UpstreamConfig::default()
     };
-    let mut client = UpstreamClient::new(credentials, upstream_config);
+    // `build_pipeline` runs for every Messages request. A fresh client UUID
+    // here would rotate the upstream prompt-cache key and session headers on
+    // every turn, defeating cache reuse for a long Claude conversation.
+    let mut client = UpstreamClient::new(credentials, upstream_config)
+        .with_session_id(conversation_key.id.clone());
     if let Some(log) = log.cloned() {
         client = client.with_retry_observer(move |error, attempt, budget, backoff| {
             record_retry(&log, error, attempt, budget, backoff);
@@ -2201,7 +2239,7 @@ fn serve_messages(
     unified_route: Option<ConversationRoute>,
     log: Option<&SharedBridgeLog>,
 ) {
-    let pipeline = match build_pipeline(config, log) {
+    let pipeline = match build_pipeline(config, log, conversation_key) {
         Ok(pipeline) => pipeline,
         Err(error) => {
             let failure = PipelineError::Upstream(error);
@@ -3582,6 +3620,16 @@ Connection: close
             .split_once("\r\n\r\n")
             .map(|(_, body)| body)
             .expect("captured HTTP body")
+    }
+
+    fn captured_header<'a>(raw_request: &'a str, name: &str) -> &'a str {
+        raw_request
+            .split("\r\n")
+            .find_map(|line| {
+                let (candidate, value) = line.split_once(':')?;
+                candidate.eq_ignore_ascii_case(name).then_some(value.trim())
+            })
+            .unwrap_or_else(|| panic!("captured upstream header {name:?}: {raw_request}"))
     }
 
     /// The smallest request the translator accepts.
@@ -6619,6 +6667,133 @@ Connection: close
         assert!(!sent.contains(bridge.bearer_token()));
     }
 
+    #[test]
+    fn cache_identity_is_conversation_scoped_not_request_scoped() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let session = "claude-session-private";
+        let turns = [
+            None,
+            None,
+            Some("agent-a-private"),
+            Some("agent-a-private"),
+            Some("agent-b-private"),
+        ];
+
+        for agent in turns {
+            let mut headers = vec![("X-Claude-Code-Session-Id", session)];
+            if let Some(agent) = agent {
+                headers.push(("x-claude-code-agent-id", agent));
+            }
+            let response = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    PROBE_BODY,
+                    &headers,
+                ),
+            );
+            assert_eq!(status(&response), 200, "{response}");
+        }
+
+        let requests = upstream.requests();
+        assert_eq!(requests.len(), 5);
+        let identity = |request: &str| {
+            let body: serde_json::Value = serde_json::from_str(captured_body(request)).unwrap();
+            (
+                captured_header(request, "session-id").to_string(),
+                captured_header(request, "thread-id").to_string(),
+                captured_header(request, "x-client-request-id").to_string(),
+                body["prompt_cache_key"].as_str().unwrap().to_string(),
+            )
+        };
+        let identities = requests
+            .iter()
+            .map(|request| identity(request))
+            .collect::<Vec<_>>();
+        let main = ConversationKey::from_headers(Some(session), None).id;
+        let agent_a = ConversationKey::from_headers(Some(session), Some("agent-a-private")).id;
+        let agent_b = ConversationKey::from_headers(Some(session), Some("agent-b-private")).id;
+
+        for index in [0, 1] {
+            assert_eq!(
+                identities[index],
+                (main.clone(), main.clone(), main.clone(), main.clone())
+            );
+        }
+        for index in [2, 3] {
+            assert_eq!(
+                identities[index],
+                (
+                    agent_a.clone(),
+                    agent_a.clone(),
+                    agent_a.clone(),
+                    agent_a.clone()
+                )
+            );
+        }
+        assert_eq!(
+            identities[4],
+            (
+                agent_b.clone(),
+                agent_b.clone(),
+                agent_b.clone(),
+                agent_b.clone()
+            )
+        );
+        assert_ne!(main, agent_a);
+        assert_ne!(main, agent_b);
+        assert_ne!(agent_a, agent_b);
+        for request in &requests {
+            for forbidden in [session, "agent-a-private", "agent-b-private"] {
+                assert!(
+                    !request.contains(forbidden),
+                    "raw Claude identity leaked: {request}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn headerless_cache_identity_is_stable_per_bridge_but_not_shared_between_launches() {
+        let upstream = FakeResponses::start();
+        let first = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let second = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+
+        for bridge in [&first, &first, &second, &second] {
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+            );
+            assert_eq!(status(&response), 200, "{response}");
+        }
+
+        let identities = upstream
+            .requests()
+            .iter()
+            .map(|request| {
+                let body: serde_json::Value = serde_json::from_str(captured_body(request)).unwrap();
+                let identity = captured_header(request, "session-id");
+                assert_eq!(captured_header(request, "thread-id"), identity);
+                assert_eq!(captured_header(request, "x-client-request-id"), identity);
+                assert_eq!(body["prompt_cache_key"].as_str(), Some(identity));
+                identity.to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(identities.len(), 4);
+        assert_eq!(identities[0], identities[1]);
+        assert_eq!(identities[2], identities[3]);
+        assert_ne!(identities[0], identities[2]);
+        assert!(identities
+            .iter()
+            .all(|identity| identity.starts_with("bridge-")));
+        assert!(identities
+            .iter()
+            .all(|identity| identity != "bridge-session"));
+    }
+
     /// What a user typing `/model luna@high` actually produces on the wire.
     ///
     /// The premise this rests on is that the harness forwards the model
@@ -6715,24 +6890,27 @@ Connection: close
             Some(recovery_success_response()),
         ]);
         let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let session = [("X-Claude-Code-Session-Id", "identity-through-compact")];
         let first = request(
             bridge.socket_addr(),
-            &authorized(
+            &authorized_with_headers(
                 "POST",
                 "/v1/messages",
                 bridge.bearer_token(),
                 PROBE_STREAM_BODY,
+                &session,
             ),
         );
         assert_eq!(status(&first), 200, "{first}");
 
         let second = request(
             bridge.socket_addr(),
-            &authorized(
+            &authorized_with_headers(
                 "POST",
                 "/v1/messages",
                 bridge.bearer_token(),
                 r#"{"model":"claude-x","messages":[{"role":"user","content":"first"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"pending"}],"stream":true}"#,
+                &session,
             ),
         );
         assert_eq!(status(&second), 200, "{second}");
@@ -6793,6 +6971,20 @@ Connection: close
             "opaque-summary"
         );
         assert_eq!(retry_body["input"][1]["content"][0]["text"], "pending");
+
+        // The request, the internal compaction request, and its retry all
+        // represent one Claude conversation. None may get a fresh UUID just
+        // because it crosses a lifecycle boundary.
+        let expected_identity =
+            ConversationKey::from_headers(Some("identity-through-compact"), None).id;
+        for request in &requests {
+            assert_eq!(captured_header(request, "session-id"), expected_identity);
+            assert_eq!(captured_header(request, "thread-id"), expected_identity);
+            assert_eq!(
+                captured_header(request, "x-client-request-id"),
+                expected_identity
+            );
+        }
     }
 
     #[test]

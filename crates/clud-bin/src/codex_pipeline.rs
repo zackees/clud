@@ -1761,6 +1761,48 @@ mod tests {
             .is_some_and(|k| !k.is_empty()));
     }
 
+    #[test]
+    fn provider_prompt_cache_key_overrides_the_bridge_conversation_identity() {
+        struct CacheKeyCredentials {
+            base_url: String,
+        }
+
+        impl CredentialSource for CacheKeyCredentials {
+            fn resolve(&self) -> Result<crate::codex_upstream::UpstreamTarget, UpstreamError> {
+                Ok(
+                    crate::codex_upstream::UpstreamTarget::new(
+                        self.base_url.clone(),
+                        "Bearer test",
+                    )
+                    .with_prompt_cache_key(Some("provider-authoritative-key".to_string())),
+                )
+            }
+        }
+
+        let server = FakeResponses::start(text_reply());
+        let pipeline = Pipeline::new(
+            UpstreamClient::new(
+                CacheKeyCredentials {
+                    base_url: server.base_url.clone(),
+                },
+                UpstreamConfig::default(),
+            )
+            .with_session_id("bridge-conversation-key".to_string()),
+        );
+        pipeline
+            .complete(
+                br#"{"messages":[{"role":"user","content":"x"}]}"#,
+                "msg_cache_override",
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+
+        assert_eq!(
+            server.request()["prompt_cache_key"],
+            "provider-authoritative-key"
+        );
+    }
+
     /// The billed default, asserted as a literal on the wire rather than
     /// through the catalog's provider-default row — a metadata-based assertion
     /// follows the row wherever it goes and cannot notice a change in what the

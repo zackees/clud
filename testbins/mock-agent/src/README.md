@@ -52,7 +52,11 @@ before exiting with the test-requested code.
     child-only Anthropic URL/token, sends the embedded deterministic Messages
     request, and records only sanitized loopback/status/fixture observations
     plus the ephemeral port (never the URL or bearer).
-  - `--mock-stream-json <path>` with `--mock-stream-delay-ms <ms>` — emit one
+  - `--mock-codex-cache-identity-probe <path>` - issue #1226's subprocess-only
+    eight-turn main/agent bridge probe with a fixed large prefix. Records only
+    status and reply counts;
+    the Python fake upstream owns the allowlisted wire assertions.
+  - `--mock-stream-json <path>` with `--mock-stream-delay-ms <ms>` - emit one
     pre-canned `--output-format stream-json` line per file line, flushing
     between each, then exit (no JSON report tail).
 - Env vars `IN_CLUD` and `RUNNING_PROCESS_ORIGINATOR` are captured and

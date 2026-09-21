@@ -80,9 +80,25 @@ impl ConversationKey {
         }
     }
 
+    /// Derive a headerless conversation beneath this bridge's random fallback
+    /// root. The root is generated once per listener, so it remains stable for
+    /// an ordinary headerless turn while never sharing an upstream cache key
+    /// with another bridge launch.
+    pub fn bridge_fallback(random_root: &str, agent_id: Option<&str>) -> Self {
+        let prefix = format!("bridge-{random_root}-");
+        let id = match agent_id.filter(|agent| !agent.is_empty()) {
+            Some(agent_id) => format!("{prefix}agent-{}", digest(agent_id)),
+            None => format!("{prefix}main"),
+        };
+        Self {
+            id,
+            session_prefix: prefix,
+        }
+    }
+
     /// Fixed, non-sensitive scope label for forensic diagnostics.
     pub fn scope(&self) -> &'static str {
-        if self.id == BRIDGE_SESSION_CONVERSATION {
+        if self.id == BRIDGE_SESSION_CONVERSATION || self.id.starts_with("bridge-") {
             "fallback"
         } else if self.id.contains("-agent-") {
             "agent"
