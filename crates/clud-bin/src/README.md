@@ -70,6 +70,10 @@ Entry and orchestration:
   the isolated sibling tree `~/.clud/state/test-sessions/`. Buffers complete
   lines across concurrent bridge workers, emits one visible truncation marker,
   and records failures plus (since #999) the model-discovery handshake.
+- `cache_health.rs` - issue #1226's bounded, content-free per-conversation
+  terminal-usage aggregates and cache-credit safety-fuse state machine. It
+  accepts only provider counts keyed by the bridge's digest-derived scope;
+  compaction, clear, and provider-route boundaries begin a new cold window.
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell and
   #898/#899's unified Claude/Codex/DeepSeek multiplexer: ephemeral listener +
   per-launch bearer, deterministic `/v1/models`, provider catalog routing,

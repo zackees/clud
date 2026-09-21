@@ -22,6 +22,8 @@
 
 use std::collections::HashMap;
 
+use crate::cache_health::TokenUsage;
+
 /// One decoded SSE frame. `event` is absent when the producer sent only data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseFrame {
@@ -246,6 +248,7 @@ pub struct StreamTranslator {
     saw_tool_call: bool,
     has_text_delta: bool,
     input_tokens: u64,
+    saw_input_tokens: bool,
     output_tokens: u64,
     cached_tokens: u64,
     stop_reason: Option<String>,
@@ -280,6 +283,7 @@ impl StreamTranslator {
             saw_tool_call: false,
             has_text_delta: false,
             input_tokens: 0,
+            saw_input_tokens: false,
             output_tokens: 0,
             cached_tokens: 0,
             stop_reason: None,
@@ -294,6 +298,17 @@ impl StreamTranslator {
     pub fn with_tool_names(mut self, tool_names: HashMap<String, String>) -> Self {
         self.tool_names = tool_names;
         self
+    }
+
+    /// Terminal Responses usage in the provider's native accounting
+    /// convention. It is intentionally aggregate-only so callers can track
+    /// cache health without retaining stream content.
+    pub fn terminal_usage(&self) -> Option<TokenUsage> {
+        self.saw_input_tokens.then_some(TokenUsage {
+            input_tokens: self.input_tokens,
+            cached_input_tokens: self.cached_tokens,
+            output_tokens: self.output_tokens,
+        })
     }
 
     /// Translate one upstream frame into zero or more Anthropic frames.
@@ -782,6 +797,7 @@ impl StreamTranslator {
             .and_then(serde_json::Value::as_u64)
         {
             self.input_tokens = input;
+            self.saw_input_tokens = true;
         }
         if let Some(output) = usage
             .get("output_tokens")

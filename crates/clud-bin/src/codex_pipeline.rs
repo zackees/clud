@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{collections::BTreeMap, collections::HashMap, collections::HashSet};
 
+use crate::cache_health::TokenUsage;
 use crate::codex_history::{ConversationHistory, HistoryError};
 use crate::codex_model::ModelSpec;
 use crate::codex_sse::{FrameDecoder, InBandFailure, StreamTranslator};
@@ -45,6 +46,10 @@ const QUOTA_EXHAUSTED_MESSAGE: &str =
 /// HTTP layer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamSummary {
+    /// Terminal provider usage, if the Responses stream supplied a complete
+    /// input count. This contains aggregates only and is safe for health
+    /// accounting at the bridge boundary.
+    pub usage: Option<TokenUsage>,
     /// The turn ended in a drained account or dead credentials, delivered
     /// in-band. HTTP status is already committed to 200 by then, so this is
     /// the only way the caller can learn it happened.
@@ -88,6 +93,7 @@ impl StreamSummary {
 #[derive(Debug)]
 pub struct Completion {
     pub message: serde_json::Value,
+    pub usage: Option<TokenUsage>,
     pub history_append_rejected: bool,
     pub pending_outputs_recovered: usize,
 }
@@ -535,6 +541,7 @@ fn string_at_pointer(value: &serde_json::Value, pointer: &str) -> String {
 }
 
 struct AttemptOutcome {
+    usage: Option<TokenUsage>,
     terminal_account_failure: bool,
     in_band_failure: Option<InBandFailure>,
     in_band_provider_failure: bool,
@@ -1158,6 +1165,7 @@ impl<C: CredentialSource> Pipeline<C> {
                 // error path is still being examined.
                 if !delivered.load(Ordering::Acquire) && error.is_context_length_exceeded() {
                     return Ok(AttemptOutcome {
+                        usage: translator.terminal_usage(),
                         terminal_account_failure: false,
                         in_band_failure: None,
                         in_band_provider_failure: false,
@@ -1176,6 +1184,7 @@ impl<C: CredentialSource> Pipeline<C> {
         let in_band_failure = translator.in_band_failure().cloned();
         let in_band_provider_failure = translator.has_in_band_provider_failure();
         let terminal_account_failure = translator.terminal_account_failure();
+        let usage = translator.terminal_usage();
         if !completed {
             if !in_band_provider_failure && !translator.is_finished() {
                 forward(translator.fail_opaque()).map_err(PipelineError::Upstream)?;
@@ -1187,6 +1196,7 @@ impl<C: CredentialSource> Pipeline<C> {
             }
         }
         Ok(AttemptOutcome {
+            usage,
             terminal_account_failure,
             in_band_failure,
             in_band_provider_failure,
@@ -1248,6 +1258,7 @@ impl<C: CredentialSource> Pipeline<C> {
             emit_deferred_frames(&first.deferred_frames, sink)?;
             if first.in_band_provider_failure {
                 return Ok(StreamSummary {
+                    usage: first.usage,
                     orphaned_outputs_repaired: 0,
                     pending_outputs_recovered,
                     terminal_account_failure: first.terminal_account_failure,
@@ -1262,6 +1273,7 @@ impl<C: CredentialSource> Pipeline<C> {
                 None => false,
             };
             return Ok(StreamSummary {
+                usage: first.usage,
                 orphaned_outputs_repaired: 0,
                 pending_outputs_recovered,
                 terminal_account_failure: first.terminal_account_failure,
@@ -1313,6 +1325,7 @@ impl<C: CredentialSource> Pipeline<C> {
         emit_deferred_frames(&retry.deferred_frames, sink)?;
         if retry.in_band_provider_failure {
             return Ok(StreamSummary {
+                usage: retry.usage,
                 orphaned_outputs_repaired: repaired,
                 pending_outputs_recovered,
                 terminal_account_failure: retry.terminal_account_failure,
@@ -1325,6 +1338,7 @@ impl<C: CredentialSource> Pipeline<C> {
         let history_append_rejected =
             record_successful_turn(history, &turn_input, &retry.output_items)?;
         Ok(StreamSummary {
+            usage: retry.usage,
             orphaned_outputs_repaired: repaired,
             pending_outputs_recovered,
             terminal_account_failure: retry.terminal_account_failure,
@@ -1396,6 +1410,7 @@ impl<C: CredentialSource> Pipeline<C> {
         }
         Ok(Completion {
             message: aggregator.finish(),
+            usage: summary.usage,
             history_append_rejected: summary.history_append_rejected,
             pending_outputs_recovered: summary.pending_outputs_recovered,
         })

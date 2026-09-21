@@ -157,6 +157,23 @@ route's explicit `prompt_cache_key`, when supplied, remains authoritative.
 DeepSeek and other Anthropic-shaped proxy routes do not construct this Codex
 client and therefore do not receive these headers or this identity policy.
 
+## Cache-health safety fuse
+
+For direct and unified Codex traffic, the bridge retains a bounded, in-memory
+health window per hashed `ConversationKey`. It records only terminal provider
+usage totals: input, cache-read input, uncached input, and output. Prompts,
+responses, credentials, raw harness identifiers, and cache keys are neither
+retained nor written to the health log.
+
+The first large turn after startup, compaction, clear, or a route boundary is
+cold. Thereafter three consecutive 50K-or-larger requests with less than 10%
+cache credit arm a session-local fuse. The bridge warns as the window becomes
+degraded, then rejects the following Codex request locally before it can incur
+another large replay. A lifecycle boundary or bridge restart starts a new cold
+window. Missing or malformed usage is inert: it cannot panic, trip, clear, or
+poison later valid accounting. Anthropic-shaped DeepSeek and OpenRouter proxies
+are intentionally outside this Codex-specific fuse.
+
 A Messages request is a display/replay view, not the canonical transcript.
 After a successful turn, the bridge appends only that logical turn's newly
 pending input, followed by verbatim `response.output_item.done` output. It
