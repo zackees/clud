@@ -139,7 +139,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: Some(EffortLevel::Low),
         default_context_window: None,
-        provider_default: false,
+        provider_default: true,
         claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
         supports_images: true,
@@ -155,7 +155,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
-        provider_default: true,
+        provider_default: false,
         claude_max_context_tokens: Some(1_050_000),
         claude_compact_window: None,
         supports_images: true,
@@ -995,6 +995,14 @@ mod tests {
         }
 
         assert_eq!(
+            models_for_provider(ModelProvider::Codex)
+                .filter(|entry| entry.provider_default)
+                .count(),
+            1,
+            "Codex must have exactly one reviewed default"
+        );
+
+        assert_eq!(
             common_claude_context_tokens(ModelProvider::Codex),
             Some(1_050_000)
         );
@@ -1360,16 +1368,57 @@ mod tests {
         let selection = resolve_for_launch(ModelProvider::Codex, None, None, None, None, true)
             .unwrap()
             .unwrap();
-        assert_eq!(selection.model.as_deref(), Some("codex-terra"));
+        assert_eq!(selection.provider, ModelProvider::Codex);
+        assert_eq!(selection.model.as_deref(), Some("codex-sol"));
+        assert_eq!(selection.wire_model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(
             selection.model_source,
             Some(SelectionSource::CatalogDefault)
         );
-        assert_eq!(selection.effort, Some(EffortLevel::Medium));
+        assert_eq!(selection.effort, Some(EffortLevel::Low));
         assert_eq!(
             selection.effort_source,
             Some(SelectionSource::CatalogDefault)
         );
+    }
+
+    #[test]
+    fn codex_launch_default_precedence_is_explicit_and_source_tracked() {
+        let terra = resolve_for_launch(
+            ModelProvider::Codex,
+            Some("codex-terra"),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(terra.model.as_deref(), Some("codex-terra"));
+        assert_eq!(terra.effort, Some(EffortLevel::Medium));
+        assert_eq!(terra.model_source, Some(SelectionSource::Cli));
+        assert_eq!(terra.effort_source, Some(SelectionSource::CatalogDefault));
+
+        let high = resolve_for_launch(ModelProvider::Codex, None, Some("high"), None, None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(high.model.as_deref(), Some("codex-sol"));
+        assert_eq!(high.effort, Some(EffortLevel::High));
+        assert_eq!(high.model_source, Some(SelectionSource::CatalogDefault));
+        assert_eq!(high.effort_source, Some(SelectionSource::Cli));
+
+        let saved = ProviderSelectionDefaults {
+            model: Some("codex-terra"),
+            effort: Some(EffortLevel::High),
+            context_window: None,
+        };
+        let saved = resolve_for_launch(ModelProvider::Codex, None, None, None, Some(saved), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.model.as_deref(), Some("codex-terra"));
+        assert_eq!(saved.effort, Some(EffortLevel::High));
+        assert_eq!(saved.model_source, Some(SelectionSource::ProviderSetting));
+        assert_eq!(saved.effort_source, Some(SelectionSource::ProviderSetting));
     }
 
     #[test]

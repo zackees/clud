@@ -32,19 +32,25 @@ pub(super) const DO_GOAL_TEMPLATE: &str = "\
 /goal read {url} and implement it. goal is resolved when the issue is closed by \
 a PR (one or more) where each is validated, tested, pushed and merged. You must \
 wait for the GHA's with the PR to go green. then merge it. please add a watch. \
-no cheating. no files left behind. all work must be done for this repo. use a git \
+No cheating, no files left behind. Rebase to local origin when done. All work \
+must be done for this repo. use a git \
 worktree or sibling checkout only when /clud-meta-work and repository guidance \
 allow it; work can only land here. when you are done do a git \
 status and make sure it's clean. make sure that the local repo is rebased to the \
 branch we started from. Find out that branch right now. If this goal contains \
 multiple independent deliverables, invoke /clud-meta-work before delegating; \
-otherwise keep the normal /goal workflow.";
+otherwise keep the normal /goal workflow. If the target is a meta issue and \
+this run came from /do or $do, use AskUserQuestion to ask whether to run its \
+independent work in parallel and wait for the answer before invoking \
+/clud-meta-work or delegating. If the run came from /meta-issue or $meta-issue, \
+assume parallel execution is approved and do not ask.";
 
 pub(super) const DO_GOAL_INPUT_TEMPLATE: &str = "\
 /goal {input}. goal is resolved when the requested work lands in one or more PRs \
 where each is validated, tested, pushed and merged. You must wait for the GHA's \
-with the PR to go green. then merge it. please add a watch. no cheating. no files \
-left behind. all work must be done for this repo. use a git worktree or sibling \
+with the PR to go green. then merge it. please add a watch. No cheating, no files \
+left behind. Rebase to local origin when done. All work must be done for this \
+repo. use a git worktree or sibling \
 checkout only when /clud-meta-work and repository guidance allow it; work can \
 only land here. when you are done do a git status and make sure \
 it's clean. make sure that the local repo is rebased to the branch we started \

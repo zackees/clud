@@ -1641,7 +1641,7 @@ mod tests {
         // What the fake actually received is the real assertion: a translation
         // regression must fail here, not merely change our own output.
         let sent = server.request();
-        assert_eq!(sent["model"], "gpt-5.6-terra");
+        assert_eq!(sent["model"], "gpt-5.6-sol");
         assert_eq!(sent["instructions"], "be brief");
         assert!(sent.get("max_output_tokens").is_none());
         assert_eq!(sent["stream"], true);
@@ -1678,7 +1678,7 @@ mod tests {
                 "id": "msg_agg",
                 "type": "message",
                 "role": "assistant",
-                "model": "gpt-5.6-terra",
+                "model": "gpt-5.6-sol",
                 "content": [{"type": "text", "text": "Hello world"}],
                 "stop_reason": "end_turn",
                 "stop_sequence": null,
@@ -1778,7 +1778,7 @@ mod tests {
         assert_eq!(sent["store"], false);
         assert_eq!(sent["include"][0], "reasoning.encrypted_content");
         assert_eq!(sent["stream"], true);
-        assert_eq!(sent["reasoning"]["effort"], "medium");
+        assert_eq!(sent["reasoning"]["effort"], "low");
         assert_eq!(sent["parallel_tool_calls"], true);
         // A stable cache key is what buys prompt-cache hits across turns.
         assert!(sent["prompt_cache_key"]
@@ -1831,11 +1831,10 @@ mod tests {
     /// The billed default, asserted as a literal on the wire rather than
     /// through the catalog's provider-default row — a metadata-based assertion
     /// follows the row wherever it goes and cannot notice a change in what the
-    /// user is charged for. `terra` at `medium` is the pair #776 selected: `sol`
-    /// costs 2.5x on both input and output, and `medium` is terra's own
-    /// catalog default effort.
+    /// user is charged for. #1254 deliberately restores Sol as the reviewed
+    /// main-session default while retaining its catalog-native low effort.
     #[test]
-    fn the_billed_default_is_terra_at_medium() {
+    fn the_billed_default_is_sol_at_low() {
         let server = FakeResponses::start(text_reply());
         pipeline(&server.base_url)
             .complete(
@@ -1845,8 +1844,8 @@ mod tests {
             )
             .unwrap();
         let sent = server.request();
-        assert_eq!(sent["model"], "gpt-5.6-terra");
-        assert_eq!(sent["reasoning"]["effort"], "medium");
+        assert_eq!(sent["model"], "gpt-5.6-sol");
+        assert_eq!(sent["reasoning"]["effort"], "low");
     }
 
     #[test]

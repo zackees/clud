@@ -113,6 +113,10 @@ class TestBackendSelection:
         assert result.returncode == 0
         report = _parse_agent_report(result)
         assert "codex" in report["program"].lower()
+        pairs = list(zip(report["args"], report["args"][1:], strict=False))
+        assert pairs.count(("-m", "gpt-5.6-sol")) == 1
+        assert pairs.count(("-c", 'model_reasoning_effort="low"')) == 1
+        assert not any("terra" in arg or arg == "medium" for arg in report["args"])
 
     def test_claude_flag(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "--claude", "-p", "hello", env=mock_env)
@@ -684,7 +688,7 @@ class TestCodexBridgeForeground:
 
         # The bridge must have spoken the Responses protocol upstream, in the
         # translated shape -- not passed the Anthropic body through.
-        assert fake_responses.requests, "the bridge never called upstream"
+        assert len(fake_responses.requests) == 1, "expected exactly one paid-shape request"
         upstream_request = fake_responses.requests[0]
         assert upstream_request.startswith(b"POST /v1/responses HTTP/1.1")
         head, _, body = upstream_request.partition(b"\r\n\r\n")
@@ -693,7 +697,8 @@ class TestCodexBridgeForeground:
         # literal on purpose: this is the one place the model id is observed
         # after travelling the whole path, so it is the assertion that would
         # catch an unintended change to what the user is charged.
-        assert sent["model"] == "gpt-5.6-terra"
+        assert sent["model"] == "gpt-5.6-sol"
+        assert sent["reasoning"]["effort"] == "low"
         assert sent["stream"] is True
         assert sent["input"][0]["content"][0]["type"] == "input_text"
         assert "messages" not in sent, "Anthropic request shape leaked upstream"

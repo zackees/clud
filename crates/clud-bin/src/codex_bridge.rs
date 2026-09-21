@@ -4163,7 +4163,7 @@ Connection: close
             thread::sleep(Duration::from_millis(5));
         };
         assert_eq!(usage.provider, "codex");
-        assert_eq!(usage.model, "gpt-5.6-terra");
+        assert_eq!(usage.model, "gpt-5.6-sol");
         assert_eq!(usage.request_count, 4);
         assert_eq!(usage.cached_input_tokens, 0);
         assert_eq!(usage.uncached_input_tokens, 400_000);
@@ -7372,7 +7372,7 @@ Connection: close
         // Translated shape, not a passed-through Anthropic body.
         let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
         let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
-        assert_eq!(json["model"], "gpt-5.6-terra");
+        assert_eq!(json["model"], "gpt-5.6-sol");
         assert_eq!(json["stream"], true, "upstream is always streamed");
         assert_eq!(json["input"][0]["content"][0]["type"], "input_text");
         assert!(json.get("messages").is_none(), "Anthropic shape leaked");

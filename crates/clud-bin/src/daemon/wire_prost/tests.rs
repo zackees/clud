@@ -30,7 +30,16 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             loop_markers: None,
             stream_json_progress: false,
             codex_model: None,
-            model_selection: None,
+            model_selection: Some(crate::provider_catalog::ResolvedModelSelection {
+                provider: ModelProvider::Codex,
+                model: Some("codex-sol".to_string()),
+                wire_model: Some("gpt-5.6-sol".to_string()),
+                effort: Some(crate::provider_catalog::EffortLevel::Low),
+                context_window: None,
+                model_source: Some(crate::provider_catalog::SelectionSource::CatalogDefault),
+                effort_source: Some(crate::provider_catalog::SelectionSource::CatalogDefault),
+                context_window_source: None,
+            }),
             failover: None,
             failover_allow_metered: false,
         },
@@ -209,6 +218,21 @@ fn daemon_create_roundtrip_preserves_resolved_launch_metadata() {
     assert_eq!(
         spec.plan.harness_source,
         Some(PreferenceSource::GlobalSetting)
+    );
+    let selection = spec.plan.model_selection.expect("model selection");
+    assert_eq!(selection.model.as_deref(), Some("codex-sol"));
+    assert_eq!(selection.wire_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(
+        selection.effort,
+        Some(crate::provider_catalog::EffortLevel::Low)
+    );
+    assert_eq!(
+        selection.model_source,
+        Some(crate::provider_catalog::SelectionSource::CatalogDefault)
+    );
+    assert_eq!(
+        selection.effort_source,
+        Some(crate::provider_catalog::SelectionSource::CatalogDefault)
     );
 }
 

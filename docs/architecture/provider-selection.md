@@ -71,6 +71,13 @@ Known compatibility spellings normalize immediately:
 - `deepseek-v4-flash` -> model `deepseek-flash`, wire ID `deepseek-flash[1m]`;
 - `opus` -> model `claude-opus`, wire alias `opus`.
 
+For a direct Codex launch with no explicit or saved provider selection, the
+reviewed catalog default is `codex-sol` / `gpt-5.6-sol` at `low` effort
+(#1254). The same normalized selection feeds both the native Codex harness and
+Codex through the Claude harness. Explicit CLI values remain highest
+precedence, followed by saved `providers.codex` values; unified mode does not
+import this direct-provider default.
+
 DeepSeek upgrades its API aliases in place and occasionally renames them. As
 of 2026-09-14, DeepSeek's Models & Pricing page lists `deepseek-flash`
 (DeepSeek-V4.1-Flash, 1M context) and `deepseek-v4-pro`

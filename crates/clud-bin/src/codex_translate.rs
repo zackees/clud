@@ -136,11 +136,10 @@ pub enum SystemPlacement {
 /// The default selection when a request does not carry one of its own.
 ///
 /// The selected row lives only in the shared provider catalog; the translator
-/// consumes it rather than maintaining a second model/default table. Terra,
-/// not the Sol flagship, remains the reviewed fallback: it has the same 1.05M
-/// context, costs 2.5x less on both input and output, and uses its own medium
-/// default effort. Defaulting to the flagship drained a real account (#776).
-/// A request naming a model through [`resolve_selection`] still wins.
+/// consumes it rather than maintaining a second model/default table. Sol at
+/// low effort is the reviewed fallback (#1254); explicit and saved provider
+/// selections still win. A request naming a model through
+/// [`resolve_selection`] still wins.
 pub fn default_model_spec() -> ModelSpec {
     let model = provider_catalog::reviewed_default_model(ModelProvider::Codex)
         .expect("the Codex catalog must contain exactly one reviewed provider default");
@@ -1130,8 +1129,8 @@ mod tests {
         assert!(out.stream);
         assert!(!out.store);
         assert_eq!(out.include, vec!["reasoning.encrypted_content"]);
-        // Effort is always set, defaulting to medium.
-        assert_eq!(out.reasoning, Some(Reasoning { effort: "medium" }));
+        // Effort is always set, defaulting to low for the reviewed Sol row.
+        assert_eq!(out.reasoning, Some(Reasoning { effort: "low" }));
         assert_eq!(out.parallel_tool_calls, Some(true));
     }
 
@@ -1657,7 +1656,7 @@ mod tests {
             assert_eq!(resolved(Some(claude)), default, "{claude}");
         }
         assert_eq!(resolved(None), default);
-        assert_eq!(default_model_spec().model, "gpt-5.6-terra");
+        assert_eq!(default_model_spec().model, "gpt-5.6-sol");
     }
 
     /// Issue #820: every model the picker can name has to reach the wire as
@@ -1752,7 +1751,7 @@ mod tests {
                 "store": false,
                 "include": ["reasoning.encrypted_content"],
                 "parallel_tool_calls": true,
-                "reasoning": {"effort": "medium"},
+                "reasoning": {"effort": "low"},
                 "input": [{
                     "type": "message",
                     "role": "user",
@@ -1887,7 +1886,7 @@ mod tests {
         assert_eq!(body["instructions"], "shared instructions");
         assert_eq!(body["tools"][0]["name"], "lookup");
         assert_eq!(body["parallel_tool_calls"], true);
-        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(body["reasoning"]["effort"], "low");
         assert_eq!(body["service_tier"], "priority");
         assert_eq!(body["prompt_cache_key"], "session-1");
         assert_eq!(body["text"], json!({}));

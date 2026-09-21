@@ -196,7 +196,9 @@ resize paths redraw the header where the terminal reports support.
 
 The Rust version of `clud` supports Codex directly. Use `--codex` to switch
 backends for interactive runs, prompt-driven execution, resume flows, and
-detachable sessions.
+detachable sessions. With no explicit or saved Codex profile, direct Codex
+launches start on Sol at low effort. `--model`, `--effort`, and saved
+`providers.codex` settings override that reviewed fallback.
 
 ### Codex through Claude Code (experimental)
 

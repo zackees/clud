@@ -479,6 +479,56 @@ fn repeat_command_pins_the_normalized_model_effort_and_context() {
         .any(|part| part == ["--context-window", "1m"]));
 }
 
+#[test]
+fn repeat_command_pins_the_resolved_codex_catalog_default() {
+    let mut args = Args::parse_from_raw(
+        ["clud", "--codex", "loop", "--repeat", "1h", "task"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    args.resolved_model_selection = crate::provider_catalog::resolve_for_launch(
+        crate::backend::ModelProvider::Codex,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let target = crate::backend::resolve_launch_target(
+        args.claude,
+        args.codex,
+        args.deepseek,
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    let plan = crate::command::build_launch_plan_for_target(&args, target, "codex");
+
+    // A later settings resolution must not alter the plan that the daemon
+    // already recorded for this repeat.  The repeat command is derived from
+    // `plan`, not from the mutable launch arguments.
+    args.resolved_model_selection = crate::provider_catalog::resolve_for_launch(
+        crate::backend::ModelProvider::Codex,
+        Some("codex-terra"),
+        Some("high"),
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let command = build_repeat_once_command(&args, &plan).unwrap();
+    assert!(command
+        .windows(2)
+        .any(|part| part == ["--model", "gpt-5.6-sol"]));
+    assert!(command.windows(2).any(|part| part == ["--effort", "low"]));
+    assert!(!command
+        .iter()
+        .any(|part| part.contains("terra") || part == "high"));
+}
+
 /// Kimi twin of `repeat_command_pins_the_normalized_model_effort_and_context`.
 #[test]
 fn repeat_command_pins_the_normalized_kimi_model_effort_and_context() {

@@ -417,7 +417,7 @@ fn build_launch_plan_for_target_at(
 
     // A Claude-harness gateway must receive its catalog discovery id, not the
     // provider wire id. Claude Code sees and classifies this value before the
-    // bridge can rewrite it; handing it `gpt-5.6-terra@medium` makes the
+    // bridge can rewrite it; handing it `gpt-5.6-sol@low` makes the
     // harness treat a valid 1M model as an unknown 200K model. The bridge owns
     // the `clud-claude-*` namespace and translates it to the wire id at the
     // request boundary.
@@ -711,7 +711,7 @@ fn build_launch_plan_for_target_at(
 /// Canonicalize `--model` for a Codex-provider / Claude-harness launch.
 ///
 /// `None` when this is not that cross-route or neither model nor effort was
-/// selected. Model-less effort pins the bridge's reviewed Terra default. A
+/// selected. Model-less effort pins the bridge's reviewed catalog default. A
 /// parse failure remains bridge-owned and does not substitute another model.
 fn codex_model_selection(
     args: &Args,
@@ -727,9 +727,10 @@ fn codex_model_selection(
     if let Some(selection) = selection {
         let mut value = selection.wire_model.clone().or_else(|| {
             selection.effort.map(|_| {
-                ModelSpec::parse("terra")
-                    .expect("the provider catalog must retain the Terra compatibility alias")
-                    .model
+                provider_catalog::reviewed_default_model(ModelProvider::Codex)
+                    .expect("Codex must have a reviewed catalog default")
+                    .wire_id
+                    .to_string()
             })
         })?;
         if let Some(effort) = selection.effort {
