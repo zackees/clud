@@ -11,6 +11,7 @@ pub mod backend_bootstrap;
 pub mod block_bad_cmd;
 pub mod block_bad_cmd_rollout;
 pub mod bridge_log;
+pub mod cache_health;
 pub mod capture;
 pub mod civil_time;
 pub mod clud_hook_roots;

@@ -263,11 +263,13 @@ impl ConversationHistory {
     /// A provider change invalidates every provider-private item from the
     /// previous epoch. The next Codex request then reseeds from the complete
     /// Anthropic-visible transcript supplied by Claude Code.
-    pub fn enter_route(&mut self, route: ConversationRoute) {
-        if self.route.is_some_and(|previous| previous != route) {
+    pub fn enter_route(&mut self, route: ConversationRoute) -> bool {
+        let changed = self.route.is_some_and(|previous| previous != route);
+        if changed {
             self.clear();
         }
         self.route = Some(route);
+        changed
     }
 
     /// Clear this transcript while its conversation mutex remains held.

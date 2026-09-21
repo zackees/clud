@@ -3,6 +3,7 @@
 
 use crate::backend::ModelProvider;
 use crate::bridge_log::{unix_ms, BridgeLog};
+use crate::cache_health::{CacheHealth, CacheHealthTracker, TokenUsage};
 use crate::codex_history::{ConversationKey, ConversationRoute, ConversationStore, HistoryLimits};
 use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
@@ -91,6 +92,7 @@ const ABANDON: u16 = 0;
 
 type ActiveConnections = Arc<Mutex<HashMap<usize, TcpStream>>>;
 type SharedBridgeLog = Arc<Mutex<BridgeLog>>;
+type SharedCacheHealth = Arc<Mutex<CacheHealthTracker>>;
 
 const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
 const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
@@ -444,6 +446,7 @@ impl BridgeHandle {
         });
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let turn_requests = Arc::clone(&config.turn_requests);
+        let cache_health = Arc::new(Mutex::new(CacheHealthTracker::default()));
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_active = Arc::clone(&active);
         let thread_conversations = conversations.clone();
@@ -451,6 +454,7 @@ impl BridgeHandle {
         let thread_log = log.clone();
         let thread_token = bearer_token.clone();
         let thread_fallback_root = fallback_root.clone();
+        let thread_cache_health = Arc::clone(&cache_health);
         let join = thread::Builder::new()
             .name("clud-codex-bridge".to_string())
             .spawn(move || {
@@ -465,6 +469,7 @@ impl BridgeHandle {
                     thread_connections,
                     thread_log,
                     thread_fallback_root,
+                    thread_cache_health,
                 )
             })
             .map_err(BridgeError::Spawn)?;
@@ -562,6 +567,7 @@ fn serve(
     connections: ActiveConnections,
     log: Option<SharedBridgeLog>,
     fallback_root: String,
+    cache_health: SharedCacheHealth,
 ) {
     let mut workers = Vec::<JoinHandle<()>>::new();
     let mut next_worker_id = 0_usize;
@@ -636,6 +642,7 @@ fn serve(
                     let worker_token = bearer_token.clone();
                     let worker_log = log.clone();
                     let worker_fallback_root = fallback_root.clone();
+                    let worker_cache_health = Arc::clone(&cache_health);
                     match thread::Builder::new()
                         .name("clud-codex-bridge-request".to_string())
                         .spawn(move || {
@@ -652,6 +659,7 @@ fn serve(
                                 &worker_conversations,
                                 worker_log.as_ref(),
                                 &worker_fallback_root,
+                                &worker_cache_health,
                             );
                         }) {
                         Ok(worker) => workers.push(worker),
@@ -710,6 +718,7 @@ impl Drop for ActiveWorker {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_connection(
     mut stream: TcpStream,
     config: &BridgeConfig,
@@ -718,6 +727,7 @@ fn handle_connection(
     conversations: &ConversationStore,
     log: Option<&SharedBridgeLog>,
     fallback_root: &str,
+    cache_health: &SharedCacheHealth,
 ) {
     #[cfg(test)]
     if let Some(notifier) = &config.admission_notifier {
@@ -802,6 +812,7 @@ fn handle_connection(
                     conversations,
                     log,
                     body_key.unwrap_or_else(|| conversation_key.clone()),
+                    cache_health,
                 ),
                 Err(ABANDON) => {}
                 Err(status) => {
@@ -825,6 +836,7 @@ fn handle_connection(
                     &mut stream,
                     conversations,
                     body_key.unwrap_or_else(|| conversation_key.clone()),
+                    cache_health,
                 ),
                 Err(ABANDON) => {}
                 Err(status) => {
@@ -930,6 +942,7 @@ fn handle_connection(
                 &body,
                 &conversation_key,
                 &parsed.headers,
+                cache_health,
             );
         }
         ("POST", "/v1/messages") => {
@@ -974,6 +987,7 @@ fn handle_connection(
                     &conversation_key,
                     &parsed.headers,
                     log,
+                    cache_health,
                 );
             } else {
                 serve_codex_discovery_messages(
@@ -985,6 +999,7 @@ fn handle_connection(
                     streaming,
                     &conversation_key,
                     log,
+                    cache_health,
                 );
             }
         }
@@ -1255,6 +1270,7 @@ fn serve_context_compact(
     conversations: &ConversationStore,
     log: Option<&SharedBridgeLog>,
     conversation_key: ConversationKey,
+    cache_health: &SharedCacheHealth,
 ) {
     let operation = conversations.with_history(&conversation_key.id, |history| {
         let snapshot = history.snapshot();
@@ -1290,6 +1306,7 @@ fn serve_context_compact(
     });
     match operation {
         Ok(Ok(())) => {
+            lock_cache_health(cache_health).mark_boundary(&conversation_key.id);
             let _ = write_response(stream, 204, "application/json", b"", false);
         }
         Ok(Err(error)) => {
@@ -1363,11 +1380,13 @@ fn serve_context_clear(
     stream: &mut TcpStream,
     conversations: &ConversationStore,
     conversation_key: ConversationKey,
+    cache_health: &SharedCacheHealth,
 ) {
     conversations.clear_session(&conversation_key.session_prefix);
     let result = Ok::<(), crate::codex_history::HistoryError>(());
     match result {
         Ok(()) => {
+            lock_cache_health(cache_health).clear_session(&conversation_key.session_prefix);
             let _ = write_response(stream, 204, "application/json", b"", false);
         }
         Err(error) => {
@@ -1431,6 +1450,7 @@ fn serve_unified_messages(
     conversation_key: &ConversationKey,
     headers: &[(String, String)],
     log: Option<&SharedBridgeLog>,
+    cache_health: &SharedCacheHealth,
 ) {
     let GatewayMode::Unified(unified) = &config.gateway_mode else {
         unreachable!("unified request dispatch is guarded by the caller");
@@ -1565,6 +1585,7 @@ fn serve_unified_messages(
                 config.stream_idle_timeout,
                 shutdown,
                 probe,
+                cache_health,
             ),
             ModelProvider::DeepSeek if unified.deepseek_api_key.is_some() => {
                 serve_unified_anthropic_proxy(
@@ -1580,6 +1601,7 @@ fn serve_unified_messages(
                     config.stream_idle_timeout,
                     shutdown,
                     probe,
+                    cache_health,
                 )
             }
             ModelProvider::OpenRouter if unified.openrouter_api_key.is_some() => {
@@ -1596,6 +1618,7 @@ fn serve_unified_messages(
                     config.stream_idle_timeout,
                     shutdown,
                     probe,
+                    cache_health,
                 )
             }
             ModelProvider::Codex if unified.codex_available => {
@@ -1612,6 +1635,7 @@ fn serve_unified_messages(
                     conversation_key,
                     Some(ConversationRoute::Codex),
                     log,
+                    cache_health,
                 );
                 ProxyOutcome::local(200)
             }
@@ -1662,6 +1686,7 @@ fn serve_unified_messages(
                         &payload,
                         attempt.route,
                         shutdown,
+                        cache_health,
                     );
                 };
                 warn_route_exhausted(attempt.route, verdict, state, Some(&rung));
@@ -1720,6 +1745,7 @@ fn finish_without_failover(
     payload: &[u8],
     route: ConversationRoute,
     shutdown: &AtomicBool,
+    cache_health: &SharedCacheHealth,
 ) {
     let (base_url, key) = match route {
         ConversationRoute::DeepSeek => (
@@ -1745,6 +1771,7 @@ fn finish_without_failover(
         config.stream_idle_timeout,
         shutdown,
         false,
+        cache_health,
     );
 }
 
@@ -1762,12 +1789,15 @@ fn serve_unified_anthropic_proxy(
     idle_timeout: Duration,
     shutdown: &AtomicBool,
     probe: bool,
+    cache_health: &SharedCacheHealth,
 ) -> ProxyOutcome {
     let mut outcome = ProxyOutcome::local(500);
     let routed = conversations.with_history(&conversation_key.id, |history| {
         // Crossing a provider boundary starts a new route epoch, which is
         // exactly what a failover is: a provider switch nobody typed.
-        history.enter_route(route);
+        if history.enter_route(route) {
+            lock_cache_health(cache_health).mark_boundary(&conversation_key.id);
+        }
         outcome = serve_anthropic_proxy(
             stream,
             AnthropicProxyTarget {
@@ -1805,6 +1835,7 @@ fn serve_unified_count_tokens(
     body: &[u8],
     conversation_key: &ConversationKey,
     headers: &[(String, String)],
+    cache_health: &SharedCacheHealth,
 ) {
     let GatewayMode::Unified(unified) = &config.gateway_mode else {
         unreachable!("unified token-count dispatch is guarded by the caller");
@@ -1847,6 +1878,7 @@ fn serve_unified_count_tokens(
         config.stream_idle_timeout,
         shutdown,
         false,
+        cache_health,
     );
 }
 
@@ -2076,6 +2108,7 @@ fn serve_codex_discovery_messages(
     streaming: bool,
     conversation_key: &ConversationKey,
     log: Option<&SharedBridgeLog>,
+    cache_health: &SharedCacheHealth,
 ) {
     let mut request: serde_json::Value = match serde_json::from_slice(body) {
         Ok(request) => request,
@@ -2218,6 +2251,7 @@ fn serve_codex_discovery_messages(
         conversation_key,
         None,
         log,
+        cache_health,
     );
 }
 
@@ -2238,6 +2272,7 @@ fn serve_messages(
     conversation_key: &ConversationKey,
     unified_route: Option<ConversationRoute>,
     log: Option<&SharedBridgeLog>,
+    cache_health: &SharedCacheHealth,
 ) {
     let pipeline = match build_pipeline(config, log, conversation_key) {
         Ok(pipeline) => pipeline,
@@ -2253,7 +2288,14 @@ fn serve_messages(
         let mut writer = EventStreamWriter::new(stream, config);
         let streamed = conversations.with_history(&conversation_key.id, |history| {
             if let Some(route) = unified_route {
-                history.enter_route(route);
+                if history.enter_route(route) {
+                    lock_cache_health(cache_health).mark_boundary(&conversation_key.id);
+                }
+            }
+            if lock_cache_health(cache_health).health(&conversation_key.id)
+                == CacheHealth::FuseTripped
+            {
+                return Ok(None);
             }
             let streamed = {
                 let mut sink = |frame: &str| -> Result<(), UpstreamError> {
@@ -2268,11 +2310,14 @@ fn serve_messages(
                     let _ = writer.finish();
                     summary.clear_history_after_client_commit(history);
                 }
+                // This remains inside the conversation lock: a queued sibling
+                // must observe a newly armed fuse before it can reach upstream.
+                record_cache_usage(cache_health, conversation_key, summary.usage, log);
             }
-            Ok(streamed)
+            Ok(Some(streamed))
         });
         match streamed {
-            Ok(Ok(summary)) => {
+            Ok(Some(Ok(summary))) => {
                 if summary.orphaned_outputs_repaired > 0 {
                     log_orphaned_outputs_repaired(log, summary.orphaned_outputs_repaired);
                 }
@@ -2303,7 +2348,7 @@ fn serve_messages(
                     let _ = writer.finish();
                 }
             }
-            Ok(Err(error)) => {
+            Ok(Some(Err(error))) => {
                 log_continuation_invariant(&error, conversation_key, log);
                 if writer.started() {
                     // Committed: the pipeline has already emitted a sanitized
@@ -2325,13 +2370,20 @@ fn serve_messages(
                 );
                 let _ = write_pipeline_error(stream, &failure, log);
             }
+            Ok(None) => write_cache_fuse_refusal(stream, log, conversation_key),
         }
         return;
     }
 
     match conversations.with_history(&conversation_key.id, |history| {
         if let Some(route) = unified_route {
-            history.enter_route(route);
+            if history.enter_route(route) {
+                lock_cache_health(cache_health).mark_boundary(&conversation_key.id);
+            }
+        }
+        if lock_cache_health(cache_health).health(&conversation_key.id) == CacheHealth::FuseTripped
+        {
+            return Ok(None);
         }
         let completed = pipeline
             .complete_with_history(body, &message_id, shutdown, history)
@@ -2347,11 +2399,14 @@ fn serve_messages(
                 if write_response(stream, 200, "application/json", &rendered, false).is_ok() {
                     completion.clear_history_after_client_commit(history);
                 }
+                // Keep health accounting ordered with the history mutation so a
+                // queued sibling rechecks the fuse after this turn completes.
+                record_cache_usage(cache_health, conversation_key, completion.usage, log);
             });
-        Ok(completed)
+        Ok(Some(completed))
     }) {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(error))) => {
             log_continuation_invariant(&error, conversation_key, log);
             if let PipelineError::Provider(failure) = &error {
                 if let Some(diagnostic) = &failure.diagnostic {
@@ -2371,6 +2426,7 @@ fn serve_messages(
             );
             let _ = write_pipeline_error(stream, &failure, log);
         }
+        Ok(None) => write_cache_fuse_refusal(stream, log, conversation_key),
     }
 }
 
@@ -2661,6 +2717,85 @@ fn retry_after_header(error: &PipelineError) -> Vec<(String, String)> {
 
 fn lock_log(log: &SharedBridgeLog) -> std::sync::MutexGuard<'_, BridgeLog> {
     log.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_cache_health(health: &SharedCacheHealth) -> std::sync::MutexGuard<'_, CacheHealthTracker> {
+    health
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn record_cache_usage(
+    health: &SharedCacheHealth,
+    conversation_key: &ConversationKey,
+    usage: Option<TokenUsage>,
+    log: Option<&SharedBridgeLog>,
+) {
+    let Some(usage) = usage else {
+        return;
+    };
+    let mut health = lock_cache_health(health);
+    let before = health.health(&conversation_key.id);
+    let after = health.record(&conversation_key.id, usage);
+    let totals = health.totals(&conversation_key.id);
+    drop(health);
+    if after == before {
+        return;
+    }
+    if let Some(log) = log {
+        lock_log(log).record(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "cache_health",
+            "conversation_scope": conversation_key.scope(),
+            "state": cache_health_name(after),
+            "input_tokens": usage.input_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "uncached_input_tokens": usage.uncached_input_tokens(),
+            "output_tokens": usage.output_tokens,
+            "request_count": totals.request_count,
+            "total_input_tokens": totals.input_tokens,
+            "total_cached_input_tokens": totals.cached_input_tokens,
+            "total_output_tokens": totals.output_tokens,
+        }));
+    }
+    match after {
+        CacheHealth::Degraded => eprintln!(
+            "\x07[clud] codex bridge: repeated large requests have little cache credit; the next misses may be stopped before more plan usage is consumed"
+        ),
+        CacheHealth::FuseTripped => eprintln!(
+            "\x07[clud] codex bridge: cache-health fuse armed; the next Codex request will be stopped before another large uncached replay"
+        ),
+        CacheHealth::Cold | CacheHealth::Healthy => {}
+    }
+}
+
+fn record_cache_fuse_refusal(log: Option<&SharedBridgeLog>, conversation_key: &ConversationKey) {
+    if let Some(log) = log {
+        lock_log(log).record(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "cache_health_fuse_refused",
+            "conversation_scope": conversation_key.scope(),
+        }));
+    }
+}
+
+fn write_cache_fuse_refusal(
+    stream: &mut TcpStream,
+    log: Option<&SharedBridgeLog>,
+    conversation_key: &ConversationKey,
+) {
+    record_cache_fuse_refusal(log, conversation_key);
+    let body = br#"{"type":"error","error":{"type":"overloaded_error","message":"clud stopped this Codex conversation after repeated large uncached requests; run /clear or restart after investigating cache health, or switch to --harness codex"}}"#;
+    let _ = write_response(stream, 429, "application/json", body, false);
+}
+
+fn cache_health_name(health: CacheHealth) -> &'static str {
+    match health {
+        CacheHealth::Cold => "cold",
+        CacheHealth::Healthy => "healthy",
+        CacheHealth::Degraded => "degraded",
+        CacheHealth::FuseTripped => "fuse_tripped",
+    }
 }
 
 fn record_rejection(log: Option<&SharedBridgeLog>, status: u16, reason: &'static str) {
@@ -3414,6 +3549,15 @@ Connection: close
         .into_bytes()
     }
 
+    fn large_uncached_response() -> Vec<u8> {
+        response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n\
+             event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0}\n\n\
+             event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100000,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n",
+        )
+    }
+
     fn context_length_failure_response() -> Vec<u8> {
         response_with_events(
             "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
@@ -3637,6 +3781,100 @@ Connection: close
         r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
     const PROBE_STREAM_BODY: &str =
         r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+
+    #[test]
+    fn cache_health_fuse_stops_the_next_large_uncached_bridge_turn() {
+        let upstream = FakeResponses::start_with_response(Some(large_uncached_response()));
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("bridge.jsonl");
+        let mut bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_test_upstream_url(Some(upstream.base_url.clone()))
+                .with_log_path(log_path.clone()),
+        )
+        .unwrap();
+        let headers = [("X-Claude-Code-Session-Id", "raw-session-must-not-log")];
+        for _ in 0..4 {
+            let response = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    PROBE_BODY,
+                    &headers,
+                ),
+            );
+            assert_eq!(status(&response), 200, "{response}");
+        }
+        let refused = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_BODY,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&refused), 429, "{refused}");
+        assert_eq!(
+            upstream.requests().len(),
+            4,
+            "the fuse blocks before upstream"
+        );
+        bridge.shutdown().unwrap();
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("cache_health_fuse_refused"));
+        assert!(!log.contains("raw-session-must-not-log"));
+        assert!(!log.contains("\"content\":\"hi\""));
+    }
+
+    #[test]
+    fn concurrent_turns_recheck_the_fuse_after_the_prior_turn_commits_usage() {
+        let upstream = FakeResponses::start_with_response(Some(large_uncached_response()));
+        let mut bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_test_upstream_url(Some(upstream.base_url.clone()))
+                // Align request handling so the old request-time preflight
+                // would admit all five before any terminal usage arrived.
+                .with_request_hold(Duration::from_millis(100)),
+        )
+        .unwrap();
+        let session = [("X-Claude-Code-Session-Id", "concurrent-cache-health")];
+        let address = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let mut statuses = thread::scope(|scope| {
+            let mut turns = Vec::new();
+            for _ in 0..5 {
+                let barrier = Arc::clone(&barrier);
+                let token = token.clone();
+                turns.push(scope.spawn(move || {
+                    barrier.wait();
+                    let response = request(
+                        address,
+                        &authorized_with_headers(
+                            "POST",
+                            "/v1/messages",
+                            &token,
+                            PROBE_BODY,
+                            &session,
+                        ),
+                    );
+                    status(&response)
+                }));
+            }
+            turns
+                .into_iter()
+                .map(|turn| turn.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        statuses.sort_unstable();
+        assert_eq!(statuses, [200, 200, 200, 200, 429]);
+        assert_eq!(upstream.requests().len(), 4, "the fifth turn stays local");
+        bridge.shutdown().unwrap();
+    }
 
     fn status(response: &str) -> u16 {
         response
