@@ -118,6 +118,10 @@ leaving the panel closes hover expansion. clud never enables either mode, and
 only consumes reports addressed to its panel. This retains selection and
 scrollback behavior for terminals and TUIs that do not request mouse input.
 
+When no Kitty overlay can be drawn, the title fallback carries the effective
+model and cache-health state. Claude's injected status line continues to show
+the full exact token counters from the same launch snapshot.
+
 ### Text-cell tier
 
 `toast/text_tier.rs` paints a one-row toast. Removal repaints the rectangle

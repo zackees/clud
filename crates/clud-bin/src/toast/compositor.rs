@@ -25,7 +25,9 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 use super::kitty;
 use super::raster;
-use super::statusline::{usage_details, usage_summary, StatusStateWriter, StatusUsage};
+use super::statusline::{
+    usage_details, usage_summary, usage_title, StatusStateWriter, StatusUsage,
+};
 use super::text_tier::{self, CellRect};
 use super::tier::ToastTier;
 use super::tracker::EscapeTracker;
@@ -413,7 +415,11 @@ impl Compositor {
                 Target::Nothing => self.input.set(None),
             }
         } else {
-            self.input.set(None);
+            if target == Target::Title {
+                out.extend(self.draw_usage_title());
+            } else {
+                self.input.set(None);
+            }
         }
         out.extend(self.render_usage());
         out
@@ -421,6 +427,12 @@ impl Compositor {
 
     fn target(&self) -> Target {
         if self.visible.is_none() {
+            if self.usage.is_some()
+                && !self.usage_target()
+                && matches!(self.fallback, Fallback::Title)
+            {
+                return Target::Title;
+            }
             return Target::Nothing;
         }
         let (rows, cols) = self.shadow.screen().size();
@@ -599,12 +611,21 @@ impl Compositor {
     }
 
     fn draw_title(&mut self, toast: &Toast) -> Vec<u8> {
+        self.draw_title_text(&toast.text)
+    }
+
+    fn draw_usage_title(&mut self) -> Vec<u8> {
+        let usage = self.usage.as_ref().expect("usage title has usage");
+        self.draw_title_text(&usage_title(usage))
+    }
+
+    fn draw_title_text(&mut self, value: &str) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.title_pushed {
             out.extend_from_slice(b"\x1b[22;0t");
             self.title_pushed = true;
         }
-        let text: String = toast.text.chars().filter(|c| !c.is_control()).collect();
+        let text: String = value.chars().filter(|c| !c.is_control()).collect();
         out.extend_from_slice(format!("\x1b]2;clud \u{b7} {text}\x07").as_bytes());
         self.drawn = Drawn::Title;
         self.input.set(None);

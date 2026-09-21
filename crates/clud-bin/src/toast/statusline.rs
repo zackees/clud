@@ -277,6 +277,15 @@ pub fn usage_details(usage: &StatusUsage) -> String {
     )
 }
 
+/// Bounded title-fallback label for terminals without an in-grid HUD.
+pub fn usage_title(usage: &StatusUsage) -> String {
+    format!(
+        "{} - {}",
+        safe_label(&usage.model),
+        safe_label(&usage.cache_health)
+    )
+}
+
 fn safe_label(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).take(96).collect()
 }
