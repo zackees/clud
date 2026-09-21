@@ -374,6 +374,7 @@ pub fn run_plan_subprocess(
         plan,
         child_env_for_backend(plan.backend),
         statusline.as_ref(),
+        status_writer.as_ref(),
     ) {
         Ok(runtime) => runtime,
         Err(error) => {

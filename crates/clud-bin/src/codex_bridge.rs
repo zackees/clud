@@ -3,7 +3,7 @@
 
 use crate::backend::ModelProvider;
 use crate::bridge_log::{unix_ms, BridgeLog};
-use crate::cache_health::{CacheHealth, CacheHealthTracker, TokenUsage};
+use crate::cache_health::{CacheHealth, CacheHealthTracker, TokenUsage, UsageTotals};
 use crate::codex_history::{ConversationKey, ConversationRoute, ConversationStore, HistoryLimits};
 use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
@@ -93,6 +93,16 @@ const ABANDON: u16 = 0;
 type ActiveConnections = Arc<Mutex<HashMap<usize, TcpStream>>>;
 type SharedBridgeLog = Arc<Mutex<BridgeLog>>;
 type SharedCacheHealth = Arc<Mutex<CacheHealthTracker>>;
+/// Launch-wide terminal usage is deliberately separate from the per-agent
+/// cache-health windows. Compaction and sibling conversations reset their
+/// safety-fuse state, but must never make a user's visible totals decrease.
+#[derive(Default)]
+struct StatusUsageState {
+    writer: Option<Arc<crate::toast::statusline::StatusStateWriter>>,
+    totals: UsageTotals,
+}
+
+type SharedStatusUsage = Arc<Mutex<StatusUsageState>>;
 
 const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
 const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
@@ -239,6 +249,7 @@ pub struct BridgeConfig {
     log_path: Option<std::path::PathBuf>,
     log_max_bytes: usize,
     test_upstream_url: Option<String>,
+    status_usage: SharedStatusUsage,
     /// How many `POST /v1/messages` turns the harness has asked this bridge to
     /// serve. Shared with [`BridgeHandle`] so a launch that exited without ever
     /// asking can be told apart from one that asked and was refused (#998).
@@ -267,6 +278,7 @@ impl Default for BridgeConfig {
             log_path: default_bridge_log_path(),
             log_max_bytes: crate::bridge_log::DEFAULT_MAX_BYTES,
             test_upstream_url: test_upstream_override_from_process(),
+            status_usage: Arc::new(Mutex::new(StatusUsageState::default())),
             turn_requests: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             request_hold: Duration::ZERO,
@@ -441,6 +453,7 @@ pub struct BridgeHandle {
     connections: ActiveConnections,
     log: Option<SharedBridgeLog>,
     turn_requests: Arc<AtomicUsize>,
+    status_usage: SharedStatusUsage,
     join: Option<JoinHandle<()>>,
 }
 
@@ -475,6 +488,7 @@ impl BridgeHandle {
         });
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let turn_requests = Arc::clone(&config.turn_requests);
+        let status_usage = Arc::clone(&config.status_usage);
         let cache_health = Arc::new(Mutex::new(CacheHealthTracker::default()));
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_active = Arc::clone(&active);
@@ -515,6 +529,7 @@ impl BridgeHandle {
             connections,
             log,
             turn_requests,
+            status_usage,
             join: Some(join),
         })
     }
@@ -537,6 +552,19 @@ impl BridgeHandle {
     /// `launch_log::silent_bridge_reason` (#998).
     pub(crate) fn turn_requests(&self) -> usize {
         self.turn_requests.load(Ordering::Acquire)
+    }
+
+    /// Attach the launch-owned status writer after the bridge starts. This is
+    /// intentionally a late binding because foreground startup creates the
+    /// bridge before composing Claude's launch-scoped settings file.
+    pub(crate) fn set_status_usage_writer(
+        &self,
+        writer: Arc<crate::toast::statusline::StatusStateWriter>,
+    ) {
+        self.status_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .writer = Some(writer);
     }
 
     #[cfg(test)]
@@ -2341,7 +2369,14 @@ fn serve_messages(
                 }
                 // This remains inside the conversation lock: a queued sibling
                 // must observe a newly armed fuse before it can reach upstream.
-                record_cache_usage(cache_health, conversation_key, summary.usage, log);
+                record_cache_usage(
+                    cache_health,
+                    &config.status_usage,
+                    conversation_key,
+                    &summary.model,
+                    summary.usage,
+                    log,
+                );
             }
             Ok(Some(streamed))
         });
@@ -2430,7 +2465,14 @@ fn serve_messages(
                 }
                 // Keep health accounting ordered with the history mutation so a
                 // queued sibling rechecks the fuse after this turn completes.
-                record_cache_usage(cache_health, conversation_key, completion.usage, log);
+                record_cache_usage(
+                    cache_health,
+                    &config.status_usage,
+                    conversation_key,
+                    &completion.model,
+                    completion.usage,
+                    log,
+                );
             });
         Ok(Some(completed))
     }) {
@@ -2756,7 +2798,9 @@ fn lock_cache_health(health: &SharedCacheHealth) -> std::sync::MutexGuard<'_, Ca
 
 fn record_cache_usage(
     health: &SharedCacheHealth,
+    status_usage: &SharedStatusUsage,
     conversation_key: &ConversationKey,
+    model: &str,
     usage: Option<TokenUsage>,
     log: Option<&SharedBridgeLog>,
 ) {
@@ -2768,6 +2812,42 @@ fn record_cache_usage(
     let after = health.record(&conversation_key.id, usage);
     let totals = health.totals(&conversation_key.id);
     drop(health);
+    let published = {
+        let mut status = status_usage.lock().unwrap_or_else(|e| e.into_inner());
+        status.totals.request_count = status.totals.request_count.saturating_add(1);
+        status.totals.input_tokens = status
+            .totals
+            .input_tokens
+            .saturating_add(usage.input_tokens);
+        status.totals.cached_input_tokens = status
+            .totals
+            .cached_input_tokens
+            .saturating_add(usage.cached_input_tokens);
+        status.totals.output_tokens = status
+            .totals
+            .output_tokens
+            .saturating_add(usage.output_tokens);
+        let totals = status.totals;
+        status.writer.clone().map(|writer| {
+            (
+                writer,
+                crate::toast::statusline::StatusUsage {
+                    provider: "codex".to_string(),
+                    model: model.to_string(),
+                    request_count: totals.request_count,
+                    cached_input_tokens: totals.cached_input_tokens,
+                    uncached_input_tokens: totals
+                        .input_tokens
+                        .saturating_sub(totals.cached_input_tokens),
+                    output_tokens: totals.output_tokens,
+                    cache_health: cache_health_name(after).to_string(),
+                },
+            )
+        })
+    };
+    if let Some((writer, status)) = published {
+        writer.publish_usage(status);
+    }
     if after == before {
         return;
     }
@@ -3915,6 +3995,83 @@ Connection: close
         assert!(log.contains("cache_health_fuse_refused"));
         assert!(!log.contains("raw-session-must-not-log"));
         assert!(!log.contains("\"content\":\"hi\""));
+    }
+
+    #[test]
+    fn terminal_codex_usage_is_published_to_the_session_status_writer() {
+        let upstream = FakeResponses::start_with_response(Some(large_uncached_response()));
+        let directory = tempfile::tempdir().unwrap();
+        let writer = std::sync::Arc::new(crate::toast::statusline::StatusStateWriter::new(
+            crate::toast::statusline::state_path(directory.path(), 77),
+        ));
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        bridge.set_status_usage_writer(std::sync::Arc::clone(&writer));
+        for agent in [None, Some("status-agent"), None] {
+            let mut headers = vec![("X-Claude-Code-Session-Id", "status-session")];
+            if let Some(agent) = agent {
+                headers.push(("x-claude-code-agent-id", agent));
+            }
+            let response = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    PROBE_BODY,
+                    &headers,
+                ),
+            );
+            assert_eq!(status(&response), 200, "{response}");
+        }
+        let cleared = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/_clud/context/clear",
+                bridge.bearer_token(),
+                r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"status-session"}"#,
+            ),
+        );
+        assert_eq!(status(&cleared), 204, "{cleared}");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_BODY,
+                &[("X-Claude-Code-Session-Id", "status-session")],
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        // The client can finish reading the HTTP response a few instructions
+        // before the worker records its terminal telemetry. Wait only for the
+        // local state write, never for a provider or a new request.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let usage = loop {
+            if let Some(usage) = crate::toast::statusline::read_live_usage(
+                writer.path(),
+                crate::toast::statusline::now_ms(),
+            ) {
+                if usage.request_count == 4 {
+                    break usage;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "second usage update was not published"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(usage.provider, "codex");
+        assert_eq!(usage.model, "gpt-5.6-terra");
+        assert_eq!(usage.request_count, 4);
+        assert_eq!(usage.cached_input_tokens, 0);
+        assert_eq!(usage.uncached_input_tokens, 400_000);
+        assert_eq!(usage.output_tokens, 4);
+        // The last post-clear turn is cold, while the counters retain every
+        // main and agent terminal report from this bridge lifetime.
+        assert_eq!(usage.cache_health, "cold");
     }
 
     #[test]
