@@ -6297,9 +6297,15 @@ Connection: close
             .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
             .nth(1)
             .expect("post-clear inference request");
-        assert!(post_clear.contains("fresh"), "{post_clear}");
+        let post_clear_body = post_clear
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("upstream request has an HTTP body");
+        let fresh_input = regex::Regex::new(r#""text"\s*:\s*"fresh""#).unwrap();
+        let stale_input = regex::Regex::new(r#""text"\s*:\s*"hi""#).unwrap();
+        assert!(fresh_input.is_match(post_clear_body), "{post_clear}");
         assert!(
-            !post_clear.contains("hi"),
+            !stale_input.is_match(post_clear_body),
             "stale pre-clear input leaked: {post_clear}"
         );
     }
