@@ -96,7 +96,11 @@ def test_release_wheel_uses_target_prefixed_objcopy_when_llvm_is_absent(
     monkeypatch.setattr(
         build_wheel.shutil,
         "which",
-        lambda candidate: cross_objcopy if candidate == cross_objcopy else None,
+        lambda candidate: (
+            candidate
+            if candidate.replace("\\", "/").endswith("/aarch64-conda-linux-gnu-objcopy")
+            else None
+        ),
     )
 
     class Result:
@@ -110,7 +114,7 @@ def test_release_wheel_uses_target_prefixed_objcopy_when_llvm_is_absent(
     )
 
     assert build_wheel.remove_elf_debug_metadata(wheel)
-    assert calls[0][0] == cross_objcopy
+    assert calls[0][0].replace("\\", "/") == cross_objcopy
 
 
 def test_release_wheel_reports_missing_elf_objcopy(monkeypatch) -> None:
