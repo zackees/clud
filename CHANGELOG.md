@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- `clud --codex --harness claude` now keeps a stable Codex cache identity for
+  each conversation and opens a cache-health fuse when a replay loses cache
+  reuse. Mocked harness coverage exercises the direct Codex bridge and every
+  unified route (Claude, DeepSeek, and OpenRouter), while the opt-in live
+  cache canary proves a second identical call returns cache-read tokens.
+  See zackees/clud#1226.
+- Usage feedback is available for direct and unified bridge routes: the
+  terminal title has a concise fallback, Kitty has a persistent strip, and
+  hovering it reveals cached-read, uncached-read, and output-write token
+  counts plus the source model. See zackees/clud#1227.
+- The command hook's removal identity guard now recognizes ANSI-C quoted
+  prose without weakening protection against commands that can remove the
+  shim. See zackees/clud#1228.
+- Nested sessions now honor `CLUD_NO_BASH_NOUNSET=1` even when they inherit
+  clud's own `BASH_ENV`, while preserving a user-owned `BASH_ENV`.
+
 - The bundled MCP bridge (`src/clud/mcp_server.py`) exposes clud's durable
   `/v1/sessions` lifecycle as async tools — `session_start` returns a
   `session_id` immediately (optional `wait_seconds` for a synchronous answer
