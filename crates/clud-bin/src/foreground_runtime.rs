@@ -328,8 +328,12 @@ impl ForegroundRuntime {
         plan: &LaunchPlan,
         env: Vec<(String, String)>,
         statusline: Option<&crate::toast::launch::StatuslineInjection>,
+        status_writer: Option<&std::sync::Arc<crate::toast::statusline::StatusStateWriter>>,
     ) -> Result<Self, BridgeError> {
         let mut runtime = Self::start(plan, env)?;
+        if let (Some(bridge), Some(writer)) = (runtime.bridge.as_ref(), status_writer) {
+            bridge.set_status_usage_writer(std::sync::Arc::clone(writer));
+        }
         if let Some(injection) = statusline {
             let home = dirs::home_dir();
             runtime.inject_statusline(plan, injection, home.as_deref())?;

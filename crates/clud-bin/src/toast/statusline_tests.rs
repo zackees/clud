@@ -53,6 +53,7 @@ fn an_orphaned_live_toast_goes_stale() {
             severity: Severity::Alert,
             expires_ms: None,
         }),
+        usage: None,
     };
     std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
     let stale = u64::try_from(STALE_AFTER.as_millis()).unwrap();
@@ -93,6 +94,57 @@ fn the_rendered_line_is_coloured_and_control_free() {
     assert!(
         !line.contains("\x1b[2J"),
         "control bytes in toast text are stripped"
+    );
+}
+
+#[test]
+fn provider_usage_is_persistent_distinct_and_stale_safe() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 15);
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: "gpt-5.6-terra".into(),
+        request_count: 2,
+        cached_input_tokens: 12_345,
+        uncached_input_tokens: 67_890,
+        output_tokens: 12,
+        cache_health: "healthy".into(),
+    });
+    let usage = read_live_usage(writer.path(), now_ms()).expect("live usage");
+    assert_eq!(usage.cached_input_tokens, 12_345);
+    assert_eq!(usage.uncached_input_tokens, 67_890);
+    let line = render_usage(&usage);
+    assert!(
+        line.contains("read 12.3K cached / 67.8K uncached"),
+        "{line}"
+    );
+    assert!(line.contains("write 12"), "{line}");
+    assert!(line.contains("gpt-5.6-terra"), "{line}");
+    let stale = now_ms().saturating_add(u64::try_from(STALE_AFTER.as_millis()).unwrap() + 1);
+    assert!(read_live_usage(writer.path(), stale).is_none());
+}
+
+#[test]
+fn a_delayed_older_usage_snapshot_cannot_replace_newer_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 16);
+    let snapshot = |request_count, uncached_input_tokens| StatusUsage {
+        provider: "codex".into(),
+        model: "gpt-5.6-terra".into(),
+        request_count,
+        cached_input_tokens: 0,
+        uncached_input_tokens,
+        output_tokens: request_count,
+        cache_health: "healthy".into(),
+    };
+    writer.publish_usage(snapshot(2, 200));
+    // This simulates an older worker acquiring the status writer after the
+    // second terminal response already committed its aggregate snapshot.
+    writer.publish_usage(snapshot(1, 100));
+    assert_eq!(
+        read_live_usage(writer.path(), now_ms()),
+        Some(snapshot(2, 200)),
+        "the visible ledger must remain monotonic"
     );
 }
 
@@ -285,4 +337,35 @@ fn render_prints_the_user_line_then_the_live_toast() {
     let mut out = Vec::new();
     render_into(&mut out, &quiet, b"{}", now_ms());
     assert!(out.is_empty(), "no user line and no toast prints nothing");
+}
+
+#[test]
+fn render_prints_usage_between_the_user_line_and_toast() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 22);
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: "gpt-5.6-terra".into(),
+        request_count: 1,
+        cached_input_tokens: 5,
+        uncached_input_tokens: 6,
+        output_tokens: 7,
+        cache_health: "cold".into(),
+    });
+    writer.publish(ToastEvent::Show(Toast::new(
+        "cpu",
+        "cpu 180 %",
+        Severity::Warn,
+        Instant::now(),
+    )));
+    let args = RunArgs {
+        session_pid: 22,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("echo user-line")),
+    };
+    let mut out = Vec::new();
+    render_into(&mut out, &args, b"{}", now_ms());
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.find("user-line").unwrap() < text.find("gpt-5.6-terra").unwrap());
+    assert!(text.find("gpt-5.6-terra").unwrap() < text.find("cpu 180 %").unwrap());
 }

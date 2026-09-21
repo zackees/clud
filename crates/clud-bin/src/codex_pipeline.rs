@@ -46,6 +46,9 @@ const QUOTA_EXHAUSTED_MESSAGE: &str =
 /// HTTP layer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamSummary {
+    /// Effective Responses model sent to the provider. It is public catalog
+    /// metadata and lets the session HUD avoid displaying the Claude alias.
+    pub model: String,
     /// Terminal provider usage, if the Responses stream supplied a complete
     /// input count. This contains aggregates only and is safe for health
     /// accounting at the bridge boundary.
@@ -93,6 +96,7 @@ impl StreamSummary {
 #[derive(Debug)]
 pub struct Completion {
     pub message: serde_json::Value,
+    pub model: String,
     pub usage: Option<TokenUsage>,
     pub history_append_rejected: bool,
     pub pending_outputs_recovered: usize,
@@ -1216,6 +1220,7 @@ impl<C: CredentialSource> Pipeline<C> {
         history: Option<&mut ConversationHistory>,
     ) -> Result<StreamSummary, PipelineError> {
         let (request, tool_names, request_shape, translated_input) = self.prepare(request_body)?;
+        let model = request.model.clone();
         let pending_input = crate::codex_translate::pending_input_items_as_values(request_body)
             .map_err(PipelineError::Translate)?;
         let (mut upstream_input, turn_input, pending_outputs_recovered) = match history.as_ref() {
@@ -1258,6 +1263,7 @@ impl<C: CredentialSource> Pipeline<C> {
             emit_deferred_frames(&first.deferred_frames, sink)?;
             if first.in_band_provider_failure {
                 return Ok(StreamSummary {
+                    model,
                     usage: first.usage,
                     orphaned_outputs_repaired: 0,
                     pending_outputs_recovered,
@@ -1273,6 +1279,7 @@ impl<C: CredentialSource> Pipeline<C> {
                 None => false,
             };
             return Ok(StreamSummary {
+                model,
                 usage: first.usage,
                 orphaned_outputs_repaired: 0,
                 pending_outputs_recovered,
@@ -1325,6 +1332,7 @@ impl<C: CredentialSource> Pipeline<C> {
         emit_deferred_frames(&retry.deferred_frames, sink)?;
         if retry.in_band_provider_failure {
             return Ok(StreamSummary {
+                model,
                 usage: retry.usage,
                 orphaned_outputs_repaired: repaired,
                 pending_outputs_recovered,
@@ -1338,6 +1346,7 @@ impl<C: CredentialSource> Pipeline<C> {
         let history_append_rejected =
             record_successful_turn(history, &turn_input, &retry.output_items)?;
         Ok(StreamSummary {
+            model,
             usage: retry.usage,
             orphaned_outputs_repaired: repaired,
             pending_outputs_recovered,
@@ -1410,6 +1419,7 @@ impl<C: CredentialSource> Pipeline<C> {
         }
         Ok(Completion {
             message: aggregator.finish(),
+            model: summary.model,
             usage: summary.usage,
             history_append_rejected: summary.history_append_rejected,
             pending_outputs_recovered: summary.pending_outputs_recovered,

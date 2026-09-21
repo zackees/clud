@@ -53,6 +53,11 @@ pub fn state_path(state_dir: &Path, session_pid: u32) -> PathBuf {
 pub struct StatusState {
     pub updated_ms: u64,
     pub toast: Option<StatusToast>,
+    /// Provider-reported usage observed by clud's own bridge. This is kept
+    /// separate from transient toasts: the model/token strip is persistent
+    /// session state, not an alert competing for the one toast slot.
+    #[serde(default)]
+    pub usage: Option<StatusUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +65,20 @@ pub struct StatusToast {
     pub text: String,
     pub severity: Severity,
     pub expires_ms: Option<u64>,
+}
+
+/// A bounded, non-sensitive snapshot suitable for Claude's status-line
+/// callback. All counts are provider terminal counts; callers must leave the
+/// field absent instead of estimating from prompt text or status callbacks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusUsage {
+    pub provider: String,
+    pub model: String,
+    pub request_count: u64,
+    pub cached_input_tokens: u64,
+    pub uncached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_health: String,
 }
 
 pub fn now_ms() -> u64 {
@@ -75,6 +94,7 @@ pub fn now_ms() -> u64 {
 pub struct StatusStateWriter {
     path: PathBuf,
     board: Mutex<ToastBoard>,
+    usage: Mutex<Option<StatusUsage>>,
 }
 
 impl StatusStateWriter {
@@ -82,6 +102,7 @@ impl StatusStateWriter {
         Self {
             path,
             board: Mutex::new(ToastBoard::default()),
+            usage: Mutex::new(None),
         }
     }
 
@@ -102,6 +123,33 @@ impl StatusStateWriter {
         let _ = self.write(visible.as_ref(), now);
     }
 
+    /// Replace the bridge-owned token snapshot and atomically refresh the
+    /// state file. It deliberately accepts only aggregate counters and public
+    /// model/provider labels, never transcript, identity, or credential data.
+    pub fn publish_usage(&self, usage: StatusUsage) {
+        {
+            let mut current = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+            // Bridge completion workers can finish out of order. The
+            // launch-wide ledger assigns a strictly increasing request count,
+            // so never let a delayed snapshot make the visible totals go
+            // backwards after a later writer has already published.
+            if current
+                .as_ref()
+                .is_some_and(|previous| previous.request_count > usage.request_count)
+            {
+                return;
+            }
+            *current = Some(usage);
+        }
+        let now = Instant::now();
+        let visible = {
+            let mut board = self.board.lock().unwrap_or_else(|e| e.into_inner());
+            board.expire(now);
+            board.visible(now).cloned()
+        };
+        let _ = self.write(visible.as_ref(), now);
+    }
+
     fn write(&self, visible: Option<&Toast>, now: Instant) -> io::Result<()> {
         let wall = now_ms();
         let state = StatusState {
@@ -116,6 +164,7 @@ impl StatusStateWriter {
                     )
                 }),
             }),
+            usage: self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         };
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -134,8 +183,7 @@ impl Drop for StatusStateWriter {
 
 /// The toast to show at `now_ms`, or `None` when absent, expired, or orphaned.
 pub fn read_live_toast(path: &Path, now_ms: u64) -> Option<StatusToast> {
-    let bytes = std::fs::read(path).ok()?;
-    let state: StatusState = serde_json::from_slice(&bytes).ok()?;
+    let state = read_live_state(path, now_ms)?;
     let toast = state.toast?;
     match toast.expires_ms {
         Some(expires) if now_ms >= expires => None,
@@ -147,6 +195,20 @@ pub fn read_live_toast(path: &Path, now_ms: u64) -> Option<StatusToast> {
     }
 }
 
+/// The current bridge-owned token snapshot, if the live session observed one.
+/// A stale file is intentionally ignored for the same reason as stale toasts:
+/// a PID may eventually be reused after an unclean shutdown.
+pub fn read_live_usage(path: &Path, now_ms: u64) -> Option<StatusUsage> {
+    read_live_state(path, now_ms)?.usage
+}
+
+fn read_live_state(path: &Path, now_ms: u64) -> Option<StatusState> {
+    let bytes = std::fs::read(path).ok()?;
+    let state: StatusState = serde_json::from_slice(&bytes).ok()?;
+    let stale_ms = u64::try_from(STALE_AFTER.as_millis()).unwrap_or(u64::MAX);
+    (now_ms.saturating_sub(state.updated_ms) <= stale_ms).then_some(state)
+}
+
 pub fn render_line(toast: &StatusToast) -> String {
     let colour = match toast.severity {
         Severity::Info => "\x1b[38;5;75m",
@@ -155,6 +217,45 @@ pub fn render_line(toast: &StatusToast) -> String {
     };
     let text: String = toast.text.chars().filter(|c| !c.is_control()).collect();
     format!("{colour}clud \u{b7} {text}\x1b[0m")
+}
+
+/// Compact status-line representation. Keep cache reads and uncached input
+/// visibly distinct: combining them hid the exact failure mode of #1226.
+pub fn render_usage(usage: &StatusUsage) -> String {
+    let text = format!(
+        "{} {} - read {} cached / {} uncached - write {} - {}",
+        safe_label(&usage.provider),
+        safe_label(&usage.model),
+        compact_tokens(usage.cached_input_tokens),
+        compact_tokens(usage.uncached_input_tokens),
+        compact_tokens(usage.output_tokens),
+        safe_label(&usage.cache_health),
+    );
+    format!("\x1b[38;5;75mclud - {text}\x1b[0m")
+}
+
+fn safe_label(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).take(96).collect()
+}
+
+fn compact_tokens(value: u64) -> String {
+    match value {
+        0..=999 => value.to_string(),
+        1_000..=999_999 => format_one_decimal(value, 1_000, "K"),
+        1_000_000..=999_999_999 => format_one_decimal(value, 1_000_000, "M"),
+        _ => format_one_decimal(value, 1_000_000_000, "B"),
+    }
+}
+
+fn format_one_decimal(value: u64, divisor: u64, suffix: &str) -> String {
+    let tenths = value.saturating_mul(10) / divisor;
+    let whole = tenths / 10;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        format!("{whole}{suffix}")
+    } else {
+        format!("{whole}.{fraction}{suffix}")
+    }
 }
 
 /// The `statusLine.command` string Claude Code runs. `None` when a path would
@@ -295,7 +396,12 @@ pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64)
             }
         }
     }
-    if let Some(toast) = read_live_toast(&state_path(&args.state_dir, args.session_pid), now_ms) {
+    let path = state_path(&args.state_dir, args.session_pid);
+    if let Some(usage) = read_live_usage(&path, now_ms) {
+        out.extend_from_slice(render_usage(&usage).as_bytes());
+        out.push(b'\n');
+    }
+    if let Some(toast) = read_live_toast(&path, now_ms) {
         out.extend_from_slice(render_line(&toast).as_bytes());
         out.push(b'\n');
     }
