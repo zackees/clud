@@ -69,7 +69,7 @@ def prune_nonproduction_scripts(wheel: Path) -> bool:
     return True
 
 
-def elf_objcopy_candidates() -> list[str]:
+def elf_objcopy_candidates(target: str | None = None) -> list[str]:
     """Find an objcopy that can edit the configured Linux target's ELF files.
 
     The native developer environment normally exposes llvm-objcopy. Soldr's
@@ -79,7 +79,11 @@ def elf_objcopy_candidates() -> list[str]:
     ``objcopy`` beside its compiler. Keep every viable candidate: GNU objcopy
     only reveals some architecture mismatches when it opens the final ELF.
     """
-    target = os.environ.get("CARGO_BUILD_TARGET", "")
+    # `ci.xbuild` assembles a child environment for maturin. The parent
+    # process that inspects the finished wheel does not inherit that mapping,
+    # so callers that know the triple must pass it explicitly rather than
+    # relying on CARGO_BUILD_TARGET being ambient.
+    target = target or os.environ.get("CARGO_BUILD_TARGET", "")
     if target:
         from ci.env import host_target_triple
 
@@ -131,9 +135,9 @@ def elf_objcopy_candidates() -> list[str]:
     return resolved
 
 
-def resolve_elf_objcopy() -> str:
+def resolve_elf_objcopy(target: str | None = None) -> str:
     """Return the first available ELF objcopy candidate for callers that need one."""
-    candidates = elf_objcopy_candidates()
+    candidates = elf_objcopy_candidates(target)
     if candidates:
         return candidates[0]
     raise RuntimeError(
@@ -141,7 +145,7 @@ def resolve_elf_objcopy() -> str:
     )
 
 
-def remove_elf_debug_metadata(wheel: Path) -> bool:
+def remove_elf_debug_metadata(wheel: Path, *, target: str | None = None) -> bool:
     """Remove the residual ELF debug-GDB section from release wheel scripts.
 
     Cargo's ``strip = "debuginfo"`` removes DWARF but intentionally retains
@@ -166,7 +170,7 @@ def remove_elf_debug_metadata(wheel: Path) -> bool:
             for script in elf_scripts:
                 original = script.read_bytes()
                 failures: list[str] = []
-                for objcopy in elf_objcopy_candidates():
+                for objcopy in elf_objcopy_candidates(target):
                     result = process.run(
                         [objcopy, "--remove-section=.debug_gdb_scripts", str(script)],
                         check=False,

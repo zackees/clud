@@ -88,7 +88,11 @@ def test_release_wheel_uses_target_prefixed_objcopy_when_llvm_is_absent(
         archive.writestr("clud-2.8.9.dist-info/RECORD", "clud-2.8.9.dist-info/RECORD,,\n")
 
     cross_objcopy = "/toolchain/bin/aarch64-conda-linux-gnu-objcopy"
-    monkeypatch.setenv("CARGO_BUILD_TARGET", "aarch64-unknown-linux-gnu")
+    # `cmd_wheel` builds maturin with a child-only target environment, then
+    # strips the completed wheel in this parent process. The explicit target
+    # must therefore still find the prepared cross objcopy without ambient
+    # CARGO_BUILD_TARGET.
+    monkeypatch.delenv("CARGO_BUILD_TARGET", raising=False)
     monkeypatch.setenv(
         "CC_aarch64_unknown_linux_gnu",
         "/toolchain/bin/aarch64-conda-linux-gnu-gcc",
@@ -113,7 +117,7 @@ def test_release_wheel_uses_target_prefixed_objcopy_when_llvm_is_absent(
         lambda argv, **kwargs: calls.append(argv) or Result(),
     )
 
-    assert build_wheel.remove_elf_debug_metadata(wheel)
+    assert build_wheel.remove_elf_debug_metadata(wheel, target="aarch64-unknown-linux-gnu")
     assert calls[0][0].replace("\\", "/") == cross_objcopy
 
 
