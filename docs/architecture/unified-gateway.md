@@ -54,6 +54,20 @@ falls back to its documented local estimation. Streaming message responses
 remain progressive; the proxy never buffers a complete upstream stream before
 returning it.
 
+## Terminal usage accounting
+
+Every successful Messages response contributes exact terminal input, cached
+input, and output counts to the launch-scoped status-line ledger when its
+provider supplies them. Native Claude, DeepSeek, and OpenRouter usage shapes
+are adapted independently from copied SSE frames; ordinary non-streaming JSON
+responses use a 64 KiB bounded observation buffer. Forwarded response bytes
+are never rewritten or retained by the ledger. The ledger combines main and
+agent turns across providers, but the last completed provider/model remains
+visible so the display cannot imply that every aggregate token came from that
+one model. Missing, malformed, or internally inconsistent counters are simply
+unavailable and do not affect the totals. This display accounting is separate
+from the Codex-only cache-health fuse.
+
 ## Session-wide effort
 
 Claude Code resolves `/effort`, `--effort`, settings, environment, model-picker
@@ -93,6 +107,7 @@ content, response bodies, or provider-private state.
 | Every discovery ID routes to exactly its upstream with per-provider credential isolation | `unified_routes_all_five_ids_with_provider_credential_isolation` |
 | Persisted wire IDs (`gpt-*`, `deepseek-*`) route to their own provider and never reach Anthropic | `unified_wire_ids_route_to_their_own_provider_not_anthropic` |
 | Native token counting proxied with Claude auth; synthetic and wire-ID routes 404; unknown reserved IDs fail locally | `unified_native_count_tokens_is_proxied_with_claude_auth` |
+| Native Claude, DeepSeek, and OpenRouter terminal usage is aggregated without changing streamed bytes | `unified_anthropic_routes_publish_exact_launch_wide_usage_to_statusline` |
 | Ambient effort preservation and no global default injection | `unified_overlay_preserves_claude_credentials_and_enables_discovery`, `unified_overlay_does_not_inject_a_global_effort_default` |
 | Missing optional credentials emit one sanitized, actionable notice | `unified_missing_provider_notices_are_sanitized_and_actionable` |
 | Installed-client `--effort low|high|xhigh|max` request shape | `tests/test_real_claude_unified_effort.py` (opt in with `CLUD_REAL_CLAUDE_TESTS=1`) |

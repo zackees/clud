@@ -74,6 +74,10 @@ Entry and orchestration:
   terminal-usage aggregates and cache-credit safety-fuse state machine. It
   accepts only provider counts keyed by the bridge's digest-derived scope;
   compaction, clear, and provider-route boundaries begin a new cold window.
+- `anthropic_usage.rs` - terminal usage adapters for native Claude, DeepSeek,
+  and OpenRouter Messages responses. It observes copied SSE frames or a
+  bounded non-streaming JSON body, retains only terminal counters, and leaves
+  forwarded bytes unchanged.
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell and
   #898/#899's unified Claude/Codex/DeepSeek multiplexer: ephemeral listener +
   per-launch bearer, deterministic `/v1/models`, provider catalog routing,

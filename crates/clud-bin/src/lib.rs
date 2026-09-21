@@ -4,6 +4,7 @@
 //! modules from this library rather than declaring its own `mod ...` copies,
 //! so there is exactly one instance of each module in the build.
 
+pub mod anthropic_usage;
 pub mod args;
 pub mod auth;
 pub mod backend;
