@@ -10,6 +10,10 @@ triggers:
 
 # /clud-meta-work
 
+Every code-change slice preserves a RED -> GREEN focused regression: first
+demonstrate the failure or reproduction, then make that signal pass before
+the broader repository gates.
+
 Use this playbook only after confirming that the requested result has at least
 two genuinely independent deliverables. A single cohesive change stays in the
 normal `/goal` flow; splitting it creates merge conflicts and obscures

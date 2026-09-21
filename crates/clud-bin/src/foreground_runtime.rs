@@ -1551,10 +1551,10 @@ mod tests {
         )
         .unwrap();
         assert!(runtime.bridge.is_none());
-        assert_eq!(
-            runtime.env(),
-            &[("UNCHANGED".to_string(), "yes".to_string())]
-        );
+        assert!(runtime
+            .env()
+            .starts_with(&[("UNCHANGED".to_string(), "yes".to_string())]));
+        assert!(lookup(runtime.env(), "CLUD_ROUTE_CONTEXT").is_some());
     }
 
     fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -2230,7 +2230,8 @@ mod tests {
             plan(ModelProvider::Codex, Backend::Codex),
         ] {
             let runtime = ForegroundRuntime::start(&route, base.clone()).unwrap();
-            assert_eq!(runtime.env(), base);
+            assert!(runtime.env().starts_with(&base));
+            assert!(lookup(runtime.env(), "CLUD_ROUTE_CONTEXT").is_some());
             assert!(!runtime.has_bridge());
         }
     }
@@ -2251,7 +2252,8 @@ mod tests {
         )
         .unwrap();
         assert!(!native_claude.has_bridge());
-        assert_eq!(native_claude.env(), base);
+        assert!(native_claude.env().starts_with(&base));
+        assert!(lookup(native_claude.env(), "CLUD_ROUTE_CONTEXT").is_some());
 
         let native_codex = ForegroundRuntime::start_with_secret_store(
             &plan(ModelProvider::Codex, Backend::Codex),
@@ -2260,7 +2262,8 @@ mod tests {
         )
         .unwrap();
         assert!(!native_codex.has_bridge());
-        assert_eq!(native_codex.env(), base);
+        assert!(native_codex.env().starts_with(&base));
+        assert!(lookup(native_codex.env(), "CLUD_ROUTE_CONTEXT").is_some());
 
         let codex_bridge = ForegroundRuntime::start_with_secret_store(
             &plan(ModelProvider::Codex, Backend::Claude),

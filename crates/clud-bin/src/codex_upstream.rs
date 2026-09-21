@@ -2033,7 +2033,7 @@ mod tests {
         assert!(CodexCliCredentials::from_auth_json(live.as_bytes()).is_ok());
 
         // An opaque (non-JWT) bearer is legitimate and must keep working.
-        let opaque = r#"{"tokens":{"access_token":"opaque-token","account_id":"acct"}}"#;
+        let opaque = r#"{"tokens":{"access_token":"opaque-token","refresh_token":"refresh","account_id":"acct"}}"#;
         assert!(CodexCliCredentials::from_auth_json(opaque.as_bytes()).is_ok());
     }
 
@@ -2041,7 +2041,9 @@ mod tests {
     fn auth_json_with_expiry(exp: u64) -> String {
         let claims = base64url_encode(format!(r#"{{"exp":{exp}}}"#).as_bytes());
         let header = base64url_encode(br#"{"alg":"none"}"#);
-        format!(r#"{{"tokens":{{"access_token":"{header}.{claims}.sig","account_id":"acct"}}}}"#)
+        format!(
+            r#"{{"tokens":{{"access_token":"{header}.{claims}.sig","refresh_token":"refresh","account_id":"acct"}}}}"#
+        )
     }
 
     fn base64url_encode(input: &[u8]) -> String {
