@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Linux release-wheel cleanup now resolves Soldr's target-prefixed `objcopy`
+  rather than assuming `llvm-objcopy` is installed. Cross-target and native
+  fallback behavior is covered on mocked paths across platforms. See
+  zackees/clud#1246.
+
 - `clud --codex --harness claude` now keeps a stable Codex cache identity for
   each conversation and opens a cache-health fuse when a replay loses cache
   reuse. Mocked harness coverage exercises the direct Codex bridge and every
