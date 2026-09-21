@@ -87,6 +87,15 @@ arms the per-session guards in this order before allocating the PTY:
    spelling of Ctrl+C as a backstop, so a child TUI that pushes the flag for
    its own use cannot take Ctrl+C away again.
 
+   A child can push its own kitty keyboard-enhancement frame while rendering
+   its TUI. On an interrupted exit it may not send the matching pop. The PTY
+   output reader therefore tracks only child `CSI > ... u` pushes and `CSI <
+   ... u` pops, including sequences split across reads. After the reader is
+   joined, `RawTerminalGuard` pops any remaining child-owned frames and then
+   drops clud's own frame. This preserves keyboard-protocol frames that were
+   present before clud started; it must not be replaced with a terminal-wide
+   protocol reset (issue #1221).
+
 ## The pump loop (`run_raw_pty_pump`)
 
 The pump entry chain is `run_raw_pty_pump` (`session.rs:387`) →

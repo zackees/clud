@@ -238,6 +238,9 @@ Console and terminal:
   thread optionally runs the toast compositor
   (`session_output.rs::run_output_writer_composited`) and the stdin path runs
   the toast close-button mouse filter; see `docs/architecture/toasts.md`.
+  The reader also balances child-owned kitty keyboard-enhancement frames on
+  forced shutdown (#1221), without resetting terminal state that predates
+  the session.
 
 Loop subsystem (`clud loop`):
 

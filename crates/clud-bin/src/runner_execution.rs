@@ -332,7 +332,7 @@ pub fn run_plan_pty(
         // before the core returns to that original mode. On the byte-stream
         // fallback (or POSIX), this remains the normal VT-input guard.
         let _console_guard = enable_console_vt_input();
-        let _raw_guard = session::enter_raw_mode_if_tty();
+        let raw_guard = session::enter_raw_mode_if_tty();
 
         // The OLE drag-drop receiver is one-shot for the process, while the
         // native keyboard receiver above is fresh on every iteration.
@@ -368,9 +368,18 @@ pub fn run_plan_pty(
                 graphics: graphics_resize,
                 normalize_bare_lf,
                 toasts,
+                keyboard_enhancement_tracker: raw_guard
+                    .as_ref()
+                    .map(session::RawTerminalGuard::child_keyboard_enhancement_tracker),
             },
         );
-        drop(_raw_guard);
+        // The pump's scoped reader has joined by now. Remove any keyboard
+        // protocol frames the child left behind before dropping clud's own
+        // frame, preserving the terminal state that predated this session.
+        if let Some(guard) = raw_guard.as_ref() {
+            guard.restore_child_keyboard_enhancements();
+        }
+        drop(raw_guard);
         drop(_console_guard);
         // Windows-only: there the guard is a real `ConsoleInputHandle` whose
         // Drop retires the reader's channel, and dropping it here is what

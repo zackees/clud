@@ -1,5 +1,6 @@
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -315,6 +316,108 @@ pub trait InteractiveHooks {
 #[derive(Debug)]
 pub struct RawTerminalGuard {
     enhancement_flags_pushed: bool,
+    child_keyboard_enhancements: Arc<KeyboardEnhancementTracker>,
+}
+
+/// Tracks the keyboard-enhancement stack frames a child writes to the outer
+/// terminal.  A child TUI is allowed to push a frame for itself, but a forced
+/// shutdown can prevent its matching pop from reaching the terminal.  Keep
+/// this separate from the terminal's pre-existing frames: cleanup must remove
+/// only frames observed after clud started the child (issue #1221).
+#[derive(Debug, Default)]
+pub struct KeyboardEnhancementTracker {
+    state: Mutex<KeyboardEnhancementTrackerState>,
+}
+
+#[derive(Debug, Default)]
+struct KeyboardEnhancementTrackerState {
+    /// Incomplete CSI sequence retained across PTY read boundaries.
+    pending: Vec<u8>,
+    unbalanced_pushes: usize,
+}
+
+impl KeyboardEnhancementTracker {
+    /// Observe unmodified child output. Only kitty's stack operations
+    /// (`CSI > ... u` and `CSI < ... u`) affect this tracker; ordinary CSI-u
+    /// key events such as Ctrl+C are deliberately ignored.
+    pub fn observe(&self, bytes: &[u8]) {
+        let mut state = self.state.lock().expect("keyboard tracker lock");
+        for &byte in bytes {
+            observe_keyboard_enhancement_byte(&mut state, byte);
+        }
+    }
+
+    fn take_unbalanced_pushes(&self) -> usize {
+        let mut state = self.state.lock().expect("keyboard tracker lock");
+        std::mem::take(&mut state.unbalanced_pushes)
+    }
+}
+
+fn observe_keyboard_enhancement_byte(state: &mut KeyboardEnhancementTrackerState, byte: u8) {
+    if state.pending.is_empty() {
+        if byte == b'\x1b' {
+            state.pending.push(byte);
+        }
+        return;
+    }
+
+    state.pending.push(byte);
+    match state.pending.len() {
+        2 if state.pending.as_slice() != b"\x1b[" => {
+            state.pending.clear();
+            if byte == b'\x1b' {
+                state.pending.push(byte);
+            }
+        }
+        2 => {}
+        3 if !matches!(state.pending[2], b'>' | b'<') => {
+            state.pending.clear();
+            if byte == b'\x1b' {
+                state.pending.push(byte);
+            }
+        }
+        3 => {}
+        4..=18 => {
+            if byte == b'u' {
+                let operation = state.pending[2];
+                let parameters = &state.pending[3..state.pending.len() - 1];
+                if parameters.iter().all(u8::is_ascii_digit) {
+                    if operation == b'>' {
+                        state.unbalanced_pushes = state.unbalanced_pushes.saturating_add(1);
+                    } else {
+                        let requested = if parameters.is_empty() {
+                            1
+                        } else {
+                            std::str::from_utf8(parameters)
+                                .ok()
+                                .and_then(|value| value.parse::<usize>().ok())
+                                .unwrap_or(0)
+                        };
+                        state.unbalanced_pushes = state.unbalanced_pushes.saturating_sub(requested);
+                    }
+                }
+                state.pending.clear();
+            } else if !byte.is_ascii_digit() {
+                state.pending.clear();
+                if byte == b'\x1b' {
+                    state.pending.push(byte);
+                }
+            }
+        }
+        _ => {
+            state.pending.clear();
+            if byte == b'\x1b' {
+                state.pending.push(byte);
+            }
+        }
+    }
+}
+
+fn keyboard_enhancement_pop_bytes(count: usize) -> Vec<u8> {
+    // crossterm's PopKeyboardEnhancementFlags emits this one-frame pop. Do
+    // not use `CSI = ... u`: that would overwrite the caller's state instead
+    // of unwinding only the frames that belong to this session.
+    b"\x1b[<1u".repeat(count)
 }
 
 /// Public factory for a `RawTerminalGuard` returning `None` when stdin
@@ -374,12 +477,31 @@ impl RawTerminalGuard {
 
         Ok(Self {
             enhancement_flags_pushed,
+            child_keyboard_enhancements: Arc::new(KeyboardEnhancementTracker::default()),
         })
+    }
+
+    /// Share the child-output tracker with the PTY reader for this session.
+    pub fn child_keyboard_enhancement_tracker(&self) -> Arc<KeyboardEnhancementTracker> {
+        Arc::clone(&self.child_keyboard_enhancements)
+    }
+
+    /// Unwind child-owned frames before this guard pops clud's own frame.
+    /// The pump joins its output reader before this is called, so every child
+    /// control sequence that reached the terminal has been observed.
+    pub fn restore_child_keyboard_enhancements(&self) {
+        let count = self.child_keyboard_enhancements.take_unbalanced_pushes();
+        if count != 0 {
+            let _ = io::stdout().write_all(&keyboard_enhancement_pop_bytes(count));
+            let _ = io::stdout().flush();
+        }
     }
 }
 
 impl Drop for RawTerminalGuard {
     fn drop(&mut self) {
+        // This is intentionally in Drop so unwind cannot strand a child frame.
+        self.restore_child_keyboard_enhancements();
         let _ = if self.enhancement_flags_pushed {
             execute!(io::stdout(), PopKeyboardEnhancementFlags)
         } else {
@@ -558,6 +680,7 @@ where
             graphics,
             normalize_bare_lf,
             toasts: None,
+            keyboard_enhancement_tracker: None,
         },
     )
 }
@@ -572,6 +695,9 @@ pub struct PumpExtras {
     pub normalize_bare_lf: bool,
     /// In-terminal toast compositor (#1189).
     pub toasts: Option<crate::toast::compositor::ToastPumpOptions>,
+    /// Tracker supplied by `RawTerminalGuard` for child-owned kitty keyboard
+    /// protocol frames (#1221). None outside an interactive guarded session.
+    pub keyboard_enhancement_tracker: Option<Arc<KeyboardEnhancementTracker>>,
 }
 
 /// Production pump entry with every optional feature.
@@ -602,6 +728,7 @@ where
             graphics: extras.graphics,
             normalize_bare_lf: extras.normalize_bare_lf,
             toasts: extras.toasts,
+            keyboard_enhancement_tracker: extras.keyboard_enhancement_tracker,
         },
     )
 }
@@ -781,6 +908,7 @@ struct PumpOptions {
     /// output reader (#1181). Only the Codex backend sets this; see that
     /// module for why the filter must never run for other TUIs.
     normalize_bare_lf: bool,
+    keyboard_enhancement_tracker: Option<Arc<KeyboardEnhancementTracker>>,
 }
 
 /// Idle poll cadence for the main loop's stdin wait when nothing is
@@ -1004,6 +1132,7 @@ where
         // set `process.set_echo(false)` so the library's built-in
         // stdout writer is silent — we own forwarding now.
         let normalize_bare_lf = options.normalize_bare_lf;
+        let keyboard_enhancement_tracker = options.keyboard_enhancement_tracker.clone();
         scope.spawn(move || {
             let mut osc_strip = OscTitleStripper::new();
             // Codex-only (#1181): rewrites bare LF to CRLF after the OSC
@@ -1018,12 +1147,18 @@ where
                     None => stripped,
                 }
             };
+            let mut observe_and_filter = |chunk: &[u8]| {
+                if let Some(tracker) = &keyboard_enhancement_tracker {
+                    tracker.observe(chunk);
+                }
+                filter(chunk)
+            };
             loop {
                 if stop_reader.load(Ordering::Acquire) {
                     // Final non-blocking drain so a chunk that arrived
                     // right before shutdown isn't lost.
                     while let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.0)) {
-                        let filtered = filter(&chunk);
+                        let filtered = observe_and_filter(&chunk);
                         if !filtered.is_empty() {
                             let _ = output_tx.send(OutputMsg::Child(filtered));
                         }
@@ -1032,14 +1167,14 @@ where
                 }
                 match process.read_chunk_impl(Some(OUTPUT_READER_POLL_SECS)) {
                     Ok(Some(chunk)) => {
-                        let mut filtered = filter(&chunk);
+                        let mut filtered = observe_and_filter(&chunk);
                         // Coalesce clud-side: drain whatever else is
                         // already queued without blocking, so a
                         // chatty child's burst becomes one send (and,
                         // downstream, one write+flush) instead of one
                         // per chunk.
                         while let Ok(Some(more)) = process.read_chunk_impl(Some(0.0)) {
-                            filtered.extend_from_slice(&filter(&more));
+                            filtered.extend_from_slice(&observe_and_filter(&more));
                         }
                         if !filtered.is_empty() {
                             let _ = output_tx.send(OutputMsg::Child(filtered));
