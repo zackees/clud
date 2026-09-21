@@ -11,6 +11,7 @@ import pytest
 
 from tests import process
 
+from . import _daemon_helpers
 from ._daemon_helpers import (
     DETACH_EXIT_TIMEOUT,
     attach_for_report,
@@ -54,6 +55,28 @@ def test_wait_for_ctrl_c_profile_treats_retired_session_as_retryable() -> None:
         wait_for_ctrl_c_profile(retired_session)
     except FileNotFoundError:
         pytest.fail("retired session metadata must make the outer attempt retry")
+
+
+def test_kill_daemon_for_session_treats_an_already_stopped_shared_daemon_as_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A second session cleanup can race a first cleanup of their daemon."""
+    state_dir = tmp_path / "daemon-state"
+    session_id = "shared-daemon-session"
+    metadata_path = state_dir / "sessions" / f"{session_id}.json"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text("{}", encoding="utf-8")
+
+    def shared_daemon_metadata(_state_dir: Path, _session_id: str) -> dict[str, int]:
+        return {"daemon_pid": 12345}
+
+    def daemon_was_already_stopped(_pid: int) -> None:
+        raise ProcessLookupError("shared daemon already stopped")
+
+    monkeypatch.setattr(_daemon_helpers, "session_metadata", shared_daemon_metadata)
+    monkeypatch.setattr(_daemon_helpers, "kill_process", daemon_was_already_stopped)
+
+    _daemon_helpers.kill_daemon_for_session(state_dir, session_id)
 
 
 class TestDaemonManagedSessionFlags:
