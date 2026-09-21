@@ -347,6 +347,50 @@ fn on_the_main_screen_text_tier_uses_the_title_fallback() {
 }
 
 #[test]
+fn non_kitty_usage_fallback_keeps_model_and_cache_health_in_the_title() {
+    let now = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 80)));
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: "gpt-5.6-terra".into(),
+        request_count: 1,
+        cached_input_tokens: 1,
+        uncached_input_tokens: 2,
+        output_tokens: 3,
+        cache_health: "degraded".into(),
+    });
+    let (mut c, _) = compositor_with_usage(ToastTier::Fallback, Fallback::Title, writer);
+    let out = c.on_tick(now);
+    assert!(has(&out, "\x1b]2;clud \u{b7} gpt-5.6-terra - degraded\x07"));
+}
+
+#[test]
+fn usage_title_fallback_is_bounded_and_control_free() {
+    let now = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 81)));
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: format!("{}\x1b]2;bad", "m".repeat(200)),
+        request_count: 1,
+        cached_input_tokens: 0,
+        uncached_input_tokens: 0,
+        output_tokens: 0,
+        cache_health: "healthy".into(),
+    });
+    let (mut c, _) = compositor_with_usage(ToastTier::Fallback, Fallback::Title, writer);
+    let out = String::from_utf8_lossy(&c.on_tick(now)).into_owned();
+    let title = out
+        .split("\x1b]2;")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches('\x07');
+    assert!(title.len() <= 96 + "clud \u{b7}  - healthy".len());
+    assert!(!title.chars().any(char::is_control));
+}
+
+#[test]
 fn the_status_file_fallback_mirrors_and_clears_the_toast() {
     let now = Instant::now();
     let dir = tempfile::tempdir().unwrap();
