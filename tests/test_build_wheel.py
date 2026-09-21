@@ -117,6 +117,60 @@ def test_release_wheel_uses_target_prefixed_objcopy_when_llvm_is_absent(
     assert calls[0][0].replace("\\", "/") == cross_objcopy
 
 
+def test_release_wheel_falls_back_after_an_incompatible_target_objcopy(
+    monkeypatch, tmp_path
+) -> None:
+    from pathlib import Path
+
+    wheel = tmp_path / "clud-2.8.10-py3-none-manylinux_2_17_aarch64.whl"
+    script = "clud-2.8.10.data/scripts/clud"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(script, b"\x7fELFdebug-gdb")
+        archive.writestr("clud-2.8.10.dist-info/RECORD", "clud-2.8.10.dist-info/RECORD,,\n")
+
+    first = "/toolchain/bin/aarch64-conda-linux-gnu-objcopy"
+    fallback = "/toolchain/bin/objcopy"
+    monkeypatch.setenv("CARGO_BUILD_TARGET", "aarch64-unknown-linux-gnu")
+    monkeypatch.setenv(
+        "CC_aarch64_unknown_linux_gnu",
+        "/toolchain/bin/aarch64-conda-linux-gnu-gcc",
+    )
+    monkeypatch.setattr(
+        build_wheel.shutil,
+        "which",
+        lambda candidate: (
+            candidate
+            if candidate.replace("\\", "/")
+            in {first, fallback}
+            else None
+        ),
+    )
+
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        script_path = Path(argv[2])
+        if argv[0].replace("\\", "/") == first:
+            script_path.write_bytes(b"corrupt")
+            return Result(1)
+        assert script_path.read_bytes() == b"\x7fELFdebug-gdb"
+        return Result(0)
+
+    monkeypatch.setattr(
+        build_wheel.process,
+        "run",
+        fake_run,
+    )
+
+    assert build_wheel.remove_elf_debug_metadata(wheel)
+    assert [call[0].replace("\\", "/") for call in calls] == [first, fallback]
+
+
 def test_release_wheel_reports_missing_elf_objcopy(monkeypatch) -> None:
     import pytest
 
