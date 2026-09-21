@@ -132,9 +132,12 @@ Anthropic-shaped DeepSeek route.
 The canary is intentionally ignored and requires explicit opt-in:
 `CLUD_LIVE_CODEX_CACHE_TESTS=1 soldr cargo test -p clud --lib
 codex_upstream::live_probe::cache_credit_is_reused_for_a_stable_conversation_prefix -- --ignored
---nocapture`. It permits at most two serial, tool-free requests with a 32 KiB
-input ceiling and a requested 16-token output cap; any failed request stops the
-probe without retry or a cache conclusion. Ordinary tests and CI never invoke it.
+--nocapture`. After the explicit operator opt-in, it permits at most two serial,
+tool-free requests with a 32 KiB input ceiling and no retries. The ChatGPT
+subscription endpoint rejects a hard output-cap field, so the probe has no
+provider-side output limit and requires explicit owner authorization before use.
+Any failed request stops the probe without a cache conclusion. Ordinary tests
+and CI never invoke it.
 
 ## Conversation state and compaction
 
