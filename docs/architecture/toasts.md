@@ -41,6 +41,15 @@ episode ends below the clear threshold.
 | Subprocess, Claude | **Status line** | Claude Code's `statusLine` row |
 | Subprocess, other harness | none | toasts are dropped |
 
+When an enabled foreground bridge receives provider-terminal token usage, the
+Kitty tier additionally shows a persistent top-right strip such as
+`gpt-5.6-terra - R 1.74B (331M cached / 1.41B uncached) - W 2.63M`.
+It is a distinct graphics image and placement, not a toast: alert toasts move
+below it and cannot overwrite the accounting. The snapshot is launch-wide and
+is wired for every foreground harness, including the unified Claude,
+DeepSeek, and OpenRouter routes. It uses only observed terminal counters; it
+does not estimate prompts or retain request content.
+
 Tier selection is `toast/tier.rs::decide`:
 
 - kitty, Ghostty and WezTerm (probe, or `TERM`/`TERM_PROGRAM`/`KITTY_WINDOW_ID`/
@@ -93,6 +102,11 @@ cell grid. The placement is re-sent after every burst because images scroll
 with text, and the image is re-uploaded after `ED 2`, `RIS` or an
 alternate-screen switch, which drop images. Removal deletes the placement:
 the child's cells were never touched, so nothing is repainted.
+
+The usage strip has its own image and placement id. It is re-pinned after
+each child burst and is removed independently at session exit. The compositor
+polls the launch writer while toasts are enabled, allowing an upstream bridge
+completion to appear even during an otherwise quiet TUI.
 
 ### Text-cell tier
 
@@ -171,6 +185,7 @@ runtime-cache or launch work, because Claude runs it every couple of seconds.
 |---|---|
 | Model, tracker, kitty encoding, raster, text tier, mouse, tier matrix, status line | `src/toast/*` unit tests (all CI lanes) |
 | Compositor byte streams (every tier, deferral, origin mode, dismiss, resize) | `src/toast/compositor_tests.rs` |
+| Persistent exact usage strip, separate placement, coexistence with a toast, redraw and cleanup | `src/toast/compositor_tests.rs` |
 | Banner never writes to the terminal; banner → toast events | `src/cpu_banner_tests.rs` |
 | Status-line injection into Claude settings | `src/foreground_runtime.rs` tests |
 | Real PTY sessions: kitty tier, title fallback (Linux, macOS, Windows), alternate-screen text tier (Unix) | `tests/pty/toast_pty.rs` |

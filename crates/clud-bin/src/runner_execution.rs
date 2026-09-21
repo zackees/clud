@@ -141,9 +141,14 @@ pub fn run_plan_pty(
         (None, None)
     };
 
-    let statusline = status_writer
-        .as_deref()
-        .and_then(crate::toast::launch::injection_for);
+    let statusline = toast_cfg
+        .claude_statusline
+        .then(|| {
+            status_writer
+                .as_deref()
+                .and_then(crate::toast::launch::injection_for)
+        })
+        .flatten();
     let runtime = match crate::foreground_runtime::ForegroundRuntime::start_with_statusline(
         plan,
         child_env_for_backend(plan.backend),
@@ -185,7 +190,13 @@ pub fn run_plan_pty(
             reason: "toasts disabled".to_string(),
         }
     };
-    let toast_fallback = crate::toast::launch::fallback_for(plan, status_writer.as_ref());
+    let toast_fallback = crate::toast::launch::fallback_for(
+        plan,
+        toast_cfg
+            .claude_statusline
+            .then_some(status_writer.as_ref())
+            .flatten(),
+    );
     if verbose {
         verbose_log::log(format_args!(
             "[clud] toasts: tier={:?} fallback={:?} ({})",
@@ -354,6 +365,7 @@ pub fn run_plan_pty(
                     toast_tier.tier
                 },
                 fallback: toast_fallback.clone(),
+                usage: status_writer.clone(),
                 rows,
                 cols,
                 image_id: crate::toast::kitty::image_id_for_process(std::process::id()),

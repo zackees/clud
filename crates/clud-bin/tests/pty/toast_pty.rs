@@ -99,6 +99,7 @@ fn run_composited(
             hub,
             tier,
             fallback,
+            usage: None,
             rows: ROWS,
             cols: COLS,
             image_id: 0x434c_1189,

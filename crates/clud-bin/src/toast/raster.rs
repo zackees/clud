@@ -77,6 +77,20 @@ pub fn render_png(text: &str, severity: Severity, cols: u16, rows: u16) -> io::R
     Ok(png)
 }
 
+/// Render a persistent usage strip. It deliberately has no close affordance:
+/// usage is session state, not a dismissible notification.
+pub fn render_usage_png(text: &str, cols: u16, rows: u16) -> io::Result<Vec<u8>> {
+    let rgba = render_usage_rgba(text, cols, rows);
+    let (w, h) = pixel_size(cols, rows);
+    let image = image::RgbaImage::from_raw(w, h, rgba)
+        .ok_or_else(|| io::Error::other("usage buffer size mismatch"))?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|err| io::Error::other(format!("failed to encode usage PNG: {err}")))?;
+    Ok(png)
+}
+
 pub fn pixel_size(cols: u16, rows: u16) -> (u32, u32) {
     (u32::from(cols) * CELL_W_PX, u32::from(rows) * CELL_H_PX)
 }
@@ -130,6 +144,37 @@ pub fn render_rgba(text: &str, severity: Severity, cols: u16, rows: u16) -> Vec<
     canvas.line(cx - arm, cy - arm, cx + arm, cy + arm, stroke, CLOSE);
     canvas.line(cx - arm, cy + arm, cx + arm, cy - arm, stroke, CLOSE);
 
+    canvas.pixels
+}
+
+/// Straight-alpha RGBA pixels for a non-interactive usage panel.
+pub fn render_usage_rgba(text: &str, cols: u16, rows: u16) -> Vec<u8> {
+    let (w, h) = pixel_size(cols.max(1), rows.max(1));
+    let mut canvas = Canvas::new(w, h);
+    let inset = 2.0;
+    let radius = (h as f32 * 0.28).min(18.0);
+    canvas.rounded_rect(
+        inset,
+        inset,
+        w as f32 - inset,
+        h as f32 - inset,
+        radius,
+        PANEL,
+    );
+    canvas.rounded_rect_outline(
+        inset,
+        inset,
+        w as f32 - inset,
+        h as f32 - inset,
+        radius,
+        BORDER,
+    );
+    if let Some(font) = font() {
+        let px = h as f32 * 0.40;
+        let left = CELL_W_PX as f32 * 0.7;
+        let fitted = fit_text(font, text, px, w as f32 - left * 2.0);
+        canvas.text(font, &fitted, px, left, h as f32 / 2.0, TEXT);
+    }
     canvas.pixels
 }
 
