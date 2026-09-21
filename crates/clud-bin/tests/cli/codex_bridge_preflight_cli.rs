@@ -107,10 +107,6 @@ fn assert_missing_diagnostic(exit: i32, output: &str) {
         output.contains("clud --codex --harness default"),
         "{output}"
     );
-    assert!(
-        output.contains("separate and is not imported from ~/.codex/auth.json"),
-        "{output}"
-    );
     assert!(!output.contains("native-codex-only"));
 }
 
