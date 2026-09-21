@@ -69,14 +69,15 @@ def prune_nonproduction_scripts(wheel: Path) -> bool:
     return True
 
 
-def resolve_elf_objcopy() -> str:
+def elf_objcopy_candidates() -> list[str]:
     """Find an objcopy that can edit the configured Linux target's ELF files.
 
     The native developer environment normally exposes llvm-objcopy. Soldr's
     catalogue GNU cross toolchain instead exports a target-prefixed GNU binary
     next to its compiler (for example aarch64-conda-linux-gnu-objcopy).
-    A cross target deliberately never derives a tool from generic ``CC`` or
-    falls back to generic ``objcopy``: either can be a host-only GNU binary.
+    A target toolchain can expose either a target-prefixed binary or a generic
+    ``objcopy`` beside its compiler. Keep every viable candidate: GNU objcopy
+    only reveals some architecture mismatches when it opens the final ELF.
     """
     target = os.environ.get("CARGO_BUILD_TARGET", "")
     if target:
@@ -116,15 +117,25 @@ def resolve_elf_objcopy() -> str:
                         )
                     )
                 )
+                candidates.append(str(compiler_path.with_name("objcopy")))
                 break
 
     # LLVM is cross-capable; generic GNU objcopy is safe only for a native build.
     candidates.append("llvm-objcopy")
     if not is_cross_target:
         candidates.append("objcopy")
+    resolved: list[str] = []
     for candidate in candidates:
-        if candidate and shutil.which(candidate):
-            return candidate
+        if candidate and shutil.which(candidate) and candidate not in resolved:
+            resolved.append(candidate)
+    return resolved
+
+
+def resolve_elf_objcopy() -> str:
+    """Return the first available ELF objcopy candidate for callers that need one."""
+    candidates = elf_objcopy_candidates()
+    if candidates:
+        return candidates[0]
     raise RuntimeError(
         "no compatible ELF objcopy found; set OBJCOPY or expose the target toolchain"
     )
@@ -152,14 +163,23 @@ def remove_elf_debug_metadata(wheel: Path) -> bool:
             ]
             if not elf_scripts:
                 return False
-            objcopy = resolve_elf_objcopy()
             for script in elf_scripts:
-                result = process.run(
-                    [objcopy, "--remove-section=.debug_gdb_scripts", str(script)],
-                    check=False,
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"failed to remove debug metadata from {script}")
+                original = script.read_bytes()
+                failures: list[str] = []
+                for objcopy in elf_objcopy_candidates():
+                    result = process.run(
+                        [objcopy, "--remove-section=.debug_gdb_scripts", str(script)],
+                        check=False,
+                    )
+                    if result.returncode == 0:
+                        break
+                    failures.append(objcopy)
+                    script.write_bytes(original)
+                else:
+                    tried = ", ".join(failures) or "no objcopy candidates"
+                    raise RuntimeError(
+                        f"failed to remove debug metadata from {script}; tried {tried}"
+                    )
             from ci.wheel_repair import _rewrite_record, _write_wheel
 
             _rewrite_record(root, Path(record))
