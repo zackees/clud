@@ -298,6 +298,81 @@ class _FakeResponsesServer:
         self._listener.close()
 
 
+class _FakeAnthropicServer:
+    """A minimal Messages-shaped upstream for unified proxy routes.
+
+    It deliberately records raw test requests only in this fixture. Assertions
+    project the wire contract and prove that the bridge did not turn a proxy
+    route into a Codex Responses request or leak another route's credential.
+    """
+
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.2)
+        self.port = self._listener.getsockname()[1]
+        self.requests: list[bytes] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._listener.accept()
+            except (TimeoutError, OSError):
+                continue
+            with connection:
+                connection.settimeout(5)
+                try:
+                    raw = b""
+                    while b"\r\n\r\n" not in raw:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        raw += chunk
+                    head, _, rest = raw.partition(b"\r\n\r\n")
+                    length = 0
+                    for line in head.split(b"\r\n"):
+                        name, _, value = line.partition(b":")
+                        if name.lower() == b"content-length":
+                            length = int(value.strip())
+                    while len(rest) < length:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        rest += chunk
+                    self.requests.append(head + b"\r\n\r\n" + rest)
+                    response = json.dumps({
+                        "id": f"fake-{self.marker}-{len(self.requests)}",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "fake-model",
+                        "content": [{"type": "text", "text": f"fake {self.marker}"}],
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 3, "output_tokens": 2},
+                    }, separators=(",", ":")).encode()
+                    connection.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        b"Content-Length: %d\r\nConnection: close\r\n\r\n%s"
+                        % (len(response), response)
+                    )
+                except OSError:
+                    continue
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self._listener.close()
+
+
 @pytest.fixture
 def fake_responses():
     server = _FakeResponsesServer()
@@ -307,10 +382,23 @@ def fake_responses():
         server.close()
 
 
+@pytest.fixture
+def fake_anthropic_upstreams():
+    servers = {
+        name: _FakeAnthropicServer(name)
+        for name in ("claude", "deepseek", "openrouter")
+    }
+    try:
+        yield servers
+    finally:
+        for server in servers.values():
+            server.close()
+
+
 class TestCodexBridgeForeground:
     """Issue #626: Codex provider through the Claude foreground harness."""
 
-    def test_cache_identity_is_stable_through_the_subprocess_harness(
+    def test_codex_cache_identity_is_stable_through_the_subprocess_harness(
         self,
         clud_binary: Path,
         mock_env: dict[str, str],
@@ -395,6 +483,134 @@ class TestCodexBridgeForeground:
         # fixture's 16 KiB prefix). The stable identity may pay only three
         # cold seeds plus five append-only suffixes.
         assert total_uncached < 10 * 16_384
+
+    def test_unified_route_matrix_through_one_mocked_claude_session(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        fake_responses: _FakeResponsesServer,
+        fake_anthropic_upstreams: dict[str, _FakeAnthropicServer],
+    ) -> None:
+        """#1226: provider-shaped foreground coverage, not unit-only routing."""
+        env = mock_env.copy()
+        env.update({
+            "CLUD_INTEGRATION_TESTS": "1",
+            "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": fake_responses.base_url,
+            "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": (
+                fake_anthropic_upstreams["claude"].base_url
+            ),
+            "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": (
+                fake_anthropic_upstreams["deepseek"].base_url
+            ),
+            "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": (
+                fake_anthropic_upstreams["openrouter"].base_url
+            ),
+            "ANTHROPIC_API_KEY": "ambient-key-must-not-reach-routed-fakes",
+        })
+        probe_path = tmp_path / "unified-route-probe.json"
+        result = _run(
+            clud_binary,
+            "--unified",
+            "--harness",
+            "claude",
+            "--subprocess",
+            "-p",
+            "unified route matrix",
+            "--",
+            "--mock-unified-route-probe",
+            str(probe_path),
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        probe = json.loads(probe_path.read_text(encoding="utf-8"))
+        assert probe == {
+            "attempted": True,
+            "loopback": True,
+            "statuses": [200] * 10,
+            "response_count": 10,
+            "error": None,
+        }
+        assert "unified-session" not in json.dumps(probe)
+
+        def split(raw: bytes) -> tuple[bytes, dict[str, Any]]:
+            head, _, body = raw.partition(b"\r\n\r\n")
+            return head, json.loads(body)
+
+        def header_value(head: bytes, name: bytes) -> bytes | None:
+            for line in head.split(b"\r\n"):
+                candidate, _, value = line.partition(b":")
+                if candidate.lower() == name.lower():
+                    return value.strip()
+            return None
+
+        # Native Claude, DeepSeek, and OpenRouter remain Messages-shaped and
+        # retain the caller-owned cache-control block byte-for-byte. Codex is
+        # separately Responses-shaped and covered by its identity assertions.
+        expected = {
+            "claude": (2, ["claude-opus-4-1", "claude-opus-4-1"]),
+            "deepseek": (2, ["deepseek-flash[1m]", "deepseek-flash[1m]"]),
+            "openrouter": (2, ["~anthropic/claude-sonnet-latest"] * 2),
+        }
+        for route, (count, models) in expected.items():
+            requests = fake_anthropic_upstreams[route].requests
+            assert len(requests) == count
+            parsed = [split(raw) for raw in requests]
+            assert all(head.startswith(b"POST /v1/messages HTTP/1.1") for head, _ in parsed)
+            assert [body["model"] for _, body in parsed] == models
+            for head, body in parsed:
+                assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+                assert "prompt_cache_key" not in body
+                assert b"session-id:" not in head.lower()
+                assert b"thread-id:" not in head.lower()
+                assert b"ambient-key-must-not-reach-routed-fakes" not in head
+                assert header_value(head, b"x-clud-gateway-token") is None
+                if route == "claude":
+                    assert b"clud-test-deepseek-key" not in head
+                    assert b"clud-test-openrouter-key" not in head
+
+        for route, fixture_key in {
+            "deepseek": b"clud-test-deepseek-key",
+            "openrouter": b"clud-test-openrouter-key",
+        }.items():
+            for raw in fake_anthropic_upstreams[route].requests:
+                head, _ = split(raw)
+                assert header_value(head, b"authorization") == b"Bearer " + fixture_key
+                other_key = (
+                    b"clud-test-openrouter-key"
+                    if route == "deepseek"
+                    else b"clud-test-deepseek-key"
+                )
+                assert other_key not in head
+
+        assert len(fake_responses.requests) == 4
+        codex_bodies = []
+        for raw in fake_responses.requests:
+            head, body = split(raw)
+            assert head.startswith(b"POST /v1/responses HTTP/1.1")
+            assert body["model"] == "gpt-5.6-terra"
+            assert "messages" not in body
+            codex_bodies.append(body)
+            assert b"unified-session" not in raw
+            assert b"unified-agent-codex" not in raw
+
+        # The two main Codex turns are append-only under one derived identity;
+        # the child turn is deliberately isolated from that cache scope. After
+        # DeepSeek/OpenRouter the final main turn retains identity but is a
+        # fresh route epoch, so it cannot replay Codex-private response items.
+        assert (
+            codex_bodies[1]["input"][: len(codex_bodies[0]["input"])]
+            == codex_bodies[0]["input"]
+        )
+        assert codex_bodies[0]["prompt_cache_key"] == codex_bodies[1]["prompt_cache_key"]
+        assert codex_bodies[2]["prompt_cache_key"] != codex_bodies[1]["prompt_cache_key"]
+        assert codex_bodies[3]["prompt_cache_key"] == codex_bodies[1]["prompt_cache_key"]
+        final_input = json.dumps(codex_bodies[3]["input"])
+        assert "unified-route-turn-2" not in final_input
+        assert "unified-route-turn-3" not in final_input
+        assert [entry["cache_hit"] for entry in fake_responses.cache_observations] == [
+            False, True, False, False,
+        ]
 
     @pytest.mark.parametrize("launch_mode", ["--subprocess", "--pty"])
     def test_cross_route_translates_upstream_and_closes_listener(
