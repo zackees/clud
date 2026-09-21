@@ -22,6 +22,27 @@ fn arms_nounset_by_default() {
 }
 
 #[test]
+fn identifies_only_a_clud_generated_nounset_script() {
+    let tmp = tempdir().unwrap();
+    let generated = env_overrides_at(tmp.path(), false, None)
+        .into_iter()
+        .find(|(key, _)| key == BASH_ENV_KEY)
+        .map(|(_, value)| value)
+        .expect("generated BASH_ENV");
+    assert!(is_clud_nounset_script(&generated));
+
+    let user_owned = tmp.path().join("user-bash-env.sh");
+    std::fs::write(
+        &user_owned,
+        format!("{GENERATED_MARKER} user-owned extension\necho user-startup\n"),
+    )
+    .unwrap();
+    assert!(!is_clud_nounset_script(
+        user_owned.to_str().expect("UTF-8 temporary path")
+    ));
+}
+
+#[test]
 fn opting_out_leaves_the_shell_alone() {
     let tmp = tempdir().unwrap();
     assert!(
