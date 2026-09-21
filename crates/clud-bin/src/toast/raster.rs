@@ -170,10 +170,21 @@ pub fn render_usage_rgba(text: &str, cols: u16, rows: u16) -> Vec<u8> {
         BORDER,
     );
     if let Some(font) = font() {
-        let px = h as f32 * 0.40;
+        let line_count = u16::try_from(text.lines().count().max(1)).unwrap_or(u16::MAX);
+        let px = (h as f32 * 0.40 / f32::from(line_count)).max(12.0);
         let left = CELL_W_PX as f32 * 0.7;
-        let fitted = fit_text(font, text, px, w as f32 - left * 2.0);
-        canvas.text(font, &fitted, px, left, h as f32 / 2.0, TEXT);
+        let spacing = h as f32 / f32::from(line_count);
+        for (index, line) in text.lines().enumerate() {
+            let fitted = fit_text(font, line, px, w as f32 - left * 2.0);
+            canvas.text(
+                font,
+                &fitted,
+                px,
+                left,
+                spacing * (index as f32 + 0.5),
+                TEXT,
+            );
+        }
     }
     canvas.pixels
 }

@@ -258,6 +258,25 @@ pub fn usage_summary(usage: &StatusUsage) -> String {
     )
 }
 
+/// Expanded PTY-overlay details. These are still bounded public counters and
+/// labels, never transcript or prompt text.
+pub fn usage_details(usage: &StatusUsage) -> String {
+    let total = usage
+        .cached_input_tokens
+        .saturating_add(usage.uncached_input_tokens);
+    format!(
+        "{} {}\nrequests {} - read {} ({} cached / {} uncached)\nwrite {} - cache {}",
+        safe_label(&usage.provider),
+        safe_label(&usage.model),
+        usage.request_count,
+        compact_tokens(total),
+        compact_tokens(usage.cached_input_tokens),
+        compact_tokens(usage.uncached_input_tokens),
+        compact_tokens(usage.output_tokens),
+        safe_label(&usage.cache_health),
+    )
+}
+
 fn safe_label(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).take(96).collect()
 }

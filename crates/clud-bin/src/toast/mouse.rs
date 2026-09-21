@@ -18,6 +18,15 @@ pub struct MouseFilter {
     swallowing_release: bool,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MouseResult {
+    pub bytes: Vec<u8>,
+    pub dismissed: bool,
+    pub usage_toggled: bool,
+    /// `Some` only when the child has enabled any-motion SGR reporting.
+    pub usage_hover: Option<bool>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Parse {
     /// Bytes at the front are not an SGR report; this many can pass through.
@@ -39,17 +48,27 @@ impl MouseFilter {
         Self::default()
     }
 
-    /// Filter one stdin chunk. `armed` is the close-button rectangle when the
-    /// filter should act. Returns the bytes to forward and whether a dismiss
-    /// click was consumed.
-    pub fn process(&mut self, chunk: &[u8], armed: Option<CellRect>) -> (Vec<u8>, bool) {
-        if armed.is_none() && self.pending.is_empty() && !self.swallowing_release {
-            return (chunk.to_vec(), false);
+    /// Filter one stdin chunk. clud consumes only clicks on its own visible
+    /// controls and hover reports over the usage panel; all other bytes reach
+    /// the child unchanged.
+    pub fn process(
+        &mut self,
+        chunk: &[u8],
+        close: Option<CellRect>,
+        usage: Option<CellRect>,
+        hover_armed: bool,
+    ) -> MouseResult {
+        if close.is_none() && usage.is_none() && self.pending.is_empty() && !self.swallowing_release
+        {
+            return MouseResult {
+                bytes: chunk.to_vec(),
+                ..MouseResult::default()
+            };
         }
         let mut input = std::mem::take(&mut self.pending);
         input.extend_from_slice(chunk);
         let mut out = Vec::with_capacity(input.len());
-        let mut dismissed = false;
+        let mut result = MouseResult::default();
         let mut i = 0;
         while i < input.len() {
             if input[i] != 0x1b {
@@ -68,7 +87,8 @@ impl MouseFilter {
                     } else {
                         out.extend_from_slice(&input[i..]);
                     }
-                    return (out, dismissed);
+                    result.bytes = out;
+                    return result;
                 }
                 Parse::Report {
                     len,
@@ -78,9 +98,19 @@ impl MouseFilter {
                     press,
                 } => {
                     let left_press = press && button & 0b11 == 0 && button & (32 | 64) == 0;
-                    let hit = armed.is_some_and(|rect| rect.contains_1based(x, y));
-                    if left_press && hit {
-                        dismissed = true;
+                    let hit_close = close.is_some_and(|rect| rect.contains_1based(x, y));
+                    let hit_usage = usage.is_some_and(|rect| rect.contains_1based(x, y));
+                    let passive_motion = button & 32 != 0 && button & 0b11 == 3;
+                    if hover_armed && passive_motion {
+                        result.usage_hover = Some(hit_usage);
+                        if !hit_usage {
+                            out.extend_from_slice(&input[i..i + len]);
+                        }
+                    } else if left_press && hit_close {
+                        result.dismissed = true;
+                        self.swallowing_release = true;
+                    } else if left_press && hit_usage {
+                        result.usage_toggled = true;
                         self.swallowing_release = true;
                     } else if !press && self.swallowing_release {
                         self.swallowing_release = false;
@@ -91,7 +121,8 @@ impl MouseFilter {
                 }
             }
         }
-        (out, dismissed)
+        result.bytes = out;
+        result
     }
 
     /// Release any held partial report (called when stdin goes idle so a lone
@@ -154,43 +185,49 @@ mod tests {
         width: 3,
         height: 1,
     };
+    const USAGE: CellRect = CellRect {
+        row: 0,
+        col: 20,
+        width: 30,
+        height: 3,
+    };
 
     #[test]
     fn unarmed_filter_is_a_byte_exact_pass_through() {
         let mut f = MouseFilter::new();
         let input = b"typed\x1b[<0;71;1Mtext\x1b";
-        assert_eq!(f.process(input, None), (input.to_vec(), false));
+        assert_eq!(f.process(input, None, None, false).bytes, input);
     }
 
     #[test]
     fn a_click_on_the_close_button_is_swallowed_with_its_release() {
         let mut f = MouseFilter::new();
-        let (out, dismissed) = f.process(b"a\x1b[<0;71;1Mb\x1b[<0;71;1mc", Some(CLOSE));
-        assert!(dismissed);
-        assert_eq!(out, b"abc");
+        let result = f.process(b"a\x1b[<0;71;1Mb\x1b[<0;71;1mc", Some(CLOSE), None, false);
+        assert!(result.dismissed);
+        assert_eq!(result.bytes, b"abc");
     }
 
     #[test]
     fn clicks_elsewhere_and_other_buttons_reach_the_child() {
         let mut f = MouseFilter::new();
         let input = b"\x1b[<0;10;5M\x1b[<0;10;5m\x1b[<2;71;1M\x1b[<64;71;1M\x1b[<32;71;1M";
-        let (out, dismissed) = f.process(input, Some(CLOSE));
-        assert!(!dismissed);
-        assert_eq!(out, input.to_vec());
+        let result = f.process(input, Some(CLOSE), None, false);
+        assert!(!result.dismissed);
+        assert_eq!(result.bytes, input);
     }
 
     #[test]
     fn a_report_split_across_chunks_is_reassembled() {
         let mut f = MouseFilter::new();
-        let (out, dismissed) = f.process(b"x\x1b[<0;7", Some(CLOSE));
-        assert_eq!(out, b"x");
-        assert!(!dismissed);
-        let (out, dismissed) = f.process(b"1;1M", Some(CLOSE));
-        assert!(dismissed);
-        assert!(out.is_empty());
-        let (out, _) = f.process(b"\x1b[<0;71;1m", None);
+        let result = f.process(b"x\x1b[<0;7", Some(CLOSE), None, false);
+        assert_eq!(result.bytes, b"x");
+        assert!(!result.dismissed);
+        let result = f.process(b"1;1M", Some(CLOSE), None, false);
+        assert!(result.dismissed);
+        assert!(result.bytes.is_empty());
+        let result = f.process(b"\x1b[<0;71;1m", None, None, false);
         assert!(
-            out.is_empty(),
+            result.bytes.is_empty(),
             "release after dismiss is swallowed even if disarmed"
         );
     }
@@ -199,16 +236,16 @@ mod tests {
     fn keyboard_escape_sequences_pass_through_unchanged() {
         let mut f = MouseFilter::new();
         let input = b"\x1b[A\x1bOP\x1b[99;5u\x1b[200~paste\x1b[201~";
-        let (out, dismissed) = f.process(input, Some(CLOSE));
-        assert!(!dismissed);
-        assert_eq!(out, input.to_vec());
+        let result = f.process(input, Some(CLOSE), None, false);
+        assert!(!result.dismissed);
+        assert_eq!(result.bytes, input);
     }
 
     #[test]
     fn a_lone_trailing_escape_is_held_then_flushed_on_idle() {
         let mut f = MouseFilter::new();
-        let (out, _) = f.process(b"q\x1b", Some(CLOSE));
-        assert_eq!(out, b"q");
+        let result = f.process(b"q\x1b", Some(CLOSE), None, false);
+        assert_eq!(result.bytes, b"q");
         assert_eq!(f.flush_pending(), b"\x1b");
         assert!(f.flush_pending().is_empty());
     }
@@ -217,8 +254,31 @@ mod tests {
     fn malformed_reports_are_forwarded() {
         let mut f = MouseFilter::new();
         let input = b"\x1b[<0;;1M\x1b[<a";
-        let (out, dismissed) = f.process(input, Some(CLOSE));
-        assert!(!dismissed);
-        assert_eq!(out, input.to_vec());
+        let result = f.process(input, Some(CLOSE), None, false);
+        assert!(!result.dismissed);
+        assert_eq!(result.bytes, input);
+    }
+
+    #[test]
+    fn usage_clicks_toggle_and_sgr_any_motion_controls_hover() {
+        let mut f = MouseFilter::new();
+        let click = f.process(b"\x1b[<0;21;1M\x1b[<0;21;1m", None, Some(USAGE), false);
+        assert!(click.usage_toggled);
+        assert!(
+            click.bytes.is_empty(),
+            "overlay click stays out of the child"
+        );
+
+        let enter = f.process(b"\x1b[<35;21;1M", None, Some(USAGE), true);
+        assert_eq!(enter.usage_hover, Some(true));
+        assert!(enter.bytes.is_empty());
+        let leave = f.process(b"\x1b[<35;5;8M", None, Some(USAGE), true);
+        assert_eq!(leave.usage_hover, Some(false));
+        assert_eq!(leave.bytes, b"\x1b[<35;5;8M");
+
+        let drag = b"\x1b[<32;21;1M";
+        let dragging = f.process(drag, None, Some(USAGE), true);
+        assert_eq!(dragging.usage_hover, None);
+        assert_eq!(dragging.bytes, drag);
     }
 }
