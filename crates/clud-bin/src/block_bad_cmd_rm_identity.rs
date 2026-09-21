@@ -62,7 +62,21 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
         Err(()) => return Err(refuse()),
     };
     for segment in statements {
-        let words = shell_words::split(segment.trim()).map_err(|_| refuse())?;
+        let words = match shell_words::split(segment.trim()) {
+            Ok(words) => words,
+            // `shell_words` intentionally does not model Bash's ANSI-C
+            // `$'...'` arguments. The statement scanner above does, and can
+            // already establish that this opaque argument cannot execute a
+            // removal or a dynamic shell program. Treating a prose body as
+            // executable source here was the #1228 regression.
+            Err(_)
+                if !contains_unquoted_removal_program(segment)
+                    && !contains_unquoted_dynamic_shell_program(segment) =>
+            {
+                continue;
+            }
+            Err(_) => return Err(refuse()),
+        };
         let mut index = 0;
         while words.get(index).is_some_and(|w| is_env_assignment(w)) {
             let name = words[index].split('=').next().unwrap_or_default();
@@ -562,6 +576,7 @@ mod tests {
             "printf '%s' \"stream or a future field\"",
             "body=$(curl -fsSL https://example.invalid); printf '%s' \"$body\"",
             "for version in 1 2 3; do printf '%s\\n' \"$version\"; done",
+            "gh issue comment 1229 --repo zackees/clud --body $'Burndown update\\n\\n- all platform CI green'",
         ] {
             assert!(source_reason(source).is_ok(), "{source}");
         }
