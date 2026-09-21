@@ -2134,14 +2134,51 @@ mod live_probe {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    const MAX_INPUT_BYTES: usize = 32 * 1024;
+    const LONGEST_SUFFIX: &str = "second";
+
     fn cache_canary_config() -> UpstreamConfig {
         UpstreamConfig {
-            // A spend ceiling must be enforced before the request, not merely
-            // observed from StreamOutcome after a retry already happened.
+            // The request-count ceiling must be enforced before the request,
+            // not merely observed from StreamOutcome after a retry happened.
             max_attempts: 1,
             unknown_max_attempts: 1,
             ..UpstreamConfig::default()
         }
+    }
+
+    fn cache_canary_body(prefix: &str, suffix: &str, cache_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "model": "gpt-5.6-terra",
+            "input": [{"type": "message", "role": "user", "content": [{
+                "type": "input_text", "text": format!("{prefix}{suffix}"),
+            }]}],
+            "stream": true,
+            "store": false,
+            "prompt_cache_key": cache_key,
+            // The ChatGPT subscription endpoint rejects the Responses API's
+            // `max_output_tokens` field. The live probe is explicitly gated
+            // and user-authorized instead; `medium` is a supported 5.6 effort.
+            "reasoning": {"effort": "medium"},
+        })
+    }
+
+    fn new_cache_canary_key() -> Result<String, getrandom::Error> {
+        let mut bytes = [0_u8; 16];
+        getrandom::fill(&mut bytes)?;
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        Ok(format!("clud-live-cache-canary-{hex}"))
+    }
+
+    fn cache_canary_prefix(cache_key: &str) -> String {
+        let unit = format!("cache canary {cache_key} prefix ");
+        let repeat_count = (MAX_INPUT_BYTES - LONGEST_SUFFIX.len()) / unit.len();
+        let prefix = unit.repeat(repeat_count);
+        assert!(
+            prefix.len() + LONGEST_SUFFIX.len() <= MAX_INPUT_BYTES,
+            "canary input exceeded its hard input-size ceiling"
+        );
+        prefix
     }
 
     #[test]
@@ -2149,6 +2186,36 @@ mod live_probe {
         let config = cache_canary_config();
         assert_eq!(config.max_attempts, 1);
         assert_eq!(config.unknown_max_attempts, 1);
+    }
+
+    #[test]
+    fn cache_canary_payload_uses_subscription_supported_fields() {
+        let first = cache_canary_body("prefix", "first", "canary-key");
+        let second = cache_canary_body("prefix", "second", "canary-key");
+        assert_eq!(first["reasoning"]["effort"], "medium");
+        assert!(first.get("max_output_tokens").is_none());
+        assert_eq!(first["prompt_cache_key"], "canary-key");
+        assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+    }
+
+    #[test]
+    fn cache_canary_key_uses_os_entropy() {
+        let key = new_cache_canary_key().expect("OS entropy available in test");
+        assert!(key.starts_with("clud-live-cache-canary-"));
+        assert_ne!(
+            key,
+            "clud-live-cache-canary-00000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn cache_canary_longest_request_stays_within_input_ceiling() {
+        let key = "clud-live-cache-canary-12345678901234567890123456789012";
+        let body = cache_canary_body(&cache_canary_prefix(key), LONGEST_SUFFIX, key);
+        let text = body["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("canary input text");
+        assert!(text.len() <= MAX_INPUT_BYTES);
     }
 
     #[test]
@@ -2174,7 +2241,7 @@ mod live_probe {
         assert!(received.contains("response.completed"));
     }
 
-    /// A deliberately bounded provider-side cache contract check for #1226.
+    /// A deliberately narrow live cache contract check for #1226.
     ///
     /// This is both ignored and explicitly gated so an ordinary `--ignored`
     /// invocation cannot charge a user's account. It makes exactly two serial
@@ -2187,32 +2254,19 @@ mod live_probe {
             Ok("1"),
             "refusing live cache canary without CLUD_LIVE_CODEX_CACHE_TESTS=1"
         );
+        let cache_key =
+            new_cache_canary_key().expect("OS entropy required for a live cache canary");
         let credentials = ResolvedCredentials::resolve_default().expect("credentials");
         let client = UpstreamClient::new(credentials, cache_canary_config())
-            .with_session_id("clud-live-cache-canary-v1".to_string());
-        // Around 3K simple tokens: above ordinary prompt-cache eligibility
-        // thresholds while keeping both requests bounded and inexpensive.
+            .with_session_id(cache_key.clone());
+        // Large enough for provider prompt-cache eligibility while remaining
+        // below the strict input-size ceiling.
         const MAX_REQUESTS: usize = 2;
-        const MAX_INPUT_BYTES: usize = 32 * 1024;
-        let prefix = "cache canary prefix ".repeat(1_024);
-        assert!(
-            prefix.len() < MAX_INPUT_BYTES,
-            "canary prefix exceeded its hard input-size ceiling"
-        );
+        let prefix = cache_canary_prefix(&cache_key);
         let mut usage = Vec::new();
 
         for suffix in ["first", "second"] {
-            let body = serde_json::json!({
-                "model": "gpt-5.6-terra",
-                "input": [{"type": "message", "role": "user", "content": [{
-                    "type": "input_text", "text": format!("{prefix}{suffix}"),
-                }]}],
-                "stream": true,
-                "store": false,
-                "prompt_cache_key": "clud-live-cache-canary-v1",
-                "max_output_tokens": 16,
-                "reasoning": {"effort": "minimal"},
-            });
+            let body = cache_canary_body(&prefix, suffix, &cache_key);
             let mut received = String::new();
             let outcome = client
                 .stream(
@@ -2246,8 +2300,12 @@ mod live_probe {
             usage[0].0, usage[0].1, usage[1].0, usage[1].1
         );
         assert!(
-            usage[1].1 >= 2_400,
-            "the second request must cache >=80% of the ~3K fixed prefix"
+            usage[0].1 == 0,
+            "the unique first request must have no cache credit"
+        );
+        assert!(
+            usage[1].1.saturating_mul(100) >= usage[1].0.saturating_mul(80),
+            "the second request must cache at least 80% of its fixed prefix"
         );
     }
 }
