@@ -81,6 +81,19 @@ pub struct StatusUsage {
     pub cache_health: String,
 }
 
+/// Claude Code's documented, most-recent-call status-line usage. This is
+/// intentionally distinct from [`StatusUsage`]: status-line callbacks are
+/// repeated for non-request events, so their values cannot be accumulated into
+/// an exact session ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeStatusUsage {
+    pub model: String,
+    pub cached_input_tokens: u64,
+    pub uncached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_health: String,
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -232,6 +245,57 @@ pub fn render_usage(usage: &StatusUsage) -> String {
     let text = format!(
         "{} {} - read {} cached / {} uncached - write {} - {}",
         safe_label(&usage.provider),
+        safe_label(&usage.model),
+        compact_tokens(usage.cached_input_tokens),
+        compact_tokens(usage.uncached_input_tokens),
+        compact_tokens(usage.output_tokens),
+        safe_label(&usage.cache_health),
+    );
+    format!("\x1b[38;5;75mclud - {text}\x1b[0m")
+}
+
+/// Parse only Claude Code's documented, current-call status-line counters.
+/// The input is not persisted, logged, or used as a session identity.
+pub fn claude_status_usage(stdin: &[u8]) -> Option<ClaudeStatusUsage> {
+    let value: Value = serde_json::from_slice(stdin).ok()?;
+    let model = value
+        .pointer("/model/display_name")
+        .or_else(|| value.pointer("/model/id"))
+        .and_then(Value::as_str)
+        .filter(|label| !label.trim().is_empty())?
+        .to_string();
+    let usage = value.pointer("/context_window/current_usage")?;
+    let number = |field| usage.get(field).and_then(Value::as_u64);
+    let input = number("input_tokens")?;
+    let cache_creation = number("cache_creation_input_tokens")?;
+    let cached = number("cache_read_input_tokens")?;
+    let output = number("output_tokens")?;
+    let cache_health = match value.pointer("/prompt_cache/warm").and_then(Value::as_bool) {
+        Some(true) => value
+            .pointer("/prompt_cache/hit_ratio")
+            .and_then(Value::as_f64)
+            .filter(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio))
+            .map(|ratio| format!("warm {:.0}%", ratio * 100.0))
+            .unwrap_or_else(|| "warm".to_string()),
+        Some(false) => "cold".to_string(),
+        None => "unavailable".to_string(),
+    };
+    Some(ClaudeStatusUsage {
+        model,
+        cached_input_tokens: cached,
+        // Claude documents ordinary input and cache creation separately. Both
+        // are fresh input for this call; only cache reads are cache credit.
+        uncached_input_tokens: input.saturating_add(cache_creation),
+        output_tokens: output,
+        cache_health,
+    })
+}
+
+/// Render documented native-Claude usage without implying exact cumulative
+/// accounting that clud did not observe on the provider stream.
+pub fn render_claude_status_usage(usage: &ClaudeStatusUsage) -> String {
+    let text = format!(
+        "Claude last call {} - read {} cached / {} uncached - write {} - cache {} - cumulative unavailable",
         safe_label(&usage.model),
         compact_tokens(usage.cached_input_tokens),
         compact_tokens(usage.uncached_input_tokens),
@@ -451,6 +515,9 @@ pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64)
     let path = state_path(&args.state_dir, args.session_pid);
     if let Some(usage) = read_live_usage(&path, now_ms) {
         out.extend_from_slice(render_usage(&usage).as_bytes());
+        out.push(b'\n');
+    } else if let Some(usage) = claude_status_usage(stdin) {
+        out.extend_from_slice(render_claude_status_usage(&usage).as_bytes());
         out.push(b'\n');
     }
     if let Some(toast) = read_live_toast(&path, now_ms) {

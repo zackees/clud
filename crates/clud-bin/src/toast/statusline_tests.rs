@@ -125,6 +125,102 @@ fn provider_usage_is_persistent_distinct_and_stale_safe() {
 }
 
 #[test]
+fn documented_claude_status_usage_is_labeled_last_call_not_a_ledger() {
+    let stdin = br#"{
+        "model": {"display_name": "Opus"},
+        "context_window": {"current_usage": {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 300,
+            "output_tokens": 40
+        }},
+        "prompt_cache": {"warm": true, "hit_ratio": 0.75}
+    }"#;
+    let usage = claude_status_usage(stdin).expect("documented status usage");
+    assert_eq!(usage.model, "Opus");
+    assert_eq!(usage.cached_input_tokens, 300);
+    assert_eq!(usage.uncached_input_tokens, 120);
+    assert_eq!(usage.output_tokens, 40);
+    let line = render_claude_status_usage(&usage);
+    assert!(line.contains("Claude last call"), "{line}");
+    assert!(line.contains("cumulative unavailable"), "{line}");
+    assert!(line.contains("cache warm 75%"), "{line}");
+    assert!(!line.contains("session total"), "{line}");
+}
+
+#[test]
+fn malformed_or_partial_claude_status_usage_is_unavailable() {
+    for stdin in [
+        br#"{"model":{"display_name":"Opus"}}"#.as_slice(),
+        br#"{"context_window":{"current_usage":null}}"#.as_slice(),
+        br#"{"model":{"display_name":"Opus"},"context_window":{"current_usage":{"input_tokens":1}}}"#.as_slice(),
+        b"not json".as_slice(),
+    ] {
+        assert!(claude_status_usage(stdin).is_none(), "{stdin:?}");
+    }
+}
+
+#[test]
+fn statusline_renders_documented_native_claude_usage_without_state_file_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = RunArgs {
+        session_pid: 17,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let stdin = br#"{
+        "model": {"id": "claude-opus-5"},
+        "context_window": {"current_usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "output_tokens": 4
+        }},
+        "prompt_cache": {"warm": false}
+    }"#;
+    let mut out = Vec::new();
+    render_into(&mut out, &args, stdin, now_ms());
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("Claude last call claude-opus-5"), "{text}");
+    assert!(text.contains("read 3 cached / 3 uncached"), "{text}");
+    assert!(text.contains("cache cold"), "{text}");
+}
+
+#[test]
+fn exact_bridge_usage_wins_over_documented_claude_last_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 18);
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: "gpt-5.6-terra".into(),
+        request_count: 1,
+        cached_input_tokens: 8,
+        uncached_input_tokens: 9,
+        output_tokens: 10,
+        cache_health: "healthy".into(),
+    });
+    let args = RunArgs {
+        session_pid: 18,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let stdin = br#"{
+        "model": {"display_name": "Opus"},
+        "context_window": {"current_usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "output_tokens": 4
+        }}
+    }"#;
+    let mut out = Vec::new();
+    render_into(&mut out, &args, stdin, now_ms());
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("gpt-5.6-terra"), "{text}");
+    assert!(!text.contains("Claude last call"), "{text}");
+}
+
+#[test]
 fn a_delayed_older_usage_snapshot_cannot_replace_newer_totals() {
     let dir = tempfile::tempdir().unwrap();
     let writer = writer_in(dir.path(), 16);
