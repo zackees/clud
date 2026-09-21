@@ -2134,12 +2134,36 @@ mod live_probe {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    const CACHE_CANARY_KEY: &str = "clud-live-cache-canary-v1";
+    const CACHE_CANARY_MAX_RESPONSE_BYTES: usize = 128 * 1024;
+
+    /// The subscription Codex client accepts this Responses shape. In
+    /// particular, its 0.146.0 request builder sends `prompt_cache_key` but
+    /// does not serialize `max_output_tokens`; the latter caused the previous
+    /// canary to be rejected before its first response. Keep the reply prompt
+    /// deliberately tiny and enforce a local stream ceiling instead.
+    fn cache_canary_body(prefix: &str, suffix: &str) -> serde_json::Value {
+        serde_json::json!({
+            "model": "gpt-5.6-terra",
+            "input": [{"type": "message", "role": "user", "content": [{
+                "type": "input_text",
+                "text": format!("{prefix}Reply with exactly the lowercase word ok. Request marker: {suffix}"),
+            }]}],
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": CACHE_CANARY_KEY,
+            "reasoning": {"effort": "medium"},
+        })
+    }
+
     fn cache_canary_config() -> UpstreamConfig {
         UpstreamConfig {
             // A spend ceiling must be enforced before the request, not merely
             // observed from StreamOutcome after a retry already happened.
             max_attempts: 1,
             unknown_max_attempts: 1,
+            max_response_bytes: CACHE_CANARY_MAX_RESPONSE_BYTES,
             ..UpstreamConfig::default()
         }
     }
@@ -2149,6 +2173,24 @@ mod live_probe {
         let config = cache_canary_config();
         assert_eq!(config.max_attempts, 1);
         assert_eq!(config.unknown_max_attempts, 1);
+        assert_eq!(config.max_response_bytes, CACHE_CANARY_MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn cache_canary_uses_the_subscription_codex_request_contract() {
+        let request = cache_canary_body("fixed prefix ", "second");
+        assert_eq!(request["prompt_cache_key"], CACHE_CANARY_KEY);
+        assert!(request.get("max_output_tokens").is_none());
+        assert_eq!(request["reasoning"]["effort"], "medium");
+        assert_eq!(
+            request["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        let text = request["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("canary text");
+        assert!(text.starts_with("fixed prefix "));
+        assert!(text.ends_with("Request marker: second"));
     }
 
     #[test]
@@ -2202,17 +2244,7 @@ mod live_probe {
         let mut usage = Vec::new();
 
         for suffix in ["first", "second"] {
-            let body = serde_json::json!({
-                "model": "gpt-5.6-terra",
-                "input": [{"type": "message", "role": "user", "content": [{
-                    "type": "input_text", "text": format!("{prefix}{suffix}"),
-                }]}],
-                "stream": true,
-                "store": false,
-                "prompt_cache_key": "clud-live-cache-canary-v1",
-                "max_output_tokens": 16,
-                "reasoning": {"effort": "minimal"},
-            });
+            let body = cache_canary_body(&prefix, suffix);
             let mut received = String::new();
             let outcome = client
                 .stream(

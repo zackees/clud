@@ -133,8 +133,12 @@ The canary is intentionally ignored and requires explicit opt-in:
 `CLUD_LIVE_CODEX_CACHE_TESTS=1 soldr cargo test -p clud --lib
 codex_upstream::live_probe::cache_credit_is_reused_for_a_stable_conversation_prefix -- --ignored
 --nocapture`. It permits at most two serial, tool-free requests with a 32 KiB
-input ceiling and a requested 16-token output cap; any failed request stops the
-probe without retry or a cache conclusion. Ordinary tests and CI never invoke it.
+input ceiling and a 128 KiB received-stream ceiling; its response instruction
+asks for exactly one word. It uses the subscription Codex client's compatible
+request shape, including `prompt_cache_key` and excluding
+`max_output_tokens`, which that backend rejected in the original probe. Any
+failed request stops the probe without retry or a cache conclusion. Ordinary
+tests and CI never invoke it.
 
 ## Conversation state and compaction
 
