@@ -540,7 +540,7 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     for wheel in wheels:
         prune_nonproduction_scripts(wheel)
         if args.profile == "release":
-            remove_elf_debug_metadata(wheel)
+            remove_elf_debug_metadata(wheel, target=args.target)
             verify_no_elf_debug_sections(wheel)
         if desktop_target(args.target):
             add_companion(wheel, companion, args.target)

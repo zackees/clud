@@ -8,7 +8,7 @@ from pathlib import Path
 
 from running_process import PIPE, RunningProcess
 
-from ci import bundle, xbuild
+from ci import build_wheel, bundle, wheel_repair, xbuild
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -139,6 +139,31 @@ def test_release_linux_wheel_env_sets_no_whisper_vars(monkeypatch) -> None:
     assert "WHISPER_LINK_CXX_STATIC" not in env
     offenders = {key: value for key, value in env.items() if "static-libstdc++" in value}
     assert not offenders, f"static-libstdc++ RUSTFLAGS survived: {offenders}"
+
+
+def test_release_wheel_stripping_receives_the_explicit_cross_target(monkeypatch, tmp_path) -> None:
+    """The wheel post-processing parent must not rely on maturin's child env."""
+    target = "aarch64-unknown-linux-gnu"
+    wheel = tmp_path / "clud.whl"
+    stripped: list[tuple[Path, str | None]] = []
+
+    monkeypatch.setattr(xbuild, "build_env", lambda *_args: {})
+    monkeypatch.setattr(xbuild, "run", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(build_wheel, "built_wheels", lambda: [wheel])
+    monkeypatch.setattr(build_wheel, "prune_nonproduction_scripts", lambda _wheel: False)
+    monkeypatch.setattr(
+        build_wheel,
+        "remove_elf_debug_metadata",
+        lambda candidate, *, target=None: stripped.append((candidate, target)) or True,
+    )
+    monkeypatch.setattr(build_wheel, "verify_no_elf_debug_sections", lambda _wheel: None)
+    monkeypatch.setattr(build_wheel, "verify_wheel_scripts", lambda _wheel: 0)
+    monkeypatch.setattr(wheel_repair, "repair_windows_gnu_wheel", lambda _wheel: None)
+    monkeypatch.setattr(xbuild, "collect_debuginfo", lambda *_args: None)
+
+    args = argparse.Namespace(target=target, strategy="soldr", profile="release")
+    assert xbuild.cmd_wheel(args) == 0
+    assert stripped == [(wheel, target)]
 
 
 def test_gnu_linux_test_verb_stays_on_prepared_cargo() -> None:
