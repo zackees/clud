@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.8.12 - 2026-09-21
 
 - Linux release-wheel cleanup now resolves Soldr's target-prefixed `objcopy`
   rather than assuming `llvm-objcopy` is installed, restoring the ELF before
