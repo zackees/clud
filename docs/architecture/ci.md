@@ -374,14 +374,12 @@ Because `publish-pypi` failed, the dependent `publish-release` job was skipped,
 so those tags produced no GitHub release either — the pipeline was silently
 broken for three tags.
 
-`split-debuginfo = "packed"` fixes it at the source: it emits a `.dwp` on ELF
-and drops `.debug_info` / `.debug_str` from the binary. Measured against the
-2.7.4 artifact: 72–91 MB of the 137 MB `clud` binary moves out, projecting the
-wheel from 105 MB to ~40 MB.
-`.debug_line` stays embedded, so a panic still resolves file:line unaided (and
-function names still come from `.symtab`). The inlined-subroutine DIEs are what
-move, so without the `.dwp` a backtrace collapses to one file:line per physical
-frame -- the sidecar is not optional for full-fidelity traces.
+`split-debuginfo = "packed"` produces the `.dwp` sidecar, but Cargo/toolchain
+combinations can still leave `.debug_*` sections in the linked executable.
+`strip = "debuginfo"` is therefore the release-wheel boundary: it removes only
+debug sections after the sidecar exists, while retaining the ordinary symbol
+table used by runtime diagnostics. The release x86_64 Linux wheel is capped at
+20 MB, so a future regression fails before PyPI upload.
 
 Only Linux changes. `packed` is already MSVC's default. On Apple it would select
 the `.dSYM` bundle, which means rustc runs `dsymutil` at link time -- the one
@@ -414,38 +412,20 @@ Only `clud` itself gets a `.dwp`. It is the sole binary that installs the crash
 reporter, and the shims currently share its whole dep tree, so publishing all
 five would put ~900 MB of near-duplicate DWARF on every release page.
 
+Maturin's binary binding includes every enabled Cargo `[[bin]]`. The wheel
+packer removes `clud-ctrlc-probe` after packaging because it is a real-signal
+test fixture, not a production command; CI bundles retain it for those tests.
+
 ### The manylinux glibc floor is `--compatibility`, not `--target`
 
 The release branch of `ci/xbuild.py::cmd_wheel` owns this and is the only place
 that should.
 
-Three traps, all of which shipped a red release run before being understood:
-
-1. **The floor cannot be spelled on `--target`.** `cargo zigbuild` accepts
-   `x86_64-unknown-linux-gnu.2.17`; maturin does not — it hands `--target`
-   straight to `target-lexicon`, which rejects the suffix as an unknown triple.
-   maturin *derives* `<triple>.2.17` itself from the manylinux platform tag and
-   passes that to zig, so `--compatibility manylinux2014 --zig` is the entire
-   mechanism. Neither does `soldr prepare` take the suffix (soldr#2139 is on
-   `main`, not in the pinned 0.8.30).
-2. **`soldr prepare`'s exports outrank zig's.** cargo-zigbuild installs its
-   2.17-floored `cc`/`c++`/`ar`/`ranlib` shims and the linker with
-   `add_env_if_missing`, which also consults the ambient environment. Because
-   `soldr prepare` exports `CC_<triple>`, `CARGO_TARGET_<T>_LINKER` and friends
-   for the compile and test steps, the wheel build silently split its
-   toolchain — Rust at 2.17, the whisper.cpp C/C++ at soldr's default — and the
-   audit rejected it for `GLIBC_2.25/2.27/2.28`. The fix is to drop those
-   variables for the wheel build, which is safe only because no `*-sys` crate
-   needs the prepared sysroot on Linux (`cpal` is cfg'd off there). (The C++
-   half of that split no longer exists — see "The static C++ runtime link is
-   gone" below.)
-3. **Only the cross lanes get a zig on PATH.** cargo-zigbuild resolves zig as
-   `which(python3) -m ziglang` then `which(zig)`. On the native `x86_64` lane
-   `python3` is the hosted-tool interpreter (no `ziglang`) and `soldr prepare`
-   is skipped, so the release wheel died with "Failed to find zig" while the
-   ARM lane sailed past it. `CARGO_ZIGBUILD_PYTHON_PATH=sys.executable` names
-   the venv interpreter that does have `ziglang` (via the `maturin[zig]` dev
-   dep), uniformly on every lane.
+The platform tag selects the floor: `--compatibility manylinux2014` asks
+maturin to audit for glibc 2.17. `--target` remains the ordinary Rust triple;
+it must not carry a synthetic `.2.17` suffix. `soldr prepare` supplies the
+matching catalogue GNU sysroot and linker to every Linux release lane, so no
+zig toolchain or environment scrubbing is involved.
 
 None of this is exercised by `ci.yml` — `_build-target.yml` refuses
 `profile: release` outside Auto Release — so the release wheel path is only

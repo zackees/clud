@@ -36,6 +36,56 @@ def test_windows_wheel_ships_the_cmd_scan_binary() -> None:
     assert "clud-cmd-scan" in build_wheel.REQUIRED_SCRIPTS
 
 
+def test_maturin_wheel_prunes_the_test_only_ctrlc_probe(tmp_path) -> None:
+    wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in (*build_wheel.REQUIRED_SCRIPTS, "clud-ctrlc-probe"):
+            archive.writestr(f"clud-2.8.7.data/scripts/{name}", b"binary")
+        archive.writestr("clud-2.8.7.dist-info/RECORD", "clud-2.8.7.dist-info/RECORD,,\n")
+
+    assert build_wheel.prune_nonproduction_scripts(wheel)
+    with zipfile.ZipFile(wheel) as archive:
+        assert "clud-2.8.7.data/scripts/clud-ctrlc-probe" not in archive.namelist()
+    assert build_wheel.verify_wheel_scripts(wheel) == 0
+
+
+def test_release_wheel_removes_elf_debug_gdb_metadata(monkeypatch, tmp_path) -> None:
+    wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
+    script = "clud-2.8.7.data/scripts/clud"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(script, b"\x7fELFdebug-gdb")
+        archive.writestr("clud-2.8.7.dist-info/RECORD", "clud-2.8.7.dist-info/RECORD,,\n")
+
+    class Result:
+        returncode = 0
+
+    calls = []
+    monkeypatch.setattr(
+        build_wheel.process,
+        "run",
+        lambda argv, **kwargs: calls.append(argv) or Result(),
+    )
+    assert build_wheel.remove_elf_debug_metadata(wheel)
+    assert calls
+    assert calls[0][:2] == ["llvm-objcopy", "--remove-section=.debug_gdb_scripts"]
+
+
+def test_release_wheel_rejects_a_remaining_elf_debug_section(monkeypatch, tmp_path) -> None:
+    import pytest
+
+    wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("clud-2.8.7.data/scripts/clud", b"\x7fELF")
+
+    class Result:
+        returncode = 0
+        stdout = "  [1] .debug_info PROGBITS"
+
+    monkeypatch.setattr(build_wheel.process, "run", lambda *args, **kwargs: Result())
+    with pytest.raises(RuntimeError, match="retains debug"):
+        build_wheel.verify_no_elf_debug_sections(wheel)
+
+
 def test_local_webterm_companion_uses_the_configured_target_directory(
     monkeypatch, tmp_path
 ) -> None:

@@ -101,6 +101,13 @@ def test_release_linux_wheel_builds_without_zig() -> None:
     assert "CARGO_ZIGBUILD_PYTHON_PATH" not in source
 
 
+def test_release_profile_strips_debug_sections_but_keeps_runtime_symbols() -> None:
+    import tomllib
+
+    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    assert cargo["profile"]["release"]["strip"] == "debuginfo"
+
+
 def test_release_linux_wheel_env_sets_no_whisper_vars(monkeypatch) -> None:
     """The release manylinux wheel no longer carries whisper's static C++ link
     mechanism (#1207).

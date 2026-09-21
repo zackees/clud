@@ -155,7 +155,7 @@ jobs:
         if: ${{ inputs.bundle || inputs.wheel-artifact != '' }}
         run: >
           "$VENV_PY" -m ci.check_wheel_size --dist-dir dist/
-          ${{ inputs.profile == 'release' && '--max-mb 90' || '' }}
+          ${{ inputs.profile == 'release' && inputs.target == 'x86_64-unknown-linux-gnu' && '--max-mb 20' || inputs.profile == 'release' && '--max-mb 90' || '' }}
 
       - name: Build sdist
         if: ${{ inputs.include-sdist }}

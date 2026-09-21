@@ -44,6 +44,10 @@ opt-level = 1
 
 [profile.release]
 debug = "line-tables-only"
+# Cargo performs this after it has produced the packed `.dwp` sidecar.  Unlike
+# `strip = "symbols"`, this retains the normal symbol table used by runtime
+# diagnostics while ensuring a wheel cannot accidentally retain `.debug_*`.
+strip = "debuginfo"
 # Move the bulk of the DWARF into a sidecar instead of the shipped binary.
 # On ELF that debug info is embedded, which is why the manylinux wheel was
 # ~7x the Windows/macOS ones (those always wrote a `.pdb` / `.dSYM` sidecar)
