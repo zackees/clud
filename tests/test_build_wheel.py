@@ -130,8 +130,9 @@ def test_release_wheel_reports_missing_elf_objcopy(monkeypatch) -> None:
 
 
 def test_cross_target_does_not_derive_objcopy_from_generic_cc(monkeypatch) -> None:
-    from ci import env
     import pytest
+
+    from ci import env
 
     monkeypatch.setenv("CARGO_BUILD_TARGET", "aarch64-unknown-linux-gnu")
     monkeypatch.setenv("CC", "/toolchain/bin/gcc")
