@@ -134,6 +134,14 @@ pub enum Decision {
     Deny { reason: String },
 }
 
+fn rm_identity_applies_to_tool(tool_name: &str) -> bool {
+    block_bad_cmd_gate::gates_tool(tool_name)
+}
+
+fn rm_identity_denial_log_line(tool_name: &str, reason: &str) -> String {
+    format!("RM-IDENTITY-BLOCKED tool_name={tool_name:?} reason={reason:?}")
+}
+
 /// A `git clone` / `git worktree add` destination detected while scanning
 /// a command (zackees/clud#532), captured so `cmd-scan` can eagerly hand
 /// the path off to the clud daemon's GC registry instead of waiting for
@@ -412,12 +420,10 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
-    if event == PRE_TOOL_USE_EVENT
-        && (block_bad_cmd_gate::gates_tool(&payload.tool_name)
-            || !payload.command.trim().is_empty())
-    {
+    if event == PRE_TOOL_USE_EVENT && rm_identity_applies_to_tool(&payload.tool_name) {
         let path = std::env::var("PATH").unwrap_or_default();
         if let Err(reason) = block_bad_cmd_rm_identity::check(&payload.command, &path) {
+            append_log(&rm_identity_denial_log_line(&payload.tool_name, &reason));
             println!("{}", deny_json(&reason));
             eprintln!("[clud rm shim] {reason}");
             return 2;
@@ -3368,6 +3374,24 @@ mod tests {
     // on this single lock. Two independent locks (one here, one in `temp_env`)
     // previously let an "unset" test race a concurrent "set" test, flaking CI.
     static OVERRIDE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn rm_identity_check_is_limited_to_shell_tools() {
+        for tool in ["Bash", "PowerShell", "pwsh", "cmd", "shell_command"] {
+            assert!(rm_identity_applies_to_tool(tool), "{tool}");
+        }
+        for tool in ["apply_patch", "Read", "Edit", "Write", "WebFetch"] {
+            assert!(!rm_identity_applies_to_tool(tool), "{tool}");
+        }
+    }
+
+    #[test]
+    fn rm_identity_denial_log_line_is_categorized() {
+        let line = rm_identity_denial_log_line("Bash", "reason");
+        assert!(line.starts_with("RM-IDENTITY-BLOCKED "));
+        assert!(line.contains("tool_name=\"Bash\""));
+        assert!(line.contains("reason=\"reason\""));
+    }
 
     fn denies(command: &str) -> bool {
         evaluate_command(command, None, false, &[]).reason.is_some()
