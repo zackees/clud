@@ -133,6 +133,20 @@ pub fn apply_child_env_policy_with(
     base: Vec<(String, String)>,
     windows_stdio: bool,
 ) -> Vec<(String, String)> {
+    apply_child_env_policy_with_nounset_opt_out(
+        base,
+        windows_stdio,
+        crate::shell::nounset::is_opted_out(),
+    )
+}
+
+/// Test seam for the nounset opt-out, which production obtains from the
+/// process environment before the backend child is constructed.
+fn apply_child_env_policy_with_nounset_opt_out(
+    base: Vec<(String, String)>,
+    windows_stdio: bool,
+    nounset_opted_out: bool,
+) -> Vec<(String, String)> {
     let originator_key = running_process::ORIGINATOR_ENV_VAR;
 
     let mut strip_keys: Vec<&str> = vec!["IN_CLUD", originator_key];
@@ -177,7 +191,24 @@ pub fn apply_child_env_policy_with(
     // already stashed any inherited BASH_ENV under CLUD_PREV_BASH_ENV, and the
     // generated file sources it. There is no daemon-side copy to keep in step
     // with any more; `daemon::io_helpers::child_env_from` calls this builder.
-    for (key, value) in crate::shell::nounset::env_overrides() {
+    // A nested clud process inherits its parent's generated BASH_ENV. The
+    // explicit escape hatch must clear that inherited policy; otherwise Bash
+    // still sources it even though this launch declined to install nounset.
+    // Do not clear a user-owned BASH_ENV: it remains stock shell behavior.
+    let inherited_clud_nounset = nounset_opted_out
+        && env
+            .iter()
+            .find(|(key, _)| key == crate::shell::nounset::BASH_ENV_KEY)
+            .is_some_and(|(_, value)| crate::shell::nounset::is_clud_nounset_script(value));
+    if inherited_clud_nounset {
+        env.retain(|(key, _)| {
+            key != crate::shell::nounset::BASH_ENV_KEY && key != crate::shell::nounset::PREV_KEY
+        });
+    }
+    let nounset_overrides = (!nounset_opted_out)
+        .then(crate::shell::nounset::env_overrides)
+        .unwrap_or_default();
+    for (key, value) in nounset_overrides {
         push_or_replace(&mut env, &key, &value);
     }
 
@@ -263,6 +294,61 @@ pub fn child_env_for_backend_at(backend: Backend, home: Option<&Path>) -> Vec<(S
 fn push_or_replace(env: &mut Vec<(String, String)>, key: &str, value: &str) {
     env.retain(|(k, _)| k != key);
     env.push((key.to_string(), value.to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn nounset_opt_out_strips_an_inherited_clud_shim_at_the_policy_boundary() {
+        let tmp = tempdir().unwrap();
+        let inherited = crate::shell::nounset::env_overrides_at(tmp.path(), false, None)
+            .into_iter()
+            .find(|(key, _)| key == crate::shell::nounset::BASH_ENV_KEY)
+            .map(|(_, value)| value)
+            .expect("generated BASH_ENV");
+        let env = apply_child_env_policy_with_nounset_opt_out(
+            vec![
+                (crate::shell::nounset::BASH_ENV_KEY.to_string(), inherited),
+                (
+                    crate::shell::nounset::PREV_KEY.to_string(),
+                    "prior.sh".to_string(),
+                ),
+            ],
+            false,
+            true,
+        );
+        assert!(value(&env, crate::shell::nounset::BASH_ENV_KEY).is_none());
+        assert!(value(&env, crate::shell::nounset::PREV_KEY).is_none());
+    }
+
+    #[test]
+    fn nounset_opt_out_preserves_a_user_owned_bash_env() {
+        let tmp = tempdir().unwrap();
+        let user_owned = tmp.path().join("user-bash-env.sh");
+        std::fs::write(&user_owned, "# user-owned\necho custom\n").unwrap();
+        let user_owned = user_owned.display().to_string();
+        let env = apply_child_env_policy_with_nounset_opt_out(
+            vec![(
+                crate::shell::nounset::BASH_ENV_KEY.to_string(),
+                user_owned.clone(),
+            )],
+            false,
+            true,
+        );
+        assert_eq!(
+            value(&env, crate::shell::nounset::BASH_ENV_KEY),
+            Some(user_owned.as_str())
+        );
+    }
 }
 
 fn clud_home_dir() -> Option<PathBuf> {
