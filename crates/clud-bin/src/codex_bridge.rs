@@ -1,6 +1,7 @@
 //! Authenticated loopback bridge used by Codex-provider launches through the
 //! Claude harness (issue #626).
 
+use crate::anthropic_usage::{Provider as AnthropicUsageProvider, StreamingUsage};
 use crate::backend::ModelProvider;
 use crate::bridge_log::{unix_ms, BridgeLog};
 use crate::cache_health::{CacheHealth, CacheHealthTracker, TokenUsage, UsageTotals};
@@ -1643,6 +1644,7 @@ fn serve_unified_messages(
                 shutdown,
                 probe,
                 cache_health,
+                &config.status_usage,
             ),
             ModelProvider::DeepSeek if unified.deepseek_api_key.is_some() => {
                 serve_unified_anthropic_proxy(
@@ -1659,6 +1661,7 @@ fn serve_unified_messages(
                     shutdown,
                     probe,
                     cache_health,
+                    &config.status_usage,
                 )
             }
             ModelProvider::OpenRouter if unified.openrouter_api_key.is_some() => {
@@ -1676,6 +1679,7 @@ fn serve_unified_messages(
                     shutdown,
                     probe,
                     cache_health,
+                    &config.status_usage,
                 )
             }
             ModelProvider::Codex if unified.codex_available => {
@@ -1829,6 +1833,7 @@ fn finish_without_failover(
         shutdown,
         false,
         cache_health,
+        &config.status_usage,
     );
 }
 
@@ -1847,7 +1852,23 @@ fn serve_unified_anthropic_proxy(
     shutdown: &AtomicBool,
     probe: bool,
     cache_health: &SharedCacheHealth,
+    status_usage: &SharedStatusUsage,
 ) -> ProxyOutcome {
+    let provider = match route {
+        ConversationRoute::Claude => AnthropicUsageProvider::Claude,
+        ConversationRoute::DeepSeek => AnthropicUsageProvider::DeepSeek,
+        ConversationRoute::OpenRouter => AnthropicUsageProvider::OpenRouter,
+        ConversationRoute::Codex => unreachable!("Codex does not use the Anthropic proxy"),
+    };
+    let model = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|request| {
+            request
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
     let mut outcome = ProxyOutcome::local(500);
     let routed = conversations.with_history(&conversation_key.id, |history| {
         // Crossing a provider boundary starts a new route epoch, which is
@@ -1855,6 +1876,7 @@ fn serve_unified_anthropic_proxy(
         if history.enter_route(route) {
             lock_cache_health(cache_health).mark_boundary(&conversation_key.id);
         }
+        let mut usage = StreamingUsage::new(provider);
         outcome = serve_anthropic_proxy(
             stream,
             AnthropicProxyTarget {
@@ -1867,7 +1889,17 @@ fn serve_unified_anthropic_proxy(
             idle_timeout,
             shutdown,
             probe,
+            &mut usage,
         );
+        if path == "/v1/messages" {
+            if let ProxyOutcome::Committed { status } = outcome {
+                if status < 400 {
+                    if let Some(usage) = usage.finish() {
+                        publish_status_usage(status_usage, provider, &model, usage, "unavailable");
+                    }
+                }
+            }
+        }
         Ok(())
     });
     if let Err(error) = routed {
@@ -1936,6 +1968,7 @@ fn serve_unified_count_tokens(
         shutdown,
         false,
         cache_health,
+        &config.status_usage,
     );
 }
 
@@ -2002,6 +2035,7 @@ fn may_be_route_terminal(status: u16) -> bool {
     matches!(status, 401 | 402 | 403 | 429)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_anthropic_proxy(
     stream: &mut TcpStream,
     target: AnthropicProxyTarget<'_>,
@@ -2010,6 +2044,7 @@ fn serve_anthropic_proxy(
     idle_timeout: Duration,
     shutdown: &AtomicBool,
     probe: bool,
+    usage: &mut StreamingUsage,
 ) -> ProxyOutcome {
     let mut request = ureq::post(&format!(
         "{}{}",
@@ -2130,6 +2165,7 @@ fn serve_anthropic_proxy(
     {
         return ProxyOutcome::Committed { status };
     }
+    usage.feed(&prefix);
     let mut chunk = [0_u8; 8192];
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -2138,6 +2174,7 @@ fn serve_anthropic_proxy(
         match reader.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(count) => {
+                usage.feed(&chunk[..count]);
                 if write!(stream, "{count:x}\r\n")
                     .and_then(|()| stream.write_all(&chunk[..count]))
                     .and_then(|()| stream.write_all(b"\r\n"))
@@ -2794,6 +2831,60 @@ fn lock_cache_health(health: &SharedCacheHealth) -> std::sync::MutexGuard<'_, Ca
     health
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Publish exact terminal usage for an Anthropic-compatible upstream without
+/// feeding a provider-specific cache-health state machine. The wire bytes have
+/// already been forwarded unchanged; this is an independent, launch-wide
+/// display ledger.
+fn publish_status_usage(
+    status_usage: &SharedStatusUsage,
+    provider: AnthropicUsageProvider,
+    model: &str,
+    usage: TokenUsage,
+    cache_health: &str,
+) {
+    let provider = match provider {
+        AnthropicUsageProvider::Claude => "claude",
+        AnthropicUsageProvider::DeepSeek => "deepseek",
+        AnthropicUsageProvider::OpenRouter => "openrouter",
+    };
+    let published = {
+        let mut status = status_usage.lock().unwrap_or_else(|e| e.into_inner());
+        status.totals.request_count = status.totals.request_count.saturating_add(1);
+        status.totals.input_tokens = status
+            .totals
+            .input_tokens
+            .saturating_add(usage.input_tokens);
+        status.totals.cached_input_tokens = status
+            .totals
+            .cached_input_tokens
+            .saturating_add(usage.cached_input_tokens);
+        status.totals.output_tokens = status
+            .totals
+            .output_tokens
+            .saturating_add(usage.output_tokens);
+        let totals = status.totals;
+        status.writer.clone().map(|writer| {
+            (
+                writer,
+                crate::toast::statusline::StatusUsage {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    request_count: totals.request_count,
+                    cached_input_tokens: totals.cached_input_tokens,
+                    uncached_input_tokens: totals
+                        .input_tokens
+                        .saturating_sub(totals.cached_input_tokens),
+                    output_tokens: totals.output_tokens,
+                    cache_health: cache_health.to_string(),
+                },
+            )
+        })
+    };
+    if let Some((writer, status)) = published {
+        writer.publish_usage(status);
+    }
 }
 
 fn record_cache_usage(
@@ -3716,6 +3807,14 @@ Connection: close
         .into_bytes()
     }
 
+    fn anthropic_usage_response(start_usage: &str, terminal_usage: &str) -> Vec<u8> {
+        response_with_events(&format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{start_usage}}}}}\n\n\
+             event: message_delta\ndata: {{\"type\":\"message_delta\",\"usage\":{terminal_usage}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        ))
+    }
+
     fn large_uncached_response() -> Vec<u8> {
         response_with_events(
             "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
@@ -4072,6 +4171,90 @@ Connection: close
         // The last post-clear turn is cold, while the counters retain every
         // main and agent terminal report from this bridge lifetime.
         assert_eq!(usage.cache_health, "cold");
+    }
+
+    #[test]
+    fn unified_anthropic_routes_publish_exact_launch_wide_usage_to_statusline() {
+        let claude = FakeResponses::start_with_response(Some(anthropic_usage_response(
+            r#"{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}"#,
+            r#"{"output_tokens":4}"#,
+        )));
+        let codex = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_response(Some(anthropic_usage_response(
+            r#"{"prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20}"#,
+            r#"{"completion_tokens":3}"#,
+        )));
+        let openrouter = FakeResponses::start_with_response(Some(anthropic_usage_response(
+            r#"{"input_tokens":10,"cache_creation_input_tokens":5,"cache_read_input_tokens":35}"#,
+            r#"{"output_tokens":2}"#,
+        )));
+        let config = BridgeConfig::default()
+            .with_test_upstream_url(Some(codex.base_url.clone()))
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-status-key".to_string()), false)
+                    .with_openrouter(Some("openrouter-status-key".to_string()))
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                    .with_openrouter_upstream(openrouter.base_url.clone()),
+            );
+        let directory = tempfile::tempdir().unwrap();
+        let writer = std::sync::Arc::new(crate::toast::statusline::StatusStateWriter::new(
+            crate::toast::statusline::state_path(directory.path(), 78),
+        ));
+        let bridge = BridgeHandle::start(config).unwrap();
+        bridge.set_status_usage_writer(std::sync::Arc::clone(&writer));
+
+        for (model, session) in [
+            ("claude-opus-4-1", "native-status"),
+            ("clud-claude-deepseek-v4-pro-0813", "deepseek-status"),
+            ("clud-claude-openrouter-sonnet", "openrouter-status"),
+        ] {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "status fixture"}],
+                "stream": true,
+            })
+            .to_string();
+            let response = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    "claude-oauth-status",
+                    &body,
+                    &[
+                        (UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token()),
+                        ("X-Claude-Code-Session-Id", session),
+                        ("Anthropic-Version", "2023-06-01"),
+                    ],
+                ),
+            );
+            assert_eq!(status(&response), 200, "{model}: {response}");
+            assert!(response.contains("message_start"), "{model}: {response}");
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let usage = loop {
+            if let Some(usage) = crate::toast::statusline::read_live_usage(
+                writer.path(),
+                crate::toast::statusline::now_ms(),
+            ) {
+                if usage.request_count == 3 {
+                    break usage;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "unified usage update was not published"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(usage.provider, "openrouter");
+        assert_eq!(usage.model, "~anthropic/claude-sonnet-latest");
+        assert_eq!(usage.request_count, 3);
+        assert_eq!(usage.cached_input_tokens, 145);
+        assert_eq!(usage.uncached_input_tokens, 65);
+        assert_eq!(usage.output_tokens, 9);
+        assert_eq!(usage.cache_health, "unavailable");
     }
 
     #[test]
