@@ -191,25 +191,35 @@ impl ForegroundRuntime {
         store: &dyn crate::provider_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
         let (bridge, claude_settings, mut startup_notices) = if is_unified(plan) {
+            let integration_upstreams =
+                crate::codex_bridge::unified_integration_upstreams_from_process();
             // Optional routes must never block native Claude. Resolve only
             // availability metadata here; the actual credentials stay inside
             // the launch-scoped bridge and are not serialized into the plan.
-            let deepseek_key = store.get().ok().flatten();
+            let deepseek_key = integration_upstreams
+                .as_ref()
+                .map(|_| "clud-test-deepseek-key".to_string())
+                .or_else(|| store.get().ok().flatten());
             // OpenRouter keeps its own vault record, so it needs its own store
             // rather than the injected DeepSeek-scoped one. Probed inline for
             // the same reason `codex_available` is: an absent optional
             // credential must omit a discovery row, never fail the launch.
-            let openrouter_key = crate::provider_auth::NativeSecretStore::new_for(
-                crate::provider_auth::OPENROUTER_VAULT_SERVICE,
-                crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
-            )
-            .ok()
-            .and_then(|store| {
-                use crate::provider_auth::SecretStore as _;
-                store.get().ok().flatten()
-            });
-            let codex_available =
-                crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
+            let openrouter_key = integration_upstreams
+                .as_ref()
+                .map(|_| "clud-test-openrouter-key".to_string())
+                .or_else(|| {
+                    crate::provider_auth::NativeSecretStore::new_for(
+                        crate::provider_auth::OPENROUTER_VAULT_SERVICE,
+                        crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
+                    )
+                    .ok()
+                    .and_then(|store| {
+                        use crate::provider_auth::SecretStore as _;
+                        store.get().ok().flatten()
+                    })
+                });
+            let codex_available = integration_upstreams.is_some()
+                || crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
             let mut startup_notices =
                 unified_startup_notices(codex_available, deepseek_key.is_some());
             if openrouter_key.is_none() {
@@ -234,13 +244,21 @@ impl ForegroundRuntime {
                         .to_string(),
                 );
             }
-            let bridge = BridgeHandle::start(
-                BridgeConfig::default().with_unified_gateway(
-                    UnifiedGatewayConfig::new(deepseek_key, codex_available)
-                        .with_openrouter(openrouter_key)
-                        .with_failover(failover),
-                ),
-            )?;
+            let unified = UnifiedGatewayConfig::new(deepseek_key, codex_available)
+                .with_openrouter(openrouter_key)
+                .with_failover(failover);
+            let unified = integration_upstreams
+                .as_ref()
+                .map_or(unified.clone(), |upstreams| {
+                    unified.with_integration_test_upstreams(upstreams)
+                });
+            let config = BridgeConfig::default().with_unified_gateway(unified);
+            let config = integration_upstreams
+                .as_ref()
+                .map_or(config.clone(), |upstreams| {
+                    config.with_integration_test_codex_upstream(upstreams)
+                });
+            let bridge = BridgeHandle::start(config)?;
             apply_unified_overlay(&mut env, &bridge)?;
             let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), startup_notices)

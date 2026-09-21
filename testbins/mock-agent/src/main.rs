@@ -48,6 +48,7 @@ fn main() {
     let mut bash_nounset_probe_to: Option<PathBuf> = None;
     let mut codex_bridge_probe_to: Option<PathBuf> = None;
     let mut codex_cache_identity_probe_to: Option<PathBuf> = None;
+    let mut unified_route_probe_to: Option<PathBuf> = None;
     // Emit canned `--output-format stream-json` lines from a file (one line
     // each, separated by `--mock-stream-delay-ms`). Used by integration tests
     // that exercise clud's stream-json renderer without needing a real
@@ -197,6 +198,13 @@ fn main() {
         if arg == "--mock-codex-cache-identity-probe" {
             if let Some(path) = args.get(i + 1) {
                 codex_cache_identity_probe_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-unified-route-probe" {
+            if let Some(path) = args.get(i + 1) {
+                unified_route_probe_to = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -356,6 +364,9 @@ fn main() {
     let cache_identity_probe = codex_cache_identity_probe_to
         .as_deref()
         .map(run_codex_cache_identity_probe);
+    let unified_route_probe = unified_route_probe_to
+        .as_deref()
+        .map(run_unified_route_probe);
     let cwd = std::env::current_dir()
         .ok()
         .map(|path| path.to_string_lossy().to_string());
@@ -386,6 +397,7 @@ fn main() {
         },
         "codex_bridge_probe": bridge_probe,
         "codex_cache_identity_probe": cache_identity_probe,
+        "unified_route_probe": unified_route_probe,
     });
 
     let report_str = serde_json::to_string(&report).unwrap();
@@ -556,6 +568,95 @@ fn run_codex_cache_identity_probe(report_path: &Path) -> serde_json::Value {
         }
         report["statuses"] = serde_json::json!(statuses);
         report["bridged_reply_count"] = replies.into();
+        Ok(())
+    })();
+    if let Err(error) = result {
+        report["error"] = error.into();
+    }
+    if let Some(parent) = report_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(report_path, serde_json::to_vec(&report).unwrap_or_default());
+    report
+}
+
+/// Drive representative native-Claude, Codex, DeepSeek, and OpenRouter turns
+/// through one real foreground unified launch. The Python integration fake
+/// owns wire-level assertions; this report intentionally contains statuses and
+/// response presence only, never the gateway bearer, URL, or test literals.
+fn run_unified_route_probe(report_path: &Path) -> serde_json::Value {
+    let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    let token = std::env::var("CLUD_GATEWAY_TOKEN").ok();
+    let mut report = serde_json::json!({
+        "attempted": false,
+        "loopback": false,
+        "statuses": [],
+        "response_count": 0,
+        "error": null,
+    });
+    let result = (|| -> Result<(), String> {
+        let base_url = base_url.as_deref().ok_or("missing bridge URL")?;
+        let token = token.as_deref().ok_or("missing gateway token")?;
+        let address: SocketAddr = base_url
+            .strip_prefix("http://")
+            .ok_or("bridge URL is not HTTP")?
+            .parse()
+            .map_err(|_| "bridge URL is not a socket address")?;
+        report["attempted"] = true.into();
+        report["loopback"] = address.ip().is_loopback().into();
+        let turns = [
+            ("claude-opus-4-1", None),
+            ("claude-opus-4-1", None),
+            ("clud-claude-codex-terra", None),
+            ("clud-claude-codex-terra", None),
+            ("clud-claude-deepseek-flash", None),
+            ("clud-claude-deepseek-flash", Some("unified-agent-deepseek")),
+            ("clud-claude-openrouter-sonnet", None),
+            ("clud-claude-openrouter-sonnet", None),
+            ("clud-claude-codex-terra", Some("unified-agent-codex")),
+            ("clud-claude-codex-terra", None),
+        ];
+        let mut statuses = Vec::new();
+        let mut responses = 0_u64;
+        for (index, (model, agent)) in turns.into_iter().enumerate() {
+            let body = serde_json::json!({
+                "model": model,
+                "system": [{"type": "text", "text": "unified-cache-marker", "cache_control": {"type": "ephemeral"}}],
+                "messages": [{"role": "user", "content": format!("unified-route-turn-{index}")}],
+                "stream": false,
+            })
+            .to_string();
+            let agent_headers = agent.map_or_else(String::new, |agent| {
+                format!(
+                    "x-claude-code-agent-id: {agent}\r\nx-claude-code-parent-agent-id: unified-main\r\n"
+                )
+            });
+            let request = format!(
+                "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Clud-Gateway-Token: {token}\r\nContent-Type: application/json\r\nX-Claude-Code-Session-Id: unified-session\r\n{agent_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+                .map_err(|error| format!("connect failed: {error}"))?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .map_err(|error| format!("read timeout failed: {error}"))?;
+            stream
+                .write_all(request.as_bytes())
+                .map_err(|error| format!("write failed: {error}"))?;
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .map_err(|error| format!("read failed: {error}"))?;
+            let status = response
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse::<u16>().ok())
+                .ok_or("missing HTTP status")?;
+            statuses.push(status);
+            responses += u64::from(response.contains("fake") || response.contains("bridged reply"));
+        }
+        report["statuses"] = serde_json::json!(statuses);
+        report["response_count"] = responses.into();
         Ok(())
     })();
     if let Err(error) = result {

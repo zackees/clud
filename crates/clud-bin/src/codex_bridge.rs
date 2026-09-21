@@ -148,6 +148,23 @@ impl UnifiedGatewayConfig {
         self
     }
 
+    /// Point every unified proxy destination at the deterministic foreground
+    /// integration fakes.  The only caller obtains this value through the
+    /// debug-and-explicit-opt-in process gate below; production launches never
+    /// receive fixture credentials or fixture URLs.
+    pub(crate) fn with_integration_test_upstreams(
+        mut self,
+        upstreams: &UnifiedIntegrationUpstreams,
+    ) -> Self {
+        self.deepseek_api_key = Some("clud-test-deepseek-key".to_string());
+        self.openrouter_api_key = Some("clud-test-openrouter-key".to_string());
+        self.codex_available = true;
+        self.anthropic_base_url = upstreams.anthropic_base_url.clone();
+        self.deepseek_base_url = upstreams.deepseek_base_url.clone();
+        self.openrouter_base_url = upstreams.openrouter_base_url.clone();
+        self
+    }
+
     #[cfg(test)]
     fn with_upstreams(mut self, anthropic_base_url: String, deepseek_base_url: String) -> Self {
         self.anthropic_base_url = anthropic_base_url;
@@ -272,6 +289,18 @@ impl BridgeConfig {
     /// This remains an in-process foreground listener; it is never a daemon.
     pub fn with_unified_gateway(mut self, config: UnifiedGatewayConfig) -> Self {
         self.gateway_mode = GatewayMode::Unified(config);
+        self
+    }
+
+    /// Bind the existing Responses fixture seam to an already validated
+    /// all-provider foreground integration configuration. This avoids a
+    /// partial test launch ever treating the real Codex credential source as a
+    /// fake upstream.
+    pub(crate) fn with_integration_test_codex_upstream(
+        mut self,
+        upstreams: &UnifiedIntegrationUpstreams,
+    ) -> Self {
+        self.test_upstream_url = Some(upstreams.codex_base_url.clone());
         self
     }
 
@@ -3322,6 +3351,64 @@ fn test_upstream_override_from_process() -> Option<String> {
     resolve_test_upstream_override(cfg!(debug_assertions), integration_enabled, value)
 }
 
+/// The three non-Codex provider-shaped fakes used by the foreground matrix.
+/// Codex continues to use `CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL` because its
+/// wire protocol is Responses-shaped and is already independently seamed.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct UnifiedIntegrationUpstreams {
+    codex_base_url: String,
+    anthropic_base_url: String,
+    deepseek_base_url: String,
+    openrouter_base_url: String,
+}
+
+impl std::fmt::Debug for UnifiedIntegrationUpstreams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnifiedIntegrationUpstreams")
+            .field("codex_base_url", &"[redacted]")
+            .field("anthropic_base_url", &"[redacted]")
+            .field("deepseek_base_url", &"[redacted]")
+            .field("openrouter_base_url", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Read an all-or-nothing test-only unified upstream override.  Requiring all
+/// three URLs means a stray environment variable cannot partially alter a
+/// launch, and the existing debug plus explicit-integration gate makes this
+/// unavailable from release builds.
+pub(crate) fn unified_integration_upstreams_from_process() -> Option<UnifiedIntegrationUpstreams> {
+    let enabled = cfg!(debug_assertions)
+        && std::env::var_os("CLUD_INTEGRATION_TESTS").is_some_and(|value| value == "1");
+    resolve_unified_integration_upstreams(
+        enabled,
+        std::env::var("CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL").ok(),
+        std::env::var("CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL").ok(),
+        std::env::var("CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL").ok(),
+        std::env::var("CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL").ok(),
+    )
+}
+
+fn resolve_unified_integration_upstreams(
+    enabled: bool,
+    codex_base_url: Option<String>,
+    anthropic_base_url: Option<String>,
+    deepseek_base_url: Option<String>,
+    openrouter_base_url: Option<String>,
+) -> Option<UnifiedIntegrationUpstreams> {
+    if !enabled {
+        return None;
+    }
+    let usable = |url: Option<String>| url.filter(|url| !url.trim().is_empty());
+    Some(UnifiedIntegrationUpstreams {
+        codex_base_url: usable(codex_base_url)?,
+        anthropic_base_url: usable(anthropic_base_url)?,
+        deepseek_base_url: usable(deepseek_base_url)?,
+        openrouter_base_url: usable(openrouter_base_url)?,
+    })
+}
+
 fn resolve_test_upstream_override(
     debug_assertions: bool,
     integration_enabled: bool,
@@ -6300,6 +6387,49 @@ Connection: close
             None
         );
         assert_eq!(resolve_test_upstream_override(true, false, value), None);
+    }
+
+    #[test]
+    fn unified_integration_upstreams_are_all_or_nothing_and_explicitly_gated() {
+        let urls = || {
+            (
+                Some("http://127.0.0.1:4100".to_string()),
+                Some("http://127.0.0.1:4101".to_string()),
+                Some("http://127.0.0.1:4102".to_string()),
+                Some("http://127.0.0.1:4103".to_string()),
+            )
+        };
+        let (codex, anthropic, deepseek, openrouter) = urls();
+        assert!(resolve_unified_integration_upstreams(
+            true,
+            codex.clone(),
+            anthropic.clone(),
+            deepseek.clone(),
+            openrouter.clone(),
+        )
+        .is_some());
+        assert!(resolve_unified_integration_upstreams(
+            false, codex, anthropic, deepseek, openrouter
+        )
+        .is_none());
+        let (codex, anthropic, deepseek, _) = urls();
+        assert!(
+            resolve_unified_integration_upstreams(true, codex, anthropic, deepseek, None).is_none()
+        );
+        let (_, anthropic, deepseek, openrouter) = urls();
+        assert!(
+            resolve_unified_integration_upstreams(true, None, anthropic, deepseek, openrouter,)
+                .is_none()
+        );
+        let (codex, anthropic, _deepseek, openrouter) = urls();
+        assert!(resolve_unified_integration_upstreams(
+            true,
+            codex,
+            anthropic,
+            Some("  ".to_string()),
+            openrouter,
+        )
+        .is_none());
     }
 
     /// Split a chunked response into its decoded body. Deliberately strict:
