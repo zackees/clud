@@ -644,7 +644,7 @@ pub use codex_upstream_credentials::{
 pub struct UpstreamClient<C: CredentialSource> {
     credentials: C,
     config: UpstreamConfig,
-    /// Stable for the life of the client so upstream can correlate a turn.
+    /// Stable upstream cache/session identity.
     session_id: String,
     retry_observer: Option<RetryObserver>,
 }
@@ -673,6 +673,15 @@ impl<C: CredentialSource> UpstreamClient<C> {
         observer: impl Fn(&UpstreamError, u32, u32, Option<Duration>) + Send + Sync + 'static,
     ) -> Self {
         self.retry_observer = Some(std::sync::Arc::new(observer));
+        self
+    }
+
+    /// Override the generated client identity when a caller owns a longer
+    /// conversation lifetime. The bridge uses its hashed conversation key so
+    /// sequential turns retain prompt-cache locality without exposing the
+    /// harness's raw session or agent identifiers upstream.
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = session_id;
         self
     }
 
@@ -2125,6 +2134,23 @@ mod live_probe {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    fn cache_canary_config() -> UpstreamConfig {
+        UpstreamConfig {
+            // A spend ceiling must be enforced before the request, not merely
+            // observed from StreamOutcome after a retry already happened.
+            max_attempts: 1,
+            unknown_max_attempts: 1,
+            ..UpstreamConfig::default()
+        }
+    }
+
+    #[test]
+    fn cache_canary_disables_all_automatic_retries() {
+        let config = cache_canary_config();
+        assert_eq!(config.max_attempts, 1);
+        assert_eq!(config.unknown_max_attempts, 1);
+    }
+
     #[test]
     #[ignore = "requires real credentials and network access"]
     fn a_real_upstream_request_streams_back() {
@@ -2146,5 +2172,82 @@ mod live_probe {
         assert_eq!(outcome.attempts, 1);
         assert!(received.contains("response.created"), "{received:.200}");
         assert!(received.contains("response.completed"));
+    }
+
+    /// A deliberately bounded provider-side cache contract check for #1226.
+    ///
+    /// This is both ignored and explicitly gated so an ordinary `--ignored`
+    /// invocation cannot charge a user's account. It makes exactly two serial
+    /// requests, with no tools or retries, and prints token counts only.
+    #[test]
+    #[ignore = "set CLUD_LIVE_CODEX_CACHE_TESTS=1; uses real credentials and two requests"]
+    fn cache_credit_is_reused_for_a_stable_conversation_prefix() {
+        assert_eq!(
+            std::env::var("CLUD_LIVE_CODEX_CACHE_TESTS").as_deref(),
+            Ok("1"),
+            "refusing live cache canary without CLUD_LIVE_CODEX_CACHE_TESTS=1"
+        );
+        let credentials = ResolvedCredentials::resolve_default().expect("credentials");
+        let client = UpstreamClient::new(credentials, cache_canary_config())
+            .with_session_id("clud-live-cache-canary-v1".to_string());
+        // Around 3K simple tokens: above ordinary prompt-cache eligibility
+        // thresholds while keeping both requests bounded and inexpensive.
+        const MAX_REQUESTS: usize = 2;
+        const MAX_INPUT_BYTES: usize = 32 * 1024;
+        let prefix = "cache canary prefix ".repeat(1_024);
+        assert!(
+            prefix.len() < MAX_INPUT_BYTES,
+            "canary prefix exceeded its hard input-size ceiling"
+        );
+        let mut usage = Vec::new();
+
+        for suffix in ["first", "second"] {
+            let body = serde_json::json!({
+                "model": "gpt-5.6-terra",
+                "input": [{"type": "message", "role": "user", "content": [{
+                    "type": "input_text", "text": format!("{prefix}{suffix}"),
+                }]}],
+                "stream": true,
+                "store": false,
+                "prompt_cache_key": "clud-live-cache-canary-v1",
+                "max_output_tokens": 16,
+                "reasoning": {"effort": "minimal"},
+            });
+            let mut received = String::new();
+            let outcome = client
+                .stream(
+                    &serde_json::to_vec(&body).expect("canary request JSON"),
+                    &AtomicBool::new(false),
+                    &mut |chunk| {
+                        received.push_str(&String::from_utf8_lossy(chunk));
+                        Ok(())
+                    },
+                )
+                .expect("canary request must succeed without retry");
+            assert_eq!(outcome.attempts, 1, "the canary must not retry");
+            let terminal = received
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|event| event["type"] == "response.completed")
+                .expect("terminal usage event");
+            let input = terminal["response"]["usage"]["input_tokens"]
+                .as_u64()
+                .expect("input token count");
+            let cached = terminal["response"]["usage"]["input_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            usage.push((input, cached));
+        }
+        assert_eq!(usage.len(), MAX_REQUESTS, "canary request-count ceiling");
+
+        eprintln!(
+            "live cache canary: first input={} cached={}; second input={} cached={}",
+            usage[0].0, usage[0].1, usage[1].0, usage[1].1
+        );
+        assert!(
+            usage[1].1 >= 2_400,
+            "the second request must cache >=80% of the ~3K fixed prefix"
+        );
     }
 }

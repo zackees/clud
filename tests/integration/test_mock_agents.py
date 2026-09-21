@@ -182,17 +182,27 @@ class TestBackendSelection:
         assert report["cwd"] == str(tmp_path)
 
 
-_RESPONSES_SSE = (
-    b'event: response.created\ndata: {"type":"response.created"}\n\n'
-    b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
-    b'"output_index":0,"content_index":0,"delta":"bridged "}\n\n'
-    b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
-    b'"output_index":0,"content_index":0,"delta":"reply"}\n\n'
-    b'event: response.output_text.done\ndata: {"type":"response.output_text.done",'
-    b'"output_index":0,"content_index":0}\n\n'
-    b'event: response.completed\ndata: {"type":"response.completed",'
-    b'"response":{"usage":{"input_tokens":4,"output_tokens":2}}}\n\n'
-)
+def _responses_sse(reply_index: int, input_tokens: int, cached_tokens: int) -> bytes:
+    """Return a valid Responses stream with deterministic cache usage."""
+    completed = json.dumps(
+        {"type": "response.completed", "response": {"usage": {
+            "input_tokens": input_tokens,
+            "input_tokens_details": {"cached_tokens": cached_tokens},
+            "output_tokens": 2,
+        }}}, separators=(",", ":"),
+    ).encode()
+    return (
+        b'event: response.created\ndata: {"type":"response.created"}\n\n'
+        b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+        b'"output_index":0,"content_index":0,"delta":"bridged "}\n\n'
+        + b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+        + b'"output_index":0,"content_index":0,"delta":"reply '
+        + str(reply_index).encode()
+        + b'"}\n\n'
+        + b'event: response.output_text.done\ndata: {"type":"response.output_text.done",'
+        + b'"output_index":0,"content_index":0}\n\n'
+        + b"event: response.completed\ndata: " + completed + b"\n\n"
+    )
 
 
 class _FakeResponsesServer:
@@ -211,6 +221,10 @@ class _FakeResponsesServer:
         self._listener.settimeout(0.2)
         self.port = self._listener.getsockname()[1]
         self.requests: list[bytes] = []
+        # Strict cache oracle: credit only a model-visible append to the
+        # previous request for the same model/key. The ledger has counts only.
+        self.cache_observations: list[dict[str, int | bool]] = []
+        self._cache_inputs: dict[tuple[str, str], list[Any]] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
@@ -246,10 +260,34 @@ class _FakeResponsesServer:
                             break
                         rest += chunk
                     self.requests.append(head + b"\r\n\r\n" + rest)
+                    payload = json.loads(rest)
+                    model = str(payload.get("model", ""))
+                    cache_key = str(payload.get("prompt_cache_key", ""))
+                    input_items = payload.get("input", [])
+                    if not isinstance(input_items, list):
+                        input_items = []
+                    cache_slot = (model, cache_key)
+                    previous = self._cache_inputs.get(cache_slot)
+                    prefix_is_stable = (
+                        previous is not None and input_items[: len(previous)] == previous
+                    )
+                    input_tokens = len(json.dumps(input_items, separators=(",", ":")).encode())
+                    cached_tokens = (
+                        len(json.dumps(previous, separators=(",", ":")).encode())
+                        if prefix_is_stable
+                        else 0
+                    )
+                    self._cache_inputs[cache_slot] = input_items
+                    self.cache_observations.append({
+                        "input_tokens": input_tokens,
+                        "cached_tokens": cached_tokens,
+                        "cache_hit": prefix_is_stable,
+                    })
+                    response = _responses_sse(len(self.requests), input_tokens, cached_tokens)
                     connection.sendall(
                         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                         b"Content-Length: %d\r\nConnection: close\r\n\r\n%s"
-                        % (len(_RESPONSES_SSE), _RESPONSES_SSE)
+                        % (len(response), response)
                     )
                 except OSError:
                     continue
@@ -271,6 +309,92 @@ def fake_responses():
 
 class TestCodexBridgeForeground:
     """Issue #626: Codex provider through the Claude foreground harness."""
+
+    def test_cache_identity_is_stable_through_the_subprocess_harness(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        fake_responses: _FakeResponsesServer,
+    ) -> None:
+        env = mock_env.copy()
+        env["CLUD_INTEGRATION_TESTS"] = "1"
+        env["CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL"] = fake_responses.base_url
+        probe_path = tmp_path / "codex-cache-identity-probe.json"
+        result = _run(
+            clud_binary,
+            "--codex",
+            "--harness",
+            "claude",
+            "--subprocess",
+            "-p",
+            "cache identity",
+            "--",
+            "--mock-codex-cache-identity-probe",
+            str(probe_path),
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        probe = json.loads(probe_path.read_text(encoding="utf-8"))
+        assert probe == {
+            "attempted": True,
+            "loopback": True,
+            "statuses": [200] * 8,
+            "bridged_reply_count": 8,
+            "error": None,
+        }
+        assert "cache-session" not in json.dumps(probe)
+
+        requests = fake_responses.requests
+        assert len(requests) == 8
+
+        def header(raw: bytes, name: bytes) -> bytes:
+            head, _, _ = raw.partition(b"\r\n\r\n")
+            for line in head.split(b"\r\n"):
+                candidate, _, value = line.partition(b":")
+                if candidate.lower() == name.lower():
+                    return value.strip()
+            raise AssertionError(f"missing {name!r} in {head!r}")
+
+        identities = []
+        bodies = []
+        for raw in requests:
+            head, _, body = raw.partition(b"\r\n\r\n")
+            sent = json.loads(body)
+            identity = (
+                header(raw, b"session-id"),
+                header(raw, b"thread-id"),
+                header(raw, b"x-client-request-id"),
+                sent["prompt_cache_key"].encode(),
+            )
+            assert len(set(identity)) == 1
+            identities.append(identity[0])
+            bodies.append(sent)
+            assert b"cache-session" not in head + body
+            assert b"cache-agent-a" not in head + body
+            assert b"cache-agent-b" not in head + body
+
+        for turn in range(1, 5):
+            assert identities[turn] == identities[0]
+            assert (
+                bodies[turn]["input"][: len(bodies[turn - 1]["input"])]
+                == bodies[turn - 1]["input"]
+            )
+        assert identities[5] == identities[6]
+        assert bodies[6]["input"][: len(bodies[5]["input"])] == bodies[5]["input"]
+        assert len({identities[0], identities[5], identities[7]}) == 3
+
+        observations = fake_responses.cache_observations
+        assert [entry["cache_hit"] for entry in observations] == [
+            False, True, True, True, True, False, True, False,
+        ]
+        total_uncached = sum(
+            entry["input_tokens"] - entry["cached_tokens"] for entry in observations
+        )
+        # A request-scoped key makes every replay cold (22 copies of this
+        # fixture's 16 KiB prefix). The stable identity may pay only three
+        # cold seeds plus five append-only suffixes.
+        assert total_uncached < 10 * 16_384
 
     @pytest.mark.parametrize("launch_mode", ["--subprocess", "--pty"])
     def test_cross_route_translates_upstream_and_closes_listener(

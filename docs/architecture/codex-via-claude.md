@@ -118,6 +118,23 @@ than silently inheriting this value. Setting
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is incompatible with this route
 and fails before child launch.
 
+The route intentionally has no `CLAUDE_CODE_AUTO_COMPACT_WINDOW` today. The
+1.05M value is the advertised provider capability, whereas the approximately
+258K window observed in a native Codex client is that client's operating
+policy, not evidence that the bridge must impose the same cap; successful
+bridge requests have exceeded it. An arbitrary lower cap would hide cache
+identity regressions while reducing usable context. The stable identity and
+bounded context-error recovery are therefore the current protection. Any
+future proactive threshold needs a bounded live cache canary with recorded
+token counts before catalog metadata changes; it must not change the
+Anthropic-shaped DeepSeek route.
+
+The canary is intentionally ignored and requires explicit opt-in:
+`CLUD_LIVE_CODEX_CACHE_TESTS=1 soldr cargo test -p clud --lib
+cache_credit_is_reused_for_a_stable_conversation_prefix -- --ignored
+--nocapture`. It sends exactly two serial, tool-free requests with a 32 KiB
+input ceiling and a 16-token output cap; ordinary tests and CI never invoke it.
+
 ## Conversation state and compaction
 
 The bridge owns an in-memory canonical Responses transcript for its lifetime.
@@ -128,6 +145,17 @@ agent header is provenance only and never selects history. Clients without
 these headers use the bridge-session fallback identity. State is evicted when
 the bridge stops and is bounded to 32 conversations, 16,384 items, and 64 MiB
 per conversation; no transcript is persisted to disk.
+
+The same hashed `ConversationKey` is the lifetime owner for Codex upstream
+identity: `session-id`, `thread-id`, `x-client-request-id`, and the derived
+`prompt_cache_key` stay stable for ordinary turns, retries, and compaction in
+one main or agent conversation. `build_pipeline` is request-scoped, so it must
+receive this key rather than use its default fresh client UUID; rotating that
+identity defeats prompt-cache reuse on long harness transcripts. The raw
+Claude session and agent headers never reach upstream or logs. A credential
+route's explicit `prompt_cache_key`, when supplied, remains authoritative.
+DeepSeek and other Anthropic-shaped proxy routes do not construct this Codex
+client and therefore do not receive these headers or this identity policy.
 
 A Messages request is a display/replay view, not the canonical transcript.
 After a successful turn, the bridge appends only that logical turn's newly
