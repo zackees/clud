@@ -164,6 +164,13 @@ released on the next idle poll.
   which then replaces the argument.
 - A non-expiring toast whose `updated_ms` is older than 90 s is ignored, so a
   crashed session cannot leave a stuck alert.
+- When clud has observed a bridged provider terminal response, its exact
+  launch-wide ledger wins. On direct/native Claude traffic where clud cannot
+  observe that response, the status-line callback consumes only Claude Code's
+  documented `model` and `context_window.current_usage` fields plus
+  `prompt_cache` warmth. It renders an explicit **Claude last call** token
+  split and **cumulative unavailable** label; callback values are never summed
+  because Claude also calls status lines for non-request events.
 
 `clud statusline` is dispatched first thing in `main.rs`, before any daemon,
 runtime-cache or launch work, because Claude runs it every couple of seconds.
