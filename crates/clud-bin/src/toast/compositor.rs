@@ -25,7 +25,7 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 use super::kitty;
 use super::raster;
-use super::statusline::StatusStateWriter;
+use super::statusline::{usage_summary, StatusStateWriter, StatusUsage};
 use super::text_tier::{self, CellRect};
 use super::tier::ToastTier;
 use super::tracker::EscapeTracker;
@@ -39,6 +39,8 @@ pub const SYNC_DEFER_LIMIT: Duration = Duration::from_millis(250);
 /// Writer-thread wake cadence while a toast is pending, visible, or may
 /// expire.
 pub const TICK: Duration = Duration::from_millis(100);
+
+const USAGE_ROWS: u16 = 1;
 
 /// What renders a toast when no in-grid tier applies.
 #[derive(Clone, Default)]
@@ -67,6 +69,9 @@ pub struct ToastPumpOptions {
     pub hub: Arc<ToastHub>,
     pub tier: ToastTier,
     pub fallback: Fallback,
+    /// Launch-wide exact bridge usage. This remains available in PTY mode for
+    /// all harnesses; Claude's status line is merely an additional surface.
+    pub usage: Option<Arc<StatusStateWriter>>,
     pub rows: u16,
     pub cols: u16,
     pub image_id: u32,
@@ -103,6 +108,7 @@ pub struct Compositor {
     hub: Arc<ToastHub>,
     tier: ToastTier,
     fallback: Fallback,
+    usage_writer: Option<Arc<StatusStateWriter>>,
     image_id: u32,
     shadow: vt100::Parser,
     tracker: EscapeTracker,
@@ -118,6 +124,9 @@ pub struct Compositor {
     /// places (a burst began mid-sequence), so repaint the whole screen.
     repaint_screen: bool,
     title_pushed: bool,
+    usage: Option<StatusUsage>,
+    usage_drawn: bool,
+    usage_transmitted: Option<(String, u16, u16)>,
 }
 
 impl Compositor {
@@ -128,6 +137,7 @@ impl Compositor {
             hub: options.hub,
             tier: options.tier,
             fallback: options.fallback,
+            usage_writer: options.usage,
             image_id: options.image_id,
             shadow: vt100::Parser::new(rows, cols, 0),
             tracker: EscapeTracker::new(),
@@ -140,6 +150,9 @@ impl Compositor {
             transmitted: None,
             repaint_screen: false,
             title_pushed: false,
+            usage: None,
+            usage_drawn: false,
+            usage_transmitted: None,
         }
     }
 
@@ -157,6 +170,7 @@ impl Compositor {
         self.tier != ToastTier::Off
             && (self.pending
                 || self.drawn != Drawn::None
+                || self.usage_writer.is_some()
                 || !self.hub.snapshot(Instant::now()).is_empty)
     }
 
@@ -168,6 +182,7 @@ impl Compositor {
         }
         let mut out = Vec::with_capacity(bytes.len() + 64);
         self.sync_hub(now);
+        self.sync_usage();
 
         // A text-cell toast is lifted before the child draws so scrolls and
         // partial rewrites move the child's real content, not ours. If the
@@ -191,6 +206,8 @@ impl Compositor {
             // Kitty drops images on clear/reset/alt switch; the alternate
             // screen takes any text-cell toast with it.
             self.transmitted = None;
+            self.usage_transmitted = None;
+            self.usage_drawn = false;
             if matches!(self.drawn, Drawn::Kitty { .. } | Drawn::Cells { .. }) {
                 self.drawn = Drawn::None;
             }
@@ -198,6 +215,9 @@ impl Compositor {
         }
         if matches!(self.drawn, Drawn::Kitty { .. }) {
             // Images scroll with text: pin the toast back after every burst.
+            self.pending = true;
+        }
+        if self.usage_drawn {
             self.pending = true;
         }
         out.extend(self.render(now));
@@ -224,6 +244,7 @@ impl Compositor {
             return Vec::new();
         }
         self.sync_hub(now);
+        self.sync_usage();
         self.render(now)
     }
 
@@ -232,8 +253,12 @@ impl Compositor {
     /// safe point.
     pub fn finish(&mut self) -> Vec<u8> {
         let mut out = self.remove_drawn();
+        out.extend(self.remove_usage_drawn());
         if self.transmitted.take().is_some() {
             out.extend(kitty::delete_image(self.image_id));
+        }
+        if self.usage_transmitted.take().is_some() {
+            out.extend(kitty::delete_image(self.usage_image_id()));
         }
         self.input.set(None);
         out
@@ -252,6 +277,17 @@ impl Compositor {
         };
         self.visible = snapshot.visible;
         if changed {
+            self.pending = true;
+        }
+    }
+
+    fn sync_usage(&mut self) {
+        let usage = self
+            .usage_writer
+            .as_ref()
+            .and_then(|writer| writer.usage_snapshot());
+        if usage != self.usage {
+            self.usage = usage;
             self.pending = true;
         }
     }
@@ -283,7 +319,9 @@ impl Compositor {
                 self.drawn,
                 Drawn::Kitty { .. } | Drawn::Cells { .. } | Drawn::Title
             )
-            || self.repaint_screen;
+            || self.repaint_screen
+            || self.usage_drawn
+            || self.usage_target();
         if needs_bytes && !self.injection_allowed(now) {
             return Vec::new();
         }
@@ -307,17 +345,18 @@ impl Compositor {
             out.extend(self.with_cursor_parked(text_tier::restore_screen(self.shadow.screen())));
         }
 
-        let Some(toast) = self.visible.clone() else {
+        if let Some(toast) = self.visible.clone() {
+            match target {
+                Target::Kitty => out.extend(self.draw_kitty(&toast)),
+                Target::Cells => out.extend(self.draw_cells(&toast)),
+                Target::Title => out.extend(self.draw_title(&toast)),
+                Target::Status => self.draw_status(&toast),
+                Target::Nothing => self.input.set(None),
+            }
+        } else {
             self.input.set(None);
-            return out;
-        };
-        match target {
-            Target::Kitty => out.extend(self.draw_kitty(&toast)),
-            Target::Cells => out.extend(self.draw_cells(&toast)),
-            Target::Title => out.extend(self.draw_title(&toast)),
-            Target::Status => self.draw_status(&toast),
-            Target::Nothing => self.input.set(None),
         }
+        out.extend(self.render_usage());
         out
     }
 
@@ -367,6 +406,61 @@ impl Compositor {
         }
     }
 
+    fn usage_image_id(&self) -> u32 {
+        self.image_id ^ 0x0040_0000
+    }
+
+    fn usage_target(&self) -> bool {
+        let Some(usage) = &self.usage else {
+            return false;
+        };
+        let (_, cols) = self.shadow.screen().size();
+        self.tier == ToastTier::Kitty && usage_cells(&usage_summary(usage), cols).is_some()
+    }
+
+    fn render_usage(&mut self) -> Vec<u8> {
+        if !self.usage_target() {
+            return self.remove_usage_drawn();
+        }
+        let usage = self.usage.as_ref().expect("usage target has usage");
+        let (_, term_cols) = self.shadow.screen().size();
+        let text = usage_summary(usage);
+        let Some((cols, rows)) = usage_cells(&text, term_cols) else {
+            return self.remove_usage_drawn();
+        };
+        let content = (text.clone(), cols, rows);
+        let mut out = Vec::new();
+        let image_id = self.usage_image_id();
+        if self.usage_transmitted.as_ref() != Some(&content) {
+            let Ok(png) = raster::render_usage_png(&text, cols, rows) else {
+                return Vec::new();
+            };
+            if self.usage_transmitted.is_some() {
+                out.extend(kitty::delete_image(image_id));
+            }
+            out.extend(kitty::transmit_png(image_id, &png));
+            self.usage_transmitted = Some(content);
+        }
+        let col = term_cols.saturating_sub(cols + 1);
+        let mut place = text_tier::cup(0, col).into_bytes();
+        place.extend(kitty::place(
+            image_id,
+            kitty::USAGE_PLACEMENT_ID,
+            cols,
+            rows,
+        ));
+        out.extend(self.with_cursor_parked(place));
+        self.usage_drawn = true;
+        out
+    }
+
+    fn remove_usage_drawn(&mut self) -> Vec<u8> {
+        if !std::mem::take(&mut self.usage_drawn) {
+            return Vec::new();
+        }
+        kitty::delete_placement(self.usage_image_id(), kitty::USAGE_PLACEMENT_ID)
+    }
+
     /// Repaint a text toast's cells from the shadow and put the cursor back.
     fn lift_cells(&mut self, rect: CellRect) -> Vec<u8> {
         self.drawn = Drawn::None;
@@ -392,7 +486,8 @@ impl Compositor {
             self.transmitted = Some(content);
         }
         let col = term_cols.saturating_sub(cols + 1);
-        let mut place = text_tier::cup(0, col).into_bytes();
+        let top_row = if self.usage_target() { USAGE_ROWS } else { 0 };
+        let mut place = text_tier::cup(top_row, col).into_bytes();
         place.extend(kitty::place(
             self.image_id,
             kitty::TOAST_PLACEMENT_ID,
@@ -402,7 +497,7 @@ impl Compositor {
         out.extend(self.with_cursor_parked(place));
         self.drawn = Drawn::Kitty { cols, rows, col };
         self.arm_close(CellRect {
-            row: 0,
+            row: top_row,
             col: col + cols.saturating_sub(raster::CLOSE_COLS),
             width: raster::CLOSE_COLS,
             height: rows,
@@ -495,6 +590,20 @@ enum Target {
     Title,
     Status,
     Nothing,
+}
+
+fn usage_cells(text: &str, term_cols: u16) -> Option<(u16, u16)> {
+    const MIN_COLS: u16 = 20;
+    const MAX_COLS: u16 = 76;
+    let available = term_cols.saturating_sub(2);
+    if available < MIN_COLS {
+        return None;
+    }
+    let wanted = u16::try_from(text.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .clamp(MIN_COLS, MAX_COLS);
+    Some((wanted.min(available), USAGE_ROWS))
 }
 
 #[cfg(test)]

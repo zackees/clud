@@ -110,6 +110,13 @@ impl StatusStateWriter {
         &self.path
     }
 
+    /// Return the newest bridge-owned snapshot without touching disk. The
+    /// PTY compositor reads this shared value directly; only the Claude
+    /// status-line callback needs the serialized state file.
+    pub fn usage_snapshot(&self) -> Option<StatusUsage> {
+        self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Apply `event` and rewrite the file. Every publish refreshes
     /// `updated_ms`, which is the heartbeat that keeps a live toast fresh.
     pub fn publish(&self, event: ToastEvent) {
@@ -232,6 +239,23 @@ pub fn render_usage(usage: &StatusUsage) -> String {
         safe_label(&usage.cache_health),
     );
     format!("\x1b[38;5;75mclud - {text}\x1b[0m")
+}
+
+/// Plain, compact PTY-overlay label. Unlike [`render_usage`], this contains
+/// no terminal controls because the compositor owns the surrounding panel.
+pub fn usage_summary(usage: &StatusUsage) -> String {
+    format!(
+        "{} - R {} ({} cached / {} uncached) - W {}",
+        safe_label(&usage.model),
+        compact_tokens(
+            usage
+                .cached_input_tokens
+                .saturating_add(usage.uncached_input_tokens)
+        ),
+        compact_tokens(usage.cached_input_tokens),
+        compact_tokens(usage.uncached_input_tokens),
+        compact_tokens(usage.output_tokens),
+    )
 }
 
 fn safe_label(value: &str) -> String {

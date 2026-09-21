@@ -17,6 +17,8 @@ use base64::Engine as _;
 
 /// Placement id for the toast. One toast is visible at a time.
 pub const TOAST_PLACEMENT_ID: u32 = 1;
+/// Placement id reserved for the persistent usage HUD.
+pub const USAGE_PLACEMENT_ID: u32 = 2;
 
 /// Above anything a TUI is likely to place, below `i32::MAX` so arithmetic by
 /// other programs cannot overflow into it.

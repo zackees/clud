@@ -41,11 +41,15 @@ pub fn publish_demo_toast(sink: &ToastSink) {
     }
 }
 
-/// The state-file writer backing Claude's injected `statusLine`, or `None`
-/// when this launch gets no status-line surface (toasts off, the user turned
-/// the status line off, or the harness is not Claude).
-pub fn statusline_writer(plan: &LaunchPlan, cfg: ToastLaunchCfg) -> Option<Arc<StatusStateWriter>> {
-    if !(cfg.enabled && cfg.claude_statusline && plan.effective_harness() == Backend::Claude) {
+/// The launch-wide state writer for toasts and bridge usage, or `None` when
+/// toasts are disabled. Claude additionally exposes this file through its
+/// injected `statusLine`; PTY compositors use the same in-memory writer for
+/// every harness, so usage never depends on a Claude-only UI feature.
+pub fn statusline_writer(
+    _plan: &LaunchPlan,
+    cfg: ToastLaunchCfg,
+) -> Option<Arc<StatusStateWriter>> {
+    if !cfg.enabled {
         return None;
     }
     let state_dir = crate::daemon::default_state_dir().ok()?;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::toast::statusline::{read_live_toast, state_path, StatusStateWriter};
+use crate::toast::statusline::{read_live_toast, state_path, StatusStateWriter, StatusUsage};
 use crate::toast::{Severity, Toast, ToastEvent, ToastHub};
 
 const ROWS: u16 = 24;
@@ -15,6 +15,25 @@ fn compositor(tier: ToastTier, fallback: Fallback) -> (Compositor, Arc<ToastHub>
         hub: Arc::clone(&hub),
         tier,
         fallback,
+        usage: None,
+        rows: ROWS,
+        cols: COLS,
+        image_id: IMAGE,
+    });
+    (c, hub)
+}
+
+fn compositor_with_usage(
+    tier: ToastTier,
+    fallback: Fallback,
+    writer: Arc<StatusStateWriter>,
+) -> (Compositor, Arc<ToastHub>) {
+    let hub = ToastHub::new();
+    let c = Compositor::new(ToastPumpOptions {
+        hub: Arc::clone(&hub),
+        tier,
+        fallback,
+        usage: Some(writer),
         rows: ROWS,
         cols: COLS,
         image_id: IMAGE,
@@ -392,6 +411,66 @@ fn a_resize_re_pins_the_toast_to_the_new_top_right() {
             .unwrap()
     };
     assert!(col(&after) > col(&before));
+}
+
+#[test]
+fn exact_bridge_usage_is_a_persistent_separate_kitty_overlay() {
+    let now = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 77)));
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: "gpt-5.6-terra".into(),
+        request_count: 3,
+        cached_input_tokens: 331_200_000,
+        uncached_input_tokens: 1_410_000_000,
+        output_tokens: 2_630_000,
+        cache_health: "healthy".into(),
+    });
+    let (mut c, hub) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
+    let first = c.on_tick(now);
+    assert_eq!(count(&first, "a=t"), 1);
+    assert!(
+        String::from_utf8_lossy(&first).contains("p=2"),
+        "usage must use its own placement: {first:?}"
+    );
+    show(&hub, "cpu 300 %", now);
+    let combined = c.on_tick(now);
+    assert_eq!(count(&combined, "a=t"), 1, "only the toast is new");
+    let text = String::from_utf8_lossy(&combined);
+    let toast_place = text.find("p=1").unwrap();
+    assert!(
+        text[..toast_place].contains("\x1b[2;"),
+        "toast must start below the persistent top-row usage strip: {text:?}"
+    );
+    let re_pinned = c.on_child(b"child redraw", now);
+    assert_eq!(count(&re_pinned, "a=t"), 0);
+    assert!(String::from_utf8_lossy(&re_pinned).contains("p=2"));
+    let finish = String::from_utf8_lossy(&c.finish()).into_owned();
+    assert!(finish.contains("d=i,i=4194381,p=2"));
+}
+
+#[test]
+fn a_narrow_resize_removes_an_existing_usage_overlay() {
+    let now = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 78)));
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: "gpt-5.6-terra".into(),
+        request_count: 1,
+        cached_input_tokens: 1,
+        uncached_input_tokens: 2,
+        output_tokens: 3,
+        cache_health: "healthy".into(),
+    });
+    let (mut c, _) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
+    c.on_tick(now);
+    let resized = String::from_utf8_lossy(&c.on_resize(ROWS, 19, now)).into_owned();
+    assert!(
+        resized.contains("d=i,i=4194381,p=2"),
+        "a strip that no longer fits must be deleted: {resized:?}"
+    );
 }
 
 #[test]
