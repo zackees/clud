@@ -69,6 +69,67 @@ def prune_nonproduction_scripts(wheel: Path) -> bool:
     return True
 
 
+def resolve_elf_objcopy() -> str:
+    """Find an objcopy that can edit the configured Linux target's ELF files.
+
+    The native developer environment normally exposes llvm-objcopy. Soldr's
+    catalogue GNU cross toolchain instead exports a target-prefixed GNU binary
+    next to its compiler (for example aarch64-conda-linux-gnu-objcopy).
+    A cross target deliberately never derives a tool from generic ``CC`` or
+    falls back to generic ``objcopy``: either can be a host-only GNU binary.
+    """
+    target = os.environ.get("CARGO_BUILD_TARGET", "")
+    if target:
+        from ci.env import host_target_triple
+
+        is_cross_target = target != host_target_triple()
+    else:
+        is_cross_target = False
+    target_key = target.upper().replace("-", "_")
+    target_cc_key = target.lower().replace("-", "_")
+    candidates = [
+        os.environ.get("OBJCOPY"),
+        os.environ.get(f"OBJCOPY_{target_key}") if target_key else None,
+    ]
+
+    target_compilers = (
+        os.environ.get(f"CARGO_TARGET_{target_key}_LINKER") if target_key else None,
+        # cc-rs and Soldr use the lowercase target spelling for CC_<target>.
+        os.environ.get(f"CC_{target_cc_key}") if target_cc_key else None,
+        os.environ.get(f"CC_{target_key}") if target_key else None,
+    )
+    compilers = (
+        target_compilers
+        if is_cross_target
+        else (*target_compilers, os.environ.get("CC"))
+    )
+    for compiler in compilers:
+        if not compiler:
+            continue
+        compiler_path = Path(compiler)
+        for suffix in ("gcc", "clang", "cc"):
+            if compiler_path.name.endswith(suffix):
+                candidates.append(
+                    str(
+                        compiler_path.with_name(
+                            f"{compiler_path.name.removesuffix(suffix)}objcopy"
+                        )
+                    )
+                )
+                break
+
+    # LLVM is cross-capable; generic GNU objcopy is safe only for a native build.
+    candidates.append("llvm-objcopy")
+    if not is_cross_target:
+        candidates.append("objcopy")
+    for candidate in candidates:
+        if candidate and shutil.which(candidate):
+            return candidate
+    raise RuntimeError(
+        "no compatible ELF objcopy found; set OBJCOPY or expose the target toolchain"
+    )
+
+
 def remove_elf_debug_metadata(wheel: Path) -> bool:
     """Remove the residual ELF debug-GDB section from release wheel scripts.
 
@@ -91,9 +152,10 @@ def remove_elf_debug_metadata(wheel: Path) -> bool:
             ]
             if not elf_scripts:
                 return False
+            objcopy = resolve_elf_objcopy()
             for script in elf_scripts:
                 result = process.run(
-                    ["llvm-objcopy", "--remove-section=.debug_gdb_scripts", str(script)],
+                    [objcopy, "--remove-section=.debug_gdb_scripts", str(script)],
                     check=False,
                 )
                 if result.returncode != 0:

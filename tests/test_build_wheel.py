@@ -59,6 +59,14 @@ def test_release_wheel_removes_elf_debug_gdb_metadata(monkeypatch, tmp_path) -> 
     class Result:
         returncode = 0
 
+    monkeypatch.setenv("CARGO_BUILD_TARGET", "")
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.delenv("OBJCOPY", raising=False)
+    monkeypatch.setattr(
+        build_wheel.shutil,
+        "which",
+        lambda candidate: candidate == "llvm-objcopy",
+    )
     calls = []
     monkeypatch.setattr(
         build_wheel.process,
@@ -68,6 +76,98 @@ def test_release_wheel_removes_elf_debug_gdb_metadata(monkeypatch, tmp_path) -> 
     assert build_wheel.remove_elf_debug_metadata(wheel)
     assert calls
     assert calls[0][:2] == ["llvm-objcopy", "--remove-section=.debug_gdb_scripts"]
+
+
+def test_release_wheel_uses_target_prefixed_objcopy_when_llvm_is_absent(
+    monkeypatch, tmp_path
+) -> None:
+    wheel = tmp_path / "clud-2.8.9-py3-none-manylinux_2_17_aarch64.whl"
+    script = "clud-2.8.9.data/scripts/clud"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(script, b"\x7fELFdebug-gdb")
+        archive.writestr("clud-2.8.9.dist-info/RECORD", "clud-2.8.9.dist-info/RECORD,,\n")
+
+    cross_objcopy = "/toolchain/bin/aarch64-conda-linux-gnu-objcopy"
+    monkeypatch.setenv("CARGO_BUILD_TARGET", "aarch64-unknown-linux-gnu")
+    monkeypatch.setenv(
+        "CC_aarch64_unknown_linux_gnu",
+        "/toolchain/bin/aarch64-conda-linux-gnu-gcc",
+    )
+    monkeypatch.setattr(
+        build_wheel.shutil,
+        "which",
+        lambda candidate: cross_objcopy if candidate == cross_objcopy else None,
+    )
+
+    class Result:
+        returncode = 0
+
+    calls = []
+    monkeypatch.setattr(
+        build_wheel.process,
+        "run",
+        lambda argv, **kwargs: calls.append(argv) or Result(),
+    )
+
+    assert build_wheel.remove_elf_debug_metadata(wheel)
+    assert calls[0][0] == cross_objcopy
+
+
+def test_release_wheel_reports_missing_elf_objcopy(monkeypatch) -> None:
+    import pytest
+
+    monkeypatch.setenv("CARGO_BUILD_TARGET", "aarch64-unknown-linux-gnu")
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.delenv("OBJCOPY", raising=False)
+    monkeypatch.delenv("OBJCOPY_AARCH64_UNKNOWN_LINUX_GNU", raising=False)
+    monkeypatch.delenv("CC_aarch64_unknown_linux_gnu", raising=False)
+    monkeypatch.delenv("CC_AARCH64_UNKNOWN_LINUX_GNU", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER", raising=False)
+    monkeypatch.setattr(build_wheel.shutil, "which", lambda _candidate: None)
+
+    with pytest.raises(RuntimeError, match="ELF objcopy"):
+        build_wheel.resolve_elf_objcopy()
+
+
+def test_cross_target_does_not_derive_objcopy_from_generic_cc(monkeypatch) -> None:
+    import pytest
+    from ci import env
+
+    monkeypatch.setenv("CARGO_BUILD_TARGET", "aarch64-unknown-linux-gnu")
+    monkeypatch.setenv("CC", "/toolchain/bin/gcc")
+    monkeypatch.delenv("OBJCOPY", raising=False)
+    monkeypatch.delenv("OBJCOPY_AARCH64_UNKNOWN_LINUX_GNU", raising=False)
+    monkeypatch.delenv("CC_aarch64_unknown_linux_gnu", raising=False)
+    monkeypatch.delenv("CC_AARCH64_UNKNOWN_LINUX_GNU", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER", raising=False)
+    monkeypatch.setattr(env, "host_target_triple", lambda: "x86_64-unknown-linux-gnu")
+    attempted = []
+    monkeypatch.setattr(
+        build_wheel.shutil,
+        "which",
+        lambda candidate: attempted.append(candidate) or candidate == "/toolchain/bin/objcopy",
+    )
+
+    with pytest.raises(RuntimeError, match="ELF objcopy"):
+        build_wheel.resolve_elf_objcopy()
+    assert "/toolchain/bin/objcopy" not in attempted
+
+
+def test_native_target_can_use_generic_objcopy(monkeypatch) -> None:
+    from ci import env
+
+    target = "x86_64-unknown-linux-gnu"
+    monkeypatch.setenv("CARGO_BUILD_TARGET", target)
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.delenv("OBJCOPY", raising=False)
+    monkeypatch.delenv("OBJCOPY_X86_64_UNKNOWN_LINUX_GNU", raising=False)
+    monkeypatch.delenv("CC_x86_64_unknown_linux_gnu", raising=False)
+    monkeypatch.delenv("CC_X86_64_UNKNOWN_LINUX_GNU", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", raising=False)
+    monkeypatch.setattr(env, "host_target_triple", lambda: target)
+    monkeypatch.setattr(build_wheel.shutil, "which", lambda candidate: candidate == "objcopy")
+
+    assert build_wheel.resolve_elf_objcopy() == "objcopy"
 
 
 def test_release_wheel_rejects_a_remaining_elf_debug_section(monkeypatch, tmp_path) -> None:
