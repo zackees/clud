@@ -524,7 +524,13 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     if run(maturin_argv(subcommand, env=env), env) != 0:
         return 1
 
-    from ci.build_wheel import built_wheels, verify_wheel_scripts
+    from ci.build_wheel import (
+        built_wheels,
+        prune_nonproduction_scripts,
+        remove_elf_debug_metadata,
+        verify_no_elf_debug_sections,
+        verify_wheel_scripts,
+    )
     from ci.wheel_repair import repair_windows_gnu_wheel
 
     wheels = built_wheels()
@@ -532,6 +538,10 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         print("build completed but produced no wheel", file=sys.stderr)
         return 1
     for wheel in wheels:
+        prune_nonproduction_scripts(wheel)
+        if args.profile == "release":
+            remove_elf_debug_metadata(wheel)
+            verify_no_elf_debug_sections(wheel)
         if desktop_target(args.target):
             add_companion(wheel, companion, args.target)
         repair_windows_gnu_wheel(wheel)

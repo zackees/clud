@@ -35,6 +35,98 @@ BuildMode = Literal["dev", "release"]
 REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd", "clud-cmd-scan")
 
 
+def prune_nonproduction_scripts(wheel: Path) -> bool:
+    """Remove maturin's test-only executables from a binary wheel.
+
+    Maturin's ``bindings = "bin"`` packages every enabled Cargo ``[[bin]]``.
+    That is useful for the production helpers, but also used to publish
+    ``clud-ctrlc-probe``, whose only callers are integration tests. Windows is
+    hand-packed from ``REQUIRED_SCRIPTS`` already; this closes the equivalent
+    native/maturin path without hiding the probe from test bundles.
+    """
+    with zipfile.ZipFile(wheel) as archive:
+        members = archive.namelist()
+        stale = [
+            name
+            for name in members
+            if ".data/scripts/clud-" in name
+            and Path(name).name.removesuffix(".exe") not in REQUIRED_SCRIPTS
+        ]
+        record = next((name for name in members if name.endswith(".dist-info/RECORD")), None)
+        if not stale or record is None:
+            return False
+        with tempfile.TemporaryDirectory(prefix="clud-wheel-prune-") as temp_dir:
+            root = Path(temp_dir)
+            archive.extractall(root)
+            for name in stale:
+                (root / name).unlink()
+            from ci.wheel_repair import _rewrite_record, _write_wheel
+
+            _rewrite_record(root, Path(record))
+            replacement = wheel.with_suffix(".pruned.whl")
+            _write_wheel(root, replacement)
+    replacement.replace(wheel)
+    return True
+
+
+def remove_elf_debug_metadata(wheel: Path) -> bool:
+    """Remove the residual ELF debug-GDB section from release wheel scripts.
+
+    Cargo's ``strip = "debuginfo"`` removes DWARF but intentionally retains
+    ``.debug_gdb_scripts``. It is not symbol data, yet its debug-prefixed name
+    violates the artifact contract and confused the original audit. objcopy
+    removes that one section without touching ``.symtab``.
+    """
+    with zipfile.ZipFile(wheel) as archive:
+        members = archive.namelist()
+        scripts = [name for name in members if ".data/scripts/" in name]
+        record = next((name for name in members if name.endswith(".dist-info/RECORD")), None)
+        if record is None:
+            return False
+        with tempfile.TemporaryDirectory(prefix="clud-wheel-strip-") as temp_dir:
+            root = Path(temp_dir)
+            archive.extractall(root)
+            elf_scripts = [
+                root / name for name in scripts if (root / name).read_bytes()[:4] == b"\x7fELF"
+            ]
+            if not elf_scripts:
+                return False
+            for script in elf_scripts:
+                result = process.run(
+                    ["llvm-objcopy", "--remove-section=.debug_gdb_scripts", str(script)],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"failed to remove debug metadata from {script}")
+            from ci.wheel_repair import _rewrite_record, _write_wheel
+
+            _rewrite_record(root, Path(record))
+            replacement = wheel.with_suffix(".stripped.whl")
+            _write_wheel(root, replacement)
+    replacement.replace(wheel)
+    return True
+
+
+def verify_no_elf_debug_sections(wheel: Path) -> None:
+    """Fail a release build if any shipped ELF script has `.debug_*` data."""
+    with zipfile.ZipFile(wheel) as archive:
+        scripts = [name for name in archive.namelist() if ".data/scripts/" in name]
+        with tempfile.TemporaryDirectory(prefix="clud-wheel-verify-") as temp_dir:
+            root = Path(temp_dir)
+            archive.extractall(root)
+            for name in scripts:
+                script = root / name
+                if script.read_bytes()[:4] != b"\x7fELF":
+                    continue
+                result = process.run(
+                    ["readelf", "-SW", str(script)], capture_output=True, text=True, check=False
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"readelf failed for shipped script {name}")
+                if ".debug_" in result.stdout:
+                    raise RuntimeError(f"shipped script retains debug sections: {name}")
+
+
 def local_webterm_target() -> str | None:
     from ci.env import host_target_triple
 
@@ -328,6 +420,19 @@ def verify_wheel_scripts(wheel: Path) -> int:
             flush=True,
         )
         return 1
+    unexpected = [
+        member
+        for member in members
+        if ".data/scripts/clud-" in member
+        and Path(member).name.removesuffix(".exe") not in required
+    ]
+    if unexpected:
+        print(
+            f"built wheel {wheel.name} contains non-production scripts: " + ", ".join(unexpected),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     return 0
 
 
@@ -353,6 +458,10 @@ def run_build(mode: BuildMode) -> int:
         else None
     )
     for wheel in changed_wheels:
+        prune_nonproduction_scripts(wheel)
+        if mode == "release":
+            remove_elf_debug_metadata(wheel)
+            verify_no_elf_debug_sections(wheel)
         repair_windows_gnu_wheel(wheel)
         if companion is not None and target is not None:
             add_companion(wheel, companion, target)
