@@ -161,7 +161,7 @@ wheels = [
 
 [[package]]
 name = "clud"
-version = "2.8.6"
+version = "2.8.7"
 source = { editable = "." }
 
 [package.optional-dependencies]

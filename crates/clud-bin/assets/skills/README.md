@@ -13,6 +13,10 @@ every backend's skills dir on launch. `clud-loop` was retired once
 
 ## Skills
 
+- [clud-meta-work/](clud-meta-work/SKILL.md) - Portable orchestrator for a
+  `/goal` or `clud do` request with several independent deliverables. It plans
+  isolated work, reviews each result, and integrates only after the repository's
+  own validation and merge rules are met.
 - [clud-issue/](clud-issue/README.md) - File a deeply-researched GitHub issue
   via investigate -> interview -> investigate -> post, returning a summary plus
   the issue URL.

@@ -94,6 +94,18 @@ on a Codex model. clud cannot constrain the picker from the gateway side — see
 [provider-selection.md](provider-selection.md#gateway-discovery-adds-picker-rows-it-does-not-constrain-them)
 and [DD-054](../DESIGN_DECISIONS.md#dd-054-the-model-picker-belongs-to-the-harness-and-discovery-only-adds-rows).
 
+For this direct route only, the child overlay also owns Claude Code's workflow
+role aliases: `opus` resolves to `clud-claude-codex-sol` and `sonnet` resolves
+to `clud-claude-codex-terra`. This keeps upstream workflows and subagents on
+their intended Codex tiers even though their requests name Claude aliases. The
+overlay also gives those aliases honest Codex display names and removes any
+ambient alias configuration before applying its mapping. Native Claude and the
+unified gateway do not receive this override; Haiku remains harness-owned.
+Every child also receives `CLUD_ROUTE_CONTEXT`, a clud-owned JSON document with
+the provider, effective harness, routing mode, and cost-aware delegation policy.
+Bundled `/do` skills use it rather than guessing from Claude Code's visible
+model labels or probing the host environment.
+
 Ordinary effort travels through Claude Code's session effort field and reaches
 the translator as `output_config.effort`. The provider-native `none` value,
 which Claude Code's CLI does not accept, remains a suffix on the synthetic ID.

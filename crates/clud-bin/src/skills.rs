@@ -51,6 +51,10 @@ pub struct BundledSkill {
 /// another `assets/skills/<name>/SKILL.md`.
 pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
+        name: "clud-meta-work",
+        skill_md: include_str!("../assets/skills/clud-meta-work/SKILL.md"),
+    },
+    BundledSkill {
         name: "clud-issue",
         skill_md: include_str!("../assets/skills/clud-issue/SKILL.md"),
     },

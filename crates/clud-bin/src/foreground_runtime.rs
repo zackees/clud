@@ -145,10 +145,11 @@ impl ForegroundRuntime {
         Ok(())
     }
 
-    pub fn start(plan: &LaunchPlan, env: Vec<(String, String)>) -> Result<Self, BridgeError> {
+    pub fn start(plan: &LaunchPlan, mut env: Vec<(String, String)>) -> Result<Self, BridgeError> {
         // `dsh` owns its provider configuration and credentials. A native
         // DeepSeek Harness launch needs no clud vault or bridge setup at all.
         if plan.effective_harness() == Backend::DeepSeek {
+            apply_route_context(&mut env, plan);
             return Ok(Self {
                 env,
                 bridge: None,
@@ -294,6 +295,7 @@ impl ForegroundRuntime {
         if let Some(entry) = hook_roots_env_value(plan) {
             env.push(entry);
         }
+        apply_route_context(&mut env, plan);
         Ok(Self {
             env,
             bridge,
@@ -663,6 +665,27 @@ const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
 ];
 
+/// Claude Code's role aliases are process-wide configuration. On the direct
+/// Codex-through-Claude route they must name bridge discovery rows, rather
+/// than the harness's unavailable Anthropic defaults. Keep these IDs aligned
+/// with the Codex rows in `provider_catalog.rs`.
+const CODEX_VIA_CLAUDE_OPUS_MODEL: &str = "clud-claude-codex-sol";
+const CODEX_VIA_CLAUDE_SONNET_MODEL: &str = "clud-claude-codex-terra";
+const CODEX_VIA_CLAUDE_CONFLICTING: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+];
+
+/// Machine-readable launch identity for bundled skills. This is child-local,
+/// route-owned data: a user-provided value never decides which models a skill
+/// is allowed to delegate to.
+const ROUTE_CONTEXT_ENV: &str = "CLUD_ROUTE_CONTEXT";
+
 /// The catalog row a launch will actually bill, when clud knows it.
 ///
 /// The selection's `model` (a catalog CLI ID) is checked first, because the
@@ -864,14 +887,10 @@ fn apply_cross_route_overlay(
         return Err(BridgeError::DiscoveryDisabled);
     }
     env.retain(|(key, _)| {
-        ![
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_API_KEY",
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        ]
-        .iter()
-        .any(|sensitive| env_key_eq(key, sensitive))
+        !CODEX_VIA_CLAUDE_CONFLICTING
+            .iter()
+            .any(|conflicting| env_key_eq(key, conflicting))
+            && !env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
             && !key
                 .to_ascii_uppercase()
                 .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
@@ -884,6 +903,29 @@ fn apply_cross_route_overlay(
         "ANTHROPIC_AUTH_TOKEN".to_string(),
         bridge.bearer_token().to_string(),
     ));
+    // The built-in `opus` and `sonnet` aliases also select models for Claude
+    // Code workflows and subagents. The bridge cannot serve Anthropic model
+    // IDs, so bind them to honest, advertised Codex rows. This deliberately
+    // leaves Haiku alone: it is used for Claude Code side work and has no
+    // corresponding Codex tier policy.
+    env.extend([
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+            CODEX_VIA_CLAUDE_OPUS_MODEL.to_string(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".to_string(),
+            "Codex Sol (OpenAI)".to_string(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+            CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME".to_string(),
+            "Codex Terra (OpenAI)".to_string(),
+        ),
+    ]);
     // Claude Code 2.1.223+ discovers every provider-scoped row from the
     // bridge. Its context override is process-wide, so the catalog must prove
     // that every switchable Codex row has one common real ceiling.
@@ -904,6 +946,37 @@ fn apply_cross_route_overlay(
     );
     push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
     Ok(())
+}
+
+fn apply_route_context(env: &mut Vec<(String, String)>, plan: &LaunchPlan) {
+    let codex_via_claude = is_codex_via_claude(plan);
+    let context = serde_json::json!({
+        "version": 1,
+        "model_provider": plan.model_provider().as_str(),
+        "harness": plan.effective_harness().as_model_provider().as_str(),
+        "routing_mode": plan.routing_mode.as_str(),
+        "delegation": if codex_via_claude {
+            serde_json::json!({
+                "cost_policy": "workers_use_sonnet; reserve_opus_for_planning_review_and_integration",
+                "roles": {
+                    "planner": "opus",
+                    "reviewer": "opus",
+                    "integrator": "opus",
+                    "worker": "sonnet"
+                },
+                "resolved_models": {
+                    "opus": CODEX_VIA_CLAUDE_OPUS_MODEL,
+                    "sonnet": CODEX_VIA_CLAUDE_SONNET_MODEL
+                }
+            })
+        } else {
+            serde_json::json!({
+                "cost_policy": "prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed",
+                "roles": "use_harness_native_model_selection"
+            })
+        }
+    });
+    set_env(env, ROUTE_CONTEXT_ENV, &context.to_string());
 }
 
 fn apply_unified_overlay(
@@ -1745,6 +1818,22 @@ mod tests {
         let base = vec![
             ("UNCHANGED".to_string(), "yes".to_string()),
             ("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string()),
+            (
+                "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                "ambient-opus".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".to_string(),
+                "ambient-opus-name".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                "ambient-sonnet".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME".to_string(),
+                "ambient-sonnet-name".to_string(),
+            ),
             ("API_TIMEOUT_MS".to_string(), "custom-timeout".to_string()),
         ];
         let runtime =
@@ -1763,6 +1852,33 @@ mod tests {
         );
         assert_eq!(lookup(env, "API_TIMEOUT_MS"), Some("custom-timeout"));
         assert_eq!(
+            lookup(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(CODEX_VIA_CLAUDE_OPUS_MODEL)
+        );
+        assert_eq!(
+            lookup(env, "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"),
+            Some("Codex Sol (OpenAI)")
+        );
+        assert_eq!(
+            lookup(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some(CODEX_VIA_CLAUDE_SONNET_MODEL)
+        );
+        assert_eq!(
+            lookup(env, "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"),
+            Some("Codex Terra (OpenAI)")
+        );
+        let route: serde_json::Value = serde_json::from_str(
+            lookup(env, ROUTE_CONTEXT_ENV).expect("all child launches carry route context"),
+        )
+        .unwrap();
+        assert_eq!(route["model_provider"], "codex");
+        assert_eq!(route["harness"], "claude");
+        assert_eq!(route["delegation"]["roles"]["planner"], "opus");
+        assert_eq!(
+            route["delegation"]["resolved_models"]["opus"],
+            CODEX_VIA_CLAUDE_OPUS_MODEL
+        );
+        assert_eq!(
             lookup(env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
             None
         );
@@ -1775,6 +1891,29 @@ mod tests {
             Some("1050000")
         );
         assert_eq!(lookup(&base, "ANTHROPIC_API_KEY"), Some("ambient-key"));
+        assert_eq!(
+            lookup(&base, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some("ambient-opus")
+        );
+    }
+
+    #[test]
+    fn route_context_describes_native_launches_without_bridge_aliases() {
+        let runtime =
+            ForegroundRuntime::start(&plan(ModelProvider::Codex, Backend::Codex), Vec::new())
+                .unwrap();
+        let route: serde_json::Value = serde_json::from_str(
+            lookup(runtime.env(), ROUTE_CONTEXT_ENV)
+                .expect("all child launches carry route context"),
+        )
+        .unwrap();
+        assert_eq!(route["model_provider"], "codex");
+        assert_eq!(route["harness"], "codex");
+        assert_eq!(
+            route["delegation"]["cost_policy"],
+            "prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed"
+        );
+        assert!(route["delegation"].get("resolved_models").is_none());
     }
 
     /// The discovery catalog replaces the old scalar custom-row extension.

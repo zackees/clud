@@ -781,6 +781,11 @@ clud fix
 
 Launches an interactive agent session with the `/goal` implementation contract.
 URLs retain the issue-oriented contract; free-form text becomes the goal directly.
+For a target with genuinely independent deliverables, `/do` invokes the bundled
+`/clud-meta-work` playbook to plan, review, and integrate those slices safely;
+single cohesive changes remain on the normal `/goal` path. The playbook reads
+clud's child-only `CLUD_ROUTE_CONTEXT` JSON rather than guessing the active
+provider/harness, so bridge subagents use the route's cost-aware model policy.
 With no target, an interactive foreground launch prompts for a URL or goal before
 starting the backend. Scripts, dry-runs, and background launches must provide the
 target explicitly so they never block on input.

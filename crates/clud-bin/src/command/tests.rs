@@ -1137,6 +1137,7 @@ fn test_do_command_resolves_goal_prompt() {
     let prompt = last_arg(&p);
     assert!(prompt.starts_with("/goal "));
     assert!(prompt.contains("https://github.com/zackees/clud/issues/866"));
+    assert!(prompt.contains("/clud-meta-work"));
     assert!(!prompt.contains("{url}"));
 }
 
@@ -1168,6 +1169,7 @@ fn test_build_do_prompt_treats_free_form_input_as_a_goal_not_a_url() {
         );
         assert!(!prompt.starts_with("/goal read "), "prompt={prompt}");
         assert!(prompt.contains("validated, tested, pushed and merged"));
+        assert!(prompt.contains("/clud-meta-work"));
     }
 }
 

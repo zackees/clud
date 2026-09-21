@@ -261,6 +261,7 @@ fn bundled_skill_frontmatter_is_valid_yaml() {
 #[test]
 fn bundled_includes_all_known_skills() {
     let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
+    assert!(names.contains(&"clud-meta-work"));
     assert!(names.contains(&"clud-issue"));
     assert!(names.contains(&"clud-issue-triage"));
     assert!(names.contains(&"clud-fix-quick"));

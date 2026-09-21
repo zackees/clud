@@ -3489,3 +3489,33 @@ source provenance and the executable cannot intercept non-rm deletions.
 Real removal deliberately requires CI plus detected Docker. Unit-test builds
 exclude the real executor. See [rm protection](architecture/rm-protection.md) for
 the contract, supported platforms, retirement rationale and residual boundary.
+
+---
+
+## DD-075: Codex-via-Claude owns the workflow role aliases
+
+**Context:** Claude Code workflows and subagents may request the built-in
+`opus` and `sonnet` aliases even when `clud --codex --harness claude` launched
+the session. The gateway cannot serve those Anthropic IDs. Before this decision,
+the translator treated both as an unknown `claude*` ID and substituted the
+launch default, collapsing workflows that deliberately used Opus for planning
+and review and Sonnet for implementation onto one Codex tier.
+
+**Decision:** The direct Codex-through-Claude child overlay removes ambient
+role-alias settings and sets `ANTHROPIC_DEFAULT_OPUS_MODEL` to the advertised
+Codex Sol discovery ID and `ANTHROPIC_DEFAULT_SONNET_MODEL` to the advertised
+Codex Terra discovery ID. It also sets their display names to honest Codex
+labels. Haiku is left harness-owned. The override does not apply to native
+Claude or the unified gateway.
+
+**Rationale:** This changes an upstream role request before it reaches the
+bridge, preserving intended tier separation and making the picker labels match
+what will be billed. It is narrower and more transparent than teaching the
+translator to guess whether every `claude*` request came from a workflow,
+subagent, or a user picker selection.
+
+**Consequences:** Direct bridge sessions now map Opus-role work to Sol and
+Sonnet-role work to Terra. The general picker limitation in DD-054 remains:
+discovery cannot remove built-in Anthropic rows, and a user can still select
+one. The aliases make that normal workflow path correct; they do not turn the
+gateway into an Anthropic provider.
