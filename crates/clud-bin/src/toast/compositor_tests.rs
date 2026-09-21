@@ -474,6 +474,36 @@ fn a_narrow_resize_removes_an_existing_usage_overlay() {
 }
 
 #[test]
+fn usage_strip_expands_on_toggle_and_arms_hover_only_for_any_motion_sgr() {
+    let now = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 79)));
+    writer.publish_usage(StatusUsage {
+        provider: "openrouter".into(),
+        model: "anthropic/claude-sonnet".into(),
+        request_count: 2,
+        cached_input_tokens: 35,
+        uncached_input_tokens: 65,
+        output_tokens: 9,
+        cache_health: "unavailable".into(),
+    });
+    let (mut c, _) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
+    c.on_tick(now);
+    let input = c.input();
+    assert!(!input.usage_hover_armed());
+    c.on_child(b"\x1b[?1000h\x1b[?1006h", now);
+    assert!(
+        !input.usage_hover_armed(),
+        "click-only mouse mode is not hover"
+    );
+    c.on_child(b"\x1b[?1003h", now);
+    assert!(input.usage_hover_armed());
+    input.toggle_usage();
+    let expanded = String::from_utf8_lossy(&c.on_tick(now)).into_owned();
+    assert!(expanded.contains("p=2") && expanded.contains("r=3"));
+}
+
+#[test]
 fn tier_off_is_a_verbatim_pass_through() {
     let now = Instant::now();
     let (mut c, hub) = compositor(ToastTier::Off, Fallback::Title);

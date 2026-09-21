@@ -1276,14 +1276,24 @@ where
                     // not the child's.
                     let outgoing = match toast_input.as_ref() {
                         Some(input) => {
-                            let (filtered, dismissed) =
-                                mouse.process(&outgoing, input.close_rect());
-                            if dismissed {
+                            let result = mouse.process(
+                                &outgoing,
+                                input.close_rect(),
+                                input.usage_rect(),
+                                input.usage_hover_armed(),
+                            );
+                            if result.dismissed {
                                 if let Some(hub) = toast_hub.as_ref() {
                                     hub.dismiss_visible(std::time::Instant::now());
                                 }
                             }
-                            filtered
+                            if result.usage_toggled {
+                                input.toggle_usage();
+                            }
+                            if let Some(hovering) = result.usage_hover {
+                                input.set_usage_hover(hovering);
+                            }
+                            result.bytes
                         }
                         None => outgoing,
                     };

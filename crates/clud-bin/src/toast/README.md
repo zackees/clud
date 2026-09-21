@@ -11,7 +11,7 @@ In-terminal toast notifications (#1189). Design and limits:
 | `kitty.rs` | kitty graphics commands (`transmit_png`, `place`, `delete_*`), all with `q=2` |
 | `raster.rs` | toast and persistent-usage PNG panels via bundled DejaVu Sans Mono (`assets/fonts/`) |
 | `text_tier.rs` | one-row cell toast and restore-from-shadow (`restore_cells`, `restore_screen`) |
-| `mouse.rs` | `MouseFilter`: swallow SGR clicks on the close button, pass everything else through |
+| `mouse.rs` | `MouseFilter`: consume only toast/usage-panel SGR controls, pass keyboard and unrelated mouse bytes through |
 | `tier.rs` | `decide`: kitty / text cells / fallback per terminal; `CLUD_TOAST_TIER` override |
 | `statusline.rs` | Claude status-line surface: `StatusStateWriter`, `clud statusline` (`run`), command composition, user status-line discovery and chaining |
 | `launch.rs` | per-launch wiring for both runners: status-line writer, injection, fallback choice, `CLUD_TOAST_DEMO` |

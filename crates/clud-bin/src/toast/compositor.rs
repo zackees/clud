@@ -25,7 +25,7 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 use super::kitty;
 use super::raster;
-use super::statusline::{usage_summary, StatusStateWriter, StatusUsage};
+use super::statusline::{usage_details, usage_summary, StatusStateWriter, StatusUsage};
 use super::text_tier::{self, CellRect};
 use super::tier::ToastTier;
 use super::tracker::EscapeTracker;
@@ -41,6 +41,7 @@ pub const SYNC_DEFER_LIMIT: Duration = Duration::from_millis(250);
 pub const TICK: Duration = Duration::from_millis(100);
 
 const USAGE_ROWS: u16 = 1;
+const USAGE_EXPANDED_ROWS: u16 = 3;
 
 /// What renders a toast when no in-grid tier applies.
 #[derive(Clone, Default)]
@@ -82,16 +83,62 @@ pub struct ToastPumpOptions {
 /// reporting on).
 #[derive(Debug, Default)]
 pub struct ToastInput {
-    close: Mutex<Option<CellRect>>,
+    state: Mutex<InputState>,
+}
+
+#[derive(Debug, Default)]
+struct InputState {
+    close: Option<CellRect>,
+    usage: Option<CellRect>,
+    hover_armed: bool,
+    manually_expanded: bool,
+    hovering_usage: bool,
 }
 
 impl ToastInput {
     pub fn close_rect(&self) -> Option<CellRect> {
-        *self.close.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).close
     }
 
     fn set(&self, rect: Option<CellRect>) {
-        *self.close.lock().unwrap_or_else(|e| e.into_inner()) = rect;
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).close = rect;
+    }
+
+    pub fn usage_rect(&self) -> Option<CellRect> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).usage
+    }
+
+    pub fn usage_hover_armed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hover_armed
+    }
+
+    pub fn toggle_usage(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.manually_expanded = !state.manually_expanded;
+    }
+
+    pub fn set_usage_hover(&self, hovering: bool) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hovering_usage = hovering;
+    }
+
+    fn usage_expanded(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.manually_expanded || state.hovering_usage
+    }
+
+    fn set_usage(&self, rect: Option<CellRect>, hover_armed: bool) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.usage = rect;
+        state.hover_armed = hover_armed;
+        if rect.is_none() {
+            state.hovering_usage = false;
+        }
     }
 }
 
@@ -125,6 +172,7 @@ pub struct Compositor {
     repaint_screen: bool,
     title_pushed: bool,
     usage: Option<StatusUsage>,
+    usage_expanded: bool,
     usage_drawn: bool,
     usage_transmitted: Option<(String, u16, u16)>,
 }
@@ -151,6 +199,7 @@ impl Compositor {
             repaint_screen: false,
             title_pushed: false,
             usage: None,
+            usage_expanded: false,
             usage_drawn: false,
             usage_transmitted: None,
         }
@@ -183,6 +232,7 @@ impl Compositor {
         let mut out = Vec::with_capacity(bytes.len() + 64);
         self.sync_hub(now);
         self.sync_usage();
+        self.sync_usage_input();
 
         // A text-cell toast is lifted before the child draws so scrolls and
         // partial rewrites move the child's real content, not ours. If the
@@ -245,6 +295,7 @@ impl Compositor {
         }
         self.sync_hub(now);
         self.sync_usage();
+        self.sync_usage_input();
         self.render(now)
     }
 
@@ -288,6 +339,14 @@ impl Compositor {
             .and_then(|writer| writer.usage_snapshot());
         if usage != self.usage {
             self.usage = usage;
+            self.pending = true;
+        }
+    }
+
+    fn sync_usage_input(&mut self) {
+        let expanded = self.input.usage_expanded();
+        if expanded != self.usage_expanded {
+            self.usage_expanded = expanded;
             self.pending = true;
         }
     }
@@ -410,22 +469,31 @@ impl Compositor {
         self.image_id ^ 0x0040_0000
     }
 
+    fn usage_content(&self) -> Option<(String, u16)> {
+        self.usage.as_ref().map(|usage| {
+            if self.usage_expanded {
+                (usage_details(usage), USAGE_EXPANDED_ROWS)
+            } else {
+                (usage_summary(usage), USAGE_ROWS)
+            }
+        })
+    }
+
     fn usage_target(&self) -> bool {
-        let Some(usage) = &self.usage else {
+        let Some((text, rows)) = self.usage_content() else {
             return false;
         };
         let (_, cols) = self.shadow.screen().size();
-        self.tier == ToastTier::Kitty && usage_cells(&usage_summary(usage), cols).is_some()
+        self.tier == ToastTier::Kitty && usage_cells(&text, cols, rows).is_some()
     }
 
     fn render_usage(&mut self) -> Vec<u8> {
         if !self.usage_target() {
             return self.remove_usage_drawn();
         }
-        let usage = self.usage.as_ref().expect("usage target has usage");
         let (_, term_cols) = self.shadow.screen().size();
-        let text = usage_summary(usage);
-        let Some((cols, rows)) = usage_cells(&text, term_cols) else {
+        let (text, wanted_rows) = self.usage_content().expect("usage target has usage");
+        let Some((cols, rows)) = usage_cells(&text, term_cols, wanted_rows) else {
             return self.remove_usage_drawn();
         };
         let content = (text.clone(), cols, rows);
@@ -451,13 +519,27 @@ impl Compositor {
         ));
         out.extend(self.with_cursor_parked(place));
         self.usage_drawn = true;
+        let hover_armed = self.shadow.screen().mouse_protocol_mode()
+            == MouseProtocolMode::AnyMotion
+            && self.shadow.screen().mouse_protocol_encoding() == MouseProtocolEncoding::Sgr;
+        self.input.set_usage(
+            Some(CellRect {
+                row: 0,
+                col,
+                width: cols,
+                height: rows,
+            }),
+            hover_armed,
+        );
         out
     }
 
     fn remove_usage_drawn(&mut self) -> Vec<u8> {
         if !std::mem::take(&mut self.usage_drawn) {
+            self.input.set_usage(None, false);
             return Vec::new();
         }
+        self.input.set_usage(None, false);
         kitty::delete_placement(self.usage_image_id(), kitty::USAGE_PLACEMENT_ID)
     }
 
@@ -592,18 +674,18 @@ enum Target {
     Nothing,
 }
 
-fn usage_cells(text: &str, term_cols: u16) -> Option<(u16, u16)> {
+fn usage_cells(text: &str, term_cols: u16, rows: u16) -> Option<(u16, u16)> {
     const MIN_COLS: u16 = 20;
     const MAX_COLS: u16 = 76;
     let available = term_cols.saturating_sub(2);
     if available < MIN_COLS {
         return None;
     }
-    let wanted = u16::try_from(text.chars().count())
+    let wanted = u16::try_from(text.lines().map(str::len).max().unwrap_or(0))
         .unwrap_or(u16::MAX)
         .saturating_add(2)
         .clamp(MIN_COLS, MAX_COLS);
-    Some((wanted.min(available), USAGE_ROWS))
+    Some((wanted.min(available), rows))
 }
 
 #[cfg(test)]

@@ -108,6 +108,16 @@ each child burst and is removed independently at session exit. The compositor
 polls the launch writer while toasts are enabled, allowing an upstream bridge
 completion to appear even during an otherwise quiet TUI.
 
+### Usage-panel interaction
+
+The collapsed strip expands to provider, model, request count, separate cached
+and uncached reads, output, and cache health. A click toggles it when the
+child has enabled SGR button reporting. Hover is enabled only when the child
+has also selected DECSET 1003 (any-motion) with SGR encoding; a pointer
+leaving the panel closes hover expansion. clud never enables either mode, and
+only consumes reports addressed to its panel. This retains selection and
+scrollback behavior for terminals and TUIs that do not request mouse input.
+
 ### Text-cell tier
 
 `toast/text_tier.rs` paints a one-row toast. Removal repaints the rectangle
@@ -186,6 +196,7 @@ runtime-cache or launch work, because Claude runs it every couple of seconds.
 | Model, tracker, kitty encoding, raster, text tier, mouse, tier matrix, status line | `src/toast/*` unit tests (all CI lanes) |
 | Compositor byte streams (every tier, deferral, origin mode, dismiss, resize) | `src/toast/compositor_tests.rs` |
 | Persistent exact usage strip, separate placement, coexistence with a toast, redraw and cleanup | `src/toast/compositor_tests.rs` |
+| Usage click/hover filtering, split reports, keyboard-byte pass-through | `src/toast/mouse.rs` unit tests |
 | Banner never writes to the terminal; banner → toast events | `src/cpu_banner_tests.rs` |
 | Status-line injection into Claude settings | `src/foreground_runtime.rs` tests |
 | Real PTY sessions: kitty tier, title fallback (Linux, macOS, Windows), alternate-screen text tier (Unix) | `tests/pty/toast_pty.rs` |
