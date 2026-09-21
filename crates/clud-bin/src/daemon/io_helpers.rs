@@ -30,7 +30,22 @@ use super::types::ENV_BACKLOG_BYTES;
 /// field, so the daemon's environment is used unchanged — the previous
 /// behaviour, rather than an empty environment.
 fn session_base(client_env: &[(String, String)]) -> Vec<(String, String)> {
-    merge_env(std::env::vars().collect(), client_env)
+    session_base_from(std::env::vars().collect(), client_env)
+}
+
+/// Merge an admission-time login baseline with the session initiator's
+/// environment. An empty baseline means a spec from before #933's remaining
+/// login-baseline slice, so preserve the legacy daemon-env fallback.
+fn session_base_from(
+    login_env: Vec<(String, String)>,
+    client_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    let base = if login_env.is_empty() {
+        std::env::vars().collect()
+    } else {
+        login_env
+    };
+    merge_env(base, client_env)
 }
 
 /// The merge itself, with the daemon side passed in.
@@ -68,6 +83,16 @@ fn merge_env(
 /// non-test caller, and that caller wanted the client env (#1209).
 pub(super) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, String)> {
     child_env_with_base(session_base(client_env))
+}
+
+/// The worker path supplies the daemon's persisted login baseline captured at
+/// admission. Keeping it in the spec means a periodic refresh changes future
+/// sessions only; it can never mutate a live worker's environment.
+pub(super) fn child_env_from_login_base(
+    login_env: Vec<(String, String)>,
+    client_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    child_env_with_base(session_base_from(login_env, client_env))
 }
 
 /// The daemon half of the merged builder (#1209): compute the base, then
@@ -589,6 +614,21 @@ mod tests {
 
         assert_eq!(value_of(&merged, "VIRTUAL_ENV"), Some("/proj/.venv"));
         assert_eq!(value_of(&merged, "PATH"), Some("/p"));
+    }
+
+    /// The admission-time login baseline, rather than the daemon process's
+    /// inherited shell, is the floor. An export that belonged only to the
+    /// auto-starting shell therefore cannot leak into a later session.
+    #[test]
+    fn login_baseline_prevents_stale_auto_starter_exports_from_leaking() {
+        let login = pairs(&[("PATH", "/login/bin"), ("HOME", "/home/user")]);
+        let client = pairs(&[("PATH", "/fresh/bin")]);
+
+        let merged = session_base_from(login, &client);
+
+        assert_eq!(value_of(&merged, "PATH"), Some("/fresh/bin"));
+        assert_eq!(value_of(&merged, "HOME"), Some("/home/user"));
+        assert_eq!(value_of(&merged, "VIRTUAL_ENV"), None);
     }
 
     /// Later client entries win over earlier ones for the same key, so a

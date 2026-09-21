@@ -904,6 +904,9 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             // #933: what the initiator sees, captured now rather than
             // whenever the daemon happened to start.
             client_env: std::env::vars().collect(),
+            // Filled by the daemon at admission. The client must never choose
+            // the login baseline, or daemon auto-start becomes shell-racy again.
+            login_env: Vec::new(),
         }),
     };
     let response = match send_daemon_request(&state_dir, &request) {

@@ -238,6 +238,14 @@ pub(super) struct WorkerLaunchSpec {
     /// simply falls back to the daemon's own environment.
     #[serde(default)]
     pub(super) client_env: Vec<(String, String)>,
+    /// The daemon's freshly materialized OS/login environment at admission.
+    ///
+    /// This snapshot is deliberately persisted with the worker spec: a later
+    /// refresh changes only future sessions, never a live session's process
+    /// tree. Missing values are the compatibility fallback for spec files from
+    /// before #933's login-baseline slice.
+    #[serde(default)]
+    pub(super) login_env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

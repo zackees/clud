@@ -17,6 +17,7 @@ mod headless_adapter;
 mod http;
 mod io_helpers;
 mod keys;
+mod login_env;
 mod paths;
 mod proc_sampler;
 mod process_utils;

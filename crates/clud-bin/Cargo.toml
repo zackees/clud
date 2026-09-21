@@ -184,6 +184,9 @@ keyring = { version = "=3.6.3", default-features = false, features = ["apple-nat
 keyring = { version = "=3.6.3", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# #933: materialize the standard machine + user login environment from the
+# registry rather than preserving the shell that happened to start the daemon.
+winreg = "0.10"
 # Issue #79 (Part A) — Windows IDropTarget COM registration on the console
 # window so dragged files reach `clud` even when conhost would refuse the
 # drop. Pinned to the same major as transitively present in the lockfile

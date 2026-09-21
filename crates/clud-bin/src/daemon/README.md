@@ -9,6 +9,8 @@ for field-level resolution.
 Normalized model/effort/context fields and unified-mode repeat reconstruction
 are owned by
 [docs/architecture/provider-selection.md](../../../../docs/architecture/provider-selection.md).
+Daemon worker environment layering and refresh are owned by
+[docs/architecture/daemon-environment.md](../../../../docs/architecture/daemon-environment.md).
 
 Always-on background service for every `clud` invocation (issue #135). One long-lived daemon process per user owns two distinct concerns, served over the RPC lanes below:
 
@@ -82,7 +84,8 @@ and why it matters.
 - `commands.rs` — implementations of `clud kill`, `clud list`, `clud logs` (including pm2-style tail/follow with rotation handling).
 - `sessions.rs` — snapshot discovery + filtering: `resolve_session_id` (exact/name/prefix), `most_recent_session[_any]`, `list_background_sessions`, `list_attachable_sessions`. Also `reconcile_session_records` (#549): retires crash-leftover records (worker **and** root dead, no clean exit, past a 10 min grace) by renaming `<id>.json` → `<id>.json.tombstone` (invisible to every `.json`-filtered lister) and deletes tombstones older than 7 days. Never terminates a process.
 - `keys.rs` — `crossterm` `KeyEvent` → terminal byte sequence translator used by interactive attach.
-- `io_helpers.rs` — JSON read/write over TCP + atomic file writes, session-id generator, terminal-size probe, `--backlog-size` / `CLUD_BACKLOG_BYTES` parsing.
+- `io_helpers.rs` — JSON read/write over TCP + atomic file writes, session-id generator, terminal-size probe, `--backlog-size` / `CLUD_BACKLOG_BYTES` parsing, and the shared child-environment policy merge.
+- `login_env.rs` — #933's refreshable login baseline: bounded POSIX login-shell capture, Windows machine/user registry materialization, admission snapshots, and the five-minute daemon refresh backstop. Full contract: [daemon environment](../../../../docs/architecture/daemon-environment.md).
 - `wire_prost/` - prost v1 foundation for the daemon wire: generated `clud.v1` types, CLUD/CLJS payload protocol discriminators, encode/decode helpers, JSON-compatibility tests, the default prost daemon RPC path, and the `CLUD_DAEMON_WIRE=json` legacy fallback.
 - `handover_registry.rs` — persisted `~/.clud/state/handover-registry.json` (issue #465): the set of originator PIDs of intentionally-detached sessions, recorded (with the launching daemon's PID) when a detached/background session is created so a *successor* daemon's sweep spares the still-live session across a restart. Purely subtractive on the reap path — `load`/`save`/`register`/`prune`; a stale entry can only leave an orphan un-reaped, never cause a wrong kill.
 - `headless_adapter.rs` — #1039's typed CLI-only headless-turn adapter: sends initial/resumed Claude and Codex turns through the canonical command builder and parses their JSONL provider identities. It deliberately owns neither worker draining nor durable session state; later lifecycle slices consume its plan and normalized events.

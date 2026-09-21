@@ -233,6 +233,10 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     let client_leases = ClientLeaseRegistry::default();
     let mut last_client_lease_prune = Instant::now();
     let shutdown_requested = Arc::new(AtomicBool::new(false));
+    // #933: a daemon's base environment is the OS/login environment, not the
+    // shell that won daemon auto-start. Refresh it on admissions and on this
+    // timer; each worker receives an immutable admission snapshot.
+    super::login_env::start_refreshing(Arc::clone(&shutdown_requested));
     // #548: one host environment pass, shared. The proc sampler and the
     // periodic orphan sweep both need the `RUNNING_PROCESS_ORIGINATOR` /
     // daemon-marker populations, and each used to take its own full-host
@@ -950,8 +954,11 @@ fn parse_worker_spawn_budget(raw: Option<&str>) -> Duration {
 fn daemon_create_session(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
-    spec: WorkerLaunchSpec,
+    mut spec: WorkerLaunchSpec,
 ) -> io::Result<SessionSnapshot> {
+    // Refresh before each admission as the low-latency path after an installer
+    // or `setx` update. The timer is only the idle-daemon backstop.
+    spec.login_env = super::login_env::snapshot_for_new_session();
     fs::create_dir_all(specs_dir(state_dir))?;
     fs::create_dir_all(sessions_dir(state_dir))?;
 
