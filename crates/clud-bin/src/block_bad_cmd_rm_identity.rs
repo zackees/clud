@@ -43,16 +43,25 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
         }
         return source_reason_with_tap(inner, trusted_tap);
     }
-    // Substitutions and process substitutions execute in contexts whose
-    // environment/startup state this PATH contract cannot establish.
-    if command.contains("$(")
-        || command.contains('`')
-        || command.contains("<(")
-        || command.contains(">(")
-    {
+    if command.contains('`') || contains_removal_in_command_substitution(command) {
         return Err(refuse());
     }
-    for segment in block_bad_cmd_rm_vars::identity_statements(command).map_err(|_| refuse())? {
+    // Opaque shell structure matters only when it can execute a removal. A
+    // command substitution used to obtain documentation, or a for loop that
+    // prints values, cannot alter rm resolution. Conversely, keep failing
+    // closed when an unquoted removal program appears inside syntax we do not
+    // model statement-by-statement.
+    let statements = match block_bad_cmd_rm_vars::identity_statements(command) {
+        Ok(statements) => statements,
+        Err(())
+            if !contains_unquoted_removal_program(command)
+                && !contains_unquoted_dynamic_shell_program(command) =>
+        {
+            return Ok(())
+        }
+        Err(()) => return Err(refuse()),
+    };
+    for segment in statements {
         let words = shell_words::split(segment.trim()).map_err(|_| refuse())?;
         let mut index = 0;
         while words.get(index).is_some_and(|w| is_env_assignment(w)) {
@@ -111,6 +120,14 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
                 | "local"
                 | "let"
         ) {
+            return Err(refuse());
+        }
+        // A shell `-c` body executes in a new interpreter context. This
+        // checker cannot prove that startup state preserves the verified rm
+        // resolution, so keep that wrapper fail-closed.
+        if matches!(base.as_str(), "bash" | "sh" | "zsh")
+            && words[index + 1..].iter().any(|word| word == "-c")
+        {
             return Err(refuse());
         }
         if matches!(
@@ -174,9 +191,7 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
         if base != "rm"
             && !matches!(base.as_str(), "echo" | "printf")
             && !(base == "git" && words.get(index + 1).is_some_and(|w| w == "rm"))
-            && words[index + 1..]
-                .iter()
-                .any(|w| program_name(w) == "rm" || w.contains("rm "))
+            && words[index + 1..].iter().any(|w| program_name(w) == "rm")
         {
             return Err(refuse());
         }
@@ -189,6 +204,261 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// True when an unquoted shell word names the protected removal executable.
+/// Arguments are data: `rg 'rm identity'` is not an invocation, while
+/// `for x; do rm x; done` remains relevant even though the flat statement
+/// analyzer intentionally refuses to model control flow.
+fn contains_unquoted_removal_program(command: &str) -> bool {
+    contains_unquoted_removal_program_at_depth(command, 0)
+}
+
+/// `eval` and a nested shell can execute quoted text. If the statement splitter
+/// cannot model surrounding control flow, their presence is still enough to
+/// make the PATH contract unprovable.
+fn contains_unquoted_dynamic_shell_program(command: &str) -> bool {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut word = String::new();
+    let mut at_program_start = true;
+    let mut quoted_program = false;
+    for character in command.chars() {
+        if escaped {
+            if quote.is_none() {
+                word.push(character);
+            }
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some('\'') if character == '\'' => quote = None,
+            Some('\'') => {}
+            Some('"') if character == '"' => quote = None,
+            Some('"') if character == '\\' => escaped = true,
+            Some('"') => {}
+            Some(_) => unreachable!(),
+            None if character == '\'' || character == '"' => {
+                quoted_program = at_program_start && word.is_empty();
+                quote = Some(character);
+            }
+            None if character == '\\' => escaped = true,
+            None if character.is_whitespace() || ";|&(){}<>".contains(character) => {
+                if opaque_program_word_changes_identity(&word, at_program_start, quoted_program) {
+                    return true;
+                }
+                if matches!(word.as_str(), "then" | "do" | "else" | "elif") {
+                    at_program_start = true;
+                } else if at_program_start && !word.is_empty() && !is_env_assignment(&word) {
+                    at_program_start = false;
+                }
+                word.clear();
+                quoted_program = false;
+                if ";|&(){}<>".contains(character) {
+                    at_program_start = true;
+                }
+            }
+            None => word.push(character),
+        }
+    }
+    opaque_program_word_changes_identity(&word, at_program_start, quoted_program)
+}
+
+fn opaque_program_word_changes_identity(
+    word: &str,
+    at_program_start: bool,
+    quoted_program: bool,
+) -> bool {
+    if !at_program_start || is_env_assignment(word) {
+        return false;
+    }
+    if quoted_program {
+        return true;
+    }
+    if word.is_empty() {
+        return false;
+    }
+    let program = program_name(word);
+    matches!(
+        program.as_str(),
+        "eval"
+            | "source"
+            | "."
+            | "bash"
+            | "sh"
+            | "zsh"
+            | "env"
+            | "exec"
+            | "sudo"
+            | "su"
+            | "command"
+            | "xargs"
+            | "busybox"
+    ) || program.contains(['$', '*', '?', '[', ']', '{', '}', '~'])
+}
+
+/// A command substitution executes its body even when it appears inside a
+/// quoted argument. The ordinary word scan intentionally ignores quoted data,
+/// so inspect substitution bodies separately.
+fn contains_removal_in_command_substitution(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    let mut quote = None::<u8>;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match quote {
+            Some(b'\'') if byte == b'\'' => quote = None,
+            Some(b'\'') => {}
+            Some(b'\"') if byte == b'\"' => quote = None,
+            Some(b'\"') if byte == b'\\' => escaped = true,
+            Some(b'\"') if byte == b'$' && bytes.get(index + 1) == Some(&b'(') => {
+                let Some(end) = closing_paren(bytes, index + 1) else {
+                    return true;
+                };
+                let inner = &command[index + 2..end - 1];
+                if contains_unquoted_removal_program(inner)
+                    || contains_removal_in_command_substitution(inner)
+                {
+                    return true;
+                }
+                index = end;
+                continue;
+            }
+            Some(b'\"') => {}
+            Some(_) => unreachable!(),
+            None if byte == b'\'' || byte == b'\"' => quote = Some(byte),
+            None if byte == b'\\' => escaped = true,
+            None if byte == b'$' && bytes.get(index + 1) == Some(&b'(') => {
+                let Some(end) = closing_paren(bytes, index + 1) else {
+                    return true;
+                };
+                let inner = &command[index + 2..end - 1];
+                if contains_unquoted_removal_program(inner)
+                    || contains_removal_in_command_substitution(inner)
+                {
+                    return true;
+                }
+                index = end;
+                continue;
+            }
+            None => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+fn contains_unquoted_removal_program_at_depth(command: &str, depth: usize) -> bool {
+    if depth >= 8 {
+        return false;
+    }
+    let mut quote = None::<u8>;
+    let mut escaped = false;
+    let mut word = String::new();
+    let finish_word = |word: &mut String| {
+        let executable = word.trim_end_matches(".exe");
+        let program = program_name(word);
+        let is_removal = matches!(program.trim_end_matches(".exe"), "rm" | "rmdir")
+            || matches!(executable, "rm" | "rmdir")
+            || executable.ends_with("/rm")
+            || executable.ends_with("/rmdir");
+        word.clear();
+        is_removal
+    };
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            if quote.is_none() {
+                word.push(byte as char);
+            }
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match quote {
+            Some(b'\'') if byte == b'\'' => quote = None,
+            Some(b'\'') => {}
+            Some(b'\"') if byte == b'\"' => quote = None,
+            Some(b'\"') if byte == b'\\' => escaped = true,
+            Some(b'\"') if byte == b'$' && bytes.get(index + 1) == Some(&b'(') => {
+                let Some(end) = closing_paren(bytes, index + 1) else {
+                    return true;
+                };
+                if contains_unquoted_removal_program_at_depth(
+                    &command[index + 2..end - 1],
+                    depth + 1,
+                ) {
+                    return true;
+                }
+                index = end;
+                continue;
+            }
+            Some(b'\"') => {}
+            Some(_) => unreachable!(),
+            None if byte == b'\'' || byte == b'\"' => quote = Some(byte),
+            None if byte == b'\\' => escaped = true,
+            None if byte == b'$' && bytes.get(index + 1) == Some(&b'(') => {
+                let Some(end) = closing_paren(bytes, index + 1) else {
+                    return true;
+                };
+                if contains_unquoted_removal_program_at_depth(
+                    &command[index + 2..end - 1],
+                    depth + 1,
+                ) {
+                    return true;
+                }
+                index = end;
+                continue;
+            }
+            None if byte.is_ascii_whitespace() || b";|&(){}<>".contains(&byte) => {
+                if finish_word(&mut word) {
+                    return true;
+                }
+            }
+            None => word.push(byte as char),
+        }
+        index += 1;
+    }
+    finish_word(&mut word)
+}
+
+fn closing_paren(bytes: &[u8], opener: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None::<u8>;
+    let mut escaped = false;
+    for (index, &byte) in bytes.iter().enumerate().skip(opener) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(b'\'') if byte == b'\'' => quote = None,
+            Some(b'\'') => continue,
+            Some(b'\"') if byte == b'\"' => quote = None,
+            Some(b'\"') if byte == b'\\' => escaped = true,
+            Some(b'\"') => continue,
+            Some(_) => unreachable!(),
+            None if byte == b'\'' || byte == b'\"' => quote = Some(byte),
+            None if byte == b'\\' => escaped = true,
+            None if byte == b'(' => depth += 1,
+            None if byte == b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            None => {}
+        }
+    }
+    None
 }
 
 fn printf_format_is_output_only(format: &str) -> bool {
@@ -288,6 +558,10 @@ mod tests {
             "git rm -r --cached foo",
             "docker run --rm ubuntu",
             "(cd src && ls)",
+            "rg -n 'rm identity' crates/clud-bin/src/block_bad_cmd_rm_identity.rs",
+            "printf '%s' \"stream or a future field\"",
+            "body=$(curl -fsSL https://example.invalid); printf '%s' \"$body\"",
+            "for version in 1 2 3; do printf '%s\\n' \"$version\"; done",
         ] {
             assert!(source_reason(source).is_ok(), "{source}");
         }
@@ -322,11 +596,31 @@ mod tests {
             "declare -n P=PATH; P=/bin; rm ./build",
             "echo ok & /bin/rm ./build",
             "echo \"$(/bin/rm ./build)\"",
+            "eval '/bin/rm victim'",
+            "for x in 1; do eval '/bin/rm victim'; done",
+            "for x in 1; do $F '/bin/rm victim'; done",
+            "for x in 1; do \"$F\" '/bin/rm victim'; done",
+            "for x in 1; do env $F victim; done",
+            "echo `/bin/rm victim`",
             "(cd src && /bin/rm ./build)",
             "(PATH=/bin; rm ./build)",
             "(echo ok) && (/bin/rm ./build)",
         ] {
             assert!(source_reason(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn unquoted_removal_detection_does_not_treat_data_as_code() {
+        for command in [
+            "rg -n 'rm identity' file",
+            "printf '%s' \"stream or a future field\"",
+            "printf '%s' \"rm identity\"",
+        ] {
+            assert!(!contains_unquoted_removal_program(command), "{command}");
+        }
+        for command in ["rm file", "/bin/rm file", "for x in 1; do rm x; done"] {
+            assert!(contains_unquoted_removal_program(command), "{command}");
         }
     }
 }

@@ -754,4 +754,10 @@ def kill_daemon_for_session(state_dir: Path, session_id: str) -> None:
         metadata = session_metadata(state_dir, session_id)
     except FileNotFoundError:
         return
-    kill_process(metadata["daemon_pid"])
+    # Sessions can share one daemon. A preceding cleanup may already have
+    # stopped it, so ESRCH is successful idempotent cleanup rather than a
+    # test failure.
+    try:
+        kill_process(metadata["daemon_pid"])
+    except ProcessLookupError:
+        pass

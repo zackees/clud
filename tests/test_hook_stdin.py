@@ -131,6 +131,42 @@ def test_block_bad_cmd_allows_malformed_json(tmp_path: Path) -> None:
     assert "permissionDecision" not in result.stdout
 
 
+def test_non_shell_patch_payload_skips_shell_identity_analysis(tmp_path: Path) -> None:
+    """A patch body is data for the harness tool, never shell source."""
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\\n*** Update File: note.txt\\n@@\\n-old\\n"
+                "+rm -rf /\\n*** End Patch"
+            ),
+            "cwd": str(tmp_path),
+        }
+    )
+
+    result = _run_hook_with_open_stdin(tmp_path, payload)
+
+    assert result.returncode == 0, result.stderr
+    assert "permissionDecision" not in result.stdout
+
+
+def test_shell_identity_denial_has_a_categorized_audit_record(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo safe"},
+            "cwd": str(tmp_path),
+        }
+    )
+
+    result = _run_hook_with_open_stdin(tmp_path, payload, extra_env={"PATH": "/usr/bin"})
+
+    assert result.returncode == 2
+    log_path = tmp_path / "home" / ".clud" / "tools" / "hooks" / "block-bad-cmd.log"
+    log = log_path.read_text(encoding="utf-8")
+    assert "RM-IDENTITY-BLOCKED tool_name=\"Bash\"" in log
+
+
 # --- #1064: unverifiable payloads fail closed for removals only -------------
 #
 # These feed the hook payloads it cannot parse. Nothing here ever executes a
