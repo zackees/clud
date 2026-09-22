@@ -985,7 +985,7 @@ fn content_block_stop_frame(index: u32) -> String {
     )
 }
 
-fn anthropic_frame(event: &str, body: serde_json::Value) -> String {
+pub(crate) fn anthropic_frame(event: &str, body: serde_json::Value) -> String {
     format!("event: {event}\ndata: {body}\n\n")
 }
 

@@ -2069,6 +2069,25 @@ fn may_be_route_terminal(status: u16) -> bool {
     matches!(status, 401 | 402 | 403 | 429)
 }
 
+/// Whether a `ureq` transport failure was a *timeout* rather than a dead peer.
+///
+/// `ureq` 2.x reports both as `ErrorKind::Io`, so the distinction has to be
+/// recovered from the error chain: its timeout path builds an `io::Error` with
+/// `ErrorKind::TimedOut`, normalizing the `WouldBlock` a POSIX socket timeout
+/// actually produces. Without this the bridge answered a hung upstream with
+/// the same 502 it uses for an unreachable one, and the harness could not tell
+/// "retry me" from "this route is broken" (#1263).
+fn transport_timed_out(error: &ureq::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(error);
+    while let Some(current) = source {
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            return io.kind() == std::io::ErrorKind::TimedOut;
+        }
+        source = std::error::Error::source(current);
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn serve_anthropic_proxy(
     stream: &mut TcpStream,
@@ -2080,12 +2099,28 @@ fn serve_anthropic_proxy(
     probe: bool,
     usage: &mut StreamingUsage,
 ) -> ProxyOutcome {
-    let mut request = ureq::post(&format!(
-        "{}{}",
-        target.base_url.trim_end_matches('/'),
-        target.path
-    ))
-    .set("Content-Type", "application/json");
+    // #1263: byte-idle, not a whole-request deadline. `Request::timeout()` is
+    // documented as covering "reading the response body" and *takes precedence
+    // over* `timeout_read()`, so the budget this hop is handed
+    // (`stream_idle_timeout`, DD-028) was really a total one: a healthy stream
+    // that simply ran longer than it -- which is ordinary for a model that
+    // thinks for minutes and keeps emitting deltas -- was cut off mid-turn,
+    // while a socket that had gone quiet was only noticed after the same
+    // absolute wall-clock had elapsed. The sibling Codex upstream hop has
+    // always read this way (`codex_upstream`); the proxy hop was the outlier,
+    // and this is the shape the constant's own doc comment claims.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(idle_timeout)
+        .timeout_read(idle_timeout)
+        .timeout_write(idle_timeout)
+        .build();
+    let mut request = agent
+        .post(&format!(
+            "{}{}",
+            target.base_url.trim_end_matches('/'),
+            target.path
+        ))
+        .set("Content-Type", "application/json");
     for (name, value) in headers {
         let forwarded = name.eq_ignore_ascii_case("authorization")
             || name.eq_ignore_ascii_case("x-api-key")
@@ -2105,10 +2140,26 @@ fn serve_anthropic_proxy(
     if let Some(api_key) = target.injected_api_key {
         request = request.set("Authorization", &format!("Bearer {api_key}"));
     }
-    let response = match request.timeout(idle_timeout).send_bytes(body) {
+    let response = match request.send_bytes(body) {
         Ok(response) => response,
         Err(ureq::Error::Status(_, response)) => response,
-        Err(ureq::Error::Transport(_)) => {
+        Err(error) if transport_timed_out(&error) => {
+            // #1263: a *timeout* is not a broken gateway hop. Answering it 502
+            // told the harness "this route is dead" when the honest answer is
+            // "retry me": 502 is not retried, 504 `timeout_error` is, and the
+            // mapping already existed for every other timeout the bridge
+            // raises. Nothing has been written yet, so the status is still
+            // ours to choose (DD-029).
+            let _ = write_response(
+                stream,
+                504,
+                "application/json",
+                br#"{"error":{"type":"timeout_error","message":"upstream request timed out"}}"#,
+                false,
+            );
+            return ProxyOutcome::local(504);
+        }
+        Err(_) => {
             let _ = write_response(
                 stream,
                 502,
@@ -2201,14 +2252,17 @@ fn serve_anthropic_proxy(
     }
     usage.feed(&prefix);
     let mut chunk = [0_u8; 8192];
+    let mut forwarded = 0_usize;
+    let mut stalled: Option<io::Error> = None;
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
         match reader.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(count) => {
                 usage.feed(&chunk[..count]);
+                forwarded += count;
                 if write!(stream, "{count:x}\r\n")
                     .and_then(|()| stream.write_all(&chunk[..count]))
                     .and_then(|()| stream.write_all(b"\r\n"))
@@ -2218,6 +2272,48 @@ fn serve_anthropic_proxy(
                     break;
                 }
             }
+            Err(error) => {
+                stalled = Some(error);
+                break;
+            }
+        }
+    }
+    if let Some(error) = stalled {
+        // #1263, DD-029: the status line went out with the first frame, so the
+        // only channel left for a mid-stream failure is in-band. This arm used
+        // to write the terminating chunk and close, which on the wire is
+        // byte-identical to a stream that ended because the model finished --
+        // a client still waiting on its `message_stop` saw a truncated turn
+        // with no reason attached, and nothing anywhere said the upstream had
+        // gone quiet. That is the silent stall DD-029 exists to prevent, and
+        // it is what a byte-idle read (above) now reports instead of hiding.
+        let timed_out = matches!(
+            error.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        );
+        eprintln!(
+            "[clud] codex bridge: upstream stream {} after {forwarded} bytes: {error}",
+            if timed_out { "stalled" } else { "failed" }
+        );
+        if content_type.starts_with("text/event-stream") {
+            let frame = crate::codex_sse::anthropic_frame(
+                "error",
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": if timed_out { "timeout_error" } else { "api_error" },
+                        "message": if timed_out {
+                            "model request stalled: no upstream bytes arrived before the idle timeout"
+                        } else {
+                            "upstream stream ended before the model finished"
+                        },
+                    }
+                }),
+            );
+            let _ = write!(stream, "{:x}\r\n", frame.len())
+                .and_then(|()| stream.write_all(frame.as_bytes()))
+                .and_then(|()| stream.write_all(b"\r\n"))
+                .and_then(|()| stream.flush());
         }
     }
     let _ = stream.write_all(b"0\r\n\r\n");
@@ -7144,6 +7240,222 @@ Connection: close
         assert!(body.starts_with("event: message_start\ndata:"));
         assert!(body.ends_with("\n\n"));
         assert!(body.contains("event: message_stop"));
+    }
+
+    /// An upstream that answers with `reply` (if any) and then holds the socket
+    /// open without saying anything more, so a read from it can only end in a
+    /// timeout rather than an EOF.
+    ///
+    /// #1263 needs exactly that shape: a *quiet* peer, which is what a stalled
+    /// provider looks like from the bridge. `FakeResponses` cannot express it --
+    /// it always writes a complete reply and shuts the socket down, which reads
+    /// as a clean end of stream. The sockets stay alive in the returned vector
+    /// for as long as the caller holds it.
+    fn quiet_upstream(reply: Option<&'static str>) -> (String, JoinHandle<Vec<TcpStream>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut held = Vec::new();
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut request = [0_u8; 8192];
+                        let _ = stream.read(&mut request);
+                        if let Some(reply) = reply {
+                            let _ = stream.write_all(reply.as_bytes());
+                            let _ = stream.flush();
+                        }
+                        held.push(stream);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+            held
+        });
+        (url, handle)
+    }
+
+    /// #1263: a hung upstream is not a broken one. The proxy answered *every*
+    /// transport failure with 502 `api_error`, which tells the harness "this
+    /// route is dead" rather than "retry me" -- while the 504 `timeout_error`
+    /// mapping already existed for every other timeout the bridge raises
+    /// (`codex_pipeline`). Nothing has been written at this point, so the
+    /// status is still ours to choose (DD-029).
+    #[test]
+    fn a_hung_upstream_answers_504_not_502() {
+        let (url, upstream) = quiet_upstream(None);
+        let config = BridgeConfig {
+            stream_idle_timeout: Duration::from_millis(200),
+            ..BridgeConfig::default()
+        }
+        .with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                .with_upstreams(url.clone(), url),
+        );
+        let mut bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "claude-opus-4-1",
+                "hung-upstream",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        assert_eq!(status(&response), 504, "{response}");
+        assert!(
+            response.contains(r#""type":"timeout_error""#),
+            "a timeout must read as retryable, not as a dead route: {response}"
+        );
+        assert!(
+            !response.contains("gateway upstream unavailable"),
+            "a quiet socket is not an unavailable gateway: {response}"
+        );
+        bridge.shutdown().unwrap();
+        drop(upstream.join().unwrap());
+    }
+
+    /// #1263 / DD-029: once the first frame is committed the status is spent,
+    /// so a mid-stream failure can only be reported in-band. This arm used to
+    /// write the terminating chunk and close, which on the wire is
+    /// byte-identical to a stream that ended because the model finished -- a
+    /// client still waiting on its `message_stop` saw a truncated turn with no
+    /// reason attached, and nothing anywhere said the upstream had gone quiet.
+    #[test]
+    fn a_stalled_upstream_stream_reports_an_in_band_error() {
+        let (url, upstream) = quiet_upstream(Some(concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Content-Length: 1000000\r\n",
+            "Connection: close\r\n\r\n",
+            "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+        )));
+        let config = BridgeConfig {
+            stream_idle_timeout: Duration::from_millis(200),
+            ..BridgeConfig::default()
+        }
+        .with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                .with_upstreams(url.clone(), url),
+        );
+        let mut bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "claude-opus-4-1",
+                "stalled-stream",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(
+            response.contains("event: error"),
+            "a stalled stream must not look like a clean end: {response}"
+        );
+        assert!(
+            response.contains(r#""type":"timeout_error""#),
+            "the in-band frame must say the request stalled: {response}"
+        );
+        assert!(response.contains("model request stalled"), "{response}");
+        bridge.shutdown().unwrap();
+        drop(upstream.join().unwrap());
+    }
+
+    /// #1263: the hop's budget is *idle*, not total -- which is what
+    /// `DEFAULT_STREAM_IDLE_TIMEOUT`'s doc comment always claimed and what the
+    /// code did not do. A stream that keeps producing frames is healthy however
+    /// long it runs (a model that thinks for minutes emits deltas the whole
+    /// time), so a long turn must not be cut off for the crime of outlasting
+    /// the timeout. Under `Request::timeout()` -- a whole-request deadline that
+    /// *overrides* `timeout_read()` -- this exact upstream was truncated
+    /// mid-turn, and the truncation was invisible.
+    #[test]
+    fn a_long_but_continuously_streaming_turn_is_not_cut_off() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let upstream = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut held = Vec::new();
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut request = [0_u8; 8192];
+                        let _ = stream.read(&mut request);
+                        let frames = (0..8)
+                            .map(|index| {
+                                format!(
+                                    "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"tick{index}\"}}}}\n\n"
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let length: usize = frames.iter().map(String::len).sum();
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.flush();
+                        // One frame every 80ms: every gap sits well inside the
+                        // 200ms idle budget, while the turn as a whole runs
+                        // four times longer than it.
+                        for frame in &frames {
+                            thread::sleep(Duration::from_millis(80));
+                            let _ = stream.write_all(frame.as_bytes());
+                            let _ = stream.flush();
+                        }
+                        held.push(stream);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+            held
+        });
+        let config = BridgeConfig {
+            stream_idle_timeout: Duration::from_millis(200),
+            ..BridgeConfig::default()
+        }
+        .with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                .with_upstreams(url.clone(), url),
+        );
+        let mut bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "claude-opus-4-1",
+                "long-stream",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(
+            response.contains("tick7"),
+            "a continuously streaming turn must not be cut off at the idle budget: {response}"
+        );
+        assert!(
+            !response.contains("event: error"),
+            "a healthy long stream must not be reported as stalled: {response}"
+        );
+        bridge.shutdown().unwrap();
+        drop(upstream.join().unwrap());
     }
 
     #[test]

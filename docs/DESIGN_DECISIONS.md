@@ -1045,6 +1045,38 @@ blocking mode, which also keeps the retry loop from busy-spinning.
 Phase 3's translator replaces the fixture frames but inherits this framing
 contract: one vector element per complete SSE event, flushed as produced.
 
+**Amendment (#1263):** the *upstream* hop of the Anthropic passthrough proxy
+did not follow the paragraph above. It reached for `ureq`'s
+`Request::timeout(stream_idle_timeout)`, which ureq documents as covering
+"reading the response body" and which *takes precedence over*
+`AgentBuilder::timeout_read()` — so the budget was a whole-request deadline
+wearing an idle timeout's name. Two things followed, both wrong in the same
+direction: a stream that simply ran longer than 300 s (ordinary for a model
+that thinks for minutes and keeps emitting deltas) was cut off mid-turn, and a
+socket that had gone quiet was only noticed once that same absolute wall-clock
+had elapsed. The hop now reads through an agent configured with
+`timeout_connect` / `timeout_read` / `timeout_write`, which is the shape the
+sibling `codex_upstream` hop has always used and the shape this entry claims.
+
+Two limits are worth stating plainly, because neither is a bug to be fixed
+later:
+
+- **A committed stream terminates; it does not retry.** The status line is sent
+  with the first frame (DD-029), so once a frame is on the wire a mid-stream
+  failure has no status left to choose and no request left to replay — the
+  transcript is half-delivered and replaying it would duplicate it. The only
+  honest report is in-band, and the proxy now emits the same sanitized SSE
+  `error` frame the translator does instead of writing the terminating chunk
+  and closing, which was byte-identical to a stream that ended because the
+  model finished.
+- **Idle is measured on received bytes, never on turn duration.** A long think
+  is healthy and a dead socket is not, and wall-clock alone cannot tell them
+  apart. `stream_idle_timeout` is therefore correct at 300 s for this hop: a
+  model may legitimately emit nothing for minutes *before its first token*,
+  which is why the sibling hop keeps a separate `first_frame_timeout` for the
+  pre-commit gate. Lowering the idle budget to catch a stall sooner would kill
+  legitimate long turns first.
+
 ## DD-029: The bridge always streams upstream, and status is chosen only before the first frame
 
 **Context:** zackees/clud#627 step 5 wired the translator, upstream client, and
@@ -3660,3 +3692,65 @@ preserving DD-054's boundary. A datasheet shape change turns the daily run red
 for review instead of silently shrinking the map. The bounds are mirrored in
 the producer and in `ModelContexts::validate`; changing one without the other
 turns CI red.
+
+## DD-079: A hung model request is reported where clud can see it, and is never mistaken for a clean end
+
+**Context:** zackees/clud#1263. A direct `--openrouter --model
+xiaomi/mimo-v2.6-flash --effort low` launch stalled for 4m39s with zero
+assistant output: no error, no timeout, no retry, no spinner state in the
+transcript, clud's logs, or the daemon events. The session looked dead and the
+user interrupted it; the next turn answered in ~4s, so the API was healthy.
+Auto-compaction was healthy and `totalAPIDuration` minus `withoutRetries`
+differed by ~0.3s across a 112-minute session, so this was neither context
+exhaustion nor a retry storm.
+
+Three independent gaps produced it, and they are not the same gap:
+
+1. **The direct route has no clud-side watchdog at all.** `--openrouter`
+   conflicts with `--unified`, so routing is Direct and
+   `apply_anthropic_compat_overlay` points the harness straight at
+   `https://openrouter.ai/api`. clud is not in the request path and cannot see
+   a byte of the stream. Every other overlay pushed `API_TIMEOUT_MS`
+   (3 000 000 ms); this one did not, so a direct launch inherited the harness's
+   undocumented client timeout and nothing said so.
+2. **The bridge answered a timeout with the wrong status.** A transport
+   timeout on the proxy hop returned 502 `api_error` — "this route is dead" —
+   while 504 `timeout_error` ("retry me") already existed for every other
+   timeout the bridge raises.
+3. **A mid-stream failure was indistinguishable from success.** The proxy's
+   read loop treated `Ok(0)` and `Err(_)` alike and then wrote the terminating
+   chunk, so a truncated turn reached the client as a normally-finished one.
+
+**Decision:** Fix each where it lives, and do not invent a fourth mechanism.
+
+- `apply_anthropic_compat_overlay` pushes `API_TIMEOUT_MS` as a *default*, so
+  all routes agree and an ambient user value still wins (DD-059's precedence),
+  and the launch emits a notice naming the route and the effective value. This
+  is the whole of what is available on the direct route: the only lever there
+  is the harness's own client timeout, and clud can at least set it, log it,
+  and say plainly that it cannot detect a hang on that path.
+- The proxy hop distinguishes a timeout from a dead peer (`transport_timed_out`
+  walks the `ureq` error chain for an `io::ErrorKind::TimedOut`, which is what
+  a `WouldBlock` socket timeout normalizes to) and answers 504 for the former.
+- The proxy hop's budget becomes genuinely byte-idle (see the DD-028
+  amendment), and its read loop separates a clean `Ok(0)` EOF from an `Err`,
+  reporting the latter as a sanitized in-band SSE `error` frame and logging it.
+
+**Rationale:** The detector has to key on *received-byte idleness*, never on
+turn duration. A model thinking for minutes is indistinguishable from a hang by
+wall-clock alone — and this model thinks for minutes routinely — so a
+turn-duration timeout would kill legitimate work. A healthy long think keeps
+resetting an idle timer because it keeps emitting deltas; a dead connection
+trips it. This is the shape DD-028 already specifies and the shape the reported
+hang's own evidence supports: during the 4m39s window the transcript held zero
+assistant records of any kind, not a partial or aborted one, which is a quiet
+stream rather than slow generation.
+
+**Consequences:** A stalled turn on a bridged route now ends in a named error
+instead of a silent truncation, and a long healthy stream is no longer cut off
+for outlasting its budget. The direct route still cannot be *detected* by clud
+— that is a property of the routing mode, not a gap left open — so the honest
+deliverable there is a known, logged timeout plus a notice saying clud is not
+watching. Note also that the harness's own client path shows no spinner, error,
+or retry state for a hung request; that remains an upstream gap, filed
+separately.

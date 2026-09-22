@@ -85,7 +85,11 @@ Entry and orchestration:
   native Claude token counting, bounded parser/workers/timeouts, authenticated
   context compact/finalize/clear lifecycle controls, and joined shutdown.
   Per-phase header/body deadlines and a per-frame idle timeout preserve chunked
-  progressive SSE; see `docs/architecture/unified-gateway.md`.
+  progressive SSE; see `docs/architecture/unified-gateway.md`. The upstream hop
+  of the Anthropic passthrough proxy reads byte-idle rather than on a
+  whole-request deadline, reports a mid-stream failure in-band instead of
+  closing like a clean end, and answers a timeout 504 rather than 502 (#1263,
+  DD-028 amendment, DD-079).
 - `codex_model.rs` - #752's Codex compatibility view over the shared provider
   catalog: the `sol`/`terra`/`luna` aliases and per-model defaults, the
   `<model>@<effort>` parser, and the provider-neutral `Effort` ladder
@@ -180,7 +184,10 @@ Entry and orchestration:
   same protocol with a Codex-only catalog and child-local 1.05M context
   metadata. Direct Anthropic-compat providers (DeepSeek, Kimi, OpenRouter)
   carry the catalog's `low` effort default on the harness's `--effort` session
-  flag and never pin or scrub `CLAUDE_CODE_EFFORT_LEVEL` (DD-059).
+  flag and never pin or scrub `CLAUDE_CODE_EFFORT_LEVEL` (DD-059). The direct
+  overlay also pushes `API_TIMEOUT_MS` as a default and the launch names the
+  effective value, because this is the one route with no clud process in the
+  request path and therefore no byte-idle watchdog (#1263, DD-079).
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a

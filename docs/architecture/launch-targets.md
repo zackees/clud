@@ -110,6 +110,21 @@ back into blocking mode, and a read timeout is fatal only once the phase
 deadline has passed. See DD-028 — the previous single-deadline arrangement
 answered `408` to any request whose body arrived in a later TCP segment.
 
+The *upstream* hop of the Anthropic passthrough proxy reads through an agent
+with `timeout_connect` / `timeout_read` / `timeout_write` set to
+`stream_idle_timeout`, so its budget is byte-idle in the same sense. It used
+`ureq`'s `Request::timeout()` until #1263, which is a whole-request deadline
+that overrides `timeout_read()` — a long stream was cut off mid-turn and a
+quiet socket was only noticed after the same absolute wall-clock. A mid-stream
+failure there is reported in-band (DD-029) rather than closed like a clean end
+of stream, and a timeout before the first frame answers 504 `timeout_error`
+instead of 502. See DD-028's amendment and DD-079.
+
+The *direct* anthropic-compat route is the one launch shape with no clud
+process in the request path, so no byte-idle watchdog is possible: the overlay
+sets `API_TIMEOUT_MS` and the launch notice names the effective value and says
+clud cannot detect a hang there. See DD-079.
+
 ## Request translation
 
 `codex_translate.rs` maps an Anthropic Messages request onto an OpenAI
