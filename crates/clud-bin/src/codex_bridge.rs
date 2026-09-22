@@ -7380,6 +7380,11 @@ Connection: close
     /// the timeout. Under `Request::timeout()` -- a whole-request deadline that
     /// *overrides* `timeout_read()` -- this exact upstream was truncated
     /// mid-turn, and the truncation was invisible.
+    ///
+    /// The margin is deliberately lopsided: the turn outlasts the budget by a
+    /// factor of two, while every *gap* sits 30x inside it. A test of "idle,
+    /// not total" fails when a gap exceeds the budget, so the gap is what needs
+    /// the headroom on a shared runner -- see the loop below.
     #[test]
     fn a_long_but_continuously_streaming_turn_is_not_cut_off() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -7392,9 +7397,19 @@ Connection: close
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false).unwrap();
+                        // Nagle off. The drip below is a long run of small
+                        // writes, which is exactly the shape Nagle coalesces:
+                        // with an unacknowledged segment in flight it holds the
+                        // next one until the ACK lands, and against a delayed
+                        // ACK that is a ~200ms stall on macOS. The bridge is
+                        // reading this with an idle budget, so the kernel's
+                        // batching would be indistinguishable from the upstream
+                        // going quiet -- the test would fail on the runner's
+                        // TCP settings rather than on the behaviour under test.
+                        stream.set_nodelay(true).unwrap();
                         let mut request = [0_u8; 8192];
                         let _ = stream.read(&mut request);
-                        let frames = (0..8)
+                        let frames = (0..60)
                             .map(|index| {
                                 format!(
                                     "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"tick{index}\"}}}}\n\n"
@@ -7407,11 +7422,23 @@ Connection: close
                         );
                         let _ = stream.write_all(head.as_bytes());
                         let _ = stream.flush();
-                        // One frame every 80ms: every gap sits well inside the
-                        // 200ms idle budget, while the turn as a whole runs
-                        // four times longer than it.
-                        for frame in &frames {
-                            thread::sleep(Duration::from_millis(80));
+                        // One frame every 100ms against an *absolute* schedule,
+                        // so the gaps cannot drift: each gap sits 30x inside the
+                        // 3s idle budget while the turn as a whole runs twice as
+                        // long as it. The first shape of this test paired 80ms
+                        // frames with a 200ms budget -- only 120ms of slack --
+                        // and failed on a loaded macOS runner, where the bridge
+                        // logged "upstream stream stalled after 120 bytes:
+                        // timed out reading response" (#1264's CI). The property
+                        // under test is "idle, not total", so the *gap* margin is
+                        // the one that has to be wide; jitter can only make the
+                        // total-duration side more true, never less.
+                        let started = Instant::now();
+                        for (index, frame) in frames.iter().enumerate() {
+                            let target = started + Duration::from_millis(100 * (index as u64 + 1));
+                            if let Some(wait) = target.checked_duration_since(Instant::now()) {
+                                thread::sleep(wait);
+                            }
                             let _ = stream.write_all(frame.as_bytes());
                             let _ = stream.flush();
                         }
@@ -7426,7 +7453,7 @@ Connection: close
             held
         });
         let config = BridgeConfig {
-            stream_idle_timeout: Duration::from_millis(200),
+            stream_idle_timeout: Duration::from_secs(3),
             ..BridgeConfig::default()
         }
         .with_unified_gateway(
@@ -7447,7 +7474,7 @@ Connection: close
 
         assert_eq!(status(&response), 200, "{response}");
         assert!(
-            response.contains("tick7"),
+            response.contains("tick59"),
             "a continuously streaming turn must not be cut off at the idle budget: {response}"
         );
         assert!(
