@@ -1,0 +1,45 @@
+# Keeps the served `model_contexts` section in step with OpenRouter's public
+# datasheet (#1258). This is the repository's first scheduled workflow: it
+# commits its own section back to `main`, so installed builds pick the change
+# up through the existing server-settings fetch-from-main path in about twenty
+# minutes, with no release. A fetch or parse failure fails the run loudly
+# instead of publishing an empty or stale map.
+name: refresh-model-contexts
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # 04:17 UTC, off-peak and off the top of the hour
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-model-contexts
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Stdlib only (urllib); deliberately no project install, because syncing
+      # the project would trigger a full PEP 517 maturin build (see docs/
+      # architecture/ci.md, "Never use uv run in a workflow step").
+      - name: Refresh model_contexts from the OpenRouter datasheet
+        run: python -m ci.refresh_model_contexts
+      - name: Commit the refreshed section
+        run: |
+          if git diff --quiet -- crates/clud-bin/assets/server-settings.json; then
+            echo "model_contexts already fresh"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/clud-bin/assets/server-settings.json
+          git commit -m "chore(server-settings): refresh model_contexts from OpenRouter datasheet (#1258)"
+          git pull --rebase origin main
+          git push origin HEAD:main
