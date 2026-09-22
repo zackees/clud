@@ -7397,6 +7397,16 @@ Connection: close
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false).unwrap();
+                        // Nagle off. The drip below is a long run of small
+                        // writes, which is exactly the shape Nagle coalesces:
+                        // with an unacknowledged segment in flight it holds the
+                        // next one until the ACK lands, and against a delayed
+                        // ACK that is a ~200ms stall on macOS. The bridge is
+                        // reading this with an idle budget, so the kernel's
+                        // batching would be indistinguishable from the upstream
+                        // going quiet -- the test would fail on the runner's
+                        // TCP settings rather than on the behaviour under test.
+                        stream.set_nodelay(true).unwrap();
                         let mut request = [0_u8; 8192];
                         let _ = stream.read(&mut request);
                         let frames = (0..60)
