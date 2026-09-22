@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.8.13 - 2026-09-22
+
+- A hung model request is now reported instead of stalling silently. A direct
+  Anthropic-compat launch (for example `--openrouter`) is the one route where
+  clud is not in the request path, so the overlay now pushes `API_TIMEOUT_MS`
+  as a default — an explicit user value still wins — and the launch notice
+  names the route and the effective timeout, including the fact that clud
+  cannot detect a hang there. On the unified bridge, a transport timeout before
+  the first frame answers 504 `timeout_error` (which the harness retries)
+  rather than a dead-route 502, and the upstream hop's budget is now genuinely
+  byte-idle: a turn that keeps streaming is never cut off, while a socket that
+  goes quiet is surfaced in-band as a sanitized SSE `error` event instead of
+  being closed like a clean end of stream. See zackees/clud#1263.
+
+- Direct OpenRouter launches of models absent from Claude Code's catalog no
+  longer auto-compact at the harness's 200k unknown-model default. OpenRouter's
+  public datasheet is folded into the repo-hosted server-settings document as a
+  `model_contexts` section (444 models seeded, refreshed daily by a scheduled
+  workflow), and the Anthropic-compat overlay emits
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` from it, with a reviewed catalog value taking
+  precedence and an ambient user-set window preserved. See zackees/clud#1258.
+
 ## 2.8.12 - 2026-09-21
 
 - Direct Codex launches now use Codex Sol at low effort by default in both the
