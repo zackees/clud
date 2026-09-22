@@ -146,15 +146,22 @@ impl ForegroundRuntime {
     }
 
     pub fn start(plan: &LaunchPlan, mut env: Vec<(String, String)>) -> Result<Self, BridgeError> {
+        // The inherited-pin line leads every launch's notices: a boundary the
+        // user did not type deserves to be seen first (#1257).
+        let pin_notices =
+            model_pin_notices(plan, std::io::IsTerminal::is_terminal(&std::io::stderr()));
         // `dsh` owns its provider configuration and credentials. A native
         // DeepSeek Harness launch needs no clud vault or bridge setup at all.
         if plan.effective_harness() == Backend::DeepSeek {
             apply_route_context(&mut env, plan);
+            for notice in &pin_notices {
+                eprintln!("{notice}");
+            }
             return Ok(Self {
                 env,
                 bridge: None,
                 claude_settings: None,
-                startup_notices: Vec::new(),
+                startup_notices: pin_notices,
             });
         }
         // Prefer a descriptor resolved from the plan's provider so the store
@@ -175,7 +182,12 @@ impl ForegroundRuntime {
         // PTY, detached, and worker launches. It must precede BridgeHandle
         // construction so refusal cannot bind a listener or expose settings.
         Self::preflight(plan)?;
-        let runtime = Self::start_with_secret_store(plan, env, &store)?;
+        let mut runtime = Self::start_with_secret_store(plan, env, &store)?;
+        if !pin_notices.is_empty() {
+            let mut notices = pin_notices;
+            notices.append(&mut runtime.startup_notices);
+            runtime.startup_notices = notices;
+        }
         for notice in &runtime.startup_notices {
             eprintln!("{notice}");
         }
@@ -252,14 +264,23 @@ impl ForegroundRuntime {
                 .map_or(unified.clone(), |upstreams| {
                     unified.with_integration_test_upstreams(upstreams)
                 });
-            let config = BridgeConfig::default().with_unified_gateway(unified);
+            let config = BridgeConfig::default()
+                .with_unified_gateway(unified)
+                // #1257: the gateway refuses any model outside the launch's
+                // allowlist, so the pin holds even though discovery is on.
+                .with_allowed_models(plan.allowed_models.clone());
             let config = integration_upstreams
                 .as_ref()
                 .map_or(config.clone(), |upstreams| {
                     config.with_integration_test_codex_upstream(upstreams)
                 });
             let bridge = BridgeHandle::start(config)?;
-            apply_unified_overlay(&mut env, &bridge)?;
+            apply_unified_overlay(
+                &mut env,
+                &bridge,
+                plan.model_selection.as_ref(),
+                &plan.allowed_models,
+            )?;
             let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), startup_notices)
         } else if is_codex_via_claude(plan) {
@@ -268,8 +289,11 @@ impl ForegroundRuntime {
             // already waited, and the message would arrive wrapped in the
             // harness's own API-error framing.
             let selection = codex_selection_from_plan(plan)?;
-            let bridge =
-                BridgeHandle::start(BridgeConfig::default().with_default_model(selection.clone()))?;
+            let bridge = BridgeHandle::start(
+                BridgeConfig::default()
+                    .with_default_model(selection.clone())
+                    .with_allowed_models(codex_via_claude_bridge_allowlist(plan)),
+            )?;
             apply_cross_route_overlay(&mut env, &bridge)?;
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), Vec::new())
@@ -288,8 +312,18 @@ impl ForegroundRuntime {
                 &secret,
                 descriptor,
                 plan.model_selection.as_ref(),
+                &plan.allowed_models,
             );
-            (None, declared_hooks_settings(plan)?, Vec::new())
+            // #1257: discovery is off under a pin, so say why once instead of
+            // leaving the picker silently short of gateway rows.
+            let mut notices = Vec::new();
+            if !plan.allowed_models.is_empty() && descriptor.enable_gateway_model_discovery {
+                notices.push(format!(
+                    "[clud] gateway model discovery is off for this launch; models are pinned to: {}",
+                    plan.allowed_models.join(", ")
+                ));
+            }
+            (None, declared_hooks_settings(plan)?, notices)
         } else {
             (None, declared_hooks_settings(plan)?, Vec::new())
         };
@@ -737,6 +771,45 @@ fn billed_catalog_row(plan: &LaunchPlan) -> Option<crate::provider_catalog::Cata
         .and_then(|descriptor| crate::provider_catalog::reviewed_default_model(descriptor.provider))
 }
 
+/// The startup line for an *inherited* pin (#1257): with no `--model` on the
+/// command line the launch pinned every slot to the previous model selection,
+/// so a cost boundary exists that the user did not type. Reported exactly in
+/// that case -- an explicit `--model`/`--allow-model` needs no announcement.
+///
+/// Green only on a TTY, the same rule as the other `[clud]` launch notices;
+/// plain text otherwise so logs and CI stay machine-readable.
+fn model_pin_notices(plan: &LaunchPlan, color: bool) -> Vec<String> {
+    if !plan.pinned_from_previous_selection || plan.allowed_models.is_empty() {
+        return Vec::new();
+    }
+    let text = format!(
+        "[clud] info: no --model given; pinned to previous model selection: {}",
+        plan.allowed_models.join(", ")
+    );
+    vec![if color {
+        format!("\x1b[32m{text}\x1b[0m")
+    } else {
+        text
+    }]
+}
+
+/// The bridge boundary for the codex-via-claude route (#1257): the launch's
+/// pin plus this route's own injected role rows -- DD-038's opus/sonnet
+/// substitutions are sent by clud's own overlay, so refusing them at the
+/// bridge would refuse clud's own configuration. An empty pin stays empty:
+/// unconstrained launches are byte-for-byte the pre-#1257 behavior.
+fn codex_via_claude_bridge_allowlist(plan: &LaunchPlan) -> Vec<String> {
+    let mut allowed = plan.allowed_models.clone();
+    if !allowed.is_empty() {
+        for role in [CODEX_VIA_CLAUDE_OPUS_MODEL, CODEX_VIA_CLAUDE_SONNET_MODEL] {
+            if !allowed.iter().any(|entry| entry.eq_ignore_ascii_case(role)) {
+                allowed.push(role.to_string());
+            }
+        }
+    }
+    allowed
+}
+
 /// The image-capability warning for a launch whose model cannot accept images,
 /// or `None` when there is nothing to warn about (#1200).
 ///
@@ -781,12 +854,27 @@ fn image_capability_notice(plan: &LaunchPlan) -> Option<String> {
 /// subagent/haiku wire model; the default wire model when `selection` is
 /// `None` comes from the catalog's reviewed default for the descriptor's
 /// provider, not a hardcoded literal.
+///
+/// `allowed` is the launch's model allowlist (#1257). Empty keeps every slot
+/// on the descriptor's own role mapping; non-empty makes the pin a cost
+/// boundary that covers the auxiliary slots and discovery too, because an
+/// OpenRouter key bills every model id sent with it.
 fn apply_anthropic_compat_overlay(
     env: &mut Vec<(String, String)>,
     secret: &str,
     descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
     selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
+    allowed: &[String],
 ) {
+    // Read before the scrub below, which removes the key outright: #1257's
+    // one precedence rule is that a user-set subagent slot wins *inside* the
+    // allowlist, and after the scrub there would be nothing left to evaluate
+    // that rule against.
+    let ambient_subagent = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     // Unconditionally case-insensitive (unlike `env_key_eq`, which mirrors
     // real per-OS env-var uniqueness semantics for the Codex overlay above):
     // this is a security guarantee against leaking an ambient Anthropic key
@@ -816,10 +904,38 @@ fn apply_anthropic_compat_overlay(
     // A served subagent name (#1192) replaces the descriptor's compiled-in one.
     let subagent_wire_id = crate::server_settings::provider_subagent_model(descriptor.provider)
         .unwrap_or(descriptor.subagent_wire_id);
-    let opus_model = role_models.map_or(model, |roles| roles.opus);
-    let sonnet_model = role_models.map_or(model, |roles| roles.sonnet);
-    let haiku_model = role_models.map_or(subagent_wire_id, |roles| roles.haiku);
-    let subagent_model = role_models.map_or(subagent_wire_id, |roles| roles.subagent);
+    // #1257: the allowlist governs every slot, not just the main conversation.
+    // `None` means unconstrained, so the descriptor's role mapping below stays
+    // authoritative and the overlay is byte-for-byte what it was.
+    let constrained = crate::provider_catalog::model_allowlist_slot(allowed, selection);
+    // Precedence, decided once: clud owns the boundary and the user chooses
+    // inside it. An ambient `CLAUDE_CODE_SUBAGENT_MODEL` therefore wins only
+    // on a constrained launch and only when the allowlist admits it; an
+    // unconstrained launch keeps scrubbing it, exactly as before (#1257).
+    let ambient_subagent = ambient_subagent
+        .as_deref()
+        .filter(|_| constrained.is_some())
+        .filter(|value| crate::provider_catalog::model_allowlist_allows(allowed, value));
+    let model = constrained.as_deref().unwrap_or(model);
+    let (opus_model, sonnet_model, haiku_model, subagent_model, fable_model) = match constrained
+        .as_deref()
+    {
+        Some(constrained) => (
+            constrained,
+            constrained,
+            constrained,
+            ambient_subagent.unwrap_or(constrained),
+            Some(constrained),
+        ),
+        None => (
+            role_models.map_or(model, |roles| roles.opus),
+            role_models.map_or(model, |roles| roles.sonnet),
+            role_models.map_or(subagent_wire_id, |roles| roles.haiku),
+            ambient_subagent
+                .unwrap_or_else(|| role_models.map_or(subagent_wire_id, |roles| roles.subagent)),
+            role_models.and_then(|roles| roles.fable),
+        ),
+    };
     env.extend([
         (
             "ANTHROPIC_BASE_URL".to_string(),
@@ -844,7 +960,7 @@ fn apply_anthropic_compat_overlay(
             subagent_model.to_string(),
         ),
     ]);
-    match role_models.and_then(|roles| roles.fable) {
+    match fable_model {
         Some(fable) => env.push((
             "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
             fable.to_string(),
@@ -858,7 +974,11 @@ fn apply_anthropic_compat_overlay(
     if descriptor.explicitly_empty_anthropic_api_key {
         env.push(("ANTHROPIC_API_KEY".to_string(), String::new()));
     }
-    if descriptor.enable_gateway_model_discovery {
+    // #1257: discovery only adds rows and cannot subtract them (DD-054), so a
+    // constrained launch does not ask for it at all rather than advertising a
+    // set the allowlist would then have to be enforced against after the fact.
+    // The launch notice in `start_with_secret_store` says so out loud.
+    if descriptor.enable_gateway_model_discovery && allowed.is_empty() {
         env.push((
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
             "1".to_string(),
@@ -1004,6 +1124,8 @@ fn apply_route_context(env: &mut Vec<(String, String)>, plan: &LaunchPlan) {
 fn apply_unified_overlay(
     env: &mut Vec<(String, String)>,
     bridge: &BridgeHandle,
+    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
+    allowed: &[String],
 ) -> Result<(), BridgeError> {
     if env.iter().any(|(key, value)| {
         env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
@@ -1033,6 +1155,34 @@ fn apply_unified_overlay(
     set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
     set_env(env, "CLUD_GATEWAY_TOKEN", bridge.bearer_token());
     push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
+    // #1257: a pinned launch constrains the auxiliary slots too, unlike the
+    // descriptor-driven direct route where they are independent role rows. On
+    // this gateway route the slot value is the row's *discovery* id: Claude
+    // Code classifies a raw wire id like `~anthropic/claude-sonnet-latest` as
+    // an unknown provider id and falls back to a built-in Anthropic row --
+    // exactly the spend the pin exists to stop. Discovery itself stays on
+    // here because clud proxies the catalog and can filter it; an ambient
+    // `CLAUDE_CODE_SUBAGENT_MODEL` wins only when the allowlist admits it,
+    // mirroring the direct route's single precedence rule.
+    if let Some(pinned) = crate::provider_catalog::model_allowlist_slot(allowed, selection) {
+        let discovery = crate::provider_catalog::model_by_any_id(&pinned)
+            .and_then(|row| row.discovery_id)
+            .unwrap_or(&pinned)
+            .to_string();
+        let ambient_subagent = env
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
+            .map(|(_, value)| value.trim().to_string())
+            .filter(|value| {
+                !value.is_empty() && crate::provider_catalog::model_allowlist_allows(allowed, value)
+            });
+        let subagent = ambient_subagent.unwrap_or_else(|| discovery.clone());
+        set_env(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", &discovery);
+        set_env(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", &discovery);
+        set_env(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", &discovery);
+        set_env(env, "ANTHROPIC_DEFAULT_FABLE_MODEL", &discovery);
+        set_env(env, "CLAUDE_CODE_SUBAGENT_MODEL", &subagent);
+    }
     Ok(())
 }
 
@@ -1562,6 +1712,8 @@ mod tests {
             model_selection: None,
             failover: None,
             failover_allow_metered: false,
+            allowed_models: Vec::new(),
+            pinned_from_previous_selection: false,
         }
     }
 
@@ -2012,7 +2164,13 @@ mod tests {
     #[test]
     fn golden_anthropic_compat_overlay_default_selection() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(&mut env, "ds-golden-secret", deepseek_descriptor(), None);
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "ds-golden-secret",
+            deepseek_descriptor(),
+            None,
+            &[],
+        );
         assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
         let mut pairs = env.clone();
         pairs.sort();
@@ -2081,6 +2239,7 @@ mod tests {
             "ds-golden-secret",
             deepseek_descriptor(),
             Some(&selection),
+            &[],
         );
         let mut pairs = env.clone();
         pairs.sort();
@@ -2161,7 +2320,13 @@ mod tests {
             ),
         ];
         let mut env = base.clone();
-        apply_anthropic_compat_overlay(&mut env, "ds-golden-secret", deepseek_descriptor(), None);
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "ds-golden-secret",
+            deepseek_descriptor(),
+            None,
+            &[],
+        );
         for (key, _) in &base {
             assert_eq!(
                 lookup(&env, key),
@@ -2190,7 +2355,13 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(&mut child, "ds-test-secret", deepseek_descriptor(), None);
+        apply_anthropic_compat_overlay(
+            &mut child,
+            "ds-test-secret",
+            deepseek_descriptor(),
+            None,
+            &[],
+        );
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "anthropic_api_key"), None);
@@ -2234,6 +2405,7 @@ mod tests {
             "ds-test-secret",
             deepseek_descriptor(),
             Some(&selection),
+            &[],
         );
         assert_eq!(lookup(&env, "ANTHROPIC_MODEL"), Some("deepseek-v4-pro"));
         assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
@@ -2411,7 +2583,13 @@ mod tests {
     #[test]
     fn deepseek_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_anthropic_compat_overlay(&mut env, "ds-test-secret", deepseek_descriptor(), None);
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "ds-test-secret",
+            deepseek_descriptor(),
+            None,
+            &[],
+        );
         let runtime = ForegroundRuntime {
             env,
             bridge: None,
@@ -2722,7 +2900,13 @@ mod tests {
     #[test]
     fn golden_kimi_overlay_default_selection() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(&mut env, "kimi-golden-secret", kimi_descriptor(), None);
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "kimi-golden-secret",
+            kimi_descriptor(),
+            None,
+            &[],
+        );
         let mut pairs = env.clone();
         pairs.sort();
         assert_eq!(
@@ -2795,7 +2979,13 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(&mut child, "kimi-test-secret", kimi_descriptor(), None);
+        apply_anthropic_compat_overlay(
+            &mut child,
+            "kimi-test-secret",
+            kimi_descriptor(),
+            None,
+            &[],
+        );
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "ANTHROPIC_API_KEY"), None);
@@ -2861,7 +3051,7 @@ mod tests {
     #[test]
     fn kimi_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_anthropic_compat_overlay(&mut env, "kimi-test-secret", kimi_descriptor(), None);
+        apply_anthropic_compat_overlay(&mut env, "kimi-test-secret", kimi_descriptor(), None, &[]);
         let runtime = ForegroundRuntime {
             env,
             bridge: None,
@@ -2918,6 +3108,7 @@ mod tests {
             "openrouter-vault-secret",
             openrouter_descriptor(),
             None,
+            &[],
         );
 
         assert_eq!(
@@ -3032,6 +3223,298 @@ mod tests {
         assert_eq!(
             crate::provider_auth::PreflightError::Cancelled.describe(descriptor),
             "Kimi credential entry was cancelled"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // #1257: a launch-time pin -- typed or inherited -- constrains every
+    // slot (haiku, subagent, fable) and the rows discovery may advertise,
+    // not just the main conversation model.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_pinned_openrouter_overlay_pins_every_slot_and_turns_discovery_off() {
+        let pin = "~anthropic/claude-sonnet-latest";
+        let base = vec![
+            (
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
+                "1".to_string(),
+            ),
+            (
+                "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+                "ambient-not-in-list".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                "ambient-opus".to_string(),
+            ),
+        ];
+        let mut child = base.clone();
+        apply_anthropic_compat_overlay(
+            &mut child,
+            "openrouter-vault-secret",
+            openrouter_descriptor(),
+            None,
+            &[pin.to_string()],
+        );
+        for key in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ] {
+            assert_eq!(lookup(&child, key), Some(pin), "{key} must be the pin");
+        }
+        // The ambient subagent is outside the allowlist, so the pin wins.
+        // Discovery never comes back: the scrub removed it and a constrained
+        // launch does not re-request it (DD-054 -- discovery only adds rows,
+        // and this launch asked for no rows).
+        assert_eq!(
+            lookup(&child, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            None
+        );
+        // The parent environment is never mutated.
+        assert_eq!(
+            lookup(&base, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some("1")
+        );
+        assert_eq!(
+            lookup(&base, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some("ambient-not-in-list")
+        );
+    }
+
+    #[test]
+    fn an_ambient_subagent_wins_the_slot_only_when_the_allowlist_admits_it() {
+        let allowed = vec!["deepseek-flash".to_string(), "deepseek-v4-pro".to_string()];
+        // Admitted: the user's own subagent rides inside the boundary, while
+        // the main slots stay on the launch selection.
+        let mut admitted = vec![(
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            "deepseek-v4-pro".to_string(),
+        )];
+        apply_anthropic_compat_overlay(
+            &mut admitted,
+            "ds-test-secret",
+            deepseek_descriptor(),
+            None,
+            &allowed,
+        );
+        assert_eq!(
+            lookup(&admitted, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(lookup(&admitted, "ANTHROPIC_MODEL"), Some("deepseek-flash"));
+        // Rejected: the pin covers the subagent slot too.
+        let mut rejected = vec![(
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            "claude-opus-5".to_string(),
+        )];
+        apply_anthropic_compat_overlay(
+            &mut rejected,
+            "ds-test-secret",
+            deepseek_descriptor(),
+            None,
+            &allowed,
+        );
+        assert_eq!(
+            lookup(&rejected, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some("deepseek-flash"),
+            "an ambient subagent outside the allowlist must not reach the child"
+        );
+    }
+
+    #[test]
+    fn an_inherited_pin_is_announced_green_on_a_tty_and_plain_otherwise() {
+        let mut route = plan(ModelProvider::OpenRouter, Backend::Claude);
+        // Nothing pinned: nothing announced.
+        assert!(model_pin_notices(&route, true).is_empty());
+        // A boundary the user typed: no announcement, they just typed it.
+        route.allowed_models = vec!["xiaomi/mimo-v2.6-flash".to_string()];
+        assert!(model_pin_notices(&route, false).is_empty());
+        // Inherited from the previous selection: announce exactly this case.
+        route.pinned_from_previous_selection = true;
+        let green = model_pin_notices(&route, true);
+        assert_eq!(green.len(), 1);
+        assert!(
+            green[0].starts_with("\x1b[32m") && green[0].ends_with("\x1b[0m"),
+            "{}",
+            green[0]
+        );
+        assert!(
+            green[0].contains(
+                "[clud] info: no --model given; pinned to previous model selection: \
+                 xiaomi/mimo-v2.6-flash"
+            ),
+            "{}",
+            green[0]
+        );
+        // Plain text when stderr is not a terminal, so logs stay parseable.
+        assert_eq!(
+            model_pin_notices(&route, false),
+            vec![
+                "[clud] info: no --model given; pinned to previous model selection: \
+                 xiaomi/mimo-v2.6-flash"
+                    .to_string()
+            ]
+        );
+        // An inherited pin with an empty allowlist pins nothing: say nothing.
+        route.allowed_models.clear();
+        assert!(model_pin_notices(&route, true).is_empty());
+    }
+
+    #[test]
+    fn an_inherited_pin_leads_the_startup_notices() {
+        let mut route = plan(ModelProvider::Claude, Backend::Claude);
+        route.allowed_models = vec!["claude-opus".to_string()];
+        route.pinned_from_previous_selection = true;
+        let runtime = ForegroundRuntime::start(&route, Vec::new()).unwrap();
+        let first = runtime
+            .startup_notices
+            .first()
+            .expect("an inherited pin must be announced first");
+        assert!(
+            first.contains("no --model given; pinned to previous model selection: claude-opus"),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_gateway_launch_announces_that_discovery_is_off() {
+        let mut route = plan(ModelProvider::OpenRouter, Backend::Claude);
+        route.allowed_models = vec!["~anthropic/claude-sonnet-latest".to_string()];
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            Vec::new(),
+            &FakeSecretStore(Some("openrouter-vault-secret".to_string())),
+        )
+        .unwrap();
+        assert!(runtime.startup_notices.iter().any(|notice| notice.contains(
+            "gateway model discovery is off for this launch; models are pinned to: \
+             ~anthropic/claude-sonnet-latest"
+        )));
+        // The child env agrees: a constrained direct launch never asks for
+        // discovery, so the picker only shows in-boundary built-in rows.
+        assert_eq!(
+            lookup(runtime.env(), "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            None
+        );
+        // An unconstrained launch keeps discovery and says nothing about it.
+        let plain = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::OpenRouter, Backend::Claude),
+            Vec::new(),
+            &FakeSecretStore(Some("openrouter-vault-secret".to_string())),
+        )
+        .unwrap();
+        assert!(plain
+            .startup_notices
+            .iter()
+            .all(|notice| !notice.contains("discovery is off")));
+        assert_eq!(
+            lookup(plain.env(), "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn unified_overlay_pins_every_slot_to_the_pinned_discovery_id() {
+        let mut route = plan(ModelProvider::Claude, Backend::Claude);
+        route.routing_mode = RoutingMode::Unified;
+        route.allowed_models = vec!["deepseek-flash".to_string()];
+        // The ambient subagent is outside the boundary: the pin wins.
+        let base = vec![(
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            "claude-haiku-4-5-20251001".to_string(),
+        )];
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            base.clone(),
+            &FakeSecretStore(Some("deepseek-test-secret".to_string())),
+        )
+        .unwrap();
+        let env = runtime.env();
+        for key in [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ] {
+            assert_eq!(
+                lookup(env, key),
+                Some("clud-claude-deepseek-flash"),
+                "{key}"
+            );
+        }
+        // Discovery stays ON here: clud proxies and filters the catalog, so
+        // every row the harness merges is already inside the boundary.
+        assert_eq!(
+            lookup(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some("1")
+        );
+        assert_eq!(
+            lookup(&base, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some("claude-haiku-4-5-20251001"),
+            "the parent environment is never mutated"
+        );
+    }
+
+    #[test]
+    fn unified_overlay_lets_an_admitted_ambient_subagent_win() {
+        let mut route = plan(ModelProvider::Claude, Backend::Claude);
+        route.routing_mode = RoutingMode::Unified;
+        route.allowed_models = vec!["deepseek-flash".to_string(), "deepseek-v4-pro".to_string()];
+        let base = vec![(
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            "deepseek-v4-pro".to_string(),
+        )];
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            base,
+            &FakeSecretStore(Some("deepseek-test-secret".to_string())),
+        )
+        .unwrap();
+        assert_eq!(
+            lookup(runtime.env(), "CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(
+            lookup(runtime.env(), "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some("clud-claude-deepseek-flash"),
+            "the main slots stay on the launch selection (first allowed entry)"
+        );
+    }
+
+    #[test]
+    fn codex_via_claude_folds_its_role_rows_into_the_boundary_without_dupes() {
+        // Unconstrained stays unconstrained: no boundary, no injected rows.
+        let mut route = plan(ModelProvider::Codex, Backend::Claude);
+        assert!(codex_via_claude_bridge_allowlist(&route).is_empty());
+        // A pin gains the route's own injected role rows (DD-038), or the
+        // bridge would refuse clud's own configuration.
+        route.allowed_models = vec!["gpt-5.6-luna".to_string()];
+        assert_eq!(
+            codex_via_claude_bridge_allowlist(&route),
+            vec![
+                "gpt-5.6-luna".to_string(),
+                CODEX_VIA_CLAUDE_OPUS_MODEL.to_string(),
+                CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
+            ]
+        );
+        // Already present (in any case): not duplicated.
+        route.allowed_models = vec![
+            CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
+            "gpt-5.6-luna".to_string(),
+        ];
+        assert_eq!(
+            codex_via_claude_bridge_allowlist(&route),
+            vec![
+                CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
+                "gpt-5.6-luna".to_string(),
+                CODEX_VIA_CLAUDE_OPUS_MODEL.to_string(),
+            ]
         );
     }
 

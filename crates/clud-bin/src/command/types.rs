@@ -79,6 +79,18 @@ pub struct LaunchPlan {
     /// Consent to descend onto a rung billed per token.
     #[serde(default)]
     pub failover_allow_metered: bool,
+    /// Every model this launch is allowed to reach (#1257): the haiku and
+    /// subagent slots, the rows gateway discovery may advertise, and what a
+    /// bridge will serve. Empty means unconstrained. A serde default keeps
+    /// old worker payloads readable.
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    /// True when `allowed_models` came from the *previous* model selection
+    /// (no `--model` / `--allow-model` on the command line), not from an
+    /// explicit pin (#1257). The runtime announces exactly that case as a
+    /// green startup line: the boundary exists, the user did not type it.
+    #[serde(default)]
+    pub pinned_from_previous_selection: bool,
 }
 
 impl LaunchPlan {
@@ -124,6 +136,8 @@ mod tests {
             model_selection: None,
             failover: None,
             failover_allow_metered: false,
+            allowed_models: Vec::new(),
+            pinned_from_previous_selection: false,
         }
     }
 

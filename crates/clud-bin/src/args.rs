@@ -109,6 +109,14 @@ pub struct Args {
     #[arg(long = "model")]
     pub model: Option<String>,
 
+    /// Constrain every model this launch can reach -- the main model, the
+    /// haiku/background and subagent slots, the rows gateway discovery may
+    /// advertise, and anything a bridge will serve -- to an explicit set.
+    /// Repeatable. Without it, `--model <id>` alone is the allowlist; with
+    /// neither, nothing is constrained and behavior is unchanged (#1257).
+    #[arg(long = "allow-model", value_name = "MODEL", action = ArgAction::Append)]
+    pub allow_model: Vec<String>,
+
     /// Reasoning effort, kept independent from the selected model.
     #[arg(long = "effort")]
     pub effort: Option<String>,
@@ -379,6 +387,59 @@ impl Args {
     pub fn normalize_explicit_run(&mut self) {
         if matches!(self.command, Some(Command::Run)) {
             self.command = None;
+        }
+    }
+
+    /// The launch-time model allowlist (#1257), derived once from `--model`
+    /// and `--allow-model`.
+    ///
+    /// With neither flag the *previous* model selection -- whatever
+    /// `resolved_model_selection` resolved from saved settings or the catalog
+    /// default -- is the only pin: a launch that names no model still runs
+    /// inside the boundary it already selected, instead of leaving every slot
+    /// and the discovery catalog open. Empty means nothing resolved at all,
+    /// which is the only unconstrained case.
+    pub fn model_allowlist(&self) -> Vec<String> {
+        let explicit =
+            crate::provider_catalog::model_allowlist(self.model.as_deref(), &self.allow_model);
+        if !explicit.is_empty() {
+            return explicit;
+        }
+        self.previous_model_selection_pin()
+    }
+
+    /// The id pinned when the user named no model (#1257): the resolved
+    /// selection's wire id -- the id actually billed -- falling back to its
+    /// CLI id. Empty when nothing resolved, which leaves the launch
+    /// unconstrained.
+    fn previous_model_selection_pin(&self) -> Vec<String> {
+        self.resolved_model_selection
+            .as_ref()
+            .and_then(|selection| {
+                selection
+                    .wire_model
+                    .as_deref()
+                    .or(selection.model.as_deref())
+            })
+            .map(|id| vec![id.to_string()])
+            .unwrap_or_default()
+    }
+
+    /// True when the pin came from the previous model selection rather than
+    /// from the command line (#1257). The runtime reports exactly this case
+    /// as a green startup line, because the user did not ask for it.
+    pub fn model_pin_is_from_previous_selection(&self) -> bool {
+        self.model.is_none() && self.allow_model.is_empty() && !self.model_allowlist().is_empty()
+    }
+
+    /// Give `--allow-model` without `--model` a main model. The allowlist
+    /// constrains every slot the launch can use, so it must also name the one
+    /// the main conversation starts on -- otherwise the launch's own first
+    /// turn would be outside its own boundary. Runs before provider inference
+    /// and selection resolution so every later consumer sees one pin.
+    pub fn normalize_model_allowlist(&mut self) {
+        if self.model.is_none() && !self.allow_model.is_empty() {
+            self.model = Some(self.allow_model[0].trim().to_string());
         }
     }
 }
@@ -1259,6 +1320,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--message",
         "--resume",
         "--model",
+        "--allow-model",
         "--provider",
         "--mode",
         "--failover",

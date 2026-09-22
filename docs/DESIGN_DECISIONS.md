@@ -3563,3 +3563,62 @@ Session-specific exports must travel in the client environment; clud does not
 try to infer them from the daemon. Durable API session records still lack a
 client environment and remain on their separately documented compatibility
 path. The full contract is in [daemon environment](architecture/daemon-environment.md).
+
+---
+
+## DD-077: a launch-time model pin constrains every model slot, not just the main model
+
+**Context:** #1257 amended [DD-054](#dd-054-the-model-picker-belongs-to-the-harness-and-discovery-only-adds-rows)
+in the failure direction: `--model` only replaced `ANTHROPIC_MODEL`, so a
+launch pinned to a non-Anthropic model still handed the harness independent
+Fable/Opus/Sonnet/Haiku/subagent role mappings and an open gateway-discovery
+catalog. The repro `clud --openrouter --model xiaomi/mimo-v2.6-flash` bounded
+the main conversation, then quietly reached Claude through subagent and
+discovery-picked rows the user believed were pinned away.
+
+**Decision:** Every launch derives a model allowlist. Precedence:
+`--allow-model` (repeatable; replaces rather than extends everything) ->
+`--model` -> the previous model selection's wire id (the id `--dry-run`
+reports as `model_selection`), which is the *only* pin when the user named no
+model -- announced exactly once as a green
+`[clud] info: no --model given; pinned to previous model selection: <id>`
+startup line, green only on a TTY, plain text otherwise. Membership is
+case-insensitive identity or same catalog row across the CLI, wire, discovery,
+and legacy-alias namespaces; effort and `[1m]` context suffixes never change
+which row was meant. Under a pin: a direct Anthropic-compat overlay sends
+every role slot the pinned wire id and unsets
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` (a startup notice says so), with
+an ambient `CLAUDE_CODE_SUBAGENT_MODEL` winning the subagent slot only when
+it is itself inside the allowlist; the unified gateway pins slots to the
+pinned id's discovery id and keeps discovery on but filters `/v1/models` to
+the allowlist, because clud proxies that catalog; the codex-via-claude bridge
+folds its own DD-038 opus/sonnet role rows into the boundary so clud never
+refuses its own configuration. The bridge refuses an out-of-allowlist model
+with `400 invalid_request_error` naming the allowed set and logs
+`model_not_allowed`, exempting ids that contain `haiku` (the harness's
+side-model machinery) or start with `claude` (the DD-038 substitution and the
+caller's own Claude credential) -- the exemptions are per-request and do not
+lift the main-model pin. An explicit allowlist outside which the resolved
+selection falls fails at launch with exit code 2, before bootstrap. No pin
+and no allowlist means an empty allowlist, and every consumer is
+byte-for-byte the pre-#1257 behavior. `--dry-run` exposes `allowed_models`
+and `pinned_from_previous_selection` so the boundary is auditable without a
+paid request.
+
+**Rationale:** An inherited pin is still a cost boundary the user is relying
+on; a pin covering only the main model is not a boundary at all, because one
+subagent turn or one `/model` pick escapes it. Reusing the resolved
+selection as the default pin means a normal `clud --openrouter` session is
+exactly as constrained as its own `--model` would be, with no new flag to
+remember and no second picker to maintain -- discovery still only adds rows,
+and the harness still owns the picker.
+
+**Consequences:** DD-054 is amended, not overturned: discovery and `/model`
+belong to the harness and still only add rows, but a constrained direct
+launch asks for no discovery at all and announces that, while the picker's
+built-in Anthropic rows remain reachable there through the bridge exemptions
+for side-model traffic. A gateway pick outside a unified launch's boundary is
+refused at the bridge with the allowlist in the message rather than silently
+relabelled. Only the inherited pin is announced, because an explicit pin is
+what the user just typed. The full slot contract is in
+[provider-selection.md](architecture/provider-selection.md#openrouter-model-selection-contract).

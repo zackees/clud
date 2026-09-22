@@ -280,15 +280,33 @@ remains the frontend and receives the resolved main-model wire ID through its
    OpenRouter owns that namespace.
 3. Claude Code's `/model` command offers the gateway-discovered live
    inventory after launch, alongside its own built-in rows. Clud enables
-   discovery but does not implement a separate pre-launch OpenRouter picker,
-   and cannot restrict the picker to the discovered set.
+   discovery on unpinned launches but does not implement a separate
+   pre-launch OpenRouter picker, and cannot restrict the picker to the
+   discovered set.
 
-An explicit main-model selection replaces `ANTHROPIC_MODEL`; it does not
-rewrite the provider descriptor's independent Fable, Opus, Sonnet, Haiku, or
-subagent role mappings. Arbitrary non-Claude wire IDs remain syntactically
-reachable but are best-effort through the Claude harness. `--dry-run` resolves
-and reports all of the above without reading the OpenRouter vault, whereas a
-live `/model` inventory or request requires a stored OpenRouter credential.
+Every launch resolves a **model allowlist** that constrains every model the
+launch can reach -- the main model, the Fable, Opus, Sonnet, Haiku, and
+subagent role slots, the rows gateway discovery may advertise, and anything
+a bridge will serve
+([DD-077](../DESIGN_DECISIONS.md#dd-077-a-launch-time-model-pin-constrains-every-model-slot-not-just-the-main-model)).
+The boundary is the launch's own model selection: `--model <id>` alone pins
+exactly that id, `--allow-model` (repeatable) replaces it with an explicit
+list, and a launch that names no model is pinned to the previous selection --
+the wire id `--dry-run` reports as `model_selection` -- announced once as a
+green `[clud] info: no --model given; pinned to previous model selection:
+<id>` startup line. Under a pin each role slot receives the pinned wire id,
+an ambient `CLAUDE_CODE_SUBAGENT_MODEL` wins the subagent slot only when it
+is itself inside the allowlist, and gateway discovery is turned off for the
+launch with a startup notice naming the boundary. With no pin and no
+allowlist nothing is constrained: the descriptor's independent role mappings
+apply unchanged, exactly as before #1257. An explicit allowlist outside
+which the resolved selection falls fails at launch with exit code 2 naming
+the allowed set. Arbitrary non-Claude wire IDs remain syntactically
+reachable through an explicit pin but are best-effort through the Claude
+harness. `--dry-run` resolves and reports `allowed_models` and
+`pinned_from_previous_selection` alongside the selection without reading the
+OpenRouter vault, whereas a live `/model` inventory or request requires a
+stored OpenRouter credential.
 
 #### Unified mode advertises exactly one OpenRouter row
 
@@ -296,7 +314,10 @@ live `/model` inventory or request requires a stored OpenRouter credential.
 available to the harness. Unified therefore advertises the single reviewed row
 (`clud-claude-openrouter-sonnet` -> `~anthropic/claude-sonnet-latest`), and only
 when an OpenRouter credential is stored; an absent key omits the row rather than
-advertising a route that cannot serve. This is deliberately *not* a mirror of
+advertising a route that cannot serve. A launch allowlist (#1257) narrows this
+further: unlike the direct route, where a pin disables discovery outright,
+unified keeps discovery on because clud proxies and filters the catalog --
+`/v1/models` advertises only rows the boundary admits. This is deliberately *not* a mirror of
 OpenRouter's changing inventory into the static catalog, and it adds no
 clud-side picker: the picker is still Claude Code's `/model`. Live inventory
 remains the direct `--openrouter` launch's story, exactly as above.

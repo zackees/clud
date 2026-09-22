@@ -705,6 +705,8 @@ fn build_launch_plan_for_target_at(
         model_selection,
         failover: args.failover.clone(),
         failover_allow_metered: args.failover_allow_metered,
+        allowed_models: args.model_allowlist(),
+        pinned_from_previous_selection: args.model_pin_is_from_previous_selection(),
     }
 }
 

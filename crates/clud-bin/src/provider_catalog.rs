@@ -929,6 +929,273 @@ pub fn resolve_for_launch_with_server_default(
     Ok(Some(selection.clone()))
 }
 
+// ---------------------------------------------------------------------------
+// Launch-time model allowlist (#1257)
+//
+// A `--model` pin is a cost boundary, not merely a main-conversation default:
+// an OpenRouter key is account-wide, so every model id sent with it bills at
+// that model's rate -- including the auxiliary slots Claude Code fills on its
+// own. These helpers are the one place that boundary is expressed, so the
+// child-env overlay, gateway discovery, and the bridge's refusal all agree on
+// membership.
+// ---------------------------------------------------------------------------
+
+/// Build the launch-time model allowlist (#1257).
+///
+/// A `--model` pin alone is the implicit allowlist `{<id>}`. An explicit
+/// `--allow-model` *replaces* that implicit single-entry set rather than
+/// extending it, which is how a launch names a small set instead of exactly
+/// one; a pin is then validated as a member rather than silently widening the
+/// boundary. Neither present yields an empty list, meaning no constraint, so a
+/// default launch keeps byte-for-byte today's behavior.
+pub fn model_allowlist(pin: Option<&str>, explicit: &[String]) -> Vec<String> {
+    let entries: Vec<&str> = if explicit.is_empty() {
+        pin.into_iter().collect()
+    } else {
+        explicit.iter().map(String::as_str).collect()
+    };
+    let mut allowed: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if !allowed.iter().any(|kept| kept.eq_ignore_ascii_case(entry)) {
+            allowed.push(entry.to_string());
+        }
+    }
+    allowed
+}
+
+/// Fail fast, at launch, when the model this launch will bill sits outside an
+/// explicit `--allow-model`. Refusing before the child starts is the point:
+/// the alternative is a session that runs and then cannot serve its own first
+/// turn. An unconstrained launch has nothing to check.
+pub fn validate_model_allowlist(allowed: &[String], effective: Option<&str>) -> Result<(), String> {
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    let Some(effective) = effective else {
+        return Ok(());
+    };
+    if model_allowlist_allows(allowed, effective) {
+        return Ok(());
+    }
+    Err(format!(
+        "model '{effective}' is not allowed by --allow-model; allowed models: {}",
+        allowed.join(", ")
+    ))
+}
+
+/// Whether `requested` -- spelled in any of clud's model namespaces -- is a
+/// member of `allowed`. An empty allowlist constrains nothing and accepts
+/// everything, which is what keeps an unconstrained launch byte-for-byte
+/// unchanged.
+pub fn model_allowlist_allows(allowed: &[String], requested: &str) -> bool {
+    allowed.is_empty()
+        || allowed
+            .iter()
+            .any(|entry| model_ids_identify_the_same_row(entry, requested))
+}
+
+/// Two model spellings name the same thing when their strings agree (either
+/// namespace, either case) or when both resolve to one catalog row.
+///
+/// The row check is what lets `--allow-model codex-terra` admit the
+/// `gpt-5.6-terra` wire ID and the `clud-claude-codex-terra` discovery ID the
+/// gateway actually receives. The string check is what lets an uncataloged ID
+/// such as `xiaomi/mimo-v2.6-flash` be named at all: clud deliberately does
+/// not own OpenRouter's namespace, so there is no row to resolve for it.
+fn model_ids_identify_the_same_row(entry: &str, requested: &str) -> bool {
+    let entry = entry.trim();
+    let requested = requested.trim();
+    if entry.eq_ignore_ascii_case(requested) {
+        return true;
+    }
+    // `wire@effort` is one model with a session-time modifier, so the effort
+    // suffix is never a different model.
+    let entry_base = split_effort_suffix(entry).0;
+    let requested_base = split_effort_suffix(requested).0;
+    if entry_base.eq_ignore_ascii_case(requested_base) {
+        return true;
+    }
+    match (catalog_match(entry_base), catalog_match(requested_base)) {
+        (Some(entry_row), Some(requested_row)) => entry_row.cli_id == requested_row.cli_id,
+        _ => false,
+    }
+}
+
+/// The model an auxiliary slot resolves to on a constrained launch, or `None`
+/// when the launch is unconstrained (the caller then keeps the descriptor's
+/// own role mapping).
+///
+/// The launch's own selection wins when the allowlist admits it, so `--model`
+/// still decides *which* member of a multi-entry allowlist fills the slots.
+/// An uncataloged pin reaches the caller verbatim: that is the whole point of
+/// `--openrouter --model xiaomi/mimo-v2.6-flash`.
+pub fn model_allowlist_slot(
+    allowed: &[String],
+    selection: Option<&ResolvedModelSelection>,
+) -> Option<String> {
+    if allowed.is_empty() {
+        return None;
+    }
+    if let Some(selection) = selection {
+        for candidate in [selection.wire_model.as_deref(), selection.model.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if model_allowlist_allows(allowed, candidate) {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+    allowed.first().cloned()
+}
+
+/// The refusal a bridge sends for a request naming a model outside the
+/// allowlist (#1257). Naming the set is the whole value of the message: a
+/// mid-session `/model` switch must tell the user what it was blocked from
+/// billing, not fail anonymously.
+pub fn model_allowlist_refusal(allowed: &[String], requested: &str) -> String {
+    format!(
+        "model '{}' is not allowed for this launch; allowed models: {}",
+        requested.trim(),
+        allowed.join(", ")
+    )
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn a_lone_model_pin_is_the_allowlist() {
+        assert_eq!(
+            model_allowlist(Some("xiaomi/mimo-v2.6-flash"), &[]),
+            ids(&["xiaomi/mimo-v2.6-flash"])
+        );
+    }
+
+    #[test]
+    fn repeated_allow_model_builds_the_allowlist_and_drops_repeats() {
+        assert_eq!(
+            model_allowlist(
+                Some("deepseek-flash"),
+                &ids(&["deepseek-flash", "deepseek-v4-pro", "DEEPSEEK-FLASH", " "])
+            ),
+            ids(&["deepseek-flash", "deepseek-v4-pro"])
+        );
+    }
+
+    #[test]
+    fn no_pin_and_no_allowlist_is_no_constraint() {
+        let allowed = model_allowlist(None, &[]);
+        assert!(allowed.is_empty());
+        assert!(model_allowlist_allows(&allowed, "claude-opus-5"));
+    }
+
+    #[test]
+    fn an_explicit_allow_list_replaces_the_pin_rather_than_extending_it() {
+        assert_eq!(
+            model_allowlist(Some("ignored"), &ids(&["a", "b"])),
+            ids(&["a", "b"])
+        );
+    }
+
+    #[test]
+    fn a_pin_outside_an_explicit_allow_list_fails_launch_validation() {
+        let allowed = model_allowlist(Some("xiaomi/mimo-v2.6-flash"), &ids(&["a", "b"]));
+        let error = validate_model_allowlist(&allowed, Some("xiaomi/mimo-v2.6-flash"))
+            .expect_err("the pin is not a member of {a, b}");
+        assert!(error.contains("xiaomi/mimo-v2.6-flash"), "{error}");
+        assert!(error.contains("--allow-model"), "{error}");
+        assert!(error.contains("a, b"), "{error}");
+    }
+
+    #[test]
+    fn a_pin_inside_an_explicit_allow_list_passes_launch_validation() {
+        let allowed = model_allowlist(Some("deepseek-flash"), &ids(&["deepseek-flash", "b"]));
+        assert!(validate_model_allowlist(&allowed, Some("deepseek-flash")).is_ok());
+    }
+
+    #[test]
+    fn membership_spans_cli_wire_and_discovery_namespaces_of_one_row() {
+        let allowed = ids(&["codex-terra"]);
+        for spelling in ["gpt-5.6-terra", "clud-claude-codex-terra", "CODEx-terra"] {
+            assert!(
+                model_allowlist_allows(&allowed, spelling),
+                "{spelling} is the same catalog row as codex-terra"
+            );
+        }
+        assert!(!model_allowlist_allows(&allowed, "gpt-5.6-sol"));
+        assert!(!model_allowlist_allows(&allowed, "claude-opus-5"));
+    }
+
+    #[test]
+    fn an_uncataloged_openrouter_id_is_matched_by_its_own_string() {
+        let allowed = ids(&["xiaomi/mimo-v2.6-flash"]);
+        assert!(model_allowlist_allows(&allowed, "xiaomi/mimo-v2.6-flash"));
+        assert!(!model_allowlist_allows(
+            &allowed,
+            "~anthropic/claude-opus-latest"
+        ));
+    }
+
+    #[test]
+    fn an_effort_suffix_never_changes_which_model_was_asked_for() {
+        let allowed = ids(&["codex-terra"]);
+        assert!(model_allowlist_allows(&allowed, "gpt-5.6-terra@high"));
+    }
+
+    #[test]
+    fn the_slot_follows_the_launch_selection_when_the_allow_list_admits_it() {
+        let allowed = ids(&["deepseek-flash", "deepseek-v4-pro"]);
+        let selection = resolve(
+            Some(ModelProvider::DeepSeek),
+            Some("deepseek-v4-pro"),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        // The wire id wins over the CLI id when both are admitted: the wire
+        // id is what the slot actually puts on the wire, and the allowlist
+        // admits it through the same catalog row as its CLI spelling.
+        assert_eq!(
+            model_allowlist_slot(&allowed, Some(&selection)).as_deref(),
+            Some("deepseek-v4-pro[1m]")
+        );
+    }
+
+    #[test]
+    fn the_slot_falls_back_to_the_first_allowed_entry_without_a_selection() {
+        let allowed = ids(&["xiaomi/mimo-v2.6-flash"]);
+        assert_eq!(
+            model_allowlist_slot(&allowed, None).as_deref(),
+            Some("xiaomi/mimo-v2.6-flash")
+        );
+        assert_eq!(model_allowlist_slot(&[], None), None);
+    }
+
+    #[test]
+    fn a_context_suffix_never_changes_which_model_was_asked_for() {
+        // `deepseek-flash[1m]` is the wire id of the same catalog row as the
+        // CLI id `deepseek-flash`, so either spelling admits the other.
+        let allowed = ids(&["deepseek-flash"]);
+        assert!(model_allowlist_allows(&allowed, "deepseek-flash[1m]"));
+        assert!(model_allowlist_allows(
+            &ids(&["deepseek-flash[1m]"]),
+            "deepseek-flash"
+        ));
+        assert!(!model_allowlist_allows(&allowed, "deepseek-v4-pro[1m]"));
+    }
+}
+
 #[cfg(test)]
 mod reachability_tests {
     use super::*;

@@ -204,6 +204,7 @@ fn backend_prompt_launch_plan(
         mode: None,
         failover: None,
         failover_allow_metered: false,
+        allow_model: Vec::new(),
         effort: None,
         context_window: None,
         prompt: Some(prompt),
