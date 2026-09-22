@@ -1291,6 +1291,86 @@ def test_dry_run_model() -> None:
     assert "opus" in data["command"]
 
 
+def test_dry_run_without_a_model_pins_only_the_previous_selection() -> None:
+    """No --model means the boundary is inherited from whatever the previous
+    selection resolved to -- and only that (#1257)."""
+    result = _run("--dry-run", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    selection = data["model_selection"]
+    if selection is None:
+        # Nothing resolved: nothing pinned, nothing to announce.
+        assert data["allowed_models"] == []
+        assert data["pinned_from_previous_selection"] is False
+    else:
+        expected = selection.get("wire_model") or selection.get("model")
+        assert data["allowed_models"] == [expected]
+        assert data["pinned_from_previous_selection"] is True
+
+
+def test_dry_run_openrouter_default_is_pinned_and_inherited() -> None:
+    result = _run("--dry-run", "--openrouter", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["allowed_models"] == ["~anthropic/claude-sonnet-latest"]
+    assert data["pinned_from_previous_selection"] is True
+
+
+def test_dry_run_explicit_model_is_a_typed_boundary_not_an_inherited_pin() -> None:
+    """The #1257 repro: an uncataloged OpenRouter id resolves, becomes the
+    whole boundary, and is not reported as an inherited pin."""
+    result = _run(
+        "--dry-run", "--openrouter", "--model", "xiaomi/mimo-v2.6-flash", "-p", "hello"
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_selection"]["wire_model"] == "xiaomi/mimo-v2.6-flash"
+    assert data["allowed_models"] == ["xiaomi/mimo-v2.6-flash"]
+    assert data["pinned_from_previous_selection"] is False
+
+
+def test_dry_run_repeated_allow_model_builds_the_boundary() -> None:
+    result = _run(
+        "--dry-run",
+        "--openrouter",
+        "--model",
+        "openrouter-claude-sonnet",
+        "--allow-model",
+        "openrouter-claude-sonnet",
+        "--allow-model",
+        "openrouter-claude-opus",
+        "-p",
+        "hello",
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["allowed_models"] == [
+        "openrouter-claude-sonnet",
+        "openrouter-claude-opus",
+    ]
+    assert data["pinned_from_previous_selection"] is False
+
+
+def test_dry_run_a_pin_outside_an_explicit_allow_list_fails_at_launch() -> None:
+    """Validation runs before bootstrap: the failure names the boundary, not
+    the first turn that tripped over it."""
+    result = _run(
+        "--dry-run",
+        "--openrouter",
+        "--model",
+        "xiaomi/mimo-v2.6-flash",
+        "--allow-model",
+        "openrouter-claude-sonnet",
+        "-p",
+        "hello",
+    )
+    assert result.returncode == 2
+    output = (result.stdout or "") + (result.stderr or "")
+    assert "xiaomi/mimo-v2.6-flash" in output
+    assert "--allow-model" in output
+    assert "openrouter-claude-sonnet" in output
+
+
 def test_dry_run_continue() -> None:
     result = _run("--dry-run", "-c")
     assert result.returncode == 0

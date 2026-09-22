@@ -36,6 +36,10 @@ fn parse_args() -> args::Args {
 
 fn run(mut args: args::Args) {
     args.normalize_explicit_run();
+    // Before provider inference and selection resolution, so `--allow-model`
+    // without `--model` still launches with a main model inside its own
+    // boundary (#1257).
+    args.normalize_model_allowlist();
     if let Some(exit_code) = webterm::handle(&args) {
         std::process::exit(exit_code);
     }
@@ -488,6 +492,25 @@ fn run(mut args: args::Args) {
                 std::process::exit(2);
             }
         };
+    // A pin outside an explicit `--allow-model` fails here, before bootstrap
+    // or the first turn: by the time a request is in flight the user has
+    // waited, and the refusal would arrive wrapped in the harness's own
+    // API-error framing (#1257).
+    let allowed_models = args.model_allowlist();
+    if let Err(error) = clud::provider_catalog::validate_model_allowlist(
+        &allowed_models,
+        args.resolved_model_selection
+            .as_ref()
+            .and_then(|selection| {
+                selection
+                    .wire_model
+                    .as_deref()
+                    .or(selection.model.as_deref())
+            }),
+    ) {
+        eprintln!("[clud] error: {error}");
+        std::process::exit(2);
+    }
     if launch_target.routing_mode == backend::RoutingMode::Unified {
         if let Some(selection) = args
             .resolved_model_selection
@@ -1046,6 +1069,14 @@ fn run(mut args: args::Args) {
             // was typed, so a dry run shows what will actually be billed.
             "codex_model": plan.codex_model,
             "model_selection": plan.model_selection,
+            // The cost boundary, auditable without a paid request: every
+            // model this launch may reach, not just the one it starts on
+            // (#1257).
+            "allowed_models": plan.allowed_models,
+            // Whether that boundary was typed or inherited from the previous
+            // selection -- the runtime prints a green startup line for the
+            // inherited case (#1257).
+            "pinned_from_previous_selection": plan.pinned_from_previous_selection,
             // Routing must be auditable without a paid request, and a ladder
             // is routing: it decides which account serves the turn after the
             // first one declines.

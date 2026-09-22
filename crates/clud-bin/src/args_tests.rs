@@ -1336,6 +1336,118 @@ fn test_clean_worktrees_with_yes_and_force() {
     assert!(args.force);
 }
 
+// ── #1257: model allowlist / inherited pin ─────────────────────────────────
+
+#[test]
+fn a_lone_model_flag_is_the_boundary_and_is_not_an_inherited_pin() {
+    let mut args = parse(&["clud", "--openrouter", "--model", "xiaomi/mimo-v2.6-flash"]);
+    // An explicit pin is the boundary whether or not anything resolved yet.
+    assert_eq!(
+        args.model_allowlist(),
+        vec!["xiaomi/mimo-v2.6-flash".to_string()]
+    );
+    assert!(!args.model_pin_is_from_previous_selection());
+    // With a resolved selection in hand the typed pin still wins: only the
+    // *absence* of a typed model makes the selection the pin.
+    let typed = args.model.clone();
+    args.resolved_model_selection =
+        crate::provider_catalog::resolve_for_launch_with_server_default(
+            crate::backend::ModelProvider::OpenRouter,
+            typed.as_deref(),
+            None,
+            None,
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        args.model_allowlist(),
+        vec!["xiaomi/mimo-v2.6-flash".to_string()]
+    );
+    assert!(!args.model_pin_is_from_previous_selection());
+}
+
+#[test]
+fn with_no_model_flag_the_boundary_is_the_previous_model_selection() {
+    let mut args = parse(&["clud", "--openrouter"]);
+    // Before anything resolves there is nothing to pin and nothing to say.
+    assert!(args.model_allowlist().is_empty());
+    assert!(!args.model_pin_is_from_previous_selection());
+    // After launch resolution, the previous selection -- the wire id that
+    // would actually be billed -- is the only pin, and it is announced.
+    args.resolved_model_selection =
+        crate::provider_catalog::resolve_for_launch_with_server_default(
+            crate::backend::ModelProvider::OpenRouter,
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        args.model_allowlist(),
+        vec!["~anthropic/claude-sonnet-latest".to_string()]
+    );
+    assert!(args.model_pin_is_from_previous_selection());
+    // A selection with no wire id falls back to its CLI id.
+    args.resolved_model_selection = Some(crate::provider_catalog::ResolvedModelSelection {
+        provider: crate::backend::ModelProvider::OpenRouter,
+        model: Some("openrouter-claude-sonnet".to_string()),
+        wire_model: None,
+        effort: None,
+        context_window: None,
+        model_source: None,
+        effort_source: None,
+        context_window_source: None,
+    });
+    assert_eq!(
+        args.model_allowlist(),
+        vec!["openrouter-claude-sonnet".to_string()]
+    );
+}
+
+#[test]
+fn repeated_allow_model_replaces_a_lone_pin_and_dedupes() {
+    let args = parse(&[
+        "clud",
+        "--model",
+        "ignored-by-the-explicit-list",
+        "--allow-model",
+        "deepseek-flash",
+        "--allow-model",
+        "DEEPSEEK-FLASH",
+        "--allow-model",
+        "deepseek-v4-pro",
+    ]);
+    assert_eq!(
+        args.model_allowlist(),
+        vec!["deepseek-flash".to_string(), "deepseek-v4-pro".to_string()]
+    );
+    assert!(!args.model_pin_is_from_previous_selection());
+}
+
+#[test]
+fn normalize_model_allowlist_promotes_the_first_allow_model_to_the_pin() {
+    let mut args = parse(&["clud", "--allow-model", "a", "--allow-model", "b"]);
+    assert_eq!(args.model, None);
+    args.normalize_model_allowlist();
+    // The allowlist constrains every slot, so the main model must come from
+    // it too -- otherwise the launch's own first turn starts outside its own
+    // boundary.
+    assert_eq!(args.model.as_deref(), Some("a"));
+    assert_eq!(
+        args.model_allowlist(),
+        vec!["a".to_string(), "b".to_string()]
+    );
+    // An explicit --model is never displaced.
+    let mut args = parse(&["clud", "--model", "x", "--allow-model", "a"]);
+    args.normalize_model_allowlist();
+    assert_eq!(args.model.as_deref(), Some("x"));
+}
+
 #[path = "args_tests/commands.rs"]
 mod commands;
 

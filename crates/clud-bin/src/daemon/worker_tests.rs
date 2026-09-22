@@ -33,6 +33,8 @@ fn cross_route_plan() -> LaunchPlan {
         model_selection: None,
         failover: None,
         failover_allow_metered: false,
+        allowed_models: Vec::new(),
+        pinned_from_previous_selection: false,
     }
 }
 

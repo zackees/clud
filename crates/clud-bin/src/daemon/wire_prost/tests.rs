@@ -42,6 +42,8 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             }),
             failover: None,
             failover_allow_metered: false,
+            allowed_models: Vec::new(),
+            pinned_from_previous_selection: false,
         },
         kind: SessionKind::Subprocess,
         name: Some("sample".to_string()),

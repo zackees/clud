@@ -245,6 +245,12 @@ pub struct BridgeConfig {
     /// keeps the built-in default. A request that names its own model still
     /// wins over this.
     default_model: Option<ModelSpec>,
+    /// Every model a request may name on this bridge (#1257). Empty means
+    /// unconstrained -- byte-for-byte the pre-#1257 behavior. The
+    /// codex-via-claude route folds in its own injected role rows when it
+    /// builds this (DD-038's substitutions are inside the boundary by
+    /// construction).
+    allowed_models: Vec<String>,
     gateway_mode: GatewayMode,
     history_limits: HistoryLimits,
     log_path: Option<std::path::PathBuf>,
@@ -274,6 +280,7 @@ impl Default for BridgeConfig {
             first_frame_timeout: DEFAULT_FIRST_FRAME_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             default_model: None,
+            allowed_models: Vec::new(),
             gateway_mode: GatewayMode::Codex,
             history_limits: HistoryLimits::default(),
             log_path: default_bridge_log_path(),
@@ -295,6 +302,13 @@ impl BridgeConfig {
     /// Pin the selection used when a request carries no model of its own.
     pub fn with_default_model(mut self, model: Option<ModelSpec>) -> Self {
         self.default_model = model;
+        self
+    }
+
+    /// Constrain every request's model to the launch's allowlist (#1257).
+    /// Empty leaves the bridge unconstrained.
+    pub fn with_allowed_models(mut self, allowed: Vec<String>) -> Self {
+        self.allowed_models = allowed;
         self
     }
 
@@ -928,7 +942,7 @@ fn handle_connection(
             }
         }
         ("GET", "/v1/models") => match &config.gateway_mode {
-            GatewayMode::Codex => serve_codex_catalog(&mut stream, log),
+            GatewayMode::Codex => serve_codex_catalog(&mut stream, config, log),
             GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config, log),
         },
         ("GET", "/_clud/route/status") => match &config.gateway_mode {
@@ -1194,6 +1208,12 @@ fn serve_unified_catalog(
             ModelProvider::Claude => false,
         })
         .filter_map(|entry| entry.discovery_id.map(|id| (id, entry.display_name)))
+        // #1257: a pinned launch may only be *advertised* rows it would also
+        // serve. Discovery adds rows and cannot subtract them from the
+        // harness's built-in catalog (DD-054), but the gateway's own listing
+        // is clud's to filter -- and the refusal path backs it up for any row
+        // the harness already knew.
+        .filter(|(id, _)| provider_catalog::model_allowlist_allows(&config.allowed_models, id))
         .collect::<Vec<_>>();
     // #1021: unified had no `catalog_advertised` entry, which mattered more
     // here than on the direct route -- that one advertises a fixed three rows,
@@ -1218,11 +1238,19 @@ fn serve_unified_catalog(
     let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
 }
 
-fn serve_codex_catalog(stream: &mut TcpStream, log: Option<&SharedBridgeLog>) {
+fn serve_codex_catalog(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    log: Option<&SharedBridgeLog>,
+) {
     let advertised = provider_catalog::MODELS
         .iter()
         .filter(|entry| entry.provider == ModelProvider::Codex)
         .filter_map(|entry| entry.discovery_id.map(|id| (id, entry.display_name)))
+        // #1257: same rule as the unified catalog -- a pinned launch is
+        // advertised only rows it would also serve (plus the route's own
+        // injected role rows, which the launch folds into this allowlist).
+        .filter(|(id, _)| provider_catalog::model_allowlist_allows(&config.allowed_models, id))
         .collect::<Vec<_>>();
     record_catalog_advertised(
         log,
@@ -1581,6 +1609,12 @@ fn serve_unified_messages(
         })
         .to_string();
         let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+        return;
+    }
+    // #1257: a known model that the launch's allowlist does not admit is the
+    // pin doing its job -- refused here rather than at the upstream, with the
+    // boundary named so the fix is one line to read.
+    if refuse_if_outside_allowlist(stream, log, &config.allowed_models, model) {
         return;
     }
     // What one descent step will send. `model` is `None` only for an ordinary
@@ -2307,6 +2341,12 @@ fn serve_codex_discovery_messages(
         })
         .to_string();
         let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+        return;
+    }
+    // #1257: the launch's allowlist governs this route too. Claude-prefixed
+    // and haiku ids pass through `allowlist_refusal`'s exemptions, so
+    // DD-038's substitution and the harness's side-model calls are untouched.
+    if refuse_if_outside_allowlist(stream, log, &config.allowed_models, base) {
         return;
     }
     // #1007: a built-in Anthropic row picked in `/model` arrives here as a
@@ -3062,6 +3102,59 @@ fn record_model_rejection(
             "model": model,
         }));
     }
+}
+
+/// Why `model` may not be served on a pinned launch (#1257), or `None` when
+/// it may. An empty allowlist means unconstrained -- byte-for-byte the
+/// pre-#1257 behavior.
+///
+/// Two exemptions, both because the id that reaches an upstream is never
+/// billed outside the pin (DD-077):
+/// - a `haiku`-named id is the harness's side-model machinery -- the same
+///   substring `is_anthropic_main_model_pick` keys on;
+/// - a `claude*` id is served *as the launch selection* on the Codex route
+///   (DD-038's substitution) and proxied on the caller's own Claude
+///   credential on the unified route. Neither touches the pinned provider's
+///   key, and refusing would break the harness's own side-model calls, which
+///   share the prefix (#1007).
+fn allowlist_refusal(allowed: &[String], model: &str) -> Option<String> {
+    if allowed.is_empty() {
+        return None;
+    }
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.contains("haiku") || lower.starts_with("claude") {
+        return None;
+    }
+    if provider_catalog::model_allowlist_allows(allowed, model) {
+        return None;
+    }
+    Some(provider_catalog::model_allowlist_refusal(allowed, model))
+}
+
+/// Write the 400 every pinned route answers with (#1257): an
+/// `invalid_request_error` whose message names the allowlist, recorded like
+/// every other model rejection so a wedged session still leaves evidence.
+/// Returns `true` when a response was written and the caller must return.
+fn refuse_if_outside_allowlist(
+    stream: &mut TcpStream,
+    log: Option<&SharedBridgeLog>,
+    allowed: &[String],
+    model: &str,
+) -> bool {
+    let Some(message) = allowlist_refusal(allowed, model) else {
+        return false;
+    };
+    record_model_rejection(log, 400, "model_not_allowed", model);
+    let body = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": message,
+        }
+    })
+    .to_string();
+    let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+    true
 }
 
 /// The model IDs a `GET /v1/models` advertised (#999).
@@ -5019,6 +5112,195 @@ Connection: close
             "{text}"
         );
         assert!(!text.contains(&bearer), "{text}");
+    }
+
+    // -----------------------------------------------------------------
+    // #1257: the launch allowlist at the bridge.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_model_outside_the_launch_allowlist_is_refused_with_the_boundary_named() {
+        let upstream = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let config = bridged_config(&upstream)
+            .with_allowed_models(vec!["codex-terra".to_string()])
+            .with_log_path(log_path.clone());
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        let body = PROBE_BODY.replace("claude-x", "gpt-5.6-sol");
+        let refused = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", &bearer, &body),
+        );
+        assert_eq!(status(&refused), 400, "{refused}");
+        let payload = captured_body(&refused);
+        assert!(payload.contains("gpt-5.6-sol"), "{payload}");
+        assert!(payload.contains("codex-terra"), "{payload}");
+        assert!(payload.contains("not allowed for this launch"), "{payload}");
+        assert!(
+            upstream.requests().is_empty(),
+            "a refused model must not reach the upstream"
+        );
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            text.contains(r#""model":"gpt-5.6-sol","reason":"model_not_allowed""#),
+            "{text}"
+        );
+        assert!(!text.contains(&bearer), "{text}");
+    }
+
+    #[test]
+    fn an_in_allowlist_model_and_the_harness_side_models_flow_normally() {
+        let upstream = FakeResponses::start();
+        let config = bridged_config(&upstream).with_allowed_models(vec!["codex-terra".to_string()]);
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        // The pinned row itself, addressed by wire id: forwarded, 200.
+        let pinned = PROBE_BODY.replace("claude-x", "gpt-5.6-terra");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", &bearer, &pinned),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert_eq!(
+            upstream.requests().len(),
+            1,
+            "the in-allowlist model is forwarded"
+        );
+        // Exemption 1: the harness's side-model machinery shares the haiku
+        // substring and is served regardless of the boundary.
+        let haiku = PROBE_BODY.replace("claude-x", "claude-haiku-4-5-20251001");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", &bearer, &haiku),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        // Exemption 2: a claude* id is the DD-038 / #1007 substitution this
+        // route performs with the caller's own Claude credential -- refusing
+        // it would refuse clud's own translation.
+        let anthropic_pick = PROBE_BODY.replace("claude-x", "claude-opus-5");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", &bearer, &anthropic_pick),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        bridge.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_pinned_codex_catalog_only_advertises_rows_the_launch_would_serve() {
+        let upstream = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let config = bridged_config(&upstream)
+            .with_allowed_models(vec!["codex-terra".to_string()])
+            .with_log_path(log_path.clone());
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("GET", "/v1/models?limit=1000", &bearer, ""),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        let payload: serde_json::Value = serde_json::from_str(captured_body(&response)).unwrap();
+        let ids = payload["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"clud-claude-codex-terra"), "{ids:?}");
+        assert!(!ids.contains(&"clud-claude-codex-sol"), "{ids:?}");
+        assert!(!ids.contains(&"clud-claude-codex-luna"), "{ids:?}");
+        for id in &ids {
+            assert!(
+                provider_catalog::model_allowlist_allows(&["codex-terra".to_string()], id),
+                "advertised {id} is outside the launch allowlist"
+            );
+        }
+        bridge.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_unified_launch_refuses_and_logs_a_model_outside_its_allowlist() {
+        let fake = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let config = BridgeConfig::default()
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                    .with_upstreams(fake.base_url.clone(), fake.base_url.clone()),
+            )
+            .with_allowed_models(vec!["deepseek-v4-pro".to_string()])
+            .with_log_path(log_path.clone());
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        // Outside the boundary: refused before any upstream is touched.
+        let outside = PROBE_BODY.replace("claude-x", "deepseek-flash");
+        let refused = unified_request(&bridge, &outside, "pin-refused", None);
+        assert_eq!(status(&refused), 400, "{refused}");
+        let payload = captured_body(&refused);
+        assert!(payload.contains("deepseek-flash"), "{payload}");
+        assert!(payload.contains("deepseek-v4-pro"), "{payload}");
+        assert!(payload.contains("not allowed for this launch"), "{payload}");
+        assert!(
+            fake.requests().is_empty(),
+            "a refused model must not reach any upstream"
+        );
+        // Inside the boundary: served normally.
+        let inside = PROBE_BODY.replace("claude-x", "deepseek-v4-pro");
+        let served = unified_request(&bridge, &inside, "pin-served", None);
+        assert_eq!(status(&served), 200, "{served}");
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            text.contains(r#""model":"deepseek-flash","reason":"model_not_allowed""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_unified_catalog_only_advertises_rows_the_launch_would_serve() {
+        let fake = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let config = BridgeConfig::default()
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                    .with_upstreams(fake.base_url.clone(), fake.base_url.clone()),
+            )
+            .with_allowed_models(vec!["deepseek-flash".to_string()])
+            .with_log_path(log_path.clone());
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let token = bridge.bearer_token().to_string();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "GET",
+                "/v1/models?limit=1000",
+                "native-claude-credential",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, token.as_str())],
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        let payload: serde_json::Value = serde_json::from_str(captured_body(&response)).unwrap();
+        let ids = payload["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["clud-claude-deepseek-flash"], "{ids:?}");
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(text.contains(r#""event":"catalog_advertised""#), "{text}");
+        assert!(text.contains("clud-claude-deepseek-flash"), "{text}");
+        assert!(!text.contains("clud-claude-codex-terra"), "{text}");
     }
 
     #[test]
