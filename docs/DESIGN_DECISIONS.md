@@ -3533,6 +3533,7 @@ gateway into an Anthropic provider.
 
 ---
 
+<<<<<<< HEAD
 ## DD-076: daemon worker environments start from the OS login baseline
 
 **Context:** A daemon outlives the terminal that started it. Inheriting that
@@ -3622,3 +3623,40 @@ refused at the bridge with the allowlist in the message rather than silently
 relabelled. Only the inherited pin is announced, because an explicit pin is
 what the user just typed. The full slot contract is in
 [provider-selection.md](architecture/provider-selection.md#openrouter-model-selection-contract).
+## DD-078: OpenRouter context windows ride server-settings, refreshed from the provider's datasheet
+
+**Context:** Claude Code clamps auto-compact to 200k for any model its catalog
+does not describe, and clud only emits a window variable on an exact
+static-catalog hit. Live OpenRouter inventory is deliberately absent from that
+catalog (DD-054), so every newly listed OpenRouter model — starting with
+`xiaomi/mimo-v2.6-flash`, whose real window is 1M — compacted far too early
+(#1258). The fix needs exact windows for models clud has never heard of, kept
+current without a release, from a config file stored in this repo that
+downloads on its own.
+
+**Decision:** Fold OpenRouter's public datasheet
+(`GET https://openrouter.ai/api/v1/models`, `context_length` per row) into the
+server-settings document (DD-072) as a `model_contexts` section — a flat
+`{wire-id: tokens}` map — populated by a scheduled producer
+(`ci/refresh_model_contexts.py`, run daily by the repository's first cron
+workflow) that rewrites only its own section and exits non-zero on fetch or
+parse failures. At launch, the Anthropic-compat overlay sets
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` from that map when the catalog has no
+reviewed `claude_max_context_tokens` for the wire ID: catalog wins, ambient
+user values win, absent-in-both emits nothing.
+
+**Rationale:** The fetch, cache, last-known-good, and per-section validation
+machinery already exists and is the repo's single source for "changeable
+without a release"; a sibling document would fork that lifecycle and create a
+second owner per fact. Exact integers beat the harness's lossy `[1m]` boolean,
+and teaching the harness the real window beats
+`CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT`, which only restores
+wait-for-the-API failure at the limit. Catalog-wins keeps the reviewed goldens
+(DeepSeek 786432, Kimi 1048576, Codex 1050000) authoritative.
+
+**Consequences:** A new OpenRouter model's window reaches installed builds in
+roughly twenty minutes after listing, with no release and no catalog edit,
+preserving DD-054's boundary. A datasheet shape change turns the daily run red
+for review instead of silently shrinking the map. The bounds are mirrored in
+the producer and in `ModelContexts::validate`; changing one without the other
+turns CI red.
