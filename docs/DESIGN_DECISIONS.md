@@ -3530,3 +3530,36 @@ Sonnet-role work to Terra. The general picker limitation in DD-054 remains:
 discovery cannot remove built-in Anthropic rows, and a user can still select
 one. The aliases make that normal workflow path correct; they do not turn the
 gateway into an Anthropic provider.
+
+---
+
+## DD-076: daemon worker environments start from the OS login baseline
+
+**Context:** A daemon outlives the terminal that started it. Inheriting that
+first terminal's environment made every later worker depend on an accident of
+auto-start ordering: an activated virtual environment, transient toolchain
+shim, or stale `PATH` could survive for days after the initiating shell exited.
+The client overlay from #1157 fixes values the client sends, but cannot remove a
+stale value that the current client does not contain.
+
+**Decision:** The daemon materializes a standard login environment at startup,
+refreshes it on every session admission plus a five-minute idle backstop, and
+persists that exact base in each `WorkerLaunchSpec`. POSIX obtains it from a
+bounded, clear-environment login-shell evaluation; Windows obtains it from the
+machine and user environment registry keys, with normal `PATH` composition and
+expand-string handling. Daemon-private protocol/lifecycle values layer above
+that base; the initiating client's environment layers above both.
+
+**Rationale:** The OS/login layer is deterministic for an account and excludes
+an arbitrary session's activated state. Capturing it in the worker spec means a
+new refresh safely affects only future workers, while older serialized specs
+keep their legacy fallback during rolling upgrades. A `PATH` union would retain
+a stale prefix and reproduce the original shadowing problem, so client `PATH`
+is replacement-only.
+
+**Consequences:** A login profile that fails or exceeds the bounded evaluation
+time does not block sessions: the last known-good baseline remains in use.
+Session-specific exports must travel in the client environment; clud does not
+try to infer them from the daemon. Durable API session records still lack a
+client environment and remain on their separately documented compatibility
+path. The full contract is in [daemon environment](architecture/daemon-environment.md).
