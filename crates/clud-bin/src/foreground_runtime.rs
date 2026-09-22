@@ -323,6 +323,22 @@ impl ForegroundRuntime {
                     plan.allowed_models.join(", ")
                 ));
             }
+            // #1263: on the direct route clud is not in the request path, so
+            // the harness's own client timeout is the only thing watching a
+            // hung request -- and it used to be inherited and unlogged. Read
+            // the *effective* value back out of the overlay's env rather than
+            // restating the default, so an ambient `API_TIMEOUT_MS` is
+            // reported as what it is.
+            let effective_timeout = env
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("API_TIMEOUT_MS"))
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| DEFAULT_API_TIMEOUT_MS.to_string());
+            notices.push(format!(
+                "[clud] direct {} route: API timeout {} ms; a hung request cannot be detected by clud \
+                 on this route -- set API_TIMEOUT_MS to override",
+                descriptor.display_name, effective_timeout
+            ));
             (None, declared_hooks_settings(plan)?, notices)
         } else {
             (None, declared_hooks_settings(plan)?, Vec::new())
@@ -1009,6 +1025,20 @@ fn apply_anthropic_compat_overlay(
     if let Some(window) = crate::server_settings::effective_context_window(model) {
         push_default(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS", &window.to_string());
     }
+    // #1263: the direct route is the one launch shape where clud is *not* in
+    // the request path -- Claude Code talks to the provider itself, so clud
+    // can neither see the model stream nor time it out. The only lever here is
+    // the harness's own client timeout, and until now this overlay was the one
+    // route that never set it: a direct `--openrouter` launch silently
+    // inherited the harness's undocumented default, and clud neither set nor
+    // logged it. A hung request then stalled with nothing anywhere watching.
+    //
+    // `push_default`, so an explicit `API_TIMEOUT_MS` from the user's
+    // environment still wins (the same precedence DD-059 gives
+    // `CLAUDE_CODE_EFFORT_LEVEL`). The value is the same one the cross-route
+    // and unified overlays already push, so every route now agrees, and the
+    // launch notice in `start_with_secret_store` names it out loud.
+    push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
 }
 
 fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, BridgeError> {
@@ -2173,7 +2203,9 @@ mod tests {
     /// pre-refactor baseline that was confirmed green before this function
     /// was touched. Second delta (DD-059): the `CLAUDE_CODE_EFFORT_LEVEL`
     /// pin is gone -- effort travels on the harness's `--effort` flag and the
-    /// overlay neither injects nor scrubs it.
+    /// overlay neither injects nor scrubs it. Third delta (#1263): the overlay
+    /// now pushes `API_TIMEOUT_MS` like every other route, so a direct launch
+    /// no longer inherits the harness's undocumented client timeout.
     #[test]
     fn golden_anthropic_compat_overlay_default_selection() {
         let mut env = Vec::new();
@@ -2218,6 +2250,7 @@ mod tests {
                     "ANTHROPIC_MODEL".to_string(),
                     "deepseek-flash[1m]".to_string()
                 ),
+                ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
                 (
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
                     "786432".to_string()
@@ -2234,7 +2267,9 @@ mod tests {
     /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set. Same deltas as above: only
     /// the new `ANTHROPIC_DEFAULT_FABLE_MODEL` pin is added relative to the
     /// confirmed pre-refactor baseline, and no `CLAUDE_CODE_EFFORT_LEVEL`
-    /// pin is emitted even for an explicitly selected effort (DD-059).
+    /// pin is emitted even for an explicitly selected effort (DD-059). The
+    /// `API_TIMEOUT_MS` push (#1263) is present here too -- it is emitted
+    /// unconditionally by the overlay, not only for the default selection.
     #[test]
     fn golden_anthropic_compat_overlay_auto_context_selection_has_no_compact_window() {
         let selection = crate::provider_catalog::resolve(
@@ -2284,6 +2319,7 @@ mod tests {
                     "deepseek-v4-pro".to_string()
                 ),
                 ("ANTHROPIC_MODEL".to_string(), "deepseek-v4-pro".to_string()),
+                ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
                     "deepseek-flash[1m]".to_string()
@@ -2495,6 +2531,54 @@ mod tests {
             Some("ds-routing-secret")
         );
         assert_eq!(lookup(deepseek_direct.env(), "UNRELATED"), Some("kept"));
+    }
+
+    /// #1263: the direct anthropic-compat route is the one launch shape where
+    /// clud is not in the request path -- Claude Code talks to the provider
+    /// itself -- so the harness's own client timeout is the only thing watching
+    /// a hung request. Until this the overlay left `API_TIMEOUT_MS` unset on
+    /// that route: the user inherited an undocumented default, and nothing in
+    /// the launch said so. A hung turn then stalled with no watchdog anywhere.
+    #[test]
+    fn direct_anthropic_compat_launch_pushes_and_reports_an_api_timeout() {
+        let store = FakeSecretStore(Some("ds-timeout-secret".to_string()));
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::DeepSeek, Backend::Claude),
+            Vec::new(),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(lookup(runtime.env(), "API_TIMEOUT_MS"), Some("3000000"));
+        let notices = runtime.startup_notices.join(" ");
+        assert!(
+            notices.contains("API timeout 3000000 ms"),
+            "the direct route must say what its timeout is: {notices}"
+        );
+        assert!(
+            notices.contains("DeepSeek"),
+            "the notice must name the route it applies to: {notices}"
+        );
+    }
+
+    /// The push is a *default*, so a user who has already chosen a client
+    /// timeout keeps it, and the notice reports the value actually in effect
+    /// rather than restating the built-in (the precedence DD-059 established
+    /// for `CLAUDE_CODE_EFFORT_LEVEL`, applied to #1263).
+    #[test]
+    fn direct_anthropic_compat_launch_keeps_an_ambient_api_timeout() {
+        let store = FakeSecretStore(Some("ds-timeout-secret".to_string()));
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::DeepSeek, Backend::Claude),
+            vec![("API_TIMEOUT_MS".to_string(), "45000".to_string())],
+            &store,
+        )
+        .unwrap();
+        assert_eq!(lookup(runtime.env(), "API_TIMEOUT_MS"), Some("45000"));
+        let notices = runtime.startup_notices.join(" ");
+        assert!(
+            notices.contains("API timeout 45000 ms"),
+            "the notice must report the effective value, not the default: {notices}"
+        );
     }
 
     #[test]
@@ -2909,7 +2993,7 @@ mod tests {
     /// #936's exact documented profile: every default-model slot *and* the
     /// subagent slot pin to `kimi-k3[1m]` (unlike DeepSeek, whose
     /// haiku/subagent slots use a cheaper flash model), compact window
-    /// 1048576, effort max.
+    /// 1048576, effort max, and the route-agnostic `API_TIMEOUT_MS` (#1263).
     #[test]
     fn golden_kimi_overlay_default_selection() {
         let mut env = Vec::new();
@@ -2950,6 +3034,7 @@ mod tests {
                     "kimi-k3[1m]".to_string()
                 ),
                 ("ANTHROPIC_MODEL".to_string(), "kimi-k3[1m]".to_string()),
+                ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
                 (
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
                     "1048576".to_string()

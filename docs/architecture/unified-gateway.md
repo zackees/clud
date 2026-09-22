@@ -96,6 +96,19 @@ The same level name is calibrated differently by each model. Diagnostics may
 name the public provider/effort, but never credentials, prompts, reasoning
 content, response bodies, or provider-private state.
 
+## Hung upstreams
+
+The proxy hop's budget is *idle*, not total: it reads through an agent with
+`timeout_read` set to `stream_idle_timeout`, so a model that thinks for minutes
+while emitting deltas is never cut off, and a socket that stops producing bytes
+is noticed after that many seconds of silence. Idleness is measured on received
+bytes, never on turn duration — a long think and a hang are identical by
+wall-clock alone. A failure before the first frame is a real status (a timeout
+answers 504 `timeout_error`, which the harness retries, rather than 502, which
+it does not); after the first frame the status is spent (DD-029), so the
+failure is reported in-band as a sanitized SSE `error` event instead of a
+clean-looking end of stream. See DD-028's amendment and DD-079.
+
 ## Acceptance matrix
 
 | Contract | Guardrail |
@@ -108,6 +121,9 @@ content, response bodies, or provider-private state.
 | Persisted wire IDs (`gpt-*`, `deepseek-*`) route to their own provider and never reach Anthropic | `unified_wire_ids_route_to_their_own_provider_not_anthropic` |
 | Native token counting proxied with Claude auth; synthetic and wire-ID routes 404; unknown reserved IDs fail locally | `unified_native_count_tokens_is_proxied_with_claude_auth` |
 | Native Claude, DeepSeek, and OpenRouter terminal usage is aggregated without changing streamed bytes | `unified_anthropic_routes_publish_exact_launch_wide_usage_to_statusline` |
+| A hung upstream answers 504 `timeout_error`, not a dead-route 502 | `a_hung_upstream_answers_504_not_502` |
+| A mid-stream stall is reported in-band, never closed like a clean end of stream | `a_stalled_upstream_stream_reports_an_in_band_error` |
+| The upstream budget is byte-idle: a long turn that keeps streaming is not cut off | `a_long_but_continuously_streaming_turn_is_not_cut_off` |
 | Ambient effort preservation and no global default injection | `unified_overlay_preserves_claude_credentials_and_enables_discovery`, `unified_overlay_does_not_inject_a_global_effort_default` |
 | Missing optional credentials emit one sanitized, actionable notice | `unified_missing_provider_notices_are_sanitized_and_actionable` |
 | Installed-client `--effort low|high|xhigh|max` request shape | `tests/test_real_claude_unified_effort.py` (opt in with `CLUD_REAL_CLAUDE_TESTS=1`) |
