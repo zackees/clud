@@ -754,6 +754,33 @@ fn local_loop_skills_never_pipe_a_download_into_a_shell() {
     }
 }
 
+/// #1273: a roll-up is not complete when the parent merely links to children.
+/// The bundled skill must route natural-language roll-up requests to GitHub's
+/// native hierarchy and verify the relationship in both directions.
+#[test]
+fn clud_issue_meta_mode_requires_native_sub_issues() {
+    let skill = BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == "clud-issue")
+        .expect("clud-issue must be bundled");
+    let frontmatter = parse_frontmatter(skill);
+    let triggers = frontmatter.triggers.join(" ").to_lowercase();
+    for phrase in ["meta issue", "roll up", "parent issue", "combine issues"] {
+        assert!(triggers.contains(phrase), "missing meta trigger: {phrase}");
+    }
+
+    let body = skill.skill_md;
+    for required in [
+        "/parent",
+        "/sub_issues",
+        "sub_issue_id",
+        "--paginate",
+        "native sub-issue",
+    ] {
+        assert!(body.contains(required), "meta mode missing {required}");
+    }
+}
+
 /// Both skills hinge on separating *local iteration* from *the subject matter
 /// being Docker or Actions*. The issue calls that boundary the main risk, and a
 /// trigger-happy skill becomes noise the model learns to ignore -- so the

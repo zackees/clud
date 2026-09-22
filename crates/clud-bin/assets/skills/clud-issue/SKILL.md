@@ -1,10 +1,11 @@
 ---
 name: clud-issue
-description: File a deeply-researched GitHub issue via investigate → investigate → post, returning a summary plus the issue URL. Files without interrogating the user — judgment calls are decided, then listed in the issue body so the user can edit them on GitHub.
+description: File a researched GitHub issue or roll existing issues into a native parent/sub-issue hierarchy. Investigates before posting and decides non-blocking judgment calls without interviewing the user.
 triggers:
   - When the user types "/clud-issue" with a topic or problem statement
   - When the user asks to "file an issue with research" or "open an issue after investigating"
   - When the user wants an issue filed and expects the agent to resolve scope itself
+  - When the user asks for a "meta issue", "roll up" issues, a "parent issue", or to "combine issues" under one parent
 ---
 <!-- managed-by: clud -->
 
@@ -15,7 +16,7 @@ File a GitHub issue informed by real research. Five hard rules:
 1. **Two investigation rounds, no interview** — resolve ambiguity from the code, not from the user. Never post after a single pass.
 2. **Question budget: 0 by default, 1 only if blocking.** Ask iff without the answer you cannot file *any* sensible issue (e.g. the user genuinely named neither a repo nor a topic). Priority, scope edges, exact wording, fix location → not blocking. Decide and document.
 3. **Decisions go in the issue body, not the chat.** Judgment calls land under a `## Decisions` section in the issue body so the user can edit them on GitHub. Never ratify-by-chat.
-4. **Post the issue** — finish with `gh issue create`. The deliverable is an issue URL, not a draft in chat.
+4. **Complete the requested GitHub object** — file an ordinary issue with `gh issue create`; for a meta issue, also attach existing children as native sub-issues. Body links alone are not a roll-up.
 5. **Surface strong duplicates only** — search existing issues; mention related issues *only* when similarity is strong (same component + overlapping intent). Don't pad the report with weak matches. End with a short summary of what was filed and the URL — nothing else.
 
 ## Forge support
@@ -95,6 +96,17 @@ Don't log or persist tokens; rely on the user's existing auth.
 
 If the issue is for a bug fix or feature implementation, acceptance criteria must require RED -> GREEN evidence: a focused failing test/repro before coding, followed by the implementation that turns that signal green.
 
+## Meta-issue mode
+
+Use this mode when the user asks for a meta issue, rolls issues up, creates a parent issue, or combines issues **under a parent**. It applies whether the parent is new or already exists. Do not treat an ordinary request to mention related issues as a hierarchy request. Keep the two investigation rounds below for the parent body, but replace the ordinary post step with the native relationship workflow here.
+
+1. Resolve the repository, parent (if supplied), and intended children. Read each issue and its current parent before mutating anything. On GitHub, `gh api repos/OWNER/REPO/issues/CHILD/parent` returns the current parent; a 404 can mean no parent only after confirming the child itself exists and is accessible. A child already under the requested parent is done. A child under a different parent is a conflict: report it, and never silently reparent or set `replace_parent`.
+2. Create a new parent with `gh issue create --repo OWNER/REPO ...` only if needed. Make its body a readable coordination summary with links, not a duplicate progress checklist. For a *new* child, `gh issue create --parent PARENT` can establish the relationship at creation. For each **existing** child, obtain its numeric issue `id` (`gh api repos/OWNER/REPO/issues/CHILD --jq .id`) and attach with `gh api --method POST repos/OWNER/REPO/issues/PARENT/sub_issues -F sub_issue_id=ID`. The API takes the global numeric `id`, not the `#CHILD` issue number; GitHub requires child and parent to have the same repository owner. Pace bulk writes to avoid secondary rate limits.
+3. Verify the parent with `gh api --paginate repos/OWNER/REPO/issues/PARENT/sub_issues` and verify each requested child's `/parent` points to the parent. An existing parent may have unrelated children: preserve them and verify the *requested set is present*, not that the parent has no extras. If an attachment fails, report the unattached issue numbers and the reason. Never claim completion on partial success; keep the parent URL and successful attachments visible for a safe retry.
+4. A Markdown link or checkbox is useful prose but never substitutes for a native sub-issue. On a forge with native hierarchy, use its equivalent relationship and verify it. If the forge lacks it or the required CLI/auth is unavailable, say that a link-only tracker is not the requested hierarchy; do not claim the roll-up is complete.
+
+For GitHub API details, use https://docs.github.com/en/rest/issues/sub-issues. The parent and child reads are part of the completion check, not optional diagnostics.
+
 ## Workflow
 
 1. **Read the prompt at face value.** If the user named the repo, that's the repo. If they named the bug, that's the bug. Do NOT re-derive specifics the user already gave you.
@@ -104,7 +116,7 @@ If the issue is for a bug fix or feature implementation, acceptance criteria mus
 5. **Search for duplicates.** `gh issue list --repo <repo> --search "<keywords>" --state all` (open + closed). Only flag issues with strong similarity — same component *and* overlapping intent. Weak keyword matches don't count.
 6. **Decide on defaults.** For each judgment call (priority, severity, scope edges, fix-location guess, acceptance criteria) pick a sensible default. Each default gets a one-line justification in the body's **Decisions** section.
 7. **Draft the issue.** Title in conventional style (`feat:`, `fix:`, `chore:`, etc.). Body sections: **Context**, **Proposal**, **Acceptance criteria**, **Decisions**, **Open questions** (if any remain), **Related issues** (only if strong matches found). For bug/feature work, acceptance criteria must include RED -> GREEN test evidence. No filler.
-8. **Post.** `gh issue create --repo <repo> --title "..." --body "$(cat <<'EOF' ... EOF)"`. Use a heredoc so formatting survives. Post it — do not show a draft and wait for approval first.
+8. **Post.** For an ordinary issue, `gh issue create --repo <repo> --title "..." --body "$(cat <<'EOF' ... EOF)"`. Use a heredoc so formatting survives. For a meta issue, follow the native relationship workflow above after creating or locating the parent. Post it — do not show a draft and wait for approval first.
 9. **Report.** Give the user: a 2-3 sentence summary of what was filed, then the issue URL. If strong related issues exist, mention them in one line above the URL. Nothing else.
 
 ## What counts as a blocking question
