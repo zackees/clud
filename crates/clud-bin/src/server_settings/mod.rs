@@ -22,7 +22,10 @@ use std::time::SystemTime;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-pub use sections::{deepseek, provider_default_model, provider_subagent_model, DeepSeekSettings};
+pub use sections::{
+    deepseek, effective_context_window, model_contexts, provider_default_model,
+    provider_subagent_model, DeepSeekSettings, ModelContexts,
+};
 
 /// The built-in copy, and the single source of the file served from `main`.
 pub const EMBEDDED_JSON: &str = include_str!("../../assets/server-settings.json");
