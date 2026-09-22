@@ -1384,6 +1384,17 @@ names `gpt-5.6-sol` deliberately — it asserts against a real upstream error
 message that happens to mention that id, and renaming it would weaken the
 regression it guards.
 
+**Amendment (2026-09-21, #1254):** The reviewed direct Codex default is now
+`gpt-5.6-sol` at its catalog-native `low` effort. Model/effort selection,
+source provenance, cache-health protection, and live usage visibility landed
+after #776, so the prior unobservable hardcoded-Sol failure mode no longer
+describes the launch path. The catalog remains the single authority and feeds
+both native Codex and Codex-through-Claude; explicit CLI and saved provider
+profiles still win, unified mode remains harness-owned, and the Claude
+overlay's separate Opus-to-Sol / Sonnet-to-Terra delegation aliases are
+unchanged. Wire-level fake-upstream tests pin both the billed model and effort
+so this policy cannot drift silently.
+
 ## DD-035: Codex model and effort travel in the model string, not beside it
 
 **Status:** Accepted

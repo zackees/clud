@@ -443,6 +443,14 @@ def test_dry_run_codex() -> None:
     assert data["effective_harness"] == "codex"
     assert data["provider_source"] == "cli"
     assert data["harness_source"] == "built_in_default"
+    assert data["model_selection"]["model"] == "codex-sol"
+    assert data["model_selection"]["wire_model"] == "gpt-5.6-sol"
+    assert data["model_selection"]["effort"] == "low"
+    assert data["model_selection"]["model_source"] == "catalog_default"
+    assert data["model_selection"]["effort_source"] == "catalog_default"
+    assert data["command"].count("gpt-5.6-sol") == 1
+    assert 'model_reasoning_effort="low"' in data["command"]
+    assert not any("terra" in arg or arg == "medium" for arg in data["command"])
 
 
 @pytest.mark.parametrize(
@@ -723,9 +731,66 @@ def test_dry_run_reports_independent_provider_and_harness() -> None:
     assert data["backend"] == "claude"
     assert "--harness" not in data["command"]
     model_index = data["command"].index("--model")
-    assert data["command"][model_index + 1] == "clud-claude-codex-terra"
+    assert data["model_selection"]["model"] == "codex-sol"
+    assert data["model_selection"]["wire_model"] == "gpt-5.6-sol"
+    assert data["model_selection"]["effort"] == "low"
+    assert data["model_selection"]["model_source"] == "catalog_default"
+    assert data["model_selection"]["effort_source"] == "catalog_default"
+    assert data["command"][model_index + 1] == "clud-claude-codex-sol"
     effort_index = data["command"].index("--effort")
-    assert data["command"][effort_index + 1] == "medium"
+    assert data["command"][effort_index + 1] == "low"
+    assert not any("terra" in arg or arg == "medium" for arg in data["command"])
+
+
+@pytest.mark.parametrize("harness", ["codex", "claude"])
+def test_saved_codex_profile_overrides_sol_low_default(
+    tmp_path: Path, harness: str
+) -> None:
+    home = tmp_path / harness / "home"
+    state_dir = tmp_path / harness / "state"
+    settings_dir = home / ".clud"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "codex": {"model": "codex-terra", "effort": "high"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with _copied_clud_tempdir() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        result = process.run(
+            [
+                str(launch),
+                "--dry-run",
+                "--codex",
+                "--harness",
+                harness,
+                "-p",
+                "hello",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_isolated_clud_env(source, home, state_dir),
+        )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_selection"]["model"] == "codex-terra"
+    assert data["model_selection"]["wire_model"] == "gpt-5.6-terra"
+    assert data["model_selection"]["effort"] == "high"
+    assert data["model_selection"]["model_source"] == "provider_setting"
+    assert data["model_selection"]["effort_source"] == "provider_setting"
+    if harness == "codex":
+        assert "gpt-5.6-terra" in data["command"]
+        assert 'model_reasoning_effort="high"' in data["command"]
+    else:
+        assert "clud-claude-codex-terra" in data["command"]
+        assert data["command"][data["command"].index("--effort") + 1] == "high"
 
 
 def test_dry_run_deepseek_carries_low_catalog_effort_on_the_session_flag() -> None:
@@ -1273,6 +1338,18 @@ def test_dry_run_rebase() -> None:
     prompt = data["command"][-1]
     assert "git fetch" in prompt
     assert "rebase" in prompt.lower()
+
+
+def test_dry_run_do_carries_completion_and_meta_issue_contracts() -> None:
+    result = _run("--dry-run", "--codex", "do", "https://github.com/o/r/issues/1")
+    assert result.returncode == 0, result.stderr
+    prompt = json.loads(result.stdout)["command"][-1]
+    assert "No cheating, no files left behind. Rebase to local origin when done." in prompt
+    assert "If the target is a meta issue" in prompt
+    assert "use AskUserQuestion to ask whether to run its" in prompt
+    assert "wait for the answer before invoking /clud-meta-work" in prompt
+    assert "/meta-issue or $meta-issue" in prompt
+    assert "assume parallel execution is approved and do not ask" in prompt
 
 
 def test_dry_run_fix() -> None:

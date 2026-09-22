@@ -205,6 +205,78 @@ fn deepseek_bridge_target() -> ResolvedLaunchTarget {
     }
 }
 
+fn args_with_codex_catalog_default() -> Args {
+    let mut args = parse(&["clud", "--codex"]);
+    args.resolved_model_selection = crate::provider_catalog::resolve_for_launch(
+        ModelProvider::Codex,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    args
+}
+
+#[test]
+fn native_codex_catalog_default_is_sol_at_low_effort() {
+    let args = args_with_codex_catalog_default();
+    let target =
+        crate::backend::resolve_launch_target(false, true, false, None, None, None).unwrap();
+    let plan = build_launch_plan_for_target(&args, target, "codex");
+    assert_eq!(
+        plan.command
+            .windows(2)
+            .filter(|pair| pair == &["-m", "gpt-5.6-sol"])
+            .count(),
+        1,
+        "{}",
+        plan.command.join(" ")
+    );
+    assert_eq!(
+        plan.command
+            .windows(2)
+            .filter(|pair| pair == &["-c", "model_reasoning_effort=\"low\""])
+            .count(),
+        1,
+        "{}",
+        plan.command.join(" ")
+    );
+    assert!(!plan
+        .command
+        .iter()
+        .any(|arg| arg.contains("terra") || arg == "medium"));
+}
+
+#[test]
+fn codex_through_claude_catalog_default_is_sol_at_low_effort() {
+    let args = args_with_codex_catalog_default();
+    let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert_eq!(
+        plan.command
+            .windows(2)
+            .filter(|pair| pair == &["--model", "clud-claude-codex-sol"])
+            .count(),
+        1,
+        "{}",
+        plan.command.join(" ")
+    );
+    assert_eq!(
+        plan.command
+            .windows(2)
+            .filter(|pair| pair == &["--effort", "low"])
+            .count(),
+        1,
+        "{}",
+        plan.command.join(" ")
+    );
+    assert!(!plan
+        .command
+        .iter()
+        .any(|arg| arg.contains("terra") || arg == "medium"));
+}
+
 fn deepseek_harness_target() -> ResolvedLaunchTarget {
     ResolvedLaunchTarget {
         routing_mode: RoutingMode::Direct,
@@ -550,12 +622,12 @@ fn model_less_bridge_effort_pins_the_reviewed_default_model() {
     assert!(plan
         .command
         .windows(2)
-        .any(|pair| pair == ["--model", "clud-claude-codex-terra"]));
+        .any(|pair| pair == ["--model", "clud-claude-codex-sol"]));
     assert!(plan
         .command
         .windows(2)
         .any(|pair| pair == ["--effort", "high"]));
-    assert_eq!(plan.codex_model.as_deref(), Some("gpt-5.6-terra@high"));
+    assert_eq!(plan.codex_model.as_deref(), Some("gpt-5.6-sol@high"));
 }
 
 #[test]
@@ -1145,6 +1217,12 @@ fn test_do_command_resolves_goal_prompt() {
 fn test_build_do_prompt_substitutes_url() {
     let prompt = build_do_prompt("https://example.com/thing");
     assert!(prompt.starts_with("/goal read https://example.com/thing"));
+    assert!(prompt.contains("No cheating, no files left behind. Rebase to local origin when done."));
+    assert!(prompt.contains("If the target is a meta issue"));
+    assert!(prompt.contains("use AskUserQuestion to ask whether to run its"));
+    assert!(prompt.contains("wait for the answer before invoking /clud-meta-work"));
+    assert!(prompt.contains("/meta-issue or $meta-issue"));
+    assert!(prompt.contains("assume parallel execution is approved and do not ask"));
     assert!(!prompt.contains("{url}"));
 }
 
@@ -1170,6 +1248,9 @@ fn test_build_do_prompt_treats_free_form_input_as_a_goal_not_a_url() {
         assert!(!prompt.starts_with("/goal read "), "prompt={prompt}");
         assert!(prompt.contains("validated, tested, pushed and merged"));
         assert!(prompt.contains("/clud-meta-work"));
+        assert!(
+            prompt.contains("No cheating, no files left behind. Rebase to local origin when done.")
+        );
     }
 }
 

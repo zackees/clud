@@ -2,6 +2,14 @@
 
 ## 2.8.12 - 2026-09-21
 
+- Direct Codex launches now use Codex Sol at low effort by default in both the
+  native Codex harness and the Claude harness bridge. Explicit CLI values and
+  saved Codex profiles still win, while unified routing and the bridge's
+  separate Opus/Sonnet delegation policy remain unchanged. The `do` goal
+  contract also requires a clean checkout rebased to local origin and asks
+  before parallelizing a detected meta issue; explicit `/meta-issue` /
+  `$meta-issue` assumes parallel execution. See zackees/clud#1254.
+
 - Linux release-wheel cleanup now resolves Soldr's target-prefixed `objcopy`
   rather than assuming `llvm-objcopy` is installed, restoring the ELF before
   trying the next toolchain-local candidate when an incompatible tool rejects
