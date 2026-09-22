@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "clud"
-version = "2.8.12"
+version = "2.8.13"
 dependencies = [
  "arboard",
  "base64",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-stub"
-version = "2.8.12"
+version = "2.8.13"
 dependencies = [
  "libc",
  "running-process",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "mock-agent"
-version = "2.8.12"
+version = "2.8.13"
 dependencies = [
  "libc",
  "serde_json",
@@ -2974,11 +2974,11 @@ dependencies = [
 
 [[package]]
 name = "probe-dll"
-version = "2.8.12"
+version = "2.8.13"
 
 [[package]]
 name = "probe-target"
-version = "2.8.12"
+version = "2.8.13"
 
 [[package]]
 name = "proc-macro-crate"
@@ -3828,7 +3828,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tap-gate"
-version = "2.8.12"
+version = "2.8.13"
 dependencies = [
  "running-process",
  "tempfile",
