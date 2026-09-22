@@ -308,6 +308,15 @@ harness. `--dry-run` resolves and reports `allowed_models` and
 OpenRouter vault, whereas a live `/model` inventory or request requires a
 stored OpenRouter credential.
 
+Because unknown full IDs pass through losslessly, the harness cannot know
+their context windows from its own catalog either; without guidance it clamps
+auto-compact to its 200k unknown-model default. clud fills that gap from the
+served [`model_contexts` section](server-settings.md#the-model_contexts-map-1258)
+— OpenRouter's own datasheet, refreshed on a schedule — so an uncataloged wire
+ID compacts at its real window (#1258). A reviewed catalog
+`claude_max_context_tokens` still wins when one exists, and an ambient
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` is never overwritten.
+
 #### Unified mode advertises exactly one OpenRouter row
 
 `--unified` makes clud the gateway, so OpenRouter's own live discovery is not

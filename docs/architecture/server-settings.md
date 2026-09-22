@@ -3,8 +3,8 @@
 Some values in clud must be changeable without a release, so they are served
 from this repository (#1192,
 [DD-072](../DESIGN_DECISIONS.md#dd-072-server-side-settings-are-one-baked-in-json-document-with-per-section-last-known-good)).
-Today the only such values are DeepSeek's model names, but the mechanism is
-general.
+Today the served values are DeepSeek's model names (#1192) and the OpenRouter
+model-context map (#1258), but the mechanism is general.
 
 ## The document
 
@@ -20,7 +20,8 @@ https://raw.githubusercontent.com/zackees/clud/main/crates/clud-bin/assets/serve
 {
   "schema_version": 1,
   "sections": {
-    "deepseek": { "default_model": "deepseek-flash", "subagent_model": "deepseek-flash[1m]" }
+    "deepseek": { "default_model": "deepseek-flash", "subagent_model": "deepseek-flash[1m]" },
+    "model_contexts": { "xiaomi/mimo-v2.6-flash": 1048576, "~anthropic/claude-sonnet-latest": 1000000 }
   }
 }
 ```
@@ -137,6 +138,33 @@ The same edit also becomes the built-in copy in the next release.
 4. **Read it.** Call `server_settings::snapshot().section::<YourSection>()`, or add
    a cached accessor like `server_settings::deepseek()`.
 
+## The `model_contexts` map (#1258)
+
+`model_contexts` is a flat `{ "<wire-id>": <context window in tokens> }` map of
+exact OpenRouter context windows. Claude Code clamps auto-compact to 200k for
+any model its own catalog does not describe, so without this map every newly
+listed OpenRouter model — starting with `xiaomi/mimo-v2.6-flash`, a 1M model —
+compacts far too early.
+
+- **Who reads it.** `server_settings::effective_context_window(wire_id)`,
+  called by the Anthropic-compat overlay in `foreground_runtime.rs`, which sets
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` for the launched wire ID. Resolution order:
+  a catalog row's reviewed `claude_max_context_tokens` wins when it has one;
+  otherwise the served map row; an ID in neither source emits nothing. An
+  ambient user-set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is preserved, and
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` stays catalog-owned (DeepSeek, Kimi).
+- **Who writes it.** `ci/refresh_model_contexts.py`, run daily at 04:17 UTC by
+  `.github/workflows/refresh-model-contexts.yml` — this repository's first
+  scheduled workflow. It fetches `https://openrouter.ai/api/v1/models` with
+  stdlib `urllib`, rewrites **only** this section, and exits non-zero when the
+  datasheet cannot be fetched or parsed, so a run fails loudly instead of
+  publishing an empty or stale map. The refreshed file is committed straight
+  to `main`; installed builds see it through the normal fetch-from-`main` path
+  in about 20 minutes.
+- **Bounds.** Keys are wire IDs: 1..=128 bytes of `[A-Za-z0-9._-/:~]`. Values
+  are `1_000..=10_000_000` tokens. The producer and `ModelContexts::validate`
+  mirror each other; changing one without the other turns CI red.
+
 ## Testing
 
 - **Unit tests** never read the cache or the network. Under `cfg(test)` the
@@ -146,6 +174,10 @@ The same edit also becomes the built-in copy in the next release.
 - **Subprocess test harnesses** set `CLUD_SERVER_SETTINGS=0`.
 - **The embedded file** is checked through `include_str!`, never by reading the
   source tree, because CI runs tests from a prebuilt bundle.
+- **The `model_contexts` producer** is tested by
+  `tests/test_refresh_model_contexts.py`, which replays a recorded datasheet
+  payload (`tests/fixtures/openrouter_models_sample.json`) through the
+  normalizer and never touches the network.
 
 ## Code map
 
@@ -155,13 +187,16 @@ The same edit also becomes the built-in copy in the next release.
 | `crates/clud-bin/src/server_settings/mod.rs` | `Section`, `SectionSpec`, document parsing, merge, `Snapshot`, process loading, controls |
 | `crates/clud-bin/src/server_settings/json.rs` | The strict JSON parser |
 | `crates/clud-bin/src/server_settings/store.rs` | Cache, refresh thread, backoff, fetch |
-| `crates/clud-bin/src/server_settings/sections.rs` | The section registry and the section types (DeepSeek) |
+| `crates/clud-bin/src/server_settings/sections.rs` | The section registry and the section types (DeepSeek, ModelContexts) |
+| `crates/clud-bin/assets/../../../ci/refresh_model_contexts.py` | The datasheet producer that rewrites the `model_contexts` section on a schedule (#1258) |
 
 Consumers:
 
 - `main.rs` reads the direct-launch DeepSeek default through
   `provider_default_model`.
 - `foreground_runtime.rs` fills DeepSeek's haiku and subagent slots through
-  `provider_subagent_model`.
+  `provider_subagent_model`, and emits `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+  through `effective_context_window` for wire IDs the catalog does not know
+  (#1258).
 
 See [provider selection](provider-selection.md#served-deepseek-model-names).

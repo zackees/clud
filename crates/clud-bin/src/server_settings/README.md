@@ -23,14 +23,19 @@ and the reasoning in
   `ureq` fetch.
 - `sections.rs` - the `SECTIONS` registry and the section types:
   `DeepSeekSettings`, with `deepseek()`, `provider_default_model()`, and
-  `provider_subagent_model()`.
+  `provider_subagent_model()`; and `ModelContexts` (#1258), with
+  `model_contexts()` and `effective_context_window()`, the exact context
+  window for a wire ID (catalog `claude_max_context_tokens` wins, then the
+  served OpenRouter datasheet row).
 
 ## Callers
 
 - `main.rs` calls `provider_default_model` for a direct launch when neither the
   CLI nor saved settings name a model.
-- `foreground_runtime.rs` calls `provider_subagent_model` when it builds the
-  child environment for an Anthropic-compatible provider.
+- `foreground_runtime.rs` calls `provider_subagent_model` and
+  `effective_context_window` when it builds the child environment for an
+  Anthropic-compatible provider — the latter teaching the harness an
+  uncataloged wire ID's exact context window (#1258).
 
 ## Adding a section
 

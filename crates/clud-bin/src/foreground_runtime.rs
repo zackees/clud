@@ -996,6 +996,19 @@ fn apply_anthropic_compat_overlay(
             window.to_string(),
         ));
     }
+    // Exact window from the served datasheet section (#1258), consulted only
+    // when neither catalog field knows this wire ID: a reviewed
+    // `claude_max_context_tokens` wins outright (see `effective_context_window`),
+    // and an ID in neither source emits nothing — unchanged behavior.
+    // Deliberately `push_default`: an ambient user-set value survives (this
+    // key is not in ANTHROPIC_COMPAT_CONFLICTING, same spirit as DD-059
+    // preserving CLAUDE_CODE_EFFORT_LEVEL). `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+    // is NOT set on this route — with the real window learned the harness
+    // derives its own threshold, and per-provider compact thresholds
+    // (DeepSeek/Kimi) remain a reviewed decision.
+    if let Some(window) = crate::server_settings::effective_context_window(model) {
+        push_default(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS", &window.to_string());
+    }
 }
 
 fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, BridgeError> {
@@ -3149,10 +3162,76 @@ mod tests {
             lookup(&child, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
             Some("1")
         );
+        // The default wire ID has a served datasheet row (#1258): OpenRouter
+        // advertises a 1M window for it, so the harness must not clamp at its
+        // 200k unknown-model default.
+        assert_eq!(
+            lookup(&child, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some("1000000")
+        );
         assert_eq!(
             lookup(&base, "ANTHROPIC_API_KEY"),
             Some("ambient-anthropic")
         );
+    }
+
+    fn openrouter_selection(model: &str) -> crate::provider_catalog::ResolvedModelSelection {
+        crate::provider_catalog::resolve(Some(ModelProvider::OpenRouter), Some(model), None, None)
+            .expect("model must parse")
+            .expect("an explicit model always resolves to a selection")
+    }
+
+    /// #1258: the reported bug — a live OpenRouter ID in neither catalog
+    /// source must still teach the harness its exact window at launch, so
+    /// auto-compact stops clamping a 1M model at 200k.
+    #[test]
+    fn direct_openrouter_launch_emits_the_served_window_for_an_uncataloged_model() {
+        let mut plan = plan(ModelProvider::OpenRouter, Backend::Claude);
+        plan.model_selection = Some(openrouter_selection("xiaomi/mimo-v2.6-flash"));
+        let store = FakeSecretStore(Some("openrouter-routing-secret".to_string()));
+        let runtime =
+            ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &store).unwrap();
+        assert_eq!(
+            lookup(runtime.env(), "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some("1048576")
+        );
+        // The compact threshold stays unset on this route: with the real
+        // window learned, the harness derives its own threshold (#1258).
+        assert_eq!(
+            lookup(runtime.env(), "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            None
+        );
+    }
+
+    #[test]
+    fn anthropic_compat_overlay_preserves_an_ambient_max_context_window() {
+        let mut env = vec![(
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
+            "4242".to_string(),
+        )];
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "openrouter-vault-secret",
+            openrouter_descriptor(),
+            Some(&openrouter_selection("xiaomi/mimo-v2.6-flash")),
+            &[],
+        );
+        // An explicit user-set window is never clobbered (DD-059's spirit).
+        assert_eq!(lookup(&env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("4242"));
+    }
+
+    #[test]
+    fn anthropic_compat_overlay_emits_no_window_for_an_id_in_neither_source() {
+        let mut env = Vec::new();
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "openrouter-vault-secret",
+            openrouter_descriptor(),
+            Some(&openrouter_selection("nonexistent/model-v9")),
+            &[],
+        );
+        assert_eq!(lookup(&env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), None);
+        assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
     }
 
     #[test]

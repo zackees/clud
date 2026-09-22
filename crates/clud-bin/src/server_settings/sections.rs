@@ -4,6 +4,7 @@
 //! its key and semantic checks, list it in [`SECTIONS`], and add its built-in
 //! value under `sections` in `assets/server-settings.json`.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -14,7 +15,10 @@ use crate::provider_catalog;
 
 /// Every section this build validates. A section missing here is treated as
 /// unknown: kept verbatim in the cache, never decoded.
-pub(crate) const SECTIONS: &[SectionSpec] = &[SectionSpec::of::<DeepSeekSettings>()];
+pub(crate) const SECTIONS: &[SectionSpec] = &[
+    SectionSpec::of::<DeepSeekSettings>(),
+    SectionSpec::of::<ModelContexts>(),
+];
 
 /// DeepSeek model names. DeepSeek renames API slugs in place
 /// (`deepseek-v4-flash` became `deepseek-flash` with V4.1-Flash), so these
@@ -71,6 +75,73 @@ pub fn provider_default_model(provider: ModelProvider) -> Option<&'static str> {
 /// Served haiku/subagent wire ID for `provider`, if its model names are served.
 pub fn provider_subagent_model(provider: ModelProvider) -> Option<&'static str> {
     (provider == ModelProvider::DeepSeek).then(|| deepseek().subagent_model.as_str())
+}
+
+/// Exact context windows by wire ID, served from OpenRouter's public model
+/// datasheet (#1258). The static catalog stays reviewed (DD-054); this map is
+/// machine-published on a schedule so newly listed models get their real
+/// window without a clud release. Keys are exact wire IDs (never a `[1m]`
+/// suffix — the harness interprets that itself), values are the datasheet's
+/// `context_length` in tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ModelContexts {
+    /// Flat `{ "<wire-id>": <context window in tokens> }`.
+    #[serde(flatten)]
+    pub windows: BTreeMap<String, u32>,
+}
+
+/// Datasheet bounds, mirrored by `ci/refresh_model_contexts.py`; change both
+/// together. Anything outside this range is corrupt data, not a window.
+const MIN_CONTEXT_TOKENS: u32 = 1_000;
+const MAX_CONTEXT_TOKENS: u32 = 10_000_000;
+const MAX_CONTEXT_MODEL_ID_LEN: usize = 128;
+
+impl Section for ModelContexts {
+    const KEY: &'static str = "model_contexts";
+
+    fn validate(&self) -> Result<(), String> {
+        for (model_id, tokens) in &self.windows {
+            if model_id.is_empty() || model_id.len() > MAX_CONTEXT_MODEL_ID_LEN {
+                return Err(format!(
+                    "model id {model_id:?} is empty or longer than \
+                     {MAX_CONTEXT_MODEL_ID_LEN} bytes"
+                ));
+            }
+            if !model_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'_' | b'-' | b'/' | b':' | b'~')
+            }) {
+                return Err(format!(
+                    "model id {model_id:?} contains characters outside the wire-ID charset"
+                ));
+            }
+            if !(MIN_CONTEXT_TOKENS..=MAX_CONTEXT_TOKENS).contains(tokens) {
+                return Err(format!(
+                    "{model_id}: context window {tokens} outside \
+                     {MIN_CONTEXT_TOKENS}..={MAX_CONTEXT_TOKENS}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Exact served context windows by wire ID (#1258).
+pub fn model_contexts() -> &'static ModelContexts {
+    static SETTINGS: OnceLock<ModelContexts> = OnceLock::new();
+    SETTINGS.get_or_init(|| super::snapshot().section())
+}
+
+/// The window to teach the harness for `wire_id` (#1258): the catalog's
+/// reviewed `claude_max_context_tokens` wins when it has one, otherwise the
+/// served datasheet row, and `None` when neither source knows the ID.
+pub fn effective_context_window(wire_id: &str) -> Option<u32> {
+    if let Some(tokens) = provider_catalog::model_by_wire_id(wire_id)
+        .and_then(|entry| entry.claude_max_context_tokens)
+    {
+        return Some(tokens);
+    }
+    model_contexts().windows.get(wire_id).copied()
 }
 
 #[cfg(test)]
@@ -167,5 +238,96 @@ mod tests {
                 "subagent {value:?}"
             );
         }
+    }
+
+    fn model_contexts_section(windows: serde_json::Value) -> Result<(), String> {
+        serde_json::from_value::<ModelContexts>(windows)
+            .map_err(|error| error.to_string())?
+            .validate()
+    }
+
+    #[test]
+    fn built_in_model_contexts_cover_the_live_inventory() {
+        let windows = &built_in::<ModelContexts>().windows;
+        assert!(!windows.is_empty());
+        // Day-one seed from the live datasheet (#1258). If a later scheduled
+        // refresh changes this value, that is a real window change worth
+        // reviewing, not a flake.
+        assert_eq!(windows.get("xiaomi/mimo-v2.6-flash"), Some(&1_048_576));
+        assert_eq!(
+            windows.get("~anthropic/claude-sonnet-latest"),
+            Some(&1_000_000)
+        );
+    }
+
+    #[test]
+    fn model_context_section_accepts_real_wire_ids_and_windows() {
+        assert_eq!(
+            model_contexts_section(serde_json::json!({
+                "xiaomi/mimo-v2.6-flash": 1_048_576u32,
+                "~anthropic/claude-sonnet-latest": 1_000_000u32,
+                "inclusionai/ling-3.0-flash-vl:free": 262_144u32,
+                "openai/gpt-3.5-turbo-0613": 4_095u32,
+                "openrouter/auto-beta": 2_000_000u32,
+                "deepseek/deepseek-chat:free": 131_072u32,
+            })),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn model_context_section_bounds_windows_and_rejects_non_model_ids() {
+        // Bounds: the mirror of ci/refresh_model_contexts.py's constants.
+        let valid = serde_json::json!({"xiaomi/mimo-v2.6-flash": 1_048_576u32});
+        for tokens in [0u32, 999, 10_000_001] {
+            let mut windows = valid.clone();
+            windows["xiaomi/mimo-v2.6-flash"] = serde_json::json!(tokens);
+            assert!(
+                model_contexts_section(windows).is_err(),
+                "window {tokens} must be rejected"
+            );
+        }
+        // Keys that are not wire IDs.
+        for bad_id in [
+            "",
+            "bad id",
+            "bad!",
+            "bracket[1m]",
+            "x".repeat(129).as_str(),
+        ] {
+            let mut windows = serde_json::json!({});
+            windows[bad_id] = serde_json::json!(200_000u32);
+            assert!(
+                model_contexts_section(windows).is_err(),
+                "id {bad_id:?} must be rejected"
+            );
+        }
+        // Wrong value types fail the typed decode before validate() runs.
+        for bad_value in [
+            serde_json::json!("200000"),
+            serde_json::json!(1_048_576.5),
+            serde_json::json!(-5),
+        ] {
+            let windows = serde_json::json!({"xiaomi/mimo-v2.6-flash": bad_value});
+            assert!(model_contexts_section(windows).is_err());
+        }
+    }
+
+    #[test]
+    fn effective_context_window_prefers_the_catalog_then_the_served_map() {
+        // Catalog wins: the Codex row carries a reviewed
+        // `claude_max_context_tokens`, and the served map has no such key.
+        assert_eq!(effective_context_window("gpt-5.6-sol"), Some(1_050_000));
+        assert!(!model_contexts().windows.contains_key("gpt-5.6-sol"));
+        // Served map: uncataloged OpenRouter IDs resolve from the datasheet.
+        assert_eq!(
+            effective_context_window("xiaomi/mimo-v2.6-flash"),
+            Some(1_048_576)
+        );
+        // Neither source: nothing, which leaves today's behavior unchanged.
+        assert_eq!(
+            effective_context_window("definitely/not-a-real-model"),
+            None
+        );
     }
 }
