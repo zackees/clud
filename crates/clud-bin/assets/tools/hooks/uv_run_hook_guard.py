@@ -33,7 +33,7 @@ etc.) the referenced script is read and grepped for the same anti-
 pattern, so a hook that wraps the offender through a shell file gets
 flagged too.
 
-Invoked via `clud tool run hooks/uv_run_hook_guard.py` so UV_CACHE_DIR
+Invoked via `"$CLUD_EXE" tool run hooks/uv_run_hook_guard.py` so UV_CACHE_DIR
 is pinned to ~/.clud/cache/uv (issue #408 three-layer enforcement) and
 managed install lifecycle preserves user edits.
 """

@@ -36,11 +36,11 @@ destructive action while more than one candidate stays plausible.
 
 Usage:
 
-    clud tool run docker/docker_recover.py doctor
-    clud tool run docker/docker_recover.py gc [--age-hours N] [--dry-run]
-    clud tool run docker/docker_recover.py restart [--yes]
-    clud tool run docker/docker_recover.py reset [--yes]
-    clud tool run docker/docker_recover.py disk [--action compact|prune|delete|reset] \
+    "$CLUD_EXE" tool run docker/docker_recover.py doctor
+    "$CLUD_EXE" tool run docker/docker_recover.py gc [--age-hours N] [--dry-run]
+    "$CLUD_EXE" tool run docker/docker_recover.py restart [--yes]
+    "$CLUD_EXE" tool run docker/docker_recover.py reset [--yes]
+    "$CLUD_EXE" tool run docker/docker_recover.py disk [--action compact|prune|delete|reset] \
         [--select <path>] [--yes]
 
 Subcommands:
@@ -123,7 +123,7 @@ READY_INTERVAL_SECONDS = 2.0
 # 20s bounded poll above (10 x 2s) reports "not ready" long before the engine
 # has had a chance. Restart/reset use this longer budget instead.
 READY_ATTEMPTS_COLD = 60
-# Issue #891: the clud tool runner aborts a child that emits nothing for
+# Issue #891: the "$CLUD_EXE" tool runner aborts a child that emits nothing for
 # 120s. Any wait longer than this must print a heartbeat.
 PROGRESS_HEARTBEAT_SECONDS = 15.0
 HELLO_WORLD_TIMEOUT_SECONDS = 120.0
@@ -1230,7 +1230,7 @@ def wait_for_docker(
     Issue #891: callers recovering from a *cold* start pass
     `READY_ATTEMPTS_COLD`, because Docker Desktop routinely needs 60-120s
     while the default 10 x 2s budget declares failure at 20s. Every attempt
-    prints, so the poll keeps the clud tool runner's progress heartbeat alive
+    prints, so the poll keeps the "$CLUD_EXE" tool runner's progress heartbeat alive
     instead of being killed at 120s with exit 124.
     """
     sink = out or sys.stderr
@@ -1621,7 +1621,7 @@ def _run_recovery(args: argparse.Namespace, *, label: str) -> int:
         out.write(f"  launch: {detail}\n")
         # Issue #891: this loop is the longest silent stretch of a recovery
         # (a hard reset can spend 60s in `wsl --shutdown` alone), and the
-        # clud tool runner kills a child that prints nothing for 120s. Flush
+        # "$CLUD_EXE" tool runner kills a child that prints nothing for 120s. Flush
         # each line rather than letting a pipe buffer them all to the end.
         out.flush()
     # Issue #891: both labels are recovering from a COLD Docker Desktop, and

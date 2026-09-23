@@ -12,7 +12,7 @@ Hook contract (mirrors Claude Code PostToolUse payloads):
 - Output: nothing actionable. This hook NEVER blocks a tool call —
   it ALWAYS exits 0 regardless of what happens internally.
 
-Invoked via `clud tool run hooks/telemetry.py` so UV_CACHE_DIR is pinned
+Invoked via `"$CLUD_EXE" tool run hooks/telemetry.py` so UV_CACHE_DIR is pinned
 to ~/.clud/cache/uv per the three-layer enforcement (issue #408). clud
 auto-installs this file to ~/.clud/tools/hooks/telemetry.py on every
 startup; the `# managed-by: clud` marker above is what gates the
@@ -33,7 +33,7 @@ Recommended `~/.claude/settings.json` wiring (matcher "*", async):
       "matcher": "*",
       "hooks": [{
         "type": "command",
-        "command": "clud tool run hooks/telemetry.py",
+        "command": "\"$CLUD_EXE\" tool run hooks/telemetry.py",
         "async": true,
         "timeout": 30
       }]

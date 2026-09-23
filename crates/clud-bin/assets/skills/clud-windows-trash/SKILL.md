@@ -1,6 +1,6 @@
 ---
 name: clud-windows-trash
-description: Quarantine Windows-locked DLL/EXE/PYD artifacts with clud trash instead of retrying deletes or killing processes.
+description: Quarantine Windows-locked DLL/EXE/PYD artifacts with the launching clud executable's trash subcommand instead of retrying deletes or killing processes.
 triggers:
   - "When deleting *.dll, *.pyd, or *.exe on Windows fails with os error 32 or being used by another process"
   - "When a build fails because an output DLL, PYD, or EXE is locked"
@@ -10,7 +10,7 @@ triggers:
 
 # /clud-windows-trash
 
-Use `clud trash` when Windows refuses to delete freshly built native artifacts.
+Use `& $env:CLUD_EXE trash` in PowerShell when Windows refuses to delete freshly built native artifacts. The launcher sets `CLUD_EXE` to its own absolute path; outside a clud-launched session, set it to the intended binary first. In cmd, use `"%CLUD_EXE%" trash` instead.
 
 ## Code Change Rule
 
@@ -26,16 +26,16 @@ If trashing a locked artifact unblocks a bug fix or feature implementation, cont
 
 1. Do not retry `del`, `Remove-Item`, or `rm` in a loop.
 2. Do not run `taskkill` for guessed parent processes.
-3. Run `clud trash <path>` for the locked file or containing directory, then continue the build or cleanup.
-4. If `clud trash` reports a source/trash volume mismatch, pass `--cross-volume` only when the copy cost is acceptable: `clud trash --cross-volume <path>`.
+3. Run `& $env:CLUD_EXE trash <path>` for the locked file or containing directory, then continue the build or cleanup.
+4. If the trash command reports a source/trash volume mismatch, pass `--cross-volume` only when the copy cost is acceptable: `& $env:CLUD_EXE trash --cross-volume <path>`.
 
 ## Workflow
 
 1. Identify the smallest locked path that unblocks the build. Prefer the exact file; use the containing build-output directory when many siblings are blocked.
-2. Run `clud trash <path>`.
+2. Run `& $env:CLUD_EXE trash <path>`.
 3. If the command succeeds, proceed immediately. The clud daemon will retry deletion from `~/.clud/trash/` until Windows releases the lock.
 4. If cross-volume copy is required and acceptable, rerun with `--cross-volume`. Source removal after the copy is best-effort.
-5. To inspect pending cleanup, run `clud gc list --kind trash`.
+5. To inspect pending cleanup, run `& $env:CLUD_EXE gc list --kind trash`.
 
 ## Exit Guidance
 

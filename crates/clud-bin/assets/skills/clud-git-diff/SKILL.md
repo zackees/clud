@@ -26,8 +26,10 @@ Three hard rules:
 
 ## How to invoke
 
+The launcher exports `CLUD_EXE` as its own absolute path. The command below is Bash syntax; in PowerShell use `& $env:CLUD_EXE`, and in cmd use `"%CLUD_EXE%"`. Outside a clud-launched session, set `CLUD_EXE` to the intended binary's absolute path first.
+
 ```bash
-clud tool run git/clud-git-diff.py [LEFT [RIGHT]]
+"$CLUD_EXE" tool run git/clud-git-diff.py [LEFT [RIGHT]]
 ```
 
 Argument shape:
@@ -39,18 +41,18 @@ Example invocations and what they show:
 
 | User asks | Invoke with |
 |---|---|
-| "Show me the diff of the last 10 commits" | `clud tool run git/clud-git-diff.py HEAD~10 HEAD` |
-| "What changed since main?" | `clud tool run git/clud-git-diff.py main HEAD` |
-| "Diff this branch against main" | `clud tool run git/clud-git-diff.py main HEAD` |
-| "Show me what's in PR #N" (after fetching) | `clud tool run git/clud-git-diff.py main pr/N` |
-| "Diff abc123 and def456" | `clud tool run git/clud-git-diff.py abc123 def456` |
-| "Show me the diff" (no range) | `clud tool run git/clud-git-diff.py` — defaults to `HEAD~10..HEAD` |
+| "Show me the diff of the last 10 commits" | `"$CLUD_EXE" tool run git/clud-git-diff.py HEAD~10 HEAD` |
+| "What changed since main?" | `"$CLUD_EXE" tool run git/clud-git-diff.py main HEAD` |
+| "Diff this branch against main" | `"$CLUD_EXE" tool run git/clud-git-diff.py main HEAD` |
+| "Show me what's in PR #N" (after fetching) | `"$CLUD_EXE" tool run git/clud-git-diff.py main pr/N` |
+| "Diff abc123 and def456" | `"$CLUD_EXE" tool run git/clud-git-diff.py abc123 def456` |
+| "Show me the diff" (no range) | `"$CLUD_EXE" tool run git/clud-git-diff.py` — defaults to `HEAD~10..HEAD` |
 
 ## Workflow
 
 1. **Recognize the trigger.** The user wants to *see* a diff — they used words like "show", "view", "look at", "visual", or referenced specific revisions. They're not asking for a text dump (that's `git diff`).
 2. **Resolve the range.** Pick `LEFT` and `RIGHT` from what they said. If ambiguous, prefer `HEAD~10..HEAD`. Don't ask — surface what you chose in your one-line acknowledgment so they can correct on the next message if needed.
-3. **Invoke the tool.** `clud tool run git/clud-git-diff.py <left> <right>`.
+3. **Invoke the tool.** `"$CLUD_EXE" tool run git/clud-git-diff.py <left> <right>`.
 4. **Block until the window closes.** The tool exits when the user closes the native window; the agent's subprocess wait returns at that point. Do not poll, do not assume — just wait.
 5. **Pick up cleanly.** After the tool returns, briefly acknowledge: "diff viewer closed" and stand ready for the next message.
 
@@ -96,5 +98,5 @@ When in doubt: invoke the tool. The viewer is cheap to dismiss; not invoking it 
 
 - `crates/clud-bin/assets/tools/git/clud-git-diff.py` — the bundled tool source.
 - Issue #445 — original request that motivated this skill.
-- `clud tool run` — the dispatch entrypoint (sets `UV_CACHE_DIR` per the three-layer enforcement from #408).
+- `"$CLUD_EXE" tool run` — the dispatch entrypoint (sets `UV_CACHE_DIR` per the three-layer enforcement from #408).
 - `pywebview` upstream — native OS webview wrapper used by the tool. WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux.

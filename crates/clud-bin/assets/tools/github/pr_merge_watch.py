@@ -14,7 +14,7 @@ On non-success exits (and defensively on success), cancels still-running
 workflow runs on the PR's head SHA so we stop burning matrix minutes on
 results we've already decided to ignore.
 
-Invoked via `clud tool run github/pr_merge_watch.py …` so UV_CACHE_DIR
+Invoked via `"$CLUD_EXE" tool run github/pr_merge_watch.py …` so UV_CACHE_DIR
 is pinned to ~/.clud/cache/uv per the three-layer enforcement (see
 issue #408).
 

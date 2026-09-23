@@ -295,6 +295,12 @@ fn build_child_env_pins_tool_environment_and_strips_inherited_values() {
         "must pin exactly one UV_CACHE_DIR entry"
     );
     assert_eq!(uv_entries[0].1, "/some/clud/cache");
+    let clud_exe_entries: Vec<_> = env.iter().filter(|(k, _)| k == "CLUD_EXE").collect();
+    assert_eq!(clud_exe_entries.len(), 1);
+    assert_eq!(
+        clud_exe_entries[0].1,
+        std::env::current_exe().unwrap().to_str().unwrap()
+    );
     let daemon_spawn_entries: Vec<_> = env
         .iter()
         .filter(|(k, _)| k == crate::daemon::ENV_ALLOW_DAEMON_SPAWN)

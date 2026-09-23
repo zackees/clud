@@ -12,26 +12,28 @@ triggers:
 
 # /clud-docker-linux-build
 
-**Use the bundled tool — do not hand-write a Dockerfile.** The `clud tool run docker/docker-build.py` family ships verified Dockerfiles + entry scripts for Rust + soldr, uv-Python, and CMake + ccache. They're written to disk via `init`; the volume contract, path conversion, and mtime gotchas are already baked in.
+**Use the bundled tool — do not hand-write a Dockerfile.** The `"$CLUD_EXE" tool run docker/docker-build.py` family ships verified Dockerfiles + entry scripts for Rust + soldr, uv-Python, and CMake + ccache. They're written to disk via `init`; the volume contract, path conversion, and mtime gotchas are already baked in.
 
 ## Concrete entry point
 
+The launcher exports `CLUD_EXE` as its own absolute path. These examples use Bash quoting; in PowerShell use `& $env:CLUD_EXE`, and in cmd use `"%CLUD_EXE%"`. Outside a clud-launched session, set `CLUD_EXE` to the intended binary's absolute path first.
+
 ```
-clud tool run docker/docker-build.py soldr  <repo-root> init    # write Dockerfile to <repo>/.clud/docker-build/soldr/
-clud tool run docker/docker-build.py soldr  <repo-root> up      # build image + start container
-clud tool run docker/docker-build.py soldr  <repo-root> run -- soldr cargo check
-clud tool run docker/docker-build.py soldr  <repo-root> shell
-clud tool run docker/docker-build.py soldr  <repo-root> clean   # wipe THIS project's volumes; force cold next time
-clud tool run docker/docker-build.py soldr  <repo-root> gc      # dry-run: list reclaimable stale groups
-clud tool run docker/docker-build.py soldr  <repo-root> gc --force   # actually delete them
+"$CLUD_EXE" tool run docker/docker-build.py soldr  <repo-root> init    # write Dockerfile to <repo>/.clud/docker-build/soldr/
+"$CLUD_EXE" tool run docker/docker-build.py soldr  <repo-root> up      # build image + start container
+"$CLUD_EXE" tool run docker/docker-build.py soldr  <repo-root> run -- soldr cargo check
+"$CLUD_EXE" tool run docker/docker-build.py soldr  <repo-root> shell
+"$CLUD_EXE" tool run docker/docker-build.py soldr  <repo-root> clean   # wipe THIS project's volumes; force cold next time
+"$CLUD_EXE" tool run docker/docker-build.py soldr  <repo-root> gc      # dry-run: list reclaimable stale groups
+"$CLUD_EXE" tool run docker/docker-build.py soldr  <repo-root> gc --force   # actually delete them
 
-clud tool run docker/docker-build.py python <repo-root> init    # python stack (v0: init only)
-clud tool run docker/docker-build.py cpp    <repo-root> init    # cpp stack (v0: init only)
+"$CLUD_EXE" tool run docker/docker-build.py python <repo-root> init    # python stack (v0: init only)
+"$CLUD_EXE" tool run docker/docker-build.py cpp    <repo-root> init    # cpp stack (v0: init only)
 
-clud tool run docker/docker-build.py doctor                     # cross-stack health check
+"$CLUD_EXE" tool run docker/docker-build.py doctor                     # cross-stack health check
 ```
 
-The trampoline dispatches in-process to the right per-stack tool — invoking directly (`clud tool run docker/docker_build_soldr.py <repo> init`) is exactly equivalent, just less ergonomic.
+The trampoline dispatches in-process to the right per-stack tool — invoking directly (`"$CLUD_EXE" tool run docker/docker_build_soldr.py <repo> init`) is exactly equivalent, just less ergonomic.
 
 ## Reclaiming disk: `clean` vs `gc` (issue #518)
 

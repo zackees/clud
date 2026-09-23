@@ -11,14 +11,14 @@
 Dispatches to a per-stack tool (`docker_build_soldr.py`, `docker_build_python.py`,
 `docker_build_cpp.py`) based on the first positional argument. In-process
 dispatch via `importlib.util` so the trampoline is sugar — invoking
-`clud tool run docker/docker-build.py soldr <path> init` and
-`clud tool run docker/docker_build_soldr.py <path> init` produce literally
+`"$CLUD_EXE" tool run docker/docker-build.py soldr <path> init` and
+`"$CLUD_EXE" tool run docker/docker_build_soldr.py <path> init` produce literally
 identical behavior (same uv venv, same module objects, no subprocess fork).
 
 Invocation:
 
-    clud tool run docker/docker-build.py <stack> <path> [subcommand]
-    clud tool run docker/docker-build.py doctor
+    "$CLUD_EXE" tool run docker/docker-build.py <stack> <path> [subcommand]
+    "$CLUD_EXE" tool run docker/docker-build.py doctor
 
 `<stack>` is one of `soldr` / `python` / `cpp`. The special first arg `doctor`
 runs the cross-stack diagnostic (docker daemon up, clock skew, MSYS path
@@ -44,8 +44,8 @@ from pathlib import Path
 STACKS = ("soldr", "python", "cpp")
 
 USAGE = """\
-usage: clud tool run docker/docker-build.py <stack> <path> [subcommand]
-       clud tool run docker/docker-build.py doctor
+usage: "$CLUD_EXE" tool run docker/docker-build.py <stack> <path> [subcommand]
+       "$CLUD_EXE" tool run docker/docker-build.py doctor
 
 Stacks: soldr (Rust + soldr + zccache), python (uv-managed), cpp (CMake + ccache)
 Subcommands: init | up | run -- <cmd...> | shell | verify | clean | doctor

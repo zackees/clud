@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import signal
 import socket
@@ -123,6 +124,42 @@ class TestBackendSelection:
         assert result.returncode == 0
         report = _parse_agent_report(result)
         assert "claude" in report["program"].lower()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell PATH-poisoning fixture")
+    @pytest.mark.parametrize("use_daemon", [False, True])
+    def test_child_invokes_launching_clud_not_path_stub(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        use_daemon: bool,
+    ) -> None:
+        stub_dir = tmp_path / "path-first"
+        stub_dir.mkdir()
+        marker = tmp_path / "stub-was-called"
+        stub = stub_dir / "clud"
+        stub.write_text(
+            '#!/bin/sh\nprintf "called\\n" > "$CLUD_STUB_MARKER"\nprintf "STUB-CLUD 0.0.0\\n"\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        env = dict(mock_env)
+        env["PATH"] = f"{stub_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["CLUD_STUB_MARKER"] = str(marker)
+        env["MOCK_AGENT_CLUD_EXE_PROBE"] = "1"
+        args = [] if use_daemon else ["--no-daemon"]
+
+        result = _run(clud_binary, *args, "--claude", "--subprocess", "-p", "test", env=env)
+        assert result.returncode == 0, result.stderr
+        report = _parse_agent_report(result)
+        pinned = report["env"]["CLUD_EXE"]
+        assert pinned
+        assert Path(pinned).is_absolute()
+        assert report["clud_exe_probe"]["exit_code"] == 0
+        expected_version = run_clud([str(clud_binary), "--version"], timeout=10, env=mock_env)
+        assert report["clud_exe_probe"]["stdout"].strip() == expected_version.stdout.strip()
+        assert "STUB-CLUD" not in report["clud_exe_probe"]["stdout"]
+        assert not marker.exists(), "the PATH-first stub intercepted an internal invocation"
 
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object lifecycle")
@@ -654,6 +691,7 @@ class TestCodexBridgeForeground:
         assert "claude" in report["program"].lower()
         assert set(report["env"]) == {
             "IN_CLUD",
+            "CLUD_EXE",
             "RUNNING_PROCESS_ORIGINATOR",
             "ANTHROPIC_BASE_URL_PRESENT",
             "ANTHROPIC_AUTH_TOKEN_PRESENT",

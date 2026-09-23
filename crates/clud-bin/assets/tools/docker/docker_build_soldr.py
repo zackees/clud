@@ -22,7 +22,7 @@ volume. That single config change is the whole point of this tool.
 
 Usage:
 
-    clud tool run docker/docker_build_soldr.py <path> [subcommand]
+    "$CLUD_EXE" tool run docker/docker_build_soldr.py <path> [subcommand]
 
 Subcommands:
     init    Write Dockerfile + entry.sh + stack.toml under <path>/.clud/docker-build/soldr/
@@ -70,7 +70,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Toolchain caches live in named volumes so cold rebuilds amortize
-# across `clud tool run docker-build` invocations.
+# across `"$CLUD_EXE" tool run docker-build` invocations.
 ENV HOME=/root \
     CARGO_HOME=/cargo-home \
     CARGO_TARGET_DIR=/target \
@@ -114,7 +114,7 @@ CMD ["bash", "-l"]
 ENTRY_SH = r"""#!/usr/bin/env bash
 # managed-by: clud (docker_build_soldr.py)
 # Idle entry script — the tool execs `docker run` directly for one-shot
-# commands; this script is here so `clud tool run docker/docker_build_soldr.py up`
+# commands; this script is here so `"$CLUD_EXE" tool run docker/docker_build_soldr.py up`
 # has a long-running PID inside the container to attach against.
 set -euo pipefail
 exec tail -f /dev/null
@@ -142,7 +142,7 @@ SOLDR_TRUST_MODE = "permissive"
 """
 
 USAGE = """\
-usage: clud tool run docker/docker_build_soldr.py <path> <subcommand> [args]
+usage: "$CLUD_EXE" tool run docker/docker_build_soldr.py <path> <subcommand> [args]
 
 Subcommands: init | up | run -- <cmd...> | shell | verify | clean | doctor
 """

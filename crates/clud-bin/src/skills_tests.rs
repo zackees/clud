@@ -292,7 +292,7 @@ fn clud_docker_recover_skill_is_non_destructive_and_config_driven() {
         .skill_md;
 
     for required in [
-        "clud tool run docker/docker_recover.py doctor",
+        "\"$CLUD_EXE\" tool run docker/docker_recover.py doctor",
         "read-only",
         "CustomWslDistroDir",
         "DataFolder",
@@ -356,7 +356,7 @@ fn clud_git_teardown_requires_process_audit() {
     for required in [
         "Process audit before destructive removal.",
         "Never blind-loop `rm -rf`.",
-        "clud trash",
+        "\"$CLUD_EXE\" trash",
     ] {
         assert!(
             skill.contains(required),

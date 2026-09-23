@@ -9,7 +9,7 @@
 //! blocking), so there are now two legacy command shapes to migrate away
 //! from. This module owns the narrow first-run repair path: detect an
 //! installed clud missing the helper and rewrite only the exact old managed
-//! hook commands once the helper is resolvable on PATH.
+//! hook commands once the sibling helper is available.
 
 use serde_json::Value;
 use std::io;
@@ -22,6 +22,9 @@ const LEGACY_NATIVE_COMMAND: &str = "clud-block-bad-cmd";
 const LEGACY_NATIVE_COMMAND_EXIT: &str = "clud-block-bad-cmd; exit $LASTEXITCODE";
 const NEW_COMMAND: &str = "clud-cmd-scan";
 const NEW_COMMAND_EXIT: &str = "clud-cmd-scan; exit $LASTEXITCODE";
+const PINNED_PYTHON_SHIM_COMMAND: &str = "\"$CLUD_EXE\" tool run hooks/block-bad-cmd.py";
+const PINNED_PYTHON_SHIM_COMMAND_EXIT: &str =
+    "& $env:CLUD_EXE tool run hooks/block-bad-cmd.py; exit $LASTEXITCODE";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallProbe {
@@ -44,8 +47,9 @@ struct FileMigration {
 }
 
 pub fn run_startup_checks(auto_fix_hooks: bool) {
-    let helper_on_path = native_helper_on_path().is_some();
-    if !helper_on_path {
+    let sibling_helper_present =
+        matches!(probe_current_install(), InstallProbe::HelperPresent { .. });
+    if !sibling_helper_present {
         if let InstallProbe::MissingFromInstalledLayout { expected } = probe_current_install() {
             eprintln!(
                 "[clud] warning: native hook helper `{}` is missing at {}; run `uv tool install --force clud` to repair this install",
@@ -62,15 +66,19 @@ pub fn run_startup_checks(auto_fix_hooks: bool) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let repo_root = crate::loop_spec::git_root_from(&cwd);
     let home = hook_home_dir();
-    match migrate_hook_configs_at(&repo_root, home.as_deref(), helper_on_path) {
+    match migrate_hook_configs_at(&repo_root, home.as_deref(), sibling_helper_present) {
         Ok(report) => {
             if report.commands_changed > 0 {
-                eprintln!(
+                if !sibling_helper_present {
+                    eprintln!("[clud] migrated legacy hook command to pinned CLUD_EXE shim");
+                } else {
+                    eprintln!(
                     "\x1b[32m[clud] migrated {count} block-bad-cmd hook command{plural} to native `{helper}`\x1b[0m",
                     count = report.commands_changed,
                     plural = if report.commands_changed == 1 { "" } else { "s" },
                     helper = NEW_COMMAND,
                 );
+                }
             }
             if report.stale_commands_blocked > 0 {
                 eprintln!(
@@ -109,10 +117,6 @@ pub fn probe_install_at(current_exe: &Path) -> InstallProbe {
     }
 
     InstallProbe::NotInstalledLayout
-}
-
-pub fn native_helper_on_path() -> Option<PathBuf> {
-    which::which(native_helper_name()).ok()
 }
 
 pub fn native_helper_name() -> &'static str {
@@ -179,7 +183,7 @@ fn migrate_file(path: &Path, helper_available: bool) -> io::Result<FileMigration
     if stale == 0 {
         return Ok(FileMigration::default());
     }
-    if !helper_available {
+    if !helper_available && !has_legacy_python_shim(&json) {
         return Ok(FileMigration {
             commands_changed: 0,
             stale_commands_blocked: stale,
@@ -187,7 +191,7 @@ fn migrate_file(path: &Path, helper_available: bool) -> io::Result<FileMigration
     }
 
     let mut changed = 0usize;
-    migrate_value(&mut json, &mut changed);
+    migrate_value(&mut json, &mut changed, helper_available);
     if changed == 0 {
         return Ok(FileMigration::default());
     }
@@ -197,7 +201,7 @@ fn migrate_file(path: &Path, helper_available: bool) -> io::Result<FileMigration
     std::fs::write(path, body)?;
     Ok(FileMigration {
         commands_changed: changed,
-        stale_commands_blocked: 0,
+        stale_commands_blocked: count_stale_commands(&json),
     })
 }
 
@@ -217,11 +221,11 @@ fn count_stale_commands(value: &Value) -> usize {
     }
 }
 
-fn migrate_value(value: &mut Value, changed: &mut usize) {
+fn migrate_value(value: &mut Value, changed: &mut usize, helper_available: bool) {
     match value {
         Value::Object(map) => {
             if let Some(command) = map.get("command").and_then(Value::as_str) {
-                if let Some(replacement) = replacement_command(command) {
+                if let Some(replacement) = replacement_command_for(command, helper_available) {
                     map.insert(
                         "command".to_string(),
                         Value::String(replacement.to_string()),
@@ -230,12 +234,12 @@ fn migrate_value(value: &mut Value, changed: &mut usize) {
                 }
             }
             for value in map.values_mut() {
-                migrate_value(value, changed);
+                migrate_value(value, changed, helper_available);
             }
         }
         Value::Array(values) => {
             for value in values {
-                migrate_value(value, changed);
+                migrate_value(value, changed, helper_available);
             }
         }
         _ => {}
@@ -246,10 +250,59 @@ fn command_is_stale(command: &str) -> bool {
     replacement_command(command).is_some()
 }
 
+fn has_legacy_python_shim(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| {
+                    matches!(
+                        command,
+                        LEGACY_PYTHON_SHIM_COMMAND | LEGACY_PYTHON_SHIM_COMMAND_EXIT
+                    )
+                })
+                || map.values().any(has_legacy_python_shim)
+        }
+        Value::Array(values) => values.iter().any(has_legacy_python_shim),
+        _ => false,
+    }
+}
+
+fn replacement_command_for(command: &str, helper_available: bool) -> Option<String> {
+    if helper_available {
+        let parent = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        let helper = parent.join(native_helper_name());
+        let helper = helper.to_str()?;
+        return match command {
+            LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND | NEW_COMMAND => {
+                if cfg!(windows) {
+                    Some(format!("& '{}'", helper.replace('\'', "''")))
+                } else {
+                    Some(format!("'{}'", helper.replace('\'', "'\\''")))
+                }
+            }
+            LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT | NEW_COMMAND_EXIT => {
+                Some(format!(
+                    "& '{}'; exit $LASTEXITCODE",
+                    helper.replace('\'', "''")
+                ))
+            }
+            _ => None,
+        };
+    }
+    match command {
+        LEGACY_PYTHON_SHIM_COMMAND => Some(PINNED_PYTHON_SHIM_COMMAND.to_string()),
+        LEGACY_PYTHON_SHIM_COMMAND_EXIT => Some(PINNED_PYTHON_SHIM_COMMAND_EXIT.to_string()),
+        _ => None,
+    }
+}
+
 fn replacement_command(command: &str) -> Option<&'static str> {
     match command {
-        LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND => Some(NEW_COMMAND),
-        LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT => Some(NEW_COMMAND_EXIT),
+        LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND | NEW_COMMAND => Some(NEW_COMMAND),
+        LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT | NEW_COMMAND_EXIT => {
+            Some(NEW_COMMAND_EXIT)
+        }
         _ => None,
     }
 }
@@ -324,12 +377,19 @@ mod tests {
         assert_eq!(report.files_changed, 2);
         assert_eq!(report.commands_changed, 2);
         assert_eq!(report.stale_commands_blocked, 0);
-        let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-        let codex = fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
-        assert!(claude.contains(r#""command": "clud-cmd-scan""#), "{claude}");
-        assert!(
-            codex.contains(r#""command": "clud-cmd-scan; exit $LASTEXITCODE""#),
-            "{codex}"
+        let claude: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let codex: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            replacement_command_for(LEGACY_PYTHON_SHIM_COMMAND, true).unwrap()
+        );
+        assert_eq!(
+            codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            replacement_command_for(LEGACY_PYTHON_SHIM_COMMAND_EXIT, true).unwrap()
         );
 
         let second = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
@@ -359,12 +419,19 @@ mod tests {
         assert_eq!(report.commands_changed, 2);
         assert_eq!(report.stale_commands_blocked, 0);
 
-        let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-        let codex = fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
-        assert!(claude.contains(r#""command": "clud-cmd-scan""#), "{claude}");
-        assert!(
-            codex.contains(r#""command": "clud-cmd-scan; exit $LASTEXITCODE""#),
-            "{codex}"
+        let claude: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let codex: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            replacement_command_for(LEGACY_NATIVE_COMMAND, true).unwrap()
+        );
+        assert_eq!(
+            codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            replacement_command_for(LEGACY_NATIVE_COMMAND_EXIT, true).unwrap()
         );
     }
 
@@ -390,6 +457,24 @@ mod tests {
     }
 
     #[test]
+    fn already_migrated_bare_helper_is_pinned_to_launching_install() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let path = home.join(".claude/settings.json");
+        write(&path, r#"{"hooks":[{"command":"clud-cmd-scan"}]}"#);
+
+        let report = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
+
+        assert_eq!(report.commands_changed, 1);
+        let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            config["hooks"][0]["command"],
+            replacement_command_for(NEW_COMMAND, true).unwrap()
+        );
+    }
+
+    #[test]
     fn missing_helper_blocks_rewrite_and_preserves_compatibility_command() {
         let tmp = tempdir().unwrap();
         let repo = tmp.path().join("repo");
@@ -402,12 +487,14 @@ mod tests {
 
         let report = migrate_hook_configs_at(&repo, Some(&home), false).unwrap();
 
-        assert_eq!(report.files_changed, 0);
-        assert_eq!(report.commands_changed, 0);
-        assert_eq!(report.stale_commands_blocked, 1);
-        assert!(fs::read_to_string(path)
-            .unwrap()
-            .contains("clud tool run hooks/block-bad-cmd.py"));
+        assert_eq!(report.files_changed, 1);
+        assert_eq!(report.commands_changed, 1);
+        assert_eq!(report.stale_commands_blocked, 0);
+        let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            config["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            PINNED_PYTHON_SHIM_COMMAND
+        );
     }
 
     #[test]

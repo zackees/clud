@@ -34,7 +34,7 @@ This skill does not change code; it files an improvement request against `zackee
    - Stop. Do not draft or stash an issue body.
 3. **Draft the issue body.** The user's words are the source of truth. Conventional title: `feat: <short summary>`, `fix: <short summary>`, or `chore: <short summary>`. Body sections:
    - **Reported by user** - quote the user's provided report verbatim.
-   - **Context** - terse facts the agent can confirm from local state (clud version via `clud --version`, OS, relevant file paths). Do not invent.
+   - **Context** - terse facts the agent can confirm from local state (clud version via `"$CLUD_EXE" --version`, OS, relevant file paths). Do not invent.
    - **Proposed direction** - a one-paragraph best-guess of what the change might look like, marked "for triage; not a commitment."
    - **Acceptance criteria** - objectively closable bullets. For a bug, include a reproduction. For a feature, include the observable behavior change.
 4. **Search for strong duplicates.** `gh issue list --repo zackees/clud --search "<keywords>" --state all`. Flag only genuine overlap (same component + same intent). Weak keyword matches do not count.

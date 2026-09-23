@@ -20,8 +20,10 @@ Three hard rules:
 
 ## Invocation
 
+The launcher exports `CLUD_EXE` as its own absolute path. The command below is Bash syntax; in PowerShell use `& $env:CLUD_EXE`, and in cmd use `"%CLUD_EXE%"`. Outside a clud-launched session, set `CLUD_EXE` to the intended binary's absolute path first.
+
 ```
-clud tool run python/lint_deadcode.py [<path>...] [--min-confidence N] [--exclude PATH]... [--json]
+"$CLUD_EXE" tool run python/lint_deadcode.py [<path>...] [--min-confidence N] [--exclude PATH]... [--json]
 ```
 
 Defaults: scans the current directory, `--min-confidence 60`. The tool always emits structured JSON to stdout.
@@ -50,7 +52,7 @@ Exit code: `0` (no dead code), `1` (at least one production-dead symbol), `2` (t
 
 ## Workflow
 
-1. **Run the tool** in the project root: `clud tool run python/lint_deadcode.py`.
+1. **Run the tool** in the project root: `"$CLUD_EXE" tool run python/lint_deadcode.py`.
 2. **Sort findings by confidence**. `confidence ≥ 80` is high-signal (vulture is very sure). 60–79 needs more thought.
 3. **Investigate before deleting**. For each candidate:
    - Read the symbol's surrounding context — is it part of a public API, plugin entry point, dynamic-dispatch target, or `__all__` export?
