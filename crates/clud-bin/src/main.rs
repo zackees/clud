@@ -1058,7 +1058,7 @@ fn run(mut args: args::Args) {
 
     if args.dry_run {
         let json = serde_json::json!({
-            "command": plan.command,
+            "command": clud::secret_redaction::redact_args(&plan.command),
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
             "routing_mode": launch_target.routing_mode.as_str(),

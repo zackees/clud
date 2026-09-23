@@ -3866,3 +3866,25 @@ before the harness starts. Revocation is noticed on the next launch rather
 than hidden behind a verdict cache. A valid 200 leaves the child env, argv,
 and startup notices unchanged. Provider status can now distinguish missing,
 malformed, rejected, and configured credentials.
+
+## DD-083: Correct exact CLUD option spelling, reject near misses before passthrough
+
+**Context:** zackees/clud#1268. The pre-split CLI grammar sent mistyped
+DeepSeek selectors and nearby API keys to the backend as prompt text. Clap
+could not suggest a correction because it never saw the unknown option.
+
+**Decision:** In the top-level option region only, correct the exact
+`-deepseek` alias and Unicode-dash spellings of public CLUD long options
+before inline-key extraction. Probe unmatched flag names against clap's
+top-level options individually. A near miss is an exit-2 error; an unknown
+option followed by a key-shaped token also fails closed. Unrelated backend
+flags continue byte-for-byte, and `--` remains the explicit escape hatch.
+Bare-word near misses only emit a note because they may be prompts. Keep
+execution argv intact, but share one key masker at launch-record, dry-run,
+crash-report, and diagnostic output boundaries.
+
+**Rationale:** Exact correction preserves intent without fuzzy routing;
+clap's own suggestion remains the authority for uncertain flags. Output
+redaction protects CLUD-owned surfaces without breaking web-terminal child
+forwarding. Inline keys remain visible in shell history and process argv,
+so native-vault entry is the safer credential path.

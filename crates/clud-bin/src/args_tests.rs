@@ -52,6 +52,119 @@ fn test_deepseek_backend_is_known_and_conflicts_with_other_providers() {
 }
 
 #[test]
+fn single_dash_and_unicode_deepseek_aliases_use_the_real_provider_path() {
+    for spelling in [
+        "-deepseek",
+        "-–deepseek",
+        "—deepseek",
+        "–deepseek",
+        "―deepseek",
+        "−deepseek",
+        "﹣deepseek",
+        "－deepseek",
+        "\u{00ad}deepseek",
+    ] {
+        let args = parse(&["clud", spelling]);
+        assert!(args.deepseek, "{spelling}");
+        assert!(args.passthrough.is_empty(), "{spelling}");
+    }
+    let with_key = parse(&["clud", "-–deepseek", DEEPSEEK_SHAPED_KEY]);
+    assert!(with_key.deepseek);
+    assert_eq!(
+        with_key.inline_api_key.as_ref().map(InlineApiKey::expose),
+        Some(DEEPSEEK_SHAPED_KEY)
+    );
+    assert!(with_key.passthrough.is_empty());
+}
+
+#[test]
+fn near_miss_flags_fail_before_backend_passthrough() {
+    for spelling in ["--deepskeek", "--deepsek", "-deepskeek", "-–deepskeek"] {
+        let error = validate_top_level_unknown(spelling, None).unwrap_err();
+        assert!(error.contains(spelling), "{error}");
+        assert!(error.contains("--deepseek"), "{error}");
+    }
+    let error =
+        validate_top_level_unknown("--not-a-clud-flag", Some(DEEPSEEK_SHAPED_KEY)).unwrap_err();
+    assert!(!error.contains(DEEPSEEK_SHAPED_KEY));
+    assert!(validate_top_level_unknown("--not-a-clud-flag", None).is_ok());
+}
+
+#[test]
+fn whole_args_debug_masks_raw_and_passthrough_keys_without_changing_execution_values() {
+    let args = parse(&["clud", "--", DEEPSEEK_SHAPED_KEY]);
+    assert_eq!(args.raw_argv[2], DEEPSEEK_SHAPED_KEY);
+    assert_eq!(args.passthrough[0], DEEPSEEK_SHAPED_KEY);
+    let debug = format!("{args:?}");
+    assert!(debug.contains("****cdef"));
+    assert!(!debug.contains(DEEPSEEK_SHAPED_KEY));
+}
+
+#[test]
+fn every_top_level_clap_long_option_is_claimed_by_the_splitter() {
+    use clap::CommandFactory;
+    let mut missing = Vec::new();
+    for argument in Args::command().get_arguments() {
+        let Some(long) = argument.get_long() else {
+            continue;
+        };
+        let flag = format!("--{long}");
+        let raw = vec!["clud".to_string(), flag.clone(), "fixture".to_string()];
+        match split_known_unknown(&raw) {
+            Ok((known, _)) if known.contains(&flag) => {}
+            _ => missing.push(flag),
+        }
+    }
+    assert!(missing.is_empty(), "splitter omitted {missing:?}");
+}
+
+#[test]
+fn clap_suggests_a_near_miss_subcommand() {
+    assert_eq!(suggest_public_subcommand("looop"), Some("loop".to_string()));
+    assert_eq!(suggest_public_subcommand("fix the bug"), None);
+}
+
+#[test]
+fn option_correction_never_rewrites_values_or_backend_passthrough() {
+    let corrected_value_flag = vec![
+        "clud".to_string(),
+        "-–prompt".to_string(),
+        "-deepseek".to_string(),
+    ];
+    assert_eq!(
+        normalize_known_option_dashes(&corrected_value_flag),
+        ["clud", "--prompt", "-deepseek"]
+    );
+    let inline_value_flag = vec![
+        "clud".to_string(),
+        "-–prompt=literal".to_string(),
+        "-deepseek".to_string(),
+    ];
+    assert_eq!(
+        normalize_known_option_dashes(&inline_value_flag),
+        ["clud", "--prompt=literal", "--deepseek"]
+    );
+    let raw = vec![
+        "clud".to_string(),
+        "--prompt".to_string(),
+        "-–deepseek".to_string(),
+    ];
+    assert_eq!(normalize_known_option_dashes(&raw), raw);
+
+    let separated = parse(&["clud", "--", "-–deepseek"]);
+    assert_eq!(separated.passthrough, ["-–deepseek"]);
+    assert!(!separated.deepseek);
+
+    let unrelated = parse(&["clud", "--add-dir"]);
+    assert_eq!(unrelated.passthrough, ["--add-dir"]);
+    let codex_config = parse(&["clud", "--", "-c", "key=value"]);
+    assert_eq!(codex_config.passthrough, ["-c", "key=value"]);
+
+    let unknown = parse(&["clud", "--not-a-clud-flag"]);
+    assert_eq!(unknown.passthrough, ["--not-a-clud-flag"]);
+}
+
+#[test]
 fn test_kimi_backend_is_known_and_conflicts_with_other_providers() {
     let args = parse(&["clud", "--kimi"]);
     assert!(args.kimi);

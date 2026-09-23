@@ -200,4 +200,12 @@ mod tests {
             "the backend separator is forwarded unchanged"
         );
     }
+
+    #[test]
+    fn companion_keeps_operational_inline_key_while_debug_masks_it() {
+        let key = "sk-0123456789abcdef0123456789abcdef";
+        let args = parse(&["clud", "--web-term", "--deepseek", key]);
+        assert!(companion_argv(&args).iter().any(|item| item == key));
+        assert!(!format!("{args:?}").contains(key));
+    }
 }

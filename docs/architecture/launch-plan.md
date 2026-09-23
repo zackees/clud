@@ -159,12 +159,24 @@ decision is a single branch at the top of plan construction.
 
 ## Unknown-flag passthrough
 
-`args.passthrough` is the bucket clap fills with anything it didn't recognize.
-The builder appends it verbatim after the synthesized prompt and before any
-launch-mode-specific splices. Adding a new clud flag means
-declaring it in `crates/clud-bin/src/args.rs`; anything not declared falls
-through to the backend. Recognized Claude/Codex-only clud options are rejected
-for DeepSeek Harness; native `dsh` options can still be passed after `--`.
+`args.passthrough` holds backend arguments the pre-split did not claim. In the
+top-level flag region, clud first corrects exact `-deepseek` and exact public
+option names with a Unicode dash prefix. An unrecognized flag-shaped token
+is checked against clap's public top-level options: a near miss fails with a
+suggestion, and any unknown option followed by a key-shaped token fails
+closed without echoing the key. Other backend flags still pass through
+byte-for-byte. The `--` separator is the explicit escape hatch and stops
+correction and validation. A bare-word subcommand near miss is only a note,
+because the word may be an intentional prompt. The builder appends accepted
+passthrough after the synthesized prompt and before launch-mode splices.
+Recognized Claude/Codex-only clud options are rejected for DeepSeek Harness;
+native `dsh` options can still be passed after `--`.
+
+Operational argv remains unredacted in memory for execution and web-terminal
+forwarding. Launch records, dry-run JSON, crash reports, and whole-Args debug
+rendering mask key-shaped values at their output boundaries. This does not
+remove an inline key from shell history or the operating system process list;
+vault-backed interactive entry is safer for a live key.
 
 ## `--dry-run` contract
 

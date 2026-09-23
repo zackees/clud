@@ -176,6 +176,8 @@ pub fn start_launch(
     let id = format!("{launched_at_ms}-{}", std::process::id());
     let cwd = launch_cwd(plan);
     let repo_root = cwd.as_deref().and_then(repo_root_for_cwd);
+    let (command, clud_argv) =
+        redacted_record_argv(&plan.command, &std::env::args().collect::<Vec<_>>());
     let record = LaunchRecord {
         id: id.clone(),
         source: source.to_string(),
@@ -184,8 +186,8 @@ pub fn start_launch(
         launch_mode: plan.launch_mode.as_str().to_string(),
         cwd,
         repo_root,
-        command: plan.command.clone(),
-        clud_argv: std::env::args().collect(),
+        command,
+        clud_argv,
         launched_at_ms,
         exited_at_ms: None,
         exit_code: None,
@@ -201,6 +203,13 @@ pub fn start_launch(
         state_dir: state_dir.to_path_buf(),
         id,
     })
+}
+
+fn redacted_record_argv(command: &[String], argv: &[String]) -> (Vec<String>, Vec<String>) {
+    (
+        crate::secret_redaction::redact_args(command),
+        crate::secret_redaction::redact_args(argv),
+    )
 }
 
 pub fn finish_launch(state_dir: &Path, id: &str, exit_code: i32) -> io::Result<()> {
@@ -352,6 +361,22 @@ fn prune_old_records(state_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serialized_launch_argv_masks_keys_but_keeps_non_secret_arguments() {
+        let key = "sk-0123456789abcdef0123456789abcdef";
+        let command = vec!["claude".to_string(), key.to_string()];
+        let argv = vec!["clud".to_string(), format!("--deepseek={key}")];
+        let (command, clud_argv) = redacted_record_argv(&command, &argv);
+        let encoded = serde_json::to_string(&serde_json::json!({
+            "command": command,
+            "clud_argv": clud_argv,
+        }))
+        .unwrap();
+        assert!(encoded.contains("****cdef"));
+        assert!(encoded.contains("claude"));
+        assert!(!encoded.contains(key));
+    }
 
     /// The ~200 records already on disk predate `failure_reason`; `#[serde(default)]`
     /// is what keeps them readable, and this is the assertion that says so.

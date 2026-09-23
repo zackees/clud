@@ -560,6 +560,52 @@ def test_dry_run_deepseek() -> None:
 _INLINE_DEEPSEEK_KEY = "sk-" + "0123456789abcdef" * 2
 
 
+@pytest.mark.parametrize(
+    "flag", ["-deepseek", "-\u2013deepseek", "\u2014deepseek", "\u2212deepseek"]
+)
+def test_near_miss_exact_deepseek_aliases_select_provider(flag: str) -> None:
+    result = _run("--dry-run", flag, _INLINE_DEEPSEEK_KEY)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_provider"] == "deepseek"
+    assert data["provider_source"] == "cli"
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("flag", ["-deepseek", "-\u2013deepseek"])
+def test_deepseek_alias_equals_form_extracts_key(flag: str) -> None:
+    result = _run("--dry-run", f"{flag}={_INLINE_DEEPSEEK_KEY}")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_provider"] == "deepseek"
+    assert data["provider_source"] == "cli"
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("flag", ["--deepskeek", "-\u2013deepskeek"])
+def test_provider_flag_typo_with_key_fails_without_echoing_key(flag: str) -> None:
+    result = _run("--dry-run", flag, _INLINE_DEEPSEEK_KEY)
+    assert result.returncode == 2
+    assert flag in result.stderr
+    assert "--deepseek" in result.stderr
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout + result.stderr
+
+
+def test_dry_run_masks_explicit_backend_key_argument() -> None:
+    result = _run("--dry-run", "--", _INLINE_DEEPSEEK_KEY)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["command"][-1] == "****cdef"
+    assert _INLINE_DEEPSEEK_KEY not in result.stdout
+
+
+def test_bare_subcommand_near_miss_is_only_a_notice() -> None:
+    result = _run("--dry-run", "looop")
+    assert result.returncode == 0, result.stderr
+    assert "did you mean 'loop'" in result.stderr
+    assert "looop" in json.loads(result.stdout)["command"]
+
+
 def test_dry_run_deepseek_inline_key_is_never_forwarded() -> None:
     """`clud --deepseek <API_KEY>` must not hand the key to the backend as a
     prompt (the 2.8.1 bug: Windows users' keys were never recognized). A dry
