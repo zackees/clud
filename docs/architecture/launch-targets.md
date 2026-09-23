@@ -221,6 +221,15 @@ clud neither spawns nor depends on that client.
 
 The record is locked with `fs4`. Refresh re-reads after acquiring the
 cross-process lock, refreshes at most once, and atomically replaces the file.
+Refresh happens on use near expiry. A pre-output upstream 401 triggers one
+locked recheck/forced refresh and at most one request retry; an in-band auth
+failure after output marks the next turn for recheck instead of replay.
+Safe pre-send and 429 token-endpoint failures are retried within a bounded
+budget; ambiguous read-timeout, 408, and 5xx outcomes return a temporary
+error without replaying a potentially rotated grant. `invalid_grant` and
+other rejected-refresh codes require a new login or an
+explicit, identity-aware native-login import in an interactive foreground
+launch. The native file is never changed.
 Unix writes use mode 0600. Windows applies a protected owner-only DACL before
 the temporary file receives credentials and verifies both that ACE and the
 protected-DACL control flag after replacement; inherited profile ACLs alone
@@ -335,8 +344,10 @@ policy. Before any frame is written, a failure picks a status:
 | Failure | Status |
 | --- | --- |
 | malformed request | `400` |
-| missing credentials, or an expired Codex login | `401` |
-| upstream `400`/`401`/`403`/`404`/`413`/`422`/`429` | passed through |
+| invalid local bridge bearer | `401` |
+| missing or rejected upstream credentials, or upstream `401` after recovery | `502` |
+| temporary credential refresh failure | `503` |
+| upstream `400`/`403`/`404`/`413`/`422`/`429` | passed through |
 | any other upstream status, or a transport failure | `502` |
 | overall deadline elapsed | `504` |
 | response over the byte budget | `413` |

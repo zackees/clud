@@ -30,6 +30,7 @@
 use std::error::Error as _;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::codex_auth::{self, SubscriptionCredentials};
@@ -630,6 +631,15 @@ impl std::fmt::Debug for UpstreamTarget {
 /// ever sees this trait, none of it has to change when that lands.
 pub trait CredentialSource: Send + Sync {
     fn resolve(&self) -> Result<UpstreamTarget, UpstreamError>;
+
+    /// A rejected subscription bearer may be refreshed before the response is
+    /// visible. API keys and other sources have no recovery action.
+    fn recover_after_unauthorized(
+        &self,
+        _rejected: &UpstreamTarget,
+    ) -> Result<Option<UpstreamTarget>, UpstreamError> {
+        Ok(None)
+    }
 }
 
 #[path = "codex_upstream_credentials.rs"]
@@ -647,6 +657,9 @@ pub struct UpstreamClient<C: CredentialSource> {
     /// Stable upstream cache/session identity.
     session_id: String,
     retry_observer: Option<RetryObserver>,
+    /// The bearer actually sent on the last attempt may differ from the
+    /// source's initial bearer after a guarded 401 refresh.
+    last_target: Mutex<Option<UpstreamTarget>>,
 }
 
 impl<C: CredentialSource> std::fmt::Debug for UpstreamClient<C> {
@@ -665,7 +678,20 @@ impl<C: CredentialSource> UpstreamClient<C> {
             config,
             session_id: new_session_id(),
             retry_observer: None,
+            last_target: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn credential_target(&self) -> Result<UpstreamTarget, UpstreamError> {
+        if let Some(target) = self
+            .last_target
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+        {
+            return Ok(target);
+        }
+        self.credentials.resolve()
     }
 
     pub fn with_retry_observer(
@@ -783,16 +809,21 @@ impl<C: CredentialSource> UpstreamClient<C> {
         sink: &mut dyn FnMut(&[u8]) -> Result<(), UpstreamError>,
         delivered: &AtomicBool,
     ) -> Result<StreamOutcome, UpstreamError> {
-        let target = self.credentials.resolve()?;
+        let mut target = self.credentials.resolve()?;
         let deadline = Instant::now() + self.config.overall_timeout;
         let mut attempt = 0_u32;
         let mut slept = Duration::ZERO;
+        let mut auth_retried = false;
 
         loop {
             attempt += 1;
             if cancel.load(Ordering::Acquire) {
                 return Err(UpstreamError::Cancelled);
             }
+            *self
+                .last_target
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(target.clone());
             match self.attempt(&target, body, cancel, deadline, sink, delivered) {
                 Ok(bytes) => {
                     return Ok(StreamOutcome {
@@ -801,6 +832,22 @@ impl<C: CredentialSource> UpstreamClient<C> {
                     })
                 }
                 Err(error) => {
+                    if !auth_retried
+                        && !delivered.load(Ordering::Acquire)
+                        && !cancel.load(Ordering::Acquire)
+                        && Instant::now() < deadline
+                        && error
+                            .failure()
+                            .is_some_and(|failure| failure.status() == 401)
+                    {
+                        if let Some(recovered) =
+                            self.credentials.recover_after_unauthorized(&target)?
+                        {
+                            auth_retried = true;
+                            target = recovered;
+                            continue;
+                        }
+                    }
                     // The absolute rule, unchanged (DD-029): once anything has
                     // reached the sink the response is committed, however
                     // retryable the failure looks. Everything below only ever
@@ -1556,6 +1603,62 @@ mod tests {
         let rendered = format!("{error} {error:?} {}", failure.diagnostic());
         assert!(!rendered.contains("sk-secret-abc"), "{rendered}");
         assert!(!rendered.contains("org_9"), "{rendered}");
+    }
+
+    #[test]
+    fn subscription_401_before_output_refreshes_and_replays_once() {
+        struct RecoveringCredentials {
+            base_url: String,
+            refreshes: Arc<AtomicUsize>,
+        }
+        impl CredentialSource for RecoveringCredentials {
+            fn resolve(&self) -> Result<UpstreamTarget, UpstreamError> {
+                Ok(UpstreamTarget::new(&self.base_url, "Bearer old-access")
+                    .with_account_id(Some("account-one".to_string())))
+            }
+
+            fn recover_after_unauthorized(
+                &self,
+                _rejected: &UpstreamTarget,
+            ) -> Result<Option<UpstreamTarget>, UpstreamError> {
+                self.refreshes.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(
+                    UpstreamTarget::new(&self.base_url, "Bearer new-access")
+                        .with_account_id(Some("account-one".to_string())),
+                ))
+            }
+        }
+
+        let server = FakeUpstream::start(vec![
+            status_response(401),
+            sse_response("data: recovered\n\n"),
+        ]);
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let client = UpstreamClient::new(
+            RecoveringCredentials {
+                base_url: server.base_url.clone(),
+                refreshes: Arc::clone(&refreshes),
+            },
+            fast_config(),
+        );
+        let mut output = Vec::new();
+        let outcome = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |chunk| {
+                output.extend_from_slice(chunk);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outcome.attempts, 2);
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(server.hits(), 2);
+        assert!(server.requests()[0].contains("Authorization: Bearer old-access"));
+        assert!(server.requests()[1].contains("Authorization: Bearer new-access"));
+        assert_eq!(
+            client.credential_target().unwrap().authorization,
+            "Bearer new-access",
+            "a later in-band rejection must mark the bearer actually sent"
+        );
+        assert_eq!(output, b"data: recovered\n\n");
     }
 
     #[test]

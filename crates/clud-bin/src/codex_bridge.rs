@@ -10,8 +10,8 @@ use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
 use crate::codex_sse::InBandFailure;
 use crate::codex_upstream::{
-    ApiKeyCredentials, FailureClass, ResolvedCredentials, UpstreamClient, UpstreamConfig,
-    UpstreamError, UpstreamFailure,
+    ApiKeyCredentials, CredentialSource, FailureClass, ResolvedCredentials, UpstreamClient,
+    UpstreamConfig, UpstreamError, UpstreamFailure, UpstreamTarget,
 };
 use crate::failover::{FailoverLadder, FailoverRung};
 use crate::provider_catalog;
@@ -261,6 +261,9 @@ pub struct BridgeConfig {
     /// serve. Shared with [`BridgeHandle`] so a launch that exited without ever
     /// asking can be told apart from one that asked and was refused (#998).
     turn_requests: Arc<AtomicUsize>,
+    /// A committed in-band auth failure cannot replay its turn. The next
+    /// request forces a credential check before sending new model input.
+    auth_recheck: Arc<Mutex<Option<UpstreamTarget>>>,
     #[cfg(test)]
     request_hold: Duration,
     #[cfg(test)]
@@ -288,6 +291,7 @@ impl Default for BridgeConfig {
             test_upstream_url: test_upstream_override_from_process(),
             status_usage: Arc::new(Mutex::new(StatusUsageState::default())),
             turn_requests: Arc::new(AtomicUsize::new(0)),
+            auth_recheck: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             request_hold: Duration::ZERO,
             #[cfg(test)]
@@ -1494,13 +1498,18 @@ fn build_pipeline(
     log: Option<&SharedBridgeLog>,
     conversation_key: &ConversationKey,
 ) -> Result<Pipeline<ResolvedCredentials>, UpstreamError> {
-    let credentials = match config.test_upstream_url.as_deref() {
+    let mut credentials = match config.test_upstream_url.as_deref() {
         Some(base_url) => ResolvedCredentials::ApiKey(ApiKeyCredentials::new(
             "clud-test-upstream-key",
             Some(base_url.into()),
         )?),
         None => ResolvedCredentials::resolve_default()?,
     };
+    if config.test_upstream_url.is_none()
+        && recover_marked_credentials(&credentials, &config.auth_recheck)?
+    {
+        credentials = ResolvedCredentials::resolve_default()?;
+    }
     let upstream_config = UpstreamConfig {
         first_frame_timeout: Some(config.first_frame_timeout),
         read_timeout: config.stream_idle_timeout,
@@ -1521,6 +1530,36 @@ fn build_pipeline(
         pipeline = pipeline.with_default_model(model);
     }
     Ok(pipeline)
+}
+
+fn recover_marked_credentials<C: CredentialSource>(
+    credentials: &C,
+    marker: &Mutex<Option<UpstreamTarget>>,
+) -> Result<bool, UpstreamError> {
+    let Some(rejected) = marker
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take()
+    else {
+        return Ok(false);
+    };
+    let result = credentials.recover_after_unauthorized(&rejected);
+    if result.is_err() {
+        let mut pending = marker.lock().unwrap_or_else(|poison| poison.into_inner());
+        if pending.is_none() {
+            *pending = Some(rejected);
+        }
+    }
+    result.map(|_| true)
+}
+
+fn mark_auth_recheck(
+    marker: &Mutex<Option<UpstreamTarget>>,
+    pipeline: &Pipeline<ResolvedCredentials>,
+) {
+    if let Ok(target) = pipeline.credential_target() {
+        *marker.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(target);
+    }
 }
 
 /// Route one unified request before the legacy Codex translator sees it.
@@ -2555,6 +2594,9 @@ fn serve_messages(
         });
         match streamed {
             Ok(Some(Ok(summary))) => {
+                if summary.authentication_failure {
+                    mark_auth_recheck(&config.auth_recheck, &pipeline);
+                }
                 if summary.orphaned_outputs_repaired > 0 {
                     log_orphaned_outputs_repaired(log, summary.orphaned_outputs_repaired);
                 }
@@ -2572,7 +2614,10 @@ fn serve_messages(
                 // produce HTTP 200, no log line even under
                 // `CLUD_CODEX_BRIDGE_DEBUG=1`, and an abruptly truncated turn.
                 // The status is committed by now, but silence is not forced.
-                if summary.terminal_account_failure {
+                // The translator also marks authentication failures as
+                // account-level, but they are not quota exhaustion: the next
+                // turn may recover them under the credential lock.
+                if summary.terminal_account_failure && !summary.authentication_failure {
                     let error = PipelineError::Provider(ProviderFailure {
                         kind: "billing_error".to_string(),
                         message: IN_BAND_QUOTA_MESSAGE.to_string(),
@@ -2653,6 +2698,9 @@ fn serve_messages(
         Ok(Some(Err(error))) => {
             log_continuation_invariant(&error, conversation_key, log);
             if let PipelineError::Provider(failure) = &error {
+                if failure.kind == "authentication_error" {
+                    mark_auth_recheck(&config.auth_recheck, &pipeline);
+                }
                 if let Some(diagnostic) = &failure.diagnostic {
                     log_in_band_failure(
                         log,
@@ -9181,6 +9229,93 @@ Connection: close
         assert!(response.contains("billing_error"), "{response}");
         assert!(response.contains("quota exhausted"), "{response}");
         assert!(!response.contains("secret account detail"), "{response}");
+    }
+
+    #[test]
+    fn visible_in_band_auth_failure_marks_the_next_turn_without_replay() {
+        let failed = response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n\
+             event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_token\",\"message\":\"Bearer secret-token\"}}}\n\n",
+        );
+        let upstream = FakeResponses::start_with_response(Some(failed));
+        let config = bridged_config(&upstream);
+        let marker = Arc::clone(&config.auth_recheck);
+        let bridge = BridgeHandle::start(config).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_STREAM_BODY,
+            ),
+        );
+
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("authentication_error"), "{response}");
+        assert!(!response.contains("secret-token"), "{response}");
+        assert!(marker.lock().unwrap().is_some());
+        assert_eq!(
+            upstream.requests().len(),
+            1,
+            "visible output must not replay"
+        );
+    }
+
+    #[test]
+    fn non_streaming_in_band_auth_failure_also_marks_the_next_turn() {
+        let failed = response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_token\",\"message\":\"Bearer secret-token\"}}}\n\n",
+        );
+        let upstream = FakeResponses::start_with_response(Some(failed));
+        let config = bridged_config(&upstream);
+        let marker = Arc::clone(&config.auth_recheck);
+        let bridge = BridgeHandle::start(config).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+
+        assert_eq!(status(&response), 502, "{response}");
+        assert!(!response.contains("secret-token"), "{response}");
+        assert!(marker.lock().unwrap().is_some());
+        assert_eq!(upstream.requests().len(), 1);
+    }
+
+    #[test]
+    fn marked_next_turn_forces_one_credential_recheck() {
+        struct RecoveringCredentials(AtomicUsize);
+        impl CredentialSource for RecoveringCredentials {
+            fn resolve(&self) -> Result<crate::codex_upstream::UpstreamTarget, UpstreamError> {
+                Ok(crate::codex_upstream::UpstreamTarget::new(
+                    "https://example.test",
+                    "Bearer rejected",
+                ))
+            }
+
+            fn recover_after_unauthorized(
+                &self,
+                _rejected: &crate::codex_upstream::UpstreamTarget,
+            ) -> Result<Option<crate::codex_upstream::UpstreamTarget>, UpstreamError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(crate::codex_upstream::UpstreamTarget::new(
+                    "https://example.test",
+                    "Bearer recovered",
+                )))
+            }
+        }
+
+        let credentials = RecoveringCredentials(AtomicUsize::new(0));
+        let marker = Mutex::new(Some(crate::codex_upstream::UpstreamTarget::new(
+            "https://example.test",
+            "Bearer rejected",
+        )));
+        assert!(recover_marked_credentials(&credentials, &marker).unwrap());
+        assert!(marker.lock().unwrap().is_none());
+        assert!(!recover_marked_credentials(&credentials, &marker).unwrap());
+        assert_eq!(credentials.0.load(Ordering::SeqCst), 1);
     }
 
     #[test]

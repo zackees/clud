@@ -129,7 +129,8 @@ Entry and orchestration:
   aliases retain provider-owned implementations and print an exact replacement.
 - `codex_auth.rs` - #629's clud-owned Codex credential implementation: browser
   authorization-code + PKCE callback flow, separate `~/.clud/codex-auth.json`
-  store, safe status claims, locked atomic refresh, and token-redacted
+  store, safe status claims, locked atomic refresh with bounded transient
+  retry and forced recovery after an upstream 401, and token-redacted
   diagnostics. See
   [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md).
 - `provider_auth.rs` - shared API-key credential implementation (originally
@@ -172,8 +173,9 @@ Entry and orchestration:
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
   bridge or unified gateway, preflights direct Codex bridge credentials before
   creating a listener or child (including daemon admission), and on an
-  interactive missing-credential bridge launch can explicitly offer to copy a
-  usable Codex CLI login into clud's own credential store (daemon and
+  interactive missing-credential or rejected-refresh bridge launch can
+  explicitly offer to copy a usable Codex CLI login into clud's own credential
+  store, with identity-aware repair/switch prompts (daemon and
   non-interactive admission never prompt). It applies child-local
   overlays, emits sanitized optional-provider notices and the image-capability
   notice for a model whose endpoint drops pasted images upstream (#1200),

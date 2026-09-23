@@ -1095,7 +1095,9 @@ the streaming path.
 Downstream status is chosen only while nothing has been written.
 `EventStreamWriter` therefore defers its HTTP headers until the first frame:
 before that a failure is a real status (`400` malformed, `422` unrepresentable,
-`401` no credentials, upstream `4xx` passed through, `502`/`504` otherwise);
+`401` invalid local bearer, `502` unavailable/rejected upstream credentials,
+`503` temporary refresh failure, other upstream `4xx` generally passed through,
+`502`/`504` otherwise);
 after it the response is committed and a failure is reported in-band as a
 sanitized SSE `error` event, with the chunked body terminated cleanly. This is
 the same boundary the upstream retry policy uses, and for the same reason.
@@ -1168,6 +1170,16 @@ copy. The import prompt warns that the two stores are independent: a future
 refresh may rotate the copied refresh token, so the Codex CLI can require its
 own re-login. clud deliberately does not write another application's auth
 file.
+
+**Amendment (#1274):** Clud refreshes its selected subscription record on use
+near expiry, with one guarded pre-output refresh/retry after an upstream 401.
+After visible output, an in-band auth failure only marks the next turn for
+credential recheck; it cannot replay the committed turn. A rejected refresh
+grant may prompt an explicit same-account repair or account switch only in an
+interactive foreground launch. Neither `always` nor another account silently
+replaces the selected record. A downstream 401 remains reserved for a bad local
+bridge bearer; upstream auth failures are gateway failures, not evidence that
+Claude's local bearer is invalid.
 
 ## DD-031: Git-Bash completions are suppressed in the backend's login shell
 
