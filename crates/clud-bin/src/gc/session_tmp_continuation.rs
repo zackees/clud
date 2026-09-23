@@ -1228,7 +1228,7 @@ mod path_serde {
     #[cfg(windows)]
     fn bytes_path(bytes: &[u8]) -> Result<PathBuf, &'static str> {
         use std::os::windows::ffi::OsStringExt;
-        if !bytes.len().is_multiple_of(2) {
+        if bytes.len() & 1 != 0 {
             return Err("odd number of UTF-16 path bytes");
         }
         let words = bytes
