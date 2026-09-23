@@ -801,6 +801,31 @@ fn incomplete_usage_record_suppresses_an_otherwise_valid_total() {
 }
 
 #[test]
+fn empty_response_id_suppresses_an_otherwise_valid_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 206);
+    let transcript = dir.path().join("empty-id.jsonl");
+    let valid = json!({"message": {"id": "valid-response", "model": "fixture-model", "usage": {
+        "input_tokens": 2, "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4, "output_tokens": 5
+    }}});
+    let empty_id = json!({"message": {"id": "  ", "usage": {
+        "input_tokens": 10, "cache_creation_input_tokens": 11,
+        "cache_read_input_tokens": 12, "output_tokens": 13
+    }}});
+    std::fs::write(&transcript, format!("{valid}\n{empty_id}\n")).unwrap();
+    let args = RunArgs {
+        session_pid: 206,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let mut out = Vec::new();
+    render_into(&mut out, &args, &transcript_stdin(&transcript), now_ms());
+    assert!(!String::from_utf8_lossy(&out).contains("read "));
+    assert!(writer.effective_usage_snapshot().is_none());
+}
+
+#[test]
 fn unchanged_callback_does_not_rewrite_cursor_state() {
     let dir = tempfile::tempdir().unwrap();
     let _writer = writer_in(dir.path(), 203);

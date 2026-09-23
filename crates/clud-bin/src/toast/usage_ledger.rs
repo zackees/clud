@@ -300,7 +300,11 @@ fn record_usage(
     let Some(usage) = message.get("usage") else {
         return;
     };
-    let Some(id) = message.get("id").and_then(Value::as_str) else {
+    let Some(id) = message
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    else {
         ledger.uncertain = true;
         return;
     };
