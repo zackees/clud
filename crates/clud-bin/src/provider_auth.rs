@@ -5,9 +5,10 @@
 //! inject an in-memory [`SecretStore`] fake instead.
 
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use zeroize::Zeroizing;
 
@@ -50,12 +51,16 @@ fn vault_target(service: &str, account: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretStoreError {
     Unavailable,
+    Malformed,
 }
 
 impl fmt::Display for SecretStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => formatter.write_str("the native credential vault is unavailable"),
+            Self::Malformed => {
+                formatter.write_str("API key is malformed; re-enter a key without whitespace")
+            }
         }
     }
 }
@@ -282,11 +287,20 @@ impl SecretStore for NativeSecretStore {
 }
 
 /// Sanitized failure from launch-time credential preflight.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreflightError {
     Missing,
     Unavailable,
     Cancelled,
+    Malformed {
+        fingerprint: String,
+    },
+    Rejected {
+        status: u16,
+        message: String,
+        masked: String,
+        fingerprint: String,
+    },
 }
 
 impl PreflightError {
@@ -307,7 +321,125 @@ impl PreflightError {
             Self::Cancelled => {
                 format!("{} credential entry was cancelled", descriptor.display_name)
             }
+            Self::Malformed { fingerprint } => format!(
+                "{} stored API key is malformed ({fingerprint}); re-enter it with {}",
+                descriptor.display_name, descriptor.login_command
+            ),
+            Self::Rejected {
+                status,
+                message,
+                masked,
+                fingerprint,
+            } => format!(
+                "{} rejected this key ({status} {message}; stored key {masked}, {fingerprint}); run {}",
+                descriptor.display_name, descriptor.login_command
+            ),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeOutcome {
+    Accepted,
+    Rejected { status: u16, message: String },
+    Unavailable,
+}
+
+fn key_fingerprint(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+    format!("{} chars, sha256 {}", key.chars().count(), &digest[..12])
+}
+
+fn stored_key_is_well_formed(key: &str) -> bool {
+    key == key.trim() && crate::args::looks_like_api_key(key)
+}
+
+fn mask_key(key: &str) -> String {
+    let suffix: String = key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("****{suffix}")
+}
+
+fn sanitize_provider_message(message: &str, key: &str) -> String {
+    let masked = mask_key(key);
+    let without_exact_key = message.replace(key, &masked);
+    let credential_pattern =
+        regex::Regex::new(r"sk-[A-Za-z0-9_-]{8,}").expect("static API-key redaction pattern");
+    let redacted = credential_pattern
+        .replace_all(&without_exact_key, masked.as_str())
+        .into_owned();
+    redacted
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(200)
+        .collect()
+}
+
+fn probe_provider_key(descriptor: &AnthropicCompatProvider, key: &str) -> ProbeOutcome {
+    let url = descriptor.credential_probe_url;
+    let secret = Zeroizing::new(key.to_owned());
+    probe_with_deadline(Duration::from_secs(5), move || probe_key_at(url, &secret))
+}
+
+fn probe_with_deadline(
+    timeout: Duration,
+    probe: impl FnOnce() -> ProbeOutcome + Send + 'static,
+) -> ProbeOutcome {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    if std::thread::Builder::new()
+        .name("clud-credential-probe".to_string())
+        .spawn(move || {
+            let _ = sender.send(probe());
+        })
+        .is_err()
+    {
+        return ProbeOutcome::Unavailable;
+    }
+    receiver
+        .recv_timeout(timeout)
+        .unwrap_or(ProbeOutcome::Unavailable)
+}
+
+fn probe_key_at(url: &str, key: &str) -> ProbeOutcome {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(5))
+        .redirects(0)
+        .build();
+    let result = agent
+        .get(url)
+        .set("Authorization", &format!("Bearer {key}"))
+        .call();
+    match result {
+        Ok(response) if response.status() == 200 => ProbeOutcome::Accepted,
+        Err(ureq::Error::Status(status @ (401 | 403), response)) => {
+            let mut body = String::new();
+            let _ = response.into_reader().take(4096).read_to_string(&mut body);
+            let message = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|json| {
+                    json.pointer("/error/message")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| {
+                    body.lines()
+                        .next()
+                        .unwrap_or("authentication failed")
+                        .to_string()
+                });
+            ProbeOutcome::Rejected {
+                status,
+                message: sanitize_provider_message(&message, key),
+            }
+        }
+        _ => ProbeOutcome::Unavailable,
     }
 }
 
@@ -323,9 +455,8 @@ pub fn store_inline_api_key(
 }
 
 fn store_inline_api_key_with(store: &dyn SecretStore, key: &str) -> Result<bool, SecretStoreError> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Ok(false);
+    if !stored_key_is_well_formed(key) {
+        return Err(SecretStoreError::Malformed);
     }
     if store.get()?.as_deref() == Some(key) {
         return Ok(false);
@@ -381,11 +512,60 @@ pub fn preflight_native(
 ) -> Result<(), PreflightError> {
     let store = NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
         .map_err(|_| PreflightError::Unavailable)?;
-    preflight_with(&store, interactive, || {
-        prompt_secret(descriptor.display_name)
-    })
+    preflight_checked_with(
+        &store,
+        interactive,
+        || prompt_secret(descriptor.display_name),
+        |key| probe_provider_key(descriptor, key),
+    )
 }
 
+fn preflight_checked_with(
+    store: &dyn SecretStore,
+    interactive: bool,
+    read_secret: impl FnOnce() -> Result<String, ()>,
+    probe: impl FnOnce(&str) -> ProbeOutcome,
+) -> Result<(), PreflightError> {
+    let key = match store.get().map_err(|_| PreflightError::Unavailable)? {
+        Some(key) => key,
+        None if !interactive => return Err(PreflightError::Missing),
+        None => {
+            let key = read_secret().map_err(|_| PreflightError::Cancelled)?;
+            if !stored_key_is_well_formed(&key) {
+                return Err(PreflightError::Malformed {
+                    fingerprint: key_fingerprint(&key),
+                });
+            }
+            assess_key(&key, probe)?;
+            store.set(&key).map_err(|_| PreflightError::Unavailable)?;
+            return Ok(());
+        }
+    };
+    assess_key(&key, probe)
+}
+
+fn assess_key(key: &str, probe: impl FnOnce(&str) -> ProbeOutcome) -> Result<(), PreflightError> {
+    if !stored_key_is_well_formed(key) {
+        return Err(PreflightError::Malformed {
+            fingerprint: key_fingerprint(key),
+        });
+    }
+    match probe(key) {
+        ProbeOutcome::Accepted => Ok(()),
+        ProbeOutcome::Rejected { status, message } => Err(PreflightError::Rejected {
+            status,
+            message: sanitize_provider_message(&message, key),
+            masked: mask_key(key),
+            fingerprint: key_fingerprint(key),
+        }),
+        ProbeOutcome::Unavailable => {
+            eprintln!("[clud] warning: could not validate provider API key; continuing offline");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 fn preflight_with(
     store: &dyn SecretStore,
     interactive: bool,
@@ -425,9 +605,14 @@ pub fn run_for(
         }
     };
     let mut stdout = io::stdout().lock();
-    run_with(descriptor, subcommand, &store, &mut stdout, || {
-        prompt_secret(descriptor.display_name)
-    })
+    run_with_probe(
+        descriptor,
+        subcommand,
+        &store,
+        &mut stdout,
+        || prompt_secret(descriptor.display_name),
+        |key| probe_provider_key(descriptor, key),
+    )
 }
 
 /// DeepSeek-scoped delegate kept for its existing call sites: `main.rs`'s
@@ -439,7 +624,8 @@ pub fn run(subcommand: &DeepseekAuthSubcommand) -> i32 {
     run_for(descriptor, subcommand)
 }
 
-/// Read a secret from the terminal without echoing typed characters.
+/// Read a secret from the terminal while echoing only one asterisk per
+/// accepted character. The typed characters themselves never reach stderr.
 /// `display_name` names the provider prompted for (e.g. "DeepSeek", "Kimi")
 /// so this one implementation serves every Anthropic-compat provider.
 fn prompt_secret(display_name: &str) -> Result<String, ()> {
@@ -449,20 +635,15 @@ fn prompt_secret(display_name: &str) -> Result<String, ()> {
     let result = (|| {
         let mut secret = String::new();
         loop {
-            match event::read().map_err(|_| ())? {
-                Event::Key(key) if key.kind.is_press() => match key.code {
-                    KeyCode::Enter => return Ok(secret),
-                    KeyCode::Esc => return Err(()),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Err(())
-                    }
-                    KeyCode::Backspace => {
-                        secret.pop();
-                    }
-                    KeyCode::Char(character) => secret.push(character),
-                    _ => {}
-                },
-                _ => {}
+            if let Event::Key(key) = event::read().map_err(|_| ())? {
+                if !key.kind.is_press() {
+                    continue;
+                }
+                match handle_secret_key(&mut secret, key, &mut io::stderr())? {
+                    SecretInputAction::Continue => {}
+                    SecretInputAction::Accept => return Ok(secret),
+                    SecretInputAction::Cancel => return Err(()),
+                }
             }
         }
     })();
@@ -471,20 +652,76 @@ fn prompt_secret(display_name: &str) -> Result<String, ()> {
     result
 }
 
-fn run_with(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretInputAction {
+    Continue,
+    Accept,
+    Cancel,
+}
+
+fn handle_secret_key(
+    secret: &mut String,
+    key: KeyEvent,
+    output: &mut dyn Write,
+) -> Result<SecretInputAction, ()> {
+    match key.code {
+        KeyCode::Enter => Ok(SecretInputAction::Accept),
+        KeyCode::Esc => Ok(SecretInputAction::Cancel),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Ok(SecretInputAction::Cancel)
+        }
+        KeyCode::Backspace => {
+            if secret.pop().is_some() {
+                output.write_all(b"\x08 \x08").map_err(|_| ())?;
+                output.flush().map_err(|_| ())?;
+            }
+            Ok(SecretInputAction::Continue)
+        }
+        KeyCode::Char(character) => {
+            secret.push(character);
+            output.write_all(b"*").map_err(|_| ())?;
+            output.flush().map_err(|_| ())?;
+            Ok(SecretInputAction::Continue)
+        }
+        _ => Ok(SecretInputAction::Continue),
+    }
+}
+
+fn write_credential_status(stdout: &mut dyn Write, json: bool, status: &str, fingerprint: &str) {
+    if json {
+        let _ = writeln!(
+            stdout,
+            "{}",
+            serde_json::json!({
+                "source": "native_vault",
+                "configured": true,
+                "status": status,
+                "fingerprint": fingerprint,
+            })
+        );
+    } else {
+        let _ = writeln!(
+            stdout,
+            "source: native credential vault\nstatus: {status}\nstored key: {fingerprint}"
+        );
+    }
+}
+
+fn run_with_probe(
     descriptor: &AnthropicCompatProvider,
     subcommand: &DeepseekAuthSubcommand,
     store: &dyn SecretStore,
     stdout: &mut dyn Write,
     read_secret: impl FnOnce() -> Result<String, ()>,
+    probe: impl FnOnce(&str) -> ProbeOutcome,
 ) -> i32 {
     match subcommand {
         DeepseekAuthSubcommand::Login => {
             let secret = match read_secret() {
-                Ok(secret) if !secret.trim().is_empty() => Zeroizing::new(secret),
+                Ok(secret) if stored_key_is_well_formed(&secret) => Zeroizing::new(secret),
                 _ => {
                     eprintln!(
-                        "{}-auth: no API key entered; nothing was stored",
+                        "{}-auth: invalid API key; nothing was stored",
                         descriptor.settings_id
                     );
                     return 2;
@@ -509,21 +746,34 @@ fn run_with(
             }
         }
         DeepseekAuthSubcommand::Status { json } => match store.get() {
-            Ok(Some(_)) if *json => {
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::json!({"source": "native_vault", "configured": true})
-                );
-                0
-            }
-            Ok(Some(_)) => {
-                let _ = writeln!(
-                    stdout,
-                    "source: native credential vault\nstatus: configured"
-                );
-                0
-            }
+            Ok(Some(key)) => match assess_key(&key, probe) {
+                Ok(()) if *json => {
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        serde_json::json!({"source": "native_vault", "configured": true})
+                    );
+                    0
+                }
+                Ok(()) => {
+                    let _ = writeln!(
+                        stdout,
+                        "source: native credential vault\nstatus: configured"
+                    );
+                    0
+                }
+                Err(PreflightError::Malformed { fingerprint }) => {
+                    write_credential_status(stdout, *json, "malformed", &fingerprint);
+                    2
+                }
+                Err(PreflightError::Rejected { fingerprint, .. }) => {
+                    write_credential_status(stdout, *json, "rejected", &fingerprint);
+                    2
+                }
+                Err(_) => {
+                    unreachable!("stored key assessment has only malformed and rejected errors")
+                }
+            },
             Ok(None) if *json => {
                 let _ = writeln!(
                     stdout,
@@ -569,6 +819,19 @@ fn run_with(
             }
         },
     }
+}
+
+#[cfg(test)]
+fn run_with(
+    descriptor: &AnthropicCompatProvider,
+    subcommand: &DeepseekAuthSubcommand,
+    store: &dyn SecretStore,
+    stdout: &mut dyn Write,
+    read_secret: impl FnOnce() -> Result<String, ()>,
+) -> i32 {
+    run_with_probe(descriptor, subcommand, store, stdout, read_secret, |_| {
+        ProbeOutcome::Accepted
+    })
 }
 
 #[cfg(test)]
@@ -649,11 +912,224 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_stored_key_fails_preflight_before_launch() {
+        let store = InMemorySecretStore {
+            secret: Mutex::new(Some("sk-0123456789abcdef0123456789abcdef".to_string())),
+            unavailable: false,
+        };
+        let result = preflight_checked_with(
+            &store,
+            false,
+            || unreachable!(),
+            |_| ProbeOutcome::Rejected {
+                status: 401,
+                message: "Authentication Fails".to_string(),
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(matches!(&error, PreflightError::Rejected { .. }));
+        let diagnostic = error.describe(deepseek_descriptor());
+        assert!(diagnostic.contains("****cdef"));
+        assert!(diagnostic.contains("35 chars, sha256"));
+        assert!(!diagnostic.contains("sk-0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
+    fn rejected_interactive_key_is_not_saved() {
+        let store = InMemorySecretStore::default();
+        let result = preflight_checked_with(
+            &store,
+            true,
+            || Ok("sk-0123456789abcdef0123456789abcdef".to_string()),
+            |_| ProbeOutcome::Rejected {
+                status: 401,
+                message: "invalid key".to_string(),
+            },
+        );
+        assert!(matches!(result, Err(PreflightError::Rejected { .. })));
+        assert_eq!(store.get().unwrap(), None);
+    }
+
+    #[test]
+    fn probe_deadline_bounds_launch_even_when_request_does_not_finish() {
+        let start = std::time::Instant::now();
+        let result = probe_with_deadline(Duration::from_millis(10), || {
+            std::thread::sleep(Duration::from_millis(100));
+            ProbeOutcome::Accepted
+        });
+        assert_eq!(result, ProbeOutcome::Unavailable);
+        assert!(start.elapsed() < Duration::from_millis(90));
+    }
+
+    #[test]
+    fn an_unreachable_probe_does_not_block_a_valid_stored_key() {
+        let key = "sk-0123456789abcdef0123456789abcdef";
+        let store = InMemorySecretStore {
+            secret: Mutex::new(Some(key.to_string())),
+            unavailable: false,
+        };
+        assert_eq!(
+            preflight_checked_with(
+                &store,
+                false,
+                || unreachable!(),
+                |_| ProbeOutcome::Unavailable
+            ),
+            Ok(())
+        );
+        assert_eq!(store.get().unwrap().as_deref(), Some(key));
+    }
+
+    #[test]
+    fn status_distinguishes_rejected_from_malformed_without_echoing_secrets() {
+        let descriptor = deepseek_descriptor();
+        let good_shape = "sk-0123456789abcdef0123456789abcdef";
+        let store = InMemorySecretStore {
+            secret: Mutex::new(Some(good_shape.to_string())),
+            unavailable: false,
+        };
+        let mut output = Vec::new();
+        let code = run_with_probe(
+            descriptor,
+            &DeepseekAuthSubcommand::Status { json: false },
+            &store,
+            &mut output,
+            || unreachable!(),
+            |_| ProbeOutcome::Rejected {
+                status: 401,
+                message: "Authentication Fails".to_string(),
+            },
+        );
+        let report = String::from_utf8(output).unwrap();
+        assert_eq!(code, 2);
+        assert!(report.contains("status: rejected"));
+        assert!(report.contains("sha256"));
+        assert!(!report.contains(good_shape));
+
+        *store.secret.lock().unwrap() =
+            Some("sk-0123456789abcdef\u{200b}0123456789abcdef".to_string());
+        let mut output = Vec::new();
+        let code = run_with_probe(
+            descriptor,
+            &DeepseekAuthSubcommand::Status { json: false },
+            &store,
+            &mut output,
+            || unreachable!(),
+            |_| panic!("zero-width corruption must not reach the network"),
+        );
+        assert_eq!(code, 2);
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("status: malformed"));
+
+        *store.secret.lock().unwrap() = Some(format!("{good_shape} "));
+        let mut output = Vec::new();
+        let code = run_with_probe(
+            descriptor,
+            &DeepseekAuthSubcommand::Status { json: false },
+            &store,
+            &mut output,
+            || unreachable!(),
+            |_| panic!("malformed keys must not reach the network"),
+        );
+        let report = String::from_utf8(output).unwrap();
+        assert_eq!(code, 2);
+        assert!(report.contains("status: malformed"));
+        assert!(!report.contains("status: rejected"));
+        assert!(!report.contains(good_shape));
+    }
+
+    #[test]
+    fn secret_prompt_echoes_asterisks_and_erases_one_on_backspace() {
+        let mut secret = String::new();
+        let mut output = Vec::new();
+        for character in ['s', 'k', '-'] {
+            assert_eq!(
+                handle_secret_key(
+                    &mut secret,
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                    &mut output,
+                ),
+                Ok(SecretInputAction::Continue)
+            );
+        }
+        assert_eq!(secret, "sk-");
+        assert_eq!(output, b"***");
+        handle_secret_key(
+            &mut secret,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(secret, "sk");
+        assert_eq!(output, b"***\x08 \x08");
+        assert!(!output.contains(&b's'));
+        assert!(!output.contains(&b'k'));
+    }
+
+    #[test]
+    fn provider_probe_classifies_401_and_transport_failure_without_key_echo() {
+        use std::net::TcpListener;
+        let key = "sk-0123456789abcdef0123456789abcdef";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/probe", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).contains("Authorization: Bearer "));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .unwrap();
+        });
+        assert_eq!(probe_key_at(&url, key), ProbeOutcome::Accepted);
+        worker.join().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/probe", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.contains("Authorization: Bearer sk-0123456789abcdef0123456789abcdef"));
+            let body = "{\"error\":{\"message\":\"Authentication Fails, sk-0123456789abcdef0123456789abcdef invalid\"}}";
+            write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let rejected = probe_key_at(&url, key);
+        worker.join().unwrap();
+        assert!(matches!(
+            rejected,
+            ProbeOutcome::Rejected { status: 401, .. }
+        ));
+        if let ProbeOutcome::Rejected { message, .. } = rejected {
+            assert!(message.contains("****cdef"));
+            assert!(!message.contains(key));
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/probe", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        assert_eq!(probe_key_at(&url, key), ProbeOutcome::Unavailable);
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn login_status_and_logout_use_only_the_injected_store() {
         let descriptor = deepseek_descriptor();
         let store = InMemorySecretStore::default();
         let mut output = Vec::new();
-        let secret = "ds-test-secret";
+        let secret = "sk-0123456789abcdef0123456789abcdef";
 
         assert_eq!(
             run_with(
@@ -699,17 +1175,25 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_key_is_stored_trimmed_and_reported_only_when_it_changes() {
+    fn an_inline_key_rejects_corrupted_pastes_and_reports_only_real_changes() {
         let store = InMemorySecretStore::default();
         let key = "sk-0123456789abcdef0123456789abcdef";
-        assert!(store_inline_api_key_with(&store, &format!("  {key}\r\n")).unwrap());
+        assert_eq!(
+            store_inline_api_key_with(&store, &format!("  {key}\r\n")),
+            Err(SecretStoreError::Malformed)
+        );
+        assert_eq!(store.get().unwrap(), None);
+        assert!(store_inline_api_key_with(&store, key).unwrap());
         assert_eq!(store.get().unwrap().as_deref(), Some(key));
         assert!(
             !store_inline_api_key_with(&store, key).unwrap(),
             "re-passing the same key is not a change"
         );
         assert!(store_inline_api_key_with(&store, "sk-ffffffffffffffffffffffff").unwrap());
-        assert!(!store_inline_api_key_with(&store, "   ").unwrap());
+        assert_eq!(
+            store_inline_api_key_with(&store, "   "),
+            Err(SecretStoreError::Malformed)
+        );
         assert_eq!(
             store.get().unwrap().as_deref(),
             Some("sk-ffffffffffffffffffffffff")
@@ -757,6 +1241,17 @@ mod tests {
                 &store,
                 &mut output,
                 || Ok("   ".to_string()),
+            ),
+            2
+        );
+        assert_eq!(store.get().unwrap(), None);
+        assert_eq!(
+            run_with(
+                deepseek_descriptor(),
+                &DeepseekAuthSubcommand::Login,
+                &store,
+                &mut output,
+                || Ok("sk-0123456789abcdef0123456789abcdef ".to_string()),
             ),
             2
         );

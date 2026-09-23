@@ -47,6 +47,9 @@ pub struct AnthropicCompatProvider {
     /// Anthropic-compatible base URL the child talks to, e.g.
     /// `https://api.deepseek.com/anthropic`.
     pub anthropic_base_url: &'static str,
+    /// Cheap provider-owned authenticated GET used to classify a stored key
+    /// before launching the harness. This endpoint must not generate tokens.
+    pub credential_probe_url: &'static str,
     /// `clud auth login <settings_id>` -- surfaced in preflight failure
     /// messages.
     pub login_command: &'static str,
@@ -77,6 +80,7 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         vault_service: crate::provider_auth::DEEPSEEK_VAULT_SERVICE,
         vault_account: crate::provider_auth::DEEPSEEK_VAULT_ACCOUNT,
         anthropic_base_url: "https://api.deepseek.com/anthropic",
+        credential_probe_url: "https://api.deepseek.com/user/balance",
         login_command: "clud auth login deepseek",
         // The 1m Flash model fills the haiku/subagent slots too, rather than
         // the auto-context `deepseek-flash` DeepSeek's guide suggests: it is
@@ -95,6 +99,7 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         vault_service: crate::provider_auth::KIMI_VAULT_SERVICE,
         vault_account: crate::provider_auth::KIMI_VAULT_ACCOUNT,
         anthropic_base_url: "https://api.moonshot.ai/anthropic",
+        credential_probe_url: "https://api.moonshot.ai/v1/models",
         login_command: "clud auth login kimi",
         // Like DeepSeek's slots in clud, Kimi's official Claude Code profile
         // points the haiku AND subagent slots at the same main model:
@@ -112,6 +117,7 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         vault_service: crate::provider_auth::OPENROUTER_VAULT_SERVICE,
         vault_account: crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
         anthropic_base_url: "https://openrouter.ai/api",
+        credential_probe_url: "https://openrouter.ai/api/v1/key",
         login_command: "clud auth login openrouter",
         subagent_wire_id: "~anthropic/claude-opus-latest",
         role_models: Some(AnthropicCompatRoleModels {

@@ -342,6 +342,28 @@ without a restart -- and can be failed over automatically. See
 No normalized field may contain credentials. Dry-run output exposes the
 selection and its sources so routing can be audited without a paid request.
 
+### Anthropic-compatible credential preflight
+
+Live DeepSeek, Kimi, and OpenRouter launches read their separate native-vault
+records before accepting foreground or daemon-backed work. A missing key can
+be entered only in an interactive foreground terminal; `--dry-run` performs
+no vault access or network probe. Both command-line and terminal entry reject
+keys that do not match the reviewed `sk-` shape, including leading/trailing
+whitespace and invisible Unicode characters, before changing the vault. The
+terminal echoes one asterisk per character and erases one on Backspace; it
+never echoes the key itself.
+
+Each live preflight performs one bounded, redirect-disabled authenticated GET
+with the value read from the vault: DeepSeek's `/user/balance`, Kimi's
+`/v1/models`, or OpenRouter's `/api/v1/key`. A 200 response proceeds unchanged;
+401/403 stops the launch before the harness starts. The failure prints only a
+sanitized provider message, a last-four mask, and the stored key's character
+count plus a short SHA-256 digest. `clud auth status <provider>` uses the same
+classification: `configured`, `malformed`, `rejected`, or `login required`.
+A timeout, connection failure, or other inconclusive status prints one warning
+and continues, so an offline machine can still launch. A malformed stored key
+is detected locally and is never sent over the network.
+
 ## Gateway discovery adds picker rows, it does not constrain them
 
 Claude Code's `/model` picker belongs to the harness. Gateway discovery is one
