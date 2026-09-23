@@ -206,12 +206,12 @@ fn render_passthrough_abort_payload(
     serde_json::json!({
         "v": 1,
         "tool": rel_path,
-        "args": args,
-        "argv": argv,
+        "args": crate::secret_redaction::redact_args(args),
+        "argv": crate::secret_redaction::redact_args(argv),
         "status": "aborted",
         "reason": reason.label(),
         "elapsed_ms": elapsed.as_millis() as u64,
-        "stderr_tail": stderr_tail,
+        "stderr_tail": stderr_tail.map(crate::secret_redaction::redact_text),
     })
     .to_string()
 }
@@ -226,7 +226,8 @@ fn emit_passthrough_abort_diagnostic(
 ) -> io::Result<()> {
     let payload =
         render_passthrough_abort_payload(rel_path, args, argv, elapsed, reason, stderr_tail);
-    let argv_json = serde_json::to_string(argv).unwrap_or_else(|_| format!("{argv:?}"));
+    let safe_argv = crate::secret_redaction::redact_args(argv);
+    let argv_json = serde_json::to_string(&safe_argv).unwrap_or_else(|_| format!("{safe_argv:?}"));
     let mut err = io::stderr().lock();
     writeln!(err, "{payload}")?;
     writeln!(
@@ -237,7 +238,11 @@ fn emit_passthrough_abort_diagnostic(
     )?;
     writeln!(err, "  command argv: {argv_json}")?;
     if let Some(tail) = stderr_tail {
-        writeln!(err, "  stderr tail: {tail}")?;
+        writeln!(
+            err,
+            "  stderr tail: {}",
+            crate::secret_redaction::redact_text(tail)
+        )?;
     }
     err.flush()
 }
@@ -990,3 +995,25 @@ fn build_child_env(cache_dir: &std::path::Path) -> Vec<(String, String)> {
 #[path = "tool_run_telemetry.rs"]
 mod tool_run_telemetry;
 use tool_run_telemetry::{stderr_tail_200, ToolTelemetry};
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn abort_diagnostic_payload_never_serializes_a_provider_key() {
+        let key = "sk-0123456789abcdef0123456789abcdef";
+        let args = vec![key.to_string()];
+        let argv = vec!["sh".to_string(), key.to_string()];
+        let payload = render_passthrough_abort_payload(
+            "tool.py",
+            &args,
+            &argv,
+            Duration::from_secs(1),
+            AbortReason::CommandTimeout,
+            Some(key),
+        );
+        assert!(!payload.contains(key));
+        assert!(payload.contains("****cdef"));
+    }
+}

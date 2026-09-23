@@ -466,7 +466,7 @@ pub(crate) fn sanitize_args(raw: Vec<String>) -> Vec<String> {
             if looks_secret(&s) {
                 "<redacted>".to_string()
             } else {
-                s
+                crate::secret_redaction::redact_text(&s)
             }
         })
         .collect()
@@ -580,6 +580,7 @@ mod tests {
             "ghp_abcDEFghiJKLmnoPQRstuVWXyz0123456789abcd".to_string(),
             "--flag".to_string(),
             "short".to_string(),
+            "sk-0123456789abcdef0123456789abcdef".to_string(),
         ];
         let out = sanitize_args(input);
         assert_eq!(out[0], "clud");
@@ -589,6 +590,10 @@ mod tests {
         assert_eq!(out[4], "<redacted>", "long base64 run should be redacted");
         assert_eq!(out[5], "--flag");
         assert_eq!(out[6], "short", "short non-secret strings pass through");
+        assert_eq!(
+            out[7], "****cdef",
+            "35-character provider keys must be masked"
+        );
     }
 
     #[test]

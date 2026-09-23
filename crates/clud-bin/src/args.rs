@@ -5,12 +5,12 @@ use crate::backend::{HarnessSelection, ModelProvider, RoutingMode};
 use crate::graphics::GraphicsMode;
 
 /// Fast CLI for running supported agent harnesses in YOLO mode.
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Clone)]
 #[command(
     name = "clud",
     version,
     about = "Fast CLI for running supported agent harnesses in YOLO mode",
-    after_help = "Unknown flags are forwarded directly to the backend agent."
+    after_help = "Unrelated backend flags are forwarded; use -- before backend arguments to bypass clud flag validation."
 )]
 pub struct Args {
     /// Open this backend launch in clud's owned web terminal window.
@@ -286,6 +286,28 @@ pub struct Args {
     /// parsed representation.
     #[arg(skip)]
     pub raw_argv: Vec<String>,
+}
+
+impl std::fmt::Debug for Args {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Args")
+            .field("claude", &self.claude)
+            .field("codex", &self.codex)
+            .field("deepseek", &self.deepseek)
+            .field("kimi", &self.kimi)
+            .field("openrouter", &self.openrouter)
+            .field(
+                "passthrough",
+                &crate::secret_redaction::redact_args(&self.passthrough),
+            )
+            .field("inline_api_key", &self.inline_api_key)
+            .field(
+                "raw_argv",
+                &crate::secret_redaction::redact_args(&self.raw_argv),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1227,6 +1249,7 @@ impl Args {
 
     pub fn parse_from_raw(raw: Vec<String>) -> Self {
         let normalized = normalize_bare_resume_before_subcommand(&raw);
+        let normalized = normalize_known_option_dashes(&normalized);
         let normalized = match split_inline_key_assignments(&normalized) {
             Ok(normalized) => normalized,
             Err(message) => {
@@ -1236,7 +1259,15 @@ impl Args {
                     .exit()
             }
         };
-        let (known, unknown) = split_known_unknown(&normalized);
+        let (known, unknown) = match split_known_unknown(&normalized) {
+            Ok(parts) => parts,
+            Err(message) => {
+                use clap::CommandFactory;
+                Args::command()
+                    .error(clap::error::ErrorKind::UnknownArgument, message)
+                    .exit()
+            }
+        };
         let mut args = Args::parse_from(known);
         if args
             .resume
@@ -1250,6 +1281,53 @@ impl Args {
         args.raw_argv = raw;
         args
     }
+}
+
+/// Only correct an exact, public clud option while still in the top-level
+/// option region. In particular, never rewrite prompt values or backend argv.
+fn normalize_known_option_dashes(raw: &[String]) -> Vec<String> {
+    use clap::CommandFactory;
+    let command = Args::command();
+    let public_longs: std::collections::HashSet<&str> = command
+        .get_arguments()
+        .filter(|argument| !argument.is_hide_set())
+        .filter_map(|argument| argument.get_long())
+        .collect();
+    let mut normalized = raw.to_vec();
+    let mut index = 1;
+    while index < raw.len() {
+        let token = raw[index].as_str();
+        if token == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&token) {
+            break;
+        }
+        let (name, assignment) = token
+            .split_once('=')
+            .map_or((token, None), |(name, value)| (name, Some(value)));
+        let corrected = if name == "-deepseek" {
+            Some("--deepseek".to_string())
+        } else {
+            let suffix = ["-–", "—", "–", "―", "−", "﹣", "－", "\u{00ad}"]
+                .iter()
+                .find_map(|prefix| name.strip_prefix(prefix));
+            suffix.and_then(|suffix| public_longs.contains(suffix).then(|| format!("--{suffix}")))
+        };
+        let effective_name = corrected.as_deref().unwrap_or(name);
+        let consumes_next = assignment.is_none()
+            && (SPLITTER_VALUE_FLAGS.contains(&effective_name)
+                || SPLITTER_SHORT_VALUE_FLAGS.contains(&effective_name));
+        if let Some(corrected) = corrected {
+            normalized[index] = match assignment {
+                Some(value) => format!("{corrected}={value}"),
+                None => corrected,
+            };
+        }
+        if consumes_next {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    normalized
 }
 
 /// `--resume` has an optional value, so clap would consume a following built-in
@@ -1313,45 +1391,48 @@ fn split_inline_key_assignments(raw: &[String]) -> Result<Vec<String>, String> {
     Ok(normalized)
 }
 
-fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
+const SPLITTER_VALUE_FLAGS: &[&str] = &[
+    "--prompt",
+    "--message",
+    "--resume",
+    "--model",
+    "--allow-model",
+    "--provider",
+    "--mode",
+    "--failover",
+    "--effort",
+    "--context-window",
+    "--harness",
+    "--name",
+    "--transcript",
+    "--backlog-size",
+    "--graphics",
+    "--graphics-image",
+    "--loop-count",
+    "--done",
+    "--repeat",
+    "--daemon-state-dir",
+    "--stale-after",
+    // Issue: `clud gc prune/purge --older-than <dur>` value arg.
+    "--older-than",
+    "--daemon",
+    "--state-dir",
+    // Issue #469: `clud log --cmd "..."` arg.
+    "--cmd",
+    "--set-web-term",
+    // #1189: hidden `clud statusline` arguments.
+    "--session-pid",
+    "--chain-b64",
+];
+const SPLITTER_SHORT_VALUE_FLAGS: &[&str] = &["-p", "-m", "-r"];
+
+fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
     let mut known = vec![raw[0].clone()];
     let mut unknown = Vec::new();
     let mut i = 1;
 
-    let value_flags: &[&str] = &[
-        "--prompt",
-        "--message",
-        "--resume",
-        "--model",
-        "--allow-model",
-        "--provider",
-        "--mode",
-        "--failover",
-        "--effort",
-        "--context-window",
-        "--harness",
-        "--name",
-        "--transcript",
-        "--backlog-size",
-        "--graphics",
-        "--graphics-image",
-        "--loop-count",
-        "--done",
-        "--repeat",
-        "--daemon-state-dir",
-        "--stale-after",
-        // Issue: `clud gc prune/purge --older-than <dur>` value arg.
-        "--older-than",
-        "--daemon",
-        "--state-dir",
-        // Issue #469: `clud log --cmd "..."` arg.
-        "--cmd",
-        "--set-web-term",
-        // #1189: hidden `clud statusline` arguments.
-        "--session-pid",
-        "--chain-b64",
-    ];
-    let short_value_flags: &[&str] = &["-p", "-m", "-r"];
+    let value_flags: &[&str] = SPLITTER_VALUE_FLAGS;
+    let short_value_flags: &[&str] = SPLITTER_SHORT_VALUE_FLAGS;
     let bool_flags: &[&str] = &[
         "--continue",
         "--claude",
@@ -1370,6 +1451,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--detach",
         "--detachable",
         "--verbose",
+        "--no-cpu-banner",
         "--experimental-daemon-centralized",
         "--all",
         "--last",
@@ -1484,11 +1566,110 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
             continue;
         }
 
+        if !arg.starts_with('-') {
+            if let Some(suggestion) = suggest_public_subcommand(arg) {
+                eprintln!("[clud] note: '{arg}' is not a subcommand; did you mean '{suggestion}'?");
+            }
+        }
+        validate_top_level_unknown(arg, raw.get(i + 1).map(String::as_str))?;
         unknown.push(arg.clone());
         i += 1;
     }
 
-    (known, unknown)
+    Ok((known, unknown))
+}
+
+fn suggest_public_subcommand(token: &str) -> Option<String> {
+    if token.chars().any(char::is_whitespace) || looks_like_api_key(token) {
+        return None;
+    }
+    use clap::CommandFactory;
+    let command = Args::command();
+    let mut suggestions = clap::Command::default().name("clud");
+    let visible: std::collections::HashSet<String> = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| subcommand.get_name().to_string())
+        .collect();
+    for subcommand in command.get_subcommands() {
+        if !subcommand.is_hide_set() {
+            suggestions = suggestions.subcommand(subcommand.clone());
+        }
+    }
+    suggestions
+        .try_get_matches_from(["clud", token])
+        .err()
+        .and_then(|error| {
+            error.to_string().lines().find_map(|line| {
+                line.split_once("a similar subcommand exists: '")
+                    .and_then(|(_, suffix)| {
+                        suffix.split_once('\'').map(|(name, _)| name.to_string())
+                    })
+            })
+        })
+        .filter(|name| visible.contains(name))
+}
+
+fn validate_top_level_unknown(token: &str, following: Option<&str>) -> Result<(), String> {
+    use clap::CommandFactory;
+    let name = token.split_once('=').map_or(token, |(name, _)| name);
+    let canonical = if let Some(name) = name.strip_prefix("--") {
+        format!("--{name}")
+    } else if let Some(name) = name.strip_prefix('-') {
+        let name = name.strip_prefix('–').unwrap_or(name);
+        format!("--{name}")
+    } else if let Some(name) = ["—", "–", "―", "−", "﹣", "－", "\u{00ad}"]
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+    {
+        format!("--{name}")
+    } else {
+        return Ok(());
+    };
+    let command = Args::command();
+    let all_options: std::collections::HashSet<String> = command
+        .get_arguments()
+        .filter_map(|argument| argument.get_long().map(|name| format!("--{name}")))
+        .collect();
+    let public_options: std::collections::HashSet<String> = command
+        .get_arguments()
+        .filter(|argument| !argument.is_hide_set())
+        .filter_map(|argument| argument.get_long().map(|name| format!("--{name}")))
+        .collect();
+    if all_options.contains(&canonical) {
+        return Err(format!(
+            "clud's option splitter omitted {name}; this is a clud bug"
+        ));
+    }
+    let suggestion = Args::command()
+        .try_get_matches_from(["clud", canonical.as_str()])
+        .err()
+        .and_then(|error| {
+            error.to_string().lines().find_map(|line| {
+                line.split_once("a similar argument exists: '")
+                    .and_then(|(_, suffix)| {
+                        suffix
+                            .split_once('\'')
+                            .map(|(option, _)| option.to_string())
+                    })
+            })
+        })
+        .filter(|suggested| public_options.contains(suggested));
+    let next_is_key = following.is_some_and(looks_like_api_key)
+        || token
+            .split_once('=')
+            .is_some_and(|(_, value)| looks_like_api_key(value));
+    if let Some(suggested) = suggestion {
+        return Err(format!(
+            "unexpected argument '{name}'; did you mean '{suggested}'? Pass backend arguments after --"
+        ));
+    }
+    if next_is_key {
+        return Err(format!(
+            "unrecognized option '{name}' is followed by an API key; check the spelling or pass backend arguments after --"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

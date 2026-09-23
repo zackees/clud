@@ -16,6 +16,7 @@ use crate::args::{Args, Command, DeepseekAuthSubcommand};
 use crate::backend::{Backend, ModelProvider};
 use crate::command;
 use crate::provider_registry::{self, AnthropicCompatProvider};
+use crate::secret_redaction::mask_key;
 
 /// DeepSeek's vault identifiers. Changing either literal orphans every
 /// existing user's stored key: on non-Windows this is the `keyring` service
@@ -353,18 +354,6 @@ fn key_fingerprint(key: &str) -> String {
 
 fn stored_key_is_well_formed(key: &str) -> bool {
     key == key.trim() && crate::args::looks_like_api_key(key)
-}
-
-fn mask_key(key: &str) -> String {
-    let suffix: String = key
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("****{suffix}")
 }
 
 fn sanitize_provider_message(message: &str, key: &str) -> String {

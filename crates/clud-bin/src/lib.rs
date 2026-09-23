@@ -78,6 +78,7 @@ pub mod repo_clud_config;
 pub mod route_health;
 pub mod runner;
 pub mod runtime_cache;
+pub mod secret_redaction;
 pub mod selector;
 pub mod server_settings;
 pub mod session;
