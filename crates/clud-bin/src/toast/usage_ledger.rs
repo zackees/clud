@@ -36,11 +36,25 @@ struct Cursor {
 struct Ledger {
     launch_nonce: String,
     files: BTreeMap<String, Cursor>,
-    // SHA-256(message.id) -> SHA-256(the four provider counters). Persisting
-    // the whole set, not a rolling window, makes resume/replay idempotent.
-    seen: BTreeMap<String, String>,
+    // SHA-256(message.id) -> provider tuple and opaque source-file key.
+    seen: BTreeMap<String, SeenRecord>,
+    uncertain: bool,
     usage: Option<StatusUsage>,
     last_timestamp: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Counts {
+    input: u64,
+    created: u64,
+    cached: u64,
+    output: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeenRecord {
+    source: String,
+    counts: Counts,
 }
 
 pub(super) fn snapshot_path(state_path: &Path) -> PathBuf {
@@ -114,13 +128,26 @@ pub(super) fn update(
         return old_snapshot;
     }
     let mut remaining = MAX_BYTES_PER_CALLBACK;
+    let mut changed = false;
     for path in &paths {
         if remaining == 0 {
             break;
         }
-        if scan_file(path, &mut ledger, &mut remaining, provider, fallback_model).is_err() {
-            return old_snapshot;
+        match scan_file(path, &mut ledger, &mut remaining, provider, fallback_model) {
+            Ok(scanned) => changed |= scanned,
+            Err(_) => return old_snapshot,
         }
+    }
+    if ledger.uncertain {
+        if !same_launch_alive(state_path, launch_nonce) {
+            return None;
+        }
+        if changed {
+            let bytes = serde_json::to_vec(&ledger).ok()?;
+            atomic_write(&cursor_path(state_path), &bytes).ok()?;
+        }
+        let _ = fs::remove_file(snapshot_path(state_path));
+        return None;
     }
     if remaining == 0 {
         // Persist progress, but never present a prefix of a large transcript
@@ -128,31 +155,28 @@ pub(super) fn update(
         if !same_launch_alive(state_path, launch_nonce) {
             return old_snapshot;
         }
-        let bytes = serde_json::to_vec(&ledger).ok()?;
-        atomic_write(&cursor_path(state_path), &bytes).ok()?;
+        if changed {
+            let bytes = serde_json::to_vec(&ledger).ok()?;
+            atomic_write(&cursor_path(state_path), &bytes).ok()?;
+        }
         return old_snapshot;
     }
     let Some(usage) = ledger.usage.clone() else {
         return old_snapshot;
     };
-    if old_snapshot.as_ref().is_some_and(|old| {
-        old.cached_input_tokens > usage.cached_input_tokens
-            || old.uncached_input_tokens > usage.uncached_input_tokens
-            || old.output_tokens > usage.output_tokens
-    }) {
-        return old_snapshot;
-    }
     let snapshot = Snapshot {
         launch_nonce: launch_nonce.to_string(),
         updated_ms: now_ms,
         usage: usage.clone(),
     };
-    let state_bytes = serde_json::to_vec(&ledger).ok()?;
     let snapshot_bytes = serde_json::to_vec(&snapshot).ok()?;
     if !same_launch_alive(state_path, launch_nonce) {
         return old_snapshot;
     }
-    atomic_write(&cursor_path(state_path), &state_bytes).ok()?;
+    if changed {
+        let state_bytes = serde_json::to_vec(&ledger).ok()?;
+        atomic_write(&cursor_path(state_path), &state_bytes).ok()?;
+    }
     atomic_write(&snapshot_path(state_path), &snapshot_bytes).ok()?;
     Some(usage)
 }
@@ -161,7 +185,12 @@ fn same_launch_alive(state_path: &Path, launch_nonce: &str) -> bool {
     fs::read(state_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StatusState>(&bytes).ok())
-        .is_some_and(|state| state.launch_nonce == launch_nonce)
+        .is_some_and(|state| {
+            state.launch_nonce == launch_nonce
+                && state
+                    .owner_identity
+                    .is_some_and(|identity| identity.is_live())
+        })
 }
 
 fn transcript_paths(main: &Path) -> Vec<PathBuf> {
@@ -196,12 +225,14 @@ fn scan_file(
     remaining: &mut u64,
     provider: &str,
     fallback_model: &str,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let key = digest(path.to_string_lossy().as_bytes());
     let mut cursor = ledger.files.remove(&key).unwrap_or_default();
-    if len < cursor.offset || !fingerprints_match(&mut file, &cursor)? {
+    let original_offset = cursor.offset;
+    let reset = len < cursor.offset || !fingerprints_match(&mut file, &cursor)?;
+    if reset {
         cursor = Cursor::default();
     }
     file.seek(SeekFrom::Start(cursor.offset))?;
@@ -217,15 +248,21 @@ fn scan_file(
         }
         cursor.offset = cursor.offset.saturating_add(bytes as u64);
         *remaining = remaining.saturating_sub(bytes as u64);
-        let record: Value = serde_json::from_slice(&line).map_err(io::Error::other)?;
-        record_usage(&record, ledger, provider, fallback_model)?;
+        // A complete malformed line may hide usage. Checkpoint it but never
+        // present the remaining prefix as an exact session total.
+        if let Ok(record) = serde_json::from_slice::<Value>(&line) {
+            record_usage(&record, ledger, &key, !reset, provider, fallback_model);
+        } else {
+            ledger.uncertain = true;
+        }
     }
     let mut file = reader.into_inner();
     cursor.prefix_hash = range_digest(&mut file, 0, cursor.offset.min(FINGERPRINT_BYTES))?;
     let tail_start = cursor.offset.saturating_sub(FINGERPRINT_BYTES);
     cursor.tail_hash = range_digest(&mut file, tail_start, cursor.offset - tail_start)?;
+    let changed = reset || cursor.offset != original_offset;
     ledger.files.insert(key, cursor);
-    Ok(())
+    Ok(changed)
 }
 
 fn fingerprints_match(file: &mut File, cursor: &Cursor) -> io::Result<bool> {
@@ -252,17 +289,19 @@ fn digest(bytes: &[u8]) -> String {
 fn record_usage(
     record: &Value,
     ledger: &mut Ledger,
+    source: &str,
+    allow_revision: bool,
     provider: &str,
     fallback_model: &str,
-) -> io::Result<()> {
+) {
     let Some(message) = record.get("message") else {
-        return Ok(());
+        return;
     };
     let Some(id) = message.get("id").and_then(Value::as_str) else {
-        return Ok(());
+        return;
     };
     let Some(usage) = message.get("usage") else {
-        return Ok(());
+        return;
     };
     let number = |name| usage.get(name).and_then(Value::as_u64);
     let (Some(input), Some(created), Some(cached), Some(output)) = (
@@ -271,21 +310,32 @@ fn record_usage(
         number("cache_read_input_tokens"),
         number("output_tokens"),
     ) else {
-        return Ok(());
+        return;
     };
     let identity = digest(id.as_bytes());
-    let counts = digest(format!("{input}:{created}:{cached}:{output}").as_bytes());
-    if let Some(previous) = ledger.seen.get(&identity) {
-        // Conflicting replay is not additive; retain the last good total.
-        if previous != &counts {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "conflicting usage for one message id",
-            ));
-        }
-        return Ok(());
+    let counts = Counts {
+        input,
+        created,
+        cached,
+        output,
+    };
+    let previous = ledger.seen.get(&identity);
+    if previous.is_some_and(|previous| previous.counts == counts) {
+        return;
     }
-    ledger.seen.insert(identity, counts);
+    if previous.is_some_and(|previous| previous.source != source || !allow_revision) {
+        ledger.uncertain = true;
+        return;
+    }
+    let old = previous.map_or(Counts::default(), |previous| previous.counts);
+    let is_new = previous.is_none();
+    ledger.seen.insert(
+        identity,
+        SeenRecord {
+            source: source.to_string(),
+            counts,
+        },
+    );
     let model = message
         .get("model")
         .and_then(Value::as_str)
@@ -311,12 +361,21 @@ fn record_usage(
         output_tokens: 0,
         cache_health: "unavailable".into(),
     });
-    totals.request_count = totals.request_count.saturating_add(1);
-    totals.cached_input_tokens = totals.cached_input_tokens.saturating_add(cached);
+    if is_new {
+        totals.request_count = totals.request_count.saturating_add(1);
+    }
+    totals.cached_input_tokens = totals
+        .cached_input_tokens
+        .saturating_sub(old.cached)
+        .saturating_add(counts.cached);
     totals.uncached_input_tokens = totals
         .uncached_input_tokens
-        .saturating_add(input.saturating_add(created));
-    totals.output_tokens = totals.output_tokens.saturating_add(output);
+        .saturating_sub(old.input.saturating_add(old.created))
+        .saturating_add(counts.input.saturating_add(counts.created));
+    totals.output_tokens = totals
+        .output_tokens
+        .saturating_sub(old.output)
+        .saturating_add(counts.output);
     let timestamp = record.get("timestamp").and_then(Value::as_str);
     if timestamp.is_none_or(|timestamp| {
         ledger
@@ -327,7 +386,6 @@ fn record_usage(
         totals.model = model;
         ledger.last_timestamp = timestamp.map(str::to_string);
     }
-    Ok(())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {

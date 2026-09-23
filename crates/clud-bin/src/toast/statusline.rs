@@ -53,6 +53,8 @@ pub fn state_path(state_dir: &Path, session_pid: u32) -> PathBuf {
 pub struct StatusState {
     pub updated_ms: u64,
     #[serde(default)]
+    pub owner_identity: Option<crate::process_identity::ProcessIdentity>,
+    #[serde(default)]
     pub launch_nonce: String,
     #[serde(default)]
     pub provider_label: Option<String>,
@@ -97,6 +99,7 @@ pub fn now_ms() -> u64 {
 #[derive(Debug)]
 pub struct StatusStateWriter {
     path: PathBuf,
+    owner_identity: Option<crate::process_identity::ProcessIdentity>,
     launch_nonce: String,
     provider_label: String,
     board: Mutex<ToastBoard>,
@@ -124,6 +127,7 @@ impl StatusStateWriter {
         };
         let writer = Self {
             path,
+            owner_identity: crate::process_identity::ProcessIdentity::observe(std::process::id()),
             launch_nonce: nonce,
             provider_label: provider.to_string(),
             board: Mutex::new(ToastBoard::default()),
@@ -193,6 +197,7 @@ impl StatusStateWriter {
         let wall = now_ms();
         let state = StatusState {
             updated_ms: wall,
+            owner_identity: self.owner_identity,
             launch_nonce: self.launch_nonce.clone(),
             provider_label: Some(self.provider_label.clone()),
             toast: visible.map(|toast| StatusToast {
@@ -242,11 +247,20 @@ pub fn read_live_toast(path: &Path, now_ms: u64) -> Option<StatusToast> {
 /// or bridged request for more than 90 seconds.
 pub fn read_live_usage(path: &Path, now_ms: u64) -> Option<StatusUsage> {
     let state = read_state(path)?;
+    let live = state_owner_live(&state, now_ms);
+    let bridge = live.then_some(state.usage).flatten();
+    bridge.or_else(|| {
+        live.then(|| super::usage_ledger::read_live(path, &state.launch_nonce, now_ms))
+            .flatten()
+    })
+}
+
+fn state_owner_live(state: &StatusState, now_ms: u64) -> bool {
+    if let Some(identity) = state.owner_identity {
+        return identity.is_live();
+    }
     let stale_ms = u64::try_from(STALE_AFTER.as_millis()).unwrap_or(u64::MAX);
-    let bridge = (now_ms.saturating_sub(state.updated_ms) <= stale_ms)
-        .then_some(state.usage)
-        .flatten();
-    bridge.or_else(|| super::usage_ledger::read_live(path, &state.launch_nonce, now_ms))
+    now_ms.saturating_sub(state.updated_ms) <= stale_ms
 }
 
 fn read_live_state(path: &Path, now_ms: u64) -> Option<StatusState> {
@@ -481,9 +495,13 @@ pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64)
     let state = read_state(&path);
     let usage = state
         .as_ref()
+        .filter(|state| state_owner_live(state, now_ms))
         .and_then(|state| state.usage.clone())
         .or_else(|| {
             let state = state.as_ref()?;
+            if !state_owner_live(state, now_ms) {
+                return None;
+            }
             let value: Value = serde_json::from_slice(stdin).ok()?;
             let transcript = value.get("transcript_path")?.as_str()?;
             let model = claude_status_model(stdin).unwrap_or_default();

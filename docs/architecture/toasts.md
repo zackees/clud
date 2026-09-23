@@ -173,8 +173,10 @@ released on the next idle poll.
   file; only aggregate counters and a public model label reach the atomic
   `<pid>.usage.json` snapshot. The PTY compositor reads that same snapshot.
   The one-line display contains one cumulative read/write triple and the last
-  completed model, with no per-call fallback. Missing or malformed transcripts
-  render only the model and do not erase the last good totals. Native Codex
+  completed model, with no per-call fallback. A malformed complete record or
+  conflicting cross-file response makes exact accounting unprovable, so the
+  callback withholds the cumulative triple and renders only the model. A
+  partial trailing record waits for its newline. Native Codex
   without the Claude status-line callback requires bridge-observed usage.
 
 `clud statusline` is dispatched first thing in `main.rs`, before any daemon,

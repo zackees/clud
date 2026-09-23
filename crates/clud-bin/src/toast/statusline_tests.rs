@@ -47,6 +47,7 @@ fn an_orphaned_live_toast_goes_stale() {
     let path = state_path(dir.path(), 13);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let state = StatusState {
+        owner_identity: None,
         updated_ms: 1_000,
         launch_nonce: String::new(),
         provider_label: None,
@@ -127,7 +128,39 @@ fn provider_usage_is_persistent_distinct_and_stale_safe() {
         format!("\x1b[38;5;75m{}\x1b[0m", usage_summary(&usage))
     );
     let stale = now_ms().saturating_add(u64::try_from(STALE_AFTER.as_millis()).unwrap() + 1);
-    assert!(read_live_usage(writer.path(), stale).is_none());
+    assert!(read_live_usage(writer.path(), stale).is_some());
+}
+
+#[test]
+fn dead_owner_cannot_keep_bridge_usage_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 204);
+    writer.publish_usage(StatusUsage {
+        provider: "codex".into(),
+        model: "fixture-model".into(),
+        request_count: 1,
+        cached_input_tokens: 0,
+        uncached_input_tokens: 3,
+        output_tokens: 2,
+        cache_health: "unavailable".into(),
+    });
+    let mut state: StatusState =
+        serde_json::from_slice(&std::fs::read(writer.path()).unwrap()).unwrap();
+    let identity = state.owner_identity.unwrap();
+    state.owner_identity = Some(crate::process_identity::ProcessIdentity::new(
+        identity.pid,
+        identity.start_time.saturating_add(100),
+    ));
+    std::fs::write(writer.path(), serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(read_live_usage(writer.path(), now_ms()).is_none());
+    let args = RunArgs {
+        session_pid: 204,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let mut out = Vec::new();
+    render_into(&mut out, &args, b"{}", now_ms());
+    assert!(!String::from_utf8(out).unwrap().contains("read "));
 }
 
 #[test]
@@ -283,7 +316,7 @@ fn fixture_without_subagent_directory_and_repeated_callbacks_stays_exact() {
 }
 
 #[test]
-fn malformed_transcript_preserves_the_last_good_snapshot() {
+fn malformed_transcript_suppresses_an_unprovable_total() {
     let dir = tempfile::tempdir().unwrap();
     let writer = writer_in(dir.path(), 194);
     let path = fixture_transcript(dir.path(), false);
@@ -298,10 +331,8 @@ fn malformed_transcript_preserves_the_last_good_snapshot() {
     std::fs::write(&path, "not JSONL\n").unwrap();
     out.clear();
     render_into(&mut out, &args, &stdin, now_ms());
-    assert!(String::from_utf8(out)
-        .unwrap()
-        .contains("read 700 cached / 60 uncached - write 15"));
-    assert_eq!(writer.effective_usage_snapshot().unwrap().request_count, 3);
+    assert!(!String::from_utf8(out).unwrap().contains("read "));
+    assert!(writer.effective_usage_snapshot().is_none());
 }
 
 #[test]
@@ -342,9 +373,7 @@ fn replacement_transcript_adds_only_new_message_ids() {
     std::fs::write(&path, format!("{next}\n")).unwrap();
     out.clear();
     render_into(&mut out, &args, &stdin, now_ms());
-    assert!(String::from_utf8(out)
-        .unwrap()
-        .contains("read 704 cached / 65 uncached - write 20"));
+    assert!(String::from_utf8_lossy(&out).contains("read 704 cached / 65 uncached - write 20"));
     assert_eq!(writer.effective_usage_snapshot().unwrap().request_count, 4);
 }
 
@@ -674,4 +703,95 @@ fn render_prints_usage_between_the_user_line_and_toast() {
     let text = String::from_utf8_lossy(&out);
     assert!(text.find("user-line").unwrap() < text.find("gpt-5.6-terra").unwrap());
     assert!(text.find("gpt-5.6-terra").unwrap() < text.find("cpu 180 %").unwrap());
+}
+
+#[test]
+fn revised_response_counters_replace_instead_of_double_counting() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 201);
+    let transcript = dir.path().join("revisions.jsonl");
+    let first = json!({"message": {"id": "same-response", "model": "fixture-model", "usage": {
+        "input_tokens": 2, "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4, "output_tokens": 5
+    }}});
+    std::fs::write(&transcript, format!("{first}\n")).unwrap();
+    let args = RunArgs {
+        session_pid: 201,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let stdin = transcript_stdin(&transcript);
+    render_into(&mut Vec::new(), &args, &stdin, now_ms());
+    let revised = json!({"message": {"id": "same-response", "model": "fixture-model", "usage": {
+        "input_tokens": 2, "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4, "output_tokens": 7
+    }}});
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    use std::io::Write;
+    writeln!(file, "{revised}").unwrap();
+    let mut out = Vec::new();
+    render_into(&mut out, &args, &stdin, now_ms());
+    assert!(String::from_utf8_lossy(&out).contains("read 4 cached / 5 uncached - write 7"));
+    assert_eq!(writer.effective_usage_snapshot().unwrap().request_count, 1);
+    let changed_tuple = json!({"message": {"id": "same-response", "model": "fixture-model", "usage": {
+        "input_tokens": 1, "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 10, "output_tokens": 9
+    }}});
+    writeln!(file, "{changed_tuple}").unwrap();
+    out.clear();
+    render_into(&mut out, &args, &stdin, now_ms());
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains("read 10 cached / 4 uncached - write 9"));
+}
+
+#[test]
+fn malformed_complete_line_is_checkpointed_before_later_usage() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 202);
+    let transcript = dir.path().join("malformed.jsonl");
+    std::fs::write(&transcript, "bad json\n").unwrap();
+    let args = RunArgs {
+        session_pid: 202,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let stdin = transcript_stdin(&transcript);
+    render_into(&mut Vec::new(), &args, &stdin, now_ms());
+    let record = json!({"message": {"id": "after-bad", "model": "fixture-model", "usage": {
+        "input_tokens": 2, "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4, "output_tokens": 5
+    }}});
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(file, "{record}").unwrap();
+    render_into(&mut Vec::new(), &args, &stdin, now_ms());
+    assert!(writer.effective_usage_snapshot().is_none());
+}
+
+#[test]
+fn unchanged_callback_does_not_rewrite_cursor_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let _writer = writer_in(dir.path(), 203);
+    let transcript = fixture_transcript(dir.path(), false);
+    let args = RunArgs {
+        session_pid: 203,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let stdin = transcript_stdin(&transcript);
+    render_into(&mut Vec::new(), &args, &stdin, now_ms());
+    let cursor = state_path(dir.path(), 203).with_extension("usage.state.json");
+    let before = std::fs::metadata(&cursor).unwrap().modified().unwrap();
+    render_into(&mut Vec::new(), &args, &stdin, now_ms() + 1_000);
+    assert_eq!(
+        std::fs::metadata(&cursor).unwrap().modified().unwrap(),
+        before
+    );
 }
