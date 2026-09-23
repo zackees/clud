@@ -1486,7 +1486,8 @@ mod tests {
         let root = temp
             .path()
             .join(OsString::from_vec(b"candidate-\xff".to_vec()));
-        fs::create_dir(&root).unwrap();
+        // APFS may reject invalid UTF-8 names even though PathBuf can carry
+        // them; serialization does not need a real directory on disk.
         let cursor_path = temp.path().join("cursor.json");
         ScanCursor::new(&root).save(&cursor_path).unwrap();
         assert!(ScanCursor::load(&cursor_path, &root).unwrap().is_some());
