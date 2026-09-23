@@ -4,14 +4,19 @@
 //! [`maybe_sweep_session_tmp`] every cadence; a sentinel at
 //! `~/.clud/state/session-tmp-sweep.last` throttles the actual work to
 //! [`MIN_INTERVAL`]. When due, it drops entries under `~/.clud/tmp` whose
-//! mtime is older than [`crate::gc::session_tmp::STALE_THRESHOLD`] (48h).
+//! mtime is older than [`crate::gc::session_tmp::STALE_THRESHOLD`] (72h).
 //!
 //! All errors are non-fatal — a missed sweep never crashes the daemon.
 
 use std::fs;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use fs4::fs_std::FileExt;
+use serde_json::json;
+
+use super::daemon_events;
 use crate::gc::session_tmp;
 
 /// Temp accumulates faster than the uv cache, so sweep more often than the
@@ -19,36 +24,131 @@ use crate::gc::session_tmp;
 pub const MIN_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 const SENTINEL_FILE: &str = "session-tmp-sweep.last";
+const WORK_FILE: &str = "session-tmp-sweep.work.json";
+const LOCK_FILE: &str = "session-tmp-sweep.lock";
+const TICK_ALLOWANCE: usize = 200_000;
 
 /// Production entry point — called from the daemon's periodic tick.
 pub fn maybe_sweep_session_tmp() {
     let Some(sentinel) = sentinel_path() else {
         return;
     };
-    if let Err(e) = maybe_sweep_at(&sentinel, SystemTime::now()) {
+    if let Err(e) = maybe_sweep_continuously_at(&sentinel, SystemTime::now()) {
         eprintln!("[clud] session-tmp sweep error: {e}");
     }
 }
 
-/// Testable variant. Skips when the sentinel is newer than
-/// `now - MIN_INTERVAL`; otherwise sweeps `~/.clud/tmp` and rewrites the
-/// sentinel.
-pub fn maybe_sweep_at(
-    sentinel_path: &std::path::Path,
+fn maybe_sweep_continuously_at(
+    sentinel_path: &Path,
     now: SystemTime,
 ) -> std::io::Result<Option<session_tmp::SweepReport>> {
-    if let Some(last) = read_sentinel(sentinel_path) {
-        match now.duration_since(last) {
-            Ok(age) if age < MIN_INTERVAL => return Ok(None),
-            // Clock skew (sentinel in the future) → skip, recover next tick.
-            Err(_) => return Ok(None),
-            _ => {}
+    let Some(root) = session_tmp::session_tmp_dir() else {
+        return Ok(None);
+    };
+    maybe_sweep_continuously_at_root(sentinel_path, &root, now, TICK_ALLOWANCE)
+}
+
+fn maybe_sweep_continuously_at_root(
+    sentinel_path: &Path,
+    root: &Path,
+    now: SystemTime,
+    allowance: usize,
+) -> std::io::Result<Option<session_tmp::SweepReport>> {
+    let Some(_lock) = try_sweep_lock(sentinel_path)? else {
+        return Ok(None);
+    };
+    let Some(mut report) = maybe_sweep_at_root(sentinel_path, root, now, allowance)? else {
+        return Ok(None);
+    };
+    report = continue_sweep(sentinel_path, root, allowance, report)?;
+    Ok(Some(report))
+}
+
+fn try_sweep_lock(sentinel_path: &Path) -> std::io::Result<Option<fs::File>> {
+    let lock_path = sentinel_path.with_file_name(LOCK_FILE);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    if FileExt::try_lock_exclusive(&file)? {
+        Ok(Some(file))
+    } else {
+        Ok(None)
+    }
+}
+
+fn continue_sweep(
+    sentinel_path: &Path,
+    root: &Path,
+    allowance: usize,
+    mut report: session_tmp::SweepReport,
+) -> std::io::Result<session_tmp::SweepReport> {
+    while report.pending > 0 && report.advanced_steps > 0 {
+        report = run_sweep_at_with_quantum(
+            sentinel_path,
+            root,
+            SystemTime::now(),
+            allowance,
+            allowance,
+        )?;
+    }
+    Ok(report)
+}
+
+fn maybe_sweep_at_root(
+    sentinel_path: &Path,
+    root: &Path,
+    now: SystemTime,
+    allowance: usize,
+) -> std::io::Result<Option<session_tmp::SweepReport>> {
+    let work_path = sentinel_path.with_file_name(WORK_FILE);
+    if !work_path.exists() {
+        if let Some(last) = read_sentinel(sentinel_path) {
+            match now.duration_since(last) {
+                Ok(age) if age < MIN_INTERVAL => return Ok(None),
+                // Clock skew (sentinel in the future) → skip, recover next tick.
+                Err(_) => return Ok(None),
+                _ => {}
+            }
         }
     }
-    let report = session_tmp::sweep_stale(now, false)?;
-    write_sentinel(sentinel_path, now)?;
-    log_report(&report);
+    let report = run_sweep_at(sentinel_path, root, now, allowance)?;
     Ok(Some(report))
+}
+
+fn run_sweep_at(
+    sentinel_path: &Path,
+    root: &Path,
+    now: SystemTime,
+    allowance: usize,
+) -> std::io::Result<session_tmp::SweepReport> {
+    run_sweep_at_with_quantum(sentinel_path, root, now, allowance, allowance)
+}
+
+fn run_sweep_at_with_quantum(
+    sentinel_path: &Path,
+    root: &Path,
+    now: SystemTime,
+    allowance: usize,
+    candidate_quantum: usize,
+) -> std::io::Result<session_tmp::SweepReport> {
+    let work_path = sentinel_path.with_file_name(WORK_FILE);
+    let report = session_tmp::sweep_tick_with_quantum(
+        root,
+        &work_path,
+        now,
+        false,
+        allowance,
+        candidate_quantum,
+    )?;
+    write_sentinel(sentinel_path, now)?;
+    log_report(&report, sentinel_path.parent());
+    Ok(report)
 }
 
 /// Force an immediate sweep, ignoring the sentinel throttle. Used by the GC
@@ -57,24 +157,89 @@ pub fn maybe_sweep_at(
 /// sentinel so the throttled path stays consistent.
 pub fn sweep_now() {
     let now = SystemTime::now();
-    match session_tmp::sweep_stale(now, false) {
-        Ok(report) => {
-            if let Some(sentinel) = sentinel_path() {
-                let _ = write_sentinel(&sentinel, now);
-            }
-            log_report(&report);
+    let Some(sentinel) = sentinel_path() else {
+        return;
+    };
+    let Some(root) = session_tmp::session_tmp_dir() else {
+        return;
+    };
+    let _lock = match try_sweep_lock(&sentinel) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!("[clud] session-tmp sweep lock error: {err}");
+            return;
         }
+    };
+    match run_sweep_at(&sentinel, &root, now, TICK_ALLOWANCE)
+        .and_then(|report| continue_sweep(&sentinel, &root, TICK_ALLOWANCE, report))
+    {
+        Ok(_) => {}
         Err(e) => eprintln!("[clud] session-tmp sweep error: {e}"),
     }
 }
 
-fn log_report(report: &session_tmp::SweepReport) {
-    if report.removed > 0 || report.skipped > 0 {
+fn log_report(report: &session_tmp::SweepReport, state_dir: Option<&Path>) {
+    if let Some(state_dir) = state_dir {
+        daemon_events::log_event(
+            state_dir,
+            "session_tmp_sweep_progress",
+            [
+                ("examined", json!(report.examined)),
+                ("removed_files", json!(report.removed_files)),
+                ("removed_dirs", json!(report.removed_dirs)),
+                ("reclaimed_bytes", json!(report.reclaimed_bytes)),
+                ("pending_candidates", json!(report.pending)),
+                ("advanced_steps", json!(report.advanced_steps)),
+                ("current_phase", json!(report.current_phase)),
+                (
+                    "current_path",
+                    json!(report
+                        .current_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())),
+                ),
+                ("cursor_examined", json!(report.cursor_examined)),
+                ("pending_explore", json!(report.phases.exploring)),
+                ("pending_probe", json!(report.phases.probing)),
+                ("pending_scan", json!(report.phases.scanning)),
+                ("pending_recheck", json!(report.phases.rechecking)),
+                ("pending_file_delete", json!(report.phases.deleting_files)),
+                ("pending_dir_delete", json!(report.phases.deleting_dirs)),
+                ("failures", json!(report.failures)),
+                ("pending_age_secs", json!(report.pending_age_secs)),
+                ("no_progress_secs", json!(report.no_progress_secs)),
+                ("retry_count", json!(report.retry_count)),
+                ("persistent_failure", json!(report.persistent_failure)),
+                (
+                    "last_error_path",
+                    json!(report
+                        .last_error_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())),
+                ),
+                ("last_error_class", json!(report.last_error_class)),
+                ("last_error_message", json!(report.last_error_message)),
+            ],
+        );
+    }
+    if report.persistent_failure {
         eprintln!(
-            "[clud] session-tmp sweep: removed {} entr{}, {} skipped",
+            "[clud] session-tmp persistent failure: {} pending for {}h without progress; last error at {} ({}) — retrying",
+            report.pending,
+            report.no_progress_secs / 3_600,
+            report.last_error_path.as_ref().map_or_else(|| "unknown".to_string(), |path| path.display().to_string()),
+            report.last_error_class.as_deref().unwrap_or("unknown"),
+        );
+    }
+    if report.removed > 0 || report.skipped > 0 || report.pending > 0 {
+        eprintln!(
+            "[clud] session-tmp sweep: examined {}, removed {} entr{}, {} pending, {} failed",
+            report.examined,
             report.removed,
             if report.removed == 1 { "y" } else { "ies" },
-            report.skipped,
+            report.pending,
+            report.failures,
         );
     }
     // #1148: a live session holding tens of gigabytes is not swept — it is in
@@ -131,7 +296,9 @@ mod tests {
     fn first_run_writes_sentinel() {
         let tmp = tempdir().unwrap();
         let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
-        let result = maybe_sweep_at(&sentinel, SystemTime::now()).unwrap();
+        let root = tmp.path().join("tmp");
+        let result =
+            maybe_sweep_at_root(&sentinel, &root, SystemTime::now(), TICK_ALLOWANCE).unwrap();
         assert!(result.is_some(), "first run must execute the sweep");
         assert!(sentinel.exists());
     }
@@ -140,24 +307,100 @@ mod tests {
     fn second_run_within_interval_skips() {
         let tmp = tempdir().unwrap();
         let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
+        let root = tmp.path().join("tmp");
         let now = SystemTime::now();
-        maybe_sweep_at(&sentinel, now).unwrap();
+        maybe_sweep_at_root(&sentinel, &root, now, TICK_ALLOWANCE).unwrap();
         let soon = now + Duration::from_secs(60 * 60);
-        assert!(maybe_sweep_at(&sentinel, soon).unwrap().is_none());
+        assert!(maybe_sweep_at_root(&sentinel, &root, soon, TICK_ALLOWANCE)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn run_after_interval_executes_again() {
         let tmp = tempdir().unwrap();
         let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
+        let root = tmp.path().join("tmp");
         let now = SystemTime::now();
-        maybe_sweep_at(&sentinel, now).unwrap();
+        maybe_sweep_at_root(&sentinel, &root, now, TICK_ALLOWANCE).unwrap();
         let later = now + Duration::from_secs(7 * 60 * 60);
-        assert!(maybe_sweep_at(&sentinel, later).unwrap().is_some());
+        assert!(maybe_sweep_at_root(&sentinel, &root, later, TICK_ALLOWANCE)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
     fn min_interval_is_6h() {
         assert_eq!(MIN_INTERVAL, Duration::from_secs(6 * 60 * 60));
+    }
+
+    #[test]
+    fn pending_work_bypasses_start_cadence() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("tmp");
+        let candidate = root.join("candidate");
+        fs::create_dir_all(&candidate).unwrap();
+        let now = SystemTime::now();
+        let old = now - session_tmp::STALE_THRESHOLD - Duration::from_secs(3_600);
+        for index in 0..5 {
+            let path = candidate.join(format!("{index}.txt"));
+            fs::write(&path, b"old").unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
+        }
+        filetime::set_file_mtime(&candidate, filetime::FileTime::from_system_time(old)).unwrap();
+        let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
+        let first = maybe_sweep_at_root(&sentinel, &root, now, 1)
+            .unwrap()
+            .unwrap();
+        assert!(first.pending > 0);
+        assert!(sentinel.with_file_name(WORK_FILE).exists());
+        let second = maybe_sweep_at_root(&sentinel, &root, now + Duration::from_secs(60), 1)
+            .unwrap()
+            .expect("pending work must resume inside six hours");
+        assert!(second.examined > 0 || second.removed > 0 || second.pending > 0);
+    }
+
+    #[test]
+    fn background_worker_continues_without_waiting_for_another_hourly_tick() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        let candidate = root.join("stale-candidate");
+        fs::create_dir_all(&candidate).unwrap();
+        let now = SystemTime::now();
+        let old = now - session_tmp::STALE_THRESHOLD - Duration::from_secs(3_600);
+        for index in 0..12 {
+            let path = candidate.join(format!("{index}.txt"));
+            fs::write(&path, b"old").unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
+        }
+        filetime::set_file_mtime(&candidate, filetime::FileTime::from_system_time(old)).unwrap();
+        let sentinel = temp.path().join("state").join(SENTINEL_FILE);
+        let report = maybe_sweep_continuously_at_root(&sentinel, &root, now, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.pending, 0);
+        assert!(!candidate.exists());
+        assert!(!sentinel.with_file_name(WORK_FILE).exists());
+    }
+
+    #[test]
+    fn second_daemon_does_not_overwrite_an_active_sweep() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        fs::create_dir(&root).unwrap();
+        let sentinel = temp.path().join("state").join(SENTINEL_FILE);
+        let held_lock = try_sweep_lock(&sentinel).unwrap().unwrap();
+        assert!(
+            maybe_sweep_continuously_at_root(&sentinel, &root, SystemTime::now(), 1)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!sentinel.exists(), "the second daemon must not start work");
+        drop(held_lock);
+        assert!(
+            maybe_sweep_continuously_at_root(&sentinel, &root, SystemTime::now(), 1)
+                .unwrap()
+                .is_some()
+        );
     }
 }

@@ -8,11 +8,11 @@
 //! Two halves:
 //! - [`ensure_dir`] — resolve `~/.clud/tmp`, create it, hand the path back
 //!   to the env builders in `runner.rs` / `daemon/io_helpers.rs`.
-//! - [`sweep_stale_at`] — drop entries that are both older than
+//! - [`sweep_stale`] — reclaim entries that are both older than
 //!   [`STALE_THRESHOLD`] (72h) by their own mtime *and* have no recent
 //!   activity anywhere beneath them, to a bounded depth
-//!   ([`MAX_NESTED_DEPTH`]). Driven from the daemon's periodic tick via
-//!   `daemon/session_tmp_sweep.rs`.
+//!   ([`MAX_NESTED_DEPTH`]). The daemon resumes a bounded work queue via
+//!   `daemon/session_tmp_sweep.rs` on every tick while work is pending.
 //!
 //!   This said "drop **top-level** entries" until #1148, and meant it: a
 //!   directory's mtime tracks its *direct* children only, so the agent
@@ -32,9 +32,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+#[cfg(test)]
 use super::delete_audit;
+use super::session_tmp_continuation;
 
-/// How old (by mtime) a top-level entry must be before [`sweep_stale_at`]
+/// How old (by mtime) a top-level entry must be before [`sweep_stale`]
 /// removes it.
 ///
 /// **72 hours, and the number is the weekend.** Someone who stops work Friday
@@ -55,18 +57,48 @@ pub const STALE_THRESHOLD: Duration = Duration::from_secs(72 * 60 * 60);
 /// drift. It read `stale>48h` for as long as the constant said 48h, which is
 /// exactly the kind of agreement a `format!` should be enforcing rather than a
 /// reviewer.
-fn stale_rule() -> String {
+pub(super) fn stale_rule() -> String {
     format!("session-tmp stale>{}h", STALE_THRESHOLD.as_secs() / 3_600)
 }
 
-/// Outcome of [`sweep_stale_at`]. `removed` counts files+dirs dropped (or,
+/// Outcome of [`sweep_tick_at`]. `removed` counts files+dirs dropped (or,
 /// in `dry_run`, that would have been); `skipped` counts lock/permission
 /// failures that a later sweep will retry.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PendingPhases {
+    pub exploring: usize,
+    pub probing: usize,
+    pub scanning: usize,
+    pub rechecking: usize,
+    pub deleting_files: usize,
+    pub deleting_dirs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SweepReport {
+    /// Candidate operations or phase transitions completed in this pass.
+    pub advanced_steps: usize,
     pub removed: usize,
     pub skipped: usize,
     pub dry_run: bool,
+    /// Work done in this tick; pending candidates continue next tick.
+    pub examined: u64,
+    pub removed_files: u64,
+    pub removed_dirs: u64,
+    pub reclaimed_bytes: u64,
+    pub pending: usize,
+    pub phases: PendingPhases,
+    pub current_phase: Option<&'static str>,
+    pub current_path: Option<PathBuf>,
+    pub cursor_examined: Option<usize>,
+    pub failures: usize,
+    pub pending_age_secs: u64,
+    pub no_progress_secs: u64,
+    pub retry_count: u32,
+    pub last_error_path: Option<PathBuf>,
+    pub last_error_class: Option<String>,
+    pub last_error_message: Option<String>,
+    pub persistent_failure: bool,
     /// Session directories over [`SIZE_REPORT_THRESHOLD`] that the sweep kept
     /// because they are still in use (#1148), newest-first by size.
     ///
@@ -159,11 +191,11 @@ pub fn ensure_dir() -> Option<PathBuf> {
 /// not own and is not told about when it changes, which is how this bug
 /// reappears silently the next time the harness reorganises. A small depth
 /// bound needs no such agreement, and covers the same ground.
-const MAX_NESTED_DEPTH: usize = 3;
+pub(super) const MAX_NESTED_DEPTH: usize = 3;
 
-/// Upper bound on directory entries examined while deciding whether one
-/// subtree is idle. Exhausting it means "could not establish that this is
-/// idle", which resolves to *keep* — see [`has_recent_activity`].
+/// Maximum entry/operation allowance for one daemon continuation tick.
+/// Exhausting it yields persisted work to the next tick, never an idle/busy
+/// decision. The legacy one-shot test fixture below also uses this value.
 const SUBTREE_SCAN_BUDGET: usize = 200_000;
 
 /// Is anything in `dir`'s subtree newer than `threshold`?
@@ -181,6 +213,7 @@ const SUBTREE_SCAN_BUDGET: usize = 200_000;
 /// `remove_dir_all` over a directory somebody is using — a 48 GB scratchpad,
 /// or the working files of the session running this very sweep. Those are not
 /// symmetric, and the tie goes to keeping data.
+#[cfg(test)]
 fn has_recent_activity(
     dir: &Path,
     now: SystemTime,
@@ -226,6 +259,7 @@ fn has_recent_activity(
 /// Apparent size, matching `du --apparent-size`: the sparse VM images that
 /// prompted the size rule are 259 GB apparent and 48 GB on disk, and the
 /// number worth reporting is the one that says what was written.
+#[cfg(test)]
 fn subtree_size(dir: &Path, budget: &mut usize) -> Option<u64> {
     let mut total = 0u64;
     let entries = fs::read_dir(dir).ok()?;
@@ -253,13 +287,91 @@ pub fn sweep_stale(now: SystemTime, dry_run: bool) -> std::io::Result<SweepRepor
             ..Default::default()
         });
     };
-    sweep_stale_at(&root, now, dry_run)
+    let Some(parent) = root.parent() else {
+        return Ok(SweepReport {
+            dry_run,
+            ..Default::default()
+        });
+    };
+    let work_path = parent.join("state/session-tmp-sweep.work.json");
+    sweep_tick_at(&root, &work_path, now, dry_run, SUBTREE_SCAN_BUDGET)
 }
 
-/// Testable variant — sweep under a caller-supplied root with a
-/// caller-supplied notion of "now". Missing directory is a valid empty
-/// state, not an error.
+/// Run one bounded continuation quantum. The work queue is durable at
+/// `work_path`; a nonzero `pending` count means the next daemon tick must
+/// resume it regardless of the ordinary six-hour start cadence.
+pub fn sweep_tick_at(
+    root: &Path,
+    work_path: &Path,
+    now: SystemTime,
+    dry_run: bool,
+    allowance: usize,
+) -> std::io::Result<SweepReport> {
+    let tick = session_tmp_continuation::sweep_tick_at(root, work_path, now, dry_run, allowance)?;
+    Ok(report_from_tick(tick, dry_run))
+}
+
+pub fn sweep_tick_with_quantum(
+    root: &Path,
+    work_path: &Path,
+    now: SystemTime,
+    dry_run: bool,
+    allowance: usize,
+    candidate_quantum: usize,
+) -> std::io::Result<SweepReport> {
+    let tick = session_tmp_continuation::sweep_tick_with_quantum(
+        root,
+        work_path,
+        now,
+        dry_run,
+        allowance,
+        candidate_quantum,
+    )?;
+    Ok(report_from_tick(tick, dry_run))
+}
+
+fn report_from_tick(tick: session_tmp_continuation::TickReport, dry_run: bool) -> SweepReport {
+    SweepReport {
+        advanced_steps: tick.advanced_steps,
+        removed: (tick.removed_files + tick.removed_dirs) as usize,
+        skipped: tick.failures,
+        dry_run,
+        examined: tick.examined,
+        removed_files: tick.removed_files,
+        removed_dirs: tick.removed_dirs,
+        reclaimed_bytes: tick.reclaimed_bytes,
+        pending: tick.pending,
+        phases: tick.phases,
+        current_phase: tick.current_phase,
+        current_path: tick.current_path,
+        cursor_examined: tick.cursor_examined,
+        failures: tick.failures,
+        pending_age_secs: tick.pending_age_secs,
+        no_progress_secs: tick.no_progress_secs,
+        retry_count: tick.retry_count,
+        last_error_path: tick.last_error_path,
+        last_error_class: tick.last_error_class,
+        last_error_message: tick.last_error_message,
+        persistent_failure: tick.persistent_failure,
+        oversized: tick.oversized,
+    }
+}
+
+/// Legacy one-shot fixture retained only for historical policy tests. The
+/// shipped daemon and new regression tests use [`sweep_tick_at`] instead.
+/// Missing directory is a valid empty state, not an error.
+#[cfg(test)]
 pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::Result<SweepReport> {
+    sweep_stale_at_with_budget(root, now, dry_run, SUBTREE_SCAN_BUDGET)
+}
+
+#[cfg(test)]
+fn sweep_stale_at_with_budget(
+    root: &Path,
+    now: SystemTime,
+    dry_run: bool,
+    scan_budget: usize,
+) -> std::io::Result<SweepReport> {
     let mut report = SweepReport {
         dry_run,
         ..Default::default()
@@ -267,12 +379,12 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
     if !root.exists() {
         return Ok(report);
     }
-    let mut budget = SUBTREE_SCAN_BUDGET;
+    let mut budget = scan_budget;
     // A separate budget: sizing is a full walk with no early exit, and it must
     // not be able to starve the freshness checks that decide what gets
     // deleted. Running out of it costs a size report; running out of the other
     // one costs nothing, because exhaustion there means "keep".
-    let mut size_budget = SUBTREE_SCAN_BUDGET;
+    let mut size_budget = scan_budget;
     sweep_level(
         root,
         now,
@@ -309,6 +421,7 @@ pub fn sweep_stale_at(root: &Path, now: SystemTime, dry_run: bool) -> std::io::R
 /// directory whose own mtime is old but whose *contents* are being written
 /// right now was, until this commit, deleted out from under its writer. The
 /// nested descent would have widened the blast radius of that.
+#[cfg(test)]
 fn sweep_level(
     dir: &Path,
     now: SystemTime,
@@ -331,8 +444,7 @@ fn sweep_level(
         let own_mtime_is_stale = age > STALE_THRESHOLD;
 
         if meta.is_dir() {
-            let idle = !has_recent_activity(&path, now, STALE_THRESHOLD, budget);
-            if own_mtime_is_stale && idle {
+            if own_mtime_is_stale && !has_recent_activity(&path, now, STALE_THRESHOLD, budget) {
                 remove_entry(&path, true, dry_run, &stale_rule(), report);
                 continue;
             }
@@ -364,6 +476,7 @@ fn sweep_level(
 /// Audit, then remove, counting the outcome. Audit happens before the act
 /// (#893): the root is clud-owned, but the audit line is what proves what was
 /// removed after the fact.
+#[cfg(test)]
 fn remove_entry(path: &Path, is_dir: bool, dry_run: bool, rule: &str, report: &mut SweepReport) {
     if dry_run {
         report.removed += 1;
@@ -604,6 +717,50 @@ mod tests {
         );
     }
 
+    /// #1260: exhausting one tick's work allowance must defer, not cause an
+    /// otherwise-idle candidate to survive every future tick.
+    #[test]
+    fn stale_tree_larger_than_one_scan_budget_eventually_goes() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let old = STALE_THRESHOLD + StdDuration::from_secs(3_600);
+        let wide = root.join("wide-stale");
+        fs::create_dir_all(&wide).unwrap();
+        for index in 0..6 {
+            let file = make_file(&wide, &format!("{index}.txt"));
+            age_path(&file, old);
+        }
+        age_path(&wide, old);
+
+        let work_path = tmp.path().join("state/work.json");
+        for _ in 0..80 {
+            sweep_tick_at(root, &work_path, SystemTime::now(), false, 2).unwrap();
+            if !wide.exists() {
+                break;
+            }
+        }
+        assert!(!wide.exists(), "an idle tree must not be kept forever");
+    }
+
+    /// A fresh parent cannot be removed, so scanning its entire subtree for
+    /// idleness must not consume the budget needed by a stale child.
+    #[test]
+    fn fresh_parent_does_not_starve_stale_child() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let parent = root.join("fresh-parent");
+        let stale = parent.join("stale-child");
+        fs::create_dir_all(&stale).unwrap();
+        let file = make_file(&stale, "old.txt");
+        let old = STALE_THRESHOLD + StdDuration::from_secs(3_600);
+        age_path(&file, old);
+        age_path(&stale, old);
+
+        sweep_stale_at_with_budget(root, SystemTime::now(), false, 1).unwrap();
+
+        assert!(!stale.exists(), "fresh parent exhausted the child's budget");
+    }
+
     /// An mtime in the future (clock skew, a restored backup, a bad NTP step)
     /// is not evidence of idleness.
     #[test]
@@ -700,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_threshold_is_48h() {
+    fn stale_threshold_is_72h() {
         assert_eq!(STALE_THRESHOLD, Duration::from_secs(72 * 60 * 60));
     }
 

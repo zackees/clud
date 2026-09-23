@@ -260,6 +260,19 @@ timestamp under `~/.clud/state/` so the per-tick cost is one stat + age compare.
 can reclaim. Set `CLUD_SESSION_TMP=0` to keep the OS temp dir. If the dir can't be created the
 override is silently skipped (the child keeps the OS temp dir) — launch never fails on this.
 
+The session-temp sweep (#1260) starts on the six-hour cadence, but stores a work queue at
+`~/.clud/state/session-tmp-sweep.work.json`. Its background worker continues and checkpoints
+while work advances; it does not wait for another hourly GC tick or impose a deadline on a large
+candidate. Deferred failures resume on a later tick. Candidate freshness scanning must finish before deletion, and a resumable
+recheck precedes each destructive batch. Recent activity stops removal of the remaining tree.
+File, directory, metadata-probe, scan, and exploration failures stay queued with backoff while
+other candidates advance. A 72-hour
+period of repeated failure without progress emits a nonfatal persistent-failure signal; the
+candidate remains retryable. `daemon-events.jsonl` records per-tick examined entries, files and
+directories removed, reclaimed apparent bytes, pending phases, retry count, work age, and the
+last error path/class, current phase/path, and cursor position. An exclusive lock prevents
+concurrent daemons from overwriting the continuation queue.
+
 **Forensic session state (#1014).** Every launch leaves a `<pid>__<start-epoch>/` directory under
 `~/.clud/state/sessions/` holding the reaper's `reap.jsonl` / `reap-health.json` and, since #1011,
 a `bridge.jsonl`. Nothing aged it out, so it accumulated one entry per session ever run — the

@@ -11,7 +11,7 @@
 //! recently-evicted env on the next `clud tool run`.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::gc::uv_cache;
@@ -42,7 +42,15 @@ pub fn maybe_sweep_uv_cache() {
 /// - Otherwise calls [`uv_cache::sweep_stale`] with `now`, writes the
 ///   new sentinel, and returns Ok(Some(report)).
 pub fn maybe_sweep_at(
-    sentinel_path: &std::path::Path,
+    sentinel_path: &Path,
+    now: SystemTime,
+) -> std::io::Result<Option<uv_cache::SweepReport>> {
+    maybe_sweep_at_root(sentinel_path, &crate::tools::clud_uv_cache_dir(), now)
+}
+
+fn maybe_sweep_at_root(
+    sentinel_path: &Path,
+    cache_root: &Path,
     now: SystemTime,
 ) -> std::io::Result<Option<uv_cache::SweepReport>> {
     if let Some(last) = read_sentinel(sentinel_path) {
@@ -57,7 +65,7 @@ pub fn maybe_sweep_at(
             return Ok(None);
         }
     }
-    let report = uv_cache::sweep_stale(now, false)?;
+    let report = uv_cache::sweep_stale_at(cache_root, now, false)?;
     write_sentinel(sentinel_path, now)?;
     if report.stale_envs_removed > 0 || report.locked_envs_skipped > 0 {
         eprintln!(
@@ -117,7 +125,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
         let now = SystemTime::now();
-        let result = maybe_sweep_at(&sentinel, now).unwrap();
+        let result = maybe_sweep_at_root(&sentinel, &tmp.path().join("cache"), now).unwrap();
         assert!(result.is_some(), "first run must execute the sweep");
         assert!(sentinel.exists(), "sentinel file must be written");
     }
@@ -127,10 +135,11 @@ mod tests {
         let tmp = tempdir().unwrap();
         let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
         let now = SystemTime::now();
-        maybe_sweep_at(&sentinel, now).unwrap();
+        maybe_sweep_at_root(&sentinel, &tmp.path().join("cache"), now).unwrap();
         // Second call 1h later — well under MIN_INTERVAL (24h).
         let one_hour_later = now + Duration::from_secs(3600);
-        let result = maybe_sweep_at(&sentinel, one_hour_later).unwrap();
+        let result =
+            maybe_sweep_at_root(&sentinel, &tmp.path().join("cache"), one_hour_later).unwrap();
         assert!(result.is_none(), "sweep must skip when sentinel is fresh");
     }
 
@@ -139,10 +148,10 @@ mod tests {
         let tmp = tempdir().unwrap();
         let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
         let now = SystemTime::now();
-        maybe_sweep_at(&sentinel, now).unwrap();
+        maybe_sweep_at_root(&sentinel, &tmp.path().join("cache"), now).unwrap();
         // 25h later — past MIN_INTERVAL.
         let next_day = now + Duration::from_secs(25 * 60 * 60);
-        let result = maybe_sweep_at(&sentinel, next_day).unwrap();
+        let result = maybe_sweep_at_root(&sentinel, &tmp.path().join("cache"), next_day).unwrap();
         assert!(result.is_some(), "sweep must re-execute after MIN_INTERVAL");
     }
 
@@ -154,7 +163,7 @@ mod tests {
         let future = now + Duration::from_secs(60 * 60);
         // Write a sentinel in the future (clock-skew scenario).
         write_sentinel(&sentinel, future).unwrap();
-        let result = maybe_sweep_at(&sentinel, now).unwrap();
+        let result = maybe_sweep_at_root(&sentinel, &tmp.path().join("cache"), now).unwrap();
         assert!(
             result.is_none(),
             "future-timestamped sentinel must skip the sweep, not panic on Err from duration_since",
@@ -167,7 +176,8 @@ mod tests {
         let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
         fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
         fs::write(&sentinel, "not-a-number").unwrap();
-        let result = maybe_sweep_at(&sentinel, SystemTime::now()).unwrap();
+        let result =
+            maybe_sweep_at_root(&sentinel, &tmp.path().join("cache"), SystemTime::now()).unwrap();
         assert!(
             result.is_some(),
             "unparseable sentinel must fall through to sweep, not skip",
