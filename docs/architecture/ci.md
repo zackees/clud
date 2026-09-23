@@ -6,8 +6,11 @@ Status: implemented (supersedes the 24 per-platform leaf workflows + `_lint.yml`
 ## Current CI selection
 
 The sole push/PR workflow is `.github/workflows/ci.yml`. Ordinary PRs and
-`main` pushes run static checks plus Linux x64 build and unit/integration
-execution. The literal `ci-test` PR label adds Windows x64 and macOS ARM.
+`main` pushes run static checks plus the Linux x64 build and unit suite.
+The literal `ci-test` PR label adds Linux x64 integration, Windows x64, and
+macOS ARM. Linux integration stays in `ci-full` and release validation too;
+it was moved out of ordinary runs after the measured minimal lane exceeded
+the 12.5% runner-minute budget.
 `ci-full` (and existing `ci:full` labels), merge queue runs, and manual full
 runs select all six targets plus Dylint. A manual run requires a reachable
 `candidate_sha`; its CI workflow and helper tree must match the selected
@@ -111,8 +114,8 @@ every push needs all six targets.
 
 | Tier | Triples | Trigger |
 | --- | --- | --- |
-| `minimal` | `x86_64-unknown-linux-gnu` | ordinary PR and `main` push |
-| `extended` | minimal + `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` | PR labeled `ci-test` |
+| `minimal` | `x86_64-unknown-linux-gnu` build + unit suite | ordinary PR and `main` push |
+| `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` | PR labeled `ci-test` |
 | `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, `x86_64-apple-darwin`, and Dylint | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
 
 `ci-test` covers one triple per operating system. The second architecture of
