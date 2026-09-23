@@ -265,6 +265,7 @@ pub struct StreamTranslator {
     /// Set when the stream ended in a drained account or dead credentials --
     /// the two failures a user must act on personally.
     terminal_account_failure: bool,
+    authentication_failure: bool,
 }
 
 impl StreamTranslator {
@@ -291,6 +292,7 @@ impl StreamTranslator {
             in_band_failure: None,
             in_band_provider_failure: false,
             terminal_account_failure: false,
+            authentication_failure: false,
         }
     }
 
@@ -555,6 +557,9 @@ impl StreamTranslator {
         if matches!(kind, "billing_error" | "authentication_error") {
             self.terminal_account_failure = true;
         }
+        if kind == "authentication_error" {
+            self.authentication_failure = true;
+        }
         out.push(anthropic_frame(
             "error",
             serde_json::json!({
@@ -586,6 +591,10 @@ impl StreamTranslator {
     /// otherwise produces HTTP 200 and no diagnostic anywhere.
     pub fn terminal_account_failure(&self) -> bool {
         self.terminal_account_failure
+    }
+
+    pub fn authentication_failure(&self) -> bool {
+        self.authentication_failure
     }
 
     /// Whether an upstream terminal error event was translated.
@@ -904,6 +913,8 @@ fn upstream_error_type(value: &serde_json::Value) -> &'static str {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     match (code, kind) {
+        ("invalid_token" | "token_expired" | "invalid_api_key" | "unauthorized", _)
+        | (_, "authentication_error" | "invalid_token") => "authentication_error",
         ("cyber_policy", _) | ("invalid_request", _) | (_, "invalid_request") => {
             "invalid_request_error"
         }

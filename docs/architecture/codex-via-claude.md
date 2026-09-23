@@ -21,6 +21,26 @@ CLI state. Since token refresh can rotate the clud copy without updating the
 Codex CLI file, users should retain their Codex login or re-authenticate it if
 the CLI later asks.
 
+The bridge refreshes clud's selected subscription credential on use, within
+60 seconds of expiry, including between turns of one long-lived Claude session.
+Safe pre-send failures and rate limits get a bounded retry; an ambiguous
+read timeout, 408, or 5xx may have already rotated the grant, so it returns a
+temporary error without replaying the same refresh token. A rejected refresh
+grant does not retry. If the model API rejects an access token before visible
+output, the bridge re-reads the record under its lock (another process may have rotated
+it), otherwise forces one refresh and replays the request once. A second 401
+stops. After visible output, it never replays: an in-band auth failure is
+sanitized and the next turn forces a credential recheck. A healthy stream is
+not interrupted merely because its token expires while it runs.
+
+For an interactive foreground launch with a rejected clud refresh token, a
+usable native Codex login may be offered as explicit repair. Matching account
+identity is described as repair; a different identity is an account switch,
+and ambiguous identity is not silently substituted. Even an `"always"` import
+preference does not auto-replace a rejected record. Native Codex auth is never
+modified. Clud owns one selected subscription record, not a multi-account
+pool, and never falls back to a different account or API key automatically.
+
 The bridge admits two request workers at a time (`DEFAULT_MAX_CONCURRENCY`),
 the smallest bound under which two connections can be in flight at once: one
 slot for the foreground turn and one for anything else, such as a background

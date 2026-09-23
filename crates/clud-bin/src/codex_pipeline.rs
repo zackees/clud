@@ -17,6 +17,7 @@ use std::time::Duration;
 use std::{collections::BTreeMap, collections::HashMap, collections::HashSet};
 
 use crate::cache_health::TokenUsage;
+use crate::codex_auth::{REFRESH_MALFORMED, REFRESH_REJECTED, REFRESH_TEMPORARY};
 use crate::codex_history::{ConversationHistory, HistoryError};
 use crate::codex_model::ModelSpec;
 use crate::codex_sse::{FrameDecoder, InBandFailure, StreamTranslator};
@@ -25,7 +26,7 @@ use crate::codex_translate::{
     SystemPlacement, TranslateError, TranslateOptions,
 };
 use crate::codex_upstream::{
-    CredentialSource, FailureClass, UpstreamClient, UpstreamError, UpstreamFailure,
+    CredentialSource, FailureClass, UpstreamClient, UpstreamError, UpstreamFailure, UpstreamTarget,
     CLUD_CREDENTIALS_EXPIRED, CREDENTIALS_EXPIRED,
 };
 
@@ -57,6 +58,8 @@ pub struct StreamSummary {
     /// in-band. HTTP status is already committed to 200 by then, so this is
     /// the only way the caller can learn it happened.
     pub terminal_account_failure: bool,
+    /// The provider rejected the upstream bearer inside an HTTP 200 stream.
+    pub authentication_failure: bool,
     /// Safe upstream classification captured from an in-band 400. This is
     /// operator-only metadata; the raw error body never leaves the translator.
     pub in_band_failure: Option<InBandFailure>,
@@ -210,9 +213,14 @@ impl PipelineError {
             Self::Translate(TranslateError::Invalid(_)) => 400,
             Self::ContinuationInvariant(_) => 400,
             Self::Compaction(_) => 502,
-            Self::Upstream(UpstreamError::Credentials(_)) => 401,
+            Self::Upstream(UpstreamError::Credentials(REFRESH_TEMPORARY)) => 503,
+            Self::Upstream(UpstreamError::Credentials(REFRESH_MALFORMED)) => 502,
+            // The caller already authenticated to the bridge. Its bearer is
+            // not invalid just because the bridge cannot authenticate upstream.
+            Self::Upstream(UpstreamError::Credentials(_)) => 502,
             Self::Upstream(UpstreamError::Status(failure)) => match failure.status() {
-                400 | 401 | 403 | 404 | 413 | 422 | 429 => failure.status(),
+                401 => 502,
+                400 | 403 | 404 | 413 | 422 | 429 => failure.status(),
                 _ => 502,
             },
             // The classification decides the status, not the transport. A
@@ -220,7 +228,7 @@ impl PipelineError {
             Self::Provider(failure) => match failure.kind.as_str() {
                 "billing_error" | "rate_limit_error" => 429,
                 "invalid_request_error" => 400,
-                "authentication_error" => 401,
+                "authentication_error" => 502,
                 _ => 502,
             },
             Self::Upstream(UpstreamError::CompactMalformed) => 502,
@@ -273,7 +281,7 @@ impl PipelineError {
     /// act on personally; everything else is the bridge's problem.
     pub fn is_terminal_account_failure(&self) -> bool {
         matches!(self.failure_class(), Some(FailureClass::Exhausted))
-            || matches!(self, Self::Upstream(UpstreamError::Credentials(_)))
+            || matches!(self, Self::Upstream(UpstreamError::Credentials(what)) if *what != REFRESH_TEMPORARY && *what != REFRESH_MALFORMED)
             || matches!(self, Self::Provider(failure) if failure.kind == "authentication_error")
     }
 
@@ -310,7 +318,14 @@ impl PipelineError {
             // attached, so it is worth forwarding verbatim. Every other reason
             // names an environment variable and stays behind the generic text.
             Self::Upstream(UpstreamError::Credentials(what))
-                if *what == CLUD_CREDENTIALS_EXPIRED || *what == CREDENTIALS_EXPIRED =>
+                if matches!(
+                    *what,
+                    CLUD_CREDENTIALS_EXPIRED
+                        | CREDENTIALS_EXPIRED
+                        | REFRESH_TEMPORARY
+                        | REFRESH_REJECTED
+                        | REFRESH_MALFORMED
+                ) =>
             {
                 what.to_string()
             }
@@ -547,6 +562,7 @@ fn string_at_pointer(value: &serde_json::Value, pointer: &str) -> String {
 struct AttemptOutcome {
     usage: Option<TokenUsage>,
     terminal_account_failure: bool,
+    authentication_failure: bool,
     in_band_failure: Option<InBandFailure>,
     in_band_provider_failure: bool,
     output_items: Vec<serde_json::Value>,
@@ -981,6 +997,10 @@ impl<C: CredentialSource> Pipeline<C> {
         }
     }
 
+    pub(crate) fn credential_target(&self) -> Result<UpstreamTarget, UpstreamError> {
+        self.client.credential_target()
+    }
+
     /// Pin the selection used when a request carries no model of its own.
     /// This is how a launch-time `--model terra@high` reaches the wire.
     pub fn with_default_model(mut self, model: ModelSpec) -> Self {
@@ -1171,6 +1191,7 @@ impl<C: CredentialSource> Pipeline<C> {
                     return Ok(AttemptOutcome {
                         usage: translator.terminal_usage(),
                         terminal_account_failure: false,
+                        authentication_failure: false,
                         in_band_failure: None,
                         in_band_provider_failure: false,
                         output_items,
@@ -1188,6 +1209,7 @@ impl<C: CredentialSource> Pipeline<C> {
         let in_band_failure = translator.in_band_failure().cloned();
         let in_band_provider_failure = translator.has_in_band_provider_failure();
         let terminal_account_failure = translator.terminal_account_failure();
+        let authentication_failure = translator.authentication_failure();
         let usage = translator.terminal_usage();
         if !completed {
             if !in_band_provider_failure && !translator.is_finished() {
@@ -1202,6 +1224,7 @@ impl<C: CredentialSource> Pipeline<C> {
         Ok(AttemptOutcome {
             usage,
             terminal_account_failure,
+            authentication_failure,
             in_band_failure,
             in_band_provider_failure,
             output_items,
@@ -1268,6 +1291,7 @@ impl<C: CredentialSource> Pipeline<C> {
                     orphaned_outputs_repaired: 0,
                     pending_outputs_recovered,
                     terminal_account_failure: first.terminal_account_failure,
+                    authentication_failure: first.authentication_failure,
                     in_band_failure: first.in_band_failure,
                     request_shape,
                     output_items: Vec::new(),
@@ -1284,6 +1308,7 @@ impl<C: CredentialSource> Pipeline<C> {
                 orphaned_outputs_repaired: 0,
                 pending_outputs_recovered,
                 terminal_account_failure: first.terminal_account_failure,
+                authentication_failure: first.authentication_failure,
                 in_band_failure: first.in_band_failure,
                 request_shape,
                 output_items: first.output_items,
@@ -1337,6 +1362,7 @@ impl<C: CredentialSource> Pipeline<C> {
                 orphaned_outputs_repaired: repaired,
                 pending_outputs_recovered,
                 terminal_account_failure: retry.terminal_account_failure,
+                authentication_failure: retry.authentication_failure,
                 in_band_failure: retry.in_band_failure,
                 request_shape,
                 output_items: Vec::new(),
@@ -1351,6 +1377,7 @@ impl<C: CredentialSource> Pipeline<C> {
             orphaned_outputs_repaired: repaired,
             pending_outputs_recovered,
             terminal_account_failure: retry.terminal_account_failure,
+            authentication_failure: retry.authentication_failure,
             in_band_failure: retry.in_band_failure,
             request_shape,
             output_items: retry.output_items,
@@ -1858,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_credentials_are_a_401_that_names_no_secret() {
+    fn missing_upstream_credentials_are_a_gateway_failure_that_names_no_secret() {
         struct NoCredentials;
         impl CredentialSource for NoCredentials {
             fn resolve(&self) -> Result<UpstreamTarget, UpstreamError> {
@@ -1876,7 +1903,7 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .unwrap_err();
-        assert_eq!(error.http_status(), 401);
+        assert_eq!(error.http_status(), 502);
         assert!(!error.client_message().contains("OPENAI_API_KEY"));
     }
 
@@ -1907,6 +1934,26 @@ mod tests {
         assert!(diagnostic.contains("status=403"), "{diagnostic}");
         assert!(!diagnostic.contains("sk-secret"), "{diagnostic}");
         assert!(!diagnostic.contains("org_1"), "{diagnostic}");
+    }
+
+    #[test]
+    fn upstream_auth_rejection_is_not_a_downstream_bearer_rejection() {
+        let failure = UpstreamFailure::from_parts(
+            401,
+            |_| None,
+            r#"{"error":{"message":"Bearer secret-token"}}"#,
+            Duration::ZERO,
+        );
+        let error = PipelineError::Upstream(UpstreamError::Status(failure));
+        assert_eq!(error.http_status(), 502);
+        assert!(!error.client_message().contains("secret-token"));
+
+        let rejected = PipelineError::Upstream(UpstreamError::Credentials(REFRESH_REJECTED));
+        assert_eq!(rejected.http_status(), 502);
+        assert!(rejected.client_message().contains("clud auth login codex"));
+
+        let transient = PipelineError::Upstream(UpstreamError::Credentials(REFRESH_TEMPORARY));
+        assert_eq!(transient.http_status(), 503);
     }
 
     /// 502 means "the gateway hop failed". Failures that are not that must not
@@ -1999,7 +2046,7 @@ mod tests {
     #[test]
     fn an_expired_login_is_the_one_credential_reason_forwarded_verbatim() {
         let expired = PipelineError::Upstream(UpstreamError::Credentials(CREDENTIALS_EXPIRED));
-        assert_eq!(expired.http_status(), 401);
+        assert_eq!(expired.http_status(), 502);
         assert!(expired.client_message().contains("codex login"));
 
         // Every other reason stays generic: they name environment variables.

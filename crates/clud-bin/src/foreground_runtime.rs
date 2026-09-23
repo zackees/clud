@@ -25,9 +25,49 @@ enum CodexCliImportChoice {
     Never,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexCliImportMode {
+    Initial,
+    RepairSameAccount,
+    SwitchAccount,
+    AmbiguousAccount,
+}
+
+fn codex_cli_import_mode(
+    current: Option<&crate::codex_auth::SubscriptionCredentials>,
+    native: &crate::codex_auth::SubscriptionCredentials,
+) -> CodexCliImportMode {
+    let Some(current) = current else {
+        return CodexCliImportMode::Initial;
+    };
+    match (
+        current.account_id.as_deref(),
+        native.account_id.as_deref(),
+        current.email.as_deref(),
+        native.email.as_deref(),
+    ) {
+        (Some(left_id), Some(right_id), Some(left_email), Some(right_email))
+            if left_id == right_id && left_email.eq_ignore_ascii_case(right_email) =>
+        {
+            CodexCliImportMode::RepairSameAccount
+        }
+        (Some(left_id), Some(right_id), _, _) if left_id != right_id => {
+            CodexCliImportMode::SwitchAccount
+        }
+        (_, _, Some(left_email), Some(right_email))
+            if !left_email.eq_ignore_ascii_case(right_email) =>
+        {
+            CodexCliImportMode::SwitchAccount
+        }
+        _ => CodexCliImportMode::AmbiguousAccount,
+    }
+}
+
 #[derive(Debug)]
 struct CodexCliImportSelector {
     email: String,
+    account_id: Option<String>,
+    mode: CodexCliImportMode,
     selected: usize,
 }
 
@@ -35,6 +75,23 @@ impl CodexCliImportSelector {
     fn new(email: Option<String>) -> Self {
         Self {
             email: email.unwrap_or_else(|| "your Codex CLI account".to_string()),
+            account_id: None,
+            mode: CodexCliImportMode::Initial,
+            selected: 0,
+        }
+    }
+
+    fn for_replacement(
+        record: &crate::codex_auth::SubscriptionCredentials,
+        mode: CodexCliImportMode,
+    ) -> Self {
+        Self {
+            email: record
+                .email
+                .clone()
+                .unwrap_or_else(|| "an unknown Codex CLI user".to_string()),
+            account_id: record.account_id.clone(),
+            mode,
             selected: 0,
         }
     }
@@ -52,16 +109,46 @@ impl Selector for CodexCliImportSelector {
     type Outcome = CodexCliImportChoice;
 
     fn view(&self, _elapsed: std::time::Duration) -> View {
+        let action = match self.mode {
+            CodexCliImportMode::Initial => ("Yes, import it", "copies into clud's own store"),
+            CodexCliImportMode::RepairSameAccount => {
+                ("Yes, repair clud login", "replaces the rejected clud copy")
+            }
+            CodexCliImportMode::SwitchAccount => (
+                "Yes, switch accounts",
+                "changes the account used by this bridge",
+            ),
+            CodexCliImportMode::AmbiguousAccount => (
+                "Yes, replace clud login",
+                "account identity could not be confirmed",
+            ),
+        };
         let labels = [
-            ("Yes, import it", "copies into clud's own store"),
+            action,
             ("Not now", "this launch only"),
             ("No, don't ask again", "persisted"),
         ];
-        View {
-            title: format!(
+        let title = match self.mode {
+            CodexCliImportMode::Initial => format!(
                 "Codex CLI login found for {}. Use it for the Claude harness bridge?",
                 self.email
             ),
+            CodexCliImportMode::RepairSameAccount => format!(
+                "Clud's Codex login cannot refresh. Repair it from the Codex CLI login for {}?",
+                self.email
+            ),
+            CodexCliImportMode::SwitchAccount => format!(
+                "Clud's Codex login cannot refresh. Switch this bridge to {} (account {})?",
+                self.email,
+                self.account_id.as_deref().unwrap_or("unknown")
+            ),
+            CodexCliImportMode::AmbiguousAccount => format!(
+                "Clud's Codex login cannot refresh. Replace it with the Codex CLI login for {}? Account identity cannot be confirmed.",
+                self.email
+            ),
+        };
+        View {
+            title,
             hints: vec!["Up/Down move, Enter select, Esc not now".to_string()],
             gap: false,
             rows: labels
@@ -574,7 +661,7 @@ pub fn admit_codex_bridge_with_cli_import(
     match preflight {
         Ok(()) => Ok(()),
         Err(error) if should_offer_codex_cli_login_import(error, interactive) => {
-            import_codex_cli_login()?;
+            import_codex_cli_login(error)?;
             ForegroundRuntime::preflight(plan)
         }
         Err(error) => Err(BridgeError::CodexBridgeCredentials(error)),
@@ -585,49 +672,73 @@ fn should_offer_codex_cli_login_import(
     error: crate::codex_upstream::CodexBridgeCredentialError,
     interactive: bool,
 ) -> bool {
-    interactive && error == crate::codex_upstream::CodexBridgeCredentialError::Missing
+    interactive
+        && matches!(
+            error,
+            crate::codex_upstream::CodexBridgeCredentialError::Missing
+                | crate::codex_upstream::CodexBridgeCredentialError::RefreshRejected
+        )
 }
 
-fn missing_codex_bridge_credentials() -> BridgeError {
-    BridgeError::CodexBridgeCredentials(crate::codex_upstream::CodexBridgeCredentialError::Missing)
+fn codex_bridge_credential_failure(
+    error: crate::codex_upstream::CodexBridgeCredentialError,
+) -> BridgeError {
+    BridgeError::CodexBridgeCredentials(error)
 }
 
-fn import_codex_cli_login() -> Result<(), BridgeError> {
-    let home =
-        crate::clud_settings::home_dir_path().map_err(|_| missing_codex_bridge_credentials())?;
+fn import_codex_cli_login(
+    failure: crate::codex_upstream::CodexBridgeCredentialError,
+) -> Result<(), BridgeError> {
+    let home = crate::clud_settings::home_dir_path()
+        .map_err(|_| codex_bridge_credential_failure(failure))?;
     let preference = crate::clud_settings::load_codex_cli_login_import_at(&home)
-        .map_err(|_| missing_codex_bridge_credentials())?;
+        .map_err(|_| codex_bridge_credential_failure(failure))?;
     if preference == Some(CodexCliLoginImport::Never) {
-        return Err(missing_codex_bridge_credentials());
+        return Err(codex_bridge_credential_failure(failure));
     }
     let credentials = crate::codex_upstream::CodexCliCredentials::from_codex_home()
-        .map_err(|_| missing_codex_bridge_credentials())?
+        .map_err(|_| codex_bridge_credential_failure(failure))?
         .subscription_record();
+    let current =
+        crate::codex_auth::load_at(&home).map_err(|_| codex_bridge_credential_failure(failure))?;
+    let mode = codex_cli_import_mode(current.as_ref(), &credentials);
     let choice = match preference {
-        Some(CodexCliLoginImport::Always) => CodexCliImportChoice::Import,
+        Some(CodexCliLoginImport::Always) if mode == CodexCliImportMode::Initial => {
+            CodexCliImportChoice::Import
+        }
         Some(CodexCliLoginImport::Never) => unreachable!("handled above"),
-        None => {
-            let mut selector = CodexCliImportSelector::new(credentials.email.clone());
+        Some(CodexCliLoginImport::Always) | None => {
+            let mut selector = if mode == CodexCliImportMode::Initial {
+                CodexCliImportSelector::new(credentials.email.clone())
+            } else {
+                CodexCliImportSelector::for_replacement(&credentials, mode)
+            };
             selector::run(&mut std::io::stderr(), &mut selector)
                 .unwrap_or(CodexCliImportChoice::NotNow)
         }
     };
-    apply_codex_cli_import_choice_at(&home, &credentials, choice)
+    apply_codex_cli_import_choice_at(&home, current.as_ref(), &credentials, choice, failure)
 }
 
 fn apply_codex_cli_import_choice_at(
     home: &Path,
+    expected: Option<&crate::codex_auth::SubscriptionCredentials>,
     credentials: &crate::codex_auth::SubscriptionCredentials,
     choice: CodexCliImportChoice,
+    failure: crate::codex_upstream::CodexBridgeCredentialError,
 ) -> Result<(), BridgeError> {
     match choice {
-        CodexCliImportChoice::Import => crate::codex_auth::save_at(home, credentials)
-            .map_err(|_| missing_codex_bridge_credentials()),
-        CodexCliImportChoice::NotNow => Err(missing_codex_bridge_credentials()),
+        CodexCliImportChoice::Import => {
+            match crate::codex_auth::replace_if_unchanged_at(home, expected, credentials) {
+                Ok(true) => Ok(()),
+                Ok(false) | Err(_) => Err(codex_bridge_credential_failure(failure)),
+            }
+        }
+        CodexCliImportChoice::NotNow => Err(codex_bridge_credential_failure(failure)),
         CodexCliImportChoice::Never => {
             crate::clud_settings::save_codex_cli_login_import_at(home, CodexCliLoginImport::Never)
-                .map_err(|_| missing_codex_bridge_credentials())?;
-            Err(missing_codex_bridge_credentials())
+                .map_err(|_| codex_bridge_credential_failure(failure))?;
+            Err(codex_bridge_credential_failure(failure))
         }
     }
 }
@@ -4194,8 +4305,14 @@ mod tests {
             .view(std::time::Duration::ZERO)
             .title
             .contains("person@example.test"));
-        apply_codex_cli_import_choice_at(home.path(), &record, CodexCliImportChoice::Import)
-            .unwrap();
+        apply_codex_cli_import_choice_at(
+            home.path(),
+            None,
+            &record,
+            CodexCliImportChoice::Import,
+            crate::codex_upstream::CodexBridgeCredentialError::Missing,
+        )
+        .unwrap();
 
         assert_eq!(
             crate::codex_auth::load_at(home.path()).unwrap(),
@@ -4208,12 +4325,61 @@ mod tests {
     }
 
     #[test]
-    fn noninteractive_and_nonmissing_bridge_failures_never_offer_cli_import() {
+    fn only_interactive_missing_or_rejected_credentials_offer_cli_import() {
         use crate::codex_upstream::CodexBridgeCredentialError as Error;
         assert!(!should_offer_codex_cli_login_import(Error::Missing, false));
-        for error in [Error::ExpiredOrRevoked, Error::Corrupt, Error::Unreadable] {
+        assert!(!should_offer_codex_cli_login_import(
+            Error::RefreshRejected,
+            false
+        ));
+        assert!(should_offer_codex_cli_login_import(
+            Error::RefreshRejected,
+            true
+        ));
+        for error in [
+            Error::ExpiredOrRevoked,
+            Error::RefreshTemporary,
+            Error::RefreshMalformed,
+            Error::Corrupt,
+            Error::Unreadable,
+        ] {
             assert!(!should_offer_codex_cli_login_import(error, true));
         }
+    }
+
+    #[test]
+    fn native_login_repair_and_account_switch_have_distinct_prompts() {
+        let native = cli_subscription_record();
+        let same = native.clone();
+        assert_eq!(
+            codex_cli_import_mode(Some(&same), &native),
+            CodexCliImportMode::RepairSameAccount
+        );
+        let repair =
+            CodexCliImportSelector::for_replacement(&native, CodexCliImportMode::RepairSameAccount);
+        assert!(repair
+            .view(std::time::Duration::ZERO)
+            .title
+            .contains("Repair"));
+
+        let mut different = native.clone();
+        different.account_id = Some("another-account".to_string());
+        assert_eq!(
+            codex_cli_import_mode(Some(&different), &native),
+            CodexCliImportMode::SwitchAccount
+        );
+        let switch =
+            CodexCliImportSelector::for_replacement(&native, CodexCliImportMode::SwitchAccount);
+        assert!(switch
+            .view(std::time::Duration::ZERO)
+            .title
+            .contains("Switch"));
+
+        different.account_id = None;
+        assert_eq!(
+            codex_cli_import_mode(Some(&different), &native),
+            CodexCliImportMode::AmbiguousAccount
+        );
     }
 
     #[test]
@@ -4222,16 +4388,20 @@ mod tests {
         let record = cli_subscription_record();
         assert!(apply_codex_cli_import_choice_at(
             home.path(),
+            None,
             &record,
-            CodexCliImportChoice::NotNow
+            CodexCliImportChoice::NotNow,
+            crate::codex_upstream::CodexBridgeCredentialError::Missing,
         )
         .is_err());
         assert_eq!(crate::codex_auth::load_at(home.path()).unwrap(), None);
 
         assert!(apply_codex_cli_import_choice_at(
             home.path(),
+            None,
             &record,
-            CodexCliImportChoice::Never
+            CodexCliImportChoice::Never,
+            crate::codex_upstream::CodexBridgeCredentialError::Missing,
         )
         .is_err());
         assert_eq!(

@@ -7,6 +7,9 @@ use super::*;
 pub enum CodexBridgeCredentialError {
     Missing,
     ExpiredOrRevoked,
+    RefreshRejected,
+    RefreshTemporary,
+    RefreshMalformed,
     Corrupt,
     Unreadable,
 }
@@ -29,6 +32,18 @@ To use that login now: clud --codex --harness default",
 \n\
 Recover with:\n\
   clud auth login codex --acknowledge-experimental",
+            ),
+            Self::RefreshRejected => formatter.write_str(
+                "cannot launch Claude with the Codex provider: the clud-owned Codex refresh token was rejected.\n\
+\n\
+Recover with:\n\
+  clud auth login codex --acknowledge-experimental",
+            ),
+            Self::RefreshTemporary => formatter.write_str(
+                "cannot launch Claude with the Codex provider: credential refresh is temporarily unavailable. Retry after the connection or provider recovers",
+            ),
+            Self::RefreshMalformed => formatter.write_str(
+                "cannot launch Claude with the Codex provider: credential refresh returned an invalid response. Retry or update clud",
             ),
             Self::Corrupt => formatter.write_str(
                 "cannot launch Claude with the Codex provider: the clud-owned Codex bridge credential is corrupt.\n\
@@ -136,6 +151,8 @@ pub struct CodexCliCredentials {
 #[derive(Clone)]
 pub struct CludSubscriptionCredentials {
     target: UpstreamTarget,
+    home: Option<std::path::PathBuf>,
+    email: Option<String>,
 }
 
 impl CludSubscriptionCredentials {
@@ -148,13 +165,11 @@ impl CludSubscriptionCredentials {
                     "no clud ChatGPT subscription login",
                 ));
             }
-            Err(_) => {
-                return Err(UpstreamError::Credentials(
-                    "the Codex login has expired -- run `clud auth login codex`",
-                ));
-            }
+            Err(error) => return Err(subscription_upstream_error(&error)),
         };
-        Self::from_record(credentials)
+        let mut source = Self::from_record(credentials)?;
+        source.home = Some(home);
+        Ok(source)
     }
 
     pub fn from_record(credentials: SubscriptionCredentials) -> Result<Self, UpstreamError> {
@@ -169,6 +184,7 @@ impl CludSubscriptionCredentials {
         {
             return Err(UpstreamError::Credentials(CLUD_CREDENTIALS_EXPIRED));
         }
+        let email = credentials.email.clone();
         Ok(Self {
             target: UpstreamTarget::new(
                 CODEX_BACKEND_BASE_URL,
@@ -176,13 +192,31 @@ impl CludSubscriptionCredentials {
             )
             .with_account_id(credentials.account_id)
             .with_header("originator", CODEX_ORIGINATOR),
+            home: None,
+            email,
         })
     }
+}
+
+fn subscription_upstream_error(error: &str) -> UpstreamError {
+    let message = match error {
+        codex_auth::REFRESH_TEMPORARY => codex_auth::REFRESH_TEMPORARY,
+        codex_auth::REFRESH_REJECTED => codex_auth::REFRESH_REJECTED,
+        codex_auth::REFRESH_MALFORMED => codex_auth::REFRESH_MALFORMED,
+        _ => "the Codex login has expired -- run `clud auth login codex`",
+    };
+    UpstreamError::Credentials(message)
 }
 
 fn classify_subscription_load_error(error: &str) -> CodexBridgeCredentialError {
     if error == "no clud ChatGPT subscription login" {
         CodexBridgeCredentialError::Missing
+    } else if error == codex_auth::REFRESH_TEMPORARY {
+        CodexBridgeCredentialError::RefreshTemporary
+    } else if error == codex_auth::REFRESH_MALFORMED {
+        CodexBridgeCredentialError::RefreshMalformed
+    } else if error == codex_auth::REFRESH_REJECTED {
+        CodexBridgeCredentialError::RefreshRejected
     } else if error.starts_with("clud subscription credentials are corrupted")
         || error == "clud subscription credentials have no access token"
     {
@@ -194,8 +228,6 @@ fn classify_subscription_load_error(error: &str) -> CodexBridgeCredentialError {
     {
         CodexBridgeCredentialError::Unreadable
     } else {
-        // Refresh failures are intentionally collapsed by codex_auth so no
-        // upstream response or token detail reaches a launch diagnostic.
         CodexBridgeCredentialError::ExpiredOrRevoked
     }
 }
@@ -216,6 +248,26 @@ impl std::fmt::Debug for CludSubscriptionCredentials {
 impl CredentialSource for CludSubscriptionCredentials {
     fn resolve(&self) -> Result<UpstreamTarget, UpstreamError> {
         Ok(self.target.clone())
+    }
+
+    fn recover_after_unauthorized(
+        &self,
+        rejected: &UpstreamTarget,
+    ) -> Result<Option<UpstreamTarget>, UpstreamError> {
+        let Some(home) = self.home.as_deref() else {
+            return Ok(None);
+        };
+        let Some(access_token) = rejected.authorization.strip_prefix("Bearer ") else {
+            return Ok(None);
+        };
+        let replacement = codex_auth::refresh_after_rejection(home, access_token)
+            .map_err(|error| subscription_upstream_error(&error))?;
+        if replacement.account_id != self.target.account_id || replacement.email != self.email {
+            return Err(UpstreamError::Credentials(
+                "Codex account changed during credential recovery",
+            ));
+        }
+        Self::from_record(replacement).map(|source| Some(source.target))
     }
 }
 
@@ -451,6 +503,16 @@ impl CredentialSource for ResolvedCredentials {
         match self {
             Self::ApiKey(credentials) => credentials.resolve(),
             Self::Subscription(credentials) => credentials.resolve(),
+        }
+    }
+
+    fn recover_after_unauthorized(
+        &self,
+        rejected: &UpstreamTarget,
+    ) -> Result<Option<UpstreamTarget>, UpstreamError> {
+        match self {
+            Self::ApiKey(_) => Ok(None),
+            Self::Subscription(credentials) => credentials.recover_after_unauthorized(rejected),
         }
     }
 }

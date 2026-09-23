@@ -27,6 +27,28 @@ const OAUTH_ISSUER: &str = "https://auth.openai.com";
 // Compatibility contract researched from openai/codex `codex-rs/login`.
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CALLBACK_PATH: &str = "/auth/callback";
+pub const REFRESH_TEMPORARY: &str = "Codex credential refresh is temporarily unavailable";
+pub const REFRESH_REJECTED: &str =
+    "the Codex refresh token was rejected -- run `clud auth login codex`";
+pub const REFRESH_MALFORMED: &str = "Codex credential refresh returned an invalid response";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshFailure {
+    Temporary,
+    Ambiguous,
+    Rejected,
+    Malformed,
+}
+
+impl RefreshFailure {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Temporary | Self::Ambiguous => REFRESH_TEMPORARY,
+            Self::Rejected => REFRESH_REJECTED,
+            Self::Malformed => REFRESH_MALFORMED,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionCredentials {
@@ -115,6 +137,21 @@ pub fn remove_at(home: &Path) -> Result<bool, String> {
 pub fn save_at(home: &Path, credentials: &SubscriptionCredentials) -> Result<(), String> {
     let _lock = acquire_lock(home)?;
     save_locked(home, credentials)
+}
+
+/// Import only if the selected record is still the one shown to the user.
+/// A concurrent login or refresh must never be overwritten by a stale prompt.
+pub fn replace_if_unchanged_at(
+    home: &Path,
+    expected: Option<&SubscriptionCredentials>,
+    replacement: &SubscriptionCredentials,
+) -> Result<bool, String> {
+    let _lock = acquire_lock(home)?;
+    if load_at(home)?.as_ref() != expected {
+        return Ok(false);
+    }
+    save_locked(home, replacement)?;
+    Ok(true)
 }
 
 fn save_locked(home: &Path, credentials: &SubscriptionCredentials) -> Result<(), String> {
@@ -312,11 +349,46 @@ pub fn refresh_if_needed_at(
     {
         return Ok(current);
     }
+    refresh_locked(home, current, refresh)
+}
+
+/// Recover a bearer rejected by the model API. A competing clud process may
+/// already have rotated it; the lock and re-read avoid replaying its old grant.
+pub fn refresh_after_rejection_at(
+    home: &Path,
+    rejected_access_token: &str,
+    refresh: impl FnOnce(&str) -> Result<(String, String, Option<u64>), String>,
+) -> Result<SubscriptionCredentials, String> {
+    let _lock = acquire_lock(home)?;
+    let current = load_at(home)?.ok_or_else(|| "no clud ChatGPT subscription login".to_string())?;
+    if current.access_token != rejected_access_token {
+        return Ok(current);
+    }
+    refresh_locked(home, current, refresh)
+}
+
+pub fn refresh_after_rejection(
+    home: &Path,
+    rejected_access_token: &str,
+) -> Result<SubscriptionCredentials, String> {
+    refresh_after_rejection_at(home, rejected_access_token, refresh_remote)
+}
+
+fn refresh_locked(
+    home: &Path,
+    current: SubscriptionCredentials,
+    refresh: impl FnOnce(&str) -> Result<(String, String, Option<u64>), String>,
+) -> Result<SubscriptionCredentials, String> {
     let (access_token, refresh_token, expires_at_unix) = refresh(&current.refresh_token)?;
+    if access_token.trim().is_empty() || refresh_token.trim().is_empty() {
+        return Err(REFRESH_MALFORMED.to_string());
+    }
     let replacement = SubscriptionCredentials {
+        expires_at_unix: expires_at_unix.or_else(|| {
+            safe_identity_claims(&access_token).and_then(|claims| claims.expires_at_unix)
+        }),
         access_token,
         refresh_token,
-        expires_at_unix,
         ..current
     };
     save_locked(home, &replacement)?;
@@ -332,6 +404,28 @@ pub fn load_fresh_at(home: &Path) -> Result<SubscriptionCredentials, String> {
 }
 
 fn refresh_remote(refresh_token: &str) -> Result<(String, String, Option<u64>), String> {
+    retry_refresh(refresh_token, refresh_remote_once).map_err(|error| error.message().to_string())
+}
+
+fn retry_refresh(
+    refresh_token: &str,
+    mut refresh: impl FnMut(&str) -> Result<(String, String, Option<u64>), RefreshFailure>,
+) -> Result<(String, String, Option<u64>), RefreshFailure> {
+    for attempt in 0..3 {
+        match refresh(refresh_token) {
+            Ok(tokens) => return Ok(tokens),
+            Err(RefreshFailure::Temporary) if attempt < 2 => {
+                thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(RefreshFailure::Temporary)
+}
+
+fn refresh_remote_once(
+    refresh_token: &str,
+) -> Result<(String, String, Option<u64>), RefreshFailure> {
     #[derive(Deserialize)]
     struct Tokens {
         access_token: String,
@@ -339,17 +433,30 @@ fn refresh_remote(refresh_token: &str) -> Result<(String, String, Option<u64>), 
         #[serde(default)]
         expires_in: Option<u64>,
     }
-    let response = ureq::post(&format!("{OAUTH_ISSUER}/oauth/token"))
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(5))
+        .build();
+    let response = agent
+        .post(&format!("{OAUTH_ISSUER}/oauth/token"))
         .send_form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("client_id", CODEX_CLIENT_ID),
         ])
-        .map_err(|_| "the Codex login has expired -- run `clud auth login codex`".to_string())?;
-    let tokens: Tokens = serde_json::from_reader(response.into_reader())
-        .map_err(|_| "the Codex login has expired -- run `clud auth login codex`".to_string())?;
+        .map_err(|error| match error {
+            ureq::Error::Transport(transport) => match transport.kind() {
+                ureq::ErrorKind::Dns
+                | ureq::ErrorKind::ConnectionFailed
+                | ureq::ErrorKind::ProxyConnect => RefreshFailure::Temporary,
+                _ => RefreshFailure::Ambiguous,
+            },
+            ureq::Error::Status(status, response) => classify_refresh_status(status, response),
+        })?;
+    let tokens: Tokens =
+        serde_json::from_reader(response.into_reader()).map_err(|_| RefreshFailure::Malformed)?;
     if tokens.access_token.trim().is_empty() || tokens.refresh_token.trim().is_empty() {
-        return Err("the Codex login has expired -- run `clud auth login codex`".to_string());
+        return Err(RefreshFailure::Malformed);
     }
     let expiry = tokens.expires_in.map(|seconds| {
         SystemTime::now()
@@ -359,6 +466,51 @@ fn refresh_remote(refresh_token: &str) -> Result<(String, String, Option<u64>), 
             .saturating_add(seconds)
     });
     Ok((tokens.access_token, tokens.refresh_token, expiry))
+}
+
+fn classify_refresh_status(status: u16, response: ureq::Response) -> RefreshFailure {
+    if status == 408 || status >= 500 {
+        // The token endpoint may have rotated the one-time grant before its
+        // response was lost. Retrying it could trigger reuse invalidation.
+        return RefreshFailure::Ambiguous;
+    }
+    if status == 429 {
+        return RefreshFailure::Temporary;
+    }
+    // The OAuth endpoint may answer 400 invalid_grant or a provider-specific
+    // token-reuse code. Only bounded enum-like fields are inspected; response
+    // text, token fragments and account identifiers are never retained.
+    let mut raw = Vec::new();
+    let _ = response.into_reader().take(4096).read_to_end(&mut raw);
+    classify_refresh_error_body(status, &raw)
+}
+
+fn classify_refresh_error_body(status: u16, raw: &[u8]) -> RefreshFailure {
+    if status == 408 || status >= 500 {
+        return RefreshFailure::Ambiguous;
+    }
+    if status == 429 {
+        return RefreshFailure::Temporary;
+    }
+    let document: serde_json::Value = match serde_json::from_slice(raw) {
+        Ok(document) => document,
+        Err(_) => return RefreshFailure::Malformed,
+    };
+    let code = document
+        .pointer("/error/code")
+        .or_else(|| document.pointer("/error"))
+        .and_then(serde_json::Value::as_str);
+    match code {
+        Some("temporarily_unavailable" | "server_error") => RefreshFailure::Temporary,
+        Some(
+            "invalid_grant"
+            | "refresh_token_reused"
+            | "refresh_token_invalidated"
+            | "refresh_token_expired"
+            | "invalid_token",
+        ) => RefreshFailure::Rejected,
+        _ => RefreshFailure::Malformed,
+    }
 }
 
 pub fn run(subcommand: &CodexAuthSubcommand, interrupted: &AtomicBool) -> i32 {
@@ -849,6 +1001,148 @@ mod tests {
             load_at(home.path()).unwrap().unwrap().refresh_token,
             "new-refresh"
         );
+    }
+
+    #[test]
+    fn rejected_access_token_forces_refresh_before_recorded_expiry() {
+        let home = tempfile::TempDir::new().unwrap();
+        save_at(
+            home.path(),
+            &SubscriptionCredentials {
+                access_token: "rejected-access".to_string(),
+                refresh_token: "old-refresh".to_string(),
+                account_id: Some("acct".to_string()),
+                email: None,
+                expires_at_unix: Some(u64::MAX),
+            },
+        )
+        .unwrap();
+        let recovered = refresh_after_rejection_at(home.path(), "rejected-access", |token| {
+            assert_eq!(token, "old-refresh");
+            Ok((
+                "new-access".to_string(),
+                "new-refresh".to_string(),
+                Some(900),
+            ))
+        })
+        .unwrap();
+        assert_eq!(recovered.access_token, "new-access");
+        assert_eq!(
+            load_at(home.path()).unwrap().unwrap().refresh_token,
+            "new-refresh"
+        );
+    }
+
+    #[test]
+    fn rejected_access_token_reuses_a_competing_refresh() {
+        let home = tempfile::TempDir::new().unwrap();
+        save_at(
+            home.path(),
+            &SubscriptionCredentials {
+                access_token: "already-refreshed".to_string(),
+                refresh_token: "new-refresh".to_string(),
+                account_id: Some("acct".to_string()),
+                email: None,
+                expires_at_unix: Some(u64::MAX),
+            },
+        )
+        .unwrap();
+        let recovered = refresh_after_rejection_at(home.path(), "rejected-access", |_| {
+            panic!("a newer stored token must not be refreshed again")
+        })
+        .unwrap();
+        assert_eq!(recovered.access_token, "already-refreshed");
+    }
+
+    #[test]
+    fn native_import_does_not_replace_a_record_changed_during_the_prompt() {
+        let home = tempfile::TempDir::new().unwrap();
+        let initial = SubscriptionCredentials {
+            access_token: "old-access".to_string(),
+            refresh_token: "old-refresh".to_string(),
+            account_id: Some("account-a".to_string()),
+            email: None,
+            expires_at_unix: Some(100),
+        };
+        let mut concurrent = initial.clone();
+        concurrent.access_token = "new-access".to_string();
+        concurrent.refresh_token = "new-refresh".to_string();
+        let mut imported = initial.clone();
+        imported.account_id = Some("account-b".to_string());
+
+        save_at(home.path(), &initial).unwrap();
+        save_at(home.path(), &concurrent).unwrap();
+        assert!(!replace_if_unchanged_at(home.path(), Some(&initial), &imported).unwrap());
+        assert_eq!(load_at(home.path()).unwrap(), Some(concurrent.clone()));
+        assert!(replace_if_unchanged_at(home.path(), Some(&concurrent), &imported).unwrap());
+        assert_eq!(load_at(home.path()).unwrap(), Some(imported));
+    }
+
+    #[test]
+    fn oauth_refresh_status_classifies_grants_without_leaking_response_text() {
+        for (status, body, expected) in [
+            (
+                400,
+                r#"{"error":"invalid_grant"}"#,
+                RefreshFailure::Rejected,
+            ),
+            (
+                401,
+                r#"{"error":{"code":"refresh_token_reused","message":"Bearer secret"}}"#,
+                RefreshFailure::Rejected,
+            ),
+            (429, r#"{}"#, RefreshFailure::Temporary),
+            (503, r#"{}"#, RefreshFailure::Ambiguous),
+            (
+                400,
+                r#"{"error":"invalid_request"}"#,
+                RefreshFailure::Malformed,
+            ),
+            (401, "<html>login</html>", RefreshFailure::Malformed),
+            (
+                400,
+                r#"{"error":"temporarily_unavailable"}"#,
+                RefreshFailure::Temporary,
+            ),
+        ] {
+            assert_eq!(
+                classify_refresh_error_body(status, body.as_bytes()),
+                expected
+            );
+        }
+        assert!(!format!("{:?}", RefreshFailure::Rejected).contains("secret"));
+    }
+
+    #[test]
+    fn temporary_refresh_is_bounded_and_rejected_grants_do_not_retry() {
+        let mut attempts = 0;
+        let result = retry_refresh("private-refresh", |token| {
+            assert_eq!(token, "private-refresh");
+            attempts += 1;
+            if attempts < 3 {
+                Err(RefreshFailure::Temporary)
+            } else {
+                Ok(("access".into(), "rotated".into(), Some(10)))
+            }
+        });
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
+
+        let mut rejected_attempts = 0;
+        let result = retry_refresh("private-refresh", |_| {
+            rejected_attempts += 1;
+            Err(RefreshFailure::Rejected)
+        });
+        assert_eq!(result.unwrap_err(), RefreshFailure::Rejected);
+        assert_eq!(rejected_attempts, 1);
+
+        let mut exhausted_attempts = 0;
+        let result = retry_refresh("private-refresh", |_| {
+            exhausted_attempts += 1;
+            Err(RefreshFailure::Temporary)
+        });
+        assert_eq!(result.unwrap_err(), RefreshFailure::Temporary);
+        assert_eq!(exhausted_attempts, 3);
     }
 
     #[test]

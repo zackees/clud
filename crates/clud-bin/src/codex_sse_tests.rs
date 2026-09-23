@@ -496,6 +496,24 @@ fn an_in_band_quota_failure_is_classified_and_named() {
     assert!(!rendered.contains("acct_42"), "{rendered}");
 }
 
+#[test]
+fn in_band_invalid_token_is_an_auth_failure_without_echoing_the_token() {
+    let stream = [
+        upstream("response.created", json!({})),
+        upstream(
+            "response.failed",
+            json!({"response": {"error": {
+                "code": "invalid_token",
+                "message": "Bearer secret-access-token was rejected"
+            }}}),
+        ),
+    ]
+    .concat();
+    let rendered = run(&stream, 4096).concat();
+    assert!(rendered.contains("authentication_error"), "{rendered}");
+    assert!(!rendered.contains("secret-access-token"), "{rendered}");
+}
+
 /// An error after partial output must still close what it opened, or the
 /// client is left holding an unterminated block.
 #[test]
