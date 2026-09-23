@@ -1,6 +1,6 @@
 # clud-issue/
 
-Source of the `/clud-issue` skill shipped inside the `clud` binary. The skill drives a workflow for filing a deeply-researched GitHub issue without interviewing the user: silent round-1 investigation, then the agent answers the open questions itself from code/history/docs, then a round-2 deep dig, then `gh issue create`. Judgment calls (priority, scope edges, fix location, acceptance criteria) are decided by the agent and recorded in a `## Decisions` section of the issue body, with anything genuinely unresolvable listed under `Open questions` so the user can correct it on GitHub. It triggers when the user invokes `/clud-issue`, asks to "file an issue with research", or wants an issue filed and expects the agent to resolve scope itself. The deliverable is a posted issue URL plus a 2-3 sentence summary - never a draft left in chat.
+Source of the `/clud-issue` skill shipped inside the `clud` binary. Ordinary issue filing uses two investigation rounds, then `gh issue create`; judgment calls go in the issue body's `## Decisions` section rather than a user interview. A request to create a meta issue, roll up issues, or combine them under a parent activates the native hierarchy mode: inspect existing parents, attach existing children through GitHub's sub-issues API, and verify both directions. Body links alone are not completion. The deliverable is the posted parent URL and an honest attachment summary, including any partial failure.
 
 ## Files
 

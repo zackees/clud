@@ -17,9 +17,8 @@ every backend's skills dir on launch. `clud-loop` was retired once
   `/goal` or `clud do` request with several independent deliverables. It plans
   isolated work, reviews each result, and integrates only after the repository's
   own validation and merge rules are met.
-- [clud-issue/](clud-issue/README.md) - File a deeply-researched GitHub issue
-  via investigate -> interview -> investigate -> post, returning a summary plus
-  the issue URL.
+- [clud-issue/](clud-issue/README.md) - File a researched GitHub issue without
+  an interview, or roll existing issues into a verified native meta-issue.
 - [clud-issue-triage/](clud-issue-triage/README.md) - Triage GitHub issues:
   close ones that are clearly resolved and silently file follow-ups for
   un-addressed CodeRabbit comments; supports single, last-week, or all.
