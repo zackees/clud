@@ -297,10 +297,11 @@ fn record_usage(
     let Some(message) = record.get("message") else {
         return;
     };
-    let Some(id) = message.get("id").and_then(Value::as_str) else {
+    let Some(usage) = message.get("usage") else {
         return;
     };
-    let Some(usage) = message.get("usage") else {
+    let Some(id) = message.get("id").and_then(Value::as_str) else {
+        ledger.uncertain = true;
         return;
     };
     let number = |name| usage.get(name).and_then(Value::as_u64);
@@ -310,6 +311,7 @@ fn record_usage(
         number("cache_read_input_tokens"),
         number("output_tokens"),
     ) else {
+        ledger.uncertain = true;
         return;
     };
     let identity = digest(id.as_bytes());

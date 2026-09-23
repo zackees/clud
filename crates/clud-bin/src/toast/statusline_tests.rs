@@ -776,6 +776,31 @@ fn malformed_complete_line_is_checkpointed_before_later_usage() {
 }
 
 #[test]
+fn incomplete_usage_record_suppresses_an_otherwise_valid_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 205);
+    let transcript = dir.path().join("incomplete-usage.jsonl");
+    let valid = json!({"message": {"id": "valid-response", "model": "fixture-model", "usage": {
+        "input_tokens": 2, "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4, "output_tokens": 5
+    }}});
+    let incomplete = json!({"message": {"id": "incomplete-response", "usage": {
+        "input_tokens": 7, "cache_creation_input_tokens": 8,
+        "cache_read_input_tokens": 9
+    }}});
+    std::fs::write(&transcript, format!("{valid}\n{incomplete}\n")).unwrap();
+    let args = RunArgs {
+        session_pid: 205,
+        state_dir: dir.path().to_path_buf(),
+        chain_b64: None,
+    };
+    let mut out = Vec::new();
+    render_into(&mut out, &args, &transcript_stdin(&transcript), now_ms());
+    assert!(!String::from_utf8_lossy(&out).contains("read "));
+    assert!(writer.effective_usage_snapshot().is_none());
+}
+
+#[test]
 fn unchanged_callback_does_not_rewrite_cursor_state() {
     let dir = tempfile::tempdir().unwrap();
     let _writer = writer_in(dir.path(), 203);
