@@ -181,21 +181,25 @@ class TestCapActuallyRefuses:
 
         first_ready = tmp_path / "first-ready"
         first_result_box: list[process.CompletedProcess[str]] = []
+        first_error_box: list[BaseException] = []
 
         def first_target() -> None:
-            r = _launch_clud(
-                clud_binary,
-                env,
-                agent_args=[
-                    "--mock-write-done",
-                    str(first_ready),
-                    "--mock-write-marker-on-iter",
-                    "1",
-                ],
-                sleep_ms=20_000,
-                timeout=45,
-            )
-            first_result_box.append(r)
+            try:
+                r = _launch_clud(
+                    clud_binary,
+                    env,
+                    agent_args=[
+                        "--mock-write-done",
+                        str(first_ready),
+                        "--mock-write-marker-on-iter",
+                        "1",
+                    ],
+                    sleep_ms=20_000,
+                    timeout=45,
+                )
+                first_result_box.append(r)
+            except BaseException as error:
+                first_error_box.append(error)
 
         t = threading.Thread(target=first_target)
         t.start()
@@ -206,7 +210,8 @@ class TestCapActuallyRefuses:
         wait_for_file(first_ready, timeout=30.0)
 
         second = _launch_clud(clud_binary, env, sleep_ms=100)
-        t.join(timeout=30)
+        # Allow the child its full 45-second timeout before judging the thread.
+        t.join(timeout=50)
 
         # The second launch must be refused (issue #73 fork-bomb guardrail)
         # rather than slipping through with the redb warning (issue #138).
@@ -222,5 +227,7 @@ class TestCapActuallyRefuses:
         )
 
         # First launch should still finish cleanly.
+        assert not t.is_alive(), "first launch outlived its 45-second subprocess timeout"
+        assert not first_error_box, f"first launch failed: {first_error_box}"
         assert first_result_box, "first launch never produced a result"
         assert first_result_box[0].returncode == 0
