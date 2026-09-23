@@ -356,6 +356,18 @@ fn stored_key_is_well_formed(key: &str) -> bool {
     key == key.trim() && crate::args::looks_like_api_key(key)
 }
 
+/// Read-only presence check for bare-launch routing. This does not probe the
+/// network: the ordinary launch preflight remains responsible for rejection.
+pub fn has_well_formed_stored_key(
+    descriptor: &'static AnthropicCompatProvider,
+) -> Result<bool, SecretStoreError> {
+    let store = NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)?;
+    let key = store.get()?.map(Zeroizing::new);
+    Ok(key
+        .as_deref()
+        .is_some_and(|key| stored_key_is_well_formed(key)))
+}
+
 fn sanitize_provider_message(message: &str, key: &str) -> String {
     let masked = mask_key(key);
     let without_exact_key = message.replace(key, &masked);

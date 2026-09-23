@@ -162,6 +162,7 @@ pub enum PreferenceSource {
     Cli,
     GlobalSetting,
     ProviderSetting,
+    CredentialFallback,
     BuiltInDefault,
 }
 
@@ -171,6 +172,7 @@ impl PreferenceSource {
             Self::Cli => "cli",
             Self::GlobalSetting => "global_setting",
             Self::ProviderSetting => "provider_setting",
+            Self::CredentialFallback => "credential_fallback",
             Self::BuiltInDefault => "built_in_default",
         }
     }

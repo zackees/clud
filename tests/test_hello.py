@@ -557,6 +557,17 @@ def test_dry_run_deepseek() -> None:
     assert "sk-" not in result.stderr
 
 
+def test_bare_and_explicit_run_dry_runs_remain_credential_free() -> None:
+    # Credential-aware routing is a live-launch fallback, never a dry-run
+    # vault or external-auth-status probe.
+    for argv in (("--dry-run",), ("run", "--dry-run")):
+        result = _run(*argv)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["model_provider"] == "claude"
+        assert data["provider_source"] == "built_in_default"
+
+
 _INLINE_DEEPSEEK_KEY = "sk-" + "0123456789abcdef" * 2
 
 

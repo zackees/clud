@@ -53,6 +53,10 @@ Entry and orchestration:
 - `lib.rs` - library facade so integration tests under `tests/` can link
   against internals; `main.rs` imports through this rather than re-declaring
   `mod ...`.
+- `harness_picker.rs` - installed-harness picker and the narrow bare-launch
+  DeepSeek-only credential fallback. External Claude/Codex authentication is
+  checked through bounded read-only CLI status commands; the DeepSeek vault
+  check never replaces the normal launch preflight.
 - `runner.rs` - per-iteration subprocess- and PTY-mode runner for a single
   `LaunchPlan`; owns child-env construction, stream-json fallback,
   Ctrl-C-aware teardown, and OLE drag-drop registration wiring. The

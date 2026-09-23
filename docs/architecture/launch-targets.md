@@ -63,6 +63,13 @@ harness falls back to the first installed row. Explicit provider/harness
 intent, prompts, non-TTY launches, dry runs, subcommands, and daemon-style
 launches bypass discovery and remain deterministic.
 
+Before this picker, a bare live direct launch with no saved route checks for
+the one unambiguous credential-backed route: a validly shaped stored DeepSeek
+key, Claude harness route, and known unauthenticated Claude/Codex status.
+That route launches DeepSeek *through Claude* without selecting native `dsh`.
+Unknown auth status keeps the existing picker/default behavior. `clud run`
+normalizes to the same path; explicit flags, saved routing, and dry runs win.
+
 DeepSeek Harness is PATH-only in this first integration. clud does not install
 the developer preview automatically; an explicit missing selection reports
 the upstream `npx @deepseek-ai/dsh web` guidance.
