@@ -173,6 +173,11 @@ runners that have no Rust toolchain at all. Full design and rationale:
 [`docs/architecture/ci.md`](docs/architecture/ci.md).
 
 Entrypoint: `.github/workflows/ci.yml` (the only push/PR workflow).
+Routine PRs and `main` updates run the minimal Linux lane. Use literal
+`ci-test` for the three-OS extended set or `ci-full` for all six targets and
+Dylint; existing `ci:full` labels remain equivalent. The merge queue is
+always full. Manual full CI pins every job to a verified candidate SHA. See
+[`ci.md`](docs/architecture/ci.md#current-ci-selection).
 
 | File | Role |
 | --- | --- |

@@ -21,9 +21,12 @@ from typing import Literal
 # `native` remains only as xbuild's local-development default — no CI lane
 # uses it (#863).
 Strategy = Literal["native", "soldr"]
-Tier = Literal["core", "full"]
+TargetTier = Literal["core", "full"]
+Mode = Literal["minimal", "extended", "full"]
 
-FULL_TIER_LABEL = "ci:full"
+FULL_TIER_LABEL = "ci-full"
+EXTENDED_TIER_LABEL = "ci-test"
+LEGACY_FULL_TIER_LABEL = "ci:full"
 
 
 @dataclass(frozen=True)
@@ -35,9 +38,9 @@ class Target:
     exec_runs_on: str
     #: Cross-compile strategy used when building on Linux.
     strategy: Strategy
-    #: `core` targets run on every PR push; `full` adds the second architecture
-    #: of each OS, which is an ABI/codegen check rather than a behaviour check.
-    tier: Tier
+    #: `core` is the extended one-per-OS set; `full` adds the second architecture
+    #: of each OS. Minimal mode selects Linux x64 alone.
+    tier: TargetTier
     #: Artifact name the release pipeline publishes this triple's wheel under.
     artifact: str
     #: Runner that compiles. Every triple cross-builds on Linux via the soldr
@@ -63,24 +66,49 @@ SDIST_TARGET = "x86_64-unknown-linux-gnu"
 SUITES: tuple[str, ...] = ("unit", "integration")
 
 
-def resolve_tier(event_name: str, dispatch_tier: str, pr_labels: str) -> Tier:
-    """Pick the target tier from the triggering event.
-
-    `main` pushes and merge-queue runs always take the full tier: that is what
-    keeps every triple's build cache warm for the PR jobs that restore from it.
-    """
+def resolve_tier(
+    event_name: str,
+    dispatch_tier: str,
+    pr_labels: str,
+    candidate_sha: str | None = None,
+    event_sha: str | None = None,
+    provenance_verified: bool = False,
+) -> Mode:
+    """Pick CI coverage; manual full runs need proven source provenance."""
     if event_name == "workflow_dispatch":
-        return "full" if dispatch_tier != "core" else "core"
-    if event_name in ("push", "merge_group"):
+        if dispatch_tier != "full" or not candidate_sha or len(candidate_sha) != 40:
+            raise ValueError("full dispatch requires a 40-character candidate SHA")
+        if not provenance_verified:
+            raise ValueError("full dispatch requires verified source/workflow provenance")
         return "full"
+    if event_name == "merge_group":
+        return "full"
+    if event_name == "push":
+        return "minimal"
+    if event_name != "pull_request":
+        raise ValueError(f"unsupported CI event: {event_name}")
     labels = {label.strip() for label in pr_labels.split(",") if label.strip()}
-    return "full" if FULL_TIER_LABEL in labels else "core"
+    unknown = {label for label in labels if label.startswith("ci-")} - {
+        FULL_TIER_LABEL,
+        EXTENDED_TIER_LABEL,
+    }
+    if unknown:
+        raise ValueError(f"unknown CI labels: {', '.join(sorted(unknown))}")
+    if FULL_TIER_LABEL in labels or LEGACY_FULL_TIER_LABEL in labels:
+        return "full"
+    if EXTENDED_TIER_LABEL in labels:
+        return "extended"
+    return "minimal"
 
 
-def selected(tier: Tier) -> list[Target]:
+def selected(tier: Mode | TargetTier) -> list[Target]:
     if tier == "full":
         return list(TARGETS)
-    return [target for target in TARGETS if target.tier == "core"]
+    if tier in ("core", "extended"):
+        return [target for target in TARGETS if target.tier == "core"]
+    if tier == "minimal":
+        return [TARGETS[0]]
+    raise ValueError(f"unsupported CI tier: {tier}")
 
 
 def build_matrix(targets: list[Target]) -> dict[str, list[dict[str, str]]]:
@@ -157,6 +185,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--event-name", default=os.environ.get("EVENT_NAME", ""))
     parser.add_argument("--dispatch-tier", default=os.environ.get("DISPATCH_TIER", ""))
     parser.add_argument("--pr-labels", default=os.environ.get("PR_LABELS", ""))
+    parser.add_argument("--candidate-sha", default=os.environ.get("CANDIDATE_SHA", ""))
+    parser.add_argument("--event-sha", default=os.environ.get("EVENT_SHA", ""))
+    parser.add_argument(
+        "--provenance-verified",
+        default=os.environ.get("PROVENANCE_VERIFIED", "false"),
+    )
     parser.add_argument(
         "--release",
         action="store_true",
@@ -168,7 +202,14 @@ def main(argv: list[str] | None = None) -> int:
         emit({"build": json.dumps(release_matrix(), separators=(",", ":"))})
         return 0
 
-    tier = resolve_tier(args.event_name, args.dispatch_tier, args.pr_labels)
+    tier = resolve_tier(
+        args.event_name,
+        args.dispatch_tier,
+        args.pr_labels,
+        args.candidate_sha,
+        args.event_sha,
+        args.provenance_verified == "true",
+    )
     targets = selected(tier)
     emit(
         {

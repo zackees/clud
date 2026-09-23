@@ -58,23 +58,90 @@ def test_full_tier_is_a_superset_of_core():
     assert full == {target.triple for target in TARGETS}
 
 
+def test_minimal_and_extended_modes_are_strict_subsets():
+    minimal = {target.triple for target in selected("minimal")}
+    extended = {target.triple for target in selected("extended")}
+    full = {target.triple for target in selected("full")}
+    assert minimal == {"x86_64-unknown-linux-gnu"}
+    assert minimal < extended < full
+
+
 @pytest.mark.parametrize(
     ("event", "dispatch", "labels", "expected"),
     [
-        ("pull_request", "", "", "core"),
+        ("pull_request", "", "", "minimal"),
+        ("pull_request", "", "ci-test", "extended"),
+        ("pull_request", "", "ci-full", "full"),
+        ("pull_request", "", "ci-test,ci-full", "full"),
         ("pull_request", "", "ci:full", "full"),
-        ("pull_request", "", "documentation,ci:full,bug", "full"),
-        ("pull_request", "", "ci:full-ish", "core"),
-        # main pushes and the merge queue always run full: that is what keeps
-        # every triple's build cache warm for PR jobs to restore from.
-        ("push", "", "", "full"),
+        ("push", "", "", "minimal"),
         ("merge_group", "", "", "full"),
-        ("workflow_dispatch", "core", "", "core"),
-        ("workflow_dispatch", "full", "", "full"),
     ],
 )
 def test_resolve_tier(event, dispatch, labels, expected):
     assert resolve_tier(event, dispatch, labels) == expected
+
+
+def test_full_dispatch_requires_exact_candidate_sha():
+    assert resolve_tier("workflow_dispatch", "full", "", "a" * 40, "a" * 40, True) == "full"
+    assert resolve_tier("workflow_dispatch", "full", "", "a" * 40, "b" * 40, True) == "full"
+    with pytest.raises(ValueError, match="provenance"):
+        resolve_tier("workflow_dispatch", "full", "", "a" * 40, "b" * 40, False)
+    with pytest.raises(ValueError, match="candidate"):
+        resolve_tier("workflow_dispatch", "full", "")
+
+
+def test_pr_and_dispatch_source_ref_is_pinned_in_every_job():
+    text = CI_YML.read_text(encoding="utf-8")
+    assert "github.event.pull_request.head.sha" in text
+    assert "git merge-base --is-ancestor" in text
+    assert "git diff --quiet" in text
+    for name in ("_build-target.yml", "_run-tests.yml", "_dylint.yml"):
+        reusable = CI_YML.with_name(name).read_text(encoding="utf-8")
+        assert "source_ref:" in reusable, name
+        assert "ref: ${{ inputs.source_ref || github.sha }}" in reusable, name
+    assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 13
+
+
+def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
+    text = CI_YML.read_text(encoding="utf-8")
+    gate = text.split("\n  ci-ok:\n", 1)[1]
+    for name in ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
+        match = re.search(
+            rf"^  test-{name}:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert match, name
+        block = match.group(1)
+        assert "suite: [unit, integration]" in block, name
+        assert f"${{{{ needs.test-{name}.result }}}}" in gate, name
+
+
+def test_unknown_ci_label_fails_closed():
+    with pytest.raises(ValueError, match="unknown"):
+        resolve_tier("pull_request", "", "ci-ful")
+
+
+def test_workflow_binds_dispatch_and_labels_to_mode():
+    text = CI_YML.read_text(encoding="utf-8")
+    assert "types: [opened, synchronize, reopened, labeled, unlabeled]" in text
+    assert "candidate_sha:" in text
+    assert "CANDIDATE_SHA: ${{ inputs.candidate_sha }}" in text
+    assert "EVENT_SHA: ${{ github.sha }}" in text
+    assert "run: python -m ci.ci_matrix" in text
+    assert "MODE: ${{ needs.static.outputs.mode }}" in text
+    assert "case \"$MODE\" in minimal|extended|full)" in text
+
+
+def test_every_build_waits_for_mode_and_full_is_complete():
+    text = CI_YML.read_text(encoding="utf-8")
+    for name in ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
+        block = text.split(f"\n  build-{name}:\n", 1)[1].split("\n  test-", 1)[0]
+        assert "    needs: static\n" in block, name
+        assert "    if: needs.static.outputs.mode" in block, name
+    assert "${{ needs.dylint.result }}" in text
+    assert "if [ \"$MODE\" = \"full\" ]; then" in text
 
 
 def test_every_target_cross_compiles_on_linux():
@@ -247,7 +314,7 @@ def test_ci_yml_covers_exactly_the_targets_table():
     # Every build job must have a matching test job that depends on it, or the
     # triple gets compiled and then never exercised.
     build_jobs = set(re.findall(r"^  build-([a-z0-9-]+):$", text, re.MULTILINE))
-    test_needs = set(re.findall(r"^    needs: build-([a-z0-9-]+)$", text, re.MULTILINE))
+    test_needs = set(re.findall(r"^    needs: \[static, build-([a-z0-9-]+)\]$", text, re.MULTILINE))
     assert build_jobs == test_needs
     assert len(build_jobs) == len(TARGETS)
 

@@ -6,6 +6,10 @@ name: Build target
 on:
   workflow_call:
     inputs:
+      source_ref:
+        description: Exact source commit for CI; defaults to caller SHA.
+        required: false
+        type: string
       target:
         description: Rust target triple.
         required: true
@@ -92,6 +96,9 @@ jobs:
           exit 1
 
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - uses: ./.github/actions/setup-build
         with:
