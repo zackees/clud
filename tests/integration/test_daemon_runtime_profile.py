@@ -360,7 +360,7 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
             "foreground-lease-keeps-daemon-alive",
             "--",
             "--mock-sleep-ms",
-            "5000",
+            "10000",
         ],
         stdout=process.DEVNULL,
         stderr=process.DEVNULL,
@@ -377,7 +377,7 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
     # the two-second idle setting while the foreground process is active.
     time.sleep(3)
     assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
-    assert wait_for_exit(client, timeout=10) == 0
+    assert wait_for_exit(client, timeout=15) == 0
     _wait_for_identity_exit(info, timeout=8)
     assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
 

@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      candidate_sha: ${{ steps.meta.outputs.candidate_sha }}
       release_tag: ${{ steps.meta.outputs.release_tag }}
       version: ${{ steps.meta.outputs.version }}
     steps:
@@ -73,6 +74,17 @@ jobs:
               raw_tag = os.environ.get("RAW_TAG", "").strip() or version
               checkout_ref = os.environ.get("GITHUB_SHA", "")
 
+          candidate_sha = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          existing_tag = subprocess.run(
+              ["git", "rev-parse", "--verify", f"refs/tags/{raw_tag}^{{commit}}"],
+              capture_output=True,
+              text=True,
+          )
+          if existing_tag.returncode == 0 and existing_tag.stdout.strip() != candidate_sha:
+              sys.exit(f"Tag {raw_tag!r} points to a different candidate SHA")
+
           normalized = raw_tag[1:] if raw_tag.startswith("v") else raw_tag
           if normalized != version:
               sys.exit(
@@ -103,6 +115,7 @@ jobs:
           out_path = os.environ["GITHUB_OUTPUT"]
           with open(out_path, "a", encoding="utf-8") as fh:
               fh.write(f"checkout_ref={checkout_ref}\n")
+              fh.write(f"candidate_sha={candidate_sha}\n")
               fh.write(f"release_tag={raw_tag}\n")
               fh.write(f"version={version}\n")
 
@@ -112,20 +125,37 @@ jobs:
           )
           PY
 
+  full-ci-gate:
+    name: Exact SHA full CI gate
+    needs: preflight
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - name: Require complete full CI execution before any release build or publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+        run: python -m ci.release_gate
+
   # The release matrix comes from ci/ci_matrix.py, the same table CI uses, so
   # release wheels are produced by the same cross-compile strategy CI exercised.
   # Shipping natively-built wheels while CI only ever tested cross-built
   # binaries would mean CI never validated the artifact that ships.
   release-matrix:
     name: Resolve release matrix
-    needs: preflight
+    needs: [preflight, full-ci-gate]
     runs-on: ubuntu-24.04
     outputs:
       build: ${{ steps.matrix.outputs.build }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -134,7 +164,7 @@ jobs:
 
   build:
     name: Build wheels
-    needs: [preflight, release-matrix]
+    needs: [preflight, full-ci-gate, release-matrix]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.release-matrix.outputs.build) }}
@@ -142,6 +172,7 @@ jobs:
     # _build-target.yml enforces that with a guard on github.workflow.
     uses: ./.github/workflows/_build-target.yml
     with:
+      source_ref: ${{ needs.preflight.outputs.candidate_sha }}
       target: ${{ matrix.target }}
       runs-on: ${{ matrix.runs-on }}
       strategy: ${{ matrix.strategy }}
@@ -155,7 +186,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [preflight, build]
+    needs: [preflight, full-ci-gate, build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -179,14 +210,14 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    needs: [preflight, build, publish-pypi]
+    needs: [preflight, full-ci-gate, build, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
 
       - uses: actions/download-artifact@v4
         with:

@@ -33,18 +33,97 @@ pytestmark = pytest.mark.integration
 def wait_for_ctrl_c_profile(
     read_metadata: Callable[[], dict], timeout: float = 10.0
 ) -> tuple[dict, dict] | None:
-    """Return completed Ctrl-C telemetry, or ``None`` if session GC wins."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    """Poll one nonblocking metadata read per turn within a single deadline."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             metadata = read_metadata()
-        except FileNotFoundError:
-            return None
-        profile = metadata.get("ctrl_c") or {}
-        if metadata.get("exit_code") == 130 and profile.get("daemon_kill_ms") is not None:
-            return metadata, profile
-        time.sleep(0.1)
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+            # A snapshot can be replaced or retired while the worker exits.
+            # Keep probing until the same deadline used for profile completion.
+            pass
+        else:
+            profile = metadata.get("ctrl_c") or {}
+            if metadata.get("exit_code") == 130 and profile.get("daemon_kill_ms") is not None:
+                return metadata, profile
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
     return None
+
+
+def read_ctrl_c_metadata_once(state_dir: Path, session_id: str) -> dict:
+    path = state_dir / "sessions" / f"{session_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def safe_daemon_event_tail(path: Path, session_id: str) -> str:
+    """Read at most 8 KiB and expose only bounded lifecycle fields."""
+    limit = 8192
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - limit))
+        tail = handle.read(limit)
+    if size > limit:
+        # The first record may start before the bounded window.
+        tail = tail.partition(b"\n")[2]
+
+    safe_lines = []
+    for line in tail.splitlines()[-10:]:
+        try:
+            event = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        safe: dict[str, int | str | bool] = {}
+        for key in ("ts_ms", "event_id", "daemon_pid", "pid", "worker_pid", "exit_code"):
+            value = event.get(key)
+            if type(value) is int and 0 <= value <= 10**16:
+                safe[key] = value
+        op = event.get("op")
+        if isinstance(op, str) and 0 < len(op) <= 48 and op.isascii() and all(
+            char.islower() or char.isdigit() or char == "_" for char in op
+        ):
+            safe["op"] = op
+        if "session_id" in event:
+            safe["session_match"] = event["session_id"] == session_id
+        if safe:
+            safe_lines.append(json.dumps(safe, sort_keys=True))
+    return "\n".join(safe_lines) or "<no complete lifecycle events in final 8 KiB>"
+
+
+def ctrl_c_metadata_diagnostics(state_dir: Path, session_id: str, returncode: int | None) -> str:
+    """Describe a missing post-Created snapshot without waiting or changing state."""
+    snapshot = state_dir / "sessions" / f"{session_id}.json"
+    paths = {
+        "snapshot": snapshot,
+        "snapshot temp": snapshot.with_suffix(".tmp"),
+        "snapshot tombstone": snapshot.with_suffix(".json.tombstone"),
+        "worker log": state_dir / "logs" / f"{session_id}.log",
+    }
+    details = [f"client returncode={returncode}"]
+    for label, path in paths.items():
+        details.append(f"{label}={path} exists={path.is_file()}")
+
+    daemon_info = state_dir / "daemon.json"
+    if daemon_info.is_file():
+        try:
+            pid = int(json.loads(daemon_info.read_text(encoding="utf-8"))["pid"])
+            details.append(f"daemon pid={pid} alive={pid_is_alive(pid)}")
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            details.append(f"daemon identity unreadable: {error!r}")
+    else:
+        details.append("daemon identity missing")
+
+    events = state_dir / "daemon-events.jsonl"
+    if events.is_file():
+        try:
+            details.append("daemon event tail:\n" + safe_daemon_event_tail(events, session_id))
+        except OSError as error:
+            details.append(f"daemon event tail unreadable: {error!r}")
+    else:
+        details.append("daemon event tail missing")
+    return "\n".join(details)
 
 
 def test_wait_for_ctrl_c_profile_treats_retired_session_as_retryable() -> None:
@@ -52,9 +131,67 @@ def test_wait_for_ctrl_c_profile_treats_retired_session_as_retryable() -> None:
         raise FileNotFoundError("session metadata retired")
 
     try:
-        wait_for_ctrl_c_profile(retired_session)
+        assert wait_for_ctrl_c_profile(retired_session, timeout=0.05) is None
     except FileNotFoundError:
         pytest.fail("retired session metadata must make the outer attempt retry")
+
+
+def test_wait_for_ctrl_c_profile_retries_missing_metadata_then_reads_profile() -> None:
+    calls = 0
+
+    def delayed_metadata() -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise FileNotFoundError("snapshot replacement in progress")
+        return {"exit_code": 130, "ctrl_c": {"daemon_kill_ms": 12}}
+
+    result = wait_for_ctrl_c_profile(delayed_metadata, timeout=0.5)
+    assert result is not None
+    assert result[1]["daemon_kill_ms"] == 12
+    assert calls == 2
+
+
+def test_wait_for_ctrl_c_profile_respects_one_deadline_for_absent_metadata() -> None:
+    started = time.monotonic()
+    result = wait_for_ctrl_c_profile(
+        lambda: (_ for _ in ()).throw(FileNotFoundError("snapshot absent")),
+        timeout=0.05,
+    )
+    assert result is None
+    assert time.monotonic() - started < 0.25
+
+
+def test_ctrl_c_metadata_diagnostics_identifies_retired_snapshot(tmp_path: Path) -> None:
+    state_dir = tmp_path / "daemon-state"
+    sessions = state_dir / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "sess-1.json.tombstone").write_text("{}", encoding="utf-8")
+
+    details = ctrl_c_metadata_diagnostics(state_dir, "sess-1", 130)
+    assert "client returncode=130" in details
+    assert "sess-1.json exists=False" in details
+    assert "sess-1.json.tombstone exists=True" in details
+    assert "daemon identity missing" in details
+
+
+def test_ctrl_c_metadata_diagnostics_bounds_and_filters_event_tail(tmp_path: Path) -> None:
+    state_dir = tmp_path / "daemon-state"
+    state_dir.mkdir()
+    secret = "sensitive-provider-key"
+    events = state_dir / "daemon-events.jsonl"
+    events.write_text(
+        json.dumps({"op": "oversized", "reason": secret * 1000}) + "\n"
+        + json.dumps({"ts_ms": 123, "event_id": 4, "daemon_pid": 5,
+                      "op": "ctrl_c_kill", "reason": secret, "session_id": "sess-1"}) + "\n",
+        encoding="utf-8",
+    )
+
+    details = ctrl_c_metadata_diagnostics(state_dir, "sess-1", 130)
+    assert "ctrl_c_kill" in details
+    assert "session_match" in details
+    assert secret not in details
+    assert len(details) < 2000
 
 
 def test_kill_daemon_for_session_treats_an_already_stopped_shared_daemon_as_clean(
@@ -464,12 +601,15 @@ class TestDaemonManagedSessionFlags:
                     continue
 
                 result = wait_for_ctrl_c_profile(
-                    lambda state_dir=state_dir, session_id=session_id: session_metadata(
+                    lambda state_dir=state_dir, session_id=session_id: read_ctrl_c_metadata_once(
                         state_dir, session_id
                     )
                 )
                 if result is None:
-                    errors.append(f"attempt {attempt}: session retired before profile completed")
+                    errors.append(
+                        f"attempt {attempt}: Ctrl-C profile incomplete after 10s\n"
+                        + ctrl_c_metadata_diagnostics(state_dir, session_id, proc.returncode)
+                    )
                     continue
                 _metadata, profile = result
 

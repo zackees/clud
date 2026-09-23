@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -353,6 +354,20 @@ class TestDaemonCentralizedPersistence:
         # must mark such sessions exited so the world is consistent again.
         state_dir = tmp_path / "daemon-state"
         env = managed_env(mock_env, state_dir)
+
+        # If the pytest process dies during this deliberately destructive test,
+        # its captured output and junit report are lost. Persist the last stage
+        # in the CI failure artifact so the next abrupt exit has a location.
+        trace_path = Path(__file__).resolve().parents[2] / "logs" / "reboot-purge.log"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def trace(stage: str) -> None:
+            with trace_path.open("a", encoding="utf-8") as stream:
+                stream.write(f"pytest_pid={os.getpid()} stage={stage}\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+
+        trace("launch initial session")
         proc, session_id = launch_detached(
             clud_binary,
             env,
@@ -371,6 +386,7 @@ class TestDaemonCentralizedPersistence:
         worker_pid = metadata["worker_pid"]
         root_pid = metadata["root_pid"]
         assert metadata["exit_code"] is None
+        trace(f"session={session_id} daemon={daemon_pid} worker={worker_pid} root={root_pid}")
 
         # Sanity: orphan session shows up as "running" in `clud list` before reboot.
         listed_before = process.run(
@@ -386,10 +402,14 @@ class TestDaemonCentralizedPersistence:
         # Kill daemon FIRST, so we shrink the window in which its
         # liveness-monitor would self-clean the worker. We then race to kill
         # the worker before its 200ms-tick monitor notices.
+        trace("kill daemon")
         kill_process_only(daemon_pid)
+        trace("kill worker")
         kill_process_only(worker_pid)
         if root_pid is not None:
+            trace("kill root")
             kill_process_only(root_pid)
+        trace("wait for worker and root exit")
         wait_for_pids_to_exit([worker_pid] + ([root_pid] if root_pid else []))
 
         # Snapshot file should still exist on disk (nothing removed it; we
@@ -400,6 +420,7 @@ class TestDaemonCentralizedPersistence:
         # Now boot a fresh daemon by spawning a brand-new session. The new
         # parent process calls `ensure_daemon()` -> `cleanup_stale_state()`
         # before the new daemon child starts.
+        trace("launch replacement session")
         proc2, session_id_2 = launch_detached(
             clud_binary,
             env,

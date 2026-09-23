@@ -3,6 +3,38 @@
 Status: implemented (supersedes the 24 per-platform leaf workflows + `_lint.yml` /
 `_unit-test.yml` / `_integration-test.yml`).
 
+## Current CI selection
+
+The sole push/PR workflow is `.github/workflows/ci.yml`. Ordinary PRs and
+`main` pushes run static checks plus the Linux x64 build and unit suite.
+The literal `ci-test` PR label adds Linux x64 integration and Windows x64.
+Linux integration stays in `ci-full` and release validation too;
+it was moved out of ordinary runs after the measured minimal lane exceeded
+the 12.5% runner-minute budget.
+`ci-full` (and existing `ci:full` labels), merge queue runs, and manual full
+runs select all six targets plus Dylint. A manual run requires a reachable
+`candidate_sha`; its CI workflow and helper tree must match the selected
+branch's workflow revision, so the same candidate can be retried after
+unrelated `main` changes. Every checkout uses that SHA. The required `CI OK`
+check verifies every job selected by the mode. Adding or removing a label
+reruns selection on the PR head SHA.
+
+The release workflow's `full-ci-gate` checks for a completed successful manual
+`CI full <candidate SHA>` run before any release build or publisher starts. It
+checks `CI OK`, Dylint, and the build plus unit and integration execution jobs
+for all six triples; absent, skipped, cancelled, or failed cells reject the
+release. A tag push can start the release workflow, but it cannot publish until
+the exact tagged commit has this full CI proof. A routine `main` version change
+does not trigger that workflow. Run full CI with `candidate_sha` on the
+candidate's branch before tagging or calling `ci/publish.py`; dry-run publish
+still only describes the intended dispatch and makes no remote calls.
+
+This gate reads the latest 100 manual CI runs, so an older proof can age out and
+must be rerun. It establishes complete dev-profile CI execution, not release
+wheel execution: release-profile artifacts are built after the gate. The
+target/label policy lives in `ci/ci_matrix.py`; the workflow has no preceding
+matrix-planning runner job.
+
 ## The problem
 
 Every push fans out to **12 heavy workflows** (6 platforms x {unit-test,
@@ -32,7 +64,7 @@ and make the producer side live on Linux.
   ┌──────────┐  ┌──────────┐   per triple, independently:
   │  static  │  │  dylint  │
   │  ubuntu  │  │  ubuntu  │   ┌──────────────┐   bundle-<triple>   ┌────────────┐
-  │ ruff/fmt │  │ non-PR   │   │ build-<trip> │ ─────────────────►  │ test-<trip>│
+  │ ruff/fmt │  │ full mode│   │ build-<trip> │ ─────────────────►  │ test-<trip>│
   │ /banned  │  │  only    │   │  ubuntu-24   │  .tar.gz artifact   │   NATIVE   │
   └────┬─────┘  └────┬─────┘   │  clippy +    │                     │  unit +    │
        │             │         │  bins +      │                     │ integration│
@@ -56,10 +88,9 @@ remains the source of truth for the triple table and
 `tests/test_ci_matrix.py::test_ci_yml_covers_exactly_the_targets_table` fails if
 the YAML drifts from it.
 
-There is deliberately no `plan` job. Computing the matrix in a preceding job
-would put a checkout + `setup-python` (~40 s of pure latency) at the head of
-every run and add a dependency edge to every lane; the tier gating is instead a
-job-level `if:` on each optional lane.
+There is deliberately no separate `plan` job. The existing static job resolves
+the mode before builds begin, so invalid labels or a mismatched dispatch SHA
+fail before allocating cross-build runners.
 
 Three structural claims, in the order they matter:
 
@@ -83,27 +114,23 @@ every push needs all six targets.
 
 | Tier | Triples | Trigger |
 | --- | --- | --- |
-| `core` | `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin` | every PR push |
-| `full` | core + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, `x86_64-apple-darwin` | `push` to `main`, `merge_group`, `ci:full` PR label, `workflow_dispatch` |
+| `minimal` | `x86_64-unknown-linux-gnu` build + unit suite | ordinary PR and `main` push |
+| `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
+| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples, and Dylint | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
 
-Rationale: `core` covers one triple per *operating system*, which is where
-essentially all platform-specific behaviour lives (the platform-gated tests are
-`#![cfg(windows)]` / `#![cfg(unix)]`, not arch-gated). The second architecture
-of each OS is an ABI/codegen check, not a behaviour check, so it belongs on the
-merge queue and `main`, not on every intermediate PR push. `x86_64-apple-darwin`
-(`macos-15-intel`) in particular is the slowest runner in the pool and is
-demoted to `full` only.
+`ci-test` covers Linux and Windows. Both hosted macOS architectures run only
+in `ci-full` and release validation. Routine events use Linux x64 for fast
+feedback, while the merge queue still requires the complete matrix.
 
-macOS ARM is always core. `soldr prepare --target aarch64-apple-darwin`
+macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old
 `MACOS_SDK_URL` gate and native macOS fallback no longer exist. The macOS
 runners only execute the resulting bundle.
 
 Two trigger-level notes:
 
-- `pull_request` subscribes to `labeled` on top of the default event types.
-  Without it, adding `ci:full` to an already-pushed PR would not re-trigger
-  anything and the opt-in would silently do nothing.
+- `pull_request` subscribes to both `labeled` and `unlabeled` so a changed
+  selection reruns against the current PR SHA.
 - Push coverage narrows from "every branch" to `main`. Branches with no open PR
   no longer get CI. That was a large share of the duplicated fan-out, but it is
   a behaviour change worth knowing about.
@@ -298,8 +325,8 @@ only by *target triple*, which is the minimum possible:
   they compile against a warm toolchain and identical glibc.
 - The venv cache key drops its `runs-on` component for build jobs (one OS) and
   keeps it for exec jobs (six OSes).
-- `main` pushes run the `full` tier, so every triple's cache is refreshed on
-  every merge; PR jobs restore from it via `restore-keys`.
+- Full runs refresh every triple's cache; ordinary `main` pushes refresh only
+  Linux x64. PR jobs restore compatible entries via `restore-keys`.
 
 ## Bundles: what crosses the wire
 
@@ -514,13 +541,13 @@ gating in this workspace is by OS rather than architecture, `x86_64-unknown-linu
 plus `x86_64-pc-windows-msvc` type-check every `cfg(windows)` / `cfg(unix)`
 branch. The other four triples would pay a full extra pass for no new coverage.
 
-**dylint is off the PR path.** It is Linux-only by construction — it needs a
+**Dylint is full-only.** It is Linux-only by construction — it needs a
 nightly toolchain with `rustc-dev` and `llvm-tools` and builds a cdylib driver
 for the host — so requirement (3) ("no dylint off Linux") is satisfied
 structurally: `_dylint.yml` pins `ubuntu-24.04` and nothing else can reach it.
 But it is also ~25 minutes of cold nightly work, which would make a
-slash-normalization style lint the longest pole in every PR. It now runs on
-`merge_group` / `main` / manual dispatch and gates the merge rather than the PR.
+slash-normalization style lint the longest pole in every ordinary PR. It now
+runs on `merge_group`, `ci-full` PRs, and exact-SHA manual dispatches.
 The old `dylint.yml` also fired on both `push` and `pull_request`, so it ran
 twice per PR.
 
