@@ -99,6 +99,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 vt100 = "0.16"
 vte = "0.15"
 wasmi = "0.40.0"
+walkdir = "2"
 which = "7"
 # Issue #183: in-process HTTP listener for the `clud ui` dashboard.
 # `tiny_http` is pure Rust, synchronous, and slots into the daemon's

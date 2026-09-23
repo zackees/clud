@@ -620,6 +620,7 @@ dependencies = [
  "ureq",
  "vt100",
  "vte",
+ "walkdir",
  "wasmi",
  "which",
  "winapi",
