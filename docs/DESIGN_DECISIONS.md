@@ -3834,3 +3834,35 @@ not monitor this request`. An explicit ambient value is still reported and
 preserved. Bridge and unified route defaults do not change. The future
 direct-route listener in #1263 remains the route for clud-owned per-request
 progress and recovery.
+
+## DD-082: Provider credentials need a verdict, not merely a vault record
+
+**Context:** zackees/clud#1269. The presence-only preflight from #878 can
+accept a corrupted vault value, launch a healthy-looking direct session, and
+leave Claude Code to retry a provider 401 repeatedly. The last-four mask alone
+cannot distinguish two otherwise different keys with the same suffix.
+
+**Decision:** For descriptor-backed Anthropic-compatible providers, check the
+stored value's shape locally and perform one bounded authenticated GET against
+a provider-owned, non-generation endpoint on each live launch and auth-status
+request. Treat 401/403 as rejected and stop a launch with exit 2; treat local
+shape violations as malformed without making a request. Timeouts, connection
+errors, redirects, and other inconclusive responses warn once and fail open.
+Keep dry runs vault- and network-free. Preserve the native-vault boundary and
+never put a key in a probe diagnostic. Report the provider's
+message only after masking credential-shaped text and control characters;
+include the stored value's length and short digest alongside its last-four
+mask. Both command-line and interactive entry reject malformed values before
+writing them. The interactive prompt masks accepted characters with asterisks
+and supports Backspace, replacing #878's completely hidden input.
+
+**Rationale:** A local CLI must remain usable offline, but a definitive auth
+rejection should not waste a full session. A cheap provider-owned GET avoids
+generation cost. The fingerprint is diagnostic only; it lets a user compare
+what clud stored with what they intended without disclosing the key.
+
+**Consequences:** Live launches can spend up to the configured probe budget
+before the harness starts. Revocation is noticed on the next launch rather
+than hidden behind a verdict cache. A valid 200 leaves the child env, argv,
+and startup notices unchanged. Provider status can now distinguish missing,
+malformed, rejected, and configured credentials.
