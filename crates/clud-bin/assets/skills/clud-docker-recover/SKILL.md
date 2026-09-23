@@ -21,12 +21,14 @@ so *classification comes before action*.
 
 Everything routes through the bundled tool:
 
+The launcher exports `CLUD_EXE` as its own absolute path. These examples use Bash quoting; in PowerShell use `& $env:CLUD_EXE`, and in cmd use `"%CLUD_EXE%"`. Outside a clud-launched session, set `CLUD_EXE` to the intended binary's absolute path first.
+
 ```
-clud tool run docker/docker_recover.py doctor            # read-only; mutates nothing
-clud tool run docker/docker_recover.py gc [--age-hours N] [--dry-run]  # reclaim dangling objects (safe)
-clud tool run docker/docker_recover.py restart [--yes]   # clean runtime restart
-clud tool run docker/docker_recover.py reset [--yes]     # wsl --shutdown + relaunch
-clud tool run docker/docker_recover.py disk [--action compact|prune|delete|reset] \
+"$CLUD_EXE" tool run docker/docker_recover.py doctor            # read-only; mutates nothing
+"$CLUD_EXE" tool run docker/docker_recover.py gc [--age-hours N] [--dry-run]  # reclaim dangling objects (safe)
+"$CLUD_EXE" tool run docker/docker_recover.py restart [--yes]   # clean runtime restart
+"$CLUD_EXE" tool run docker/docker_recover.py reset [--yes]     # wsl --shutdown + relaunch
+"$CLUD_EXE" tool run docker/docker_recover.py disk [--action compact|prune|delete|reset] \
     [--select <path>] [--yes]                            # storage report; gated actions
 ```
 
@@ -36,7 +38,7 @@ clud tool run docker/docker_recover.py disk [--action compact|prune|delete|reset
 rotation. Run it first, every time:
 
 ```
-clud tool run docker/docker_recover.py doctor
+"$CLUD_EXE" tool run docker/docker_recover.py doctor
 ```
 
 It reports client/server availability, the engine error, host free memory +
@@ -65,7 +67,7 @@ Do not read a 5xx engine as "docker is not installed". `doctor` now
 distinguishes CLI-missing / server-unreachable / server-5xx explicitly; a
 timeout on `docker version` means the **engine** is sick, not the CLI.
 
-## Run restart/reset backgrounded under `clud tool run`
+## Run restart/reset backgrounded under `"$CLUD_EXE" tool run`
 
 `restart` and `reset` can exceed the tool runner's **120s progress timeout**
 and get killed with exit 124 — this happened twice in #891, both times at
@@ -73,7 +75,7 @@ exactly 120s, because `docker run --rm hello-world` blocks silently for up to
 120s. The tool now prints a heartbeat before and during every long wait, but a
 cold Docker Desktop start still routinely takes 60–120s on its own. So:
 
-- prefer `clud tool run --background docker/docker_recover.py reset --yes`
+- prefer `"$CLUD_EXE" tool run --background docker/docker_recover.py reset --yes`
   (or raise the progress timeout) for `restart`/`reset`;
 - `doctor`, `gc` and `disk` are *usually* short. On a badly wedged host
   `doctor` can still spend several 20s probes in `gather_snapshot` before it
@@ -225,9 +227,9 @@ prints the escalation ladder (`gc -> restart -> disk`, lightest first) when
 disk is low.
 
 ```
-clud tool run docker/docker_recover.py gc --dry-run     # preview candidates
-clud tool run docker/docker_recover.py gc               # reclaim (safe, no --yes needed)
-clud tool run docker/docker_recover.py gc --age-hours 72
+"$CLUD_EXE" tool run docker/docker_recover.py gc --dry-run     # preview candidates
+"$CLUD_EXE" tool run docker/docker_recover.py gc               # reclaim (safe, no --yes needed)
+"$CLUD_EXE" tool run docker/docker_recover.py gc --age-hours 72
 ```
 
 **More aggressive on the system/boot volume.** When the resolved Docker data
@@ -238,7 +240,7 @@ decides which physical drive the data root is on.
 
 **Periodic use.** `gc` is an idempotent one-shot — wire it into a schedule so
 it runs even when nobody hits a low-disk wall: `clud schedule`, cron, or
-Windows Task Scheduler calling `clud tool run docker/docker_recover.py gc`.
+Windows Task Scheduler calling `"$CLUD_EXE" tool run docker/docker_recover.py gc`.
 The tool does NOT embed its own daemon/scheduler; trigger it externally.
 
 ## Storage remediation is opt-in and never automatic

@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! TIMEOUT after 60m on docker-build (tool #3).
-//! For last 50 lines:  clud tool info 3
-//! For full log:       clud tool log  3
+//! For last 50 lines:  '<launching-clud-exe>' tool info 3
+//! For full log:       '<launching-clud-exe>' tool log  3
 //! ```
 //!
 //! The structured exit payload (a single JSON line emitted before the
@@ -98,8 +98,8 @@ pub fn render_structured_payload(
 
 /// Human-readable pointer block. Renders to stderr after the JSON
 /// payload. Uses the session-local integer ID (the PM2-friendly form)
-/// for the follow-up commands so the user types `clud tool info 3`,
-/// not `clud tool info 47180-3`.
+/// for the follow-up commands, with the launching executable's absolute path
+/// so PATH cannot redirect follow-up inspection to another installation.
 pub fn render_pointer_block(
     tool_id: u32,
     tool: &str,
@@ -135,9 +135,31 @@ pub fn render_pointer_block(
             format_elapsed(elapsed)
         ),
     };
+    let exe = quoted_current_exe();
     format!(
-        "{header}\n  For last 50 lines:  clud tool info {tool_id}\n  For full log:       clud tool log  {tool_id}\n",
+        "{header}\n  For last 50 lines:  {exe} tool info {tool_id}\n  For full log:       {exe} tool log  {tool_id}\n",
     )
+}
+
+fn quoted_current_exe() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "<launching clud executable unavailable>".to_string();
+    };
+    let Some(exe) = exe.to_str() else {
+        return "<launching clud executable is not Unicode>".to_string();
+    };
+    quote_exe(exe)
+}
+
+fn quote_exe(exe: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("& '{}'", exe.replace('\'', "''"))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("'{}'", exe.replace('\'', "'\\''"))
+    }
 }
 
 /// Format a Duration like `26m 1s`, `2h 14m`, `42s`, `123ms`.
@@ -265,12 +287,24 @@ mod tests {
             Duration::from_secs(60),
             ExitKind::Aborted(AbortReason::CommandTimeout),
         );
-        assert!(block.contains("clud tool info 3"));
-        assert!(block.contains("clud tool log  3"));
+        assert!(block.contains(std::env::current_exe().unwrap().to_str().unwrap()));
+        assert!(block.contains("tool info 3"));
+        assert!(block.contains("tool log  3"));
         assert!(
             !block.contains("47180-3"),
             "long-form ID should not appear in the human block"
         );
+    }
+
+    #[test]
+    fn executable_path_is_shell_quoted_without_interpolation() {
+        #[cfg(windows)]
+        assert_eq!(
+            quote_exe("C:\\odd$path`name\\clud.exe"),
+            "& 'C:\\odd$path`name\\clud.exe'"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(quote_exe("/tmp/odd'path/clud"), "'/tmp/odd'\\''path/clud'");
     }
 
     #[test]
@@ -300,7 +334,8 @@ mod tests {
             ExitKind::InProgress(AbortReason::CommandTimeout),
         );
         assert!(block.contains("RESUMABLE"));
-        assert!(block.contains("clud tool info 3"));
+        assert!(block.contains(std::env::current_exe().unwrap().to_str().unwrap()));
+        assert!(block.contains("tool info 3"));
     }
 
     #[test]

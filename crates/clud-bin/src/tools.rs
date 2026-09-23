@@ -358,6 +358,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bundled_assets_do_not_re_resolve_clud_from_path() {
+        const BARE: &[&str] = &[
+            "clud tool run",
+            "clud tool info",
+            "clud tool log",
+            "clud trash",
+            "clud gc ",
+            "clud --version",
+        ];
+        for skill in BUNDLED_SKILLS {
+            for bare in BARE {
+                assert!(
+                    !skill.skill_md.contains(bare),
+                    "skill {} must invoke the launching executable, not bare {bare}",
+                    skill.name,
+                );
+            }
+        }
+        for tool in BUNDLED_TOOLS {
+            for bare in BARE {
+                assert!(
+                    !tool.body.contains(bare),
+                    "tool {} must invoke the launching executable, not bare {bare}",
+                    tool.rel_path,
+                );
+            }
+        }
+    }
+
     /// The `uv_run_hook_guard` tool ships and is invoked from clud
     /// startup (`main.rs` → `uv_run_hook_guard::run`). If the entry is
     /// removed or renamed the wrapper silently does nothing and the
@@ -385,7 +415,7 @@ mod tests {
             "block-bad-cmd.py must delegate to the native binary",
         );
         assert!(
-            tool.body.contains("compatibility"),
+            tool.body.contains("Compatibility"),
             "block-bad-cmd.py must document that it is compatibility-only",
         );
     }
@@ -486,8 +516,8 @@ mod tests {
             .find(|t| t.rel_path == "docker/docker-build.py")
             .expect("docker-build trampoline must be in BUNDLED_TOOLS");
         for required_line in [
-            "clud tool run docker/docker-build.py <stack> <path> [subcommand]",
-            "clud tool run docker/docker-build.py doctor",
+            "\"$CLUD_EXE\" tool run docker/docker-build.py <stack> <path> [subcommand]",
+            "\"$CLUD_EXE\" tool run docker/docker-build.py doctor",
             "Stacks: soldr",
             "doctor",
         ] {

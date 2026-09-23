@@ -85,7 +85,7 @@ pub const WINDOWS_STDIO_KEYS: &[&str] = &["PYTHONIOENCODING", "PYTHONUTF8"];
 /// on Windows). `PATH` is deliberately absent — `activate_rm` prepends to
 /// whatever the base carried rather than owning the value.
 pub fn child_env_policy_keys() -> Vec<&'static str> {
-    let mut keys = vec!["IN_CLUD", running_process::ORIGINATOR_ENV_VAR];
+    let mut keys = vec!["IN_CLUD", "CLUD_EXE", running_process::ORIGINATOR_ENV_VAR];
     keys.extend(crate::gc::session_tmp::OVERRIDDEN_KEYS.iter().copied());
     keys.push(crate::shell::completion_guard::SUPPRESS_KEY);
     keys.push(crate::shell::nounset::BASH_ENV_KEY);
@@ -149,7 +149,7 @@ fn apply_child_env_policy_with_nounset_opt_out(
 ) -> Vec<(String, String)> {
     let originator_key = running_process::ORIGINATOR_ENV_VAR;
 
-    let mut strip_keys: Vec<&str> = vec!["IN_CLUD", originator_key];
+    let mut strip_keys: Vec<&str> = vec!["IN_CLUD", "CLUD_EXE", originator_key];
     if windows_stdio {
         strip_keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
     }
@@ -160,6 +160,16 @@ fn apply_child_env_policy_with_nounset_opt_out(
         .collect();
 
     env.push(("IN_CLUD".to_string(), "1".to_string()));
+
+    // Internal hooks and bundled instructions must use this executable, not
+    // a second `clud` resolved from PATH (which may be a different uvx copy).
+    // Strip any inherited value first so a nested launch cannot keep its
+    // parent's executable when it is running a different version.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe) = exe.to_str() {
+            env.push(("CLUD_EXE".to_string(), exe.to_string()));
+        }
+    }
 
     let originator_value = format!("CLUD:{}", std::process::id());
     env.push((originator_key.to_string(), originator_value));
@@ -305,6 +315,17 @@ mod tests {
         env.iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn child_env_pins_clud_exe_instead_of_inheriting_a_path_poison() {
+        let env = apply_child_env_policy_with_nounset_opt_out(
+            vec![("CLUD_EXE".to_string(), "poisoned-clud".to_string())],
+            false,
+            false,
+        );
+        let expected = std::env::current_exe().unwrap();
+        assert_eq!(value(&env, "CLUD_EXE"), expected.to_str());
     }
 
     #[test]

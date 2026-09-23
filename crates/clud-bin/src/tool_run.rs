@@ -971,12 +971,19 @@ fn resolved_uv_cache_dir_from(env_value: Option<OsString>) -> PathBuf {
 /// shared daemon.
 fn build_child_env(cache_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k != "UV_CACHE_DIR" && k != crate::daemon::ENV_ALLOW_DAEMON_SPAWN)
+        .filter(|(k, _)| {
+            k != "UV_CACHE_DIR" && k != "CLUD_EXE" && k != crate::daemon::ENV_ALLOW_DAEMON_SPAWN
+        })
         .collect();
     env.push((
         "UV_CACHE_DIR".to_string(),
         cache_dir.to_string_lossy().into_owned(),
     ));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe) = exe.to_str() {
+            env.push(("CLUD_EXE".to_string(), exe.to_string()));
+        }
+    }
     env
 }
 

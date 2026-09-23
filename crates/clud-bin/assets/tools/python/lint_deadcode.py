@@ -13,7 +13,7 @@ exists to exercise behavior, but if no production caller invokes that
 behavior, the production code is unused.
 
 Usage:
-  clud tool run python/lint_deadcode.py [<path>...] [--min-confidence N]
+  "$CLUD_EXE" tool run python/lint_deadcode.py [<path>...] [--min-confidence N]
                                         [--exclude PATTERN]... [--json]
 
 Output (stdout, when --json or default):

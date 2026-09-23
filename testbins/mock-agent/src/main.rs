@@ -348,7 +348,22 @@ fn main() {
 
     // Capture env vars relevant for testing
     let in_clud = std::env::var("IN_CLUD").ok();
+    let clud_exe = std::env::var("CLUD_EXE").ok();
     let originator = std::env::var("RUNNING_PROCESS_ORIGINATOR").ok();
+    let clud_exe_probe = std::env::var_os("MOCK_AGENT_CLUD_EXE_PROBE")
+        .map(|_| {
+            Command::new("sh")
+                .args(["-c", "\"$CLUD_EXE\" --version"])
+                .output()
+        })
+        .map(|result| match result {
+            Ok(output) => serde_json::json!({
+                "exit_code": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            }),
+            Err(error) => serde_json::json!({"error": error.to_string()}),
+        });
     let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
     let anthropic_auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
     let anthropic_base_url_present = anthropic_base_url.is_some();
@@ -386,6 +401,7 @@ fn main() {
         "sleep_ms": sleep_ms,
         "env": {
             "IN_CLUD": in_clud,
+            "CLUD_EXE": clud_exe,
             "RUNNING_PROCESS_ORIGINATOR": originator,
             "ANTHROPIC_BASE_URL_PRESENT": anthropic_base_url_present,
             "ANTHROPIC_AUTH_TOKEN_PRESENT": anthropic_auth_token_present,
@@ -398,6 +414,7 @@ fn main() {
         "codex_bridge_probe": bridge_probe,
         "codex_cache_identity_probe": cache_identity_probe,
         "unified_route_probe": unified_route_probe,
+        "clud_exe_probe": clud_exe_probe,
     });
 
     let report_str = serde_json::to_string(&report).unwrap();

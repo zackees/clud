@@ -2,13 +2,13 @@
 
 # `docker/` bundled tools
 
-Bundled Python tools that drive Docker-based Linux build harnesses. Installed under `~/.clud/tools/docker/` by the `BundledTool` lifecycle (see `crates/clud-bin/src/tool_install.rs`); invoked via `clud tool run docker/<file>.py`.
+Bundled Python tools that drive Docker-based Linux build harnesses. Installed under `~/.clud/tools/docker/` by the `BundledTool` lifecycle (see `crates/clud-bin/src/tool_install.rs`); invoked via `"$CLUD_EXE" tool run docker/<file>.py`.
 
 ## Tools
 
 | File | Role |
 |---|---|
-| [`docker-build.py`](docker-build.py) | Trampoline. Dispatches to a per-stack tool based on the first arg. Implementation note: filename uses a hyphen to match the public CLI shape (`clud tool run docker/docker-build.py soldr <path>`); sibling per-stack files use underscores because Python module imports cannot tolerate hyphens. |
+| [`docker-build.py`](docker-build.py) | Trampoline. Dispatches to a per-stack tool based on the first arg. Implementation note: filename uses a hyphen to match the public CLI shape (`"$CLUD_EXE" tool run docker/docker-build.py soldr <path>`); sibling per-stack files use underscores because Python module imports cannot tolerate hyphens. |
 | [`docker_build_soldr.py`](docker_build_soldr.py) | Rust + soldr + zccache stack. The reference implementation. The image bakes in soldr, and persistent anonymous volumes hold `target/`, `CARGO_HOME`, `RUSTUP_HOME`, the cargo-chef recipe cache, and `/root/.soldr`; source bind-mounted read-only at `/src`. |
 | [`docker_build_python.py`](docker_build_python.py) | uv-managed Python stack. **v0 scope: `init` only.** Other subcommands return EX_USAGE (64) with a clear "needs author work" notice. |
 | [`docker_build_cpp.py`](docker_build_cpp.py) | CMake + ccache stack. **v0 scope: `init` only.** Same status as python. |
@@ -17,10 +17,10 @@ Bundled Python tools that drive Docker-based Linux build harnesses. Installed un
 ## Invocation shapes
 
 ```
-clud tool run docker/docker-build.py <stack> <path> [subcommand]   # trampoline
-clud tool run docker/docker_build_soldr.py <path> [subcommand]     # direct
-clud tool run docker/docker_build_python.py <path> [subcommand]    # direct
-clud tool run docker/docker_build_cpp.py <path> [subcommand]       # direct
+"$CLUD_EXE" tool run docker/docker-build.py <stack> <path> [subcommand]   # trampoline
+"$CLUD_EXE" tool run docker/docker_build_soldr.py <path> [subcommand]     # direct
+"$CLUD_EXE" tool run docker/docker_build_python.py <path> [subcommand]    # direct
+"$CLUD_EXE" tool run docker/docker_build_cpp.py <path> [subcommand]       # direct
 ```
 
 `<path>` defaults to `.`. Subcommands: `init` / `up` / `run` / `shell` / `verify` / `clean` / `doctor` — identical across every per-stack tool so the trampoline is a pure dispatcher.
@@ -28,11 +28,11 @@ clud tool run docker/docker_build_cpp.py <path> [subcommand]       # direct
 The recovery tool is standalone (not a docker-build stack) and has its own subcommands:
 
 ```
-clud tool run docker/docker_recover.py doctor                      # read-only health + storage report
-clud tool run docker/docker_recover.py gc                          # reclaim dangling objects (safe; no --yes; cron-friendly)
-clud tool run docker/docker_recover.py restart --yes               # clean runtime restart (containers stop; images/volumes preserved)
-clud tool run docker/docker_recover.py reset --yes                 # wsl --shutdown + relaunch (Windows)
-clud tool run docker/docker_recover.py disk                        # report storage candidates; destructive actions are gated
+"$CLUD_EXE" tool run docker/docker_recover.py doctor                      # read-only health + storage report
+"$CLUD_EXE" tool run docker/docker_recover.py gc                          # reclaim dangling objects (safe; no --yes; cron-friendly)
+"$CLUD_EXE" tool run docker/docker_recover.py restart --yes               # clean runtime restart (containers stop; images/volumes preserved)
+"$CLUD_EXE" tool run docker/docker_recover.py reset --yes                 # wsl --shutdown + relaunch (Windows)
+"$CLUD_EXE" tool run docker/docker_recover.py disk                        # report storage candidates; destructive actions are gated
 ```
 
 ## Design
