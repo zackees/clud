@@ -233,7 +233,13 @@ def read_session_id(proc: process.Popen[str], timeout: float = _SESSION_ID_TIMEO
         if session_id is not None:
             return session_id
         if proc.poll() is not None:
-            raise AssertionError(f"clud exited early while waiting for session id: {line!r}")
+            stdout = proc.stdout.read() if proc.stdout is not None else "<not captured>"
+            stderr = proc.stderr.read()
+            raise AssertionError(
+                "clud exited early while waiting for session id: "
+                f"exit={proc.returncode}, last_line={line!r}, "
+                f"stdout={stdout!r}, stderr={stderr!r}"
+            )
     raise AssertionError("timed out waiting for daemon session id")
 
 
