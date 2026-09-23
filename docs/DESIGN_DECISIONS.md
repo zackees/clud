@@ -3767,6 +3767,10 @@ watching. Note also that the harness's own client path shows no spinner, error,
 or retry state for a hung request; that remains an upstream gap, filed
 separately.
 
+**Superseded for descriptor-backed direct routes by DD-081:** The bridge's
+3 000 000 ms API request budget remains unchanged; the direct route no longer
+copies it merely to make the overlay values agree.
+
 ## DD-080: Codex updates use one verified subprocess, not a removal-shim exception
 
 **Context:** zackees/clud#1271. The standalone Codex installer removes staging,
@@ -3794,3 +3798,39 @@ managed session; users run `clud codex-update` instead. Upstream installer
 changes require a reviewed hash-pin update. A fixture exercises fresh,
 already-complete, and stale-staging paths, and the normal gate is regression
 tested for a nonexistent operand without CI evidence.
+
+## DD-081: Direct routes do not lengthen Claude Code's API request timeout
+
+**Context:** zackees/clud#1270. DD-079's bridge-era `API_TIMEOUT_MS=3000000`
+(50 minutes) was copied to descriptor-backed direct routes without a direct-
+route rationale. Claude Code documents a 600000 ms (10-minute) per-request
+default. Current Claude Code versions also have separate streaming idle and
+first-byte watchdogs, whose availability and defaults have changed across
+versions. The API request timeout is not a clud-side stream-idle detector.
+
+**Decision:** Set the direct-route `DIRECT_API_TIMEOUT_MS` to `600000`, while
+retaining the bridge/unified `BRIDGE_API_TIMEOUT_MS=3000000` from DD-028.
+Keep `push_default`, so an ambient `API_TIMEOUT_MS` wins unchanged.
+The direct-route launch notice reports the effective value as a *Claude Code
+API timeout* and says only that clud does not monitor this request. Do not
+imply that a 10-minute timer detects every stalled stream or terminates a
+whole agent turn. Stream watchdog behavior remains owned by the installed
+Claude Code version; clud's bridge idle detector is independent of this value.
+
+**Rationale:** A 50-minute pre-response stall was much longer than the
+documented client default without any evidence that legitimate individual
+requests require it. Matching the documented default restores the upstream
+request budget while retaining an explicit, testable direct-route value.
+For a request phase covered by `API_TIMEOUT_MS`, Claude Code surfaces its
+timeout/error (and may retry according to its own policy); clud does not
+observe or recover the direct request. A stalled streaming response is governed
+by Claude Code's separate watchdogs, not guaranteed by this setting.
+
+**Consequences:** Without an override, the direct notice changes from
+`API timeout 3000000 ms; a hung request cannot be detected by clud on this
+route -- set API_TIMEOUT_MS to override` to
+`Claude Code API timeout 600000 ms (set API_TIMEOUT_MS to override); clud does
+not monitor this request`. An explicit ambient value is still reported and
+preserved. Bridge and unified route defaults do not change. The future
+direct-route listener in #1263 remains the route for clud-owned per-request
+progress and recovery.

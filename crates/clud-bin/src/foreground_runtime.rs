@@ -16,7 +16,11 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_API_TIMEOUT_MS: &str = "3000000";
+// Direct requests are not monitored by clud; do not lengthen Claude Code's
+// documented per-request default. The bridge budget is a separate DD-028
+// decision and must not change as a side effect of direct-route policy.
+const DIRECT_API_TIMEOUT_MS: &str = "600000";
+const BRIDGE_API_TIMEOUT_MS: &str = "3000000";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexCliImportChoice {
@@ -410,20 +414,16 @@ impl ForegroundRuntime {
                     plan.allowed_models.join(", ")
                 ));
             }
-            // #1263: on the direct route clud is not in the request path, so
-            // the harness's own client timeout is the only thing watching a
-            // hung request -- and it used to be inherited and unlogged. Read
-            // the *effective* value back out of the overlay's env rather than
-            // restating the default, so an ambient `API_TIMEOUT_MS` is
-            // reported as what it is.
+            // #1270: clud cannot monitor a direct request. Report the
+            // effective per-request value, including any ambient override,
+            // without claiming this is a stream-idle watchdog.
             let effective_timeout = env
                 .iter()
                 .find(|(key, _)| key.eq_ignore_ascii_case("API_TIMEOUT_MS"))
                 .map(|(_, value)| value.clone())
-                .unwrap_or_else(|| DEFAULT_API_TIMEOUT_MS.to_string());
+                .unwrap_or_else(|| DIRECT_API_TIMEOUT_MS.to_string());
             notices.push(format!(
-                "[clud] direct {} route: API timeout {} ms; a hung request cannot be detected by clud \
-                 on this route -- set API_TIMEOUT_MS to override",
+                "[clud] direct {} route: Claude Code API timeout {} ms (set API_TIMEOUT_MS to override); clud does not monitor this request",
                 descriptor.display_name, effective_timeout
             ));
             (None, declared_hooks_settings(plan)?, notices)
@@ -1146,10 +1146,8 @@ fn apply_anthropic_compat_overlay(
     //
     // `push_default`, so an explicit `API_TIMEOUT_MS` from the user's
     // environment still wins (the same precedence DD-059 gives
-    // `CLAUDE_CODE_EFFORT_LEVEL`). The value is the same one the cross-route
-    // and unified overlays already push, so every route now agrees, and the
-    // launch notice in `start_with_secret_store` names it out loud.
-    push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
+    // `CLAUDE_CODE_EFFORT_LEVEL`). The launch notice names the effective value.
+    push_default(env, "API_TIMEOUT_MS", DIRECT_API_TIMEOUT_MS);
 }
 
 fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, BridgeError> {
@@ -1240,7 +1238,7 @@ fn apply_cross_route_overlay(
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
         &context_tokens.to_string(),
     );
-    push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
+    push_default(env, "API_TIMEOUT_MS", BRIDGE_API_TIMEOUT_MS);
     Ok(())
 }
 
@@ -1308,7 +1306,7 @@ fn apply_unified_overlay(
     env.push(("ANTHROPIC_CUSTOM_HEADERS".to_string(), custom_headers));
     set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
     set_env(env, "CLUD_GATEWAY_TOKEN", bridge.bearer_token());
-    push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
+    push_default(env, "API_TIMEOUT_MS", BRIDGE_API_TIMEOUT_MS);
     // #1257: a pinned launch constrains the auxiliary slots too, unlike the
     // descriptor-driven direct route where they are independent role rows. On
     // this gateway route the slot value is the row's *discovery* id: Claude
@@ -2361,7 +2359,7 @@ mod tests {
                     "ANTHROPIC_MODEL".to_string(),
                     "deepseek-flash[1m]".to_string()
                 ),
-                ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
+                ("API_TIMEOUT_MS".to_string(), "600000".to_string()),
                 (
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
                     "786432".to_string()
@@ -2430,7 +2428,7 @@ mod tests {
                     "deepseek-v4-pro".to_string()
                 ),
                 ("ANTHROPIC_MODEL".to_string(), "deepseek-v4-pro".to_string()),
-                ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
+                ("API_TIMEOUT_MS".to_string(), "600000".to_string()),
                 (
                     "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
                     "deepseek-flash[1m]".to_string()
@@ -2644,31 +2642,30 @@ mod tests {
         assert_eq!(lookup(deepseek_direct.env(), "UNRELATED"), Some("kept"));
     }
 
-    /// #1263: the direct anthropic-compat route is the one launch shape where
-    /// clud is not in the request path -- Claude Code talks to the provider
-    /// itself -- so the harness's own client timeout is the only thing watching
-    /// a hung request. Until this the overlay left `API_TIMEOUT_MS` unset on
-    /// that route: the user inherited an undocumented default, and nothing in
-    /// the launch said so. A hung turn then stalled with no watchdog anywhere.
+    /// #1270: every descriptor-backed direct route uses the same documented
+    /// per-request timeout; the notice reports that exact effective value.
     #[test]
     fn direct_anthropic_compat_launch_pushes_and_reports_an_api_timeout() {
         let store = FakeSecretStore(Some("ds-timeout-secret".to_string()));
-        let runtime = ForegroundRuntime::start_with_secret_store(
-            &plan(ModelProvider::DeepSeek, Backend::Claude),
-            Vec::new(),
-            &store,
-        )
-        .unwrap();
-        assert_eq!(lookup(runtime.env(), "API_TIMEOUT_MS"), Some("3000000"));
-        let notices = runtime.startup_notices.join(" ");
-        assert!(
-            notices.contains("API timeout 3000000 ms"),
-            "the direct route must say what its timeout is: {notices}"
-        );
-        assert!(
-            notices.contains("DeepSeek"),
-            "the notice must name the route it applies to: {notices}"
-        );
+        for (provider, name) in [
+            (ModelProvider::DeepSeek, "DeepSeek"),
+            (ModelProvider::Kimi, "Kimi"),
+            (ModelProvider::OpenRouter, "OpenRouter"),
+        ] {
+            let runtime = ForegroundRuntime::start_with_secret_store(
+                &plan(provider, Backend::Claude),
+                Vec::new(),
+                &store,
+            )
+            .unwrap();
+            assert_eq!(lookup(runtime.env(), "API_TIMEOUT_MS"), Some("600000"));
+            let notice = runtime
+                .startup_notices
+                .iter()
+                .find(|notice| notice.contains("API timeout"))
+                .unwrap();
+            assert_eq!(notice, &format!("[clud] direct {name} route: Claude Code API timeout 600000 ms (set API_TIMEOUT_MS to override); clud does not monitor this request"));
+        }
     }
 
     /// The push is a *default*, so a user who has already chosen a client
@@ -2685,11 +2682,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lookup(runtime.env(), "API_TIMEOUT_MS"), Some("45000"));
-        let notices = runtime.startup_notices.join(" ");
-        assert!(
-            notices.contains("API timeout 45000 ms"),
-            "the notice must report the effective value, not the default: {notices}"
-        );
+        let notice = runtime
+            .startup_notices
+            .iter()
+            .find(|notice| notice.contains("API timeout"))
+            .unwrap();
+        assert_eq!(notice, "[clud] direct DeepSeek route: Claude Code API timeout 45000 ms (set API_TIMEOUT_MS to override); clud does not monitor this request");
     }
 
     #[test]
@@ -3145,7 +3143,7 @@ mod tests {
                     "kimi-k3[1m]".to_string()
                 ),
                 ("ANTHROPIC_MODEL".to_string(), "kimi-k3[1m]".to_string()),
-                ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
+                ("API_TIMEOUT_MS".to_string(), "600000".to_string()),
                 (
                     "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
                     "1048576".to_string()
