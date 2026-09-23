@@ -3888,3 +3888,28 @@ clap's own suggestion remains the authority for uncertain flags. Output
 redaction protects CLUD-owned surfaces without breaking web-terminal child
 forwarding. Inline keys remain visible in shell history and process argv,
 so native-vault entry is the safer credential path.
+
+## DD-084: Transcript usage is the direct-route cumulative fallback
+
+**Context:** zackees/clud#1267 reverses #1227's refusal to derive cumulative
+tokens from Claude's undocumented JSONL transcript. Claude's documented
+status-line callback exposes only the last request's token triple, and the
+direct Claude, DeepSeek, Kimi, and OpenRouter routes do not have a bridge
+ledger. A per-call number displayed beside an aggregate label is misleading.
+
+**Decision:** Keep bridge-observed provider totals authoritative. Otherwise,
+incrementally read the main transcript and sibling subagent JSONL, accepting
+only complete integer usage objects with a response id. Deduplicate globally
+across files and replays using session-lifetime SHA-256 id hashes; retain exact
+cursors and hashes until the launch ends rather than evicting old ids. Store
+the cumulative snapshot separately from the parent-owned toast file, guard
+updates with a per-launch file lock, and atomically replace the snapshot. Both
+Claude's status line and the PTY compositor read it. An absent or malformed
+transcript never makes last-call counters masquerade as cumulative totals.
+
+**Rationale:** Transcript usage is the harness's own record of provider counts,
+not a tokenizer estimate. Hashed ids and paths enable replay-safe accounting
+without persisting prompts, raw session ids, or agent ids. The status-line
+callback already receives the transcript path, so direct routes need no
+listener in the request path. Native Codex without that callback still needs
+bridge-observed usage to display a triple.

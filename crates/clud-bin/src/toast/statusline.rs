@@ -52,6 +52,10 @@ pub fn state_path(state_dir: &Path, session_pid: u32) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusState {
     pub updated_ms: u64,
+    #[serde(default)]
+    pub launch_nonce: String,
+    #[serde(default)]
+    pub provider_label: Option<String>,
     pub toast: Option<StatusToast>,
     /// Provider-reported usage observed by clud's own bridge. This is kept
     /// separate from transient toasts: the model/token strip is persistent
@@ -81,19 +85,6 @@ pub struct StatusUsage {
     pub cache_health: String,
 }
 
-/// Claude Code's documented, most-recent-call status-line usage. This is
-/// intentionally distinct from [`StatusUsage`]: status-line callbacks are
-/// repeated for non-request events, so their values cannot be accumulated into
-/// an exact session ledger.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaudeStatusUsage {
-    pub model: String,
-    pub cached_input_tokens: u64,
-    pub uncached_input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_health: String,
-}
-
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -106,17 +97,40 @@ pub fn now_ms() -> u64 {
 #[derive(Debug)]
 pub struct StatusStateWriter {
     path: PathBuf,
+    launch_nonce: String,
+    provider_label: String,
     board: Mutex<ToastBoard>,
     usage: Mutex<Option<StatusUsage>>,
 }
 
 impl StatusStateWriter {
     pub fn new(path: PathBuf) -> Self {
-        Self {
+        Self::new_with_provider(path, "claude")
+    }
+
+    pub fn new_with_provider(path: PathBuf, provider: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_NONCE: AtomicU64 = AtomicU64::new(0);
+        let mut random = [0u8; 16];
+        let nonce = if getrandom::fill(&mut random).is_ok() {
+            format!("{:032x}", u128::from_le_bytes(random))
+        } else {
+            format!(
+                "{}-{}-{}",
+                std::process::id(),
+                now_ms(),
+                NEXT_NONCE.fetch_add(1, Ordering::Relaxed)
+            )
+        };
+        let writer = Self {
             path,
+            launch_nonce: nonce,
+            provider_label: provider.to_string(),
             board: Mutex::new(ToastBoard::default()),
             usage: Mutex::new(None),
-        }
+        };
+        let _ = writer.write(None, Instant::now());
+        writer
     }
 
     pub fn path(&self) -> &Path {
@@ -128,6 +142,11 @@ impl StatusStateWriter {
     /// status-line callback needs the serialized state file.
     pub fn usage_snapshot(&self) -> Option<StatusUsage> {
         self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn effective_usage_snapshot(&self) -> Option<StatusUsage> {
+        self.usage_snapshot()
+            .or_else(|| read_live_usage(&self.path, now_ms()))
     }
 
     /// Apply `event` and rewrite the file. Every publish refreshes
@@ -174,6 +193,8 @@ impl StatusStateWriter {
         let wall = now_ms();
         let state = StatusState {
             updated_ms: wall,
+            launch_nonce: self.launch_nonce.clone(),
+            provider_label: Some(self.provider_label.clone()),
             toast: visible.map(|toast| StatusToast {
                 text: toast.text.clone(),
                 severity: toast.severity,
@@ -198,6 +219,7 @@ impl StatusStateWriter {
 impl Drop for StatusStateWriter {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        super::usage_ledger::cleanup(&self.path);
     }
 }
 
@@ -215,18 +237,27 @@ pub fn read_live_toast(path: &Path, now_ms: u64) -> Option<StatusToast> {
     }
 }
 
-/// The current bridge-owned token snapshot, if the live session observed one.
-/// A stale file is intentionally ignored for the same reason as stale toasts:
-/// a PID may eventually be reused after an unclean shutdown.
+/// Bridge usage follows the parent's heartbeat. The separately refreshed
+/// transcript sidecar remains live even when a quiet parent has had no toast
+/// or bridged request for more than 90 seconds.
 pub fn read_live_usage(path: &Path, now_ms: u64) -> Option<StatusUsage> {
-    read_live_state(path, now_ms)?.usage
+    let state = read_state(path)?;
+    let stale_ms = u64::try_from(STALE_AFTER.as_millis()).unwrap_or(u64::MAX);
+    let bridge = (now_ms.saturating_sub(state.updated_ms) <= stale_ms)
+        .then_some(state.usage)
+        .flatten();
+    bridge.or_else(|| super::usage_ledger::read_live(path, &state.launch_nonce, now_ms))
 }
 
 fn read_live_state(path: &Path, now_ms: u64) -> Option<StatusState> {
-    let bytes = std::fs::read(path).ok()?;
-    let state: StatusState = serde_json::from_slice(&bytes).ok()?;
+    let state = read_state(path)?;
     let stale_ms = u64::try_from(STALE_AFTER.as_millis()).unwrap_or(u64::MAX);
     (now_ms.saturating_sub(state.updated_ms) <= stale_ms).then_some(state)
+}
+
+fn read_state(path: &Path) -> Option<StatusState> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 pub fn render_line(toast: &StatusToast) -> String {
@@ -242,80 +273,14 @@ pub fn render_line(toast: &StatusToast) -> String {
 /// Compact status-line representation. Keep cache reads and uncached input
 /// visibly distinct: combining them hid the exact failure mode of #1226.
 pub fn render_usage(usage: &StatusUsage) -> String {
-    let text = format!(
-        "{} {} - read {} cached / {} uncached - write {} - {}",
-        safe_label(&usage.provider),
-        safe_label(&usage.model),
-        compact_tokens(usage.cached_input_tokens),
-        compact_tokens(usage.uncached_input_tokens),
-        compact_tokens(usage.output_tokens),
-        safe_label(&usage.cache_health),
-    );
-    format!("\x1b[38;5;75mclud - {text}\x1b[0m")
+    format!("\x1b[38;5;75m{}\x1b[0m", usage_summary(usage))
 }
 
-/// Parse only Claude Code's documented, current-call status-line counters.
-/// The input is not persisted, logged, or used as a session identity.
-pub fn claude_status_usage(stdin: &[u8]) -> Option<ClaudeStatusUsage> {
-    let value: Value = serde_json::from_slice(stdin).ok()?;
-    let model = value
-        .pointer("/model/display_name")
-        .or_else(|| value.pointer("/model/id"))
-        .and_then(Value::as_str)
-        .filter(|label| !label.trim().is_empty())?
-        .to_string();
-    let usage = value.pointer("/context_window/current_usage")?;
-    let number = |field| usage.get(field).and_then(Value::as_u64);
-    let input = number("input_tokens")?;
-    let cache_creation = number("cache_creation_input_tokens")?;
-    let cached = number("cache_read_input_tokens")?;
-    let output = number("output_tokens")?;
-    let cache_health = match value.pointer("/prompt_cache/warm").and_then(Value::as_bool) {
-        Some(true) => value
-            .pointer("/prompt_cache/hit_ratio")
-            .and_then(Value::as_f64)
-            .filter(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio))
-            .map(|ratio| format!("warm {:.0}%", ratio * 100.0))
-            .unwrap_or_else(|| "warm".to_string()),
-        Some(false) => "cold".to_string(),
-        None => "unavailable".to_string(),
-    };
-    Some(ClaudeStatusUsage {
-        model,
-        cached_input_tokens: cached,
-        // Claude documents ordinary input and cache creation separately. Both
-        // are fresh input for this call; only cache reads are cache credit.
-        uncached_input_tokens: input.saturating_add(cache_creation),
-        output_tokens: output,
-        cache_health,
-    })
-}
-
-/// Render documented native-Claude usage without implying exact cumulative
-/// accounting that clud did not observe on the provider stream.
-pub fn render_claude_status_usage(usage: &ClaudeStatusUsage) -> String {
-    let text = format!(
-        "Claude last call {} - read {} cached / {} uncached - write {} - cache {} - cumulative unavailable",
-        safe_label(&usage.model),
-        compact_tokens(usage.cached_input_tokens),
-        compact_tokens(usage.uncached_input_tokens),
-        compact_tokens(usage.output_tokens),
-        safe_label(&usage.cache_health),
-    );
-    format!("\x1b[38;5;75mclud - {text}\x1b[0m")
-}
-
-/// Plain, compact PTY-overlay label. Unlike [`render_usage`], this contains
-/// no terminal controls because the compositor owns the surrounding panel.
+/// The same cumulative shape is used by Claude's status line and the PTY HUD.
 pub fn usage_summary(usage: &StatusUsage) -> String {
     format!(
-        "{} - R {} ({} cached / {} uncached) - W {}",
+        "{} - read {} cached / {} uncached - write {}",
         safe_label(&usage.model),
-        compact_tokens(
-            usage
-                .cached_input_tokens
-                .saturating_add(usage.uncached_input_tokens)
-        ),
         compact_tokens(usage.cached_input_tokens),
         compact_tokens(usage.uncached_input_tokens),
         compact_tokens(usage.output_tokens),
@@ -513,17 +478,45 @@ pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64)
         }
     }
     let path = state_path(&args.state_dir, args.session_pid);
-    if let Some(usage) = read_live_usage(&path, now_ms) {
+    let state = read_state(&path);
+    let usage = state
+        .as_ref()
+        .and_then(|state| state.usage.clone())
+        .or_else(|| {
+            let state = state.as_ref()?;
+            let value: Value = serde_json::from_slice(stdin).ok()?;
+            let transcript = value.get("transcript_path")?.as_str()?;
+            let model = claude_status_model(stdin).unwrap_or_default();
+            super::usage_ledger::update(
+                &path,
+                &state.launch_nonce,
+                Path::new(transcript),
+                state.provider_label.as_deref().unwrap_or("claude"),
+                &model,
+                now_ms,
+            )
+        });
+    if let Some(usage) = usage {
         out.extend_from_slice(render_usage(&usage).as_bytes());
         out.push(b'\n');
-    } else if let Some(usage) = claude_status_usage(stdin) {
-        out.extend_from_slice(render_claude_status_usage(&usage).as_bytes());
+    } else if let Some(model) = claude_status_model(stdin) {
+        out.extend_from_slice(format!("\x1b[38;5;75m{}\x1b[0m", safe_label(&model)).as_bytes());
         out.push(b'\n');
     }
     if let Some(toast) = read_live_toast(&path, now_ms) {
         out.extend_from_slice(render_line(&toast).as_bytes());
         out.push(b'\n');
     }
+}
+
+fn claude_status_model(stdin: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(stdin).ok()?;
+    value
+        .pointer("/model/display_name")
+        .or_else(|| value.pointer("/model/id"))
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {

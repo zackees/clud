@@ -165,12 +165,17 @@ released on the next idle poll.
 - A non-expiring toast whose `updated_ms` is older than 90 s is ignored, so a
   crashed session cannot leave a stuck alert.
 - When clud has observed a bridged provider terminal response, its exact
-  launch-wide ledger wins. On direct/native Claude traffic where clud cannot
-  observe that response, the status-line callback consumes only Claude Code's
-  documented `model` and `context_window.current_usage` fields plus
-  `prompt_cache` warmth. It renders an explicit **Claude last call** token
-  split and **cumulative unavailable** label; callback values are never summed
-  because Claude also calls status lines for non-request events.
+  launch-wide ledger wins. Otherwise the callback incrementally scans the
+  Claude transcript named by `transcript_path` and sibling `subagents/*.jsonl`.
+  It counts each provider-reported `message.usage` once by hashed `message.id`,
+  even when the transcript repeats a response or a sidechain appears in both
+  locations. Offsets and opaque hashes live in a lock-guarded private cursor
+  file; only aggregate counters and a public model label reach the atomic
+  `<pid>.usage.json` snapshot. The PTY compositor reads that same snapshot.
+  The one-line display contains one cumulative read/write triple and the last
+  completed model, with no per-call fallback. Missing or malformed transcripts
+  render only the model and do not erase the last good totals. Native Codex
+  without the Claude status-line callback requires bridge-observed usage.
 
 `clud statusline` is dispatched first thing in `main.rs`, before any daemon,
 runtime-cache or launch work, because Claude runs it every couple of seconds.

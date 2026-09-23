@@ -31,6 +31,7 @@ pub mod statusline;
 pub mod text_tier;
 pub mod tier;
 pub mod tracker;
+mod usage_ledger;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
