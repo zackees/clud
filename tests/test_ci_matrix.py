@@ -100,13 +100,13 @@ def test_pr_and_dispatch_source_ref_is_pinned_in_every_job():
         reusable = CI_YML.with_name(name).read_text(encoding="utf-8")
         assert "source_ref:" in reusable, name
         assert "ref: ${{ inputs.source_ref || github.sha }}" in reusable, name
-    assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 13
+    assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 14
 
 
 def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
     text = CI_YML.read_text(encoding="utf-8")
     gate = text.split("\n  ci-ok:\n", 1)[1]
-    for name in ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
+    for name in ("windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
         match = re.search(
             rf"^  test-{name}:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
             text,
@@ -116,6 +116,23 @@ def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
         block = match.group(1)
         assert "suite: [unit, integration]" in block, name
         assert f"${{{{ needs.test-{name}.result }}}}" in gate, name
+
+    unit = text.split("\n  test-linux-x64-unit:\n", 1)[1].split(
+        "\n  test-linux-x64-integration:\n", 1
+    )[0]
+    integration = text.split("\n  test-linux-x64-integration:\n", 1)[1].split(
+        "\n  build-windows-x64:\n", 1
+    )[0]
+    assert "suite: unit" in unit
+    assert "suite: integration" in integration
+    assert "if: needs.static.outputs.mode != 'minimal'" in integration
+    assert "${{ needs.test-linux-x64-unit.result }}" in gate
+    assert "${{ needs.test-linux-x64-integration.result }}" in gate
+    minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
+    extended = gate.split("EXTENDED: >-", 1)[1].split("FULL: >-", 1)[0]
+    assert "needs.test-linux-x64-unit.result" in minimal
+    assert "needs.test-linux-x64-integration.result" not in minimal
+    assert "needs.test-linux-x64-integration.result" in extended
 
 
 def test_unknown_ci_label_fails_closed():
@@ -131,7 +148,7 @@ def test_workflow_binds_dispatch_and_labels_to_mode():
     assert "EVENT_SHA: ${{ github.sha }}" in text
     assert "run: python -m ci.ci_matrix" in text
     assert "MODE: ${{ needs.static.outputs.mode }}" in text
-    assert "case \"$MODE\" in minimal|extended|full)" in text
+    assert 'case "$MODE" in minimal|extended|full)' in text
 
 
 def test_every_build_waits_for_mode_and_full_is_complete():
@@ -141,7 +158,7 @@ def test_every_build_waits_for_mode_and_full_is_complete():
         assert "    needs: static\n" in block, name
         assert "    if: needs.static.outputs.mode" in block, name
     assert "${{ needs.dylint.result }}" in text
-    assert "if [ \"$MODE\" = \"full\" ]; then" in text
+    assert 'if [ "$MODE" = "full" ]; then' in text
 
 
 def test_every_target_cross_compiles_on_linux():
@@ -163,9 +180,7 @@ def test_darwin_and_windows_use_the_soldr_blessed_cross_path():
     edit from silently regressing to a hand-installed cross wrapper."""
     include = build_matrix(selected("full"))["include"]
     crossed = [
-        entry
-        for entry in include
-        if "apple" in entry["target"] or "windows" in entry["target"]
+        entry for entry in include if "apple" in entry["target"] or "windows" in entry["target"]
     ]
     assert len(crossed) == 4
     assert all(entry["strategy"] == "soldr" for entry in crossed)
@@ -261,6 +276,7 @@ def test_release_matrix_uses_the_same_strategies_as_ci():
     If release built natively while CI only exercised cross-built binaries, CI
     would never have validated the artifact that ships.
     """
+
     def strategies(matrix):
         return {entry["target"]: entry["strategy"] for entry in matrix["include"]}
 
@@ -279,9 +295,7 @@ def test_doc_tests_run_on_a_live_matrix_triple():
     """
     build_target = CI_YML.parent / "_build-target.yml"
     text = build_target.read_text(encoding="utf-8")
-    step = re.search(
-        r"- name: Doc tests\n\s+if: \$\{\{ (.+?) \}\}", text, re.DOTALL
-    )
+    step = re.search(r"- name: Doc tests\n\s+if: \$\{\{ (.+?) \}\}", text, re.DOTALL)
     assert step, "_build-target.yml has no conditional Doc tests step"
     condition = step.group(1)
 
@@ -293,8 +307,7 @@ def test_doc_tests_run_on_a_live_matrix_triple():
     assert named, f"doc-test condition must pin a target triple: {condition}"
     live = {target.triple for target in TARGETS}
     assert named.group(1) in live, (
-        f"doc-tests keyed on {named.group(1)}, which is not in the matrix — "
-        "they would never run"
+        f"doc-tests keyed on {named.group(1)}, which is not in the matrix — they would never run"
     )
 
 
@@ -340,8 +353,7 @@ def test_ci_yml_job_configuration_matches_the_targets_table():
         declared_builds[triple.group(1)] = (runner.group(1), strategy.group(1))
 
     assert declared_builds == {
-        triple: (target.build_runs_on, target.strategy)
-        for triple, target in expected.items()
+        triple: (target.build_runs_on, target.strategy) for triple, target in expected.items()
     }
 
     test_blocks = re.findall(
@@ -357,9 +369,7 @@ def test_ci_yml_job_configuration_matches_the_targets_table():
         assert runner
         declared_exec[triple.group(1)] = runner.group(1)
 
-    assert declared_exec == {
-        triple: target.exec_runs_on for triple, target in expected.items()
-    }
+    assert declared_exec == {triple: target.exec_runs_on for triple, target in expected.items()}
 
 
 def test_ci_yml_never_requests_a_release_profile():

@@ -127,8 +127,11 @@ jobs:
       source_ref: ${{ needs.static.outputs.source_ref }}
 
   # ----------------------------------------------------------------- core ---
-  # Minimal runs Linux x64. ci-test adds Windows x64 and macOS ARM; ci-full,
-  # merge_group, and SHA-pinned dispatches add the other architectures.
+  # Minimal runs Linux x64 unit tests. The Linux integration suite alone cost
+  # 6.87 runner-minutes in the measured minimal run (#35845956093), taking it
+  # above the 12.5% routine/full budget; ci-test and full retain that suite.
+  # ci-test also adds Windows x64 and macOS ARM; ci-full, merge_group, and
+  # SHA-pinned dispatches add the other architectures.
 
   build-linux-x64:
     name: Build linux-x64
@@ -142,19 +145,26 @@ jobs:
       strategy: soldr
       clippy: true
 
-  test-linux-x64:
-    name: Test linux-x64
+  test-linux-x64-unit:
+    name: Test linux-x64 (unit)
     needs: [static, build-linux-x64]
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [unit, integration]
     uses: ./.github/workflows/_run-tests.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
       target: x86_64-unknown-linux-gnu
       runs-on: ubuntu-24.04
-      suite: ${{ matrix.suite }}
+      suite: unit
+
+  test-linux-x64-integration:
+    name: Test linux-x64 (integration)
+    needs: [static, build-linux-x64]
+    if: needs.static.outputs.mode != 'minimal'
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      source_ref: ${{ needs.static.outputs.source_ref }}
+      target: x86_64-unknown-linux-gnu
+      runs-on: ubuntu-24.04
+      suite: integration
 
   build-windows-x64:
     name: Build windows-x64
@@ -314,7 +324,8 @@ jobs:
       - static
       - dylint
       - build-linux-x64
-      - test-linux-x64
+      - test-linux-x64-unit
+      - test-linux-x64-integration
       - build-windows-x64
       - test-windows-x64
       - build-macos-arm
@@ -342,8 +353,9 @@ jobs:
           MINIMAL: >-
             ${{ needs.static.result }}
             ${{ needs.build-linux-x64.result }}
-            ${{ needs.test-linux-x64.result }}
+            ${{ needs.test-linux-x64-unit.result }}
           EXTENDED: >-
+            ${{ needs.test-linux-x64-integration.result }}
             ${{ needs.build-windows-x64.result }}
             ${{ needs.test-windows-x64.result }}
             ${{ needs.build-macos-arm.result }}
