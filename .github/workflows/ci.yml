@@ -130,7 +130,7 @@ jobs:
   # Minimal runs Linux x64 unit tests. The Linux integration suite alone cost
   # 6.87 runner-minutes in the measured minimal run (#35845956093), taking it
   # above the 12.5% routine/full budget; ci-test and full retain that suite.
-  # ci-test also adds Windows x64 and macOS ARM; ci-full, merge_group, and
+  # ci-test also adds Windows x64; ci-full, merge_group, and
   # SHA-pinned dispatches add the other architectures.
 
   build-linux-x64:
@@ -203,7 +203,7 @@ jobs:
   build-macos-arm:
     name: Build macos-arm
     needs: static
-    if: needs.static.outputs.mode == 'extended' || needs.static.outputs.mode == 'full'
+    if: needs.static.outputs.mode == 'full'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -358,10 +358,10 @@ jobs:
             ${{ needs.test-linux-x64-integration.result }}
             ${{ needs.build-windows-x64.result }}
             ${{ needs.test-windows-x64.result }}
-            ${{ needs.build-macos-arm.result }}
-            ${{ needs.test-macos-arm.result }}
           FULL: >-
             ${{ needs.dylint.result }}
+            ${{ needs.build-macos-arm.result }}
+            ${{ needs.test-macos-arm.result }}
             ${{ needs.build-linux-arm.result }}
             ${{ needs.test-linux-arm.result }}
             ${{ needs.build-windows-arm.result }}

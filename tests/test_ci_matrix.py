@@ -40,15 +40,26 @@ def test_every_target_is_unique():
     assert len(triples) == len(set(triples))
 
 
-def test_core_tier_covers_every_operating_system():
-    """core must exercise Linux, Windows and macOS.
-
-    The platform-gated tests are `#![cfg(windows)]` / `#![cfg(unix)]`, not
-    arch-gated, so one triple per OS is what makes the reduced tier safe.
-    """
+def test_core_tier_avoids_hosted_macos():
+    """The ci-test tier may add Windows, but macOS is reserved for full CI."""
     core = selected("core")
     families = {triple.split("-")[2] for triple in (target.triple for target in core)}
-    assert families == {"linux", "windows", "darwin"}
+    assert families == {"linux", "windows"}
+
+
+def test_full_and_release_include_both_hosted_macos_architectures():
+    full = {target.triple for target in selected("full")}
+    assert {"aarch64-apple-darwin", "x86_64-apple-darwin"} <= full
+    release = {entry["target"] for entry in release_matrix()["include"]}
+    assert {"aarch64-apple-darwin", "x86_64-apple-darwin"} <= release
+    workflow = CI_YML.read_text(encoding="utf-8")
+    arm = workflow.split("\n  build-macos-arm:\n", 1)[1].split("\n  test-macos-arm:\n", 1)[0]
+    assert "if: needs.static.outputs.mode == 'full'" in arm
+    gate = workflow.split("\n  ci-ok:\n", 1)[1]
+    extended = gate.split("EXTENDED: >-", 1)[1].split("FULL: >-", 1)[0]
+    full_gate = gate.split("FULL: >-", 1)[1]
+    assert "needs.test-macos-arm.result" not in extended
+    assert "needs.test-macos-arm.result" in full_gate
 
 
 def test_full_tier_is_a_superset_of_core():

@@ -7,8 +7,8 @@ Status: implemented (supersedes the 24 per-platform leaf workflows + `_lint.yml`
 
 The sole push/PR workflow is `.github/workflows/ci.yml`. Ordinary PRs and
 `main` pushes run static checks plus the Linux x64 build and unit suite.
-The literal `ci-test` PR label adds Linux x64 integration, Windows x64, and
-macOS ARM. Linux integration stays in `ci-full` and release validation too;
+The literal `ci-test` PR label adds Linux x64 integration and Windows x64.
+Linux integration stays in `ci-full` and release validation too;
 it was moved out of ordinary runs after the measured minimal lane exceeded
 the 12.5% runner-minute budget.
 `ci-full` (and existing `ci:full` labels), merge queue runs, and manual full
@@ -115,15 +115,14 @@ every push needs all six targets.
 | Tier | Triples | Trigger |
 | --- | --- | --- |
 | `minimal` | `x86_64-unknown-linux-gnu` build + unit suite | ordinary PR and `main` push |
-| `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` | PR labeled `ci-test` |
-| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, `x86_64-apple-darwin`, and Dylint | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
+| `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
+| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples, and Dylint | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
 
-`ci-test` covers one triple per operating system. The second architecture of
-each OS is an ABI/codegen check in `ci-full`; Intel macOS is the scarcest
-runner. Routine events use Linux x64 for fast feedback, while the merge queue
-still requires the complete matrix.
+`ci-test` covers Linux and Windows. Both hosted macOS architectures run only
+in `ci-full` and release validation. Routine events use Linux x64 for fast
+feedback, while the merge queue still requires the complete matrix.
 
-macOS ARM is part of extended/full coverage. `soldr prepare --target aarch64-apple-darwin`
+macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old
 `MACOS_SDK_URL` gate and native macOS fallback no longer exist. The macOS
 runners only execute the resulting bundle.

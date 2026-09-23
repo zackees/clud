@@ -52,7 +52,7 @@ class Target:
 TARGETS: tuple[Target, ...] = (
     Target("x86_64-unknown-linux-gnu", "ubuntu-24.04", "soldr", "core", "wheels-linux-x86"),
     Target("x86_64-pc-windows-msvc", "windows-2025", "soldr", "core", "wheels-windows-x86"),
-    Target("aarch64-apple-darwin", "macos-15", "soldr", "core", "wheels-macos-arm"),
+    Target("aarch64-apple-darwin", "macos-15", "soldr", "full", "wheels-macos-arm"),
     Target("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm", "soldr", "full", "wheels-linux-arm"),
     # whisper-rs is cfg-excluded on this triple (crates/clud-bin/Cargo.toml:149),
     # so there is no C++/CMake to cross at all -- the cheapest cross in the set.
