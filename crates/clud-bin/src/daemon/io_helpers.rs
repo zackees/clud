@@ -81,7 +81,7 @@ fn merge_env(
 /// hand (the API turn controller, diagnostics) passes. The zero-argument
 /// `child_env()` this module also used to expose is gone: it had exactly one
 /// non-test caller, and that caller wanted the client env (#1209).
-pub(super) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, String)> {
+pub(crate) fn child_env_from(client_env: &[(String, String)]) -> Vec<(String, String)> {
     child_env_with_base(session_base(client_env))
 }
 

@@ -79,6 +79,14 @@ fn run(mut args: args::Args) {
         std::process::exit(tool_cli::run(subcommand));
     }
 
+    if matches!(&args.command, Some(args::Command::CodexUpdate)) {
+        if !args.passthrough.is_empty() {
+            eprintln!("codex-update accepts no passthrough arguments");
+            std::process::exit(2);
+        }
+        std::process::exit(backend_bootstrap::run_trusted_codex_update());
+    }
+
     // Credential management is self-contained and must never resolve a backend,
     // start a daemon, or forward secrets to a harness.
     if let Some(args::Command::Auth { subcommand }) = &args.command {

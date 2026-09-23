@@ -4,7 +4,7 @@
 //! path consumes the same resolved backend path before `LaunchPlan` is built.
 
 use std::fmt;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -21,6 +21,11 @@ const CLAUDE_WINDOWS_CMD_INSTALL_COMMAND: &str =
     "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd";
 
 const CODEX_POSIX_INSTALL_COMMAND: &str = "curl -fsSL https://chatgpt.com/codex/install.sh | sh";
+const CODEX_LINUX_MANAGED_INSTALL_COMMAND: &str = "clud codex-update";
+const CODEX_TRUSTED_INSTALLER_URL: &str = "https://releases.openai.com/codex/install.sh";
+// Audited 2026-09-22. Update this only after reviewing the new installer.
+const CODEX_TRUSTED_INSTALLER_SHA256: &str =
+    "150e3cf675682efeaac115aa3747add3f27887896d04ce6d0b56478d8b428bf6";
 const CODEX_WINDOWS_POWERSHELL_INSTALL_COMMAND: &str =
     "irm https://chatgpt.com/codex/install.ps1 | iex";
 const DEEPSEEK_RUN_COMMAND: &str = "npx @deepseek-ai/dsh web";
@@ -74,6 +79,7 @@ impl InstallPlatform {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallerPlan {
+    TrustedCodex,
     PosixShell {
         command: &'static str,
     },
@@ -189,9 +195,17 @@ impl BackendInstallSpec {
                 installer_kind: "standalone",
                 prompt_text:
                     "Codex CLI is not installed. Install OpenAI's standalone Codex CLI now? [y/N]",
-                manual_install_command: CODEX_POSIX_INSTALL_COMMAND,
-                installer: InstallerPlan::PosixShell {
-                    command: CODEX_POSIX_INSTALL_COMMAND,
+                manual_install_command: if platform == InstallPlatform::Linux {
+                    CODEX_LINUX_MANAGED_INSTALL_COMMAND
+                } else {
+                    CODEX_POSIX_INSTALL_COMMAND
+                },
+                installer: if platform == InstallPlatform::Linux {
+                    InstallerPlan::TrustedCodex
+                } else {
+                    InstallerPlan::PosixShell {
+                        command: CODEX_POSIX_INSTALL_COMMAND,
+                    }
                 },
                 fallback_location: InstallLocation::HomeLocalBin {
                     executable: "codex",
@@ -492,8 +506,137 @@ pub fn official_claude_install_command() -> &'static str {
     official_install_command(Backend::Claude, InstallPlatform::current())
 }
 
+/// Only this fixed, hash-checked installer is given a system-tool PATH. Session
+/// shells retain the removal shim; neither shell text nor a script path is an
+/// argument to this entry point.
+pub fn run_trusted_codex_update() -> i32 {
+    match trusted_codex_update() {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("Codex update refused: {error}");
+            1
+        }
+    }
+}
+
+fn trusted_codex_update() -> Result<(), String> {
+    if !cfg!(target_os = "linux") {
+        return Err("Codex standalone update is supported here only on Linux".into());
+    }
+    let home = std::env::var_os("HOME").ok_or("HOME is required")?;
+    let home = std::fs::canonicalize(home).map_err(|e| format!("cannot resolve HOME: {e}"))?;
+    let response = ureq::get(CODEX_TRUSTED_INSTALLER_URL)
+        .timeout(Duration::from_secs(30))
+        .call()
+        .map_err(|e| format!("cannot fetch Codex installer: {e}"))?;
+    if response.get_url() != CODEX_TRUSTED_INSTALLER_URL {
+        return Err("Codex installer redirected away from the audited origin".to_string());
+    }
+    let mut script = Vec::new();
+    response
+        .into_reader()
+        .take(128 * 1024 + 1)
+        .read_to_end(&mut script)
+        .map_err(|e| format!("cannot read Codex installer: {e}"))?;
+    if script.len() > 128 * 1024 {
+        return Err("Codex installer exceeds the reviewed size limit".to_string());
+    }
+    run_verified_codex_installer(&script, CODEX_TRUSTED_INSTALLER_SHA256, &home)
+}
+
+fn trusted_codex_update_env(
+    home: &Path,
+    original_path: Option<&str>,
+    shell: Option<&str>,
+) -> Vec<(String, String)> {
+    let system_path = if Path::new("/run/current-system/sw/bin/mkdir").is_file() {
+        "/run/current-system/sw/bin:/usr/bin:/bin"
+    } else {
+        "/usr/bin:/bin"
+    };
+    let mut path = system_path.to_string();
+    let visible_bin = home.join(".local/bin");
+    let visible_bin = visible_bin.to_string_lossy();
+    if !visible_bin.contains(':')
+        && original_path
+            .is_some_and(|value| value.split(':').any(|part| part == visible_bin.as_ref()))
+    {
+        path.push(':');
+        path.push_str(&visible_bin);
+    }
+    let mut env = vec![
+        ("HOME".into(), home.to_string_lossy().into_owned()),
+        ("PATH".into(), path),
+        ("CODEX_NON_INTERACTIVE".into(), "1".into()),
+    ];
+    if let Some(shell) = shell {
+        env.push(("SHELL".into(), shell.into()));
+    }
+    env
+}
+
+fn run_verified_codex_installer(
+    script: &[u8],
+    expected_sha256: &str,
+    home: &Path,
+) -> Result<(), String> {
+    let parent_env: Vec<_> = std::env::vars().collect();
+    run_verified_codex_installer_with_parent_env(script, expected_sha256, home, &parent_env)
+}
+
+fn run_verified_codex_installer_with_parent_env(
+    script: &[u8],
+    expected_sha256: &str,
+    home: &Path,
+    parent_env: &[(String, String)],
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let actual = format!("{:x}", Sha256::digest(script));
+    if actual != expected_sha256 {
+        return Err(format!(
+            "installer contents changed (sha256 {actual}); review the new script before updating the pin"
+        ));
+    }
+    let temp = tempfile::tempdir().map_err(|e| format!("cannot stage installer: {e}"))?;
+    let path = temp.path().join("install.sh");
+    std::fs::write(&path, script).map_err(|e| format!("cannot write installer: {e}"))?;
+    let process = NativeProcess::new(ProcessConfig {
+        command: CommandSpec::Argv(vec!["/bin/sh".into(), path.to_string_lossy().into_owned()]),
+        cwd: Some(home.to_path_buf()),
+        env: Some(trusted_codex_update_env(
+            home,
+            parent_env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.as_str()),
+            parent_env
+                .iter()
+                .find(|(key, _)| key == "SHELL")
+                .map(|(_, value)| value.as_str()),
+        )),
+        capture: false,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: None,
+        create_process_group: false,
+        stdin_mode: StdinMode::Inherit,
+        nice: None,
+    });
+    process
+        .start()
+        .map_err(|e| format!("cannot start installer: {e}"))?;
+    let code = process
+        .wait(None)
+        .map_err(|e| format!("cannot wait for installer: {e}"))?;
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(format!("installer exited with {code}"))
+    }
+}
+
 fn run_backend_installer(spec: &BackendInstallSpec) -> Result<(), String> {
     match spec.installer {
+        InstallerPlan::TrustedCodex => trusted_codex_update(),
         InstallerPlan::PosixShell { command } => run_interactive_command(
             CommandSpec::Argv(vec![
                 "sh".to_string(),
@@ -776,6 +919,167 @@ mod tests {
     use std::collections::VecDeque;
     use std::io;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_update_env_does_not_inherit_session_shims_or_installer_overrides() {
+        let home = Path::new("/tmp/clud-codex-update-home");
+        let env =
+            trusted_codex_update_env(home, Some("/untrusted/shims:/usr/bin"), Some("/bin/bash"));
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "PATH" && value.ends_with("/usr/bin:/bin")));
+        assert!(env
+            .iter()
+            .all(|(_, value)| !value.contains("/untrusted/shims")));
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "SHELL" && value == "/bin/bash"));
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "HOME" && value == &home.to_string_lossy()));
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "CODEX_NON_INTERACTIVE" && value == "1"));
+        assert!(!env.iter().any(|(key, _)| key == "CLUD_RM_DRY_RUN"));
+        assert!(!env.iter().any(|(key, _)| key == "CODEX_INSTALL_DIR"));
+        let with_visible_bin = trusted_codex_update_env(
+            home,
+            Some("/untrusted/shims:/tmp/clud-codex-update-home/.local/bin:/usr/bin"),
+            None,
+        );
+        assert!(with_visible_bin.iter().any(|(key, value)| key == "PATH"
+            && value.ends_with(":/tmp/clud-codex-update-home/.local/bin")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_update_fixture_covers_fresh_complete_and_stale_staging() {
+        use sha2::{Digest, Sha256};
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(
+            home.join("fixture-codex"),
+            b"#!/bin/sh\nprintf 'codex-cli 0.156.0\\n'\n",
+        )
+        .unwrap();
+        let script = br#"set -eu
+root="$HOME/.codex/packages/standalone"
+releases="$root/releases"
+mkdir -p "$releases"
+tmp_dir="$(mktemp -d "$HOME/.codex/tmp.XXXXXX")"
+remove=rm
+cleanup() { "$remove" -rf "$tmp_dir"; }
+trap cleanup EXIT
+find "$releases" -mindepth 1 -maxdepth 1 -name '.staging.*' -exec "$remove" -rf {} +
+stage="$releases/.staging.fixture.$$"
+"$remove" -rf "$stage"
+if [ ! -f "$releases/0.156.0/version" ]; then
+  mkdir -p "$stage/bin"
+  cp "$HOME/fixture-codex" "$stage/bin/codex"
+  chmod 0755 "$stage/bin/codex"
+  printf '0.156.0' > "$stage/version"
+  mv "$stage" "$releases/0.156.0"
+fi
+ln -sfn releases/0.156.0 "$root/current"
+"#;
+        let digest = format!("{:x}", Sha256::digest(script));
+        let root = home.join(".codex/packages/standalone");
+        let releases = root.join("releases");
+        run_verified_codex_installer(script, &digest, home).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(releases.join("0.156.0/version")).unwrap(),
+            "0.156.0"
+        );
+        assert_eq!(
+            std::fs::read_link(root.join("current")).unwrap(),
+            Path::new("releases/0.156.0")
+        );
+        let (code, version) = run_captured_command(vec![
+            root.join("current/bin/codex")
+                .to_string_lossy()
+                .into_owned(),
+            "--version".into(),
+        ])
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(version.trim(), "codex-cli 0.156.0");
+        run_verified_codex_installer(script, &digest, home).unwrap();
+        let stale = releases.join(".staging.old");
+        std::fs::create_dir(&stale).unwrap();
+        run_verified_codex_installer(script, &digest, home).unwrap();
+        assert!(!stale.exists());
+        assert!(std::fs::read_dir(home.join(".codex"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("tmp.")));
+        assert!(std::fs::read_dir(releases).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".staging.")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_update_removes_stale_files_from_both_session_routes() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path().to_string_lossy().into_owned();
+        let shim_dir = home.path().join("session-shim");
+        std::fs::create_dir(&shim_dir).unwrap();
+        let poisoned_rm = shim_dir.join("rm");
+        std::fs::write(&poisoned_rm, b"#!/bin/sh\nexit 27\n").unwrap();
+        std::fs::set_permissions(&poisoned_rm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let base = vec![
+            ("HOME".to_string(), home_path),
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", shim_dir.display()),
+            ),
+        ];
+        let routes = [
+            (
+                "foreground",
+                crate::runner::apply_child_env_policy(base.clone()),
+            ),
+            ("daemon", crate::daemon::io_helpers::child_env_from(&base)),
+        ];
+        let script = b"set -eu\nrm -rf \"$HOME/stale\"\n";
+        let digest = format!("{:x}", Sha256::digest(script));
+        for (route, parent_env) in routes {
+            let path = parent_env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.as_str())
+                .unwrap();
+            assert!(
+                path.contains("session-shim"),
+                "{route} route lost the shim: {path}"
+            );
+            let stale = home.path().join("stale");
+            std::fs::create_dir(&stale).unwrap();
+            std::fs::write(stale.join("old"), b"old").unwrap();
+            run_verified_codex_installer_with_parent_env(script, &digest, home.path(), &parent_env)
+                .unwrap();
+            assert!(!stale.exists(), "{route} route retained stale files");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_update_rejects_changed_installer_before_execution() {
+        let home = tempfile::tempdir().unwrap();
+        let err =
+            run_verified_codex_installer(b"touch \"$HOME/not-run\"\n", "wrong-digest", home.path())
+                .unwrap_err();
+        assert!(err.contains("installer contents changed"));
+        assert!(!home.path().join("not-run").exists());
+    }
+
     #[test]
     fn unified_claude_version_parser_accepts_supported_output_shapes() {
         assert_eq!(
@@ -1026,13 +1330,11 @@ mod tests {
     #[test]
     fn codex_linux_install_spec_uses_standalone_command_and_home_local_bin() {
         let spec = BackendInstallSpec::for_backend(Backend::Codex, InstallPlatform::Linux);
-        assert_eq!(spec.manual_install_command, CODEX_POSIX_INSTALL_COMMAND);
         assert_eq!(
-            spec.installer,
-            InstallerPlan::PosixShell {
-                command: CODEX_POSIX_INSTALL_COMMAND
-            }
+            spec.manual_install_command,
+            CODEX_LINUX_MANAGED_INSTALL_COMMAND
         );
+        assert_eq!(spec.installer, InstallerPlan::TrustedCodex);
         assert_eq!(
             spec.fallback_path(&path_env()).unwrap(),
             PathBuf::from("/home/me/.local/bin/codex")
@@ -1115,10 +1417,10 @@ mod tests {
             BackendBootstrapError::BackendMissingNonInteractive {
                 backend: Backend::Codex,
                 product_name: "Codex CLI",
-                install_command: CODEX_POSIX_INSTALL_COMMAND
+                install_command: CODEX_LINUX_MANAGED_INSTALL_COMMAND
             }
         );
-        assert!(err.to_string().contains("chatgpt.com/codex/install.sh"));
+        assert!(err.to_string().contains("clud codex-update"));
         assert!(host.installer_runs.is_empty());
     }
 
@@ -1211,7 +1513,7 @@ mod tests {
             BackendBootstrapError::BackendInstallerFailed { .. }
         ));
         assert!(err.to_string().contains("network down"));
-        assert!(err.to_string().contains("chatgpt.com/codex/install"));
+        assert!(err.to_string().contains("clud codex-update"));
     }
 
     #[test]

@@ -53,6 +53,25 @@ validated arguments to absolute `/bin/rm` through running-process, with
 `--preserve-root=all` and `--one-file-system`; no PATH lookup or shell is used.
 Ordinary removal outside CI + Docker is intentionally denied.
 
+## Trusted Codex standalone updates
+
+On Linux, `clud codex-update` is the explicit update route. The same route is
+used when CLUD bootstraps a missing Codex backend. CLUD fetches the installer
+from the fixed OpenAI release URL, rejects redirects, caps its size, and checks
+the reviewed SHA-256 before running it. Its child environment contains only a
+canonical HOME, noninteractive mode, and a system-tool PATH (including the
+root-owned NixOS system profile when present). It retains the user's shell name
+and, only if already present on the original PATH, the HOME-based `~/.local/bin` entry after system
+tools. No other session PATH entry, installer-location override, or
+deletion-gate variable is inherited.
+
+This is a scoped installer operation, not an exception in `rm_guard`: callers
+cannot supply shell text, a script path, or deletion operands to the command.
+The usual shell pipeline to an installer still inherits the session shim and
+still fails closed. When OpenAI changes the installer body, CLUD refuses the
+new digest until the script is reviewed and the pin is updated. Neither the
+foreground nor daemon child environment changes its ordinary removal policy.
+
 ## Retirement rationale
 
 No source protection is retired. The only code moved out of the interpreter is
