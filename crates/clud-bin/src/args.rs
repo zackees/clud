@@ -448,6 +448,8 @@ impl Args {
 pub enum Command {
     /// Explicit compatibility spelling for a normal backend launch.
     Run,
+    /// Install or update Codex through CLUD's verified standalone-installer path.
+    CodexUpdate,
     /// Manage provider credentials. Claude authentication remains owned by
     /// Claude Code and is reported as externally managed.
     Auth {
@@ -1208,6 +1210,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "settings",
     "test",
     "auth",
+    "codex-update",
     "codex-auth",
     "deepseek-auth",
     "run",

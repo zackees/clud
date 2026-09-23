@@ -579,6 +579,7 @@ fn build_launch_plan_for_target_at(
             push_prompt_interactive(&mut cmd, build_grind_prompt(url));
         }
         Some(Command::Auth { .. })
+        | Some(Command::CodexUpdate)
         | Some(Command::CodexAuth { .. })
         | Some(Command::DeepseekAuth { .. })
         | Some(Command::Attach { .. })

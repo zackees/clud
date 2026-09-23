@@ -3766,3 +3766,31 @@ deliverable there is a known, logged timeout plus a notice saying clud is not
 watching. Note also that the harness's own client path shows no spinner, error,
 or retry state for a hung request; that remains an upstream gap, filed
 separately.
+
+## DD-080: Codex updates use one verified subprocess, not a removal-shim exception
+
+**Context:** zackees/clud#1271. The standalone Codex installer removes staging,
+stale links, and temporary downloads while updating. Inside a CLUD-managed
+session, those calls resolve to the #1183 removal shim and fail its CI plus
+Docker gate, aborting the install before extraction.
+
+**Decision:** Expose `clud codex-update` on Linux and reuse it for automatic
+Codex bootstrap. Fetch only the fixed official release URL, reject redirects,
+cap the response, and require an audited SHA-256. Execute that script with a
+minimal child environment with OS-owned tools first; preserve only an existing
+`~/.local/bin` PATH entry after them so profile handling remains faithful. Do
+not alter the session PATH or the removal shim's gate. The child may remove its own installer staging
+as the verified script directs. Arbitrary shell commands cannot supply script
+contents, an install path, or deletion operands to this entry point.
+
+**Rationale:** A shell receiving installer text from a pipe cannot prove the
+text's origin to the removal shim. Parent-process ancestry or a user-set
+environment token would grant the same exception to unrelated commands. A
+deliberate update command gives CLUD a trust boundary it can verify before the
+script executes, while the common session shell remains protected.
+
+**Consequences:** The normal pipe-to-shell installer remains denied inside a
+managed session; users run `clud codex-update` instead. Upstream installer
+changes require a reviewed hash-pin update. A fixture exercises fresh,
+already-complete, and stale-staging paths, and the normal gate is regression
+tested for a nonexistent operand without CI evidence.

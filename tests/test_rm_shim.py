@@ -66,6 +66,30 @@ def test_rm_alias_safe_dry_run_preserves_file(shim: Path, tmp_path: Path) -> Non
     assert target.read_text() == "must survive"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="real execution gate is Linux-only")
+@pytest.mark.parametrize("exists", [False, True])
+def test_real_rm_still_denies_without_ci_for_existing_or_missing_operand(
+    shim: Path, tmp_path: Path, exists: bool
+) -> None:
+    env = {key: value for key, value in os.environ.items() if "CI" not in key}
+    env.pop("CLUD_RM_DRY_RUN", None)
+    target = tmp_path / "never-created"
+    if exists:
+        target.write_text("must survive")
+    result = process.run(
+        [str(shim), "-rf", str(target)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2, result
+    assert json.loads(result.stdout)["decision"] == "deny"
+    assert target.exists() == exists
+    if exists:
+        assert target.read_text() == "must survive"
+
+
 @pytest.mark.parametrize("state", ["trusted", "replaced", "missing", "system", "unreadable"])
 def test_hook_rm_identity(shim: Path, tmp_path: Path, state: str) -> None:
     directory = tmp_path / state
