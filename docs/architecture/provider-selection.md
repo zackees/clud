@@ -192,8 +192,17 @@ access, daemon dispatch, or child launch:
 explicit provider flag
 -> provider inferred from a qualified/known model
 -> saved direct-provider default
+-> DeepSeek only-authorized-provider fallback for bare live direct launches
 -> Claude built-in default
 ```
+
+The DeepSeek fallback runs only when no explicit provider/model/harness or
+saved provider/harness overrides routing. It requires a well-formed DeepSeek
+key in clud's native vault, a Claude harness route (bootstrapped if needed), and
+negative read-only authentication status from both Claude Code and Codex.
+An unavailable or unparseable external status is unknown, not unauthenticated,
+so it cannot trigger the fallback. DeepSeek's ordinary provider preflight
+still validates the key before work is accepted; dry runs never read credentials.
 
 An explicit provider conflicting with the model's provider is a local error.
 Unified mode does not import the saved direct-provider provider or harness; it

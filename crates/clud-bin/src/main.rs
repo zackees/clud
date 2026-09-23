@@ -359,11 +359,40 @@ fn run(mut args: args::Args) {
         }
     }
 
-    let auto_selected_harness = if harness_picker::should_select(
-        &args,
-        io::stdin().is_terminal(),
-        io::stderr().is_terminal(),
-    ) {
+    // Resolve saved routing policy before the picker: installed executables
+    // do not imply that their providers are authorized.
+    let (launch_preferences, preferences_known) =
+        match clud_settings::load_launch_preferences_read_only() {
+            Ok(preferences) => (preferences, true),
+            Err(error) => {
+                eprintln!(
+                    "[clud] warning: failed to load launch preferences: {error}; using defaults"
+                );
+                (clud_settings::LaunchPreferencesSnapshot::default(), false)
+            }
+        };
+    let global_launch_preferences = launch_preferences.global;
+    let fallback_is_eligible = preferences_known
+        && harness_picker::deepseek_fallback_candidate(
+            &args,
+            global_launch_preferences.model_provider,
+        )
+        && matches!(
+            global_launch_preferences.harness,
+            None | Some(backend::HarnessSelection::Default | backend::HarnessSelection::Claude)
+        );
+    let deepseek_credential_fallback = fallback_is_eligible
+        && harness_picker::deepseek_only_fallback(
+            &args,
+            global_launch_preferences.model_provider,
+            harness_picker::credential_snapshot(),
+        );
+    let auto_selected_harness = if !deepseek_credential_fallback
+        && harness_picker::should_select(
+            &args,
+            io::stdin().is_terminal(),
+            io::stderr().is_terminal(),
+        ) {
         let installed = harness_picker::discover_installed_with(|candidate| {
             backend_bootstrap::locate_installed_backend(candidate).is_some()
         });
@@ -407,17 +436,10 @@ fn run(mut args: args::Args) {
     // Routing is resolved from a read-only snapshot after the separate
     // launcher-history write above. No provider preference is mutated merely
     // because the user chose an installed harness from the launcher.
-    let launch_preferences = match clud_settings::load_launch_preferences_read_only() {
-        Ok(preferences) => preferences,
-        Err(error) => {
-            eprintln!("[clud] warning: failed to load launch preferences: {error}; using defaults");
-            clud_settings::LaunchPreferencesSnapshot::default()
-        }
-    };
-    let global_launch_preferences = launch_preferences.global;
     let cli_provider = args
         .explicit_model_provider()
-        .or_else(|| auto_selected_harness.map(backend::Backend::as_model_provider));
+        .or_else(|| auto_selected_harness.map(backend::Backend::as_model_provider))
+        .or(deepseek_credential_fallback.then_some(backend::ModelProvider::DeepSeek));
     let cli_harness = args
         .harness
         .or_else(|| auto_selected_harness.map(backend::HarnessSelection::for_backend));
@@ -429,7 +451,8 @@ fn run(mut args: args::Args) {
         .or(model_inferred_provider)
         .or(global_launch_preferences.model_provider)
         .unwrap_or(backend::ModelProvider::Claude);
-    let explicit_provider_intent = cli_provider.is_some() || model_inferred_provider.is_some();
+    let explicit_provider_intent =
+        args.explicit_model_provider().is_some() || model_inferred_provider.is_some();
     let provider_profile = (args.routing_mode() == backend::RoutingMode::Direct)
         .then(|| launch_preferences.profile(direct_provider))
         .flatten();
@@ -451,6 +474,9 @@ fn run(mut args: args::Args) {
     };
     if profile_harness.is_some() {
         launch_target.harness_source = backend::PreferenceSource::ProviderSetting;
+    }
+    if deepseek_credential_fallback {
+        launch_target.provider_source = backend::PreferenceSource::CredentialFallback;
     }
     if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
         eprintln!("{error}");

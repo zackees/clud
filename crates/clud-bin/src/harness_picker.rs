@@ -4,8 +4,188 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use crate::args::Args;
-use crate::backend::Backend;
+use crate::backend::{Backend, ModelProvider, RoutingMode};
 use crate::selector::{self, check_marker, Key, Note, OnExit, Row, Selector, Step, View};
+use running_process::ReadStatus;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthState {
+    KnownYes,
+    KnownNo,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CredentialSnapshot {
+    pub deepseek: AuthState,
+    pub claude: AuthState,
+    pub codex: AuthState,
+}
+
+/// Never displace explicit routing or a saved direct-provider preference.
+/// Unknown external authentication is deliberately not treated as absent.
+pub fn deepseek_only_fallback(
+    args: &Args,
+    saved_provider: Option<ModelProvider>,
+    auth: CredentialSnapshot,
+) -> bool {
+    deepseek_fallback_candidate(args, saved_provider)
+        && auth.deepseek == AuthState::KnownYes
+        && auth.claude == AuthState::KnownNo
+        && auth.codex == AuthState::KnownNo
+}
+
+pub fn deepseek_fallback_candidate(args: &Args, saved_provider: Option<ModelProvider>) -> bool {
+    matches!(args.command, None | Some(crate::args::Command::Run))
+        && args.routing_mode() == RoutingMode::Direct
+        && !args.dry_run
+        && args.explicit_model_provider().is_none()
+        && args.harness.is_none()
+        && args.model.is_none()
+        && args.effort.is_none()
+        && args.context_window.is_none()
+        && args.prompt.is_none()
+        && args.message.is_none()
+        && !args.continue_session
+        && args.resume.is_none()
+        && !args.detach
+        && !args.detachable
+        && args.transcript.is_none()
+        && !args.experimental_daemon_centralized
+        && args.daemon_mode.is_none()
+        && args.passthrough.is_empty()
+        && saved_provider.is_none()
+}
+
+/// Inspect only supported status surfaces; never read another CLI's secret
+/// files or print status output (which may contain account information).
+pub fn credential_snapshot() -> CredentialSnapshot {
+    let deepseek = crate::provider_registry::descriptor_for(ModelProvider::DeepSeek)
+        .expect("DeepSeek descriptor is registered");
+    let deepseek = match crate::provider_auth::has_well_formed_stored_key(deepseek) {
+        Ok(true) => AuthState::KnownYes,
+        Ok(false) => AuthState::KnownNo,
+        Err(_) => AuthState::Unknown,
+    };
+    if deepseek != AuthState::KnownYes {
+        return CredentialSnapshot {
+            deepseek,
+            claude: AuthState::Unknown,
+            codex: AuthState::Unknown,
+        };
+    }
+    let claude = if credential_env_present(&["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
+        || credential_env_present(&[
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ]) {
+        AuthState::KnownYes
+    } else if let Some(path) = crate::backend_bootstrap::locate_installed_backend(Backend::Claude) {
+        match status_command(vec![
+            path.to_string_lossy().into_owned(),
+            "auth".into(),
+            "status".into(),
+            "--json".into(),
+        ]) {
+            Ok((0, output)) => parse_claude_auth_status(&output),
+            Ok(_) => AuthState::Unknown,
+            Err(_) => AuthState::Unknown,
+        }
+    } else {
+        AuthState::KnownNo
+    };
+    let clud_codex = dirs::home_dir()
+        .map(|home| crate::codex_auth::load_at(&home))
+        .unwrap_or(Err("home directory unavailable".to_string()));
+    let codex = if credential_env_present(&["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"])
+        || matches!(&clud_codex, Ok(Some(_)))
+    {
+        AuthState::KnownYes
+    } else if clud_codex.is_err() {
+        AuthState::Unknown
+    } else if let Some(path) = crate::backend_bootstrap::locate_installed_backend(Backend::Codex) {
+        match status_command(vec![
+            path.to_string_lossy().into_owned(),
+            "login".into(),
+            "status".into(),
+        ]) {
+            Ok((exit, output)) => parse_codex_auth_status(exit, &output),
+            Err(_) => AuthState::Unknown,
+        }
+    } else {
+        AuthState::KnownNo
+    };
+    CredentialSnapshot {
+        deepseek,
+        claude,
+        codex,
+    }
+}
+
+fn parse_claude_auth_status(output: &[u8]) -> AuthState {
+    match serde_json::from_slice::<serde_json::Value>(output)
+        .ok()
+        .and_then(|status| status.get("loggedIn").and_then(serde_json::Value::as_bool))
+    {
+        Some(true) => AuthState::KnownYes,
+        Some(false) => AuthState::KnownNo,
+        None => AuthState::Unknown,
+    }
+}
+
+fn parse_codex_auth_status(exit: i32, output: &[u8]) -> AuthState {
+    if exit == 0 {
+        AuthState::KnownYes
+    } else if String::from_utf8_lossy(output).trim() == "Not logged in" {
+        AuthState::KnownNo
+    } else {
+        AuthState::Unknown
+    }
+}
+
+fn credential_env_present(names: &[&str]) -> bool {
+    names.iter().any(|name| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty() && value != "0" && value != "false")
+    })
+}
+
+fn status_command(argv: Vec<String>) -> Result<(i32, Vec<u8>), ()> {
+    let process = crate::subprocess::ManagedSubprocess::start_inheriting_env(
+        argv,
+        None,
+        true,
+        crate::win_creation_flags::invisible_helper_creationflags(),
+    )
+    .map_err(|_| ())?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut output = Vec::new();
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = process.kill();
+            return Err(());
+        }
+        match process.read_stdout(Some(Duration::from_millis(100))) {
+            ReadStatus::Line(line) => {
+                output.extend_from_slice(&line);
+                if output.len() > 8192 {
+                    let _ = process.kill();
+                    return Err(());
+                }
+            }
+            ReadStatus::Timeout => {
+                let _ = process.poll();
+            }
+            ReadStatus::Eof => break,
+        }
+    }
+    let exit = process
+        .wait(Some(Duration::from_millis(100)))
+        .map_err(|_| ())?;
+    Ok((exit, output))
+}
 
 pub const DEFAULT_COUNTDOWN: Duration = Duration::from_secs(3);
 
@@ -224,6 +404,120 @@ mod tests {
     use super::*;
     use crate::backend::Backend;
     use std::time::Duration;
+
+    #[test]
+    fn deepseek_sole_authorized_route_overrides_installed_harness_picker() {
+        let args = parse(&["clud"]);
+        let auth = CredentialSnapshot {
+            deepseek: AuthState::KnownYes,
+            claude: AuthState::KnownNo,
+            codex: AuthState::KnownNo,
+        };
+        assert!(deepseek_only_fallback(&args, None, auth));
+        assert!(!deepseek_only_fallback(
+            &args,
+            Some(crate::backend::ModelProvider::Claude),
+            auth
+        ));
+        assert!(!deepseek_only_fallback(
+            &parse(&["clud", "--claude"]),
+            None,
+            auth
+        ));
+        assert!(!deepseek_only_fallback(
+            &parse(&["clud", "--dry-run"]),
+            None,
+            auth
+        ));
+        assert!(!deepseek_only_fallback(
+            &parse(&["clud", "--harness", "deepseek"]),
+            None,
+            auth
+        ));
+        assert!(!deepseek_only_fallback(
+            &parse(&["clud", "--unified"]),
+            None,
+            auth
+        ));
+        assert!(deepseek_only_fallback(&parse(&["clud", "run"]), None, auth));
+        let target = crate::backend::resolve_routed_launch_target(
+            RoutingMode::Direct,
+            Some(ModelProvider::DeepSeek),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(target.model_provider, ModelProvider::DeepSeek);
+        assert_eq!(target.effective_harness, Backend::Claude);
+    }
+
+    #[test]
+    fn deepseek_fallback_requires_positive_exclusive_evidence() {
+        let args = parse(&["clud"]);
+        for state in [AuthState::KnownNo, AuthState::Unknown] {
+            assert!(!deepseek_only_fallback(
+                &args,
+                None,
+                CredentialSnapshot {
+                    deepseek: state,
+                    claude: AuthState::KnownNo,
+                    codex: AuthState::KnownNo,
+                }
+            ));
+        }
+        for state in [AuthState::KnownYes, AuthState::Unknown] {
+            assert!(!deepseek_only_fallback(
+                &args,
+                None,
+                CredentialSnapshot {
+                    deepseek: AuthState::KnownYes,
+                    claude: state,
+                    codex: AuthState::KnownNo,
+                }
+            ));
+            assert!(!deepseek_only_fallback(
+                &args,
+                None,
+                CredentialSnapshot {
+                    deepseek: AuthState::KnownYes,
+                    claude: AuthState::KnownNo,
+                    codex: state,
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn claude_auth_status_requires_documented_boolean_field() {
+        assert_eq!(
+            parse_claude_auth_status(br#"{"loggedIn":true}"#),
+            AuthState::KnownYes
+        );
+        assert_eq!(
+            parse_claude_auth_status(br#"{"loggedIn":false}"#),
+            AuthState::KnownNo
+        );
+        for output in [br#"{}"#.as_slice(), br#"{"loggedIn":"false"}"#, b"not JSON"] {
+            assert_eq!(parse_claude_auth_status(output), AuthState::Unknown);
+        }
+    }
+
+    #[test]
+    fn codex_status_error_is_not_mistaken_for_logged_out() {
+        assert_eq!(
+            parse_codex_auth_status(1, b"Not logged in\n"),
+            AuthState::KnownNo
+        );
+        assert_eq!(
+            parse_codex_auth_status(1, b"Error checking login status"),
+            AuthState::Unknown
+        );
+        assert_eq!(
+            parse_codex_auth_status(0, b"Logged in using ChatGPT"),
+            AuthState::KnownYes
+        );
+    }
 
     fn parse(argv: &[&str]) -> crate::args::Args {
         crate::args::Args::parse_from_raw(argv.iter().map(|arg| (*arg).to_string()).collect())
