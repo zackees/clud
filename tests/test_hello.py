@@ -453,6 +453,36 @@ def test_dry_run_codex() -> None:
     assert not any("terra" in arg or arg == "medium" for arg in data["command"])
 
 
+def test_dry_run_codex_through_claude_defaults_to_luna_high() -> None:
+    result = _run("--dry-run", "--codex", "--harness", "claude", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_selection"]["model"] == "codex-luna"
+    assert data["model_selection"]["wire_model"] == "gpt-5.6-luna"
+    assert data["model_selection"]["effort"] == "high"
+    assert data["model_selection"]["model_source"] == "catalog_default"
+    assert data["model_selection"]["effort_source"] == "catalog_default"
+    assert data["command"].count("clud-claude-codex-luna") == 1
+    assert data["command"][data["command"].index("--effort") + 1] == "high"
+
+
+@pytest.mark.parametrize(
+    ("extra", "model", "effort"),
+    [
+        (["--model", "codex-sol"], "codex-sol", "low"),
+        (["--effort", "low"], "codex-luna", "low"),
+    ],
+)
+def test_dry_run_codex_through_claude_respects_explicit_selection(
+    extra: list[str], model: str, effort: str
+) -> None:
+    result = _run("--dry-run", "--codex", "--harness", "claude", *extra, "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    selection = json.loads(result.stdout)["model_selection"]
+    assert selection["model"] == model
+    assert selection["effort"] == effort
+
+
 @pytest.mark.parametrize(
     ("verb", "target", "prompt_fragment"),
     [

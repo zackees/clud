@@ -7,6 +7,10 @@ credential route. Native Claude launches and every non-bridge route remain
 unchanged; stopping the foreground runtime stops the listener and is the
 rollback boundary.
 
+With no model selection, this route starts on Codex Luna at high effort.
+Native Codex keeps its Sol at low effort default; explicit model and effort
+choices and saved provider settings retain their precedence.
+
 ## Admission and retries
 
 When the direct bridge has no clud-owned subscription record or API key, an

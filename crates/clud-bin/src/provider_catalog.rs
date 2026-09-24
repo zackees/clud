@@ -929,6 +929,23 @@ pub fn resolve_for_launch_with_server_default(
     Ok(Some(selection.clone()))
 }
 
+/// The Codex provider keeps Sol as its native default. Its Claude-harness
+/// bridge starts on Luna at high effort when the catalog supplied the model.
+/// Explicit models, saved profiles, and served defaults keep their own effort.
+pub fn apply_codex_claude_default(selection: &mut ResolvedModelSelection) {
+    if selection.provider != ModelProvider::Codex
+        || selection.model_source != Some(SelectionSource::CatalogDefault)
+    {
+        return;
+    }
+    let luna = model_by_cli_id("codex-luna").expect("Codex Luna catalog row");
+    selection.model = Some(luna.cli_id.to_string());
+    selection.wire_model = Some(luna.wire_id.to_string());
+    if selection.effort_source == Some(SelectionSource::CatalogDefault) {
+        selection.effort = Some(EffortLevel::High);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Launch-time model allowlist (#1257)
 //

@@ -250,13 +250,16 @@ fn native_codex_catalog_default_is_sol_at_low_effort() {
 }
 
 #[test]
-fn codex_through_claude_catalog_default_is_sol_at_low_effort() {
-    let args = args_with_codex_catalog_default();
+fn codex_through_claude_catalog_default_is_luna_at_high_effort() {
+    let mut args = args_with_codex_catalog_default();
+    crate::provider_catalog::apply_codex_claude_default(
+        args.resolved_model_selection.as_mut().unwrap(),
+    );
     let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
     assert_eq!(
         plan.command
             .windows(2)
-            .filter(|pair| pair == &["--model", "clud-claude-codex-sol"])
+            .filter(|pair| pair == &["--model", "clud-claude-codex-luna"])
             .count(),
         1,
         "{}",
@@ -265,7 +268,7 @@ fn codex_through_claude_catalog_default_is_sol_at_low_effort() {
     assert_eq!(
         plan.command
             .windows(2)
-            .filter(|pair| pair == &["--effort", "low"])
+            .filter(|pair| pair == &["--effort", "high"])
             .count(),
         1,
         "{}",
@@ -617,17 +620,29 @@ fn unified_initial_routes_use_discovery_ids_and_keep_plan_mode() {
 
 #[test]
 fn model_less_bridge_effort_pins_the_reviewed_default_model() {
-    let args = parse(&["clud", "--effort", "high"]);
+    let mut args = parse(&["clud", "--effort", "high"]);
+    args.resolved_model_selection = crate::provider_catalog::resolve_for_launch(
+        ModelProvider::Codex,
+        None,
+        Some("high"),
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    crate::provider_catalog::apply_codex_claude_default(
+        args.resolved_model_selection.as_mut().unwrap(),
+    );
     let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
     assert!(plan
         .command
         .windows(2)
-        .any(|pair| pair == ["--model", "clud-claude-codex-sol"]));
+        .any(|pair| pair == ["--model", "clud-claude-codex-luna"]));
     assert!(plan
         .command
         .windows(2)
         .any(|pair| pair == ["--effort", "high"]));
-    assert_eq!(plan.codex_model.as_deref(), Some("gpt-5.6-sol@high"));
+    assert_eq!(plan.codex_model.as_deref(), Some("gpt-5.6-luna@high"));
 }
 
 #[test]

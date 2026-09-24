@@ -535,6 +535,14 @@ fn run(mut args: args::Args) {
                 std::process::exit(2);
             }
         };
+    if direct_launch
+        && launch_target.model_provider == backend::ModelProvider::Codex
+        && launch_target.effective_harness == backend::Backend::Claude
+    {
+        if let Some(selection) = args.resolved_model_selection.as_mut() {
+            clud::provider_catalog::apply_codex_claude_default(selection);
+        }
+    }
     // A pin outside an explicit `--allow-model` fails here, before bootstrap
     // or the first turn: by the time a request is in flight the user has
     // waited, and the refusal would arrive wrapped in the harness's own
