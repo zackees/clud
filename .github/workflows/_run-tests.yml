@@ -65,18 +65,23 @@ jobs:
       # build-backend = "soldr", so `uv run` would sync the project and trigger
       # a PEP 517 maturin build -- which on this runner hits the removed
       # toolchain and fails every job. See lint:8-24.
-      - name: Run ${{ inputs.suite }} suite
-        shell: bash
-        run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'
-
-      # ci.run_bundle installs the wheel before running the suite. Exercise the
-      # packaged Kitty GUI in a native Windows runner session without user interaction.
+      # Run the focused GUI check before the broad integration suite, which can
+      # hang independently. setup-exec has unpacked the wheel into bundle/dist.
       - name: Smoke installed Kitty GUI headlessly
         if: ${{ inputs.target == 'x86_64-pc-windows-msvc' && inputs.suite == 'integration' }}
         shell: pwsh
-        # VENV_PY is exported as an MSYS /d/... path by setup-exec; pwsh
-        # interprets that as a rooted Windows path on the current drive.
-        run: pwsh -NoProfile -File ci/kitty_windows_smoke.ps1 -ScriptsDir (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts')
+        run: |
+          $wheels = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'bundle/dist') -Filter '*.whl' -File)
+          if ($wheels.Count -ne 1) { throw "Expected one bundled wheel, found $($wheels.Count)" }
+          $wheel = $wheels[0]
+          uv pip install --python (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts/python.exe') --reinstall --no-deps $wheel.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Wheel install failed with exit $LASTEXITCODE" }
+          pwsh -NoProfile -File ci/kitty_windows_smoke.ps1 -ScriptsDir (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts')
+          if ($LASTEXITCODE -ne 0) { throw "Kitty GUI smoke failed with exit $LASTEXITCODE" }
+
+      - name: Run ${{ inputs.suite }} suite
+        shell: bash
+        run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'
 
       - name: Diagnose Linux failure
         if: ${{ failure() && runner.os == 'Linux' }}
