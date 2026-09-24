@@ -38,9 +38,10 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
     launch_args = smoke.split("foreach ($arg in @(", 1)[1].split(")) {", 1)[0]
     assert "--always-new-process" not in launch_args
     assert "socket=$env:WEZTERM_UNIX_SOCKET" in smoke
-    assert "socket=%WEZTERM_UNIX_SOCKET%" in smoke
+    assert "WEZTERM_UNIX_SOCKET" in smoke
     assert '$start.Environment[\'PATH\'] = "$probeDir;' in smoke
     assert "$start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker" in smoke
+    assert "[IO.File]::Copy($MockAgentPath, $backend)" in smoke
     assert "reused the live GUI" in smoke
     assert "first GUI child status 23" in smoke
     assert "reused pane status 37" in smoke
@@ -107,22 +108,14 @@ def test_windows_smoke_outer_timeout_reports_backend_and_gui_state() -> None:
     assert "Stop-SmokeProcess $process 'seed GUI'" not in timeout
 
 
-def test_windows_smoke_fake_backend_marks_version_probe() -> None:
+def test_windows_smoke_uses_bundled_native_mock_backend() -> None:
     smoke = SMOKE.read_text(encoding="utf-8")
-    assert 'echo version-probe >"%CLUD_KITTY_SMOKE_VERSION_MARKER%"' in smoke
-    assert "$start.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker" in smoke
-    assert "$start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir" in smoke
-    assert "$start.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker" in smoke
-    assert 'if /I "%%~A"=="kitty-smoke-no-daemon"' in smoke
-    assert 'set "backendMarker=%CLUD_KITTY_BACKEND_CONTROL_MARKER%"' in smoke
-    assert 'args=%* >"%backendMarker%"' in smoke
-    assert "$outer.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker" in smoke
-    assert "$outer.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir" in smoke
-    assert "'--subprocess', '--verbose', '-p'" in smoke
-    assert "$controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'" in smoke
-    assert "$control.Environment['CLUD_KITTY_SMOKE_MARKER'] = $controlMarker" in smoke
-    assert "$control.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker" in smoke
-    assert "Stop-SmokeProcess $controlProcess 'no-daemon control launcher'" in smoke
+    assert "[Parameter(Mandatory = $true)][string]$MockAgentPath" in smoke
+    assert "[IO.File]::Copy($MockAgentPath, $backend)" in smoke
+    assert "--mock-report-file', $backendMarker" in smoke
+    assert "--mock-exit-code', '37'" in smoke
+    assert "ConvertFrom-Json" in smoke
+    assert "$backendResult.env.WEZTERM_UNIX_SOCKET" in smoke
 
 
 def test_kitty_term_config_has_core_behaviors() -> None:

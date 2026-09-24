@@ -4,6 +4,7 @@
 # The second probe below also exercises the installed clud --kitty-term path.
 param(
     [Parameter(Mandatory = $true)][string]$ScriptsDir,
+    [Parameter(Mandatory = $true)][string]$MockAgentPath,
     [int]$TimeoutSeconds = 45
 )
 
@@ -20,6 +21,9 @@ foreach ($file in @($wezterm, $gui, $config, $clud)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         throw "Installed Kitty bundle is missing $file"
     }
+}
+if (-not (Test-Path -LiteralPath $MockAgentPath -PathType Leaf)) {
+    throw "Mock agent is missing at $MockAgentPath"
 }
 
 function Get-BundledGuiPids {
@@ -134,22 +138,9 @@ foreach ($arg in @('--config-file', $config, 'start', '--no-auto-connect',
     Write-Host "Native Kitty GUI child is live with $observed"
 
 # Route a real installed clud invocation through its packaged launcher. A
-# private claude.cmd on PATH is deterministic and needs no account or network.
-# The version branch satisfies clud's Claude Code version probe.
-$backend = Join-Path $probeDir 'claude.cmd'
-$batch = @'
-@echo off
-if /I "%~1"=="--version" (
-  echo version-probe >"%CLUD_KITTY_SMOKE_VERSION_MARKER%"
-  echo 9.9.9 (mock-agent)
-  exit /b 0
-)
-set "backendMarker=%CLUD_KITTY_BACKEND_MARKER%"
-for %%A in (%*) do if /I "%%~A"=="kitty-smoke-no-daemon" set "backendMarker=%CLUD_KITTY_BACKEND_CONTROL_MARKER%"
-echo kitty=%CLUD_KITTY_TERM% pane=%WEZTERM_PANE% socket=%WEZTERM_UNIX_SOCKET% args=%* >"%backendMarker%"
-exit /b 37
-'@
-[IO.File]::WriteAllText($backend, $batch, [Text.Encoding]::ASCII)
+# private native mock agent on PATH is deterministic and needs no account or network.
+$backend = Join-Path $probeDir 'claude.exe'
+[IO.File]::Copy($MockAgentPath, $backend)
 $outer = [Diagnostics.ProcessStartInfo]::new($clud)
 $outer.UseShellExecute = $false
 $outer.WorkingDirectory = $ScriptsDir
@@ -161,7 +152,8 @@ $outer.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker
 $outer.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $outer.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
 $outer.Environment['CLUD_NO_UNLOCK'] = '1'
-foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p', 'kitty-smoke')) {
+foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p', 'kitty-smoke', '--',
+                   '--mock-report-file', $backendMarker, '--mock-exit-code', '37')) {
     [void]$outer.ArgumentList.Add($arg)
 }
 
@@ -241,12 +233,12 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
     if (-not (Test-Path -LiteralPath $backendMarker -PathType Leaf)) {
         throw "CLUD_KITTY_LAUNCH_FAILED: backend did not run; outer exit=$($outerProcess.ExitCode)"
     }
-    $backendResult = (Get-Content -LiteralPath $backendMarker -Raw).Trim()
-    if ($backendResult -notmatch '^kitty=1 pane=\d+ socket=(\S+) args=.*kitty-smoke') {
+    $backendResult = Get-Content -LiteralPath $backendMarker -Raw | ConvertFrom-Json
+    if ($backendResult.exit_code -ne 37 -or [string]::IsNullOrWhiteSpace($backendResult.env.WEZTERM_UNIX_SOCKET)) {
         throw "Installed clud did not forward into a Kitty pane: $backendResult"
     }
-    if ($Matches[1] -ne $serverSocket) {
-        throw "Installed clud started another GUI instead of reusing the live GUI: seed=$serverSocket probe=$($Matches[1])"
+    if ($backendResult.env.WEZTERM_UNIX_SOCKET -ne $serverSocket) {
+        throw "Installed clud started another GUI instead of reusing the live GUI: seed=$serverSocket probe=$($backendResult.env.WEZTERM_UNIX_SOCKET)"
     }
     if ($outerProcess.ExitCode -ne 37) {
         throw "Installed clud failed to propagate backend exit 37: exit=$($outerProcess.ExitCode)"

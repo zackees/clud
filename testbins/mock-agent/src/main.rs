@@ -375,6 +375,7 @@ fn main() {
     let enable_gateway_model_discovery =
         std::env::var("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY").ok();
     let max_context_tokens = std::env::var("CLAUDE_CODE_MAX_CONTEXT_TOKENS").ok();
+    let wezterm_unix_socket = std::env::var("WEZTERM_UNIX_SOCKET").ok();
     let bridge_probe = codex_bridge_probe_to.as_deref().map(run_codex_bridge_probe);
     let cache_identity_probe = codex_cache_identity_probe_to
         .as_deref()
@@ -410,6 +411,7 @@ fn main() {
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": disable_nonessential_traffic,
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": enable_gateway_model_discovery,
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS": max_context_tokens,
+            "WEZTERM_UNIX_SOCKET": wezterm_unix_socket,
         },
         "codex_bridge_probe": bridge_probe,
         "codex_cache_identity_probe": cache_identity_probe,
