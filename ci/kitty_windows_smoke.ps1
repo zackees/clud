@@ -81,9 +81,12 @@ function Stop-SmokeProcess {
 
 $process = $null
 $outerProcess = $null
+$controlProcess = $null
 try {
 $marker = Join-Path $probeDir 'seed.txt'
 $backendMarker = Join-Path $probeDir 'backend.txt'
+$controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'
+$versionMarker = Join-Path $probeDir 'version.txt'
 $child = 'Set-Content -LiteralPath $env:CLUD_KITTY_SMOKE_MARKER -Value "kitty=$env:CLUD_KITTY_TERM pane=$env:WEZTERM_PANE socket=$env:WEZTERM_UNIX_SOCKET"; while (-not (Test-Path -LiteralPath $env:CLUD_KITTY_SMOKE_RELEASE)) { Start-Sleep -Milliseconds 100 }; exit 23'
 $start = [Diagnostics.ProcessStartInfo]::new($gui)
 $start.UseShellExecute = $false
@@ -134,6 +137,7 @@ $backend = Join-Path $probeDir 'claude.cmd'
 $batch = @'
 @echo off
 if /I "%~1"=="--version" (
+  echo version-probe >"%CLUD_KITTY_SMOKE_VERSION_MARKER%"
   echo 9.9.9 (mock-agent)
   exit /b 0
 )
@@ -146,9 +150,11 @@ $outer.UseShellExecute = $false
 $outer.WorkingDirectory = $ScriptsDir
 $outer.Environment['PATH'] = "$probeDir;$($outer.Environment['PATH'])"
 $outer.Environment['CLUD_KITTY_SMOKE_MARKER'] = $backendMarker
+$outer.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker
+$outer.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $outer.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
 $outer.Environment['CLUD_NO_UNLOCK'] = '1'
-foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '-p', 'kitty-smoke')) {
+foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p', 'kitty-smoke')) {
     [void]$outer.ArgumentList.Add($arg)
 }
 
@@ -163,12 +169,29 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '-p', 'kitty-smok
             $backendState = "unavailable: $($_.Exception.Message)"
         }
         $guiPids = @()
+        $versionState = 'absent'
+        try {
+            if (Test-Path -LiteralPath $versionMarker -PathType Leaf) {
+                $versionState = (Get-Content -LiteralPath $versionMarker -Raw).Trim()
+            }
+        } catch {
+            $versionState = "unavailable: $($_.Exception.Message)"
+        }
         try {
             $guiPids = @(Get-BundledGuiPids)
         } catch {
             $guiPids = @("unavailable: $($_.Exception.Message)")
         }
         $outerChildren = @()
+        $launchTrace = @()
+        try {
+            foreach ($log in (Get-ChildItem -LiteralPath $probeDir -Filter 'clud-*.log' -File -ErrorAction Stop)) {
+                $launchTrace += "$($log.Name): $((Get-Content -LiteralPath $log.FullName -Tail 25 -ErrorAction Stop) -join ' | ')"
+            }
+            if ($launchTrace.Count -eq 0) { $launchTrace = @('absent') }
+        } catch {
+            $launchTrace = @("unavailable: $($_.Exception.Message)")
+        }
         try {
             foreach ($candidate in (Get-CimInstance Win32_Process -Filter "ParentProcessId = $($outerProcess.Id)" -ErrorAction Stop)) {
                 $outerChildren += "$($candidate.Name):$($candidate.ProcessId)"
@@ -176,7 +199,36 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '-p', 'kitty-smok
         } catch {
             $outerChildren = @("unavailable: $($_.Exception.Message)")
         }
-        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds; backend_marker=$backendState bundled_gui_pids=$($guiPids -join ',') outer_children=$($outerChildren -join ',')"
+        $seedState = "pid=$($process.Id) exited=$($process.HasExited)"
+        # Keep the seed GUI alive for one bounded control run. This is only a
+        # differential diagnostic; the default launch still fails the smoke.
+        Stop-SmokeProcess $outerProcess 'timed-out clud launcher'
+        $outerProcess = $null
+        $controlState = 'not-started'
+        try {
+            $control = [Diagnostics.ProcessStartInfo]::new($clud)
+            $control.UseShellExecute = $false
+            $control.WorkingDirectory = $ScriptsDir
+            foreach ($entry in $outer.Environment.GetEnumerator()) {
+                $control.Environment[$entry.Key] = $entry.Value
+            }
+            $control.Environment['CLUD_KITTY_SMOKE_MARKER'] = $controlMarker
+            foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose',
+                               '--no-daemon', '-p', 'kitty-smoke')) {
+                [void]$control.ArgumentList.Add($arg)
+            }
+            $controlProcess = [Diagnostics.Process]::Start($control)
+            $controlExited = $controlProcess.WaitForExit(15000)
+            $controlBackend = 'absent'
+            if (Test-Path -LiteralPath $controlMarker -PathType Leaf) {
+                $controlBackend = "present: $((Get-Content -LiteralPath $controlMarker -Raw).Trim())"
+            }
+            $controlExit = if ($controlExited) { "$($controlProcess.ExitCode)" } else { 'running' }
+            $controlState = "marker=$controlBackend exit=$controlExit"
+        } catch {
+            $controlState = "unavailable: $($_.Exception.Message)"
+        }
+        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds; backend_marker=$backendState version_probe=$versionState seed=$seedState bundled_gui_pids=$($guiPids -join ',') outer_children=$($outerChildren -join ',') launch_trace=$($launchTrace -join ' || ') outer_argv=$($outer.ArgumentList -join ' ') cwd=$ScriptsDir no_daemon_control=$controlState control_caveat=first_attempt_pane_may_remain"
     }
     if (-not (Test-Path -LiteralPath $backendMarker -PathType Leaf)) {
         throw "CLUD_KITTY_LAUNCH_FAILED: backend did not run; outer exit=$($outerProcess.ExitCode)"
@@ -206,6 +258,7 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '-p', 'kitty-smok
 } finally {
     # Stop the launcher before the seed GUI, so no new pane can be spawned
     # while the GUI is being torn down. Never replace the probe's real error.
+    Stop-SmokeProcess $controlProcess 'no-daemon control launcher'
     Stop-SmokeProcess $outerProcess 'clud launcher'
     Stop-SmokeProcess $process 'seed GUI'
     # A launcher may exit after spawning another GUI. Match the exact wheel

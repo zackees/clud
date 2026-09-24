@@ -52,7 +52,7 @@ def test_windows_smoke_timeout_reports_whether_child_ran() -> None:
     assert "marker=absent" in timeout
     assert "ParentProcessId = $($process.Id)" in timeout
     assert "exited=$($process.HasExited)" in timeout
-    assert "backend=$backendState seed=$seedState" in smoke
+    assert "backend_marker=$backendState version_probe=$versionState seed=$seedState" in smoke
 
 
 def test_windows_smoke_cleans_up_both_process_trees_and_probe_directory() -> None:
@@ -90,7 +90,32 @@ def test_windows_smoke_outer_timeout_reports_backend_and_gui_state() -> None:
     assert "backend_marker=$backendState" in timeout
     assert "bundled_gui_pids=$($guiPids -join ',')" in timeout
     assert "outer_children=$($outerChildren -join ',')" in timeout
-    assert "Stop-SmokeProcess" not in timeout
+    assert "version_probe=$versionState" in timeout
+    assert "launch_trace=$($launchTrace -join ' || ')" in timeout
+    assert "outer_argv=$($outer.ArgumentList -join ' ') cwd=$ScriptsDir" in timeout
+    assert "no_daemon_control=$controlState" in timeout
+    assert "control_caveat=first_attempt_pane_may_remain" in timeout
+    assert "Stop-SmokeProcess $outerProcess 'timed-out clud launcher'" in timeout
+    assert "$controlProcess.WaitForExit(15000)" in timeout
+    assert "Test-Path -LiteralPath $controlMarker -PathType Leaf" in timeout
+    assert "'--no-daemon', '-p', 'kitty-smoke'" in timeout
+    assert timeout.index("Stop-SmokeProcess $outerProcess") < timeout.index(
+        "$controlProcess = [Diagnostics.Process]::Start($control)"
+    )
+    assert "Get-ChildItem -LiteralPath $probeDir -Filter 'clud-*.log'" in timeout
+    assert "Get-Content -LiteralPath $log.FullName -Tail 25" in timeout
+    assert "Stop-SmokeProcess $process 'seed GUI'" not in timeout
+
+
+def test_windows_smoke_fake_backend_marks_version_probe() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    assert 'echo version-probe >"%CLUD_KITTY_SMOKE_VERSION_MARKER%"' in smoke
+    assert "$outer.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker" in smoke
+    assert "$outer.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir" in smoke
+    assert "'--subprocess', '--verbose', '-p'" in smoke
+    assert "$controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'" in smoke
+    assert "$control.Environment['CLUD_KITTY_SMOKE_MARKER'] = $controlMarker" in smoke
+    assert "Stop-SmokeProcess $controlProcess 'no-daemon control launcher'" in smoke
 
 
 def test_kitty_term_config_has_core_behaviors() -> None:
