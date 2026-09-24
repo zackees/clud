@@ -4,7 +4,8 @@ Some values in clud must be changeable without a release, so they are served
 from this repository (#1192,
 [DD-072](../DESIGN_DECISIONS.md#dd-072-server-side-settings-are-one-baked-in-json-document-with-per-section-last-known-good)).
 Today the served values are DeepSeek's model names (#1192) and the OpenRouter
-model-context map (#1258), but the mechanism is general.
+model-context map (#1258). The larger OpenRouter pricing catalog (#1256) is a
+separate document with its own cache and consumer.
 
 ## The document
 
@@ -165,6 +166,33 @@ compacts far too early.
   are `1_000..=10_000_000` tokens. The producer and `ModelContexts::validate`
   mirror each other; changing one without the other turns CI red.
 
+## OpenRouter pricing catalog (#1256)
+
+`assets/openrouter-catalog.json` is a separately embedded fallback and the
+scheduled job's output. `openrouter_catalog::catalog` fetches only the fixed
+raw GitHub document, disables redirects, and uses a three-second timeout. A
+validated response atomically updates the catalog cache under daemon state.
+Network or schema errors keep the last valid cache, then use the embedded
+catalog. Cache entries refresh after six hours. The consumer never follows
+URLs from the remote document.
+
+The producer runs daily at 04:37 UTC and fails the workflow on fetch,
+normalization, or serialization errors. It publishes schema version 1 with
+sorted raw model rows, OpenRouter source attribution, and a convenience
+shortlist. Additive fields do not change the version; Rust ignores unknown
+fields so older builds can read a newer additive document.
+
+Eligibility is a capability and price filter, not a code-quality claim: a row
+needs text input and output, `tools` and `tool_choice`, at least 16,000 context
+tokens, and known input and output rates (which may both be zero). OpenRouter's
+negative automatic-router rate sentinel is retained as unknown and excluded.
+The “lowest-priced
+eligible” shortlist estimates USD per million equivalent tokens as 70% input,
+20% output, and 10% cached input. When no cached-input rate is published,
+normal input pricing is used for that component. The consumer ranks raw rows
+locally and does not alter the static model catalog or harness-owned picker
+(DD-054).
+
 ## Testing
 
 - **Unit tests** never read the cache or the network. Under `cfg(test)` the
@@ -189,6 +217,9 @@ compacts far too early.
 | `crates/clud-bin/src/server_settings/store.rs` | Cache, refresh thread, backoff, fetch |
 | `crates/clud-bin/src/server_settings/sections.rs` | The section registry and the section types (DeepSeek, ModelContexts) |
 | `crates/clud-bin/assets/../../../ci/refresh_model_contexts.py` | The datasheet producer that rewrites the `model_contexts` section on a schedule (#1258) |
+| `crates/clud-bin/assets/openrouter-catalog.json` | Embedded fallback and scheduled pricing catalog (#1256) |
+| `crates/clud-bin/src/openrouter_catalog.rs` | Fixed-origin fetch, cache, fallback, and ranking (#1256) |
+| `ci/refresh_openrouter_catalog.py` | Scheduled model and pricing producer (#1256) |
 
 Consumers:
 

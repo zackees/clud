@@ -1,0 +1,357 @@
+//! Cached OpenRouter model pricing catalog (#1256).
+//!
+//! The scheduled producer publishes a data-only JSON document. This consumer
+//! only requests the fixed GitHub raw-content origin, validates the complete
+//! document before replacing its daemon-state cache, and keeps the embedded
+//! catalog available when the network or document is unavailable.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use serde::Deserialize;
+
+pub const CATALOG_URL: &str = "https://raw.githubusercontent.com/zackees/clud/main/crates/clud-bin/assets/openrouter-catalog.json";
+const EMBEDDED_JSON: &str = include_str!("../assets/openrouter-catalog.json");
+const CACHE_FILE: &str = "openrouter-catalog.json";
+const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+const CACHE_FRESHNESS: Duration = Duration::from_secs(6 * 60 * 60);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
+const SCHEMA_VERSION: u32 = 1;
+const TOP_LIMIT: usize = 20;
+
+/// Token-mix assumptions used for the displayed weighted estimate.
+pub const INPUT_WEIGHT: f64 = 0.70;
+pub const OUTPUT_WEIGHT: f64 = 0.20;
+pub const CACHED_INPUT_WEIGHT: f64 = 0.10;
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Catalog {
+    schema_version: u32,
+    generated_at: String,
+    source: String,
+    models: Vec<Model>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Model {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub context_length: u32,
+    pub input_price_per_token: Option<f64>,
+    pub output_price_per_token: Option<f64>,
+    /// OpenRouter's cached-input read rate, falling back to normal input rate
+    /// when it does not publish a separate cached-input price.
+    pub cached_input_price_per_token: Option<f64>,
+    pub supports_tools: bool,
+    pub supports_reasoning: bool,
+    pub supports_vision: bool,
+    pub eligible_for_coding: bool,
+    pub ineligibility_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricedModel {
+    pub model: Model,
+    /// Weighted estimated cost, USD per million equivalent tokens.
+    pub weighted_usd_per_million_tokens: f64,
+}
+
+impl Model {
+    pub fn weighted_usd_per_million_tokens(&self) -> f64 {
+        let input = self.input_price_per_token.unwrap_or(0.0);
+        let output = self.output_price_per_token.unwrap_or(0.0);
+        let cached_input = self.cached_input_price_per_token.unwrap_or(input);
+        (input * INPUT_WEIGHT + output * OUTPUT_WEIGHT + cached_input * CACHED_INPUT_WEIGHT)
+            * 1_000_000.0
+    }
+}
+
+impl Catalog {
+    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_CATALOG_BYTES {
+            return Err(format!("catalog exceeds {MAX_CATALOG_BYTES} bytes"));
+        }
+        let value = crate::server_settings::parse_strict_json(bytes, MAX_CATALOG_BYTES)?;
+        let mut catalog: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if catalog.schema_version == 0 || catalog.schema_version > SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported catalog schema_version {}",
+                catalog.schema_version
+            ));
+        }
+        if catalog.generated_at.is_empty()
+            || catalog.source != "https://openrouter.ai/api/v1/models"
+        {
+            return Err("catalog has invalid timestamp or source attribution".to_string());
+        }
+        for model in &catalog.models {
+            model.validate()?;
+        }
+        if catalog.models.is_empty() {
+            return Err("catalog has no model rows".to_string());
+        }
+        catalog.models.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(catalog)
+    }
+
+    pub fn models(&self) -> &[Model] {
+        &self.models
+    }
+
+    /// Rank eligible rows using the fixed documented token mix. This is a
+    /// lowest-priced eligible shortlist, not a claim that price measures code
+    /// quality.
+    pub fn cheapest_programming(&self) -> Vec<PricedModel> {
+        let mut rows: Vec<_> = self
+            .models
+            .iter()
+            .filter(|row| row.eligible_for_coding)
+            .map(|model| PricedModel {
+                model: model.clone(),
+                weighted_usd_per_million_tokens: model.weighted_usd_per_million_tokens(),
+            })
+            .collect();
+        rows.sort_by(|left, right| {
+            left.weighted_usd_per_million_tokens
+                .total_cmp(&right.weighted_usd_per_million_tokens)
+                .then_with(|| left.model.id.cmp(&right.model.id))
+        });
+        rows.truncate(TOP_LIMIT);
+        rows
+    }
+}
+
+impl Model {
+    fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty()
+            || self.id.len() > 128
+            || !self
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-/:~".contains(&byte))
+        {
+            return Err(format!("invalid OpenRouter wire ID {:?}", self.id));
+        }
+        if self.name.is_empty()
+            || self.provider.is_empty()
+            || !(1_000..=10_000_000).contains(&self.context_length)
+        {
+            return Err(format!(
+                "{} has invalid name, provider, or context length",
+                self.id
+            ));
+        }
+        for (field, price) in [
+            ("input", self.input_price_per_token),
+            ("output", self.output_price_per_token),
+            ("cached input", self.cached_input_price_per_token),
+        ] {
+            if price.is_some_and(|price| !price.is_finite() || price < 0.0) {
+                return Err(format!("{} has invalid {field} price", self.id));
+            }
+        }
+        if self.eligible_for_coding && (!self.supports_tools || self.context_length < 16_000) {
+            return Err(format!("{} has inconsistent coding eligibility", self.id));
+        }
+        if self.eligible_for_coding
+            && (self.input_price_per_token.is_none() || self.output_price_per_token.is_none())
+        {
+            return Err(format!(
+                "{} is eligible without known input and output prices",
+                self.id
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Get the last-known-good catalog from the daemon state cache, refreshing it
+/// synchronously with a bounded request when it is stale. The built-in copy
+/// is always returned if no valid cache or response is available.
+pub fn catalog() -> Catalog {
+    let cache_path = crate::daemon::default_state_dir()
+        .ok()
+        .map(|dir| dir.join("cache").join(CACHE_FILE));
+    catalog_at(cache_path.as_deref(), SystemTime::now(), fetch)
+}
+
+fn catalog_at(
+    cache_path: Option<&Path>,
+    now: SystemTime,
+    fetch: impl FnOnce() -> Result<Vec<u8>, String>,
+) -> Catalog {
+    let cached = cache_path.and_then(read_cache);
+    if let (Some(path), Some(catalog)) = (cache_path, cached.as_ref()) {
+        if is_fresh(path, now) {
+            return catalog.clone();
+        }
+    }
+    if let Ok(body) = fetch() {
+        if let Ok(refreshed) = Catalog::parse(&body) {
+            if let Some(path) = cache_path {
+                write_cache(path, &body);
+            }
+            return refreshed;
+        }
+    }
+    cached.unwrap_or_else(built_in)
+}
+
+fn built_in() -> Catalog {
+    Catalog::parse(EMBEDDED_JSON.as_bytes()).expect("embedded OpenRouter catalog is valid")
+}
+
+fn fetch() -> Result<Vec<u8>, String> {
+    let response = ureq::AgentBuilder::new()
+        .timeout(FETCH_TIMEOUT)
+        .redirects(0)
+        .build()
+        .get(CATALOG_URL)
+        .call()
+        .map_err(|error| error.to_string())?;
+    if response.get_url() != CATALOG_URL {
+        return Err("catalog response did not come from the allowlisted origin".to_string());
+    }
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_CATALOG_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| error.to_string())?;
+    Ok(body)
+}
+
+fn read_cache(path: &Path) -> Option<Catalog> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_CATALOG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Catalog::parse(&bytes).ok()
+}
+
+fn is_fresh(path: &Path, now: SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age < CACHE_FRESHNESS)
+}
+
+fn write_cache(path: &Path, bytes: &[u8]) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let staging = path.with_extension("json.partial");
+    if std::fs::write(&staging, bytes)
+        .and_then(|()| std::fs::rename(&staging, path))
+        .is_err()
+    {
+        let _ = std::fs::remove_file(staging);
+    }
+}
+
+/// Cached location, exposed within the crate to keep the path contract easy
+/// to test without touching a developer's real daemon state.
+#[allow(dead_code)]
+fn cache_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("cache").join(CACHE_FILE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn fixture() -> Vec<u8> {
+        include_bytes!("../../../tests/fixtures/openrouter_catalog_sample.json").to_vec()
+    }
+
+    #[test]
+    fn weighted_prices_can_change_the_input_only_ranking() {
+        let catalog = Catalog::parse(&fixture()).unwrap();
+        let ranked = catalog.cheapest_programming();
+        assert_eq!(ranked[0].model.id, "provider/weighted-cheap");
+        assert_eq!(ranked[1].model.id, "provider/input-cheap");
+        let input_only = catalog
+            .models
+            .iter()
+            .filter(|row| row.eligible_for_coding)
+            .min_by(|a, b| {
+                a.input_price_per_token
+                    .unwrap()
+                    .total_cmp(&b.input_price_per_token.unwrap())
+            })
+            .unwrap();
+        assert_eq!(input_only.id, "provider/input-cheap");
+    }
+
+    #[test]
+    fn success_updates_cache_and_missing_or_malformed_fetch_keeps_stale_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = cache_path(temp.path());
+        let body = fixture();
+        let loaded = catalog_at(Some(&cache), SystemTime::now(), || Ok(body.clone()));
+        assert_eq!(loaded.models.len(), 3);
+        assert!(cache.exists());
+
+        let old_time = SystemTime::now() - CACHE_FRESHNESS - Duration::from_secs(1);
+        filetime::set_file_mtime(&cache, filetime::FileTime::from_system_time(old_time)).unwrap();
+        let stale = catalog_at(Some(&cache), SystemTime::now(), || Err("offline".into()));
+        assert_eq!(stale, loaded);
+        filetime::set_file_mtime(&cache, filetime::FileTime::from_system_time(old_time)).unwrap();
+        let malformed = catalog_at(
+            Some(&cache),
+            SystemTime::now(),
+            || Ok(b"{not json".to_vec()),
+        );
+        assert_eq!(malformed, loaded);
+    }
+
+    #[test]
+    fn malformed_required_data_is_rejected_but_newer_additive_fields_are_ignored() {
+        let mut json: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        json["future_field"] = serde_json::json!({"new": true});
+        json["models"][0]["future_model_field"] = serde_json::json!("accepted");
+        assert!(Catalog::parse(json.to_string().as_bytes()).is_ok());
+        let mut missing_timestamp: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        missing_timestamp["generated_at"] = serde_json::Value::Null;
+        assert!(Catalog::parse(missing_timestamp.to_string().as_bytes()).is_err());
+
+        let mut missing_id: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        missing_id["models"][0]["id"] = serde_json::Value::Null;
+        assert!(Catalog::parse(missing_id.to_string().as_bytes()).is_err());
+
+        let mut bad_price: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        bad_price["models"][0]["input_price_per_token"] = serde_json::json!("bad");
+        assert!(Catalog::parse(bad_price.to_string().as_bytes()).is_err());
+
+        let mut unpriced_eligible: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        unpriced_eligible["models"][0]["input_price_per_token"] = serde_json::Value::Null;
+        assert!(Catalog::parse(unpriced_eligible.to_string().as_bytes()).is_err());
+
+        let duplicate_key = String::from_utf8(fixture()).unwrap().replacen(
+            "\"schema_version\":1",
+            "\"schema_version\":1,\"schema_version\":1",
+            1,
+        );
+        assert!(Catalog::parse(duplicate_key.as_bytes()).is_err());
+        assert!(Catalog::parse(
+            br#"{"schema_version":1,"source":"https://openrouter.ai/api/v1/models","models":[]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unavailable_catalog_uses_the_baked_in_fallback() {
+        let fallback = catalog_at(None, SystemTime::now(), || Err("offline".into()));
+        assert_eq!(fallback, built_in());
+        assert!(!fallback.cheapest_programming().is_empty());
+    }
+}

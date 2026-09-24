@@ -3577,7 +3577,6 @@ gateway into an Anthropic provider.
 
 ---
 
-<<<<<<< HEAD
 ## DD-076: daemon worker environments start from the OS login baseline
 
 **Context:** A daemon outlives the terminal that started it. Inheriting that
@@ -3913,3 +3912,26 @@ without persisting prompts, raw session ids, or agent ids. The status-line
 callback already receives the transcript path, so direct routes need no
 listener in the request path. Native Codex without that callback still needs
 bridge-observed usage to display a triple.
+## DD-085: Keep OpenRouter's changing price inventory separate from the model catalog
+
+**Context:** zackees/clud#1256. OpenRouter's model inventory and token prices
+change independently of clud releases, while the reviewed provider catalog
+and harness-owned picker have separate compatibility contracts (DD-054).
+
+**Decision:** Publish one additive, versioned JSON document from a scheduled
+producer. It records normalized model rows, explicit text/tool/context/price
+eligibility, and a convenience shortlist ranked by a 70% input, 20% output,
+10% cached-input estimate. The consumer fetches only the fixed raw GitHub
+document with redirects disabled and a bounded timeout, caches valid data
+under daemon state, and falls back through the last good copy to an embedded
+seed. Unknown fields remain compatible; the static catalog and picker do not
+change.
+
+**Rationale:** A price ranking is useful only when its population and token
+mix are visible. Calling the results the lowest-priced *eligible* rows avoids
+implying that provider metadata measures programming quality. Raw rows let a
+later build apply another weighting without scraping OpenRouter at launch.
+
+**Consequences:** Prices may be six hours stale on a healthy install, or older
+when fetches keep failing. The producer fails visibly on invalid upstream data
+and commits only validated deterministic output.
