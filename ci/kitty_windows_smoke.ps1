@@ -302,6 +302,14 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         # Name what is still alive so a hang is diagnosable from one CI run.
         $env:WEZTERM_UNIX_SOCKET = $serverSocket
         $livePanes = (& $wezterm cli list --format json 2>&1 | Out-String).Trim()
+        try {
+            foreach ($live in @($livePanes | ConvertFrom-Json)) {
+                $liveText = (& $wezterm cli get-text --pane-id "$($live.pane_id)" 2>&1 | Out-String).Trim()
+                Write-Host "Live pane $($live.pane_id) '$($live.title)' text:`n$liveText"
+            }
+        } catch {
+            Write-Host "Could not read live pane text: $_"
+        }
         Remove-Item Env:WEZTERM_UNIX_SOCKET -ErrorAction SilentlyContinue
         $seedReported = Test-Path -LiteralPath $marker -PathType Leaf
         throw "GUI_UNAVAILABLE: seed GUI stayed open after reused pane completed; seed report written=$seedReported; live panes=$livePanes"
