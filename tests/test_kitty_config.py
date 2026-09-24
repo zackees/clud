@@ -55,6 +55,26 @@ def test_windows_smoke_timeout_reports_whether_child_ran() -> None:
     assert "backend=$backendState seed=$seedState" in smoke
 
 
+def test_windows_smoke_cleans_up_both_process_trees_and_probe_directory() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    cleanup = smoke.rsplit("} finally {", 1)[1]
+    assert "Stop-SmokeProcess $outerProcess 'clud launcher'" in cleanup
+    assert "Stop-SmokeProcess $process 'seed GUI'" in cleanup
+    assert 'Get-CimInstance Win32_Process -Filter "Name = \'wezterm-gui.exe\'"' in smoke
+    assert "if ($candidate.ExecutablePath -eq $gui)" in smoke
+    assert "$baselineGuiPids = @(Get-BundledGuiPids)" in smoke
+    assert "if ($guiPid -in $baselineGuiPids) { continue }" in cleanup
+    assert "Stop-SmokeProcess $newGuiProcess 'new bundled GUI'" in cleanup
+    assert cleanup.index("Stop-SmokeProcess $outerProcess") < cleanup.index(
+        "Stop-SmokeProcess $process"
+    )
+    assert "Remove-Item -LiteralPath $probeDir -Recurse -Force" in cleanup
+    assert "$Target.Kill($true)" in smoke
+    assert "$Target.WaitForExit(5000)" in smoke
+    assert "$Target.Dispose()" in smoke
+    assert "Write-Host \"Cleanup could not" in smoke
+
+
 def test_kitty_term_config_has_core_behaviors() -> None:
     config = CONFIG.read_text(encoding="utf-8")
     for required in (

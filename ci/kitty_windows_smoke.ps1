@@ -22,6 +22,15 @@ foreach ($file in @($wezterm, $gui, $config, $clud)) {
     }
 }
 
+function Get-BundledGuiPids {
+    $found = @()
+    foreach ($candidate in (Get-CimInstance Win32_Process -Filter "Name = 'wezterm-gui.exe'" -ErrorAction Stop)) {
+        if ($candidate.ExecutablePath -eq $gui) { $found += [int]$candidate.ProcessId }
+    }
+    return $found
+}
+$baselineGuiPids = @(Get-BundledGuiPids)
+
 $self = [Diagnostics.Process]::GetCurrentProcess()
 Write-Host "Windows session=$($self.SessionId) userInteractive=$([Environment]::UserInteractive)"
 Write-Host "Explorer running=$([bool](Get-Process explorer -ErrorAction SilentlyContinue))"
@@ -48,6 +57,31 @@ Write-Host 'WezTerm CLI and Kitty config loaded successfully'
 if (-not $env:RUNNER_TEMP) { $env:RUNNER_TEMP = [IO.Path]::GetTempPath() }
 $probeDir = Join-Path $env:RUNNER_TEMP "clud-kitty-backend-$([Guid]::NewGuid().ToString('N'))"
 [void][IO.Directory]::CreateDirectory($probeDir)
+
+function Stop-SmokeProcess {
+    param([Diagnostics.Process]$Target, [string]$Name)
+    if ($null -eq $Target) { return }
+    try {
+        if (-not $Target.HasExited) { $Target.Kill($true) }
+    } catch {
+        Write-Host "Cleanup could not kill $Name process tree: $_"
+    }
+    try {
+        if (-not $Target.HasExited -and -not $Target.WaitForExit(5000)) {
+            Write-Host "Cleanup timed out waiting for $Name process tree"
+        }
+    } catch {
+        Write-Host "Cleanup could not wait for $Name process tree: $_"
+    } finally {
+        try { $Target.Dispose() } catch {
+            Write-Host "Cleanup could not dispose process handle: $_"
+        }
+    }
+}
+
+$process = $null
+$outerProcess = $null
+try {
 $marker = Join-Path $probeDir 'seed.txt'
 $backendMarker = Join-Path $probeDir 'backend.txt'
 $child = 'Set-Content -LiteralPath $env:CLUD_KITTY_SMOKE_MARKER -Value "kitty=$env:CLUD_KITTY_TERM pane=$env:WEZTERM_PANE socket=$env:WEZTERM_UNIX_SOCKET"; while (-not (Test-Path -LiteralPath $env:CLUD_KITTY_SMOKE_RELEASE)) { Start-Sleep -Milliseconds 100 }; exit 23'
@@ -67,8 +101,6 @@ foreach ($arg in @('--config-file', $config, 'start', '--no-auto-connect',
     [void]$start.ArgumentList.Add($arg)
 }
 
-$process = $null
-try {
     $process = [Diagnostics.Process]::Start($start)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not (Test-Path -LiteralPath $marker -PathType Leaf) -and
@@ -94,10 +126,6 @@ try {
         throw "GUI_UNAVAILABLE: seed GUI exited before the reuse probe: exit=$($process.ExitCode)"
     }
     Write-Host "Native Kitty GUI child is live with $observed"
-} catch {
-    if ($process) { $process.Dispose() }
-    throw
-}
 
 # Route a real installed clud invocation through its packaged launcher. A
 # private claude.cmd on PATH is deterministic and needs no account or network.
@@ -124,17 +152,9 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '-p', 'kitty-smok
     [void]$outer.ArgumentList.Add($arg)
 }
 
-$outerProcess = $null
-try {
     $outerProcess = [Diagnostics.Process]::Start($outer)
     if (-not $outerProcess.WaitForExit($TimeoutSeconds * 1000)) {
-        $backendState = 'absent'
-        if (Test-Path -LiteralPath $backendMarker -PathType Leaf) {
-            $backendState = (Get-Content -LiteralPath $backendMarker -Raw).Trim()
-        }
-        $seedState = "pid=$($process.Id) exited=$($process.HasExited)"
-        $outerProcess.Kill($true)
-        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds; backend=$backendState seed=$seedState"
+        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds"
     }
     if (-not (Test-Path -LiteralPath $backendMarker -PathType Leaf)) {
         throw "CLUD_KITTY_LAUNCH_FAILED: backend did not run; outer exit=$($outerProcess.ExitCode)"
@@ -162,6 +182,28 @@ try {
     }
     Write-Host 'Independent first GUI child status 23 propagated after reused pane status 37'
 } finally {
-    if ($outerProcess) { Write-Verbose "Outer process $($outerProcess.Id) completed" }
-    Write-Verbose "Probe directory: $probeDir"
+    # Stop the launcher before the seed GUI, so no new pane can be spawned
+    # while the GUI is being torn down. Never replace the probe's real error.
+    Stop-SmokeProcess $outerProcess 'clud launcher'
+    Stop-SmokeProcess $process 'seed GUI'
+    # A launcher may exit after spawning another GUI. Match the exact wheel
+    # executable and only PIDs absent before this probe.
+    try {
+        foreach ($guiPid in (Get-BundledGuiPids)) {
+            if ($guiPid -in $baselineGuiPids) { continue }
+            try {
+                $newGuiProcess = [Diagnostics.Process]::GetProcessById($guiPid)
+                Stop-SmokeProcess $newGuiProcess 'new bundled GUI'
+            } catch {
+                Write-Host "Cleanup could not stop new bundled GUI process $guiPid`: $_"
+            }
+        }
+    } catch {
+        Write-Host "Cleanup could not enumerate new bundled GUI processes: $_"
+    }
+    try {
+        Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction Stop
+    } catch {
+        Write-Host "Cleanup could not remove probe directory $probeDir`: $_"
+    }
 }
