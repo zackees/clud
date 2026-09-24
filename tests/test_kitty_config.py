@@ -16,11 +16,15 @@ def test_software_renderer_is_opt_in_for_ci() -> None:
     config = CONFIG.read_text(encoding="utf-8")
     assert re.search(
         r"if os\.getenv\('CLUD_KITTYTERM_SOFTWARE_RENDERER'\) == '1' then\s+"
-        r"config\.front_end = 'Software'\s+end",
+        r"config\.front_end = 'WebGpu'\s+"
+        r"config\.webgpu_force_fallback_adapter = true\s+end",
         config,
     )
-    assert config.count("config.front_end = 'Software'") == 1
+    assert config.count("config.front_end = 'WebGpu'") == 1
+    assert config.count("config.webgpu_force_fallback_adapter = true") == 1
     assert not re.search(r"config\.front_end\s*=", config.split("if os.getenv", 1)[0])
+    before_ci_override = config.split("if os.getenv", 1)[0]
+    assert not re.search(r"config\.webgpu_force_fallback_adapter\s*=", before_ci_override)
 
 
 def test_windows_smoke_selects_software_renderer_for_both_gui_paths() -> None:

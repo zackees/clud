@@ -4,10 +4,12 @@ local wezterm = require 'wezterm'
 local act = wezterm.action
 local config = wezterm.config_builder()
 
--- Headless Windows CI can render through the software frontend. Interactive
--- installs retain WezTerm's normal renderer selection.
+-- Headless Windows CI uses WebGpu's fallback CPU adapter to avoid glium's
+-- OpenGL requirement on the hosted runner. Interactive installs retain
+-- WezTerm's normal renderer selection.
 if os.getenv('CLUD_KITTYTERM_SOFTWARE_RENDERER') == '1' then
-  config.front_end = 'Software'
+  config.front_end = 'WebGpu'
+  config.webgpu_force_fallback_adapter = true
 end
 
 -- Keep graphics enabled and let applications negotiate the Kitty keyboard
