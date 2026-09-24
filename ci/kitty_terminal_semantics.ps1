@@ -58,7 +58,19 @@ function Start-ProbePane {
 
 function Stop-ProbePane {
     param([int]$Pane)
-    [void](Invoke-GuiCli @('kill-pane', '--pane-id', "$Pane") 2000)
+    try {
+        [void](Invoke-GuiCli @('kill-pane', '--pane-id', "$Pane") 2000)
+    } catch {
+        # A completed mock pane may disappear before cleanup reaches it.
+        # Only that exact pane's not-found response counts as already clean.
+        if ($_.Exception.Message -notmatch ('no such pane {0}(?!\d)' -f $Pane)) {
+            throw
+        }
+        $listed = @((Invoke-GuiCli @('list', '--format', 'json') 2000) | ConvertFrom-Json)
+        if (@($listed | Where-Object { [int]$_.pane_id -eq $Pane }).Count -gt 0) {
+            throw "Pane $Pane was still listed after kill-pane reported it absent"
+        }
+    }
     [void]$panes.Remove($Pane)
 }
 

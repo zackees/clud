@@ -120,6 +120,19 @@ def test_windows_terminal_semantics_run_inside_reused_installed_gui() -> None:
     assert "kill-pane" in semantics
     assert "Stop-ProbePane $keyboardPane" in semantics
     assert "Stop-ProbePane $heavyPane" in semantics
+    cleanup = semantics.split("function Stop-ProbePane", 1)[1].split(
+        "function Wait-ProbeFile", 1
+    )[0]
+    assert "Invoke-GuiCli @('kill-pane', '--pane-id', \"$Pane\") 2000" in cleanup
+    assert "if ($_.Exception.Message -notmatch ('no such pane {0}(?!\\d)' -f $Pane))" in cleanup
+    assert "Invoke-GuiCli @('list', '--format', 'json') 2000" in cleanup
+    assert "[int]$_.pane_id -eq $Pane" in cleanup
+    assert "throw" in cleanup
+    assert cleanup.index("throw") < cleanup.index("[void]$panes.Remove($Pane)")
+    pane_absent = re.compile(r"no such pane 3(?!\d)")
+    assert pane_absent.search('Error: no such pane 3')
+    assert not pane_absent.search('Error: no such pane 30')
+    assert not pane_absent.search('Error: socket unavailable')
     assert "--mock-stdin-ready-file', $pasteReady" in semantics
     assert "--mock-stdin-ready-file', $etxReady" in semantics
     assert "Start-Sleep -Milliseconds 450" not in semantics
