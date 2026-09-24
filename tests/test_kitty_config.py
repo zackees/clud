@@ -113,7 +113,8 @@ def test_windows_smoke_outer_timeout_reports_backend_and_gui_state() -> None:
     assert "Stop-SmokeProcess $outerProcess 'timed-out clud launcher'" in timeout
     assert "$controlProcess.WaitForExit(15000)" in timeout
     assert "Test-Path -LiteralPath $controlMarker -PathType Leaf" in timeout
-    assert "'--no-daemon', '-p', 'kitty-smoke-no-daemon'" in timeout
+    assert "'--no-daemon', '-p', 'kitty-smoke-no-daemon', '--'" in timeout
+    assert "'--mock-report-file', $controlMarker, '--mock-exit-code', '41'" in timeout
     assert timeout.index("Stop-SmokeProcess $outerProcess") < timeout.index(
         "$controlProcess = [Diagnostics.Process]::Start($control)"
     )

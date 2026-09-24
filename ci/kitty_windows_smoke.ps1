@@ -219,7 +219,8 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
             $control.Environment['CLUD_KITTY_SMOKE_MARKER'] = $controlMarker
             $control.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
             foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose',
-                               '--no-daemon', '-p', 'kitty-smoke-no-daemon')) {
+                               '--no-daemon', '-p', 'kitty-smoke-no-daemon', '--',
+                               '--mock-report-file', $controlMarker, '--mock-exit-code', '41')) {
                 [void]$control.ArgumentList.Add($arg)
             }
             $controlProcess = [Diagnostics.Process]::Start($control)
