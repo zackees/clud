@@ -103,6 +103,9 @@ class Offender:
     matcher: str
     command: str
     indirect_via: Path | None = None  # set when surfaced via a wrapper script
+    # The Cargo-backed project(s) a re-sync would build (#1251): the scanned
+    # root itself, or the extern checkout(s) a `$PWD`-walking hook can bind to.
+    risk_roots: tuple[Path, ...] = ()
 
     def render(self) -> str:
         loc = (
@@ -110,10 +113,12 @@ class Offender:
             if not self.indirect_via
             else f"{self.config_path} → {self.event} ({self.matcher}) → {self.indirect_via}"
         )
+        roots = ", ".join(str(root) for root in self.risk_roots)
         return (
             f"{YELLOW}{BOLD}[clud] WARNING: bare `uv run` in agent hook{RESET}\n"
             f"  {loc}\n"
             f"  command: {self.command.strip()}\n"
+            f"  builds:  {roots}\n"
             f"  fix:     add `--no-project`, `--no-sync`, or `--frozen` to the uv run\n"
         )
 
@@ -177,9 +182,35 @@ def _repo_qualifies(repo_root: Path) -> bool:
     Either this repo is itself a Python+Rust polyglot with a build backend,
     or it has a Rust-backed dependent checkout that a `$PWD`-walking hook
     can bind to. Requiring Cargo.toml at *this* root is what made the guard
-    silent through #972.
+    silent through #972. Which hooks the extern case covers is narrowed per
+    hook in `_risk_roots` (#1251).
     """
     return _is_rust_backed(repo_root) or bool(_extern_rust_checkouts(repo_root))
+
+
+# A command that locates its project from the shell's cwd rather than a fixed
+# path. Only these can bind to an extern checkout the agent `cd`s into (#972).
+_PWD_RELATIVE = re.compile(
+    r"\$\{?PWD\b|\$\(\s*pwd\s*\)|`\s*pwd\s*`|%CD%|Get-Location|\bos\.getcwd\(|\bPath\.cwd\(",
+    re.IGNORECASE,
+)
+
+
+def _risk_roots(
+    command: str, repo_root: Path, rust_root: bool, externs: list[Path]
+) -> tuple[Path, ...]:
+    """The Cargo-backed root(s) a bare `uv run` in this hook could build.
+
+    #1251: a sibling checkout that merely exists does not make the parent a
+    Cargo project. A fixed-path hook resolves the parent's own pyproject, so
+    an extern checkout only matters for a `$PWD`-walking hook. This assumes
+    the harness starts hooks in the project root, as Claude Code does.
+    """
+    if rust_root:
+        return (repo_root,)
+    if externs and _PWD_RELATIVE.search(command):
+        return tuple(externs)
+    return ()
 
 
 def _iter_hooks_from_claude(config_path: Path) -> list[tuple[str, str, str]]:
@@ -298,7 +329,9 @@ def _scan_referenced_script(
 
 def scan(repo_root: Path) -> list[Offender]:
     """Run the full scan, returning every offender found."""
-    if not _repo_qualifies(repo_root):
+    rust_root = _is_rust_backed(repo_root)
+    externs = _extern_rust_checkouts(repo_root)
+    if not (rust_root or externs):
         return []
 
     configs: list[tuple[Path, str]] = [
@@ -317,21 +350,32 @@ def scan(repo_root: Path) -> list[Offender]:
             entries = _iter_hooks_from_codex(config_path)
         for event, matcher, command in entries:
             if _has_bare_uv_run(command):
-                offenders.append(
-                    Offender(
-                        config_path=config_path,
-                        event=event,
-                        matcher=matcher,
-                        command=command,
+                roots = _risk_roots(command, repo_root, rust_root, externs)
+                if roots:
+                    offenders.append(
+                        Offender(
+                            config_path=config_path,
+                            event=event,
+                            matcher=matcher,
+                            command=command,
+                            risk_roots=roots,
+                        )
                     )
-                )
                 continue
             # The hook doesn't directly call uv run, but it might
             # wrap a local script that does. Dereference one level.
             target = _resolve_referenced_script(command, repo_root)
             if target is None:
                 continue
+            try:
+                # The cwd walk and the `uv run` are usually on different lines.
+                body = target.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                body = ""
             for hit in _scan_referenced_script(target):
+                roots = _risk_roots(f"{command}\n{body}", repo_root, rust_root, externs)
+                if not roots:
+                    continue
                 offenders.append(
                     Offender(
                         config_path=config_path,
@@ -339,6 +383,7 @@ def scan(repo_root: Path) -> list[Offender]:
                         matcher=matcher,
                         command=hit,
                         indirect_via=target,
+                        risk_roots=roots,
                     )
                 )
     return offenders
@@ -353,8 +398,8 @@ def main(argv: list[str]) -> int:
         return 0
     sys.stderr.write(
         f"{YELLOW}{BOLD}[clud] uv_run_hook_guard: detected {len(offenders)} "
-        f"bare `uv run` invocation(s) in agent hooks of a Python+Rust "
-        f"polyglot repo.{RESET}\n"
+        f"bare `uv run` invocation(s) in agent hooks that can resolve a "
+        f"Cargo-backed Python project (see `builds:` per hook).{RESET}\n"
         "Bare `uv run` walks the tree to pyproject.toml, finds the "
         "build-backend, and triggers a project re-sync (full maturin "
         "rebuild on maturin-backed projects) on every hook fire — "

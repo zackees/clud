@@ -150,7 +150,7 @@ def test_stop_hooks_are_scanned(tmp_path: Path) -> None:
     for two fires."""
     assert "Stop" in guard.SCANNED_EVENTS
 
-    repo = _parent_repo(tmp_path, event="Stop", command="uv run python ci/lint.py")
+    repo = _parent_repo(tmp_path, event="Stop", command=PWD_WALK_WRAPPER)
     _add_extern_rust_checkout(repo)
 
     offenders = guard.scan(repo)
@@ -193,3 +193,90 @@ def test_the_current_sibling_layout_also_arms_the_guard(tmp_path: Path) -> None:
     offenders = guard.scan(repo)
     assert len(offenders) == 1, offenders
     assert offenders[0].event == "Stop"
+
+
+def _fastled_shaped_repo(root: Path, command: str) -> Path:
+    """#1251: FastLED's shape -- Hatchling root, no root Cargo.toml, a nested
+    auxiliary Cargo manifest, and a Rust-backed sibling under `<repo>-extern/`."""
+    repo = _parent_repo(root, command=command)
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "fastled"\n[build-system]\nbuild-backend = "hatchling.build"\n',
+        encoding="utf-8",
+    )
+    nested = repo / "ci" / "lint_cpp_rs"
+    nested.mkdir(parents=True)
+    (nested / "Cargo.toml").write_text("[package]\nname = 'lint'\n", encoding="utf-8")
+    _add_extern_rust_checkout(repo, legacy=False)
+    return repo
+
+
+def test_an_inactive_extern_sibling_does_not_flag_fixed_root_hooks(tmp_path: Path) -> None:
+    """#1251: a bare `uv run` that does not walk `$PWD` resolves the parent's
+    own Hatchling project; a Rust checkout parked beside it cannot be bound."""
+    repo = _fastled_shaped_repo(tmp_path, "uv run python ci/lint.py")
+
+    assert guard.scan(repo) == []
+
+
+def test_a_nested_cargo_manifest_does_not_qualify_the_root(tmp_path: Path) -> None:
+    """#1251: only root manifests define a Cargo project."""
+    repo = _fastled_shaped_repo(tmp_path, "uv run python ci/lint.py")
+
+    assert guard._is_rust_backed(repo) is False
+
+
+def test_a_pwd_walking_hook_still_names_the_extern_build_root(tmp_path: Path) -> None:
+    """#972 stays covered: a `$PWD`-walking wrapper can bind to the sibling,
+    and the warning names that checkout, not the non-Cargo parent."""
+    repo = _fastled_shaped_repo(tmp_path, PWD_WALK_WRAPPER)
+
+    offenders = guard.scan(repo)
+    assert len(offenders) == 1, offenders
+    dep = repo.parent / f"{repo.name}-extern" / "fbuild"
+    assert offenders[0].risk_roots == (dep,)
+    assert str(dep) in offenders[0].render()
+
+
+def test_a_multiline_pwd_walking_wrapper_script_is_still_caught(tmp_path: Path) -> None:
+    """#972 as a real script: the cwd walk and `uv run` sit on separate lines."""
+    repo = _fastled_shaped_repo(tmp_path, "bash ./ci/stop.sh")
+    (repo / "ci" / "stop.sh").write_text(
+        'd=$PWD\nwhile [ ! -f "$d/pyproject.toml" ]; do d=$(dirname "$d"); done\n'
+        'cd "$d"\nuv run python ci/check.py\n',
+        encoding="utf-8",
+    )
+
+    offenders = guard.scan(repo)
+    assert len(offenders) == 1, offenders
+    assert offenders[0].indirect_via is not None
+
+
+def test_a_fixed_path_wrapper_script_is_not_flagged_by_a_sibling(tmp_path: Path) -> None:
+    repo = _fastled_shaped_repo(tmp_path, "bash ./ci/stop.sh")
+    (repo / "ci" / "stop.sh").write_text("uv run python ci/check.py\n", encoding="utf-8")
+
+    assert guard.scan(repo) == []
+
+
+@pytest.mark.parametrize(
+    "command", ['cd "$(pwd)" && uv run x', 'cd "${PWD}" && uv run x', "cd %CD% && uv run x"]
+)
+def test_other_cwd_forms_count_as_pwd_walking(tmp_path: Path, command: str) -> None:
+    repo = _fastled_shaped_repo(tmp_path, command)
+
+    assert len(guard.scan(repo)) == 1
+
+
+def test_a_rust_backed_root_flags_every_bare_uv_run(tmp_path: Path) -> None:
+    """A root with Cargo.toml plus a build backend still qualifies directly --
+    which is also what an extern checkout scanned as the launch root hits."""
+    repo = _parent_repo(tmp_path, command="uv run python ci/lint.py")
+    (repo / "Cargo.toml").write_text("[package]\nname = 'x'\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text(
+        '[build-system]\nbuild-backend = "maturin"\n', encoding="utf-8"
+    )
+
+    offenders = guard.scan(repo)
+    assert len(offenders) == 1, offenders
+    assert offenders[0].risk_roots == (repo,)
+    assert "polyglot" not in offenders[0].render()

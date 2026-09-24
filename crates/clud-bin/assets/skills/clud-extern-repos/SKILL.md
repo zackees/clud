@@ -49,7 +49,8 @@ Two rules follow, and they apply wherever the checkout lives:
 - **Never let a hook trigger a project sync**: use `uv run --no-project` (or
   `--frozen`). A hook may lint; it may not compile a dependency from source.
   clud's `uv_run_hook_guard` warns about the bare form, and since #972 it looks
-  at `Stop` hooks and at dependent checkouts in both locations.
+  at `Stop` hooks and at dependent checkouts in both locations. A dependent
+  checkout only counts against `$PWD`-walking hooks (#1251).
 
 Create feature branches in the dependent repo using the `feat/<short-name>` convention.
 
