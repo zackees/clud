@@ -94,8 +94,8 @@ function Write-Ansi {
 }
 
 function Get-ProbeReport {
-    param([string]$Path)
-    Wait-ProbeFile $Path
+    param([string]$Path, [int]$TimeoutMs = 6000)
+    Wait-ProbeFile $Path $TimeoutMs
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
     do {
         try { return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch {
@@ -197,6 +197,7 @@ try {
                                 '--mock-ansi-after-wait', $restoreScript,
                                 '--mock-ready-file', $altReady,
                                 '--mock-wait-for-file', $altRelease,
+                                '--mock-sleep-ms', '6000',
                                 '--mock-report-file', $altReport,
                                 '--mock-exit-code', '23')
     Wait-ProbeFile $altReady
@@ -205,27 +206,29 @@ try {
         throw 'Alternate screen did not replace the main screen text'
     }
     [IO.File]::WriteAllText($altRelease, 'restore')
-    [void](Get-ProbeReport $altReport)
+    # The pane closes when the mock exits, so read it during the mock's sleep.
     $mainText = Wait-PaneText $altPane 'RESTORED_SENTINEL'
     if (-not $mainText.Contains('MAIN_SENTINEL') -or
         -not $mainText.Contains('RESTORED_SENTINEL') -or
         $mainText.Contains('ALT_SENTINEL')) {
         throw 'Main screen did not return after alternate-screen exit'
     }
+    [void](Get-ProbeReport $altReport 10000)
     Stop-ProbePane $altPane
 
     $rgbScript = Write-Ansi 'truecolor.bin' "${esc}[38;2;12;34;56mRGB_SENTINEL${esc}[0m"
     $rgbReport = Join-Path $ProbeDir 'rgb-report.json'
     $rgbPane = Start-ProbePane @('--mock-ansi-script', $rgbScript,
+                                '--mock-sleep-ms', '6000',
                                 '--mock-report-file', $rgbReport,
                                 '--mock-exit-code', '23')
-    [void](Get-ProbeReport $rgbReport)
     [void](Wait-PaneText $rgbPane 'RGB_SENTINEL')
     $rgbText = Invoke-GuiCli @('get-text', '--escapes', '--pane-id', "$rgbPane")
     if (-not $rgbText.Contains('RGB_SENTINEL') -or
         $rgbText -notmatch '38(?:;2;12;34;56|:2::12:34:56)') {
         throw "Truecolor style was not retained in escaped pane text: $rgbText"
     }
+    [void](Get-ProbeReport $rgbReport 10000)
     Stop-ProbePane $rgbPane
 
     $sizeReport = Join-Path $ProbeDir 'pty-size.json'
@@ -278,13 +281,14 @@ try {
     $heavyScript = Write-Ansi 'heavy-output.bin' $heavy.ToString()
     $heavyReport = Join-Path $ProbeDir 'heavy-report.json'
     $heavyPane = Start-ProbePane @('--mock-ansi-script', $heavyScript,
+                                  '--mock-sleep-ms', '15000',
                                   '--mock-report-file', $heavyReport,
                                   '--mock-exit-code', '23')
-    [void](Get-ProbeReport $heavyReport)
     $heavyText = Wait-PaneText $heavyPane 'HEAVY_FINAL_SENTINEL' 12
     if (-not $heavyText.Contains('HEAVY_FINAL_SENTINEL')) {
         throw 'Heavy ConPTY output did not reach its final marker in the GUI'
     }
+    [void](Get-ProbeReport $heavyReport 20000)
     Stop-ProbePane $heavyPane
     Write-Host 'Native Kitty GUI terminal semantics passed: keyboard/graphics replies, paste, ETX, alt screen, RGB, resize, heavy output'
 } finally {
