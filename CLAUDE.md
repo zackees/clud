@@ -21,13 +21,14 @@ Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --glob
 
 ### Local validation before GitHub Actions
 
-For code or workflow behavior changes, start with a focused local test, then run
-lint and affected suites through the tasks in `bosn.toml` when Docker is
-available. For workflow changes, also run the applicable Linux job with `act`
-when it can represent that job. An `act` dry run does not execute action code,
-and local Linux results cannot prove macOS or Windows behavior. If Docker or a
-required tool is unavailable, run the direct local checks and report the gap.
-Commands, limits, and the pinned action input check are in
+For code or workflow-behavior changes, use a working local Docker engine before
+spending a GitHub Actions run: run the relevant focused test, then lint and the
+affected suites through the tasks in `bosn.toml`. For workflow changes, also run
+the applicable Linux job with `act` when it can represent that job. Do not treat
+an `act` dry run as execution or a local pass as proof of macOS/Windows behavior.
+If Docker or a required tool is unavailable, use the direct local checks and
+report the gap; do not push merely to discover a failure those checks could
+catch. The commands, limits, and pinned-action-input check are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
 
 ## Repository Map

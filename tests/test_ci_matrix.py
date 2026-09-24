@@ -29,10 +29,17 @@ CI_YML = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.
 BUILD_YML = CI_YML.with_name("_build-target.yml")
 
 
-def test_build_workflow_caps_compile_parallelism_for_hosted_runner_memory() -> None:
-    workflow = BUILD_YML.read_text(encoding="utf-8")
-    assert 'CARGO_BUILD_JOBS: "1"' in workflow
-    assert 'SOLDR_JOBS: "1"' in workflow
+@pytest.mark.parametrize(
+    "path",
+    [
+        BUILD_YML,
+        CI_YML.with_name("rm-protection-docker.yml"),
+        CI_YML.parent.parent.parent / "bosn.toml",
+    ],
+)
+def test_builds_leave_compile_concurrency_to_soldr(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert not re.search(r"^\s*(?:SOLDR_JOBS|CARGO_BUILD_JOBS)\s*[:=]", text, re.MULTILINE)
 
 
 def test_every_target_is_unique():
