@@ -104,7 +104,7 @@ $start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker
 $start.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
 $start.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker
 $start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
-$start.Environment['PATH'] = "$probeDir;$($start.Environment['PATH'])"
+$start.Environment['PATH'] = "$probeDir;$env:PATH"
 $start.Environment['CLUD_NO_UNLOCK'] = '1'
 $start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
 foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '--no-daemon', '-p',
@@ -188,7 +188,7 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '--n
 $outer = [Diagnostics.ProcessStartInfo]::new($clud)
 $outer.UseShellExecute = $false
 $outer.WorkingDirectory = $ScriptsDir
-$outer.Environment['PATH'] = "$probeDir;$($outer.Environment['PATH'])"
+$outer.Environment['PATH'] = "$probeDir;$env:PATH"
 $outer.Environment['CLUD_KITTY_SMOKE_MARKER'] = $backendMarker
 $outer.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker
 $outer.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
