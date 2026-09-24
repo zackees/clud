@@ -56,6 +56,9 @@ $start.UseShellExecute = $false
 $start.WorkingDirectory = $ScriptsDir
 $start.Environment['CLUD_KITTY_SMOKE_MARKER'] = $marker
 $start.Environment['CLUD_KITTY_SMOKE_RELEASE'] = $backendMarker
+$start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker
+$start.Environment['PATH'] = "$probeDir;$($start.Environment['PATH'])"
+$start.Environment['CLUD_NO_UNLOCK'] = '1'
 $start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
 foreach ($arg in @('--config-file', $config, 'start', '--no-auto-connect',
                    '--return-initial-exit-code', '--cwd',
@@ -106,7 +109,7 @@ if /I "%~1"=="--version" (
   echo 9.9.9 (mock-agent)
   exit /b 0
 )
-echo kitty=%CLUD_KITTY_TERM% pane=%WEZTERM_PANE% socket=%WEZTERM_UNIX_SOCKET% args=%* >"%CLUD_KITTY_SMOKE_MARKER%"
+echo kitty=%CLUD_KITTY_TERM% pane=%WEZTERM_PANE% socket=%WEZTERM_UNIX_SOCKET% args=%* >"%CLUD_KITTY_BACKEND_MARKER%"
 exit /b 37
 '@
 [IO.File]::WriteAllText($backend, $batch, [Text.Encoding]::ASCII)

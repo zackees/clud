@@ -39,6 +39,8 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
     assert "--always-new-process" not in launch_args
     assert "socket=$env:WEZTERM_UNIX_SOCKET" in smoke
     assert "socket=%WEZTERM_UNIX_SOCKET%" in smoke
+    assert '$start.Environment[\'PATH\'] = "$probeDir;' in smoke
+    assert "$start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker" in smoke
     assert "reused the live GUI" in smoke
     assert "first GUI child status 23" in smoke
     assert "reused pane status 37" in smoke
