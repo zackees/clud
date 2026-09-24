@@ -1226,7 +1226,10 @@ PRs. Never combine children in one PR. Only a child’s final PR closes it; chil
 close the parent. Record child→PR links, then close the parent after all children are resolved. \
 For every PR: show RED→GREEN, review, test, push, watch CI to green, and merge. Merge separately; \
 update remaining branches as needed. Follow repo worktree rules, return to the starting branch, \
-and leave a clean status."
+and leave a clean status.
+
+Goal is satisfied when all PRs are merged, all referenced issues are closed as complete. No \
+cheating. No files left behind. Rebase to origin main or master when done."
     );
 }
 

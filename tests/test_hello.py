@@ -1491,6 +1491,9 @@ def test_dry_run_do_carries_completion_and_meta_issue_contracts() -> None:
     assert "Record child→PR links" in prompt
     assert "show RED→GREEN, review, test, push, watch CI to green, and merge" in prompt
     assert "return to the starting branch, and leave a clean status" in prompt
+    assert "all referenced issues are closed as complete" in prompt
+    assert "No cheating. No files left behind" in prompt
+    assert "Rebase to origin main or master when done" in prompt
 
 
 def test_dry_run_fix() -> None:
