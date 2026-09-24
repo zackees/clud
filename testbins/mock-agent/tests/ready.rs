@@ -15,7 +15,9 @@ fn readiness_report_is_atomic_and_precedes_release_and_final_report() {
     let release = dir.join("release.txt");
     let report = dir.join("report.json");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mock-agent"))
+    let mock_agent = std::env::var("CARGO_BIN_EXE_mock-agent")
+        .expect("Cargo should provide the mock-agent binary path to integration tests");
+    let mut child = Command::new(mock_agent)
         .args([
             "--mock-ready-file",
             ready.to_str().expect("ready path"),
