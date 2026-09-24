@@ -37,7 +37,10 @@ def test_native_windows_integration_smokes_installed_gui() -> None:
     assert "inputs.target == 'x86_64-pc-windows-msvc' && inputs.suite == 'integration'" in workflow
     assert "pwsh -NoProfile -File ci/kitty_windows_smoke.ps1" in workflow
     assert "-ScriptsDir (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts')" in workflow
-    assert "-MockAgentPath (Join-Path $env:GITHUB_WORKSPACE 'bundle/bin/mock-agent.exe')" in workflow
+    assert (
+        "-MockAgentPath (Join-Path $env:GITHUB_WORKSPACE 'bundle/bin/mock-agent.exe')"
+        in workflow
+    )
     assert "-ScriptsDir (Split-Path $env:VENV_PY -Parent)" not in workflow
     setup_exec = (ROOT / ".github/actions/setup-exec/action.yml").read_text(encoding="utf-8")
     assert "-m ci.bundle unpack" in setup_exec
