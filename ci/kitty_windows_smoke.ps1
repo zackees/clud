@@ -91,8 +91,9 @@ $marker = Join-Path $probeDir 'seed.txt'
 $backendMarker = Join-Path $probeDir 'backend.txt'
 $controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'
 $versionMarker = Join-Path $probeDir 'version.txt'
-$child = 'Set-Content -LiteralPath $env:CLUD_KITTY_SMOKE_MARKER -Value "kitty=$env:CLUD_KITTY_TERM pane=$env:WEZTERM_PANE socket=$env:WEZTERM_UNIX_SOCKET"; while (-not (Test-Path -LiteralPath $env:CLUD_KITTY_SMOKE_RELEASE)) { Start-Sleep -Milliseconds 100 }; exit 23'
-$start = [Diagnostics.ProcessStartInfo]::new($gui)
+$backend = Join-Path $probeDir 'claude.exe'
+[IO.File]::Copy($MockAgentPath, $backend)
+$start = [Diagnostics.ProcessStartInfo]::new($clud)
 $start.UseShellExecute = $false
 $start.WorkingDirectory = $ScriptsDir
 $start.Environment['CLUD_KITTY_SMOKE_MARKER'] = $marker
@@ -104,20 +105,21 @@ $start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $start.Environment['PATH'] = "$probeDir;$($start.Environment['PATH'])"
 $start.Environment['CLUD_NO_UNLOCK'] = '1'
 $start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
-foreach ($arg in @('--config-file', $config, 'start', '--no-auto-connect',
-                   '--return-initial-exit-code', '--cwd',
-                   $ScriptsDir, '--', 'pwsh.exe', '-NoProfile', '-NonInteractive',
-                   '-Command', $child)) {
+foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p',
+                   'kitty-seed', '--', '--mock-report-file', $marker,
+                   '--mock-sleep-ms', '15000', '--mock-exit-code', '23')) {
     [void]$start.ArgumentList.Add($arg)
 }
 
     $process = [Diagnostics.Process]::Start($start)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while (-not (Test-Path -LiteralPath $marker -PathType Leaf) -and
-           -not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+    $seedGuiPids = @()
+    while ($seedGuiPids.Count -eq 0 -and -not $process.HasExited -and
+           [DateTime]::UtcNow -lt $deadline) {
+        $seedGuiPids = @(Get-BundledGuiPids | Where-Object { $_ -notin $baselineGuiPids })
         Start-Sleep -Milliseconds 100
     }
-    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+    if ($seedGuiPids.Count -eq 0) {
         $children = @()
         try {
             $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($process.Id)" |
@@ -125,22 +127,15 @@ foreach ($arg in @('--config-file', $config, 'start', '--no-auto-connect',
         } catch {
             $children = @("unavailable: $($_.Exception.Message)")
         }
-        throw "GUI_UNAVAILABLE: WezTerm failed to spawn its child within $TimeoutSeconds seconds; marker=absent children=$($children -join ',') exited=$($process.HasExited) session=$($self.SessionId) interactive=$([Environment]::UserInteractive)"
+        throw "GUI_UNAVAILABLE: installed clud failed to seed WezTerm within $TimeoutSeconds seconds; children=$($children -join ',') exited=$($process.HasExited) session=$($self.SessionId) interactive=$([Environment]::UserInteractive)"
     }
-    $observed = (Get-Content -LiteralPath $marker -Raw).Trim()
-    if ($observed -notmatch '^kitty=1 pane=\d+ socket=(.+)$') {
-        throw "WezTerm child lacked Kitty config/pane environment: $observed"
-    }
-    $serverSocket = $Matches[1]
     if ($process.HasExited) {
         throw "GUI_UNAVAILABLE: seed GUI exited before the reuse probe: exit=$($process.ExitCode)"
     }
-    Write-Host "Native Kitty GUI child is live with $observed"
+    Write-Host "Native Kitty GUI seeded through installed clud: pids=$($seedGuiPids -join ',')"
 
 # Route a real installed clud invocation through its packaged launcher. A
 # private native mock agent on PATH is deterministic and needs no account or network.
-$backend = Join-Path $probeDir 'claude.exe'
-[IO.File]::Copy($MockAgentPath, $backend)
 $outer = [Diagnostics.ProcessStartInfo]::new($clud)
 $outer.UseShellExecute = $false
 $outer.WorkingDirectory = $ScriptsDir
@@ -237,9 +232,6 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
     if ($backendResult.exit_code -ne 37 -or [string]::IsNullOrWhiteSpace($backendResult.env.WEZTERM_UNIX_SOCKET)) {
         throw "Installed clud did not forward into a Kitty pane: $backendResult"
     }
-    if ($backendResult.env.WEZTERM_UNIX_SOCKET -ne $serverSocket) {
-        throw "Installed clud started another GUI instead of reusing the live GUI: seed=$serverSocket probe=$($backendResult.env.WEZTERM_UNIX_SOCKET)"
-    }
     if ($outerProcess.ExitCode -ne 37) {
         throw "Installed clud failed to propagate backend exit 37: exit=$($outerProcess.ExitCode)"
     }
@@ -253,6 +245,14 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
     }
     if ($process.ExitCode -ne 23) {
         throw "WezTerm failed to propagate first GUI child status 23: status=$($process.ExitCode)"
+    }
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+        throw 'Seed mock agent did not write its report'
+    }
+    $seedResult = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+    if ($seedResult.exit_code -ne 23 -or
+        $seedResult.env.WEZTERM_UNIX_SOCKET -ne $backendResult.env.WEZTERM_UNIX_SOCKET) {
+        throw "Installed clud started another GUI instead of reusing the live GUI: seed=$seedResult probe=$backendResult"
     }
     Write-Host 'Independent first GUI child status 23 propagated after reused pane status 37'
 } finally {

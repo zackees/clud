@@ -37,20 +37,20 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
     smoke = SMOKE.read_text(encoding="utf-8")
     launch_args = smoke.split("foreach ($arg in @(", 1)[1].split(")) {", 1)[0]
     assert "--always-new-process" not in launch_args
-    assert "socket=$env:WEZTERM_UNIX_SOCKET" in smoke
     assert "WEZTERM_UNIX_SOCKET" in smoke
     assert '$start.Environment[\'PATH\'] = "$probeDir;' in smoke
     assert "$start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker" in smoke
     assert "[IO.File]::Copy($MockAgentPath, $backend)" in smoke
+    assert "'--mock-sleep-ms', '15000', '--mock-exit-code', '23'" in smoke
+    assert "$seedResult.env.WEZTERM_UNIX_SOCKET -ne $backendResult.env.WEZTERM_UNIX_SOCKET" in smoke
     assert "reused the live GUI" in smoke
     assert "first GUI child status 23" in smoke
     assert "reused pane status 37" in smoke
 
 
-def test_windows_smoke_timeout_reports_whether_child_ran() -> None:
+def test_windows_smoke_timeout_reports_seed_process_state() -> None:
     smoke = SMOKE.read_text(encoding="utf-8")
-    timeout = smoke.split("if (-not (Test-Path -LiteralPath $marker", 1)[1]
-    assert "marker=absent" in timeout
+    timeout = smoke.split("if ($seedGuiPids.Count -eq 0)", 1)[1]
     assert "ParentProcessId = $($process.Id)" in timeout
     assert "exited=$($process.HasExited)" in timeout
     assert "backend_marker=$backendState version_probe=$versionState seed=$seedState" in smoke
