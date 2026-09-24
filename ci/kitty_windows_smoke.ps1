@@ -129,10 +129,20 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         }
         throw "GUI_UNAVAILABLE: installed clud failed to seed WezTerm within $TimeoutSeconds seconds; children=$($children -join ',') exited=$($process.HasExited) session=$($self.SessionId) interactive=$([Environment]::UserInteractive)"
     }
+    $discoveryReady = $false
+    while (-not $discoveryReady -and -not $process.HasExited -and
+           [DateTime]::UtcNow -lt $deadline) {
+        & $wezterm --config-file $config cli list 2>$null | Out-Null
+        $discoveryReady = $LASTEXITCODE -eq 0
+        if (-not $discoveryReady) { Start-Sleep -Milliseconds 100 }
+    }
+    if (-not $discoveryReady) {
+        throw "GUI_UNAVAILABLE: seeded WezTerm did not publish its discovery socket within $TimeoutSeconds seconds"
+    }
     if ($process.HasExited) {
         throw "GUI_UNAVAILABLE: seed GUI exited before the reuse probe: exit=$($process.ExitCode)"
     }
-    Write-Host "Native Kitty GUI seeded through installed clud: pids=$($seedGuiPids -join ',')"
+    Write-Host "Native Kitty GUI seeded and discoverable through installed clud: pids=$($seedGuiPids -join ',')"
 
 # Route a real installed clud invocation through its packaged launcher. A
 # private native mock agent on PATH is deterministic and needs no account or network.

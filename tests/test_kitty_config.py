@@ -42,6 +42,8 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
     assert "$start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker" in smoke
     assert "[IO.File]::Copy($MockAgentPath, $backend)" in smoke
     assert "'--mock-sleep-ms', '15000', '--mock-exit-code', '23'" in smoke
+    assert "& $wezterm --config-file $config cli list" in smoke
+    assert "$discoveryReady = $LASTEXITCODE -eq 0" in smoke
     assert "$seedResult.env.WEZTERM_UNIX_SOCKET -ne $backendResult.env.WEZTERM_UNIX_SOCKET" in smoke
     assert "reused the live GUI" in smoke
     assert "first GUI child status 23" in smoke
