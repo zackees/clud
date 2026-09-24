@@ -14,6 +14,17 @@ SEMANTICS = Path(__file__).resolve().parents[1] / "ci/kitty_terminal_semantics.p
 MOCK_AGENT = Path(__file__).resolve().parents[1] / "testbins/mock-agent/src/main.rs"
 
 
+def test_font_uses_only_faces_bundled_with_wezterm() -> None:
+    # An absent font opens a "Configuration Error" window that keeps the GUI
+    # alive; only WezTerm's built-in faces are safe on a stock Windows box.
+    config = CONFIG.read_text(encoding="utf-8")
+    assert (
+        "config.font = wezterm.font_with_fallback({ 'JetBrains Mono', "
+        "'Symbols Nerd Font Mono' })" in config
+    )
+    assert "Nerd Font')" not in config
+
+
 def test_software_renderer_is_opt_in_for_ci() -> None:
     config = CONFIG.read_text(encoding="utf-8")
     assert re.search(

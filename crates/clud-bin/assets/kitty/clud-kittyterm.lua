@@ -20,7 +20,10 @@ config.enable_kitty_keyboard = true
 config.allow_win32_input_mode = true
 config.set_environment_variables = { CLUD_KITTY_TERM = '1' }
 
-config.font = wezterm.font('JetBrainsMono Nerd Font')
+-- Both faces ship inside WezTerm, so this matches JetBrainsMono Nerd Font
+-- without requiring an installed font. Naming an absent font opens a
+-- "Configuration Error" window, which also keeps the GUI process alive.
+config.font = wezterm.font_with_fallback({ 'JetBrains Mono', 'Symbols Nerd Font Mono' })
 config.font_size = 10.0
 config.line_height = 1.1
 config.default_cursor_style = 'BlinkingBar'
