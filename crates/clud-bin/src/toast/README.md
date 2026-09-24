@@ -13,7 +13,8 @@ In-terminal toast notifications (#1189). Design and limits:
 | `text_tier.rs` | one-row cell toast and restore-from-shadow (`restore_cells`, `restore_screen`) |
 | `mouse.rs` | `MouseFilter`: consume only toast/usage-panel SGR controls, pass keyboard and unrelated mouse bytes through |
 | `tier.rs` | `decide`: kitty / text cells / fallback per terminal; `CLUD_TOAST_TIER` override |
-| `statusline.rs` | Claude status-line surface: exact bridge snapshots, documented native-Claude last-call usage adapter, `clud statusline` (`run`), command composition, user status-line discovery and chaining |
+| `statusline.rs` | Claude status-line surface: bridge-first cumulative rendering, `clud statusline` (`run`), command composition, user status-line discovery and chaining |
+| `usage_ledger.rs` | Lock-guarded, incremental transcript and subagent accounting for direct Claude-harness routes; opaque dedupe/cursor state and atomic usage sidecar |
 | `launch.rs` | per-launch wiring for both runners: status-line writer, injection, fallback choice, `CLUD_TOAST_DEMO` |
 
 Callers:

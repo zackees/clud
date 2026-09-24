@@ -56,17 +56,19 @@ returning it.
 
 ## Terminal usage accounting
 
-Every successful Messages response contributes exact terminal input, cached
-input, and output counts to the launch-scoped status-line ledger when its
-provider supplies them. Native Claude, DeepSeek, and OpenRouter usage shapes
-are adapted independently from copied SSE frames; ordinary non-streaming JSON
-responses use a 64 KiB bounded observation buffer. Forwarded response bytes
-are never rewritten or retained by the ledger. The ledger combines main and
-agent turns across providers, but the last completed provider/model remains
-visible so the display cannot imply that every aggregate token came from that
-one model. Missing, malformed, or internally inconsistent counters are simply
-unavailable and do not affect the totals. This display accounting is separate
-from the Codex-only cache-health fuse.
+On bridged routes, every successful Messages response contributes exact
+terminal input, cached input, and output counts to the launch-scoped ledger
+when its provider supplies them. Native Claude, DeepSeek, and OpenRouter usage
+shapes are adapted independently from copied SSE frames; ordinary non-streaming
+JSON responses use a 64 KiB bounded observation buffer. Forwarded response
+bytes are never rewritten or retained by the bridge ledger. On direct
+Claude-harness routes, the status-line callback instead incrementally reads
+provider-reported counters from the harness transcript and its subagents,
+deduplicated globally by response id. Bridge totals take precedence. Both
+surfaces show a single cumulative triple and the last completed model; cache
+health remains in expanded details. Missing or malformed counters do not
+become per-call estimates. This display accounting is separate from the
+Codex-only cache-health fuse.
 
 ## Session-wide effort
 

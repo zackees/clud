@@ -338,7 +338,7 @@ impl Compositor {
         let usage = self
             .usage_writer
             .as_ref()
-            .and_then(|writer| writer.usage_snapshot());
+            .and_then(|writer| writer.effective_usage_snapshot());
         if usage != self.usage {
             self.usage = usage;
             self.pending = true;

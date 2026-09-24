@@ -45,18 +45,15 @@ pub fn publish_demo_toast(sink: &ToastSink) {
 /// toasts are disabled. Claude additionally exposes this file through its
 /// injected `statusLine`; PTY compositors use the same in-memory writer for
 /// every harness, so usage never depends on a Claude-only UI feature.
-pub fn statusline_writer(
-    _plan: &LaunchPlan,
-    cfg: ToastLaunchCfg,
-) -> Option<Arc<StatusStateWriter>> {
+pub fn statusline_writer(plan: &LaunchPlan, cfg: ToastLaunchCfg) -> Option<Arc<StatusStateWriter>> {
     if !cfg.enabled {
         return None;
     }
     let state_dir = crate::daemon::default_state_dir().ok()?;
-    Some(Arc::new(StatusStateWriter::new(state_path(
-        &state_dir,
-        std::process::id(),
-    ))))
+    Some(Arc::new(StatusStateWriter::new_with_provider(
+        state_path(&state_dir, std::process::id()),
+        plan.model_provider().as_str(),
+    )))
 }
 
 /// What `ForegroundRuntime` needs to compose the `statusLine` setting.
