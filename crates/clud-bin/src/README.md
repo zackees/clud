@@ -34,6 +34,10 @@ the integration tests.
   the `assets/server-settings.json` baked into the binary and refreshed from
   `main`, falling back section by section to the last valid value, plus a strict
   JSON parser. See `docs/architecture/server-settings.md`.
+- `openrouter_catalog.rs` - #1256's separate bounded catalog consumer: fixed
+  GitHub origin, last-known-good daemon-state cache, baked-in fallback, and
+  weighted pricing for eligible OpenRouter models. See
+  `docs/architecture/server-settings.md`.
 - [toast/](toast/README.md) - in-terminal toasts (#1189): toast model and
   hub, the PTY writer-thread compositor (kitty graphics, alternate-screen text
   cells, title/status-line fallback), Claude `statusLine` chaining, and

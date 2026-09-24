@@ -470,6 +470,11 @@ impl Args {
 pub enum Command {
     /// Explicit compatibility spelling for a normal backend launch.
     Run,
+    /// Query clud's cached OpenRouter model and pricing catalog.
+    Models {
+        #[command(subcommand)]
+        subcommand: ModelsSubcommand,
+    },
     /// Install or update Codex through CLUD's verified standalone-installer path.
     CodexUpdate,
     /// Manage provider credentials. Claude authentication remains owned by
@@ -791,6 +796,16 @@ pub enum AuthProvider {
     Kimi,
     Openrouter,
     Claude,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ModelsSubcommand {
+    /// List the lowest-priced eligible programming models.
+    Cheapest {
+        /// Emit stable machine-readable JSON.
+        #[arg(long = "json")]
+        json: bool,
+    },
 }
 
 impl AuthProvider {
@@ -1232,6 +1247,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "settings",
     "test",
     "auth",
+    "models",
     "codex-update",
     "codex-auth",
     "deepseek-auth",

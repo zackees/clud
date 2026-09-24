@@ -54,6 +54,11 @@ pub const SCHEMA_VERSION: u64 = 1;
 
 const CACHE_RELATIVE_PATH: &str = ".clud/cache/server-settings/server-settings.json";
 
+/// Strict JSON parser shared with other bounded remote-data consumers.
+pub(crate) fn parse_strict_json(bytes: &[u8], max_bytes: usize) -> Result<Value, String> {
+    json::parse_strict_with_limit(bytes, max_bytes)
+}
+
 /// One independently validated block of server settings, stored under
 /// `sections.<KEY>`. Unknown fields are ignored so a later build can add
 /// optional ones without breaking this one.

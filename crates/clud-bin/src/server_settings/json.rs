@@ -18,9 +18,15 @@ pub(crate) const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 /// Parse one strict JSON value: UTF-8, at most [`MAX_DOCUMENT_BYTES`], an
 /// optional leading byte-order mark, no duplicate keys, no trailing content.
 pub(crate) fn parse_strict(bytes: &[u8]) -> Result<Value, String> {
-    if bytes.len() > MAX_DOCUMENT_BYTES {
+    parse_strict_with_limit(bytes, MAX_DOCUMENT_BYTES)
+}
+
+/// Parse strict JSON with a caller-specific size cap. The OpenRouter catalog
+/// reuses these duplicate-key and trailing-content checks with a larger bound.
+pub(crate) fn parse_strict_with_limit(bytes: &[u8], max_bytes: usize) -> Result<Value, String> {
+    if bytes.len() > max_bytes {
         return Err(format!(
-            "document is {} bytes; the limit is {MAX_DOCUMENT_BYTES}",
+            "document is {} bytes; the limit is {max_bytes}",
             bytes.len()
         ));
     }

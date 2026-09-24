@@ -1,0 +1,39 @@
+# Publishes the OpenRouter public model/pricing inventory used by clud (#1256).
+# Fetch/normalization errors fail the run; only a valid deterministic document
+# is committed to main for installed builds to consume.
+name: refresh-openrouter-catalog
+
+on:
+  schedule:
+    - cron: "37 4 * * *" # 04:37 UTC, after the model-context refresh
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-openrouter-catalog
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Refresh OpenRouter catalog
+        run: python -m ci.refresh_openrouter_catalog
+      - name: Commit catalog when changed
+        run: |
+          if git diff --quiet -- crates/clud-bin/assets/openrouter-catalog.json; then
+            echo "OpenRouter catalog already fresh"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/clud-bin/assets/openrouter-catalog.json
+          git commit -m "chore(openrouter): refresh model catalog (#1256)"
+          git pull --rebase origin main
+          git push origin HEAD:main
