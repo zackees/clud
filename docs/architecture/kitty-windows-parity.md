@@ -50,6 +50,9 @@ sentinel, and Kitty keyboard/graphics query replies. These probes are pending
 native CI validation; source checks alone do not establish a pass. Raw ETX is
 not a physical Ctrl-C key event. CLI text injection does not prove key
 press/repeat/release behavior. The graphics reply proves protocol negotiation,
-not image pixels; escaped text proves style state, not visual contrast.
+not image pixels; escaped text proves style state, not visual contrast. On
+Windows, ConPTY's input parser discards APC strings, so a console child
+receives only the trailing `\` of the Kitty graphics reply; the probe accepts
+that exact residue as a known limitation and fails on anything else.
 Physical mouse events, clipboard interaction, drag, and pixel rendering remain
 outside headless evidence.

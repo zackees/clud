@@ -102,6 +102,9 @@ def test_windows_terminal_semantics_run_inside_reused_installed_gui() -> None:
     assert "-SeedPane ([int]$seedReady.env.WEZTERM_PANE)" in smoke
     assert "'WEZTERM_UNIX_SOCKET'] = $Socket" in semantics
     assert "--mock-ansi-after-wait" in semantics
+    # Only the exact ConPTY APC residue may stand in for the graphics reply.
+    assert "$graphicsStdin.Replace([string]$esc, '') -eq '\\'" in semantics
+    assert 'throw "Kitty graphics query had no matching OK reply' in semantics
     for mode in (
         "keyboard-query.bin",
         "graphics-query.bin",
