@@ -2,10 +2,10 @@ use clud::{
     args, auth, backend, backend_bootstrap, clud_settings, codex_auth, command, config,
     console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover, gc,
     graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
-    launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth,
-    runner, runtime_cache, settings_tui, soldr_activate, stage_trace, startup, symbols,
-    test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
-    verbose_log, wasm, webterm, workspace_trust, worktrees,
+    launch_setup, log_event, loop_artifacts, loop_spec, openrouter_catalog, optimize,
+    orphan_reaper, provider_auth, runner, runtime_cache, settings_tui, soldr_activate, stage_trace,
+    startup, symbols, test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui,
+    uv_run_hook_guard, verbose_log, wasm, webterm, workspace_trust, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -92,6 +92,15 @@ fn run(mut args: args::Args) {
     if let Some(args::Command::Auth { subcommand }) = &args.command {
         let interrupted = startup::install_ctrl_c_flag(args.verbose);
         std::process::exit(auth::run(subcommand.as_ref(), interrupted.as_ref()));
+    }
+    // #1256: catalog queries are self-contained and must not launch a backend
+    // or grant daemon-spawn authority. A stale cache may perform one bounded,
+    // fixed-origin refresh before rendering the baked/last-known-good result.
+    if let Some(args::Command::Models { subcommand }) = &args.command {
+        let code = match subcommand {
+            args::ModelsSubcommand::Cheapest { json } => openrouter_catalog::run_cheapest(*json),
+        };
+        std::process::exit(code);
     }
     // Compatibility aliases remain through this major version. Keep their
     // provider implementation authoritative while giving callers the exact

@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn models_cheapest_json_is_a_known_self_contained_command() {
+    let args = parse(&["clud", "models", "cheapest", "--json"]);
+    match args.command {
+        Some(Command::Models {
+            subcommand: ModelsSubcommand::Cheapest { json },
+        }) => assert!(json),
+        other => panic!("expected models cheapest --json, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
 fn test_clean_worktrees_with_dry_run() {
     let args = parse(&["clud", "--clean-worktrees", "--dry-run"]);
     assert!(args.clean_worktrees);

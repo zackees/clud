@@ -191,7 +191,8 @@ eligible” shortlist estimates USD per million equivalent tokens as 70% input,
 20% output, and 10% cached input. When no cached-input rate is published,
 normal input pricing is used for that component. The consumer ranks raw rows
 locally and does not alter the static model catalog or harness-owned picker
-(DD-054).
+(DD-054). `clud models cheapest` is the user-facing text query;
+`clud models cheapest --json` emits the same locally ranked rows for automation.
 
 ## Testing
 

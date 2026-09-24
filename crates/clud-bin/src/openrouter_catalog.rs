@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const CATALOG_URL: &str = "https://raw.githubusercontent.com/zackees/clud/main/crates/clud-bin/assets/openrouter-catalog.json";
 const EMBEDDED_JSON: &str = include_str!("../assets/openrouter-catalog.json");
@@ -33,7 +33,7 @@ pub struct Catalog {
     models: Vec<Model>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Model {
     pub id: String,
     pub name: String,
@@ -45,13 +45,15 @@ pub struct Model {
     /// when it does not publish a separate cached-input price.
     pub cached_input_price_per_token: Option<f64>,
     pub supports_tools: bool,
+    pub supports_text_input: bool,
+    pub supports_text_output: bool,
     pub supports_reasoning: bool,
     pub supports_vision: bool,
     pub eligible_for_coding: bool,
     pub ineligibility_reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PricedModel {
     pub model: Model,
     /// Weighted estimated cost, USD per million equivalent tokens.
@@ -152,7 +154,12 @@ impl Model {
                 return Err(format!("{} has invalid {field} price", self.id));
             }
         }
-        if self.eligible_for_coding && (!self.supports_tools || self.context_length < 16_000) {
+        if self.eligible_for_coding
+            && (!self.supports_tools
+                || !self.supports_text_input
+                || !self.supports_text_output
+                || self.context_length < 16_000)
+        {
             return Err(format!("{} has inconsistent coding eligibility", self.id));
         }
         if self.eligible_for_coding
@@ -165,6 +172,30 @@ impl Model {
         }
         Ok(())
     }
+}
+
+/// User-facing `clud models cheapest` query. This is the production consumer
+/// of the scheduled catalog; the model picker remains harness-owned (DD-054).
+pub fn run_cheapest(json: bool) -> i32 {
+    let rows = catalog().cheapest_programming();
+    if json {
+        match serde_json::to_writer(std::io::stdout().lock(), &rows) {
+            Ok(()) => println!(),
+            Err(error) => {
+                eprintln!("error: failed to render OpenRouter catalog: {error}");
+                return 1;
+            }
+        }
+    } else {
+        println!("Lowest-priced eligible OpenRouter models (not a quality ranking):");
+        for row in rows {
+            println!(
+                "{}\t${:.6}/M weighted tokens\t{}",
+                row.model.id, row.weighted_usd_per_million_tokens, row.model.name
+            );
+        }
+    }
+    0
 }
 
 /// Get the last-known-good catalog from the daemon state cache, refreshing it
@@ -335,6 +366,10 @@ mod tests {
         let mut unpriced_eligible: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
         unpriced_eligible["models"][0]["input_price_per_token"] = serde_json::Value::Null;
         assert!(Catalog::parse(unpriced_eligible.to_string().as_bytes()).is_err());
+
+        let mut non_text_eligible: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        non_text_eligible["models"][0]["supports_text_output"] = serde_json::json!(false);
+        assert!(Catalog::parse(non_text_eligible.to_string().as_bytes()).is_err());
 
         let duplicate_key = String::from_utf8(fixture()).unwrap().replacen(
             "\"schema_version\":1",
