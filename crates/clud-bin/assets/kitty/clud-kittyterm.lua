@@ -67,7 +67,8 @@ wezterm.on('format-tab-title', function(tab)
   local pane = tab.active_pane
   local directory = directory_label(pane.current_working_dir)
   local title = directory or pane.title
-  if directory and pane.title and pane.title ~= directory then
+  if tab.tab_title and tab.tab_title ~= '' then title = tab.tab_title end
+  if (not tab.tab_title or tab.tab_title == '') and directory and pane.title and pane.title ~= directory then
     title = directory .. ' · ' .. pane.title
   end
   return string.format(' %d: %s ', tab.tab_index + 1, title or 'shell')
@@ -107,6 +108,13 @@ local function shortcut_sheet(window, pane)
     end),
   }, pane)
 end
+
+local rename_tab = act.PromptInputLine {
+  description = 'New tab title (empty restores the cwd and command label)',
+  action = wezterm.action_callback(function(window, _, line)
+    if line ~= nil then window:active_tab():set_title(line) end
+  end),
+}
 
 -- SpawnCommand inherits the active pane's OSC 7 cwd when its cwd is omitted.
 -- In WezTerm, SplitVertical places panes above/below; SplitHorizontal places
@@ -224,15 +232,21 @@ config.keys = {
   bind('p', 'ALT|SHIFT', act.PaneSelect { mode = 'SwapWithActive', alphabet = '1234567890' }, 'Swap panes'),
   bind('r', 'ALT|SHIFT', act.RotatePanes 'Clockwise', 'Rotate panes clockwise'),
   bind('r', 'ALT|CTRL|SHIFT', act.RotatePanes 'CounterClockwise', 'Rotate panes counterclockwise'),
+  bind('d', 'ALT|SHIFT', act.PaneSelect { mode = 'MoveToNewWindow' }, 'Detach pane to window'),
   bind('w', 'ALT|SHIFT', act.CloseCurrentPane { confirm = true }, 'Close pane'),
   bind('d', 'SUPER|SHIFT', act.PaneSelect { mode = 'MoveToNewWindow' }, 'Move pane to new window'),
   bind('t', 'SUPER|SHIFT', act.PaneSelect { mode = 'MoveToNewTab' }, 'Move pane to new tab'),
+  bind('x', 'SUPER|SHIFT', act.PaneSelect { mode = 'MoveToNewWindow' }, 'Move pane to new window'),
+  bind('t', 'ALT', act.ShowLauncherArgs { flags = 'FUZZY|TABS' }, 'Choose tab'),
+  bind('t', 'ALT|SHIFT', rename_tab, 'Rename tab'),
   bind('m', 'CTRL|SHIFT', act.ActivateCommandPalette, 'Command palette'),
   bind('u', 'ALT|SHIFT', act.ActivateCopyMode, 'Browse scrollback'),
   bind('Home', 'CTRL|SHIFT', act.ScrollToTop, 'Scroll to top'),
   bind('End', 'CTRL|SHIFT', act.ScrollToBottom, 'Scroll to bottom'),
   bind('PageUp', 'CTRL|SHIFT', act.ScrollByPage(-1), 'Scroll up one page'),
   bind('PageDown', 'CTRL|SHIFT', act.ScrollByPage(1), 'Scroll down one page'),
+  bind('g', 'ALT|SHIFT', act.ScrollToPrompt(-1), 'Go to previous prompt'),
+  bind('F5', 'CTRL|SHIFT', act.ReloadConfiguration, 'Reload configuration'),
   bind('/', 'SUPER', wezterm.action_callback(shortcut_sheet), 'Show shortcut sheet'),
   bind('/', 'SUPER|SHIFT', wezterm.action_callback(shortcut_sheet), 'Show shortcut sheet'),
   bind('c', 'SUPER', act.CopyTo 'Clipboard', 'Copy'),
@@ -263,5 +277,11 @@ config.mouse_bindings = {
     action = act.Nop,
   },
 }
+
+table.insert(config.mouse_bindings, {
+  event = { Up = { streak = 1, button = 'Right' } },
+  mods = 'NONE',
+  action = act.Nop,
+})
 
 return config

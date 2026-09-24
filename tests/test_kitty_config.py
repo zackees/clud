@@ -107,3 +107,21 @@ def test_supported_pane_and_scrollback_shortcuts() -> None:
     assert "act.ScrollToTop" in config
     assert "act.ScrollToBottom" in config
     assert "act.ScrollByPage" in config
+
+
+def test_reference_tab_and_pane_management_bindings() -> None:
+    config = CONFIG.read_text(encoding="utf-8")
+    assert "bind('t', 'ALT', act.ShowLauncherArgs { flags = 'FUZZY|TABS' }" in config
+    assert "bind('t', 'ALT|SHIFT', rename_tab" in config
+    assert "act.PromptInputLine" in config
+    assert "window:active_tab():set_title(line)" in config
+    assert "bind('d', 'ALT|SHIFT', act.PaneSelect" in config
+    assert "bind('x', 'SUPER|SHIFT', act.PaneSelect" in config
+    assert "bind('g', 'ALT|SHIFT', act.ScrollToPrompt(-1)" in config
+    assert "bind('F5', 'CTRL|SHIFT', act.ReloadConfiguration" in config
+
+
+def test_mouse_bindings_consume_both_right_click_edges() -> None:
+    config = CONFIG.read_text(encoding="utf-8")
+    assert "Down = { streak = 1, button = 'Right' }" in config
+    assert "Up = { streak = 1, button = 'Right' }" in config
