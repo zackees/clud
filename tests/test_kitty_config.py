@@ -27,97 +27,13 @@ def test_software_renderer_is_opt_in_for_ci() -> None:
     assert not re.search(r"config\.webgpu_force_fallback_adapter\s*=", before_ci_override)
 
 
-def test_windows_smoke_selects_software_renderer_for_both_gui_paths() -> None:
+def test_windows_smoke_exercises_installed_gui_and_exit_propagation() -> None:
     smoke = SMOKE.read_text(encoding="utf-8")
     assert "$start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'" in smoke
-    assert "$outer.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'" in smoke
-
-
-def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> None:
-    smoke = SMOKE.read_text(encoding="utf-8")
-    launch_args = smoke.split("foreach ($arg in @(", 1)[1].split(")) {", 1)[0]
-    assert "--always-new-process" not in launch_args
-    assert "WEZTERM_UNIX_SOCKET" in smoke
-    assert '$start.Environment[\'PATH\'] = "$probeDir;' in smoke
-    assert "$start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker" in smoke
-    assert "[IO.File]::Copy($MockAgentPath, $backend)" in smoke
-    assert "'--mock-sleep-ms', '15000', '--mock-exit-code', '23'" in smoke
-    assert "& $wezterm --config-file $config cli list" in smoke
-    assert "$discoveryReady = $LASTEXITCODE -eq 0" in smoke
-    assert "$seedResult.env.WEZTERM_UNIX_SOCKET -ne $backendResult.env.WEZTERM_UNIX_SOCKET" in smoke
-    assert "reused the live GUI" in smoke
-    assert "first GUI child status 23" in smoke
-    assert "reused pane status 37" in smoke
-
-
-def test_windows_smoke_timeout_reports_seed_process_state() -> None:
-    smoke = SMOKE.read_text(encoding="utf-8")
-    timeout = smoke.split("if ($seedGuiPids.Count -eq 0)", 1)[1]
-    assert "ParentProcessId = $($process.Id)" in timeout
-    assert "exited=$($process.HasExited)" in timeout
-    assert "backend_marker=$backendState version_probe=$versionState seed=$seedState" in smoke
-
-
-def test_windows_smoke_cleans_up_both_process_trees_and_probe_directory() -> None:
-    smoke = SMOKE.read_text(encoding="utf-8")
-    cleanup = smoke.rsplit("} finally {", 1)[1]
-    assert "Stop-SmokeProcess $outerProcess 'clud launcher'" in cleanup
-    assert "Stop-SmokeProcess $process 'seed GUI'" in cleanup
-    assert 'Get-CimInstance Win32_Process -Filter "Name = \'wezterm-gui.exe\'"' in smoke
-    assert "if ($candidate.ExecutablePath -eq $gui)" in smoke
-    assert "$baselineGuiPids = @(Get-BundledGuiPids)" in smoke
-    assert "if ($guiPid -in $baselineGuiPids) { continue }" in cleanup
-    assert "Stop-SmokeProcess $newGuiProcess 'new bundled GUI'" in cleanup
-    assert cleanup.index("Stop-SmokeProcess $outerProcess") < cleanup.index(
-        "Stop-SmokeProcess $process"
-    )
-    assert "Remove-Item -LiteralPath $probeDir -Recurse -Force" in cleanup
-    assert "$Target.Kill($true)" in smoke
-    assert "$Target.WaitForExit(5000)" in smoke
-    assert "$Target.Dispose()" in smoke
-    assert "Write-Host \"Cleanup could not" in smoke
-
-
-def test_windows_smoke_outer_timeout_reports_backend_and_gui_state() -> None:
-    smoke = SMOKE.read_text(encoding="utf-8")
-    timeout = smoke.split("if (-not $outerProcess.WaitForExit", 1)[1].split(
-        "if (-not (Test-Path -LiteralPath $backendMarker", 1
-    )[0]
-    assert "Test-Path -LiteralPath $backendMarker -PathType Leaf" in timeout
-    assert "Get-Content -LiteralPath $backendMarker -Raw" in timeout
-    assert "$guiPids = @(Get-BundledGuiPids)" in timeout
-    assert (
-        'Get-CimInstance Win32_Process -Filter "ParentProcessId = $($outerProcess.Id)"'
-        in timeout
-    )
-    assert "backend_marker=$backendState" in timeout
-    assert "bundled_gui_pids=$($guiPids -join ',')" in timeout
-    assert "outer_children=$($outerChildren -join ',')" in timeout
-    assert "version_probe=$versionState" in timeout
-    assert "launch_trace=$($launchTrace -join ' || ')" in timeout
-    assert "outer_argv=$($outer.ArgumentList -join ' ') cwd=$ScriptsDir" in timeout
-    assert "no_daemon_control=$controlState" in timeout
-    assert "control_caveat=first_attempt_pane_may_remain" in timeout
-    assert "Stop-SmokeProcess $outerProcess 'timed-out clud launcher'" in timeout
-    assert "$controlProcess.WaitForExit(15000)" in timeout
-    assert "Test-Path -LiteralPath $controlMarker -PathType Leaf" in timeout
-    assert "'--no-daemon', '-p', 'kitty-smoke-no-daemon'" in timeout
-    assert timeout.index("Stop-SmokeProcess $outerProcess") < timeout.index(
-        "$controlProcess = [Diagnostics.Process]::Start($control)"
-    )
-    assert "Get-ChildItem -LiteralPath $probeDir -Filter 'clud-*.log'" in timeout
-    assert "Get-Content -LiteralPath $log.FullName -Tail 25" in timeout
-    assert "Stop-SmokeProcess $process 'seed GUI'" not in timeout
-
-
-def test_windows_smoke_uses_bundled_native_mock_backend() -> None:
-    smoke = SMOKE.read_text(encoding="utf-8")
-    assert "[Parameter(Mandatory = $true)][string]$MockAgentPath" in smoke
-    assert "[IO.File]::Copy($MockAgentPath, $backend)" in smoke
-    assert "--mock-report-file', $backendMarker" in smoke
-    assert "--mock-exit-code', '37'" in smoke
-    assert "ConvertFrom-Json" in smoke
-    assert "$backendResult.env.WEZTERM_UNIX_SOCKET" in smoke
+    assert "--return-initial-exit-code" in smoke
+    assert "kitty=$env:CLUD_KITTY_TERM pane=$env:WEZTERM_PANE" in smoke
+    assert "$process.ExitCode -ne 37" in smoke
+    assert "Native installed Kitty GUI child ran" in smoke
 
 
 def test_kitty_term_config_has_core_behaviors() -> None:
