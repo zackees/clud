@@ -154,7 +154,29 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '-p', 'kitty-smok
 
     $outerProcess = [Diagnostics.Process]::Start($outer)
     if (-not $outerProcess.WaitForExit($TimeoutSeconds * 1000)) {
-        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds"
+        $backendState = 'absent'
+        try {
+            if (Test-Path -LiteralPath $backendMarker -PathType Leaf) {
+                $backendState = "present: $((Get-Content -LiteralPath $backendMarker -Raw).Trim())"
+            }
+        } catch {
+            $backendState = "unavailable: $($_.Exception.Message)"
+        }
+        $guiPids = @()
+        try {
+            $guiPids = @(Get-BundledGuiPids)
+        } catch {
+            $guiPids = @("unavailable: $($_.Exception.Message)")
+        }
+        $outerChildren = @()
+        try {
+            foreach ($candidate in (Get-CimInstance Win32_Process -Filter "ParentProcessId = $($outerProcess.Id)" -ErrorAction Stop)) {
+                $outerChildren += "$($candidate.Name):$($candidate.ProcessId)"
+            }
+        } catch {
+            $outerChildren = @("unavailable: $($_.Exception.Message)")
+        }
+        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds; backend_marker=$backendState bundled_gui_pids=$($guiPids -join ',') outer_children=$($outerChildren -join ',')"
     }
     if (-not (Test-Path -LiteralPath $backendMarker -PathType Leaf)) {
         throw "CLUD_KITTY_LAUNCH_FAILED: backend did not run; outer exit=$($outerProcess.ExitCode)"

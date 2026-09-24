@@ -75,6 +75,24 @@ def test_windows_smoke_cleans_up_both_process_trees_and_probe_directory() -> Non
     assert "Write-Host \"Cleanup could not" in smoke
 
 
+def test_windows_smoke_outer_timeout_reports_backend_and_gui_state() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    timeout = smoke.split("if (-not $outerProcess.WaitForExit", 1)[1].split(
+        "if (-not (Test-Path -LiteralPath $backendMarker", 1
+    )[0]
+    assert "Test-Path -LiteralPath $backendMarker -PathType Leaf" in timeout
+    assert "Get-Content -LiteralPath $backendMarker -Raw" in timeout
+    assert "$guiPids = @(Get-BundledGuiPids)" in timeout
+    assert (
+        'Get-CimInstance Win32_Process -Filter "ParentProcessId = $($outerProcess.Id)"'
+        in timeout
+    )
+    assert "backend_marker=$backendState" in timeout
+    assert "bundled_gui_pids=$($guiPids -join ',')" in timeout
+    assert "outer_children=$($outerChildren -join ',')" in timeout
+    assert "Stop-SmokeProcess" not in timeout
+
+
 def test_kitty_term_config_has_core_behaviors() -> None:
     config = CONFIG.read_text(encoding="utf-8")
     for required in (
