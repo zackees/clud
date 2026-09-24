@@ -1481,12 +1481,16 @@ def test_dry_run_do_carries_completion_and_meta_issue_contracts() -> None:
     result = _run("--dry-run", "--codex", "do", "https://github.com/o/r/issues/1")
     assert result.returncode == 0, result.stderr
     prompt = json.loads(result.stdout)["command"][-1]
-    assert "No cheating, no files left behind. Rebase to local origin when done." in prompt
-    assert "If the target is a meta issue" in prompt
-    assert "use AskUserQuestion to ask whether to run its" in prompt
-    assert "wait for the answer before invoking /clud-meta-work" in prompt
-    assert "/meta-issue or $meta-issue" in prompt
-    assert "assume parallel execution is approved and do not ask" in prompt
+    assert "Record the starting branch" in prompt
+    assert "meta issue launched via clud do" in prompt
+    assert "/meta-issue already approves parallelism" in prompt
+    assert "each child needs its own branch and one or more PRs" in prompt
+    assert "Never combine children in one PR" in prompt
+    assert "Only a child\u2019s final PR closes it" in prompt
+    assert "child PRs must not close the parent" in prompt
+    assert "Record child→PR links" in prompt
+    assert "show RED→GREEN, review, test, push, watch CI to green, and merge" in prompt
+    assert "return to the starting branch, and leave a clean status" in prompt
 
 
 def test_dry_run_fix() -> None:

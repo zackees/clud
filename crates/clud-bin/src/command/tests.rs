@@ -1216,14 +1216,18 @@ fn test_do_command_resolves_goal_prompt() {
 #[test]
 fn test_build_do_prompt_substitutes_url() {
     let prompt = build_do_prompt("https://example.com/thing");
-    assert!(prompt.starts_with("/goal read https://example.com/thing"));
-    assert!(prompt.contains("No cheating, no files left behind. Rebase to local origin when done."));
-    assert!(prompt.contains("If the target is a meta issue"));
-    assert!(prompt.contains("use AskUserQuestion to ask whether to run its"));
-    assert!(prompt.contains("wait for the answer before invoking /clud-meta-work"));
-    assert!(prompt.contains("/meta-issue or $meta-issue"));
-    assert!(prompt.contains("assume parallel execution is approved and do not ask"));
-    assert!(!prompt.contains("{url}"));
+    assert_eq!(
+        prompt,
+        "/goal read https://example.com/thing and implement it. Record the starting branch. \
+If this is a meta issue launched via clud do, ask whether to work on independent children in \
+parallel; /meta-issue already approves parallelism. Use /clud-meta-work before delegating. \
+Parallel work may use separate worktrees, but each child needs its own branch and one or more \
+PRs. Never combine children in one PR. Only a child’s final PR closes it; child PRs must not \
+close the parent. Record child→PR links, then close the parent after all children are resolved. \
+For every PR: show RED→GREEN, review, test, push, watch CI to green, and merge. Merge separately; \
+update remaining branches as needed. Follow repo worktree rules, return to the starting branch, \
+and leave a clean status."
+    );
 }
 
 #[test]
