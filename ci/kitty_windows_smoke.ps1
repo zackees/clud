@@ -95,12 +95,7 @@ $controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'
 $versionMarker = Join-Path $probeDir 'version.txt'
 $backend = Join-Path $probeDir 'claude.exe'
 [IO.File]::Copy($MockAgentPath, $backend)
-$nativeBackendDir = Join-Path $env:USERPROFILE '.local\bin'
-[void][IO.Directory]::CreateDirectory($nativeBackendDir)
-$nativeBackend = Join-Path $nativeBackendDir 'claude.exe'
-if (Test-Path -LiteralPath $nativeBackend) { throw "Refusing to replace existing $nativeBackend" }
-[IO.File]::Copy($MockAgentPath, $nativeBackend)
-$start = [Diagnostics.ProcessStartInfo]::new($wezterm)
+$start = [Diagnostics.ProcessStartInfo]::new($clud)
 $start.UseShellExecute = $false
 $start.WorkingDirectory = $ScriptsDir
 $start.Environment['CLUD_KITTY_SMOKE_MARKER'] = $marker
@@ -112,9 +107,8 @@ $start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $start.Environment['PATH'] = "$probeDir;$env:PATH"
 $start.Environment['CLUD_NO_UNLOCK'] = '1'
 $start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
-foreach ($arg in @('--config-file', $config, 'start', '--no-auto-connect',
-                   '--return-initial-exit-code', '--cwd', $ScriptsDir, '--', $MockAgentPath,
-                   '--mock-report-file', $marker,
+foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '--no-daemon', '-p',
+                   'kitty-seed', '--', '--mock-report-file', $marker,
                    '--mock-ready-file', $readyMarker,
                    '--mock-wait-for-file', $seedReleaseMarker, '--mock-exit-code', '23')) {
     [void]$start.ArgumentList.Add($arg)
@@ -285,6 +279,9 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         throw "CLUD_KITTY_LAUNCH_FAILED: backend did not run; outer exit=$($outerProcess.ExitCode)"
     }
     $backendResult = Get-Content -LiteralPath $backendMarker -Raw | ConvertFrom-Json
+    if ([IO.Path]::GetFullPath([string]$backendResult.program) -ine $backend) {
+        throw "Installed clud resolved the wrong backend instead of session PATH mock: $($backendResult.program)"
+    }
     if ($backendResult.exit_code -ne 37 -or $backendResult.env.WEZTERM_UNIX_SOCKET -ne $serverSocket) {
         throw "Installed clud did not forward into a Kitty pane: $backendResult"
     }
@@ -307,6 +304,9 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         throw 'Seed mock agent did not write its report'
     }
     $seedResult = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+    if ([IO.Path]::GetFullPath([string]$seedResult.program) -ine $backend) {
+        throw "Seed clud resolved the wrong backend instead of session PATH mock: $($seedResult.program)"
+    }
     if ($seedResult.exit_code -ne 23 -or
         $seedResult.env.WEZTERM_UNIX_SOCKET -ne $backendResult.env.WEZTERM_UNIX_SOCKET) {
         throw "Installed clud started another GUI instead of reusing the live GUI: seed=$seedResult probe=$backendResult"
@@ -337,8 +337,5 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction Stop
     } catch {
         Write-Host "Cleanup could not remove probe directory $probeDir`: $_"
-    }
-    try { Remove-Item -LiteralPath $nativeBackend -Force -ErrorAction Stop } catch {
-        Write-Host "Cleanup could not remove native mock backend $nativeBackend`: $_"
     }
 }

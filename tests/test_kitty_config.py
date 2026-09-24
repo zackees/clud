@@ -49,6 +49,22 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
     assert "reused pane status 37" in smoke
 
 
+def test_windows_smoke_cold_launch_uses_installed_clud_and_session_path_mock() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    seed = smoke.split("$start = [Diagnostics.ProcessStartInfo]::new(", 1)[1].split(
+        "$process = [Diagnostics.Process]::Start($start)", 1
+    )[0]
+    assert seed.startswith("$clud)")
+    assert "'--kitty-term', '--claude', '--subprocess'" in seed
+    assert "'--no-daemon'" in seed
+    assert '$start.Environment[\'PATH\'] = "$probeDir;$env:PATH"' in seed
+    assert "--always-new-process" not in seed
+    assert "$MockAgentPath" not in seed
+    assert "$nativeBackend" not in smoke
+    assert "[IO.Path]::GetFullPath([string]$backendResult.program) -ine $backend" in smoke
+    assert "[IO.Path]::GetFullPath([string]$seedResult.program) -ine $backend" in smoke
+
+
 def test_windows_smoke_timeout_reports_seed_process_state() -> None:
     smoke = SMOKE.read_text(encoding="utf-8")
     timeout = smoke.split("if (-not (Test-Path -LiteralPath $readyMarker", 1)[1]
