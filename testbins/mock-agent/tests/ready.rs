@@ -5,6 +5,29 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
+fn version_probe_writes_smoke_marker() {
+    let marker = std::env::temp_dir().join(format!(
+        "mock-agent-version-{}-{}.txt",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let output = Command::new(mock_agent_binary())
+        .arg("--version")
+        .env("CLUD_KITTY_SMOKE_VERSION_MARKER", &marker)
+        .output()
+        .expect("run mock version probe");
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(&marker).expect("read version marker"),
+        "mock-agent --version"
+    );
+    fs::remove_file(marker).expect("remove version marker");
+}
+
+#[test]
 fn readiness_report_is_atomic_and_precedes_release_and_final_report() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

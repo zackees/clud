@@ -931,9 +931,15 @@ fn run(mut args: args::Args) {
         if args.verbose {
             verbose_log::log("[clud] uv-run hook guard: scanning agent hooks");
         }
-        uv_run_hook_guard::run(&root);
+        uv_run_hook_guard::run(&root, args.verbose);
+        if args.verbose {
+            verbose_log::log("[clud] uv-run hook guard: complete");
+        }
     }
 
+    if args.verbose {
+        verbose_log::log("[clud] backend: resolving executable");
+    }
     let backend = launch_target.effective_harness;
     let backend_path = {
         let mut bootstrap_host = backend_bootstrap::ProductionBackendBootstrapHost;
@@ -957,6 +963,9 @@ fn run(mut args: args::Args) {
             }
         }
     };
+    if args.verbose {
+        verbose_log::log("[clud] backend: executable resolved");
+    }
     if !args.dry_run {
         let discovery_version = if launch_target.routing_mode == backend::RoutingMode::Unified {
             Some(backend_bootstrap::require_unified_claude_version(

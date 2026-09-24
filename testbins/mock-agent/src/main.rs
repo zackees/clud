@@ -248,6 +248,9 @@ fn main() {
     // the floor, so existing tests stay silent) and exit before the JSON
     // report machinery runs.
     if args.get(1).map(String::as_str) == Some("--version") {
+        if let Ok(path) = std::env::var("CLUD_KITTY_SMOKE_VERSION_MARKER") {
+            let _ = std::fs::write(path, "mock-agent --version");
+        }
         let version = std::env::var("MOCK_CLAUDE_VERSION")
             .unwrap_or_else(|_| "9.9.9 (mock-agent)".to_string());
         println!("{version}");
