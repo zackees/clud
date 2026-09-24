@@ -50,6 +50,7 @@ def test_windows_smoke_timeout_reports_whether_child_ran() -> None:
     assert "marker=absent" in timeout
     assert "ParentProcessId = $($process.Id)" in timeout
     assert "exited=$($process.HasExited)" in timeout
+    assert "backend=$backendState seed=$seedState" in smoke
 
 
 def test_kitty_term_config_has_core_behaviors() -> None:

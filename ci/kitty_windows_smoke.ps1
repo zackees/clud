@@ -125,8 +125,13 @@ $outerProcess = $null
 try {
     $outerProcess = [Diagnostics.Process]::Start($outer)
     if (-not $outerProcess.WaitForExit($TimeoutSeconds * 1000)) {
+        $backendState = 'absent'
+        if (Test-Path -LiteralPath $backendMarker -PathType Leaf) {
+            $backendState = (Get-Content -LiteralPath $backendMarker -Raw).Trim()
+        }
+        $seedState = "pid=$($process.Id) exited=$($process.HasExited)"
         $outerProcess.Kill($true)
-        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds"
+        throw "CLUD_KITTY_LAUNCH_TIMEOUT: installed clud did not exit within $TimeoutSeconds seconds; backend=$backendState seed=$seedState"
     }
     if (-not (Test-Path -LiteralPath $backendMarker -PathType Leaf)) {
         throw "CLUD_KITTY_LAUNCH_FAILED: backend did not run; outer exit=$($outerProcess.ExitCode)"
