@@ -95,6 +95,9 @@ $controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'
 $versionMarker = Join-Path $probeDir 'version.txt'
 $backend = Join-Path $probeDir 'claude.exe'
 [IO.File]::Copy($MockAgentPath, $backend)
+$nativeBackendDir = Join-Path $probeDir '.local\bin'
+[void][IO.Directory]::CreateDirectory($nativeBackendDir)
+[IO.File]::Copy($MockAgentPath, (Join-Path $nativeBackendDir 'claude.exe'))
 $start = [Diagnostics.ProcessStartInfo]::new($wezterm)
 $start.UseShellExecute = $false
 $start.WorkingDirectory = $ScriptsDir
@@ -190,6 +193,7 @@ $outer = [Diagnostics.ProcessStartInfo]::new($clud)
 $outer.UseShellExecute = $false
 $outer.WorkingDirectory = $ScriptsDir
 $outer.Environment['PATH'] = "$probeDir;$env:PATH"
+$outer.Environment['USERPROFILE'] = $probeDir
 $outer.Environment['CLUD_KITTY_SMOKE_MARKER'] = $backendMarker
 $outer.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker
 $outer.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
