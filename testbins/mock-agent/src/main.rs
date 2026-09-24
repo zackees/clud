@@ -46,6 +46,7 @@ fn main() {
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
     let mut ansi_script: Option<PathBuf> = None;
+    let mut ansi_after_wait: Option<PathBuf> = None;
     let mut tool_shell_probe_to: Option<PathBuf> = None;
     let mut bash_nounset_probe_to: Option<PathBuf> = None;
     let mut codex_bridge_probe_to: Option<PathBuf> = None;
@@ -186,6 +187,13 @@ fn main() {
         if arg == "--mock-ansi-script" {
             if let Some(path) = args.get(i + 1) {
                 ansi_script = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-ansi-after-wait" {
+            if let Some(path) = args.get(i + 1) {
+                ansi_after_wait = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -430,6 +438,20 @@ fn main() {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+    if let Some(path) = ansi_after_wait.as_ref() {
+        let bytes = std::fs::read(path).unwrap_or_else(|error| {
+            eprintln!("mock-agent could not read post-release ANSI script: {error}");
+            std::process::exit(89);
+        });
+        io::stdout().write_all(&bytes).unwrap_or_else(|error| {
+            eprintln!("mock-agent could not emit post-release ANSI script: {error}");
+            std::process::exit(89);
+        });
+        io::stdout().flush().unwrap_or_else(|error| {
+            eprintln!("mock-agent could not flush post-release ANSI script: {error}");
+            std::process::exit(89);
+        });
     }
     if sleep_ms > 0 {
         std::thread::sleep(Duration::from_millis(sleep_ms));
@@ -759,7 +781,16 @@ fn set_stdin_raw_if_tty() {
     let _ = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_stdin_raw_if_tty() {
+    // ConPTY presents a Windows console handle. Its default line-input mode
+    // buffers query replies, paste markers and ETX until Return is pressed.
+    if io::stdin().is_terminal() {
+        crossterm::terminal::enable_raw_mode().expect("enable raw ConPTY input for mock probe");
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn set_stdin_raw_if_tty() {}
 
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
