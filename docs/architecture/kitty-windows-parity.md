@@ -41,3 +41,15 @@ The NixOS clipboard popup placement and shell/Wayland scripts are platform-speci
 2. Reproduce Kitty and WezTerm failures separately at process start, GUI creation, ConPTY shell, and protocol layers. Capture exact error and lowest failing layer before attributing a cause.
 3. Verify bundle layout, license notices, wheel `RECORD`, and installed paths on Windows. Run the wired CI jobs against the published fork ZIP and confirm the pinned digest and revision checks pass. Ensure no independently installed WezTerm is shadowed and `--web-term` still launches by its existing contract. Verify initial-pane exit propagation in the packaged GUI smoke and reused-pane propagation in the fork tests.
 4. Use a controlled native Windows desktop for any future claims about visible rendering, physical keyboard/mouse behavior, clipboard interaction, or cross-window dragging. Until evidence is recorded, those rows remain explicitly partial or unverified.
+
+The installed-GUI smoke also has a bounded headless semantics stage after the
+shared-GUI and independent-exit checks. It exercises ConPTY size changes, raw
+ETX delivery, alternate-screen entry/restoration, truecolor style retained in
+escaped pane text, bracketed-paste framing, heavy output through a final
+sentinel, and Kitty keyboard/graphics query replies. These probes are pending
+native CI validation; source checks alone do not establish a pass. Raw ETX is
+not a physical Ctrl-C key event. CLI text injection does not prove key
+press/repeat/release behavior. The graphics reply proves protocol negotiation,
+not image pixels; escaped text proves style state, not visual contrast.
+Physical mouse events, clipboard interaction, drag, and pixel rendering remain
+outside headless evidence.

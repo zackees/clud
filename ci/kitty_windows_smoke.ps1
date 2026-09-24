@@ -289,6 +289,10 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         throw "Installed clud failed to propagate backend exit 37: exit=$($outerProcess.ExitCode)"
     }
     Write-Host "Installed clud --kitty-term reused the live GUI: $backendResult; exit 37 propagated"
+    $semanticsScript = Join-Path $PSScriptRoot 'kitty_terminal_semantics.ps1'
+    & $semanticsScript -Wezterm $wezterm -Socket $serverSocket `
+        -SeedPane ([int]$seedReady.env.WEZTERM_PANE) -MockAgentPath $MockAgentPath `
+        -ProbeDir $probeDir -ScriptsDir $ScriptsDir
     [IO.File]::WriteAllText($seedReleaseMarker, 'reused pane complete')
     $seedDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not $process.HasExited -and [DateTime]::UtcNow -lt $seedDeadline) {

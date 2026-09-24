@@ -10,6 +10,8 @@ CONFIG = (
     / "crates/clud-bin/assets/kitty/clud-kittyterm.lua"
 )
 SMOKE = Path(__file__).resolve().parents[1] / "ci/kitty_windows_smoke.ps1"
+SEMANTICS = Path(__file__).resolve().parents[1] / "ci/kitty_terminal_semantics.ps1"
+MOCK_AGENT = Path(__file__).resolve().parents[1] / "testbins/mock-agent/src/main.rs"
 
 
 def test_software_renderer_is_opt_in_for_ci() -> None:
@@ -89,6 +91,41 @@ def test_windows_smoke_waits_for_seed_pane_before_reuse() -> None:
     assert smoke.index("[IO.File]::WriteAllText($seedReleaseMarker") > smoke.index(
         "if ($outerProcess.ExitCode -ne 37)"
     )
+
+
+def test_windows_terminal_semantics_run_inside_reused_installed_gui() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    semantics = SEMANTICS.read_text(encoding="utf-8")
+    call = smoke.index("& $semanticsScript -Wezterm $wezterm -Socket $serverSocket")
+    assert smoke.index("if ($outerProcess.ExitCode -ne 37)") < call
+    assert call < smoke.index("[IO.File]::WriteAllText($seedReleaseMarker")
+    assert "-SeedPane ([int]$seedReady.env.WEZTERM_PANE)" in smoke
+    assert "'WEZTERM_UNIX_SOCKET'] = $Socket" in semantics
+    assert "--mock-ansi-after-wait" in semantics
+    for mode in (
+        "keyboard-query.bin",
+        "graphics-query.bin",
+        "bracketed-paste.bin",
+        "--no-paste",
+        "alternate-enter.bin",
+        "alternate-exit.bin",
+        "truecolor.bin",
+        "adjust-pane-size",
+        "heavy-output.bin",
+    ):
+        assert mode in semantics
+    assert "WaitForExit($TimeoutMs)" in semantics
+    assert "Kill($true)" in semantics
+    assert "WaitForExit(2000)" in semantics
+    assert "kill-pane" in semantics
+    assert "Stop-ProbePane $keyboardPane" in semantics
+    assert "Stop-ProbePane $heavyPane" in semantics
+
+
+def test_windows_mock_reads_conpty_replies_without_line_buffering() -> None:
+    mock = MOCK_AGENT.read_text(encoding="utf-8")
+    assert "#[cfg(windows)]\nfn set_stdin_raw_if_tty()" in mock
+    assert "crossterm::terminal::enable_raw_mode()" in mock
 
 
 def test_windows_smoke_cleans_up_both_process_trees_and_probe_directory() -> None:
