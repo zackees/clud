@@ -299,7 +299,12 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         Start-Sleep -Milliseconds 100
     }
     if (-not $process.HasExited) {
-        throw "GUI_UNAVAILABLE: seed GUI stayed open after reused pane completed"
+        # Name what is still alive so a hang is diagnosable from one CI run.
+        $env:WEZTERM_UNIX_SOCKET = $serverSocket
+        $livePanes = (& $wezterm cli list --format json 2>&1 | Out-String).Trim()
+        Remove-Item Env:WEZTERM_UNIX_SOCKET -ErrorAction SilentlyContinue
+        $seedReported = Test-Path -LiteralPath $marker -PathType Leaf
+        throw "GUI_UNAVAILABLE: seed GUI stayed open after reused pane completed; seed report written=$seedReported; live panes=$livePanes"
     }
     if ($process.ExitCode -ne 23) {
         throw "WezTerm failed to propagate first GUI child status 23: status=$($process.ExitCode)"
