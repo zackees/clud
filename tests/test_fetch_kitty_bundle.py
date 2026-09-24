@@ -17,9 +17,9 @@ from ci.kitty_wheel import KITTY_BUNDLE_FILES
 ROOT = Path(__file__).resolve().parent.parent
 PINNED_URL = (
     "https://github.com/zackees/wezterm/releases/download/"
-    "kitty-windows-compat-efa27226/WezTerm-windows-portable.zip"
+    "kitty-windows-compat-8f53eb5c/WezTerm-windows-portable.zip"
 )
-PINNED_SHA256 = "42724c661ee56cb41d26b8d8c3f61600fa6d069a8186597f9fc3363edbf15a74"
+PINNED_SHA256 = "ec3f2a0ab244b86589d9acda8581465dd68a645a7228abc8998077b3fd0698de"
 
 
 def test_windows_x64_wheel_fetches_pinned_bundle_before_build() -> None:
