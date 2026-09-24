@@ -74,7 +74,9 @@ jobs:
       - name: Smoke installed Kitty GUI headlessly
         if: ${{ inputs.target == 'x86_64-pc-windows-msvc' && inputs.suite == 'integration' }}
         shell: pwsh
-        run: pwsh -NoProfile -File ci/kitty_windows_smoke.ps1 -ScriptsDir (Split-Path $env:VENV_PY -Parent)
+        # VENV_PY is exported as an MSYS /d/... path by setup-exec; pwsh
+        # interprets that as a rooted Windows path on the current drive.
+        run: pwsh -NoProfile -File ci/kitty_windows_smoke.ps1 -ScriptsDir (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts')
 
       - name: Diagnose Linux failure
         if: ${{ failure() && runner.os == 'Linux' }}
