@@ -95,7 +95,7 @@ $controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'
 $versionMarker = Join-Path $probeDir 'version.txt'
 $backend = Join-Path $probeDir 'claude.exe'
 [IO.File]::Copy($MockAgentPath, $backend)
-$start = [Diagnostics.ProcessStartInfo]::new($clud)
+$start = [Diagnostics.ProcessStartInfo]::new($wezterm)
 $start.UseShellExecute = $false
 $start.WorkingDirectory = $ScriptsDir
 $start.Environment['CLUD_KITTY_SMOKE_MARKER'] = $marker
@@ -107,8 +107,9 @@ $start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $start.Environment['PATH'] = "$probeDir;$env:PATH"
 $start.Environment['CLUD_NO_UNLOCK'] = '1'
 $start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
-foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '--no-daemon', '-p',
-                   'kitty-seed', '--', '--mock-report-file', $marker,
+foreach ($arg in @('--config-file', $config, 'start', '--no-auto-connect',
+                   '--return-initial-exit-code', '--cwd', $ScriptsDir, '--', $MockAgentPath,
+                   '--mock-report-file', $marker,
                    '--mock-ready-file', $readyMarker,
                    '--mock-wait-for-file', $seedReleaseMarker, '--mock-exit-code', '23')) {
     [void]$start.ArgumentList.Add($arg)
