@@ -79,13 +79,13 @@ SAFE_UV_RUN_FLAGS = {"--no-project", "--no-sync", "--frozen"}
 # a sync there is startup cost the user is already paying.
 SCANNED_EVENTS = ("PreToolUse", "PostToolUse", "Stop")
 
-# Where the `clud-extern-repos` convention puts dependent checkouts.
+# Historical extern-layout inventory. Startup qualification is root-only;
+# this helper is retained to document the two managed layouts.
 #
 # Two locations, mirroring `extern_root::known_roots` on the Rust side:
 # `<repo>-extern/` beside the repo is current, `<repo>/.extern-repos/` is the
 # pre-#986 in-tree location that existing checkouts still use. Looking in only
-# one would leave the guard blind for half the users during the migration --
-# and being blind is the bug this is fixing.
+# one would miss a layout during any future explicit extern diagnostics.
 EXTERN_SUFFIX = "-extern"
 LEGACY_EXTERN_DIR = ".extern-repos"
 
@@ -151,6 +151,9 @@ def _known_extern_roots(repo_root: Path) -> list[Path]:
 def _extern_rust_checkouts(repo_root: Path) -> list[Path]:
     """Rust-backed dependent projects under `.extern-repos/`.
 
+    Historical inventory only: startup qualification does not call this
+    helper because a parked checkout cannot identify the active project.
+
     #972: the native build a hook triggers need not be *this* repo's. The
     `clud-extern-repos` convention puts a complete sibling project at
     `<repo>/.extern-repos/<name>/`, and a hook wrapper that resolves its
@@ -174,12 +177,11 @@ def _extern_rust_checkouts(repo_root: Path) -> list[Path]:
 def _repo_qualifies(repo_root: Path) -> bool:
     """Gate: scan when a bare `uv run` here could trigger a native build.
 
-    Either this repo is itself a Python+Rust polyglot with a build backend,
-    or it has a Rust-backed dependent checkout that a `$PWD`-walking hook
-    can bind to. Requiring Cargo.toml at *this* root is what made the guard
-    silent through #972.
+    Only the effective project root qualifies. A parked extern checkout
+    cannot establish where a hook will run later. Hooks that walk from a
+    different future `$PWD` must be anchored to the session root (#972).
     """
-    return _is_rust_backed(repo_root) or bool(_extern_rust_checkouts(repo_root))
+    return _is_rust_backed(repo_root)
 
 
 def _iter_hooks_from_claude(config_path: Path) -> list[tuple[str, str, str]]:
@@ -354,7 +356,8 @@ def main(argv: list[str]) -> int:
     sys.stderr.write(
         f"{YELLOW}{BOLD}[clud] uv_run_hook_guard: detected {len(offenders)} "
         f"bare `uv run` invocation(s) in agent hooks of a Python+Rust "
-        f"polyglot repo.{RESET}\n"
+        f"native-build project.{RESET}\n"
+        f"Native-build project root: {repo_root}\n"
         "Bare `uv run` walks the tree to pyproject.toml, finds the "
         "build-backend, and triggers a project re-sync (full maturin "
         "rebuild on maturin-backed projects) on every hook fire — "

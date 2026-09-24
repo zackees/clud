@@ -31,6 +31,15 @@ agent, and the tracker's own reports disagree about whether cwd drifts or
 silently resets (anthropics/claude-code#83636, #76708, #84685; the exact class
 in #50960 and #42282 was closed NOT_PLANNED).
 
+The startup `uv_run_hook_guard` has a narrower contract than hook dispatch.
+It scans the effective launch root only when that root has both a root-level
+Rust package manifest and a Python build backend. A parked sibling or in-tree
+extern checkout does not make its parent qualify. Launching from a Rust-backed
+extern checkout scans that checkout and names it in the warning. The guard
+cannot predict a parent hook's later `$PWD` walk into another project, the
+failure in [#972](https://github.com/zackees/clud/issues/972); anchor those
+hooks to the session project root or migrate them to clud's rooted hook dispatch.
+
 ## Two layers
 
 **Tier A — clud policy.** Built-in rules plus `bad_commands` / `bad_pipelines`,
