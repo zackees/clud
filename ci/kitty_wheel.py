@@ -19,7 +19,7 @@ from pathlib import Path
 
 # Mirrors the runtime portion of the fork's Windows portable release. PDBs are
 # deliberately excluded; license notices and source provenance are mandatory.
-KITTY_SOURCE_REVISION = "8f53eb5c51ac1ea2f182fdac096f63bd08cd61b5"
+KITTY_SOURCE_REVISION = "0be809bc0d2d82143efa5684ad3e0d76d879ce9e"
 KITTY_BUNDLE_ENV = "CLUD_KITTYTERM_BUNDLE_DIR"
 KITTY_TARGET = "x86_64-pc-windows-msvc"
 KITTY_PE_MACHINE = 0x8664  # IMAGE_FILE_MACHINE_AMD64
