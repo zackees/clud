@@ -98,7 +98,7 @@ def test_windows_smoke_outer_timeout_reports_backend_and_gui_state() -> None:
     assert "Stop-SmokeProcess $outerProcess 'timed-out clud launcher'" in timeout
     assert "$controlProcess.WaitForExit(15000)" in timeout
     assert "Test-Path -LiteralPath $controlMarker -PathType Leaf" in timeout
-    assert "'--no-daemon', '-p', 'kitty-smoke'" in timeout
+    assert "'--no-daemon', '-p', 'kitty-smoke-no-daemon'" in timeout
     assert timeout.index("Stop-SmokeProcess $outerProcess") < timeout.index(
         "$controlProcess = [Diagnostics.Process]::Start($control)"
     )
@@ -110,11 +110,18 @@ def test_windows_smoke_outer_timeout_reports_backend_and_gui_state() -> None:
 def test_windows_smoke_fake_backend_marks_version_probe() -> None:
     smoke = SMOKE.read_text(encoding="utf-8")
     assert 'echo version-probe >"%CLUD_KITTY_SMOKE_VERSION_MARKER%"' in smoke
+    assert "$start.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker" in smoke
+    assert "$start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir" in smoke
+    assert "$start.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker" in smoke
+    assert 'if /I "%%~A"=="kitty-smoke-no-daemon"' in smoke
+    assert 'set "backendMarker=%CLUD_KITTY_BACKEND_CONTROL_MARKER%"' in smoke
+    assert 'args=%* >"%backendMarker%"' in smoke
     assert "$outer.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker" in smoke
     assert "$outer.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir" in smoke
     assert "'--subprocess', '--verbose', '-p'" in smoke
     assert "$controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'" in smoke
     assert "$control.Environment['CLUD_KITTY_SMOKE_MARKER'] = $controlMarker" in smoke
+    assert "$control.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker" in smoke
     assert "Stop-SmokeProcess $controlProcess 'no-daemon control launcher'" in smoke
 
 

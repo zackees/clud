@@ -94,6 +94,9 @@ $start.WorkingDirectory = $ScriptsDir
 $start.Environment['CLUD_KITTY_SMOKE_MARKER'] = $marker
 $start.Environment['CLUD_KITTY_SMOKE_RELEASE'] = $backendMarker
 $start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker
+$start.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
+$start.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker
+$start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $start.Environment['PATH'] = "$probeDir;$($start.Environment['PATH'])"
 $start.Environment['CLUD_NO_UNLOCK'] = '1'
 $start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
@@ -141,7 +144,9 @@ if /I "%~1"=="--version" (
   echo 9.9.9 (mock-agent)
   exit /b 0
 )
-echo kitty=%CLUD_KITTY_TERM% pane=%WEZTERM_PANE% socket=%WEZTERM_UNIX_SOCKET% args=%* >"%CLUD_KITTY_BACKEND_MARKER%"
+set "backendMarker=%CLUD_KITTY_BACKEND_MARKER%"
+for %%A in (%*) do if /I "%%~A"=="kitty-smoke-no-daemon" set "backendMarker=%CLUD_KITTY_BACKEND_CONTROL_MARKER%"
+echo kitty=%CLUD_KITTY_TERM% pane=%WEZTERM_PANE% socket=%WEZTERM_UNIX_SOCKET% args=%* >"%backendMarker%"
 exit /b 37
 '@
 [IO.File]::WriteAllText($backend, $batch, [Text.Encoding]::ASCII)
@@ -150,6 +155,8 @@ $outer.UseShellExecute = $false
 $outer.WorkingDirectory = $ScriptsDir
 $outer.Environment['PATH'] = "$probeDir;$($outer.Environment['PATH'])"
 $outer.Environment['CLUD_KITTY_SMOKE_MARKER'] = $backendMarker
+$outer.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker
+$outer.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
 $outer.Environment['CLUD_KITTY_SMOKE_VERSION_MARKER'] = $versionMarker
 $outer.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $outer.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
@@ -213,8 +220,9 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
                 $control.Environment[$entry.Key] = $entry.Value
             }
             $control.Environment['CLUD_KITTY_SMOKE_MARKER'] = $controlMarker
+            $control.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
             foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose',
-                               '--no-daemon', '-p', 'kitty-smoke')) {
+                               '--no-daemon', '-p', 'kitty-smoke-no-daemon')) {
                 [void]$control.ArgumentList.Add($arg)
             }
             $controlProcess = [Diagnostics.Process]::Start($control)
