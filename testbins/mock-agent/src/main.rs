@@ -35,6 +35,7 @@ fn main() {
     let mut tree_log: Option<PathBuf> = None;
     let mut report_file: Option<PathBuf> = None;
     let mut ready_file: Option<PathBuf> = None;
+    let mut stdin_ready_file: Option<PathBuf> = None;
     let mut wait_for_file: Option<PathBuf> = None;
     let mut write_done_at: Option<PathBuf> = None;
     let mut write_done_body = String::from("mock-done");
@@ -145,6 +146,13 @@ fn main() {
         if arg == "--mock-ready-file" {
             if let Some(path) = args.get(i + 1) {
                 ready_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-stdin-ready-file" {
+            if let Some(path) = args.get(i + 1) {
+                stdin_ready_file = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -364,7 +372,7 @@ fn main() {
 
     // Read stdin: either timed read (--mock-read-stdin-ms) or pipe-mode read
     let stdin_bytes: Option<Vec<u8>> = if read_stdin_ms > 0 {
-        read_stdin_timed(read_stdin_ms)
+        read_stdin_timed(read_stdin_ms, stdin_ready_file.as_deref())
     } else if !stdin_is_terminal {
         let mut buf = Vec::new();
         io::stdin().read_to_end(&mut buf).ok();
@@ -795,7 +803,7 @@ fn set_stdin_raw_if_tty() {}
 
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
-fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
+fn read_stdin_timed(timeout_ms: u64, stdin_ready_file: Option<&Path>) -> Option<Vec<u8>> {
     // Real TUI children (e.g., codex Ink) put their PTY slave into raw mode
     // before reading. The mock-agent must do the same when its stdin is a PTY
     // slave, otherwise the kernel's canonical line discipline holds non-
@@ -819,6 +827,14 @@ fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
             }
         }
     });
+
+    if let Some(path) = stdin_ready_file {
+        let ready = serde_json::json!({ "pid": std::process::id(), "stdin_raw_ready": true });
+        if let Err(error) = write_atomic_ready_file(path, &ready) {
+            eprintln!("mock-agent could not write stdin readiness report: {error}");
+            std::process::exit(87);
+        }
+    }
 
     let mut collected = Vec::new();
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);

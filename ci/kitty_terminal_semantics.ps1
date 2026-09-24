@@ -134,7 +134,7 @@ try {
     $pasteReady = Join-Path $ProbeDir 'paste-ready.json'
     $pasteReport = Join-Path $ProbeDir 'paste-report.json'
     $pastePane = Start-ProbePane @('--mock-ansi-script', $pasteScript,
-                                  '--mock-ready-file', $pasteReady,
+                                  '--mock-stdin-ready-file', $pasteReady,
                                   '--mock-read-stdin-ms', '2500',
                                   '--mock-report-file', $pasteReport,
                                   '--mock-exit-code', '23')
@@ -149,7 +149,7 @@ try {
     # A raw ETX injected by the CLI is not evidence of a physical Ctrl-C key.
     $etxReady = Join-Path $ProbeDir 'etx-ready.json'
     $etxReport = Join-Path $ProbeDir 'etx-report.json'
-    $etxPane = Start-ProbePane @('--mock-ready-file', $etxReady,
+    $etxPane = Start-ProbePane @('--mock-stdin-ready-file', $etxReady,
                                 '--mock-read-stdin-ms', '2500',
                                 '--mock-report-file', $etxReport,
                                 '--mock-exit-code', '23')
@@ -203,12 +203,10 @@ try {
 
     $sizeReport = Join-Path $ProbeDir 'pty-size.json'
     $sizePane = Start-ProbePane @('--mock-report-pty-size', $sizeReport,
-                                 '--mock-pty-size-samples', '10',
+                                 '--mock-pty-size-samples', '50',
                                  '--mock-pty-size-interval-ms', '200',
                                  '--mock-exit-code', '23') -Right
-    Start-Sleep -Milliseconds 450
-    [void](Invoke-GuiCli @('adjust-pane-size', '--pane-id', "$sizePane", '--amount', '8', 'Left'))
-    $sizeDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $sizeDeadline = [DateTime]::UtcNow.AddSeconds(6)
     $sizes = @()
     do {
         Start-Sleep -Milliseconds 100
@@ -218,10 +216,30 @@ try {
             # The mock rewrites its sample array; a read can catch an update.
             $sizes = @()
         }
-    } while ($sizes.Count -lt 10 -and [DateTime]::UtcNow -lt $sizeDeadline)
-    if ($sizes.Count -lt 10 -or $null -eq $sizes[0].cols -or
-        @($sizes | ForEach-Object { $_.cols } | Select-Object -Unique).Count -lt 2) {
-        throw "ConPTY pane resize did not reach the child: $($sizes | ConvertTo-Json -Compress)"
+    } while (($sizes.Count -lt 1 -or $null -eq $sizes[-1].cols) -and
+             [DateTime]::UtcNow -lt $sizeDeadline)
+    if ($sizes.Count -lt 1 -or $null -eq $sizes[-1].cols) {
+        throw 'ConPTY child did not report a pre-resize terminal size'
+    }
+    $beforeCount = $sizes.Count
+    $beforeCols = [int]$sizes[-1].cols
+    [void](Invoke-GuiCli @('adjust-pane-size', '--pane-id', "$sizePane", '--amount', '8', 'Left'))
+    $sizeDeadline = [DateTime]::UtcNow.AddSeconds(6)
+    $changed = $false
+    do {
+        Start-Sleep -Milliseconds 100
+        try {
+            $sizes = @(Get-Content -LiteralPath $sizeReport -Raw | ConvertFrom-Json)
+        } catch { continue }
+        foreach ($sample in @($sizes | Select-Object -Skip $beforeCount)) {
+            if ($null -ne $sample.cols -and [int]$sample.cols -ne $beforeCols) {
+                $changed = $true
+                break
+            }
+        }
+    } while (-not $changed -and [DateTime]::UtcNow -lt $sizeDeadline)
+    if (-not $changed) {
+        throw "ConPTY pane resize did not change columns from $beforeCols in later samples: $($sizes | ConvertTo-Json -Compress)"
     }
     Stop-ProbePane $sizePane
 

@@ -120,12 +120,26 @@ def test_windows_terminal_semantics_run_inside_reused_installed_gui() -> None:
     assert "kill-pane" in semantics
     assert "Stop-ProbePane $keyboardPane" in semantics
     assert "Stop-ProbePane $heavyPane" in semantics
+    assert "--mock-stdin-ready-file', $pasteReady" in semantics
+    assert "--mock-stdin-ready-file', $etxReady" in semantics
+    assert "Start-Sleep -Milliseconds 450" not in semantics
+    assert semantics.index("$beforeCols = [int]$sizes[-1].cols") < semantics.index(
+        "@('adjust-pane-size'"
+    )
+    assert "Select-Object -Skip $beforeCount" in semantics
 
 
 def test_windows_mock_reads_conpty_replies_without_line_buffering() -> None:
     mock = MOCK_AGENT.read_text(encoding="utf-8")
     assert "#[cfg(windows)]\nfn set_stdin_raw_if_tty()" in mock
     assert "crossterm::terminal::enable_raw_mode()" in mock
+    assert mock.index("if let Some(path) = ansi_script.as_ref()") < mock.index(
+        "read_stdin_timed(read_stdin_ms, stdin_ready_file.as_deref())"
+    )
+    raw = mock.split("fn read_stdin_timed(", 1)[1]
+    assert raw.index("set_stdin_raw_if_tty();") < raw.index(
+        "write_atomic_ready_file(path, &ready)"
+    )
 
 
 def test_windows_smoke_cleans_up_both_process_trees_and_probe_directory() -> None:

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -131,6 +132,50 @@ fn ansi_after_wait_emits_only_after_release() {
             .starts_with(b"MAIN\x1b[?1049hALT\x1b[?1049lRESTORED"),
         "initial and release scripts must remain ordered before the JSON report"
     );
+    fs::remove_dir_all(&dir).expect("remove isolated test directory");
+}
+
+#[test]
+fn stdin_ready_marker_is_atomic_and_precedes_input_capture() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("mock-agent-stdin-{}-{nonce}", std::process::id()));
+    fs::create_dir(&dir).expect("create isolated test directory");
+    let ready = dir.join("stdin-ready.json");
+    let report = dir.join("report.json");
+    let mut child = Command::new(mock_agent_binary())
+        .args([
+            "--mock-stdin-ready-file",
+            ready.to_str().expect("ready path"),
+            "--mock-read-stdin-ms",
+            "500",
+            "--mock-report-file",
+            report.to_str().expect("report path"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn mock agent");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.is_file() && Instant::now() < deadline {
+        assert!(child.try_wait().expect("poll child").is_none());
+        thread::sleep(Duration::from_millis(10));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&ready).expect("ready file"))
+        .expect("atomic complete stdin readiness report");
+    assert_eq!(value["stdin_raw_ready"], true);
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"stdin-after-ready")
+        .expect("write input after readiness");
+    assert!(child.wait().expect("wait for mock agent").success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&report).expect("report")).expect("valid report");
+    assert_eq!(value["stdin"], "stdin-after-ready");
     fs::remove_dir_all(&dir).expect("remove isolated test directory");
 }
 
