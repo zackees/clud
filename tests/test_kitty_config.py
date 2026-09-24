@@ -41,9 +41,8 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
     assert '$start.Environment[\'PATH\'] = "$probeDir;' in smoke
     assert "$start.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker" in smoke
     assert "[IO.File]::Copy($MockAgentPath, $backend)" in smoke
-    assert "'--mock-sleep-ms', '15000', '--mock-exit-code', '23'" in smoke
-    assert "& $wezterm --config-file $config cli list" in smoke
-    assert "$discoveryReady = $LASTEXITCODE -eq 0" in smoke
+    assert "'--mock-ready-file', $readyMarker" in smoke
+    assert "'--mock-wait-for-file', $seedReleaseMarker" in smoke
     assert "$seedResult.env.WEZTERM_UNIX_SOCKET -ne $backendResult.env.WEZTERM_UNIX_SOCKET" in smoke
     assert "reused the live GUI" in smoke
     assert "first GUI child status 23" in smoke
@@ -52,10 +51,23 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
 
 def test_windows_smoke_timeout_reports_seed_process_state() -> None:
     smoke = SMOKE.read_text(encoding="utf-8")
-    timeout = smoke.split("if ($seedGuiPids.Count -eq 0)", 1)[1]
+    timeout = smoke.split("if (-not (Test-Path -LiteralPath $readyMarker", 1)[1]
     assert "ParentProcessId = $($process.Id)" in timeout
     assert "exited=$($process.HasExited)" in timeout
     assert "backend_marker=$backendState version_probe=$versionState seed=$seedState" in smoke
+
+
+def test_windows_smoke_waits_for_seed_pane_before_reuse() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    ready = smoke.index("$seedReady = Get-Content -LiteralPath $readyMarker")
+    outer = smoke.index("$outerProcess = [Diagnostics.Process]::Start($outer)")
+    assert ready < outer
+    assert "[string]$seedReady.env.WEZTERM_PANE -notmatch '^\\d+$'" in smoke
+    assert "$serverSocket = [string]$seedReady.env.WEZTERM_UNIX_SOCKET" in smoke
+    assert "$backendResult.env.WEZTERM_UNIX_SOCKET -ne $serverSocket" in smoke
+    assert smoke.index("[IO.File]::WriteAllText($seedReleaseMarker") > smoke.index(
+        "if ($outerProcess.ExitCode -ne 37)"
+    )
 
 
 def test_windows_smoke_cleans_up_both_process_trees_and_probe_directory() -> None:

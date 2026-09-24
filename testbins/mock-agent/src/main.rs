@@ -34,6 +34,8 @@ fn main() {
     let mut helper_role: Option<String> = None;
     let mut tree_log: Option<PathBuf> = None;
     let mut report_file: Option<PathBuf> = None;
+    let mut ready_file: Option<PathBuf> = None;
+    let mut wait_for_file: Option<PathBuf> = None;
     let mut write_done_at: Option<PathBuf> = None;
     let mut write_done_body = String::from("mock-done");
     let mut write_blocked_at: Option<PathBuf> = None;
@@ -135,6 +137,20 @@ fn main() {
         if arg == "--mock-report-file" {
             if let Some(path) = args.get(i + 1) {
                 report_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-ready-file" {
+            if let Some(path) = args.get(i + 1) {
+                ready_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-wait-for-file" {
+            if let Some(path) = args.get(i + 1) {
+                wait_for_file = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -289,6 +305,21 @@ fn main() {
         return;
     }
 
+    if let Some(path) = ready_file.as_ref() {
+        let ready = serde_json::json!({
+            "pid": std::process::id(),
+            "env": {
+                "CLUD_KITTY_TERM": std::env::var("CLUD_KITTY_TERM").ok(),
+                "WEZTERM_PANE": std::env::var("WEZTERM_PANE").ok(),
+                "WEZTERM_UNIX_SOCKET": std::env::var("WEZTERM_UNIX_SOCKET").ok(),
+            },
+        });
+        if let Err(error) = write_atomic_ready_file(path, &ready) {
+            eprintln!("mock-agent could not write readiness report: {error}");
+            std::process::exit(87);
+        }
+    }
+
     // Track which iteration we're on by reading/bumping a counter file whose
     // path is shared by all three marker flags. We compute that path as the
     // parent of the first marker path, suffixed with ".iter-count".
@@ -387,6 +418,16 @@ fn main() {
         .ok()
         .map(|path| path.to_string_lossy().to_string());
 
+    if let Some(path) = wait_for_file.as_ref() {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !path.is_file() {
+            if Instant::now() >= deadline {
+                eprintln!("mock-agent timed out waiting for {}", path.display());
+                std::process::exit(88);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     if sleep_ms > 0 {
         std::thread::sleep(Duration::from_millis(sleep_ms));
     }
@@ -442,6 +483,16 @@ fn main() {
     }
 
     std::process::exit(exit_code);
+}
+
+fn write_atomic_ready_file(path: &Path, ready: &serde_json::Value) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("ready-{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec(ready).map_err(io::Error::other)?;
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, path)
 }
 
 fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {

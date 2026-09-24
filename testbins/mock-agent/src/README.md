@@ -30,6 +30,10 @@ before exiting with the test-requested code.
   - `--mock-stdin-raw-to <path>` — also dump captured stdin bytes to a file.
   - `--mock-report-file <path>` — duplicate the JSON report to a file (useful
     when stdout is owned by a PTY).
+  - `--mock-ready-file <path>` — atomically publish early PID and Kitty pane
+    environment JSON before waiting or producing the final report.
+  - `--mock-wait-for-file <path>` — hold the process until the named file
+    appears (120-second safety limit), keeping a seed pane alive for reuse.
   - `--mock-write-done <path>` / `--mock-write-done-body <s>`,
     `--mock-write-blocked <path>` / `--mock-write-blocked-body <s>`,
     `--mock-write-marker-on-iter <n>` — `clud loop` DONE/BLOCKED contract:
