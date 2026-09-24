@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.8.14 - 2026-09-23
+
+- The Claude-harness Codex bridge can recover clud-owned credentials during a
+  session. It refreshes on use, retries a rejected token once before output is
+  shown, and rechecks credentials on the next turn after an in-band auth
+  failure. An interactive launch can explicitly repair its clud login from a
+  usable native Codex login. See zackees/clud#1274.
+- Direct provider launches now validate credentials before starting and restore
+  the model request timeout. A bare launch selects DeepSeek when it is the
+  only authorized route. See zackees/clud#1283, #1281, and #1287.
+- The session status line now accumulates transcript usage across direct
+  routes. Near-miss command-line flags are corrected without exposing credentials.
+  See zackees/clud#1288 and #1285.
+- OpenRouter model discovery now includes a scheduled pricing catalog and
+  weighted eligibility ranking, exposed through `clud models cheapest`.
+  See zackees/clud#1289.
+- Bundled tools and hooks invoke the clud binary that launched them; session
+  temporary-file cleanup continues through large trees. See zackees/clud#1279
+  and #1278.
+- Release publishing now requires a successful full CI run on the exact tag
+  commit before any wheels are built or published. See zackees/clud#1284.
+
 ## 2.8.13 - 2026-09-22
 
 - A hung model request is now reported instead of stalling silently. A direct
