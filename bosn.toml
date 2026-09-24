@@ -38,6 +38,10 @@ destination = "/root/.cargo"
 scope = "machine"
 destination = "/root/.rustup"
 
+[stack.clud_1044_final_retry.volumes.soldr-home]
+scope = "machine"
+destination = "/root/.soldr"
+
 [stack.clud_1044_final_retry.env]
 CARGO_TARGET_DIR = "/workspace/target"
 UV_CACHE_DIR = "/root/.cache/uv"

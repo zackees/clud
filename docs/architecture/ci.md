@@ -35,6 +35,60 @@ wheel execution: release-profile artifacts are built after the gate. The
 target/label policy lives in `ci/ci_matrix.py`; the workflow has no preceding
 matrix-planning runner job.
 
+## Local validation before remote CI
+
+GitHub Actions is the final cross-platform check, not the first test loop. For a
+code or workflow-behavior change, identify the smallest failing test or job,
+reproduce it locally, make the change, and rerun it to green before pushing.
+When `docker info` succeeds, use this repository's `bosn.toml` tasks for the
+repeatable Linux build/test loop. Bosn keeps the checkout read-only and puts
+build state in managed volumes, so repeated tests reuse the expensive Rust and
+Python caches without filling the host with disposable Docker resources. The
+first run may still need to build the image and warm those caches:
+
+```bash
+docker info
+bosn tasks                         # inspect available focused tasks
+bosn run --task focused-test       # example; choose the task relevant to the edit
+bosn run --task lint               # runs the required bash lint
+bosn run --task test               # broad Rust + Python suite when warranted
+```
+
+For a GitHub Actions behavior change, exercise the affected **Linux** job with
+`act` as well when it is installed and the job is supported. Select a runner
+image explicitly to avoid an interactive first-run prompt; for example:
+
+```bash
+act -l -W .github/workflows/ci.yml
+act pull_request -W .github/workflows/ci.yml -j static \
+  -P ubuntu-24.04=catthehacker/ubuntu:act-latest
+```
+
+`act --dryrun` is useful for planning/validation but does not run action code.
+Its Docker runner is not a native macOS or Windows runner, and this workflow's
+reusable jobs, artifacts, and runner environment can differ from GitHub's.
+`act` creates Docker resources outside Bosn's managed registry.
+Run only a representative supported job locally; do not claim that it replaces
+the remote matrix. If `act` cannot model the affected path, use the direct
+Bosn test and, where available, the `clud-preloop` workflow runner before CI;
+record what was and was not reproduced.
+
+The workflow review that motivated this rule caught a real false positive: a
+cache-looking input was accepted by a policy checker but did not enable the
+cache in the **pinned** `setup-soldr` action. When editing third-party action
+inputs, inspect that action's `action.yml` at the exact ref used by the
+workflow, verify the input's effect rather than just its spelling, and add a
+negative/mutation case to any policy checker. If a job approaches its timeout,
+measure the slow step or cell and split work where possible instead of simply
+raising the timeout.
+
+If Docker is unavailable, or Bosn/`act` is missing or unsupported, run the
+equivalent direct checks (`bash lint`, focused tests, `bash test` or
+`bash test --integration` as appropriate) and state the local validation gap.
+Do not auto-install tools, prune Docker resources, or consume remote CI merely
+to avoid a reproducible local failure. See the bundled `clud-bosn` and
+`clud-preloop` skills for their respective prerequisites and limits.
+
 ## The problem
 
 Every push fans out to **12 heavy workflows** (6 platforms x {unit-test,
