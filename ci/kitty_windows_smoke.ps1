@@ -129,7 +129,46 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '--n
         } catch {
             $children = @("unavailable: $($_.Exception.Message)")
         }
-        throw "GUI_UNAVAILABLE: installed clud failed to start a ready seed pane within $TimeoutSeconds seconds; children=$($children -join ',') exited=$($process.HasExited) session=$($self.SessionId) interactive=$([Environment]::UserInteractive)"
+        $seedLogs = @()
+        try {
+            $logFiles = @(Get-ChildItem -LiteralPath $probeDir -Filter 'clud-*.log' -File -ErrorAction Stop)
+            foreach ($log in $logFiles) {
+                if ($seedLogs.Count -ge 4) { break }
+                $lines = @(Get-Content -LiteralPath $log.FullName -Tail 20 -ErrorAction Stop)
+                $shortLines = @()
+                foreach ($line in $lines) {
+                    if ($line.Length -gt 300) { $shortLines += $line.Substring(0, 300) }
+                    else { $shortLines += $line }
+                }
+                $seedLogs += "$($log.Name): $($shortLines -join ' | ')"
+            }
+            if ($seedLogs.Count -eq 0) { $seedLogs = @('absent') }
+        } catch {
+            $seedLogs = @("unavailable: $($_.Exception.Message)")
+        }
+        $descendants = @()
+        try {
+            $snapshot = @(Get-CimInstance Win32_Process -OperationTimeoutSec 3 -ErrorAction Stop)
+            $parentIds = @([int]$process.Id)
+            for ($depth = 0; $depth -lt 4 -and $parentIds.Count -gt 0; $depth++) {
+                $nextIds = @()
+                foreach ($candidate in $snapshot) {
+                    if ([int]$candidate.ParentProcessId -in $parentIds) {
+                        $descendants += "$($candidate.Name):$($candidate.ProcessId)<-$($candidate.ParentProcessId)"
+                        $nextIds += [int]$candidate.ProcessId
+                        if ($descendants.Count -ge 24) { break }
+                    }
+                }
+                $parentIds = $nextIds
+                if ($descendants.Count -ge 24) { break }
+            }
+            if ($descendants.Count -eq 0) { $descendants = @('none') }
+        } catch {
+            $descendants = @("unavailable: $($_.Exception.Message)")
+        }
+        $versionState = if (Test-Path -LiteralPath $versionMarker -PathType Leaf) { 'present' } else { 'absent' }
+        $seedExit = if ($process.HasExited) { "$($process.ExitCode)" } else { 'running' }
+        throw "GUI_UNAVAILABLE: installed clud failed to start a ready seed pane within $TimeoutSeconds seconds; seed_pid=$($process.Id) seed_exit=$seedExit children=$($children -join ',') descendants=$($descendants -join ',') version_probe=$versionState seed_logs=$($seedLogs -join ' || ') session=$($self.SessionId) interactive=$([Environment]::UserInteractive)"
     }
     if ($process.HasExited) {
         throw "GUI_UNAVAILABLE: seed GUI exited before the reuse probe: exit=$($process.ExitCode)"

@@ -53,7 +53,12 @@ def test_windows_smoke_timeout_reports_seed_process_state() -> None:
     smoke = SMOKE.read_text(encoding="utf-8")
     timeout = smoke.split("if (-not (Test-Path -LiteralPath $readyMarker", 1)[1]
     assert "ParentProcessId = $($process.Id)" in timeout
-    assert "exited=$($process.HasExited)" in timeout
+    assert "seed_exit=$seedExit" in timeout
+    assert "descendants=$($descendants -join ',')" in timeout
+    assert "version_probe=$versionState seed_logs=$($seedLogs -join ' || ')" in timeout
+    assert "Get-Content -LiteralPath $log.FullName -Tail 20" in timeout
+    assert "if ($seedLogs.Count -ge 4) { break }" in timeout
+    assert "Get-CimInstance Win32_Process -OperationTimeoutSec 3" in timeout
     assert "backend_marker=$backendState version_probe=$versionState seed=$seedState" in smoke
 
 
