@@ -29,6 +29,17 @@ def test_windows_smoke_selects_software_renderer_for_both_gui_paths() -> None:
     assert "$outer.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'" in smoke
 
 
+def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    launch_args = smoke.split("foreach ($arg in @(", 1)[1].split(")) {", 1)[0]
+    assert "--always-new-process" not in launch_args
+    assert "socket=$env:WEZTERM_UNIX_SOCKET" in smoke
+    assert "socket=%WEZTERM_UNIX_SOCKET%" in smoke
+    assert "reused the live GUI" in smoke
+    assert "first GUI child status 23" in smoke
+    assert "reused pane status 37" in smoke
+
+
 def test_kitty_term_config_has_core_behaviors() -> None:
     config = CONFIG.read_text(encoding="utf-8")
     for required in (
