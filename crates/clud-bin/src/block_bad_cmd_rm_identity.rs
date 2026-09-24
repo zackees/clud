@@ -26,10 +26,14 @@ pub(super) fn identity_reason(path_env: &str, trusted: &Path) -> Result<(), Stri
 
 #[cfg(test)]
 pub(super) fn source_reason(command: &str) -> Result<(), String> {
-    source_reason_with_tap(command, false)
+    source_reason_with_tap(command, false, false)
 }
 
-fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String> {
+fn source_reason_with_tap(
+    command: &str,
+    trusted_tap: bool,
+    rg_configured: bool,
+) -> Result<(), String> {
     let refuse = || "rm identity: command changes or bypasses provable shim resolution".to_string();
     // A single plain subshell inherits PATH. Check every inner statement with
     // the same rules; extra/nested parentheses remain unsupported.
@@ -41,9 +45,13 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
         if inner.contains(['(', ')']) {
             return Err(refuse());
         }
-        return source_reason_with_tap(inner, trusted_tap);
+        return source_reason_with_tap(inner, trusted_tap, rg_configured);
     }
-    if command.contains('`') || contains_removal_in_command_substitution(command) {
+    let has_backticks = command.as_bytes().contains(&96);
+    if contains_active_backtick_substitution(command)
+        || (has_backticks && !literal_backticks_are_data_only(command, rg_configured))
+        || contains_removal_in_command_substitution(command)
+    {
         return Err(refuse());
     }
     // Opaque shell structure matters only when it can execute a removal. A
@@ -218,6 +226,151 @@ fn source_reason_with_tap(command: &str, trusted_tap: bool) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// Active legacy command substitutions remain fail-closed. Quoting and escaping
+/// are modeled; comments and other opaque shell constructs stay fail-closed.
+fn contains_active_backtick_substitution(command: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        Single,
+        AnsiC,
+        Double,
+    }
+
+    let bytes = command.as_bytes();
+    let mut quote = None::<Quote>;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(Quote::Single) => {
+                if byte == b'\'' {
+                    quote = None;
+                }
+                index += 1;
+            }
+            Some(Quote::AnsiC) => match byte {
+                b'\\' => {
+                    index = (index + 2).min(bytes.len());
+                }
+                b'\'' => {
+                    quote = None;
+                    index += 1;
+                }
+                _ => index += 1,
+            },
+            Some(Quote::Double) => match byte {
+                b'\\' => {
+                    if bytes
+                        .get(index + 1)
+                        .is_some_and(|next| matches!(next, b'$' | 96 | b'"' | b'\\' | b'\n'))
+                    {
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+                b'"' => {
+                    quote = None;
+                    index += 1;
+                }
+                96 => return true,
+                _ => index += 1,
+            },
+            None => match byte {
+                b'\\' => {
+                    if bytes.get(index + 1) == Some(&b'\n') {
+                        index += 2;
+                    } else {
+                        index = (index + 2).min(bytes.len());
+                    }
+                }
+                b'\'' => {
+                    quote = Some(if is_ansi_c_quote_start(bytes, index) {
+                        Quote::AnsiC
+                    } else {
+                        Quote::Single
+                    });
+                    index += 1;
+                }
+                b'"' => {
+                    quote = Some(Quote::Double);
+                    index += 1;
+                }
+                b'<' if bytes.get(index + 1) == Some(&b'<')
+                    && bytes.get(index + 2) != Some(&b'<') =>
+                {
+                    // Here-doc bodies have different quote rules; without
+                    // parsing delimiters, fail closed on any later backtick.
+                    if bytes[index + 2..].contains(&96) {
+                        return true;
+                    }
+                    index += 2;
+                }
+                96 => return true,
+                _ => index += 1,
+            },
+        }
+    }
+    false
+}
+
+fn is_ansi_c_quote_start(bytes: &[u8], quote_index: usize) -> bool {
+    if quote_index == 0 || bytes[quote_index - 1] != b'$' {
+        return false;
+    }
+    let mut cursor = quote_index - 1;
+    let mut backslashes = 0;
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 0
+}
+
+fn literal_backticks_are_data_only(command: &str, rg_configured: bool) -> bool {
+    let Ok(statements) = block_bad_cmd_rm_vars::identity_statements(command) else {
+        return false;
+    };
+    !statements.is_empty()
+        && statements.iter().all(|statement| {
+            let Ok(words) = shell_words::split(statement.trim()) else {
+                return false;
+            };
+            let Some(program) = words.first().map(|word| program_name(word)) else {
+                return false;
+            };
+            match program.as_str() {
+                "rg" => {
+                    // Require this first so it cannot be consumed as another
+                    // option's value or treated as a path after `--`.
+                    let no_config = words.get(1).is_some_and(|word| word == "--no-config");
+                    let has_config = words
+                        .iter()
+                        .any(|word| word == "--config" || word.starts_with("--config="));
+                    let has_preprocessor = words.iter().any(|word| {
+                        word == "--pre" || word == "--pre-glob" || word.starts_with("--pre=")
+                    });
+                    !has_preprocessor && !has_config && (no_config || !rg_configured)
+                }
+                "gh" => {
+                    let has_body = words.iter().any(|word| {
+                        matches!(word.as_str(), "-b" | "--body" | "-F" | "--body-file")
+                    });
+                    let launches_editor_or_browser = words.iter().any(|word| {
+                        matches!(word.as_str(), "-e" | "--editor" | "-w" | "--web")
+                            || word.starts_with("--editor=")
+                    });
+                    has_body
+                        && !launches_editor_or_browser
+                        && words.get(1).is_some_and(|word| word == "issue")
+                        && words.get(2).is_some_and(|word| word == "comment")
+                }
+                "echo" | "printf" => true,
+                _ => false,
+            }
+        })
 }
 
 /// True when an unquoted shell word names the protected removal executable.
@@ -533,7 +686,11 @@ pub(super) fn check(command: &str, path_env: &str) -> Result<(), String> {
     };
     // Refusing opaque source needs no binary IO. Every allowed command still
     // reaches the full byte comparison; there is no identity cache or bypass.
-    source_reason_with_tap(command, trusted_tap)?;
+    source_reason_with_tap(
+        command,
+        trusted_tap,
+        std::env::var_os("RIPGREP_CONFIG_PATH").is_some(),
+    )?;
     identity_reason(path_env, &trusted)
 }
 
@@ -623,6 +780,74 @@ mod tests {
         ] {
             assert!(source_reason(source).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn single_quoted_markdown_backticks_in_search_pattern_are_data() {
+        // Reproduces the read-only search denied by the hook after a successful jq query.
+        // Shell single quotes make the Markdown delimiters literal pattern text.
+        let tick = char::from(96);
+        let command = format!(
+            "rg -l --glob '*.md' --glob '!projects/**' 'Run {tick}git diff @\\{{upstream\\}}\\.\\.\\.HEAD{tick}|high effort → 8 inline angles|Phase 0 — Gather the diff' /home/niteris/.claude /home/niteris/dev/fastled/.claude"
+        );
+        assert!(source_reason(&command).is_ok(), "{command}");
+        assert!(!literal_backticks_are_data_only(&command, true));
+        let no_config = command.replacen("rg -l", "rg --no-config -l", 1);
+        assert!(literal_backticks_are_data_only(&no_config, true));
+        let after_terminator = command.replacen(
+            " /home/niteris/.claude",
+            " -- --no-config /home/niteris/.claude",
+            1,
+        );
+        assert!(!literal_backticks_are_data_only(&after_terminator, true));
+        let consumed_as_value = command.replacen("rg -l", "rg -g --no-config -l", 1);
+        assert!(!literal_backticks_are_data_only(&consumed_as_value, true));
+        let preprocessed = command.replacen("rg -l", "rg --pre=printf -l", 1);
+        assert!(!literal_backticks_are_data_only(&preprocessed, false));
+        let issue_comment = format!(
+            "gh issue comment 1298 --repo zackees/clud --body 'Findings include {tick}cache_health_fuse{tick} and {tick}quoted prose{tick}'"
+        );
+        assert!(source_reason(&issue_comment).is_ok(), "{issue_comment}");
+        for command in [
+            format!("gh issue comment 1298 --editor --attach image.png --body 'literal {tick}text{tick}'"),
+            format!("gh issue comment 1298 --web --body 'literal {tick}text{tick}'"),
+        ] {
+            assert!(source_reason(&command).is_err(), "{command}");
+        }
+
+        for command in [
+            format!("printf '%s' \\{tick}literal\\{tick}"),
+            format!(r#"printf '%s' "\{tick}literal\{tick}""#),
+            "printf '%s' $'\\x60literal\\x60'".to_string(),
+        ] {
+            assert!(source_reason(&command).is_ok(), "{command}");
+        }
+
+        for command in [
+            format!("echo {tick}PATH=/tmp{tick}"),
+            format!("printf x\\ #{tick}rm /tmp/victim{tick}"),
+            format!("printf $(echo x)#{tick}rm /tmp/victim{tick}"),
+            format!("printf x\r#{tick}rm /tmp/victim{tick}"),
+            format!("printf ok \\;# literal {tick}text{tick}"),
+            format!("printf ok # literal {tick}text{tick}"),
+            format!("cat <<EOF\nprintf ok # {tick}rm /tmp/victim{tick}\nEOF"),
+        ] {
+            assert!(contains_active_backtick_substitution(&command), "{command}");
+            assert!(source_reason(&command).is_err(), "{command}");
+        }
+
+        let dollar = char::from(36);
+        let nested_expansion = format!(
+            "unset CLUD_REVIEW_UNSET; printf '%s' {dollar}{{CLUD_REVIEW_UNSET:- #{tick}printf nested{tick}}}"
+        );
+        assert!(contains_active_backtick_substitution(&nested_expansion));
+        assert!(source_reason(&nested_expansion).is_err());
+
+        let nested_shell = format!("env bash -c 'printf ok {tick}printf nested{tick}'");
+        assert!(source_reason(&nested_shell).is_err(), "{nested_shell}");
+
+        let perl_program = format!("perl -e 'print {tick}printf nested{tick}'");
+        assert!(source_reason(&perl_program).is_err(), "{perl_program}");
     }
 
     #[test]
