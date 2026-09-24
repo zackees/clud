@@ -28,8 +28,8 @@ use DONE/BLOCKED marker files for `grind`. See the
 [grind contract](docs/architecture/grind.md). It requires the Claude harness;
 for another model provider, use `--harness claude`.
 
-[![CI](https://github.com/zackees/clud/actions/workflows/ci.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/ci.yml)
-[![Auto Release](https://github.com/zackees/clud/actions/workflows/auto-release.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/auto-release.yml)
+[![CI](https://github.com/zackees/clud/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/zackees/clud/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Auto Release](https://github.com/zackees/clud/actions/workflows/auto-release.yml/badge.svg?event=push)](https://github.com/zackees/clud/actions/workflows/auto-release.yml?query=event%3Apush)
 
 CI builds each of the six target triples once on Linux and executes the result
 on native Linux/Windows/macOS runners — see
