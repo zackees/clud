@@ -42,7 +42,7 @@ def test_native_windows_installed_console_help_smoke(
     monkeypatch.setattr(build_wheel.process, "run", fake_run)
     assert build_wheel._verify_installed_smokes(env={}, target=None) == expected
     assert calls[-1] == [
-        str(tmp_path / "clud-kittyterm" / "wezterm.exe"),
+        str(tmp_path.parent / "clud-kittyterm" / "wezterm.exe"),
         "start",
         "--help",
     ]
@@ -96,7 +96,7 @@ def test_windows_soldr_wheel_packages_prebuilt_executables(monkeypatch, tmp_path
         assert "clud-2.5.4.dist-info/WHEEL" in members
         assert "clud-2.5.4.dist-info/RECORD" in members
         for name in (*KITTY_BUNDLE_FILES, "clud-kittyterm.lua", "clud-kittyterm-paste.exe"):
-            assert f"clud-2.5.4.data/scripts/clud-kittyterm/{name}" in members
+            assert f"clud-2.5.4.data/data/clud-kittyterm/{name}" in members
 
 
 def test_windows_soldr_wheel_fails_closed_without_bundle(monkeypatch, tmp_path):

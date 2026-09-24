@@ -243,7 +243,7 @@ def _is_clud_script_exe(member: str) -> bool:
 
 def _is_kitty_bundle_exe(member: str) -> bool:
     normalized = member.replace("\\", "/")
-    return "/scripts/clud-kittyterm/" in normalized and normalized.lower().endswith(".exe")
+    return "/data/clud-kittyterm/" in normalized and normalized.lower().endswith(".exe")
 
 
 def check_wheel(wheel_path: Path) -> list[str]:

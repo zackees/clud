@@ -35,7 +35,7 @@ def test_add_companion_keeps_large_members_compressed_and_record_valid(tmp_path)
     wheel = tmp_path / "clud-2.7.1-py3-none-win_amd64.whl"
     companion = tmp_path / "clud-webterm.exe"
     companion.write_bytes(b"MZ" + b"w" * 1_000_000)
-    runtime = "clud-2.7.1.data/scripts/clud-kittyterm/wezterm-gui.exe"
+    runtime = "clud-2.7.1.data/data/clud-kittyterm/wezterm-gui.exe"
     runtime_data = b"MZ" + b"r" * 2_000_000
     with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         info = zipfile.ZipInfo(runtime)

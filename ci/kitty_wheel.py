@@ -1,7 +1,7 @@
 """Package the pinned Windows WezTerm fork without losing its DLL layout.
 
 The GUI and its ConPTY/graphics support files must share an installed directory.
-Keeping them under wheel ``.data/scripts/clud-kittyterm/`` also avoids shadowing
+Keeping them under wheel ``.data/data/clud-kittyterm/`` also avoids shadowing
 an independently installed WezTerm on ``PATH``.
 """
 
@@ -65,15 +65,21 @@ def check_kitty_wheel(wheel: Path) -> list[str]:
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         if wheel.name.endswith("-win_arm64.whl"):
-            if any(".data/scripts/clud-kittyterm/" in name for name in names):
+            if any(
+                f".data/{scheme}/clud-kittyterm/" in name
+                for name in names
+                for scheme in ("data", "scripts")
+            ):
                 return [f"{wheel.name}: x64 Kitty GUI bundle is forbidden in ARM64 wheel"]
             return []
+        if any(".data/scripts/clud-kittyterm/" in name for name in names):
+            errors.append(f"{wheel.name}: Kitty bundle cannot be under wheel scripts directory")
         dist_info = next(
             (n.split("/", 1)[0] for n in names if n.endswith(".dist-info/WHEEL")), None
         )
         if dist_info is None:
             return [f"{wheel.name}: missing dist-info/WHEEL"]
-        prefix = f"{dist_info.removesuffix('.dist-info')}.data/scripts/clud-kittyterm/"
+        prefix = f"{dist_info.removesuffix('.dist-info')}.data/data/clud-kittyterm/"
         record_name = f"{dist_info}/RECORD"
         if record_name not in names:
             return [f"{wheel.name}: missing RECORD"]
@@ -190,6 +196,7 @@ def add_kitty_bundle(
             (info, source.read(info.filename))
             for info in source.infolist()
             if not info.filename.endswith(".dist-info/RECORD")
+            and ".data/data/clud-kittyterm/" not in info.filename
             and ".data/scripts/clud-kittyterm/" not in info.filename
         ]
     dist_info = next(
@@ -202,7 +209,7 @@ def add_kitty_bundle(
     )
     if dist_info is None:
         raise RuntimeError(f"wheel has no dist-info/WHEEL entry: {wheel}")
-    prefix = f"{dist_info.removesuffix('.dist-info')}.data/scripts/clud-kittyterm/"
+    prefix = f"{dist_info.removesuffix('.dist-info')}.data/data/clud-kittyterm/"
 
     for name in KITTY_BUNDLE_FILES:
         info = zipfile.ZipInfo(prefix + name)

@@ -6,9 +6,11 @@ import base64
 import hashlib
 import struct
 import zipfile
+from pathlib import Path
 
 import pytest
 
+from ci import process
 from ci.kitty_wheel import (
     KITTY_BUNDLE_FILES,
     KITTY_SOURCE_REVISION,
@@ -21,7 +23,14 @@ from ci.kitty_wheel import (
 def _wheel(tmp_path):
     wheel = tmp_path / "clud-2.7.1-py3-none-win_amd64.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("clud-2.7.1.dist-info/WHEEL", "Wheel-Version: 1.0\n")
+        archive.writestr(
+            "clud-2.7.1.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: py3-none-win_amd64\n",
+        )
+        archive.writestr(
+            "clud-2.7.1.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: clud\nVersion: 2.7.1\n",
+        )
         archive.writestr("clud-2.7.1.data/scripts/clud.exe", b"clud")
         archive.writestr("clud-2.7.1.dist-info/RECORD", "stale")
     return wheel
@@ -68,7 +77,7 @@ def test_kitty_bundle_preserves_layout_and_record(tmp_path) -> None:
     add_kitty_bundle(wheel, bundle, config, "x86_64-pc-windows-msvc", helper)
 
     with zipfile.ZipFile(wheel) as archive:
-        prefix = "clud-2.7.1.data/scripts/clud-kittyterm/"
+        prefix = "clud-2.7.1.data/data/clud-kittyterm/"
         names = set(archive.namelist())
         assert {prefix + name for name in KITTY_BUNDLE_FILES} <= names
         assert prefix + "clud-kittyterm.lua" in names
@@ -84,6 +93,32 @@ def test_kitty_bundle_preserves_layout_and_record(tmp_path) -> None:
             digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
             assert f"{member},sha256={digest},{len(data)}" in record
     assert check_kitty_wheel(wheel) == []
+
+
+def test_kitty_bundle_installs_with_uv_windows_scheme(tmp_path: Path) -> None:
+    wheel = _wheel(tmp_path)
+    bundle, config = _bundle(tmp_path)
+    add_kitty_bundle(wheel, bundle, config, "x86_64-pc-windows-msvc", _paste_helper(tmp_path))
+    installed = tmp_path / "installed"
+    result = process.run(
+        [
+            "uv", "pip", "install", "--target", str(installed),
+            "--python-platform", "x86_64-pc-windows-msvc", "--no-deps", str(wheel),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (installed / "clud-kittyterm" / "wezterm-gui.exe").is_file()
+    assert (installed / "clud-kittyterm" / "conpty.dll").is_file()
+
+
+def test_checker_rejects_bundle_in_wheel_scripts_scheme(tmp_path: Path) -> None:
+    wheel = _wheel(tmp_path)
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("clud-2.7.1.data/scripts/clud-kittyterm/wezterm-gui.exe", b"bad")
+    assert any("cannot be under wheel scripts" in error for error in check_kitty_wheel(wheel))
 
 
 def test_kitty_bundle_rejects_missing_runtime_files(tmp_path) -> None:
@@ -116,7 +151,7 @@ def test_arm64_checker_rejects_foreign_kitty_bundle(tmp_path) -> None:
         archive.writestr("clud-2.7.1.dist-info/WHEEL", "Wheel-Version: 1.0\n")
     assert check_kitty_wheel(wheel) == []
     with zipfile.ZipFile(wheel, "a") as archive:
-        archive.writestr("clud-2.7.1.data/scripts/clud-kittyterm/wezterm-gui.exe", b"x64")
+        archive.writestr("clud-2.7.1.data/data/clud-kittyterm/wezterm-gui.exe", b"x64")
     assert any("forbidden in ARM64" in error for error in check_kitty_wheel(wheel))
 
 
@@ -161,7 +196,7 @@ def test_kitty_wheel_check_rejects_gui_without_exit_code_flag(tmp_path) -> None:
     wheel = _wheel(tmp_path)
     bundle, config = _bundle(tmp_path)
     add_kitty_bundle(wheel, bundle, config, "x86_64-pc-windows-msvc", _paste_helper(tmp_path))
-    member = "clud-2.7.1.data/scripts/clud-kittyterm/wezterm-gui.exe"
+    member = "clud-2.7.1.data/data/clud-kittyterm/wezterm-gui.exe"
     with pytest.warns(UserWarning, match="Duplicate name"):
         with zipfile.ZipFile(wheel, "a") as archive:
             archive.writestr(member, (bundle / "wezterm-gui.exe").read_bytes().replace(
@@ -192,5 +227,5 @@ def test_kitty_wheel_check_rejects_stale_record(tmp_path) -> None:
     add_kitty_bundle(wheel, bundle, config, "x86_64-pc-windows-msvc", _paste_helper(tmp_path))
     with pytest.warns(UserWarning, match="Duplicate name"):
         with zipfile.ZipFile(wheel, "a") as archive:
-            archive.writestr("clud-2.7.1.data/scripts/clud-kittyterm/conpty.dll", b"changed")
+            archive.writestr("clud-2.7.1.data/data/clud-kittyterm/conpty.dll", b"changed")
     assert any("invalid RECORD" in error for error in check_kitty_wheel(wheel))

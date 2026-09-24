@@ -215,11 +215,11 @@ def test_kitty_executable_imports_are_scanned(tmp_path: Path):
     wheel = _make_wheel(tmp_path, "clud-2.0.0-py3-none-win_amd64.whl", ["KERNEL32.dll"])
     with zipfile.ZipFile(wheel, "a") as archive:
         archive.writestr(
-            "clud-2.0.0.data/scripts/clud-kittyterm/wezterm-gui.exe",
+            "clud-2.0.0.data/data/clud-kittyterm/wezterm-gui.exe",
             _make_pe_with_imports(["libstdc++-6.dll"]),
         )
     assert any("wezterm-gui.exe" in error and "libstdc++" in error for error in check_wheel(wheel))
-    assert _is_kitty_bundle_exe("clud-2.0.0.data/scripts/clud-kittyterm/OpenConsole.exe")
+    assert _is_kitty_bundle_exe("clud-2.0.0.data/data/clud-kittyterm/OpenConsole.exe")
 
 
 def test_mingw_wheel_flags_every_forbidden_dll(tmp_path: Path):

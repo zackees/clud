@@ -453,7 +453,7 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
         )
         return 1
     if platform.system() == "Windows" and platform.machine().lower() in {"amd64", "x86_64"}:
-        kitty_dir = _installed_script("clud").parent / "clud-kittyterm"
+        kitty_dir = _installed_script("clud").parent.parent / "clud-kittyterm"
         kitty_missing = [
             name for name in (*KITTY_BUNDLE_FILES, "clud-kittyterm.lua", KITTY_PASTE_HELPER)
             if not (kitty_dir / name).is_file()
@@ -546,7 +546,7 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
             return 1
 
     if platform.system() == "Windows" and platform.machine().lower() in {"amd64", "x86_64"}:
-        wezterm = _installed_script("clud").parent / "clud-kittyterm" / "wezterm.exe"
+        wezterm = _installed_script("clud").parent.parent / "clud-kittyterm" / "wezterm.exe"
         version = process.run(
             [str(wezterm), "--version"],
             text=True,
@@ -614,12 +614,11 @@ def verify_wheel_scripts(wheel: Path) -> int:
         member
         for member in members
         if ".data/scripts/clud-" in member
-        and "/clud-kittyterm/" not in member
         and Path(member).name.removesuffix(".exe") not in required
     ]
     if platform_tag == "win_amd64":
         prefix = next(
-            (name.removesuffix(".dist-info/WHEEL") + ".data/scripts/clud-kittyterm/"
+            (name.removesuffix(".dist-info/WHEEL") + ".data/data/clud-kittyterm/"
              for name in members if name.endswith(".dist-info/WHEEL")),
             None,
         )

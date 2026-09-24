@@ -83,6 +83,7 @@ fn companion_paths(executable: &Path) -> Result<(PathBuf, PathBuf), String> {
 fn default_paths(executable: &Path) -> Result<(PathBuf, PathBuf), String> {
     let directory = executable
         .parent()
+        .and_then(Path::parent)
         .ok_or_else(|| {
             format!(
                 "clud executable has no parent directory: {}",
@@ -180,12 +181,12 @@ mod tests {
     }
 
     #[test]
-    fn companion_defaults_to_isolated_adjacent_bundle() {
-        let (binary, config) = default_paths(Path::new("C:/bin/clud.exe")).unwrap();
-        assert_eq!(binary, Path::new("C:/bin/clud-kittyterm/wezterm-gui.exe"));
+    fn companion_defaults_to_wheel_data_directory() {
+        let (binary, config) = default_paths(Path::new("C:/venv/Scripts/clud.exe")).unwrap();
+        assert_eq!(binary, Path::new("C:/venv/clud-kittyterm/wezterm-gui.exe"));
         assert_eq!(
             config,
-            Path::new("C:/bin/clud-kittyterm/clud-kittyterm.lua")
+            Path::new("C:/venv/clud-kittyterm/clud-kittyterm.lua")
         );
     }
 

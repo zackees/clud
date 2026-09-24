@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Kitty Windows smoke requires native Windows' }
 if ($TimeoutSeconds -lt 1) { throw 'TimeoutSeconds must be positive' }
 
-$bundle = Join-Path $ScriptsDir 'clud-kittyterm'
+$bundle = Join-Path (Split-Path $ScriptsDir -Parent) 'clud-kittyterm'
 $wezterm = Join-Path $bundle 'wezterm.exe'
 $gui = Join-Path $bundle 'wezterm-gui.exe'
 $config = Join-Path $bundle 'clud-kittyterm.lua'
