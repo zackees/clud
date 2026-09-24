@@ -19,6 +19,17 @@ All `cargo` / `rustc` / `rustfmt` calls **must go through [soldr](https://github
 
 Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --global` (puts it in `~/.cargo/bin` or `~/.local/bin`). CI uses `zackees/setup-soldr@v0`.
 
+### Local validation before GitHub Actions
+
+For code or workflow behavior changes, start with a focused local test, then run
+lint and affected suites through the tasks in `bosn.toml` when Docker is
+available. For workflow changes, also run the applicable Linux job with `act`
+when it can represent that job. An `act` dry run does not execute action code,
+and local Linux results cannot prove macOS or Windows behavior. If Docker or a
+required tool is unavailable, run the direct local checks and report the gap.
+Commands, limits, and the pinned action input check are in
+[`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
+
 ## Repository Map
 
 This is a Rust CLI (`clud`) distributed as a Python wheel via maturin (`bindings = "bin"`). The Rust source lives under `crates/` and is mirrored by a progressive-disclosure README tree:

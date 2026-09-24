@@ -3,6 +3,55 @@
 Status: implemented (supersedes the 24 per-platform leaf workflows + `_lint.yml` /
 `_unit-test.yml` / `_integration-test.yml`).
 
+## Local validation before remote CI
+
+GitHub Actions is the final cross-platform check. For a code or workflow change,
+identify the smallest relevant test or job, run it locally, and rerun it after
+the change before pushing. When `docker info` succeeds, use this repository's
+`bosn.toml` tasks for repeatable Linux builds and tests. Bosn mounts the source
+checkout read-only and stores build state in managed volumes. Repeated runs
+reuse the Rust and Python caches; the first run still builds the image and warms
+those caches.
+
+```bash
+docker info
+bosn tasks                         # inspect available focused tasks
+bosn run --task focused-test       # example; choose a task relevant to the edit
+bosn run --task lint               # runs bash lint
+bosn run --task test               # broad Rust and Python suite when warranted
+```
+
+For GitHub Actions behavior changes, exercise the affected Linux job with
+`act` when installed and supported. Specify a runner image to avoid an
+interactive first-run prompt. For example:
+
+```bash
+act -l -W .github/workflows/ci.yml
+act pull_request -W .github/workflows/ci.yml -j static \
+  -P ubuntu-24.04=catthehacker/ubuntu:act-latest
+```
+
+`act --dryrun` validates the plan but does not execute action code. Its Docker
+runner cannot represent native macOS or Windows, and reusable jobs, artifacts,
+and runner environments may differ from GitHub's. `act` creates Docker
+resources outside Bosn's managed registry. Run a representative supported job
+locally, and record which paths could not be reproduced. If `act` cannot model
+the affected path, run the direct Bosn test and use the `clud-preloop` workflow
+runner where available.
+
+When editing a third-party action's inputs, inspect its `action.yml` at the
+exact pinned ref and verify that the input actually changes the behavior you
+expect. A policy check can accept an input name even when the pinned action
+does not use it. Add a negative or mutation case to any policy checker. If a
+job approaches its timeout, measure the slow step or cell and split work where
+possible before raising the timeout.
+
+If Docker, Bosn, or `act` is unavailable, run the relevant direct checks
+(`bash lint`, focused tests, `bash test`, or `bash test --integration`) and
+report the validation gap. Do not install tools or prune Docker resources
+automatically. See the bundled `clud-bosn` and `clud-preloop` skills for their
+prerequisites and limits.
+
 ## Current CI selection
 
 The sole push/PR workflow is `.github/workflows/ci.yml`. Ordinary PRs and
