@@ -107,7 +107,7 @@ $start.Environment['CLUD_VERBOSE_LOG_DIR'] = $probeDir
 $start.Environment['PATH'] = "$probeDir;$($start.Environment['PATH'])"
 $start.Environment['CLUD_NO_UNLOCK'] = '1'
 $start.Environment['CLUD_KITTYTERM_SOFTWARE_RENDERER'] = '1'
-foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p',
+foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '--no-daemon', '-p',
                    'kitty-seed', '--', '--mock-report-file', $marker,
                    '--mock-ready-file', $readyMarker,
                    '--mock-wait-for-file', $seedReleaseMarker, '--mock-exit-code', '23')) {
