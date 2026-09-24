@@ -95,9 +95,11 @@ $controlMarker = Join-Path $probeDir 'backend-no-daemon.txt'
 $versionMarker = Join-Path $probeDir 'version.txt'
 $backend = Join-Path $probeDir 'claude.exe'
 [IO.File]::Copy($MockAgentPath, $backend)
-$nativeBackendDir = Join-Path $probeDir '.local\bin'
+$nativeBackendDir = Join-Path $env:USERPROFILE '.local\bin'
 [void][IO.Directory]::CreateDirectory($nativeBackendDir)
-[IO.File]::Copy($MockAgentPath, (Join-Path $nativeBackendDir 'claude.exe'))
+$nativeBackend = Join-Path $nativeBackendDir 'claude.exe'
+if (Test-Path -LiteralPath $nativeBackend) { throw "Refusing to replace existing $nativeBackend" }
+[IO.File]::Copy($MockAgentPath, $nativeBackend)
 $start = [Diagnostics.ProcessStartInfo]::new($wezterm)
 $start.UseShellExecute = $false
 $start.WorkingDirectory = $ScriptsDir
@@ -193,7 +195,6 @@ $outer = [Diagnostics.ProcessStartInfo]::new($clud)
 $outer.UseShellExecute = $false
 $outer.WorkingDirectory = $ScriptsDir
 $outer.Environment['PATH'] = "$probeDir;$env:PATH"
-$outer.Environment['USERPROFILE'] = $probeDir
 $outer.Environment['CLUD_KITTY_SMOKE_MARKER'] = $backendMarker
 $outer.Environment['CLUD_KITTY_BACKEND_MARKER'] = $backendMarker
 $outer.Environment['CLUD_KITTY_BACKEND_CONTROL_MARKER'] = $controlMarker
@@ -336,5 +337,8 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
         Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction Stop
     } catch {
         Write-Host "Cleanup could not remove probe directory $probeDir`: $_"
+    }
+    try { Remove-Item -LiteralPath $nativeBackend -Force -ErrorAction Stop } catch {
+        Write-Host "Cleanup could not remove native mock backend $nativeBackend`: $_"
     }
 }
