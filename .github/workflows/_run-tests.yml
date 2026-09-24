@@ -76,8 +76,11 @@ jobs:
           $wheel = $wheels[0]
           uv pip install --python (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts/python.exe') --reinstall --no-deps $wheel.FullName
           if ($LASTEXITCODE -ne 0) { throw "Wheel install failed with exit $LASTEXITCODE" }
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'bundle/manifest.json') | ConvertFrom-Json
+          $mockAgent = Join-Path $env:GITHUB_WORKSPACE "bundle/target/$($manifest.profile_dir)/mock-agent.exe"
           pwsh -NoProfile -File ci/kitty_windows_smoke.ps1 `
-            -ScriptsDir (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts')
+            -ScriptsDir (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts') `
+            -MockAgentPath $mockAgent
           if ($LASTEXITCODE -ne 0) { throw "Kitty GUI smoke failed with exit $LASTEXITCODE" }
 
       - name: Run ${{ inputs.suite }} suite
