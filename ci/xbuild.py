@@ -299,6 +299,15 @@ def run(argv: list[str], env: dict[str, str]) -> int:
     return process.run(command, cwd=ROOT, env=env).returncode
 
 
+def cargo_target_dir(env: dict[str, str], default: Path) -> Path:
+    """Resolve Cargo's output root against the build process working directory."""
+    configured = env.get("CARGO_TARGET_DIR")
+    if not configured:
+        return default
+    path = Path(configured)
+    return path if path.is_absolute() else ROOT / path
+
+
 def cmd_clippy(args: argparse.Namespace) -> int:
     env = build_env(args.target, args.strategy)
     base = cargo_argv(["clippy", "--workspace", "--all-targets"], args.target, args.strategy)
@@ -454,7 +463,10 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     env = build_env(args.target, args.strategy)
     profile = "release" if args.profile == "release" else "debug"
     companion = (
-        ROOT / "clud-webterm" / "target" / args.target / profile / companion_name(args.target)
+        cargo_target_dir(env, ROOT / "clud-webterm" / "target")
+        / args.target
+        / profile
+        / companion_name(args.target)
     )
     if desktop_target(args.target):
         command = [
@@ -470,8 +482,8 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         if run(command, env) != 0:
             return 1
     if _is_windows(args.target) and args.strategy == "soldr":
-        target_dir = ROOT / "target"
-        from ci.build_wheel import build_windows_wheel_from_binaries
+        target_dir = cargo_target_dir(env, ROOT / "target")
+        from ci.build_wheel import build_windows_wheel_from_binaries, verify_wheel_scripts
 
         try:
             wheel = build_windows_wheel_from_binaries(
@@ -485,6 +497,8 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             print(error, file=sys.stderr)
             return 1
         add_companion(wheel, companion, args.target)
+        if verify_wheel_scripts(wheel) != 0:
+            return 1
         print(f"packaged soldr-built Windows wheel: {wheel}")
         collect_debuginfo(args.target, profile)
         return 0

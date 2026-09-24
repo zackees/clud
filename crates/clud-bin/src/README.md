@@ -73,6 +73,9 @@ Entry and orchestration:
   prevents launch recursion with `CLUD_WEBTERM`, and forwards the original
   clud argv to the separately packaged Tauri companion. See
   [`docs/architecture/web-terminal.md`](../../../docs/architecture/web-terminal.md).
+- `kitty_term.rs` - explicit `clud --kitty-term` launcher for an adjacent native
+  WezTerm GUI and `clud-kittyterm.lua` config on Windows; forwards the original
+  backend argv and fails if the pinned companion assets are unavailable.
 - `bridge_log.rs` - issue #772's always-on, bounded JSONL writer
   for `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`; test-mode logs use
   the isolated sibling tree `~/.clud/state/test-sessions/`. Buffers complete

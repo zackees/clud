@@ -69,6 +69,13 @@ jobs:
         shell: bash
         run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'
 
+      # ci.run_bundle installs the wheel before running the suite. Exercise the
+      # packaged Kitty GUI in a native Windows runner session without user interaction.
+      - name: Smoke installed Kitty GUI headlessly
+        if: ${{ inputs.target == 'x86_64-pc-windows-msvc' && inputs.suite == 'integration' }}
+        shell: pwsh
+        run: pwsh -NoProfile -File ci/kitty_windows_smoke.ps1 -ScriptsDir (Split-Path $env:VENV_PY -Parent)
+
       - name: Diagnose Linux failure
         if: ${{ failure() && runner.os == 'Linux' }}
         shell: bash

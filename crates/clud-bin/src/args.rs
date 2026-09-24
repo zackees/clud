@@ -17,6 +17,10 @@ pub struct Args {
     #[arg(long = "web-term", conflicts_with = "set_web_term")]
     pub web_term: bool,
 
+    /// Open this backend launch in the Kitty-compatible desktop terminal.
+    #[arg(long = "kitty-term", conflicts_with_all = ["web_term", "set_web_term"])]
+    pub kitty_term: bool,
+
     /// Persist the web-terminal preference. With no value this enables it;
     /// pass `off` to restore the ordinary console launch.
     #[arg(
@@ -281,7 +285,7 @@ pub struct Args {
     #[arg(skip)]
     pub resolved_model_selection: Option<crate::provider_catalog::ResolvedModelSelection>,
 
-    /// Original invocation, retained only so `--web-term` can hand every
+    /// Original invocation, retained so desktop terminal launchers can hand every
     /// backend option to the child clud process without re-serializing clap's
     /// parsed representation.
     #[arg(skip)]
@@ -1491,6 +1495,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--help",
         "--version",
         "--web-term",
+        "--kitty-term",
         // Issue #469: `clud log --fail-on-no-server` bool flag.
         "--fail-on-no-server",
         // `clud settings --list` bool flag.

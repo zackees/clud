@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ci.check_windows_wheel import (
     _is_clud_script_exe,
+    _is_kitty_bundle_exe,
     check_wheel,
     forbidden_imports,
     has_common_controls_v6_manifest,
@@ -200,6 +201,25 @@ def test_parses_imports_from_synthetic_pe():
 def test_clean_wheel_passes(tmp_path: Path):
     wheel = _make_wheel(tmp_path, "clud-2.0.0-py3-none-win_amd64.whl", ["VCRUNTIME140.dll"])
     assert check_wheel(wheel) == []
+
+
+def test_incomplete_windows_wheel_reports_bundle_error_without_exe(tmp_path: Path):
+    wheel = tmp_path / "clud-2.0.0-py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("clud-2.0.0.dist-info/WHEEL", "Wheel-Version: 1.0\n")
+        archive.writestr("clud-2.0.0.dist-info/RECORD", "")
+    assert any("wezterm.exe" in error for error in check_wheel(wheel))
+
+
+def test_kitty_executable_imports_are_scanned(tmp_path: Path):
+    wheel = _make_wheel(tmp_path, "clud-2.0.0-py3-none-win_amd64.whl", ["KERNEL32.dll"])
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr(
+            "clud-2.0.0.data/scripts/clud-kittyterm/wezterm-gui.exe",
+            _make_pe_with_imports(["libstdc++-6.dll"]),
+        )
+    assert any("wezterm-gui.exe" in error and "libstdc++" in error for error in check_wheel(wheel))
+    assert _is_kitty_bundle_exe("clud-2.0.0.data/scripts/clud-kittyterm/OpenConsole.exe")
 
 
 def test_mingw_wheel_flags_every_forbidden_dll(tmp_path: Path):

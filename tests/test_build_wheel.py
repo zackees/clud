@@ -1,14 +1,83 @@
+import struct
 import zipfile
 
+import pytest
+
 from ci import build_wheel
+from ci.kitty_wheel import KITTY_BUNDLE_FILES, KITTY_SOURCE_REVISION, add_kitty_bundle
 
 
-def test_windows_soldr_wheel_packages_prebuilt_executables(tmp_path):
+@pytest.mark.parametrize(
+    ("help_returncode", "help_output", "expected"),
+    [
+        (0, "--return-initial-exit-code", 0),
+        (0, "Usage: wezterm-gui start", 1),
+        (1, "--return-initial-exit-code", 1),
+    ],
+)
+def test_native_windows_installed_console_help_smoke(
+    monkeypatch, tmp_path, help_returncode, help_output, expected
+):
+    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(build_wheel.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(build_wheel, "_installed_script", lambda name: tmp_path / name)
+    calls = []
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == "--version":
+            return Result(stdout="wezterm 1.0")
+        if argv[-2:] == ["start", "--help"]:
+            return Result(help_returncode, help_output)
+        if kwargs.get("input") and "bad" + " cmd" in kwargs["input"]:
+            return Result(2, '{"permissionDecision":"deny"}')
+        return Result()
+
+    monkeypatch.setattr(build_wheel.process, "run", fake_run)
+    assert build_wheel._verify_installed_smokes(env={}, target=None) == expected
+    assert calls[-1] == [
+        str(tmp_path / "clud-kittyterm" / "wezterm.exe"),
+        "start",
+        "--help",
+    ]
+
+
+def test_windows_soldr_wheel_packages_prebuilt_executables(monkeypatch, tmp_path):
     target_dir = tmp_path / "target"
     binaries = target_dir / "x86_64-pc-windows-msvc" / "release"
     binaries.mkdir(parents=True)
     for name in build_wheel.REQUIRED_SCRIPTS:
         (binaries / f"{name}.exe").write_bytes(f"{name}-binary".encode())
+    helper = binaries / "clud-kittyterm-paste.exe"
+    helper_data = bytearray(0x46)
+    helper_data[:2] = b"MZ"
+    struct.pack_into("<I", helper_data, 0x3C, 0x40)
+    helper_data[0x40:0x44] = b"PE\0\0"
+    struct.pack_into("<H", helper_data, 0x44, 0x8664)
+    helper.write_bytes(helper_data)
+    bundle = tmp_path / "fork-build"
+    for name in KITTY_BUNDLE_FILES:
+        file = bundle / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        if name.lower().endswith((".exe", ".dll")):
+            pe = bytearray(0x46)
+            pe[:2] = b"MZ"
+            struct.pack_into("<I", pe, 0x3C, 0x40)
+            pe[0x40:0x44] = b"PE\0\0"
+            struct.pack_into("<H", pe, 0x44, 0x8664)
+            if name == "wezterm-gui.exe":
+                pe.extend(b"return-initial-exit-code\0")
+            file.write_bytes(pe)
+        else:
+            file.write_bytes(name.encode())
+    (bundle / "SOURCE_REVISION").write_text(f"zackees/wezterm@{KITTY_SOURCE_REVISION}\n")
+    monkeypatch.setenv("CLUD_KITTYTERM_BUNDLE_DIR", str(bundle))
 
     wheel = build_wheel.build_windows_wheel_from_binaries(
         target="x86_64-pc-windows-msvc",
@@ -26,6 +95,53 @@ def test_windows_soldr_wheel_packages_prebuilt_executables(tmp_path):
         assert "clud-2.5.4.dist-info/METADATA" in members
         assert "clud-2.5.4.dist-info/WHEEL" in members
         assert "clud-2.5.4.dist-info/RECORD" in members
+        for name in (*KITTY_BUNDLE_FILES, "clud-kittyterm.lua", "clud-kittyterm-paste.exe"):
+            assert f"clud-2.5.4.data/scripts/clud-kittyterm/{name}" in members
+
+
+def test_windows_soldr_wheel_fails_closed_without_bundle(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLUD_KITTYTERM_BUNDLE_DIR", raising=False)
+    with pytest.raises(RuntimeError, match="CLUD_KITTYTERM_BUNDLE_DIR"):
+        build_wheel.build_windows_wheel_from_binaries(
+            target="x86_64-pc-windows-msvc",
+            profile="release",
+            target_dir=tmp_path / "target",
+            dist_dir=tmp_path / "dist",
+            version="2.5.4",
+        )
+    assert not (tmp_path / "dist").exists()
+
+
+def test_windows_soldr_wheel_fails_before_writing_without_paste_helper(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_wheel, "resolve_kitty_bundle", lambda: tmp_path)
+    with pytest.raises(RuntimeError, match=r"clud-kittyterm-paste\.exe"):
+        build_wheel.build_windows_wheel_from_binaries(
+            target="x86_64-pc-windows-msvc",
+            profile="release",
+            target_dir=tmp_path / "target",
+            dist_dir=tmp_path / "dist",
+            version="2.5.4",
+        )
+    assert not (tmp_path / "dist").exists()
+
+
+def test_windows_arm64_wheel_does_not_require_or_ship_x64_gui(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLUD_KITTYTERM_BUNDLE_DIR", raising=False)
+    target = "aarch64-pc-windows-msvc"
+    binaries = tmp_path / "target" / target / "release"
+    binaries.mkdir(parents=True)
+    for name in build_wheel.REQUIRED_SCRIPTS:
+        (binaries / f"{name}.exe").write_bytes(f"{name}-arm64".encode())
+    wheel = build_wheel.build_windows_wheel_from_binaries(
+        target=target,
+        profile="release",
+        target_dir=tmp_path / "target",
+        dist_dir=tmp_path / "dist",
+        version="2.5.4",
+    )
+    assert wheel.name.endswith("-win_arm64.whl")
+    with zipfile.ZipFile(wheel) as archive:
+        assert not any("clud-kittyterm/" in name for name in archive.namelist())
 
 
 def test_windows_wheel_ships_the_cmd_scan_binary() -> None:
@@ -266,6 +382,108 @@ def test_local_webterm_companion_uses_the_configured_target_directory(
     assert build_wheel.build_local_webterm_companion(mode="dev", target=target, env={}) == companion
 
 
+def test_local_windows_build_explicitly_builds_paste_helper(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(build_wheel, "ROOT", tmp_path)
+    helper = (
+        tmp_path / "custom-target" / "x86_64-pc-windows-msvc" / "release"
+        / "clud-kittyterm-paste.exe"
+    )
+    helper.parent.mkdir(parents=True)
+    data = bytearray(0x46)
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, 0x40)
+    data[0x40:0x44] = b"PE\0\0"
+    struct.pack_into("<H", data, 0x44, 0x8664)
+    helper.write_bytes(data)
+    calls = []
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(
+        build_wheel.process,
+        "run",
+        lambda argv, **kwargs: calls.append((argv, kwargs)) or Result(),
+    )
+    env = {"CARGO_TARGET_DIR": "custom-target"}
+    assert build_wheel.build_local_kitty_paste_helper(mode="release", env=env) == helper
+    assert calls[0][0] == [
+        "soldr",
+        "build",
+        "--manifest-path",
+        str(tmp_path / "crates" / "clud-bin" / "Cargo.toml"),
+        "--bin",
+        "clud-kittyterm-paste",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--release",
+    ]
+
+
+@pytest.mark.parametrize("bundle_state", ["absent", "stale"])
+def test_local_windows_build_rejects_bundle_before_maturin(
+    monkeypatch, tmp_path, bundle_state
+) -> None:
+    from ci import env as build_env_module
+
+    monkeypatch.setattr(build_wheel, "DIST", tmp_path / "dist")
+    monkeypatch.setattr(build_wheel, "local_webterm_target", lambda: build_wheel.KITTY_TARGET)
+    monkeypatch.setattr(build_env_module, "build_env", lambda: {})
+    if bundle_state == "absent":
+        monkeypatch.delenv("CLUD_KITTYTERM_BUNDLE_DIR", raising=False)
+    else:
+        bundle = tmp_path / "stale-bundle"
+        for name in KITTY_BUNDLE_FILES:
+            file = bundle / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            if name.lower().endswith((".exe", ".dll")):
+                data = bytearray(0x46)
+                data[:2] = b"MZ"
+                struct.pack_into("<I", data, 0x3C, 0x40)
+                data[0x40:0x44] = b"PE\0\0"
+                struct.pack_into("<H", data, 0x44, 0x8664)
+                if name == "wezterm-gui.exe":
+                    data.extend(b"return-initial-exit-code")
+                file.write_bytes(data)
+            else:
+                file.write_text(name)
+        (bundle / "SOURCE_REVISION").write_text("zackees/wezterm@stale\n")
+        monkeypatch.setenv("CLUD_KITTYTERM_BUNDLE_DIR", str(bundle))
+
+    calls = []
+    monkeypatch.setattr(build_wheel.process, "run", lambda *args, **kwargs: calls.append(args))
+
+    with pytest.raises(RuntimeError, match=r"CLUD_KITTYTERM_BUNDLE_DIR|SOURCE_REVISION"):
+        build_wheel.run_build("release")
+    assert calls == []
+    assert not build_wheel.DIST.exists()
+
+
+def test_local_windows_build_rejects_paste_helper_before_maturin(monkeypatch, tmp_path):
+    from ci import env as build_env_module
+
+    monkeypatch.setattr(build_wheel, "DIST", tmp_path / "dist")
+    monkeypatch.setattr(build_wheel, "local_webterm_target", lambda: build_wheel.KITTY_TARGET)
+    monkeypatch.setattr(build_wheel, "resolve_kitty_bundle", lambda: tmp_path)
+    monkeypatch.setattr(build_env_module, "build_env", lambda: {})
+    calls = []
+
+    class FailedBuild:
+        returncode = 1
+
+    monkeypatch.setattr(
+        build_wheel.process,
+        "run",
+        lambda argv, **kwargs: calls.append(argv) or FailedBuild(),
+    )
+
+    with pytest.raises(RuntimeError, match="failed to build clud-kittyterm-paste"):
+        build_wheel.run_build("release")
+    assert len(calls) == 1
+    assert calls[0][:2] == ["soldr", "build"]
+    assert not build_wheel.DIST.exists()
+
+
 def test_hook_rollout_target_is_a_shipped_script() -> None:
     """Whatever binary the rollout migrates hook configs to MUST be in the
     wheel. Reads NEW_COMMAND from the rollout source so a future rename
@@ -303,6 +521,33 @@ def test_verify_windows_wheel_scripts_uses_target_not_host(monkeypatch, tmp_path
         for name in build_wheel.REQUIRED_SCRIPTS:
             archive.writestr(f"clud-2.3.0.data/scripts/{name}.exe", b"")
         archive.writestr("clud-2.3.0.data/scripts/clud-webterm.exe", b"")
+        archive.writestr("clud-2.3.0.dist-info/WHEEL", "Wheel-Version: 1.0\n")
+    bundle = tmp_path / "fork-build"
+    for name in KITTY_BUNDLE_FILES:
+        file = bundle / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        if name.lower().endswith((".exe", ".dll")):
+            pe = bytearray(0x46)
+            pe[:2] = b"MZ"
+            struct.pack_into("<I", pe, 0x3C, 0x40)
+            pe[0x40:0x44] = b"PE\0\0"
+            struct.pack_into("<H", pe, 0x44, 0x8664)
+            if name == "wezterm-gui.exe":
+                pe.extend(b"return-initial-exit-code\0")
+            file.write_bytes(pe)
+        else:
+            file.write_bytes(name.encode())
+    (bundle / "SOURCE_REVISION").write_text(f"zackees/wezterm@{KITTY_SOURCE_REVISION}\n")
+    config = tmp_path / "clud-kittyterm.lua"
+    config.write_text("return {}\n")
+    helper = tmp_path / "clud-kittyterm-paste.exe"
+    helper_data = bytearray(0x46)
+    helper_data[:2] = b"MZ"
+    struct.pack_into("<I", helper_data, 0x3C, 0x40)
+    helper_data[0x40:0x44] = b"PE\0\0"
+    struct.pack_into("<H", helper_data, 0x44, 0x8664)
+    helper.write_bytes(helper_data)
+    add_kitty_bundle(wheel, bundle, config, "x86_64-pc-windows-msvc", helper)
 
     assert build_wheel.verify_wheel_scripts(wheel) == 0
 

@@ -198,6 +198,7 @@ fn backend_prompt_launch_plan(
 ) -> command::LaunchPlan {
     let launch_args = Args {
         web_term: false,
+        kitty_term: false,
         set_web_term: None,
         provider: None,
         unified: false,

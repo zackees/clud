@@ -1,8 +1,8 @@
 use clud::{
     args, auth, backend, backend_bootstrap, clud_settings, codex_auth, command, config,
     console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover, gc,
-    graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
-    launch_setup, log_event, loop_artifacts, loop_spec, openrouter_catalog, optimize,
+    graphics, grind, harness_picker, hook_health, job_orphan_reaper, kitty_term, large_file_guard,
+    launch_log, launch_setup, log_event, loop_artifacts, loop_spec, openrouter_catalog, optimize,
     orphan_reaper, provider_auth, runner, runtime_cache, settings_tui, soldr_activate, stage_trace,
     startup, symbols, test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui,
     uv_run_hook_guard, verbose_log, wasm, webterm, workspace_trust, worktrees,
@@ -40,7 +40,7 @@ fn run(mut args: args::Args) {
     // without `--model` still launches with a main model inside its own
     // boundary (#1257).
     args.normalize_model_allowlist();
-    if let Some(exit_code) = webterm::handle(&args) {
+    if let Some(exit_code) = kitty_term::handle(&args) {
         std::process::exit(exit_code);
     }
     if let Some(exit_code) = webterm::handle(&args) {

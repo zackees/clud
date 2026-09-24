@@ -18,3 +18,7 @@ added after the main wheel build and its wheel `RECORD` is regenerated. The
 Linux-to-Windows cross-build writes and links a Common Controls v6 manifest
 without relying on a host resource compiler; this is required before Windows
 can resolve Tauri's `comctl32!TaskDialogIndirect` import (#1033).
+
+The separate Windows-only `--kitty-term` candidate and its acceptance matrix
+are documented in [kitty-windows-parity.md](kitty-windows-parity.md). It has an
+explicit launcher and does not change the `--web-term` preference or companion.
