@@ -44,6 +44,14 @@ def test_windows_smoke_proves_shared_gui_and_independent_child_statuses() -> Non
     assert "reused pane status 37" in smoke
 
 
+def test_windows_smoke_timeout_reports_whether_child_ran() -> None:
+    smoke = SMOKE.read_text(encoding="utf-8")
+    timeout = smoke.split("if (-not (Test-Path -LiteralPath $marker", 1)[1]
+    assert "marker=absent" in timeout
+    assert "ParentProcessId = $($process.Id)" in timeout
+    assert "exited=$($process.HasExited)" in timeout
+
+
 def test_kitty_term_config_has_core_behaviors() -> None:
     config = CONFIG.read_text(encoding="utf-8")
     for required in (

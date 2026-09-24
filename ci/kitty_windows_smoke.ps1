@@ -73,7 +73,14 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
-        throw "GUI_UNAVAILABLE: WezTerm exited $($process.ExitCode) without spawning its child; session=$($self.SessionId) interactive=$([Environment]::UserInteractive)"
+        $children = @()
+        try {
+            $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($process.Id)" |
+                ForEach-Object { "$($_.Name):$($_.ProcessId)" })
+        } catch {
+            $children = @("unavailable: $($_.Exception.Message)")
+        }
+        throw "GUI_UNAVAILABLE: WezTerm failed to spawn its child within $TimeoutSeconds seconds; marker=absent children=$($children -join ',') exited=$($process.HasExited) session=$($self.SessionId) interactive=$([Environment]::UserInteractive)"
     }
     $observed = (Get-Content -LiteralPath $marker -Raw).Trim()
     if ($observed -notmatch '^kitty=1 pane=\d+ socket=(.+)$') {
