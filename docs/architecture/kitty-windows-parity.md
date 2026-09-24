@@ -53,6 +53,8 @@ press/repeat/release behavior. The graphics reply proves protocol negotiation,
 not image pixels; escaped text proves style state, not visual contrast. On
 Windows, ConPTY's input parser discards APC strings, so a console child
 receives only the trailing `\` of the Kitty graphics reply; the probe accepts
-that exact residue as a known limitation and fails on anything else.
+that exact residue as a known limitation and fails on anything else. ConPTY
+likewise does not forward a child's bracketed-paste mode (DECSET 2004), so the
+GUI pastes unframed text; the probe accepts only the intact bare payload.
 Physical mouse events, clipboard interaction, drag, and pixel rendering remain
 outside headless evidence.
