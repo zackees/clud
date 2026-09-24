@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,9 +16,7 @@ fn readiness_report_is_atomic_and_precedes_release_and_final_report() {
     let release = dir.join("release.txt");
     let report = dir.join("report.json");
 
-    let mock_agent = std::env::var("CARGO_BIN_EXE_mock-agent")
-        .expect("Cargo should provide the mock-agent binary path to integration tests");
-    let mut child = Command::new(mock_agent)
+    let mut child = Command::new(mock_agent_binary())
         .args([
             "--mock-ready-file",
             ready.to_str().expect("ready path"),
@@ -61,4 +60,27 @@ fn readiness_report_is_atomic_and_precedes_release_and_final_report() {
     assert_eq!(child.wait().expect("wait for child").code(), Some(23));
     assert!(report.is_file(), "final report missing after release");
     fs::remove_dir_all(&dir).expect("remove isolated test directory");
+}
+
+fn mock_agent_binary() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLUD_TEST_BIN_DIR") {
+        let candidate = PathBuf::from(dir).join(exe_file_name("mock-agent"));
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Some(compiled) = option_env!("CARGO_BIN_EXE_mock-agent") {
+        return PathBuf::from(compiled);
+    }
+    let mut dir = std::env::current_exe().expect("current test exe");
+    dir.pop();
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    dir.join(exe_file_name("mock-agent"))
+}
+
+fn exe_file_name(name: &str) -> String {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    format!("{name}{ext}")
 }
