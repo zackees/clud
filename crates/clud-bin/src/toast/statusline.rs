@@ -594,22 +594,39 @@ pub fn run_chain(command: &str, stdin: &[u8]) -> Option<Vec<u8>> {
 fn chain_spec(command: &str) -> CommandSpec {
     #[cfg(windows)]
     {
-        let bash = std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH")
-            .map(PathBuf::from)
-            .filter(|p| p.is_file())
-            .or_else(|| which::which("bash").ok());
-        match bash {
-            Some(bash) => CommandSpec::Argv(vec![
-                bash.to_string_lossy().into_owned(),
-                "-c".into(),
-                command.into(),
-            ]),
-            None => CommandSpec::Shell(command.into()),
-        }
+        windows_chain_spec(
+            command,
+            std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH"),
+            || which::which("bash").ok(),
+        )
     }
     #[cfg(not(windows))]
     {
         CommandSpec::Argv(vec!["sh".into(), "-c".into(), command.into()])
+    }
+}
+
+/// Windows shell resolution for [`chain_spec`], kept pure and compiled on
+/// every platform so Linux CI covers it: a `CLAUDE_CODE_GIT_BASH_PATH` that
+/// names an existing file wins, then `bash` on PATH, then `cmd` via
+/// [`CommandSpec::Shell`].
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_chain_spec(
+    command: &str,
+    git_bash_env: Option<std::ffi::OsString>,
+    which_bash: impl FnOnce() -> Option<PathBuf>,
+) -> CommandSpec {
+    let bash = git_bash_env
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(which_bash);
+    match bash {
+        Some(bash) => CommandSpec::Argv(vec![
+            bash.to_string_lossy().into_owned(),
+            "-c".into(),
+            command.into(),
+        ]),
+        None => CommandSpec::Shell(command.into()),
     }
 }
 
