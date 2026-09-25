@@ -166,7 +166,7 @@ def test_workflow_binds_dispatch_and_labels_to_mode():
     assert "EVENT_SHA: ${{ github.sha }}" in text
     assert "run: python -m ci.ci_matrix" in text
     assert "MODE: ${{ needs.static.outputs.mode }}" in text
-    assert 'case "$MODE" in minimal|extended|full)' in text
+    assert 'case "$MODE" in minimal|extended|full|windows)' in text
 
 
 def test_every_build_waits_for_mode_and_full_is_complete():
@@ -409,3 +409,27 @@ def test_matrices_are_json_serializable_for_github_actions():
         encoded = json.dumps(matrix, separators=(",", ":"))
         assert "\n" not in encoded
         assert json.loads(encoded) == matrix
+
+
+def test_ci_windows_label_selects_only_windows_x64():
+    """#1310: an iteration-only mode for Windows work."""
+    assert resolve_tier("pull_request", "", "ci-windows") == "windows"
+    assert [t.triple for t in selected("windows")] == ["x86_64-pc-windows-msvc"]
+    # Merge-gating tiers win when both labels are present.
+    assert resolve_tier("pull_request", "", "ci-windows,ci-test") == "extended"
+    assert resolve_tier("pull_request", "", "ci-windows,ci-full") == "full"
+
+
+def test_ci_windows_mode_skips_linux_and_never_passes_ci_ok():
+    text = CI_YML.read_text(encoding="utf-8")
+    linux = text.split("\n  build-linux-x64:\n", 1)[1].split("\n\n", 1)[0]
+    assert "needs.static.outputs.mode != 'windows'" in linux
+    integration = text.split("\n  test-linux-x64-integration:\n", 1)[1].split("\n\n", 1)[0]
+    assert "needs.static.outputs.mode != 'windows'" in integration
+    windows = text.split("\n  build-windows-x64:\n", 1)[1].split("\n\n", 1)[0]
+    assert "needs.static.outputs.mode == 'windows'" in windows
+    gate = text.split("\n  ci-ok:\n", 1)[1]
+    branch = gate.split('if [ "$MODE" = "windows" ]; then', 1)[1].split("\n          fi\n", 1)[0]
+    # The mode's last word is an unconditional failure after the lane check.
+    assert branch.rstrip().endswith("exit 1")
+    assert "remove the ci-windows label" in branch

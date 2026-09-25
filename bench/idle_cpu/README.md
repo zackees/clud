@@ -17,8 +17,22 @@ python -m bench.idle_cpu.harness --sessions 8 --window-secs 60 --json bench/idle
 ```
 
 `CLUD_TEST_BINARY` and `CLUD_TEST_MOCK_AGENT_BINARY` can point at already-built
-test binaries. The harness launches `--detach --codex` sessions without a PTY,
-so it measures daemon-managed idle work rather than terminal rendering.
+test binaries. The default `--mode daemon` launches `--detach --codex` sessions
+without a PTY, so it measures daemon-managed idle work rather than terminal
+rendering. `--mode pty` measures the foreground PTY pump instead: each session
+is `clud --pty` inside a pseudo-terminal, as in an interactive launch (#691).
+Its baselines are `baseline_pty_n1.json` and `baseline_pty_n6.json`:
+
+```bash
+python -m bench.idle_cpu.harness --mode pty --sessions 1 --window-secs 60 --json bench/idle_cpu/baseline_pty_n1.json
+python -m bench.idle_cpu.harness --mode pty --sessions 6 --window-secs 60 --json bench/idle_cpu/baseline_pty_n6.json
+```
+
+Every launch runs with a throwaway HOME and working directory. A dev build of
+clud rewrites per-user state (including the `~/.clud/state/rm-shim/rm` shim
+the installed `clud-cmd-scan` hook checks) and the launch directory's
+`.claude/settings.json` / `.codex/hooks.json`, so it must never see the real
+ones.
 
 ## Read and enforce
 
