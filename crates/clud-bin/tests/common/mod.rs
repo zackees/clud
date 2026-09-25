@@ -195,21 +195,49 @@ pub fn through_pty_input(sent: &[u8]) -> Vec<u8> {
 /// child before its first line runs, so it could never write the ready file.
 /// Only startup noise is consumed; the test sends nothing before this returns.
 pub fn wait_for_mock_ready(process: &NativePtyProcess, ready_file: &std::path::Path) {
+    let outcome =
+        wait_answering_cursor_queries(process, Duration::from_secs(20), || ready_file.exists());
+    assert!(
+        outcome.met,
+        "mock-agent never signalled ready at {}; startup output: {:?}",
+        ready_file.display(),
+        String::from_utf8_lossy(&outcome.output)
+    );
+}
+
+/// Result of [`wait_answering_cursor_queries`].
+pub struct CursorQueryWait {
+    /// Whether the condition held before the timeout.
+    pub met: bool,
+    /// Everything the child printed while waiting, for failure messages.
+    pub output: Vec<u8>,
+}
+
+/// Wait until `condition` holds, reading the child's output and answering
+/// each `ESC[6n` cursor query as a terminal would (#1310). A test that talks
+/// to a PTY child directly, without the pump, must use this: until the
+/// query is answered, ConPTY holds the child before its first line runs, so
+/// any artifact the test is waiting for would never appear on Windows.
+pub fn wait_answering_cursor_queries(
+    process: &NativePtyProcess,
+    timeout: Duration,
+    mut condition: impl FnMut() -> bool,
+) -> CursorQueryWait {
     const DSR: &[u8] = b"\x1b[6n";
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut seen = Vec::new();
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
     let mut answered = 0;
-    while !ready_file.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "mock-agent never signalled ready at {}; startup output: {:?}",
-            ready_file.display(),
-            String::from_utf8_lossy(&seen)
-        );
-        if let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.05)) {
-            seen.extend_from_slice(&chunk);
+    loop {
+        if condition() {
+            return CursorQueryWait { met: true, output };
         }
-        let queries = seen.windows(DSR.len()).filter(|w| *w == DSR).count();
+        if Instant::now() >= deadline {
+            return CursorQueryWait { met: false, output };
+        }
+        if let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.05)) {
+            output.extend_from_slice(&chunk);
+        }
+        let queries = output.windows(DSR.len()).filter(|w| *w == DSR).count();
         while answered < queries {
             let _ = process.write_impl(b"\x1b[1;1R", false);
             answered += 1;
