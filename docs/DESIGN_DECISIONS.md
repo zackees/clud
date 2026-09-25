@@ -4002,3 +4002,41 @@ subagents.
 since the Workflow tool is the point. A new role needs its agent file, a
 `claude_files.rs` entry and a policy in `block_bad_cmd_grind_caps.rs`. The
 contract is owned by [architecture/grind.md](architecture/grind.md).
+
+## DD-088: The PTY pump blocks on one event channel, and CI must prove it under a real console
+
+**Status:** Accepted
+
+**Context:** #1310, following DD-086. Every console launch now runs through
+the PTY pump, but its main loop polled stdin every 5 ms: about 200 idle
+wakeups a second per session. Nothing measured that cost, since
+`bench/idle_cpu` covered only daemon subprocess sessions. Nothing proved the
+pump works on Windows either. CI ran every Rust harness with stdout piped, and
+`require_pty_or_skip!` quietly skipped each PTY test when its canary failed.
+Running the `pty` harness inside a pseudo-terminal with the skip turned into a
+failure showed that 18 of its 22 Windows tests had never actually run.
+
+**Decision:** stdin, `extra_rx`, resize, and the output reader's close notice
+all feed one `PumpEvent` channel. The main loop blocks on it until the next
+event or a 50 ms tick, which re-checks the interrupt flag, the hooks, and
+Windows child exit. `bench/idle_cpu --mode pty` measures foreground `clud
+--pty` sessions against committed N=1 and N=6 baselines, using a throwaway
+HOME and working directory. `ci/run_bundle.py` runs the `pty` harness inside
+a pseudo-terminal with `CLUD_REQUIRE_PTY=1`, and the canary answers ConPTY's
+`ESC[6n` cursor query the way a terminal would. The `ci-windows` PR label
+runs only static checks plus Windows x64, so Windows fixes iterate quickly.
+It deliberately leaves `CI OK` red and can never gate a merge.
+
+**Rationale:** An event wakes the loop immediately, so keystroke latency
+stays where DD-018 put it. Only the idle re-checks move to the tick.
+Measured on Linux with the same host and 60 s windows, run back to back, one
+idle session went from 11,314 to 1,221 context switches and from 1.89 to
+0.92 CPU-seconds. Six sessions went from 69,692 to 7,335 and from 7.6 to 5.08.
+A skip that reads as green is worse than no test, so the gate fails loudly
+and prints the bytes the canary received.
+
+**Consequences:** The Windows resize watcher (150 ms) and the
+`console_input` adapter (100 ms slices) still poll. Making them event-driven
+needs upstream `running-process` support. A dev build of clud must never see
+the real HOME: it rewrites `~/.clud/state/rm-shim/rm`, and the installed
+`clud-cmd-scan` hook then denies every shell command.

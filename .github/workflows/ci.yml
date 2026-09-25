@@ -136,7 +136,7 @@ jobs:
   build-linux-x64:
     name: Build linux-x64
     needs: static
-    if: needs.static.outputs.mode != ''
+    if: needs.static.outputs.mode != '' && needs.static.outputs.mode != 'windows'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -158,7 +158,7 @@ jobs:
   test-linux-x64-integration:
     name: Test linux-x64 (integration)
     needs: [static, build-linux-x64]
-    if: needs.static.outputs.mode != 'minimal'
+    if: needs.static.outputs.mode != 'minimal' && needs.static.outputs.mode != 'windows'
     uses: ./.github/workflows/_run-tests.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -169,7 +169,8 @@ jobs:
   build-windows-x64:
     name: Build windows-x64
     needs: static
-    if: needs.static.outputs.mode == 'extended' || needs.static.outputs.mode == 'full'
+    # `windows` is the ci-windows iteration mode (#1310).
+    if: needs.static.outputs.mode == 'extended' || needs.static.outputs.mode == 'full' || needs.static.outputs.mode == 'windows'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -350,6 +351,10 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
           MODE: ${{ needs.static.outputs.mode }}
+          STATIC: ${{ needs.static.result }}
+          WINDOWS: >-
+            ${{ needs.build-windows-x64.result }}
+            ${{ needs.test-windows-x64.result }}
           MINIMAL: >-
             ${{ needs.static.result }}
             ${{ needs.build-linux-x64.result }}
@@ -375,10 +380,23 @@ jobs:
             echo "::error::one or more CI jobs failed or were cancelled"
             exit 1
           fi
-          case "$MODE" in minimal|extended|full) ;; *)
+          case "$MODE" in minimal|extended|full|windows) ;; *)
             echo "::error::CI mode was not resolved (got '$MODE')"
             exit 1;;
           esac
+          # ci-windows (#1310) runs static checks plus Windows x64 only. Report
+          # whether those lanes passed, then fail regardless: skipped Linux and
+          # macOS lanes are not coverage, so this mode can never gate a merge.
+          if [ "$MODE" = "windows" ]; then
+            for result in $STATIC $WINDOWS; do
+              if [ "$result" != "success" ]; then
+                echo "::error::a ci-windows lane did not run to success (got '$result')"
+                exit 1
+              fi
+            done
+            echo "::error::ci-windows lanes passed; remove the ci-windows label (or add ci-test/ci-full) for merge-gating CI"
+            exit 1
+          fi
           for result in $MINIMAL; do
             if [ "$result" != "success" ]; then
               echo "::error::a minimal lane did not run to success (got '$result')"
