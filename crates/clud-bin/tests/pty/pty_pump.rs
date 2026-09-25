@@ -560,8 +560,8 @@ fn raw_pump_restores_raw_mode_on_panic() {
 ///   1. Injecting upstream terminal events into clud's real adapter.
 ///   2. Sending the adapter receiver through the production PTY pump.
 ///   3. Capturing the child's stdin via `--mock-stdin-raw-to`.
-///   4. Asserting complete arrow CSI chunks plus Shift+Enter `\n` and plain
-///      Enter `\r` made the round trip.
+///   4. Asserting complete arrow CSI chunks plus Shift+Enter ESC CR (#1369)
+///      and plain Enter `\r` made the round trip.
 ///
 /// The separate `shift_enter_dual_reader` test keeps the upstream translation
 /// and trace assertions active on headless Windows. This child-PTY half uses
@@ -647,22 +647,12 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
             .any(|window| window == b"\x1b[D\x1b[B\x1b[C\x1b[A"),
         "complete navigation sequences must reach the child PTY; got {got:?}"
     );
-    // Shift+Enter is sent as a literal LF. ConPTY turns that into Enter, so
-    // on Windows the child cannot tell it from plain Enter (#1369).
-    if cfg!(windows) {
-        assert_eq!(
-            got.iter().filter(|&&byte| byte == b'\r').count(),
-            2,
-            "under ConPTY both Shift+Enter (LF) and Enter arrive as CR; got {:?}",
-            got
-        );
-    } else {
-        assert!(
-            got.contains(&b'\n'),
-            "Shift+Enter translation must produce a literal \\n in the child's stdin; got {:?}",
-            got
-        );
-    }
+    // Shift+Enter is sent as ESC CR, which survives ConPTY unchanged and
+    // stays distinct from plain Enter (#1369).
+    assert!(
+        got.windows(2).any(|window| window == b"\x1b\r"),
+        "Shift+Enter translation must reach the child as ESC CR; got {got:?}"
+    );
     assert!(
         got.contains(&b'\r'),
         "plain Enter translation must produce a \\r in the child's stdin; got {:?}",

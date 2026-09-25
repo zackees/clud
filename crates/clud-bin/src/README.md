@@ -242,7 +242,7 @@ Console and terminal:
 - `console_input.rs` - Windows adapter over
   `running_process::pty::terminal_input::TerminalInputCore` (issues #141 /
   #575): forwards upstream's complete virtual-key translations atomically
-  while retaining clud's Shift+Enter-LF and Ctrl+V image policies.
+  while retaining clud's Shift+Enter-as-ESC-CR (ConPTY rewrites LF, #1369) and Ctrl+V image policies.
 - `console_setup.rs` - RAII guard that enables
   `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin and `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
   on a terminal stdout (#1345) for the lifetime of a PTY session and
