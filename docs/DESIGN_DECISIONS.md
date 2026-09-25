@@ -4257,3 +4257,24 @@ translation bridge.
   support Claude Code's WebFetch, and clud does not emulate it.
 - Credentials still never cross the daemon wire, `LaunchPlan`, or dry-run
   output; the route list lives only inside the launch-scoped gateway.
+
+---
+
+## DD-094: `gh pr merge --auto` is allowed; only local watchers are denied
+
+**Status:** Accepted (amends DD-065)
+
+**Context:** DD-065 put `gh pr merge --auto` on the `git.pr_wait_fail_fast`
+deny list next to `gh pr checks --watch`. But `--auto` does not wait locally:
+it enqueues the merge with GitHub and returns at once, so it never ties up an
+agent the way a local watcher does, and it is the normal way to say "merge
+when green".
+
+**Decision:** The guard denies only local waiters (`gh pr checks --watch`,
+`gh run watch`, hand-rolled polling loops), which `pr_merge_watch.py`
+replaces because it fails fast. `gh pr merge --auto` is allowed.
+
+**Consequences:** A red lane on an auto-merge PR no longer cancels the rest
+of the matrix unless someone also runs `pr_merge_watch.py`; the merge simply
+never happens. That is an acceptable cost for keeping GitHub's native
+auto-merge available.

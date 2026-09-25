@@ -201,7 +201,7 @@ fn setting_items() -> Vec<SettingItem> {
     items.push(SettingItem {
         key: "git.pr_wait_fail_fast",
         label: "PR-wait fail-fast git commands",
-        note: "Blocks raw `gh pr checks --watch` / `gh pr merge --auto` in \
+        note: "Blocks raw `gh pr checks --watch` / `gh run watch` in \
                favor of a bundled fail-fast waiter script that exits on the \
                first red check instead of waiting out the full matrix. On \
                by default (DD-065).",
