@@ -3011,7 +3011,8 @@ fn find_matching_double_paren_close(chars: &[char], open: usize) -> Option<usize
 /// POSIX shell interpreters that execute a heredoc body or `-c` script as a
 /// program rather than treating it as data (#1081/#1082).
 const HEREDOC_SHELL_HEADS: &[&str] = &[
-    "bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "python", "python3",
+    "bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "python",
+    "python3", // names an agent may type; python-name-lint: allow
 ];
 
 /// #1087: whether a rewrite's blanket `allow` is safe — true only when every

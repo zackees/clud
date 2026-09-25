@@ -1410,7 +1410,7 @@ fn statement_bears_extra_deleter(words: &[Word]) -> bool {
     if has("perl") && (joined_lower.contains("rmtree") || joined_lower.contains("remove_tree")) {
         return true;
     }
-    if (has("python") || has("python2") || has("python3"))
+    if (has("python") || has("python2") || has("python3")) // names an agent may type; python-name-lint: allow
         && (joined_lower.contains("rmtree") || joined_lower.contains("removedirs"))
     {
         return true;
@@ -1432,7 +1432,7 @@ fn statement_bears_extra_deleter(words: &[Word]) -> bool {
                             | "perl"
                             | "python"
                             | "python2"
-                            | "python3"
+                            | "python3" // names an agent may type; python-name-lint: allow
                             | "unlink"
                             | "shred"
                     ) {
@@ -2026,7 +2026,7 @@ mod tests {
     fn issue_1079_other_recursive_deleters_are_denied() {
         for command in [
             r#"perl -MFile::Path -e 'rmtree($ARGV[0])' "$V"/"#,
-            r#"python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$V"/"#,
+            r#"python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$V"/"#, // bypass an agent may type; python-name-lint: allow
             r#"rsync -a --delete /var/empty/ "$V"/"#,
             r#"find "$V"/ -exec perl -e unlink {} +"#,
         ] {

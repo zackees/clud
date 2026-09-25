@@ -156,7 +156,7 @@ If `soldr` is the project's toolchain wrapper:
 Create `ci/perf_local.py` (or whatever the project's CI script convention is). The minimal version forwards arbitrary cargo invocations; the rich version adds per-subcommand subcommands. Skeleton:
 
 ```python
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Run cargo (and friends) against <project>'s warmed Docker volumes."""
 
 from __future__ import annotations

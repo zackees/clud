@@ -942,14 +942,16 @@ fn find_named_executable(dir: &std::path::Path, names: &[&str], depth: usize) ->
     None
 }
 
+/// Every venv ships `python` (`Scripts\\python.exe` on Windows), and clud
+/// standardizes on that name; see `ci/banned_python3.py`.
 fn python_executable_names() -> &'static [&'static str] {
     #[cfg(windows)]
     {
-        &["python.exe", "python3.exe"]
+        &["python.exe"]
     }
     #[cfg(not(windows))]
     {
-        &["python3", "python"]
+        &["python"]
     }
 }
 

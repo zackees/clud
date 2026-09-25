@@ -282,7 +282,7 @@ def _resolve_referenced_script(command: str, repo_root: Path) -> Path | None:
     if not tokens:
         return None
     # Strip common shell wrappers: `bash ./foo.sh args`, `python ./bar.py`, etc.
-    shell_wrappers = {"bash", "sh", "zsh", "python", "python3", "pwsh", "powershell", "cmd"}
+    shell_wrappers = {"bash", "sh", "zsh", "python", "python3", "pwsh", "powershell", "cmd"} # names an agent may type; python-name-lint: allow
     i = 0
     while i < len(tokens) - 1 and tokens[i] in shell_wrappers:
         i += 1

@@ -4,12 +4,13 @@
 ARG BASE=ubuntu:24.04
 FROM ${BASE}
 
-# python3 generates the payload corpus; bash runs the assertions. Neither ever
+# Python generates the payload corpus; bash runs the assertions. Neither ever
 # hands a case to a shell.
 RUN apt-get update \
+    # Debian package names. python-name-lint: allow-next-line
     && apt-get install -y --no-install-recommends python3 python3-venv proot ca-certificates
 
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir running-process==4.10.1
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir running-process==4.10.1 # Debian image has no `python`; python-name-lint: allow
 
 ARG SHIM_BINARY=target/debug/clud-shim
 COPY ${SHIM_BINARY} /usr/local/bin/clud-shim

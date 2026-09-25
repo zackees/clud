@@ -116,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from ci.banned_cross_tools import main as check_banned_cross_tools
     from ci.banned_imports import main as check_banned_imports
+    from ci.banned_python3 import main as check_banned_python3
     from ci.banned_skill_sources import main as check_banned_skill_sources
 
     # Ordered cheapest-first so the common failure reds out soonest: ruff is a
@@ -134,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
     # #847: bundled skills have exactly one source of truth. Another source
     # grep, same tier as the two above — no toolchain, no compile.
     if check_banned_skill_sources() != 0:
+        return 1
+    # The interpreter is `python` everywhere; clud's shim makes that name work
+    # on Linux, macOS and Windows; the versioned name does not exist on Windows.
+    if check_banned_python3() != 0:
         return 1
     # setup-soldr's cargo shim can otherwise omit repository discovery for
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the

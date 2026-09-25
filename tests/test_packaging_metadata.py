@@ -290,7 +290,7 @@ def test_install_script_uses_wheel_with_legacy_fallback() -> None:
     )
     assert '"$target_dir/python.exe" -c' in text
     assert '"$target_dir/python" -c' in text
-    assert "command -v python3" in text
+    assert "command -v python3" in text # asserts the installer's fallback; python-name-lint: allow
 
 
 def test_ci_setup_soldr_never_cooks_before_the_toolchain_is_prepared() -> None:
