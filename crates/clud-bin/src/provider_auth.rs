@@ -1441,6 +1441,112 @@ mod tests {
         assert_eq!(store.get().unwrap(), None);
     }
 
+    fn kimi_descriptor() -> &'static AnthropicCompatProvider {
+        provider_registry::descriptor_for(ModelProvider::Kimi).unwrap()
+    }
+
+    /// #936: a first interactive `clud --kimi` with no stored key prompts,
+    /// probes, stores into Kimi's own record, and lets the launch continue --
+    /// no prior `clud auth login kimi` needed. The next launch reads it back
+    /// without prompting.
+    #[test]
+    fn kimi_first_interactive_launch_prompts_probes_stores_and_continues() {
+        assert_eq!(
+            launch_preflight_target(ModelProvider::Kimi, false),
+            Some(kimi_descriptor())
+        );
+        let key = "sk-kimi0123456789abcdef0123456789ab";
+        let store = InMemorySecretStore::default();
+        let mut probed = Vec::new();
+        assert_eq!(
+            preflight_checked_with(
+                &store,
+                true,
+                || Ok(key.to_string()),
+                |candidate| {
+                    probed.push(candidate.to_string());
+                    ProbeOutcome::Accepted
+                },
+            ),
+            Ok(())
+        );
+        assert_eq!(probed, vec![key.to_string()], "probed once, before storing");
+        assert_eq!(store.get().unwrap().as_deref(), Some(key));
+        assert_eq!(
+            preflight_checked_with(&store, false, || unreachable!(), |_| ProbeOutcome::Accepted),
+            Ok(())
+        );
+    }
+
+    /// Esc cancels; Enter on an empty (or blank) entry submits a malformed key.
+    /// Either way nothing is stored and nothing is sent to Moonshot.
+    #[test]
+    fn kimi_cancelled_or_empty_interactive_entry_is_never_stored_or_probed() {
+        let store = InMemorySecretStore::default();
+        assert_eq!(
+            preflight_checked_with(&store, true, || Err(()), |_| unreachable!()),
+            Err(PreflightError::Cancelled)
+        );
+        for blank in ["", "   "] {
+            assert!(matches!(
+                preflight_checked_with(&store, true, || Ok(blank.to_string()), |_| unreachable!()),
+                Err(PreflightError::Malformed { .. })
+            ));
+        }
+        assert_eq!(store.get().unwrap(), None);
+        assert_eq!(
+            PreflightError::Cancelled.describe(kimi_descriptor()),
+            "Kimi credential entry was cancelled"
+        );
+    }
+
+    /// #936: every descriptor provider (Kimi included) fails fast with its own
+    /// login command -- never a prompt -- when the launch is detached,
+    /// detachable, a repeat loop, a `-p` prompt, or lacks a terminal.
+    #[test]
+    fn every_api_key_provider_prompts_only_on_a_true_interactive_foreground_launch() {
+        for descriptor in provider_registry::ANTHROPIC_COMPAT_PROVIDERS {
+            let flag = descriptor.cli_flag;
+            let interactive = parse(&["clud", flag]);
+            assert!(
+                launch_is_interactive(&interactive, Backend::Claude, true, true),
+                "{flag}"
+            );
+            assert!(
+                !launch_is_interactive(&interactive, Backend::Claude, false, true),
+                "{flag}"
+            );
+            assert!(
+                !launch_is_interactive(&interactive, Backend::Claude, true, false),
+                "{flag}"
+            );
+            for argv in [
+                vec!["clud", flag, "--detach"],
+                vec!["clud", flag, "--detachable"],
+                vec!["clud", flag, "loop", "--repeat", "1h", "task"],
+                vec!["clud", flag, "-p", "do the thing"],
+            ] {
+                assert!(
+                    !launch_is_interactive(&parse(&argv), Backend::Claude, true, true),
+                    "{argv:?} must never prompt"
+                );
+            }
+            let store = InMemorySecretStore::default();
+            assert_eq!(
+                preflight_checked_with(&store, false, || unreachable!(), |_| unreachable!()),
+                Err(PreflightError::Missing)
+            );
+            assert_eq!(
+                PreflightError::Missing.describe(descriptor),
+                format!(
+                    "{} credentials are not configured; run `clud auth login {}`",
+                    descriptor.display_name, descriptor.settings_id
+                )
+            );
+            assert_eq!(launch_preflight_target(descriptor.provider, true), None);
+        }
+    }
+
     #[test]
     fn preflight_unavailable_vault_is_sanitized() {
         let store = InMemorySecretStore {

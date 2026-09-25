@@ -3370,6 +3370,26 @@ mod tests {
         assert_eq!(lookup(runtime.env(), "UNRELATED"), Some("kept"));
     }
 
+    /// #936: the Kimi key reaches the child env and nowhere else a user or log
+    /// could see -- not the runtime's `Debug`, the plan's `Debug`, or the
+    /// plan's serialized (dry-run / daemon) form.
+    #[test]
+    fn kimi_runtime_and_plan_debug_omit_the_secret() {
+        let secret = "sk-kimi-debug-canary-0123456789abcdef";
+        let plan = plan(ModelProvider::Kimi, Backend::Claude);
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &plan,
+            Vec::new(),
+            &FakeSecretStore(Some(secret.to_string())),
+        )
+        .unwrap();
+        assert_eq!(lookup(runtime.env(), "ANTHROPIC_AUTH_TOKEN"), Some(secret));
+        assert!(!format!("{runtime:?}").contains(secret));
+        assert!(!format!("{runtime:#?}").contains(secret));
+        assert!(!format!("{plan:?}").contains(secret));
+        assert!(!serde_json::to_string(&plan).unwrap().contains(secret));
+    }
+
     #[test]
     fn kimi_route_without_a_stored_credential_fails_the_launch() {
         let store = FakeSecretStore(None);
