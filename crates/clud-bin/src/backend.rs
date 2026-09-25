@@ -510,7 +510,10 @@ mod launch_mode_tests {
 
     #[test]
     fn console_launch_uses_pty() {
-        assert_eq!(resolve_launch_mode(false, false, false, true), LaunchMode::Pty);
+        assert_eq!(
+            resolve_launch_mode(false, false, false, true),
+            LaunchMode::Pty
+        );
     }
 
     #[test]
@@ -531,7 +534,10 @@ mod launch_mode_tests {
 
     #[test]
     fn explicit_flags_win() {
-        assert_eq!(resolve_launch_mode(true, false, true, false), LaunchMode::Pty);
+        assert_eq!(
+            resolve_launch_mode(true, false, true, false),
+            LaunchMode::Pty
+        );
         assert_eq!(
             resolve_launch_mode(false, true, false, true),
             LaunchMode::Subprocess
@@ -897,5 +903,4 @@ mod tests {
         assert_eq!(Backend::Claude.executable_name(), "claude");
         assert_eq!(Backend::Codex.executable_name(), "codex");
     }
-
 }
