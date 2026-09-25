@@ -71,6 +71,66 @@ fn merge_extra_rx(
     }
 }
 
+/// Poll interval for [`lease_shared_rx`]'s forwarder; also bounds how long
+/// dropping a [`SharedRxLease`] can block.
+const SHARED_RX_LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Guard for one iteration's lease on a shared receiver. Dropping it
+/// stops the forwarder thread and joins it (bounded by
+/// [`SHARED_RX_LEASE_POLL`]), so the next lease is the only reader.
+struct SharedRxLease {
+    stop: std::sync::Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for SharedRxLease {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Lease a process-lifetime receiver for one PTY iteration (#1360).
+///
+/// The OLE drag-drop receiver outlives every loop iteration, but
+/// [`merge_extra_rx`] moves its inputs into forwarder threads that die
+/// with the iteration's merged output. Moving the drag-drop receiver
+/// there meant only iteration 0 ever saw drops. Instead, each iteration
+/// gets a fresh channel fed by a forwarder that polls the shared receiver
+/// under its mutex and never moves it; the returned [`SharedRxLease`]
+/// stops that forwarder when the iteration ends.
+fn lease_shared_rx(
+    shared: &std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>>,
+) -> (std::sync::mpsc::Receiver<Vec<u8>>, SharedRxLease) {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let thread_stop = std::sync::Arc::clone(&stop);
+    let shared = std::sync::Arc::clone(shared);
+    let thread = std::thread::Builder::new()
+        .name("clud-dnd-lease".into())
+        .spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                let received = match shared.lock() {
+                    Ok(guard) => guard.recv_timeout(SHARED_RX_LEASE_POLL),
+                    Err(_) => break,
+                };
+                match received {
+                    Ok(chunk) => {
+                        if tx.send(chunk).is_err() {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .ok();
+    (rx, SharedRxLease { stop, thread })
+}
+
 /// The two keys that force UTF-8 on any Python helper the agent shells
 /// out to. Public so the daemon-side drift guard can assert against the
 /// same list rather than restating it (#1209).
@@ -322,6 +382,58 @@ mod tests {
         env.iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    type SharedRx = std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>>;
+
+    fn shared_channel() -> (std::sync::mpsc::Sender<Vec<u8>>, SharedRx) {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        (tx, std::sync::Arc::new(std::sync::Mutex::new(rx)))
+    }
+
+    /// #1360: a drop in iteration N > 0 must reach that iteration's child.
+    #[test]
+    fn dnd_chunks_reach_every_iteration() {
+        let timeout = std::time::Duration::from_secs(1);
+        let (tx, shared) = shared_channel();
+
+        // Iteration 0.
+        let (_other_tx0, other_rx0) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (leased, lease) = lease_shared_rx(&shared);
+        let merged = merge_extra_rx(Some(leased), Some(other_rx0)).expect("merged rx");
+        tx.send(b"a".to_vec()).expect("send in iteration 0");
+        assert_eq!(merged.recv_timeout(timeout).expect("iteration 0 chunk"), b"a");
+        drop(merged);
+        drop(lease);
+
+        // The shared receiver must survive iteration 0.
+        tx.send(b"b".to_vec())
+            .expect("receiver must stay alive after iteration 0 ends");
+
+        // Iteration 1.
+        let (_other_tx1, other_rx1) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (leased, lease) = lease_shared_rx(&shared);
+        let merged = merge_extra_rx(Some(leased), Some(other_rx1)).expect("merged rx");
+        assert_eq!(merged.recv_timeout(timeout).expect("iteration 1 chunk"), b"b");
+        drop(merged);
+        drop(lease);
+    }
+
+    #[test]
+    fn lease_drop_stops_forwarder() {
+        let timeout = std::time::Duration::from_secs(1);
+        let (tx, shared) = shared_channel();
+
+        let (first_rx, first_lease) = lease_shared_rx(&shared);
+        drop(first_lease);
+        // Sent after the first lease is gone: a dead forwarder must not
+        // swallow it.
+        tx.send(b"late".to_vec()).expect("shared receiver alive");
+        assert!(first_rx.recv_timeout(timeout / 10).is_err());
+
+        let (second_rx, second_lease) = lease_shared_rx(&shared);
+        assert_eq!(second_rx.recv_timeout(timeout).expect("chunk"), b"late");
+        drop(second_lease);
     }
 
     #[test]
