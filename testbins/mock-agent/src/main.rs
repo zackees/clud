@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 const CODEX_BRIDGE_PROBE_REQUEST: &str = include_str!("../assets/codex_bridge_probe_request.json");
 
 fn main() {
+    trace("start");
     let args: Vec<String> = std::env::args().collect();
 
     // Extract --mock-exit-code if present (our own flag, not forwarded by clud)
@@ -322,7 +323,13 @@ fn main() {
 
     // Read stdin: either timed read (--mock-read-stdin-ms) or pipe-mode read
     let stdin_bytes: Option<Vec<u8>> = if read_stdin_ms > 0 {
-        read_stdin_timed(read_stdin_ms)
+        trace("stdin read start");
+        let bytes = read_stdin_timed(read_stdin_ms);
+        trace(&format!(
+            "stdin read done: {} bytes",
+            bytes.as_ref().map_or(0, Vec::len)
+        ));
+        bytes
     } else if !stdin_is_terminal {
         let mut buf = Vec::new();
         io::stdin().read_to_end(&mut buf).ok();
@@ -429,7 +436,9 @@ fn main() {
         eprintln!("mock-agent refused to serialize a bridge credential");
         std::process::exit(86);
     }
+    trace("report write start");
     println!("{}", report_str);
+    trace("report write done");
 
     // Also write to file if requested (useful when stdout is captured by PTY)
     if let Some(path) = report_file {
@@ -439,7 +448,32 @@ fn main() {
         let _ = std::fs::write(&path, &report_str);
     }
 
+    trace(&format!("exit {exit_code}"));
     std::process::exit(exit_code);
+}
+
+/// Append one timestamped stage line to `$MOCK_AGENT_TRACE_DIR/mock-<pid>.log`
+/// (#1310). CI dumps these files when a PTY test times out, so a hang shows
+/// whether the child stalled reading stdin, writing its report, or exiting.
+/// A no-op unless the variable is set.
+fn trace(stage: &str) {
+    let Some(dir) = std::env::var_os("MOCK_AGENT_TRACE_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    let path = dir.join(format!("mock-{}.log", std::process::id()));
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{millis} {stage}");
+    }
 }
 
 fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {

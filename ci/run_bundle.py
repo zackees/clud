@@ -193,7 +193,7 @@ REQUIRE_PTY_ENV = "CLUD_REQUIRE_PTY"
 # Upper bound on one test of the terminal harness. Each test runs in its own
 # pseudo-terminal (see `run_terminal_harness`), so a hang costs this much and
 # names the test instead of swallowing the rest of the harness.
-TERMINAL_TEST_TIMEOUT_SECS = 180.0
+TERMINAL_TEST_TIMEOUT_SECS = 60.0
 
 
 def needs_terminal(harness: Path) -> bool:
@@ -280,6 +280,18 @@ def list_tests(harness: Path, env: dict[str, str]) -> list[str]:
     ]
 
 
+def dump_traces(name: str, trace_dir: Path) -> None:
+    """Print the mock-agent stage traces a failed or hung PTY test left (#1310)."""
+    logs = sorted(trace_dir.glob("*.log")) if trace_dir.is_dir() else []
+    if not logs:
+        print(f"[pty-trace] {name}: no mock-agent trace (child never started?)", flush=True)
+        return
+    for log in logs:
+        print(f"[pty-trace] {name}: {log.name}", flush=True)
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            print(f"[pty-trace]   {line}", flush=True)
+
+
 def run_terminal_harness(argv: list[str], env: dict[str, str]) -> int:
     """Run each test of the terminal harness in its own pseudo-terminal.
 
@@ -291,11 +303,15 @@ def run_terminal_harness(argv: list[str], env: dict[str, str]) -> int:
     if not names:
         print(f"::error::{argv[0]} listed no tests", file=sys.stderr)
         return 1
-    failed = [
-        name
-        for name in names
-        if run_in_terminal([*argv, "--exact", name], env) != 0
-    ]
+    failed = []
+    for name in names:
+        trace_dir = LOG_DIR / "pty-trace" / name.replace("::", "__")
+        test_env = dict(env)
+        test_env["MOCK_AGENT_TRACE_DIR"] = str(trace_dir)
+        test_env["CLUD_PTY_PUMP_TRACE"] = "1"
+        if run_in_terminal([*argv, "--exact", name, "--nocapture"], test_env) != 0:
+            failed.append(name)
+            dump_traces(name, trace_dir)
     if failed:
         print(f"::error::failing PTY tests: {', '.join(failed)}", file=sys.stderr)
         return 1

@@ -925,6 +925,9 @@ struct PumpOptions {
 /// 200 idle wakeups a second per session.
 const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Environment switch that forces the pump's verbose trace on (#1310).
+pub const PUMP_TRACE_ENV: &str = "CLUD_PTY_PUMP_TRACE";
+
 /// How long a partial SGR mouse report held by the toast mouse filter (for
 /// example a lone Esc keypress) waits for its continuation before it is
 /// released to the child (#1189). Only armed while such bytes are pending,
@@ -1058,7 +1061,7 @@ fn run_raw_pty_pump_full_verbose_with_writer<H, R, W>(
     stdin_source: R,
     resize_rx: std::sync::mpsc::Receiver<(u16, u16)>,
     extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
-    options: PumpOptions,
+    mut options: PumpOptions,
     writer: W,
 ) -> i32
 where
@@ -1068,6 +1071,9 @@ where
 {
     use std::sync::mpsc;
 
+    // #1310: `CLUD_PTY_PUMP_TRACE=1` turns on the pump's verbose lines for
+    // any caller, so a CI run can show where a Windows PTY test stalls.
+    options.verbose |= std::env::var_os(PUMP_TRACE_ENV).is_some_and(|value| value != "0");
     let (event_tx, event_rx) = mpsc::channel::<PumpEvent>();
     let interactive_real_stdin = stdin_source_is_real_stdin::<R>() && terminals_are_interactive();
     let normalize_console_stdin =
@@ -1159,7 +1165,7 @@ where
     let stop_reader = AtomicBool::new(false);
     let reader_closed = AtomicBool::new(false);
 
-    std::thread::scope(|scope| {
+    let exit_code = std::thread::scope(|scope| {
         let (output_tx, output_rx) = mpsc::channel::<OutputMsg>();
         // #1189: the compositor lives on the writer thread; the stdin path
         // shares its close-button hit rect and the hub for dismissal.
@@ -1465,8 +1471,17 @@ where
         };
 
         stop_reader.store(true, Ordering::Release);
+        if options.verbose {
+            verbose_log::log(format_args!(
+                "[clud] pty pump: loop exited code {exit_code}; joining reader/writer"
+            ));
+        }
         exit_code
-    })
+    });
+    if options.verbose {
+        verbose_log::log(format_args!("[clud] pty pump: returned {exit_code}"));
+    }
+    exit_code
 }
 
 /// `extra_rx` already wired, the `console_input::ReadConsoleInputW`
