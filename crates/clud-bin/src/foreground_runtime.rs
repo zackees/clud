@@ -275,6 +275,7 @@ impl ForegroundRuntime {
         Self::preflight(plan)?;
         let mut runtime = Self::start_with_secret_store(plan, env, &store)?;
         runtime.apply_attribution(plan)?;
+        runtime.apply_session_history(plan);
         if !pin_notices.is_empty() {
             let mut notices = pin_notices;
             notices.append(&mut runtime.startup_notices);
@@ -544,6 +545,44 @@ impl ForegroundRuntime {
         self.merge_launch_settings(plan, |document| {
             crate::attribution::merge_into(&coauthor, document)
         })
+    }
+
+    /// Register `clud session-hook` for this Claude-harness launch (#922), so
+    /// the per-cwd session index records it under the route clud resolved.
+    /// Appended next to the user's own hooks. Best effort: a launch never
+    /// fails because its session could not be indexed.
+    pub(crate) fn apply_session_history(&mut self, plan: &LaunchPlan) {
+        if plan.effective_harness() != Backend::Claude {
+            return;
+        }
+        let (Ok(exe), Ok(state_dir)) =
+            (std::env::current_exe(), crate::daemon::default_state_dir())
+        else {
+            return;
+        };
+        let route = crate::session_history::hook::route_arg(
+            plan.model_provider(),
+            plan.routing_mode == crate::backend::RoutingMode::Unified,
+        );
+        let recovery = crate::session_history::launch::take_pending_recovery();
+        let Some(fragment) = crate::session_history::hook::settings_fragment(
+            &exe,
+            &state_dir,
+            route,
+            recovery.as_deref(),
+            cfg!(windows),
+        ) else {
+            eprintln!(
+                "[clud] note: session history hooks skipped: clud's path cannot be quoted safely"
+            );
+            return;
+        };
+        let merged = self.merge_launch_settings(plan, |document| {
+            crate::clud_hooks_compile::merge_hook_settings(document, &fragment).is_ok()
+        });
+        if let Err(error) = merged {
+            eprintln!("[clud] warning: session history hooks not registered: {error}");
+        }
     }
 
     /// Run `compose` over this launch's single Claude `--settings` document:
@@ -2891,8 +2930,22 @@ mod tests {
             settings["hooks"]["SessionStart"][1]["hooks"][0]["url"],
             format!("{base_url}/_clud/context/compact-finished")
         );
+        // clud's own session-history hook (#922) rides alongside, unmatched.
+        assert!(settings["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.get("matcher").is_none()
+                && entry["hooks"][0]["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains(" session-hook "))));
         for event in ["PreCompact", "SessionStart"] {
-            for entry in settings["hooks"][event].as_array().unwrap() {
+            for entry in settings["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.get("matcher").is_some())
+            {
                 let hook = &entry["hooks"][0];
                 assert_eq!(hook["type"], "http");
                 assert_eq!(
@@ -3009,9 +3062,11 @@ mod tests {
         let settings: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&merged_path).unwrap()).unwrap();
         assert_eq!(settings["env"]["USER_SETTING"], "preserved");
+        // The user's hook, the bridge's clear and compact-finished hooks, and
+        // clud's session-history hook (#922).
         assert_eq!(
             settings["hooks"]["SessionStart"].as_array().unwrap().len(),
-            3
+            4
         );
         assert_eq!(settings["hooks"]["PreCompact"][0]["matcher"], "manual|auto");
         drop(calls);
@@ -3901,13 +3956,32 @@ mod tests {
         let repo = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();
 
-        // `--coauthor` opts back in to Claude Code's own attribution, which is
-        // the only reason an undeclared repo's launch carries `--settings`.
+        // `--coauthor` opts back in to Claude Code's own attribution. What is
+        // left in `--settings` is clud's own session-history hooks (#922):
+        // no repo-declared hook, and no dispatcher env.
         let mut plan = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
         plan.coauthor = crate::attribution::Coauthor::Harness;
         let runtime = ForegroundRuntime::start(&plan, Vec::new()).unwrap();
 
-        assert_eq!(settings_argument(&runtime), None);
+        let path = settings_argument(&runtime).expect("session-history hooks");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let hooks = document["hooks"].as_object().unwrap();
+        assert_eq!(
+            hooks
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            crate::session_history::hook::EVENTS
+                .iter()
+                .map(|e| e.to_string())
+                .collect()
+        );
+        for entries in hooks.values() {
+            let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
+            assert!(command.contains(" session-hook "), "{command}");
+        }
+        assert!(document.get("attribution").is_none());
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
     }
 

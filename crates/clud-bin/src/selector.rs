@@ -998,6 +998,10 @@ mod tests {
                 include_str!("foreground_runtime.rs"),
             ),
             ("settings_tui.rs", include_str!("settings_tui.rs")),
+            (
+                "session_history/picker.rs",
+                include_str!("session_history/picker.rs"),
+            ),
         ] {
             // Only production code: tests legitimately assert on the escape
             // sequences the shared renderer emits. Colored output elsewhere in

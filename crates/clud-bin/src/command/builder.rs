@@ -613,6 +613,7 @@ fn build_launch_plan_for_target_at(
         | Some(Command::Daemon { .. })
         | Some(Command::InternalDaemon { .. })
         | Some(Command::Statusline { .. })
+        | Some(Command::SessionHook { .. })
         | Some(Command::InternalWorker { .. }) => {}
         Some(Command::Run) | None => {
             if let Some(ref prompt) = args.prompt {

@@ -121,6 +121,9 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--transcript <PATH>` | Tee daemon-managed session output bytes to a transcript file |
 | `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
 | `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
+| `-c`, `--continue` | At a terminal, pick one of this directory's Claude-harness sessions (newest first, with provider, context estimate and compact checkpoints) to resume; without a terminal, Claude's native `--continue` |
+| `--last` | Resume this directory's newest Claude-harness session without the picker |
+| `--resume-mode <auto\|native\|portable>` | How `-c`/`--last` resumes: `native` is Claude's own resume, `portable` starts a new session from a compact summary plus the newest turns that fit, `auto` (default) picks native when safe |
 | `--coauthor[=TAG]` | Opt in to commit/PR attribution. clud hides Claude Code's `Co-Authored-By` trailer and "Generated with Claude Code" PR line by default; bare `--coauthor` keeps Claude's own, `=TAG` uses TAG for both (also `CLUD_COAUTHOR=1|TAG`; Claude harness only) |
 | `--dry-run` | Print what would be executed, then exit |
 | `-v`, `--verbose` | Show debug output |

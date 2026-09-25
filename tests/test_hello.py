@@ -477,6 +477,32 @@ def test_dry_run_coauthor_env_var() -> None:
     assert _dry_run_coauthor(env_value="Bot <b@x>") == {"mode": "tag", "tag": "Bot <b@x>"}
 
 
+def test_dry_run_continue_keeps_native_continue_for_scripts() -> None:
+    """#922: `-c` without a terminal (scripts, --dry-run) still forwards
+    Claude's own `--continue`; only an interactive launch opens the picker."""
+    result = _run("--dry-run", "-c")
+    assert result.returncode == 0, result.stderr
+    command = json.loads(result.stdout)["command"]
+    assert "--continue" in command
+
+
+def test_session_picker_flags_are_clud_options_not_passthrough() -> None:
+    for argv in (["--last"], ["-c", "--resume-mode", "portable"], ["-c", "--resume-mode=native"]):
+        result = _run("--dry-run", *argv)
+        assert result.returncode == 0, (argv, result.stderr)
+        command = json.loads(result.stdout)["command"]
+        assert not any(arg.startswith(("--last", "--resume-mode")) for arg in command), (
+            argv,
+            command,
+        )
+
+
+def test_resume_mode_rejects_unknown_values() -> None:
+    result = _run("--dry-run", "-c", "--resume-mode", "sideways")
+    assert result.returncode != 0
+    assert "sideways" in result.stderr
+
+
 def test_dry_run_codex() -> None:
     result = _run("--dry-run", "--codex", "-p", "hello")
     assert result.returncode == 0
