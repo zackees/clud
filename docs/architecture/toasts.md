@@ -61,12 +61,10 @@ Tier selection is `toast/tier.rs::decide`:
 - while clud's Sixel header owns a scroll region, in-grid tiers are off;
 - `CLUD_TOAST_TIER=kitty|text|fallback|off` overrides the decision.
 
-On the Linux/macOS default launch Claude runs in subprocess mode, so Claude
-users see the status line unless they opt into PTY mode (`CLUD_PTY_DEFAULT=1`,
-`--pty`; the default flip is #691). Codex already uses PTY there (DD-070).
-On Windows both harnesses default to subprocess; PTY sessions there (`loop`,
-`grind`, `--pty`) get the kitty tier under WezTerm and text cells or the title
-elsewhere.
+An interactive launch from a real terminal runs every harness through the PTY
+pump on every platform (DD-086), so it gets in-grid toasts; headless `-p` and
+`--subprocess` launches see the status line. On Windows, PTY sessions get the
+kitty tier under WezTerm and text cells or the title elsewhere.
 
 ## Compositor
 

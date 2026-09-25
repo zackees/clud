@@ -474,7 +474,7 @@ def test_codex_builtins_seed_interactive_dry_run(
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["backend"] == "codex"
-    assert data["launch_mode"] == "pty"
+    assert data["launch_mode"] == "subprocess"  # no terminal under pytest (DD-086)
     assert "exec" not in data["command"]
     assert prompt_fragment in data["command"][-1]
 
@@ -486,7 +486,7 @@ def test_grind_seeds_the_native_loop_on_the_claude_harness() -> None:
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["effective_harness"] == "claude"
-    assert data["launch_mode"] == "pty"
+    assert data["launch_mode"] == "subprocess"  # no terminal under pytest (DD-086)
     assert data["command"][-1].startswith("/loop look at https://")
     assert "-p" not in data["command"]
     assert data["iterations"] == 1

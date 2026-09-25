@@ -62,7 +62,7 @@ pip install clud       # plain pip; you must ensure the install bin dir is on PA
 ## Usage
 
 ```bash
-clud                              # Launch Claude in YOLO mode via subprocess
+clud                              # Launch Claude in YOLO mode
 clud --codex                      # Use Codex as the backend
 clud --claude                     # Use Claude as the backend (default)
 clud --deepseek                   # Use DeepSeek through the Claude harness

@@ -475,92 +475,69 @@ pub fn saved_harness_override_notice(
     ))
 }
 
-/// Resolve how the backend should be launched.
+/// Resolve how the backend should be launched (#691, [DD-086]).
 ///
-/// Explicit `--pty` / `--subprocess` always wins. Otherwise:
-/// - Claude defaults to subprocess. #328 is **closed** (2026-06-16) and did
-///   not flip this: it landed the Ctrl+V / Shift+Enter work plus the opt-in
-///   flag below, but its audit criterion — flip the default and run the
-///   platform matrix — was never carried out. The open proposal to flip is
-///   #691; until that lands, subprocess stays the default by inertia rather
-///   than by an in-progress audit.
-///   `CLUD_PTY_DEFAULT=1` opts Claude into PTY by default so the matrix and
-///   manual Windows checks can exercise the keyboard-interception path without
-///   changing the stable default yet. In `clud loop` mode, non-Windows already
-///   defaults to PTY so the user sees live token streaming. Loop iterations
-///   take long enough that the subprocess-default's silent-until-EOF buffering
-///   makes it impossible to tell if the agent is working or hung; see #32.
-/// - Codex `exec` (non-interactive) always uses subprocess.
-/// - Codex interactive TUI (#1181, [DD-070]): on Linux/macOS it runs through
-///   the PTY pump even when clud already has a real terminal, so clud owns
-///   the byte stream and can apply the Codex-only bare-LF normalizer
-///   (`codex_lf.rs`). On Windows with a real terminal it still runs as a
-///   subprocess inheriting that console: ConPTY adds its own repaint layer
-///   (#515) and the console's LF->CRLF output processing already masks the
-///   Codex rendering bug, so there is nothing to gain from wrapping. When
-///   clud has no TTY on any platform (piped stdin or headless host), the
-///   child is wrapped in a PTY so the TUI has a pseudo-console to talk to.
-///   History: PR #47 (titled `(#46)`, but #46 is an unrelated CI issue —
-///   see #737) introduced "Codex + TTY => subprocess" because the old
-///   crossterm event loop dropped Codex's startup `\x1b[6n` reply; the same
-///   PR replaced that loop with the raw byte pump that forwards replies
-///   verbatim, which removed the hang's mechanism.
+/// One rule for every harness on every platform:
+/// - `--pty` / `--subprocess` win.
+/// - A console launch (stdin and stdout both TTYs) that is not `headless`
+///   (Claude `-p`/`--print`, `codex exec`, DeepSeek's headless profile) runs
+///   through the PTY pump. Harness TUIs expect a terminal.
+/// - Everything else — headless, piped, or redirected to a log — runs as a
+///   subprocess so its output reaches the destination byte-exact. Without a
+///   terminal there is nothing for a PTY to drive.
+///
+/// History: subprocess mode for interactive TUIs came from an old event-loop
+/// bug that dropped Codex's startup `\x1b[6n` reply (PR #47, titled `(#46)`;
+/// see #737). The raw byte pump fixed it in the same PR.
 pub fn resolve_launch_mode(
     pty: bool,
     subprocess: bool,
-    backend: Backend,
-    codex_uses_exec: bool,
-    is_loop: bool,
+    headless: bool,
     parent_has_tty: bool,
-) -> LaunchMode {
-    resolve_launch_mode_with_pty_default(
-        pty,
-        subprocess,
-        backend,
-        codex_uses_exec,
-        is_loop,
-        parent_has_tty,
-        env_pty_default_enabled(),
-    )
-}
-
-fn env_pty_default_enabled() -> bool {
-    std::env::var_os("CLUD_PTY_DEFAULT").is_some_and(|value| {
-        let value = value.to_string_lossy();
-        let value = value.trim();
-        !value.is_empty()
-            && value != "0"
-            && !value.eq_ignore_ascii_case("false")
-            && !value.eq_ignore_ascii_case("off")
-    })
-}
-
-fn resolve_launch_mode_with_pty_default(
-    pty: bool,
-    subprocess: bool,
-    backend: Backend,
-    codex_uses_exec: bool,
-    is_loop: bool,
-    parent_has_tty: bool,
-    pty_default: bool,
 ) -> LaunchMode {
     if pty {
-        return LaunchMode::Pty;
-    }
-    if subprocess {
-        return LaunchMode::Subprocess;
-    }
-    match backend {
-        Backend::Claude if pty_default => LaunchMode::Pty,
-        Backend::Claude if is_loop && !cfg!(target_os = "windows") => LaunchMode::Pty,
-        Backend::Claude => LaunchMode::Subprocess,
-        Backend::Codex if codex_uses_exec => LaunchMode::Subprocess,
-        Backend::Codex if parent_has_tty && cfg!(target_os = "windows") => LaunchMode::Subprocess,
-        Backend::Codex => LaunchMode::Pty,
-        Backend::DeepSeek => LaunchMode::Subprocess,
+        LaunchMode::Pty
+    } else if subprocess || headless || !parent_has_tty {
+        LaunchMode::Subprocess
+    } else {
+        LaunchMode::Pty
     }
 }
 
+#[cfg(test)]
+mod launch_mode_tests {
+    use super::*;
+
+    #[test]
+    fn console_launch_uses_pty() {
+        assert_eq!(resolve_launch_mode(false, false, false, true), LaunchMode::Pty);
+    }
+
+    #[test]
+    fn headless_uses_subprocess_even_with_a_terminal() {
+        assert_eq!(
+            resolve_launch_mode(false, false, true, true),
+            LaunchMode::Subprocess
+        );
+    }
+
+    #[test]
+    fn no_terminal_uses_subprocess() {
+        assert_eq!(
+            resolve_launch_mode(false, false, false, false),
+            LaunchMode::Subprocess
+        );
+    }
+
+    #[test]
+    fn explicit_flags_win() {
+        assert_eq!(resolve_launch_mode(true, false, true, false), LaunchMode::Pty);
+        assert_eq!(
+            resolve_launch_mode(false, true, false, true),
+            LaunchMode::Subprocess
+        );
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,198 +898,4 @@ mod tests {
         assert_eq!(Backend::Codex.executable_name(), "codex");
     }
 
-    #[test]
-    fn test_claude_defaults_to_subprocess() {
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Claude, false, false, true),
-            LaunchMode::Subprocess
-        );
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Claude, true, false, true),
-            LaunchMode::Subprocess
-        );
-    }
-
-    #[test]
-    fn test_claude_loop_uses_pty_for_streaming() {
-        // #32: subprocess silence during long loop iterations makes it
-        // impossible to tell if claude is working or hung. Loop mode opts
-        // into PTY so token output streams live.
-        //
-        // Still gated to non-Windows, but NOT for the reason this comment
-        // used to give. It cited #38's "Windows ConPTY handle-inheritance",
-        // and #38 is closed (2026-04-19) and was about `clud attach` hanging
-        // on *daemon-worker* PTY sessions spawned through the old
-        // `trampoline::spawn_detached_self(bInheritHandles=TRUE)` (replaced by
-        // running-process's daemon spawn in #1186) — a different code path
-        // from this foreground pump, which inherits nothing. So the gate has
-        // no verified justification on record; whether Windows loop-PTY
-        // actually misbehaves is untested. #691 owns re-testing it.
-        let expected = if cfg!(target_os = "windows") {
-            LaunchMode::Subprocess
-        } else {
-            LaunchMode::Pty
-        };
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Claude, false, true, true),
-            expected
-        );
-    }
-
-    #[test]
-    fn test_claude_loop_respects_explicit_subprocess_override() {
-        // --subprocess still wins for users who want the old behavior.
-        assert_eq!(
-            resolve_launch_mode(false, true, Backend::Claude, false, true, true),
-            LaunchMode::Subprocess
-        );
-    }
-
-    #[test]
-    fn test_claude_pty_default_audit_flag_uses_pty() {
-        assert_eq!(
-            resolve_launch_mode_with_pty_default(
-                false,
-                false,
-                Backend::Claude,
-                false,
-                false,
-                true,
-                true,
-            ),
-            LaunchMode::Pty
-        );
-        assert_eq!(
-            resolve_launch_mode_with_pty_default(
-                false,
-                false,
-                Backend::Claude,
-                false,
-                true,
-                true,
-                true
-            ),
-            LaunchMode::Pty
-        );
-    }
-
-    #[test]
-    fn test_claude_pty_default_respects_explicit_subprocess_override() {
-        assert_eq!(
-            resolve_launch_mode_with_pty_default(
-                false,
-                true,
-                Backend::Claude,
-                false,
-                false,
-                true,
-                true
-            ),
-            LaunchMode::Subprocess
-        );
-    }
-
-    #[test]
-    fn test_pty_default_audit_flag_does_not_change_codex_exec() {
-        assert_eq!(
-            resolve_launch_mode_with_pty_default(
-                false,
-                false,
-                Backend::Codex,
-                true,
-                false,
-                false,
-                true
-            ),
-            LaunchMode::Subprocess
-        );
-    }
-
-    #[test]
-    fn test_codex_interactive_no_tty_uses_pty() {
-        // When clud has no real terminal (piped stdin / headless), wrap the
-        // child in a PTY so its TUI has a pseudo-console to talk to.
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Codex, false, false, false),
-            LaunchMode::Pty
-        );
-    }
-
-    /// Windows keeps inheriting the real console (#1181): ConPTY brings its
-    /// own repaint layer (#515) and the console already translates LF to
-    /// CRLF, so the Codex goal-cell rendering bug never shows there. This
-    /// test runs on the Windows exec lane and is the guard that the flip
-    /// for Linux/macOS did not change Windows behavior.
-    ///
-    /// Cite PR #47, not issue #46, for the original rule. The PR is titled
-    /// `... (#46)`, so the number is not wrong -- but the *issue* is "CI:
-    /// macos-15-intel integration test can't locate mock-agent", which
-    /// concluded it was not a PTY regression (#737).
-    #[cfg(windows)]
-    #[test]
-    fn test_codex_interactive_with_tty_uses_subprocess_on_windows() {
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Codex, false, false, true),
-            LaunchMode::Subprocess
-        );
-    }
-
-    /// Linux/macOS run interactive Codex through the PTY pump even with a
-    /// real terminal (#1181), so clud is in the byte path and
-    /// `codex_lf::CodexLfNormalizer` can mask Codex's bare-LF goal cell.
-    #[cfg(not(windows))]
-    #[test]
-    fn test_codex_interactive_with_tty_uses_pty_off_windows() {
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Codex, false, false, true),
-            LaunchMode::Pty
-        );
-    }
-
-    /// Explicit `--subprocess` still wins for Codex with a TTY on every
-    /// platform, so the old inherit-the-console behavior stays reachable.
-    #[test]
-    fn test_codex_interactive_with_tty_explicit_subprocess_wins() {
-        assert_eq!(
-            resolve_launch_mode(false, true, Backend::Codex, false, false, true),
-            LaunchMode::Subprocess
-        );
-    }
-
-    #[test]
-    fn test_codex_exec_defaults_to_subprocess() {
-        // `clud --codex -p "..."` -> `codex exec` -> non-interactive, pipeable.
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Codex, true, false, true),
-            LaunchMode::Subprocess
-        );
-        assert_eq!(
-            resolve_launch_mode(false, false, Backend::Codex, true, false, false),
-            LaunchMode::Subprocess
-        );
-    }
-
-    #[test]
-    fn test_launch_mode_pty_override() {
-        assert_eq!(
-            resolve_launch_mode(true, false, Backend::Claude, false, false, true),
-            LaunchMode::Pty
-        );
-        assert_eq!(
-            resolve_launch_mode(true, false, Backend::Codex, true, false, true),
-            LaunchMode::Pty
-        );
-    }
-
-    #[test]
-    fn test_launch_mode_subprocess_override() {
-        assert_eq!(
-            resolve_launch_mode(false, true, Backend::Claude, false, false, true),
-            LaunchMode::Subprocess
-        );
-        assert_eq!(
-            resolve_launch_mode(false, true, Backend::Codex, false, false, true),
-            LaunchMode::Subprocess
-        );
-    }
 }

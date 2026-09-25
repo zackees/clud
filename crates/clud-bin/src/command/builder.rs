@@ -639,20 +639,19 @@ fn build_launch_plan_for_target_at(
     cmd.extend(args.passthrough.iter().cloned());
 
     let is_loop_cmd = matches!(&args.command, Some(Command::Loop { .. }));
-    let is_loop = loop_markers.is_some() && repeat_schedule.is_none();
-    let parent_has_tty = crate::session::terminals_are_interactive();
-    let launch_mode = if matches!(&args.command, Some(Command::Grind { .. })) {
-        LaunchMode::Pty
-    } else {
-        crate::backend::resolve_launch_mode(
-            args.pty,
-            args.subprocess,
-            backend,
-            codex_uses_exec,
-            is_loop,
-            parent_has_tty,
-        )
+    // Headless: Claude `-p`/`--print` (from clud or passthrough), `codex exec`,
+    // DeepSeek's headless profile.
+    let headless = match backend {
+        Backend::Claude => cmd.iter().any(|a| a == "-p" || a == "--print"),
+        Backend::Codex => codex_uses_exec,
+        Backend::DeepSeek => has_noninteractive_prompt(args, backend),
     };
+    let launch_mode = crate::backend::resolve_launch_mode(
+        args.pty,
+        args.subprocess,
+        headless,
+        crate::session::terminals_are_interactive(),
+    );
 
     // Issue: subprocess-mode loops on claude went silent until the iteration
     // finished, because `claude -p` buffers its single final response. Inject

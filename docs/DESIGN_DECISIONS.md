@@ -3278,7 +3278,7 @@ cannot lock the top-level session out of delegating.
 
 ## DD-070: interactive Codex runs through the PTY pump on Linux/macOS and inherits the console on Windows
 
-**Status:** Accepted
+**Status:** Accepted; the Windows exception is superseded by DD-086.
 
 **Context:** #1181. Codex's TUI writes every history line with an explicit
 `\r\n`, but its `/goal` status cell hands the whole objective to one span
@@ -3370,8 +3370,8 @@ is clickable only when the child already reports SGR mouse events.
   restores the old argv.
 - In PTY mode every child byte also feeds a `vt100` shadow and an escape
   tracker while toasts are enabled.
-- Claude on Linux/macOS sees in-grid toasts only in PTY mode until #691 flips
-  its default; Codex already gets them (DD-070).
+- Claude on Linux/macOS sees in-grid toasts only in PTY mode; since DD-086
+  that is its interactive default, as it is for Codex (DD-070).
 - Konsole and iTerm2 stay on text cells until their kitty graphics support is
   validated; `CLUD_TOAST_TIER` overrides the choice.
 - Subprocess-mode Codex (Windows) has no toast surface.
@@ -3935,3 +3935,35 @@ later build apply another weighting without scraping OpenRouter at launch.
 **Consequences:** Prices may be six hours stale on a healthy install, or older
 when fetches keep failing. The producer fails visibly on invalid upstream data
 and commits only validated deterministic output.
+
+## DD-086: every console launch runs through the PTY pump; subprocess is for headless and redirected output
+
+**Status:** Accepted. Supersedes DD-070's Windows exception.
+
+**Context:** zackees/clud#691. Claude defaulted to subprocess since `a4ef5f5`
+with no recorded rationale; every Claude-specific reason cited in code was
+stale or mis-cited (#737). Codex kept subprocess on Windows (DD-070). Every
+harness clud launches from a console is a TUI that expects a terminal; where
+one ran as a subprocess, that was incidental rather than designed. Owning the
+byte stream is what gives clud its PTY features (toasts DD-071, Ctrl+V image
+paste, drag-drop path normalization, F3 voice).
+
+**Decision:** One rule for every harness, command and platform. `--pty` /
+`--subprocess` win. Otherwise PTY if and only if clud has a real terminal
+(stdin and stdout both TTYs) and the launch is not headless (Claude
+`-p`/`--print` from clud or passthrough, `codex exec`, DeepSeek's headless
+profile). Everything else is subprocess: clud never fabricates a PTY when it
+has no terminal. This retires the per-harness, per-platform, `clud loop` and
+`grind` special cases and the `CLUD_PTY_DEFAULT` audit lever.
+
+**Rationale:** The TTY gate avoids the one hard hazard: redirected stdout
+(ConPTY hangs, and `clud -p ... > out.txt` must stay byte-exact). Headless
+launches keep subprocess so stream-json and final output reach stdout
+unmodified. ConPTY's attach repaint (#515) and the pump's idle polling are
+real costs, but a harness TUI running without clud in its byte path loses
+more than they cost; the pump budget is its own work item.
+
+**Consequences:** Interactive sessions pay the pump's idle polling (#691's
+cost table) on every platform. Claude `clud loop` runs `claude -p`, so it is
+subprocess and streams progress through stream-json. Codex and `grind`
+without a terminal are subprocess. Guard: `backend::launch_mode_tests`.
