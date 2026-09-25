@@ -244,8 +244,9 @@ Console and terminal:
   #575): forwards upstream's complete virtual-key translations atomically
   while retaining clud's Shift+Enter-LF and Ctrl+V image policies.
 - `console_setup.rs` - RAII guard that enables
-  `ENABLE_VIRTUAL_TERMINAL_INPUT` for the lifetime of a PTY session and
-  restores the prior console mode on drop; no-op on POSIX.
+  `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin and `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+  on a terminal stdout (#1345) for the lifetime of a PTY session and
+  restores the prior console modes on drop; no-op on POSIX.
 - `console_title.rs` - stamps `clud <cwd-name>` once on launch and runs a
   background keeper that re-applies the title when downstream OSC 0/2 sequences
   overwrite it.

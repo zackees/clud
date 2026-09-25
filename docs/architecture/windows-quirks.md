@@ -122,15 +122,23 @@ the codebase stays portable.
   stdin is not a real TTY (piped `cargo test`, CI without a console) —
   it remembers `original_mode: None` so the drop impl skips the restore.
 
-- **File**: `crates/clud-bin/src/console_setup.rs:8` (`ConsoleVtGuard`);
-  construction at `:26` (`enable_console_vt_input`); the actual
-  `Get/SetConsoleMode` calls at `:51` (`set_console_vt_input`) and `:82`
+- **Output side (#1345)**: The same `ConsoleVtGuard` returned by
+  `console_setup::enable_console_vt_input()` also ORs
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` (0x0004) into the stdout console
+  handle when stdout is a terminal, and restores the original output mode
+  on drop. Without it, ANSI output forwarded by the PTY pump (colors,
+  cursor moves, the toast compositor, kitty keyboard flags) prints
+  literally on plain conhost windows instead of being interpreted.
+
+- **File**: `crates/clud-bin/src/console_setup.rs:24` (`ConsoleVtGuard`);
+  construction at `:54` (`enable_console_vt_input`); the actual
+  `Get/SetConsoleMode` calls at `:89` (`or_console_mode`) and `:104`
   (`restore_console_mode`).
 
 - **POSIX behavior**: No-op. The `ConsoleVtGuard` struct has no
-  `original_mode` field off Windows (see the `#[cfg(windows)]` field at
-  `:9`); the `Drop` impl is empty on POSIX; the `enable_console_vt_input`
-  constructor at `:44` returns the empty-struct form. POSIX terminals are
+  `original_mode` / `original_output_mode` fields off Windows (see the
+  `#[cfg(windows)]` fields at `:25`); the `Drop` impl is empty on POSIX; the
+  `enable_console_vt_input` constructor at `:80` returns the empty-struct form. POSIX terminals are
   already in canonical VT mode and need no opt-in.
 
 ### (d) Native terminal input via running-process (issues #141 / #575)
