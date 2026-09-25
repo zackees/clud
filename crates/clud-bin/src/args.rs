@@ -564,6 +564,14 @@ pub enum Command {
     /// Install clud's bundled skills, agent types and workflows now, the same
     /// files a launch installs. `--home` targets another home directory; the
     /// real-harness tests (#1323) use it to populate an isolated config.
+    /// Print the `/do` prompt for a target in this checkout: the starting-
+    /// branch verdict and the contract (#1322). The `/do` skill's body runs
+    /// this at invocation, so its output is what the model sees.
+    #[command(hide = true)]
+    DoPrompt {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        target: Vec<String>,
+    },
     #[command(hide = true)]
     InstallAssets {
         #[arg(long = "home", value_name = "DIR")]
@@ -1249,6 +1257,7 @@ pub enum GcSubcommand {
 }
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
+    "do-prompt",
     "install-assets",
     "loop",
     "up",

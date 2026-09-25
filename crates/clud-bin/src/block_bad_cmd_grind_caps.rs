@@ -440,7 +440,7 @@ mod tests {
         let facts = run(true, false);
         assert!(allowed(
             LANDER,
-            "\"$CLUD_EXE\" tool run github/pr_merge_watch.py --pr 5",
+            "\"$CLUD_EXE\" tool run github/pr_merge_watch.py 5",
             &facts
         ));
         assert!(allowed(LANDER, "gh pr merge 5 --admin --squash", &facts));

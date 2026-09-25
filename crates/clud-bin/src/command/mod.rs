@@ -1,6 +1,7 @@
 mod builder;
 mod do_input;
 pub mod do_kind;
+pub mod do_prompt;
 mod loop_task;
 mod prompts;
 mod types;

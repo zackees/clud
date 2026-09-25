@@ -71,6 +71,10 @@ fn run(mut args: args::Args) {
     // normal clud startup so hook/tool invocations do not connect to the
     // daemon, touch runtime-cache, start title keepers, or register as
     // foreground clud sessions.
+    if let Some(args::Command::DoPrompt { target }) = &args.command {
+        std::process::exit(command::do_prompt::run(target));
+    }
+
     if let Some(args::Command::InstallAssets { home }) = &args.command {
         std::process::exit(install_assets(home.as_deref()));
     }

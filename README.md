@@ -871,6 +871,16 @@ keeps the session going until the bundled
 in merged PRs, referenced issues are closed, and the checkout is clean and
 rebased. A single issue URL, a PR, or a free-form goal all go to `/do`.
 
+`/do`'s prompt is rendered when it's invoked, whether by `clud do` or by typing
+`/do <target>` in Claude Code. It runs `clud do-prompt`, which checks the
+current branch first:
+- On the default branch, it starts there.
+- On a branch with an open PR, or one named for the issue, it continues there.
+- On a branch whose PR merged, or that has no commits, it tells the agent to
+  switch to `main` first.
+- With uncommitted changes or an unrelated branch, the agent asks you before
+  doing anything.
+
 A GitHub issue with open sub-issues is a meta issue. clud checks this with
 `gh` before launch and seeds `/goal /grind <url>` instead, so the children are
 worked through [`/grind`](docs/architecture/grind.md). If clud can't tell (no

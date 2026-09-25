@@ -943,23 +943,20 @@ fn os_debug_skill_warns_that_attaching_suspends_the_target() {
     assert!(flattened("clud-os-debug").contains("suspends the target"));
 }
 
-/// `clud do` seeds `/goal /do <target>`, so the `/do` skill is the whole
-/// completion contract that used to live in the seeded prompt.
+/// `/do`'s body is rendered at invocation by `clud do-prompt` (#1322); the
+/// contract lives in `command::do_prompt`, which has its own tests.
 #[test]
-fn do_skill_carries_the_clud_do_contract() {
-    let skill = flattened("do");
-    for required in [
-        "Record the starting branch",
-        "never combine children in one PR",
-        "child PRs must not close the parent",
-        "watch CI to green, and merge",
-        "all referenced issues are closed as complete",
-        "No files left behind",
-        "Rebase to origin main or master",
-        "invoke `/grind` to delegate them",
-    ] {
-        assert!(skill.contains(required), "/do skill missing: {required:?}");
-    }
+fn do_skill_renders_its_prompt_through_clud_do_prompt() {
+    let skill = BUNDLED_SKILLS
+        .iter()
+        .find(|s| s.name == "do")
+        .expect("do must be bundled")
+        .skill_md;
+    // A literal command: Claude Code will not auto-approve one containing a
+    // shell expansion such as `${CLUD_EXE:-clud}` (tests/harness H9), and a
+    // clud-launched session already puts clud's own directory on PATH.
+    assert!(skill.contains("!`clud do-prompt \"$ARGUMENTS\"`"));
+    assert!(skill.contains("allowed-tools: Bash(clud do-prompt:*)"));
     assert!(
         !skill.contains("disable-model-invocation"),
         "/goal /do needs the model to load /do"
