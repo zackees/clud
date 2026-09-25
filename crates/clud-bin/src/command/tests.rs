@@ -341,7 +341,7 @@ fn grind_rejects_harnesses_without_native_loop() {
     assert_eq!(
         grind_launch_error(&args, deepseek_harness_target()),
         Some(
-            "`clud grind` requires the Claude harness, whose interactive prompt supports `/loop`; use `--harness claude`"
+            "`clud grind` requires the Claude harness, whose Workflow tool and `/loop` the `/grind` skill drives; use `--harness claude`"
         )
     );
 }
@@ -1214,7 +1214,8 @@ fn test_do_command_resolves_goal_prompt() {
     let prompt = last_arg(&p);
     assert!(prompt.starts_with("/goal "));
     assert!(prompt.contains("https://github.com/zackees/clud/issues/866"));
-    assert!(prompt.contains("/clud-meta-work"));
+    assert!(prompt.contains("/grind"));
+    assert!(!prompt.contains("/clud-meta-work"));
     assert!(!prompt.contains("{url}"));
 }
 
@@ -1225,7 +1226,7 @@ fn test_build_do_prompt_substitutes_url() {
         prompt,
         "/goal read https://example.com/thing and implement it. Record the starting branch. \
 If this is a meta issue launched via clud do, ask whether to work on independent children in \
-parallel; /meta-issue already approves parallelism. Use /clud-meta-work before delegating. \
+parallel; /meta-issue already approves parallelism. Use /grind to delegate them. \
 Parallel work may use separate worktrees, but each child needs its own branch and one or more \
 PRs. Never combine children in one PR. Only a child’s final PR closes it; child PRs must not \
 close the parent. Record child→PR links, then close the parent after all children are resolved. \
@@ -1259,7 +1260,7 @@ fn test_build_do_prompt_treats_free_form_input_as_a_goal_not_a_url() {
         );
         assert!(!prompt.starts_with("/goal read "), "prompt={prompt}");
         assert!(prompt.contains("validated, tested, pushed and merged"));
-        assert!(prompt.contains("/clud-meta-work"));
+        assert!(prompt.contains("/grind"));
         assert!(
             prompt.contains("No cheating, no files left behind. Rebase to local origin when done.")
         );
@@ -1269,7 +1270,7 @@ fn test_build_do_prompt_treats_free_form_input_as_a_goal_not_a_url() {
 #[test]
 fn test_build_grind_prompt_substitutes_url() {
     let prompt = build_grind_prompt("https://example.com/repo/issues");
-    assert!(prompt.starts_with("/loop "));
+    assert_eq!(prompt, "/grind https://example.com/repo/issues");
     assert!(prompt.contains("https://example.com/repo/issues"));
     assert!(!prompt.contains("{url}"));
 }
@@ -1279,8 +1280,8 @@ fn grind_uses_one_interactive_harness_session_without_external_loop_state() {
     let p = plan(&["clud", "grind", "https://github.com/zackees/clud/issues"]);
     let prompt = last_arg(&p);
     assert!(
-        prompt.starts_with("/loop "),
-        "grind prompt must start with /loop; got: {prompt:?}"
+        prompt.starts_with("/grind "),
+        "grind prompt must start with /grind; got: {prompt:?}"
     );
     assert!(
         prompt.contains("https://github.com/zackees/clud/issues"),
@@ -1334,7 +1335,7 @@ fn grind_through_claude_harness_seeds_native_loop_interactively() {
     assert_eq!(plan.iterations, 1);
     assert!(plan.loop_markers.is_none());
     assert!(plan.command.last().is_some_and(|prompt| {
-        prompt.starts_with("/loop ") && prompt.contains("zackees/clud/issues")
+        prompt.starts_with("/grind ") && prompt.contains("zackees/clud/issues")
     }));
 }
 
@@ -1541,7 +1542,10 @@ fn grind_never_enables_external_loop_stream_json() {
     assert!(!p.command.iter().any(|arg| arg == "stream-json"));
     assert!(!p.command.iter().any(|arg| arg == "--verbose"));
     assert!(!p.stream_json_progress);
-    assert!(p.command.last().is_some_and(|arg| arg.starts_with("/loop")));
+    assert!(p
+        .command
+        .last()
+        .is_some_and(|arg| arg.starts_with("/grind")));
 }
 
 #[test]

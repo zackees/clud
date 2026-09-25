@@ -15,6 +15,7 @@ pub mod bridge_log;
 pub mod cache_health;
 pub mod capture;
 pub mod civil_time;
+pub mod claude_files;
 pub mod clud_hook_roots;
 pub mod clud_hooks;
 pub mod clud_hooks_compile;

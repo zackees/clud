@@ -235,6 +235,20 @@ fn gate_words(statement: &str) -> Vec<String> {
     words
 }
 
+/// The literal words of each statement in `command`, or the construct that
+/// made it undecomposable. Shared with the `/grind` role caps, which need the
+/// same refusal of anything that hides a program.
+pub(super) fn statement_words(command: &str) -> Result<Vec<Vec<String>>, &'static str> {
+    match decompose(command) {
+        Decomposition::Statements(statements) => Ok(statements
+            .iter()
+            .map(|statement| gate_words(statement))
+            .filter(|words| !words.is_empty())
+            .collect()),
+        Decomposition::Opaque(construct) => Err(construct),
+    }
+}
+
 /// What the scanner could make of a command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Decomposition {

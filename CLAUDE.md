@@ -85,9 +85,12 @@ end-to-end daemon/client performance change.
 ### `grind` directive
 
 [`docs/architecture/grind.md`](docs/architecture/grind.md) is the single
-owner of the `clud grind` execution contract. `grind` opens one normal
-interactive PTY session and places its generated `/loop ...` request in that
-harness prompt. The harness owns repetition and termination. Do not implement,
+owner of the `clud grind` execution contract and its `/grind` skill DAG.
+`grind` opens one normal interactive PTY session seeded with `/grind`; the
+bundled workflow and capped `grind-*` agents do the work, and cron mode uses
+the harness's native `/loop`. The harness owns repetition and termination.
+A new `grind-*` role needs its agent file, a `claude_files.rs` entry, and a
+policy in `block_bad_cmd_grind_caps.rs`. Do not implement,
 restore, or emulate an external clud prompt/relaunch loop for `grind`: no
 DONE/BLOCKED markers, iteration cap, headless `-p`/`exec`, or stream-json
 renderer. A harness without native interactive `/loop` support must fail

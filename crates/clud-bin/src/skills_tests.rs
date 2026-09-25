@@ -261,7 +261,15 @@ fn bundled_skill_frontmatter_is_valid_yaml() {
 #[test]
 fn bundled_includes_all_known_skills() {
     let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
-    assert!(names.contains(&"clud-meta-work"));
+    assert!(names.contains(&"grind"));
+    assert!(names.contains(&"grind-intake"));
+    assert!(names.contains(&"grind-plan"));
+    assert!(names.contains(&"grind-work"));
+    assert!(names.contains(&"grind-review"));
+    assert!(names.contains(&"grind-integrate"));
+    assert!(names.contains(&"grind-land"));
+    assert!(names.contains(&"grind-cron"));
+    assert!(!names.contains(&"clud-meta-work"));
     assert!(names.contains(&"clud-issue"));
     assert!(names.contains(&"clud-issue-triage"));
     assert!(names.contains(&"clud-fix-quick"));

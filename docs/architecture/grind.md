@@ -1,74 +1,130 @@
 # `grind` Execution Contract
 
-This document is the single owner of the required behavior of `clud grind`.
-It deliberately describes the required implementation while the historical
-external-loop implementation is being removed; current behavior that conflicts
-with this document is a bug, not a compatibility contract.
+This document is the single owner of the required behavior of `clud grind`
+and the `/grind` skill DAG it launches. Current behavior that conflicts with
+it is a bug, not a compatibility contract.
 
-## Required behavior
+## Launch
 
 `clud grind [url]` starts exactly one normal, foreground, interactive PTY
-session for the selected harness. With no URL, clud resolves the repository's
-`origin` remote to its forge issues page. An explicit URL is used verbatim.
-Before the session starts, clud forms the normal `grind` prompt beginning:
+session for the Claude harness. With no URL, clud resolves the repository's
+`origin` remote to its forge issues page; an explicit URL is used verbatim.
+The seeded prompt is:
 
 ```text
-/loop look at <resolved issues URL> and select the next issue and then perform the task.
+/grind <resolved URL>
 ```
 
-clud passes that prompt to the harness's normal interactive entrypoint. It
-does not use a headless prompt flag or subcommand (`-p`, `exec`, or their
-equivalent), and it does not relaunch the backend or issue an external repeat
-prompt after the session begins. Ordinary helper processes remain outside this
-restriction.
-The PTY is the ordinary user-visible session: the harness renders its own UI,
-the user can interact with it, and the harness receives terminal input and
-signals normally.
+clud passes it to the harness's normal interactive entrypoint. It does not
+use a headless prompt flag or subcommand (`-p`, `exec`), relaunch the backend,
+issue an external repeat prompt, inject or poll DONE/BLOCKED markers, set an
+iteration count, use the daemon repeat worker, or enable stream-json
+rendering. Everything after the prompt belongs to the harness.
 
-The harness owns every repetition decision, including its completion and
-blocked behavior. `clud grind` has no clud-side completion protocol and no
-clud-side scheduler. In particular, it must not inject or inspect DONE or
-BLOCKED marker paths, scan completion tokens, create loop artifacts, set a
-fixed iteration count (including 200), re-prompt/relaunch the harness, use the
-daemon repeat worker, or add headless stream-json rendering.
+`grind` requires the Claude harness: `/grind` drives Claude Code's Workflow
+tool and, in cron mode, its native `/loop`. A Codex or DeepSeek model uses
+`--harness claude`. Other harnesses are refused before launch
+(`command::builder::grind_launch_error`); clud never substitutes `clud loop`
+or a hand-rolled loop.
 
-## Harness support
+## The DAG
 
-`grind` is available only on the Claude harness, which accepts `/loop` in its
-normal interactive PTY prompt. For a Codex or DeepSeek model, select it with
-`--harness claude`. Other harnesses must report `grind` as unsupported before
-launch; clud must not silently substitute `clud loop`, headless prompting,
-marker polling, or any other external loop.
+`/grind` is a router over bundled skills, one bundled workflow, and five
+capped agent types:
+
+```
+/grind ─ /grind-intake ─ questions ─┬─ parallel   ─┐
+                                    ├─ sequential ─┼─ workflow grind: plan → work → review → integrate → land
+                                    └─ cron ─ /grind-cron ─ /loop: one sequential run per tick
+```
+
+| Asset | Source | Installed to |
+|---|---|---|
+| Skills `grind`, `grind-intake`, `grind-plan`, `grind-work`, `grind-review`, `grind-integrate`, `grind-land`, `grind-cron` | `crates/clud-bin/assets/skills/` (`skills.rs::BUNDLED_SKILLS`) | `~/.claude/skills/`, `~/.codex/skills/` |
+| Agents `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
+| Workflow `grind` | `crates/clud-bin/assets/workflows/grind.js` (`claude_files.rs`) | `~/.claude/workflows/` |
+
+Each workflow agent runs as its `grind-<role>` type and is told to invoke
+its leaf skill, so the procedure lives once, in the skill, and each leaf is
+also usable directly (for example `/grind-land` on an existing PR).
+
+### Router questions
+
+A workflow cannot ask questions while it runs, so the `/grind` skill asks
+everything first:
+
+- **Mode.** *Parallel*: each goal gets a git worktree; workers only read and
+  write. *Sequential*: one goal at a time from `origin/<main>` in the local
+  checkout, no worktrees or sister clones, so a heavy C++/Rust build cache is
+  reused. *Cron*: the harness's `/loop`, one issue per tick, each tick a
+  sequential run.
+- **Models** for planner, worker, reviewer and integrator (the lander shares
+  the integrator's). The default is the session's own model, whatever route
+  resolved it; an unchanged default is omitted so the agent inherits it.
+- **Local CI**: offered only when `docker info` succeeds and
+  `.github/workflows/ci.yml` exists. Otherwise the router prints why
+  ("Docker/github actions disabled due to no docker running", or that
+  `ci.yml` is missing) and CI is off.
+
+The router records `{mode, ci}` in `.clud/grind/run.json` at the repository
+root for the hook below, and removes it when the run ends.
+
+### Integration order
+
+- Plan, work and review run at most **4** agents at a time.
+- Exactly **one** integrator runs at a time. It is the only role that
+  builds, so builds never overlap and caches stay warm. No `bosn` wrapper is
+  needed or allowed.
+- The planner declares `depends_on`. An isolated goal rebases onto
+  `origin/<main>`. A dependent goal waits until its dependency merges, then
+  rebases onto the new `origin/<main>`.
+- Landing does not hold the build lock: while one PR's CI runs on GitHub, the
+  next goal integrates locally.
+- The lander runs `pr_merge_watch`. When checks pass it admin-merges. On red CI or
+  new review it hands the failure back to the integrator, which fixes,
+  re-verifies and pushes. That is at most 10 rounds; after that the PR is
+  left open and reported.
+
+### Role caps
+
+| Role | Tools (`tools:` frontmatter) | Shell (hook) |
+|---|---|---|
+| `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only |
+| `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh` only |
+| `grind-reviewer` | same as worker | same as worker |
+| `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, and `act` when CI is off |
+| `grind-lander` | Read, Grep, Glob, Bash, Skill | `gh pr`, `gh run view|list`, read-only git, `git push`, `pr_merge_watch` |
+
+Claude Code enforces the tool lists. Shell commands are enforced by clud's
+native PreToolUse hook (`clud-block-bad-cmd`): the harness puts the calling
+subagent's `agent_type` in the payload, and
+`block_bad_cmd_grind_caps.rs` applies that role's policy. Commands it cannot
+decompose (command substitution, subshells) are refused for capped roles, as
+are `find -exec`/`-delete`, `tail -f`, and git global options other than
+`-C`. The integrator's bans also look inside wrappers such as `bash -c`.
+A goal may depend only on goals listed before it, so dependency waits cannot
+cycle. `CLUD_ALLOW_ALL_CMDS=1` turns the whole command hook off, these caps
+included.
+Other agents and the primary session are unaffected. The tests next to it
+own the exact allowlists.
 
 ## Boundary with `clud loop`
 
 `clud loop` remains a separate command with its own external runner,
 DONE/BLOCKED contract, iteration budget, artifacts, and optional repeat
-scheduler. Those mechanisms belong only to
-[the loop subsystem](loop-subsystem.md). Sharing task text or launch-plan
-plumbing does not permit `grind` to inherit the loop subsystem's lifecycle.
-
-## Historical guidance and tests
-
-Issue #897 and PRs #950 and #1045 are superseded where they prescribe or
-preserve clud-managed grind iteration, markers, headless execution, or output
-streaming. They are historical context only and must not be used as authority
-for a future `grind` fix. Legacy tests that assert an external iteration count
-or DONE/BLOCKED behavior must be replaced when the runtime changes. The
-replacement tests must prove one interactive PTY backend launch, a `/loop`
-prompt, and the absence of markers, external iterations, and stream-json
-setup.
+scheduler; see [the loop subsystem](loop-subsystem.md). `grind`'s cron mode
+uses the harness's `/loop`, never clud's.
 
 ## Implementation review checklist
 
-When changing `grind`, verify all of the following:
-
-- One backend harness session is launched for one `clud grind` invocation.
-- Launch mode follows DD-086 (PTY from a console) and the generated prompt begins `/loop look
-  at <resolved issues URL>`.
-- The argv uses the harness's ordinary interactive entrypoint.
-- The plan carries no loop markers, repeat schedule, external iteration count,
-  or stream-json progress setting.
+- One backend harness session per `clud grind`, launched per DD-086 (PTY
+  from a console), with a prompt starting `/grind`.
+- No loop markers, repeat schedule, external iteration count, or stream-json
+  setting in the plan.
 - Unsupported harnesses fail before a backend process is spawned.
+- A new `grind-*` role needs its agent file, a `claude_files.rs` entry, and a
+  policy arm plus tests in `block_bad_cmd_grind_caps.rs`.
 
-See [DD-068](../DESIGN_DECISIONS.md#dd-068-grind-delegates-looping-to-the-interactive-harness) for the rationale.
+See [DD-087](../DESIGN_DECISIONS.md#dd-087-grind-is-a-skill-dag-with-capped-agent-roles)
+for the rationale; it supersedes [DD-068](../DESIGN_DECISIONS.md#dd-068-grind-delegates-looping-to-the-interactive-harness)'s
+direct `/loop` prompt.

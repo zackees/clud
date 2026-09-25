@@ -21,10 +21,12 @@ The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
 `clud grind`
 
-`grind` opens one normal interactive PTY session and seeds its
-prompt with the harness-native `/loop` instruction. The harness owns all
-repetition; clud must not relaunch the agent, impose an iteration ceiling, or
-use DONE/BLOCKED marker files for `grind`. See the
+`grind` opens one normal interactive PTY session seeded with `/grind`,
+which asks for a mode (parallel worktrees, sequential in the local checkout,
+or one issue per native `/loop` tick) and the model for each role, then runs
+the bundled plan → work → review → integrate → land workflow with per-role
+tool caps. clud never relaunches the agent, imposes an iteration ceiling, or
+uses DONE/BLOCKED marker files for `grind`. See the
 [grind contract](docs/architecture/grind.md). It requires the Claude harness;
 for another model provider, use `--harness claude`.
 
@@ -783,11 +785,9 @@ clud fix
 
 Launches an interactive agent session with the `/goal` implementation contract.
 URLs retain the issue-oriented contract; free-form text becomes the goal directly.
-For a target with genuinely independent deliverables, `/do` invokes the bundled
-`/clud-meta-work` playbook to plan, review, and integrate those slices safely;
-single cohesive changes remain on the normal `/goal` path. The playbook reads
-clud's child-only `CLUD_ROUTE_CONTEXT` JSON rather than guessing the active
-provider/harness, so bridge subagents use the route's cost-aware model policy.
+For a target with genuinely independent deliverables, `/do` routes them to
+[`/grind`](docs/architecture/grind.md) to plan, review, and integrate those
+slices; single cohesive changes remain on the normal `/goal` path.
 With no target, an interactive foreground launch prompts for a URL or goal before
 starting the backend. Scripts, dry-runs, and background launches must provide the
 target explicitly so they never block on input.

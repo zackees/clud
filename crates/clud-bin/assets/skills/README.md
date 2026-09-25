@@ -13,10 +13,15 @@ every backend's skills dir on launch. `clud-loop` was retired once
 
 ## Skills
 
-- [clud-meta-work/](clud-meta-work/SKILL.md) - Portable orchestrator for a
-  `/goal` or `clud do` request with several independent deliverables. It plans
-  isolated work, reviews each result, and integrates only after the repository's
-  own validation and merge rules are met.
+- [grind/](grind/SKILL.md) - Router for the `/grind` DAG: intake, mode,
+  per-role models and local-CI questions, then the bundled `grind` workflow.
+  Leaves: [grind-intake/](grind-intake/SKILL.md),
+  [grind-plan/](grind-plan/SKILL.md), [grind-work/](grind-work/SKILL.md),
+  [grind-review/](grind-review/SKILL.md),
+  [grind-integrate/](grind-integrate/SKILL.md),
+  [grind-land/](grind-land/SKILL.md), [grind-cron/](grind-cron/SKILL.md).
+  Contract: [grind.md](../../../../docs/architecture/grind.md). It replaces
+  the retired `clud-meta-work`.
 - [clud-issue/](clud-issue/README.md) - File a researched GitHub issue without
   an interview, or roll existing issues into a verified native meta-issue.
 - [clud-issue-triage/](clud-issue-triage/README.md) - Triage GitHub issues:
