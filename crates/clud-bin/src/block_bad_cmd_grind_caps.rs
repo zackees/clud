@@ -15,7 +15,9 @@
 //! router at the main checkout's root before the workflow starts, and found
 //! from a linked worktree through its `.git` file: `mode`
 //! (`parallel` permits the planner's `git worktree add`) and `ci` (permits the
-//! integrator's `act`).
+//! integrator's `act`), plus the optional `scripts: {lint, test}` the router
+//! detected. Workers and reviewers may never run the repo's lint/test
+//! scripts; the integrator runs them before every push.
 
 use std::path::Path;
 
@@ -51,8 +53,10 @@ const GIT_READ: &[&str] = &[
 ];
 
 /// `find -exec`/`-delete` run or remove things, and `tail -f` never exits.
+/// A path-qualified program (`./test`, `bin/ls`) is never the builtin or the
+/// system tool, so it is not inspection.
 fn inspect_ok(program: &str, words: &[String]) -> bool {
-    if !INSPECT.contains(&program) {
+    if !INSPECT.contains(&program) || words[0].contains(['/', '\\']) {
         return false;
     }
     let args = &words[1..];
@@ -80,13 +84,36 @@ fn inspect_ok(program: &str, words: &[String]) -> bool {
 pub(super) struct RunFacts {
     pub parallel: bool,
     pub ci: bool,
+    /// The repo's lint/test scripts the router detected and the user agreed
+    /// to run (`scripts: {lint, test}`); `None` when absent or not a string.
+    pub scripts: RunScripts,
+}
+
+/// The repo scripts recorded in `run.json`'s optional `scripts` object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RunScripts {
+    pub lint: Option<String>,
+    pub test: Option<String>,
 }
 
 impl RunFacts {
     pub(super) fn from_json(value: &Value) -> Self {
+        let script = |name: &str| {
+            value
+                .get("scripts")
+                .and_then(|s| s.get(name))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
         Self {
             parallel: value.get("mode").and_then(Value::as_str) == Some("parallel"),
             ci: value.get("ci").and_then(Value::as_bool).unwrap_or(false),
+            scripts: RunScripts {
+                lint: script("lint"),
+                test: script("test"),
+            },
         }
     }
 
@@ -272,6 +299,10 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
         // Workers and reviewers hold a shell only to investigate on GitHub:
         // read-only `gh`.
         WORKER | REVIEWER if is_gh_read(words) => None,
+        WORKER | REVIEWER if runs_repo_script(words) => Some(format!(
+            "{role} may not run the repo's lint or test scripts; the grind-integrator runs \
+             lint/test before every push"
+        )),
         WORKER | REVIEWER => Some(format!(
             "{role} may only run read-only `gh` (issue/pr/run view|list, search); it cannot build, \
              lint or test"
@@ -284,6 +315,64 @@ fn program_name(word: &str) -> String {
     let word = word.trim_matches(&['\'', '"'][..]);
     let bare = word.rsplit(['/', '\\']).next().unwrap_or(word);
     bare.strip_suffix(".exe").unwrap_or(bare).to_string()
+}
+
+/// Whether a statement runs a repo `lint`/`test` script in any form: `./lint`,
+/// `scripts/test.sh`, `bash lint`, `sh test.sh`, `cmd /c lint.bat`,
+/// `powershell -File test.ps1`. The bare `test` builtin (`test -f x`) is not
+/// a script: only a path-qualified or extension-bearing name, or a name handed
+/// to a shell, counts.
+fn runs_repo_script(words: &[String]) -> bool {
+    const SHELLS: &[&str] = &[
+        "bash",
+        "sh",
+        "zsh",
+        "dash",
+        "cmd",
+        "powershell",
+        "pwsh",
+        "call",
+        "source",
+        ".",
+    ];
+    let tokens: Vec<&str> = words
+        .iter()
+        .flat_map(|w| w.split_whitespace())
+        .map(|t| t.trim_matches(&['\'', '"'][..]))
+        .collect();
+    // `Some(qualified)` when `t` names a lint/test script; `qualified` is true
+    // for a path or a script extension, which the `test` builtin never has.
+    let script_name = |t: &str| -> Option<bool> {
+        let bare = t.rsplit(['/', '\\']).next().unwrap_or(t);
+        let pathed = bare.len() != t.len();
+        let (stem, has_ext) = match bare.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() => {
+                let ext = ext.to_ascii_lowercase();
+                if !matches!(ext.as_str(), "sh" | "bash" | "bat" | "cmd" | "ps1" | "py") {
+                    return None;
+                }
+                (stem, true)
+            }
+            _ => (bare, false),
+        };
+        matches!(stem, "lint" | "test").then_some(pathed || has_ext)
+    };
+    let mut after_shell = false;
+    for t in &tokens {
+        if let Some(qualified) = script_name(t) {
+            if qualified || after_shell {
+                return true;
+            }
+        }
+        let program = program_name(t).to_ascii_lowercase();
+        if SHELLS.contains(&program.as_str()) {
+            after_shell = true;
+        } else if after_shell && !t.starts_with(['-', '/']) {
+            // A shell's first operand decides; `/c`, `-File`, `-c` do not.
+            after_shell = false;
+        }
+    }
+    false
 }
 
 fn is_clud(word: &str) -> bool {
@@ -359,7 +448,76 @@ mod tests {
     use super::*;
 
     fn run(parallel: bool, ci: bool) -> RunFacts {
-        RunFacts { parallel, ci }
+        RunFacts {
+            parallel,
+            ci,
+            ..RunFacts::default()
+        }
+    }
+
+    #[test]
+    fn run_facts_parse_scripts() {
+        let facts = RunFacts::from_json(&serde_json::json!({
+            "mode": "sequential",
+            "scripts": {"lint": "./lint", "test": "bash test"}
+        }));
+        assert_eq!(facts.scripts.lint.as_deref(), Some("./lint"));
+        assert_eq!(facts.scripts.test.as_deref(), Some("bash test"));
+        let none = RunFacts::from_json(&serde_json::json!({"mode": "sequential"}));
+        assert_eq!(none.scripts, RunScripts::default());
+        let invalid = RunFacts::from_json(&serde_json::json!({
+            "scripts": {"lint": 5, "test": ""}
+        }));
+        assert_eq!(invalid.scripts, RunScripts::default());
+        let not_object = RunFacts::from_json(&serde_json::json!({"scripts": "lint"}));
+        assert_eq!(not_object.scripts, RunScripts::default());
+    }
+
+    #[test]
+    fn workers_cannot_run_repo_lint_or_test_scripts() {
+        let facts = run(true, true);
+        for role in [WORKER, REVIEWER] {
+            for command in [
+                "./lint",
+                "./test",
+                "bash ./lint",
+                "bash lint",
+                "bash test",
+                "sh test.sh",
+                "cmd /c lint.bat",
+                "powershell -File test.ps1",
+                "pwsh -NoProfile -File ./lint.ps1",
+                "bash -c 'bash lint'",
+            ] {
+                let reason = shell_reason(role, command, &facts)
+                    .unwrap_or_else(|| panic!("{role} allowed `{command}`"));
+                assert!(
+                    reason.contains("integrator") && reason.contains("lint/test"),
+                    "{role} `{command}`: {reason}"
+                );
+            }
+        }
+        // `./test` is not the `test` builtin, for the inspecting roles either.
+        for role in [PLANNER, LANDER] {
+            assert!(allowed(role, "test -f Cargo.toml", &facts));
+            assert!(!allowed(role, "./test", &facts));
+            assert!(!allowed(role, "./lint", &facts));
+        }
+    }
+
+    #[test]
+    fn integrator_runs_repo_lint_and_test_scripts() {
+        let facts = run(false, false);
+        for command in [
+            "./lint",
+            "./test",
+            "bash ./lint && bash ./test",
+            "sh test.sh",
+            "cmd /c lint.bat",
+            "powershell -File test.ps1",
+        ] {
+            assert!(allowed(INTEGRATOR, command, &facts), "{command}");
+        }
     }
 
     fn allowed(role: &str, command: &str, facts: &RunFacts) -> bool {

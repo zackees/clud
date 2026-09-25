@@ -574,6 +574,9 @@ fn build_launch_plan_for_target_at(
         Some(Command::DoPrompt { .. }) => {
             unreachable!("do-prompt is handled directly in main")
         }
+        Some(Command::GrindScripts) => {
+            unreachable!("grind-scripts is handled directly in main")
+        }
         Some(Command::InstallAssets { .. }) => {
             unreachable!("install-assets is handled directly in main")
         }

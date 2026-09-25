@@ -89,6 +89,52 @@ everything first:
 The router records `{mode, ci}` in `.clud/grind/run.json` at the repository
 root for the hook below, and removes it when the run ends.
 
+### Repository lint/test scripts
+
+Issue [#1336](https://github.com/zackees/clud/issues/1336).
+
+- **Detection.** The router carries a `` !`clud grind-scripts` `` line
+  (`command/grind_scripts.rs`), so Claude Code renders the detected facts into
+  the skill before the model sees it. The candidates are `lint`, `lint.sh`,
+  `lint.bat`, `lint.ps1` and the matching `test*`. On Windows the `.bat` /
+  `.ps1` form wins, with the extensionless or `.sh` script (via Git Bash) as a
+  fallback. Elsewhere only the extensionless or `.sh` form counts, so a lone
+  `test.bat` on Linux means nothing was detected. If a script isn't
+  executable, it runs through its interpreter: `bash ./lint`,
+  `cmd /c lint.bat`, `pwsh -File lint.ps1`.
+- **Modes, by reading only.** For each script the output lists the files to
+  read: the script and whatever it delegates to (`python -m ci.test` means
+  `ci/test.py`; `bash ci/x.sh` means `ci/x.sh`). The router reads them and
+  offers at most four user-facing modes, such as `--integration`, each with a
+  short description. It ignores flags the script passes to its own tools
+  (`uv`, `cargo`, `pip`, `pytest`). It never runs a script to find its modes,
+  because a script that ignores `--help` would start the whole suite.
+- **One question per run**, asked only when something was detected: lint and
+  test, lint and test with each mode found, lint only, test only, or neither
+  (use the planner's verify commands). If nothing was detected, there's no
+  question.
+- **Recording.** The answer goes into `.clud/grind/run.json` as `scripts`,
+  for example `{"lint": "bash ./lint", "test": "bash ./test --integration"}`,
+  and reaches the workflow as `args.scripts`. `{}` means neither.
+- **Integrator.** Before **every** push, fix rounds included, it runs the
+  goal's focused RED → GREEN test, then lint, then test. A failure loops
+  inside the integrator (fix, re-run), because nothing has been pushed yet,
+  so it doesn't use up a lander fix round. When scripts are chosen, the
+  planner supplies only the focused test.
+- **Long scripts.** Anything that may run past the Bash tool's 600-second
+  limit runs in the background, and the integrator waits for its exit code.
+  Never pipe a script through `tail`, which hides its exit status (#1331).
+- **Main already red.** If lint or test already fails on `origin/main`, the
+  integrator fixes that too. The fix goes in its own commit ahead of the
+  goal's commit, in the same PR, titled like
+  `fix: pre-existing lint failure on main`.
+- **Caps.** The integrator's shell is a denylist, so the scripts run.
+  `grind-worker` and `grind-reviewer` are denied them like any other build,
+  lint or test command.
+
+The rationale is in
+[DD-091](../DESIGN_DECISIONS.md#dd-091-grind-gets-repo-linttest-scripts-from-a-clud-subcommand-asked-once-per-run).
+
 ### Integration order
 
 - Plan, work and review run at most **4** agents at a time.

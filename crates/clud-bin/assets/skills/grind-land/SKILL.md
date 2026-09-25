@@ -38,4 +38,6 @@ server and merge.
    - A cancelled check superseded by a newer run of the same workflow is
      ignored, so concurrency cancellations are not failures.
 3. You cannot edit or build. The workflow gives a `needs_fix` to the
-   integrator and calls you again, up to 10 rounds.
+   integrator and calls you again, up to 10 rounds. Each fix round goes back
+   through the integrator, which reruns the run's lint and test scripts
+   before pushing.

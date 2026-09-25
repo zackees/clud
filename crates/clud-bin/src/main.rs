@@ -74,6 +74,9 @@ fn run(mut args: args::Args) {
     if let Some(args::Command::DoPrompt { target }) = &args.command {
         std::process::exit(command::do_prompt::run(target));
     }
+    if let Some(args::Command::GrindScripts) = &args.command {
+        std::process::exit(command::grind_scripts::run());
+    }
 
     if let Some(args::Command::InstallAssets { home }) = &args.command {
         std::process::exit(install_assets(home.as_deref()));

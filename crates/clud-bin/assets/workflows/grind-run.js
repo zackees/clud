@@ -16,6 +16,7 @@ export const meta = {
 //   repo: '/abs/repo', main: 'main', mode: 'parallel' | 'sequential',
 //   goals: [{ id, title, brief }], ci: false, lane?: 'job-id',
 //   models?: { planner, worker, reviewer, integrator },   // omitted = session model
+//   scripts?: { lint?: './lint', test?: './test' },     // omitted = planner picks verify
 //   maxAgents?: 4, maxFixRounds?: 10,
 // }
 if (!args || !args.repo || !Array.isArray(args.goals) || !args.goals.length) {
@@ -31,6 +32,15 @@ const CI = !!args.ci
 const MAX_AGENTS = Math.max(1, Math.floor(args.maxAgents ?? 4))
 const MAX_FIX = Math.max(0, Math.floor(args.maxFixRounds ?? 10))
 const MODELS = args.models || {}
+// The repo's ./lint and ./test, chosen once by the /grind router (#1336).
+const SCRIPTS = (args.scripts && (args.scripts.lint || args.scripts.test)) ? args.scripts : null
+const scriptLines = () => [SCRIPTS.lint, SCRIPTS.test].filter(Boolean)
+const verifyBlock = (p) => SCRIPTS
+  ? `Verify commands, in this order, before every push (fix rounds included):\n` +
+    `1. planner's focused test:\n${p.verify}\n` +
+    scriptLines().map((c, i) => `${i + 2}. ${c}`).join('\n') +
+    `\nThe repo scripts (${scriptLines().join(', ')}) were chosen for this run; run them lint first, then test, and rerun after every fix until green.`
+  : `Verify commands:\n${p.verify}`
 
 // Model per role; the lander shares the integrator's choice.
 const opts = (role, label, phase, schema) => {
@@ -83,7 +93,8 @@ const ctx = (g) => `Repo: ${REPO} (default branch ${MAIN}). Mode: ${args.mode}. 
 const others = (g) => args.goals.filter(o => o.id !== g.id).map(o => `${o.id}: ${o.title}`).join('\n') || '(none)'
 
 const plan = (g) => light(() => agent(
-  `Follow your built-in /grind-plan procedure.\n\n${ctx(g)}\n\nOther goals in this run (for depends_on):\n${others(g)}`,
+  `Follow your built-in /grind-plan procedure.\n\n${ctx(g)}\n\nOther goals in this run (for depends_on):\n${others(g)}` +
+  (SCRIPTS ? `\n\nRun scripts chosen: ${scriptLines().join(', ')}. The integrator runs them before every push, so verify must hold only the goal's focused test; do not add lint or test commands.` : ''),
   opts('planner', `plan:${g.id}`, 'Plan', PLAN)))
 
 const work = (p, g) => (PARALLEL
@@ -101,7 +112,7 @@ const review = ({ p, results }, g) => light(() => agent(
 const integrate = (p, g, note) => exclusive(() => agent(
   `Follow your built-in /grind-integrate procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nBranch: ${p.branch}\n` +
   `Base: origin/${MAIN}${p.depends_on.length ? ` (it already contains ${p.depends_on.join(', ')}, which landed first)` : ''}\n` +
-  `Verify commands:\n${p.verify}\n\n${note}`,
+  `${verifyBlock(p)}\n\n${note}`,
   opts('integrator', `integrate:${g.id}`, 'Integrate', INTEG)))
 
 const land = (p, g, pr, round) => agent(
@@ -142,7 +153,7 @@ const integrateAndLand = async ({ p, review: rv }, g) => {
     if (l && l.status === 'merged') return { merged: true, pr: integ.pr_url, note: l.summary }
     if (!l || l.status === 'gave_up' || fixes >= MAX_FIX) return { merged: false, pr: integ.pr_url, note: l ? l.failure_log || l.summary : 'lander died' }
     log(`goal ${g.id}: PR not green, fix round ${fixes + 1} of ${MAX_FIX}`)
-    integ = await integrate(p, g, `FIX ROUND ${fixes + 1} of ${MAX_FIX}: the PR ${integ.pr_url} failed. Fix, re-verify, push to the same branch.\n${l.failure_log || l.summary}`)
+    integ = await integrate(p, g, `FIX ROUND ${fixes + 1} of ${MAX_FIX}: the PR ${integ.pr_url} failed. Fix, re-verify${SCRIPTS ? ` (focused test, then ${scriptLines().join(', then ')})` : ''}, push to the same branch.\n${l.failure_log || l.summary}`)
   }
 }
 

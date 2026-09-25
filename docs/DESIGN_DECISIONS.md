@@ -4062,3 +4062,42 @@ should be done deliberately. The fixture has to work around clud's own
 session machinery (the `python` shim, the rm-identity check), as its module
 docs describe.
 
+## DD-091: `/grind` gets repo lint/test scripts from a clud subcommand, asked once per run
+
+**Status:** Accepted.
+
+**Context:** zackees/clud#1336. Many repos ship `./lint` and `./test` entry
+scripts, and `/grind`'s integrator should run them before every push. Finding
+them depends on the platform (`.bat`/`.ps1` on Windows, extensionless or
+`.sh` elsewhere), on whether the file is executable (`bash ./lint` if not),
+and on what the script hands off to (`python -m ci.test` means `ci/test.py`).
+A goal list can hold many goals from the same repository.
+
+**Decision:** `clud grind-scripts` detects the scripts and prints each one's
+kind, path, run command and the files to read for modes. The `/grind` router
+gets that output through a `` !`clud grind-scripts` `` line, the way `/do` gets
+`clud do-prompt` (#1322). The model's only job is to read the listed files
+and pick out the user-facing modes. It never runs the scripts. The router asks
+one question per run, records the answer as `scripts` in
+`.clud/grind/run.json`, and passes it to the workflow as `args.verify`.
+
+**Rationale:**
+
+- **The subcommand, not the model, does detection.** The steps are fixed
+  rules: which candidate wins, whether the file is executable, which
+  interpreter to use. A model probing the filesystem could get any of them
+  wrong, and a scripted-model harness can't test what it does. A subcommand is
+  unit-tested, and the harness can check its rendered output in the router's
+  first request. What's left for the model is reading, where it beats a
+  regex, which can't follow delegation and picks up tool flags.
+- **One question per run.** The scripts belong to the repository, not to a
+  goal, so every goal gets the same answer. Asking once per goal would repeat
+  the question N times. A workflow can't ask questions while it runs, so the
+  router asks everything before it starts.
+
+**Consequences:** If no scripts are detected, there's no question and the
+planner's verify commands stand. When scripts are chosen, the planner only
+supplies the goal's focused test. Adding a candidate or interpreter means
+changing `grind_scripts.rs` and its tests, not the router text. The contract is
+owned by [architecture/grind.md](architecture/grind.md#repository-linttest-scripts).
+

@@ -572,6 +572,10 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         target: Vec<String>,
     },
+    /// Print the repo's detected `./lint` / `./test` scripts for the
+    /// `/grind` router (#1336). The router's body runs this at invocation.
+    #[command(hide = true)]
+    GrindScripts,
     #[command(hide = true)]
     InstallAssets {
         #[arg(long = "home", value_name = "DIR")]
@@ -1258,6 +1262,7 @@ pub enum GcSubcommand {
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "do-prompt",
+    "grind-scripts",
     "install-assets",
     "loop",
     "up",
@@ -1736,6 +1741,22 @@ fn validate_top_level_unknown(token: &str, following: Option<&str>) -> Result<()
 #[cfg(test)]
 #[path = "args_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod grind_scripts_parse_tests {
+    use super::*;
+
+    #[test]
+    fn grind_scripts_dispatches_as_subcommand_not_passthrough() {
+        let raw: Vec<String> = ["clud", "grind-scripts"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let args = Args::parse_from_raw(raw);
+        assert!(matches!(args.command, Some(Command::GrindScripts)));
+        assert!(args.passthrough.is_empty());
+    }
+}
 
 /// A provider API key passed on the command line. `Debug` never prints it, so
 /// verbose logging of [`Args`] cannot leak it.

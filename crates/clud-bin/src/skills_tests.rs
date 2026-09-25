@@ -962,3 +962,24 @@ fn do_skill_renders_its_prompt_through_clud_do_prompt() {
         "/goal /do needs the model to load /do"
     );
 }
+
+/// `/grind` renders the repo's `./lint` / `./test` report at invocation via
+/// `clud grind-scripts` (#1336), and the integrator runs them before every push.
+#[test]
+fn grind_skill_renders_scripts_through_clud_grind_scripts() {
+    let skill = |name: &str| {
+        BUNDLED_SKILLS
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} must be bundled"))
+            .skill_md
+    };
+    let grind = skill("grind");
+    assert!(grind.contains("!`clud grind-scripts`"));
+    assert!(grind.contains("allowed-tools: Bash(clud grind-scripts:*)"));
+    let integrate = skill("grind-integrate");
+    assert!(
+        integrate.contains("run lint before test before every push"),
+        "grind-integrate must run lint before test before every push"
+    );
+}
