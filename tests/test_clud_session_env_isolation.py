@@ -53,7 +53,8 @@ def test_session_vars_do_not_reach_tests() -> None:
 
 def test_rm_identity_tests_pass_under_exported_session_vars() -> None:
     """Re-run the tests #1423 broke with the session vars exported."""
-    if not (os.environ.get("CLUD_TEST_BLOCK_BAD_CMD_BINARY") or (ROOT / "target/debug").is_dir()):
+    hook = os.environ.get("CLUD_TEST_BLOCK_BAD_CMD_BINARY")
+    if not (hook and Path(hook).is_file()) and not (ROOT / "target/debug/clud-shim").is_file():
         pytest.skip("hook binaries not built")
     env = os.environ.copy() | SESSION_VARS
     result = process.run(
@@ -71,6 +72,6 @@ def test_rm_identity_tests_pass_under_exported_session_vars() -> None:
         env=env,
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=300,
     )
     assert result.returncode == 0, result.stdout + result.stderr

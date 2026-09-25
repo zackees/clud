@@ -267,9 +267,8 @@ _TEST_HARNESS_CLUD_NAMES = frozenset(
         "CLUD_REQUIRE_PTY",
         "CLUD_PTY_PUMP_TRACE",
         # Plumbing, not behavior: a clud session puts its `python` shim on
-        # PATH, and the shim exits 127 without these (#1423 review).
+        # PATH, and the shim exits 127 without its target (#1423).
         "CLUD_PYTHON_SHIM_TARGET",
-        "CLUD_DAEMON_SOCKET",
     }
 )
 
