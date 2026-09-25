@@ -14,6 +14,7 @@ mod warnings;
 
 use crate::args::{Args, Command as CliCommand};
 use crate::backend::{Backend, ResolvedLaunchTarget};
+use std::io::Write;
 
 pub use codex_trust::{codex_project_key, codex_project_trusted};
 pub use inspect::{hook_home_dir, inspect_current, inspect_paths};
@@ -61,11 +62,37 @@ pub fn should_check_launch(args: &Args, launch_target: ResolvedLaunchTarget) -> 
     )
 }
 
+/// Write the launch hook-health warnings to stderr. Issue #1346 (same root
+/// cause as #515): every warning line is composed into a single buffer and
+/// emitted with one locked, flushed `write_all`, rather than a sequence of
+/// `eprintln!` calls. On Windows, `clud --codex` launches the backend through
+/// a ConPTY that repaints the viewport when the child attaches; lines emitted
+/// as separate writes just before takeover were being wiped. One flushed
+/// block commits every warning up front so they survive.
 pub fn emit_launch_warnings() {
     let report = inspect_current_impl();
-    for warning in report.warnings {
-        eprintln!("[clud] warning: {warning}");
+    let Some(message) = format_launch_warnings(&report.warnings) else {
+        return;
+    };
+    let stderr = std::io::stderr();
+    let mut handle = stderr.lock();
+    let _ = handle.write_all(message.as_bytes());
+    let _ = handle.flush();
+}
+
+/// Compose every launch warning as `[clud] warning: {warning}\n` into one
+/// string, or `None` when there is nothing to report.
+pub(crate) fn format_launch_warnings(warnings: &[String]) -> Option<String> {
+    if warnings.is_empty() {
+        return None;
     }
+    let mut message = String::new();
+    for warning in warnings {
+        message.push_str("[clud] warning: ");
+        message.push_str(warning);
+        message.push('\n');
+    }
+    Some(message)
 }
 
 pub fn apply_default_repairs() -> Result<usize, DeterministicRepairError> {
