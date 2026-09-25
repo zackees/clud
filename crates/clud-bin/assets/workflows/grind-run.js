@@ -1,7 +1,7 @@
 // managed-by: clud
 export const meta = {
-  name: 'grind',
-  description: 'clud /grind: plan, write, review, integrate and land a list of goals, in parallel worktrees or sequentially in the local checkout, with per-role caps.',
+  name: 'grind-run',
+  description: 'Engine behind clud /grind (start it with /grind): plan, write, review, integrate and land a list of goals, in parallel worktrees or sequentially in the local checkout, with per-role caps.',
   whenToUse: 'Started by the /grind router skill, which gathers the goals, mode, models and CI choice first. Do not start it directly.',
   phases: [
     { title: 'Plan', detail: 'grind-planner: split each goal into disjoint file tasks' },

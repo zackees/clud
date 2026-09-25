@@ -266,6 +266,9 @@ impl HarnessSetupAction for BundledSkillsAction {
                 for path in &report.refreshed {
                     let _ = writeln!(ctx.out, "\x1b[32m[clud] updated ~/.claude/{path}\x1b[0m");
                 }
+                for path in &report.purged {
+                    let _ = writeln!(ctx.out, "\x1b[32m[clud] removed ~/.claude/{path}\x1b[0m");
+                }
             }
         }
         Ok(())

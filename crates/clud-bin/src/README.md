@@ -670,7 +670,7 @@ Diagnostics and misc:
 - `wasm.rs` - `wasmi`-based runner that loads a WASM module, registers a
   minimal `host.log` import, invokes a named export, and propagates the integer
   exit code.
-- `claude_files.rs` - installs the bundled `grind-*` agent types and `grind` workflow into `~/.claude/{agents,workflows}/` with the skill installer's `managed-by: clud` ownership rules.
+- `claude_files.rs` - installs the bundled `grind-*` agent types and `grind-run` workflow into `~/.claude/{agents,workflows}/` with the skill installer's `managed-by: clud` ownership rules.
 - `civil_time.rs` - issue #1206: the crate's one civil-date algorithm.
   `civil_from_unix_secs(unix_secs: i64) -> (year, month, day, hour, minute,
   second)` is Howard Hinnant's public-domain `civil_from_days` plus a

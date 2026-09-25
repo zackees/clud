@@ -34,7 +34,7 @@ capped agent types:
 
 ```
 /grind ─ /grind-intake ─ questions ─┬─ parallel   ─┐
-                                    ├─ sequential ─┼─ workflow grind: plan → work → review → integrate → land
+                                    ├─ sequential ─┼─ workflow grind-run: plan → work → review → integrate → land
                                     └─ cron ─ /grind-cron ─ /loop: one sequential run per tick
 ```
 
@@ -42,7 +42,7 @@ capped agent types:
 |---|---|---|
 | Skills `grind`, `grind-intake`, `grind-plan`, `grind-work`, `grind-review`, `grind-integrate`, `grind-land`, `grind-cron` | `crates/clud-bin/assets/skills/` (`skills.rs::BUNDLED_SKILLS`) | `~/.claude/skills/`, `~/.codex/skills/` |
 | Agents `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
-| Workflow `grind` | `crates/clud-bin/assets/workflows/grind.js` (`claude_files.rs`) | `~/.claude/workflows/` |
+| Workflow `grind-run` | `crates/clud-bin/assets/workflows/grind-run.js` (`claude_files.rs`) | `~/.claude/workflows/` |
 
 Each workflow agent runs as its `grind-<role>` type and is told to invoke
 its leaf skill, so the procedure lives once, in the skill, and each leaf is

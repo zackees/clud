@@ -15,7 +15,7 @@ or DONE/BLOCKED marker; see `docs/architecture/grind.md` in the clud repo.
 Issue one `/loop` whose body is:
 
 > Take the next open goal from <source> that has no open linked PR. If none
-> remain, end the loop. Otherwise start the Workflow named `grind` with
+> remain, end the loop. Otherwise start the Workflow named `grind-run` with
 > `mode: "sequential"`, that one goal, and these recorded answers: <models,
 > ci>. When it returns, rebase the checkout onto `origin/<main>` and confirm
 > `git status` is clean.
