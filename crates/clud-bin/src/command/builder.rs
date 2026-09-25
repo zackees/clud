@@ -563,7 +563,7 @@ fn build_launch_plan_for_target_at(
             // session. `main` resolves the optional target before plan building.
             if seed_interactive_builtin {
                 if let Some(target) = target.as_deref() {
-                    let prompt = build_do_prompt(target);
+                    let prompt = build_do_prompt(target, args.do_meta);
                     push_prompt_interactive(&mut cmd, prompt);
                 }
             }

@@ -228,6 +228,7 @@ fn backend_prompt_launch_plan(
         allow_plan_mode: args.allow_plan_mode,
         coauthor: args.coauthor.clone(),
         dry_run: false,
+        do_meta: false,
         detach: false,
         detachable: false,
         session_name: None,
