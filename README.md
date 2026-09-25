@@ -2,28 +2,37 @@
 
 ![hero-clud](https://github.com/user-attachments/assets/4009dfee-e703-446d-b073-80d826708a10)
 
-**A luxury agentic experience with Claude, Codex and Deepseek. By running them all on Claude**
+**A luxury agentic experience with Claude, Codex and DeepSeek, by running them all on Claude Code.**
 
-  * Fixes Windows Performance Problem with Windows git/bash zombie process
-  * transltate codex and deepseek into claude terminal
+- Fixes the Windows performance problem with zombie git/bash processes.
+- Runs Codex and DeepSeek models inside the Claude Code terminal.
 
 The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
-## Built in support for running codex on the claude harness:
+## Run Codex on the Claude harness
 
-`clud --codex --harness claude`
+```bash
+clud --codex --harness claude
+```
 
-## A /goal tuned for one task: solve it and push and merge the PR
+See [Codex through Claude Code](#codex-through-claude-code-experimental).
 
-`clud do github.com/zackess/isssu/123`
+## Solve one issue, all the way to a merged PR
 
-## Grind down your bug list starting with the easy one
+```bash
+clud do https://github.com/<owner>/<repo>/issues/<N>
+```
 
-`clud grind`
+See [`clud do`](#clud-do-url-or-goal--implement-to-a-merged-pr).
+
+## Grind down your issue list
+
+```bash
+clud grind
+```
 
 Plans, writes, reviews and lands a whole issue list as merged PRs, with each
-agent role capped to its job. See [`clud grind`](#clud-grind--burn-down-issues-to-merged-prs)
-below.
+agent role capped to its job. See [`clud grind`](#clud-grind--burn-down-issues-to-merged-prs).
 
 [![CI](https://github.com/zackees/clud/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/zackees/clud/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Auto Release](https://github.com/zackees/clud/actions/workflows/auto-release.yml/badge.svg?event=push)](https://github.com/zackees/clud/actions/workflows/auto-release.yml?query=event%3Apush)
@@ -168,8 +177,10 @@ model-not-found errors, run `/logout` once inside Claude Code, exit, and
 relaunch `clud --openrouter`. Use `clud --claude` to return to native Claude
 routing.
 
-`clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
-to opt back into PTY while Claude PTY issues are being investigated.
+From a real terminal, every harness launches in a PTY; with redirected output
+or a headless run (`-p`, `codex exec`) it launches as a subprocess instead.
+`--pty` and `--subprocess` override that choice. See
+[DD-086](docs/DESIGN_DECISIONS.md#dd-086-every-console-launch-runs-through-the-pty-pump-subprocess-is-for-headless-and-redirected-output).
 
 ## PTY Graphics Headers
 
@@ -452,6 +463,24 @@ CLUD_BAD_CMD_OVERRIDE="no-raw-playwright:debugging a trace-viewer bug"
 The `id:reason` form is required; an override with no reason is ignored and the
 command stays blocked. It has to be a real environment variable — you can't
 just type it in front of the command.
+
+### Turn the guard off entirely
+
+`CLUD_ALLOW_ALL_CMDS=1` skips every `clud-cmd-scan` check, built-in ones
+included (the rm-shim identity check, the `cd` pin, `bad_commands`,
+`bad_pipelines`, and the `/grind` role caps). It is the escape hatch for when
+the guard itself is wedged — for example, a rebuilt `clud-shim` that no longer
+matches the installed rm shim, which makes the guard deny every shell call.
+
+```bash
+export CLUD_ALLOW_ALL_CMDS=1        # the whole session
+```
+
+Unlike `CLUD_BAD_CMD_OVERRIDE`, it also works written into a single command
+(`export CLUD_ALLOW_ALL_CMDS=1; <cmd>` or `CLUD_ALLOW_ALL_CMDS=1 <cmd>`), so an
+agent can repair a wedged guard. The one exception: `/grind`'s capped
+`grind-*` agents cannot lift their own caps this way. Only an explicit `1`
+counts.
 
 ### Keep the agent from wandering out of the repo
 
@@ -846,8 +875,8 @@ clud --codex do                 # prompts: Enter an issue URL or goal
 clud do --dry-run https://github.com/zackees/clud/issues/866
 ```
 
-On the native Codex harness, the built-ins `do`, `up`, `rebase`, `fix`, and
-`grind` seed the interactive TUI rather than `codex exec`, so progress and follow-up
+On the native Codex harness, the built-ins `do`, `up`, `rebase`, and `fix`
+seed the interactive TUI rather than `codex exec`, so progress and follow-up
 input stay live. They can resume `--continue` or `--resume=<session>`; bare
 `--resume` is rejected because Codex would mistake the generated prompt for a
 session ID. Explicit `-p` and `loop` runs remain non-interactive.
@@ -860,7 +889,7 @@ Runs lint, test, cleanup, then commits.
 clud up
 ```
 
-## `clud wasm` â€” Embedded Runtime
+## `clud wasm` — Embedded Runtime
 
 Loads a local `.wasm` module, wires up a host logging import, and invokes an exported function.
 
