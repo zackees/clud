@@ -1,11 +1,11 @@
 use clud::{
-    args, auth, backend, backend_bootstrap, clud_settings, codex_auth, command, config,
-    console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover, gc,
-    graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
-    launch_setup, log_event, loop_artifacts, loop_spec, openrouter_catalog, optimize,
-    orphan_reaper, provider_auth, runner, runtime_cache, settings_tui, soldr_activate, stage_trace,
-    startup, symbols, test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui,
-    uv_run_hook_guard, verbose_log, wasm, webterm, workspace_trust, worktrees,
+    args, auth, backend, backend_bootstrap, claude_files, clud_settings, codex_auth, command,
+    config, console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover,
+    gc, graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard,
+    launch_log, launch_setup, log_event, loop_artifacts, loop_spec, openrouter_catalog, optimize,
+    orphan_reaper, provider_auth, runner, runtime_cache, settings_tui, skills, soldr_activate,
+    stage_trace, startup, symbols, test_runtime, toast, tool_cli, tool_install, tools, trampoline,
+    trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm, workspace_trust, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -71,6 +71,10 @@ fn run(mut args: args::Args) {
     // normal clud startup so hook/tool invocations do not connect to the
     // daemon, touch runtime-cache, start title keepers, or register as
     // foreground clud sessions.
+    if let Some(args::Command::InstallAssets { home }) = &args.command {
+        std::process::exit(install_assets(home.as_deref()));
+    }
+
     if let Some(args::Command::Tool { subcommand }) = &args.command {
         unsafe {
             std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
@@ -1518,3 +1522,48 @@ use main_helpers::{
     build_cpu_banner_cfg, build_toast_launch_cfg, flush_ctrl_c_exit_event,
     record_repo_visit_best_effort,
 };
+
+/// `clud install-assets`: run the launch-time installers on demand.
+fn install_assets(home: Option<&std::path::Path>) -> i32 {
+    let Some(home) = home
+        .map(std::path::Path::to_path_buf)
+        .or_else(dirs::home_dir)
+    else {
+        eprintln!("[clud] error: could not resolve a home directory; pass --home");
+        return 2;
+    };
+    match skills::ensure_installed_at(&home) {
+        Ok(reports) => {
+            for (backend, report) in reports {
+                println!(
+                    "skills -> {}: {} installed, {} refreshed",
+                    backend.skills_dir(&home).display(),
+                    report.installed.len(),
+                    report.refreshed.len()
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("[clud] error: installing skills: {error}");
+            return 1;
+        }
+    }
+    match claude_files::ensure_installed_at(&home) {
+        Ok(Some(report)) => println!(
+            "claude files -> {}: {} installed, {} refreshed, {} removed",
+            home.join(".claude").display(),
+            report.installed.len(),
+            report.refreshed.len(),
+            report.purged.len()
+        ),
+        Ok(None) => println!(
+            "claude files: {} has no .claude directory; skipped",
+            home.display()
+        ),
+        Err(error) => {
+            eprintln!("[clud] error: installing agents and workflows: {error}");
+            return 1;
+        }
+    }
+    0
+}

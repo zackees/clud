@@ -10,6 +10,9 @@ before exiting with the test-requested code.
 
 ## Files
 
+- `serve.rs` — `mock-agent serve`: the scripted Anthropic Messages backend for
+  the real-harness tier (see "Server mode" below and
+  [testing-tiers.md](../../../docs/architecture/testing-tiers.md)).
 - `main.rs` — Entire mock-agent implementation: arg filtering, stdin capture
   (timed + pipe modes, raw-mode on Unix TTYs), iteration counter for
   `clud loop` marker tests, helper-process tree spawning, terminal-size
@@ -68,3 +71,45 @@ before exiting with the test-requested code.
   or stream-json bytes are emitted before the report when configured.
 - Stderr: unused.
 - Exit code: value of `--mock-exit-code`, default 0.
+
+## Server mode: `mock-agent serve`
+
+```
+mock-agent serve --script script.json [--port 0] [--log requests.jsonl] [--port-file port.txt]
+```
+
+It binds to `127.0.0.1` and prints `listening <port>` (and writes `--port-file`).
+It serves `POST /v1/messages` (SSE when `"stream": true`, JSON otherwise),
+`POST …/count_tokens` and `GET /v1/models`. Point Claude Code at it with
+`ANTHROPIC_BASE_URL`.
+
+Script format:
+
+```json
+{
+  "default_text": "DONE",
+  "roles": [
+    {"name": "worker", "match": "You are a /grind worker", "steps": [
+      {"tool_use": {"name": "Bash", "input": {"command": "cargo build"}}},
+      {"expect": {"is_error": true, "content_contains": "BLOCKED"}, "text": "denied as expected"}
+    ]},
+    {"name": "main", "steps": [
+      {"structured": {"answer": 42}},
+      {"error": {"status": 500}}
+    ]}
+  ]
+}
+```
+
+- **Role:** the first role whose `match` substring is in the request's system
+  prompt; a role with no `match` is the fallback.
+- **Step:** the number of assistant turns already in the request's messages.
+  Past the last step, or when a step's tool isn't offered in the request, the
+  reply is `default_text`.
+- **Step kinds:** `tool_use {name, input}`, `structured {…}` (a
+  `StructuredOutput` call), `text`, and `error {status}` (an HTTP error reply).
+- **`expect`** checks the `tool_result`s sent back for the previous step
+  (`is_error`, `content_contains`). A mismatch replies
+  `MOCK_EXPECT_FAILED: …` and is recorded in the log's `note`.
+- **Log:** one JSON line per request, with `role`, `turn`, `step`, `note`,
+  `tools`, `tool_results`, `system` and `messages`.

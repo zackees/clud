@@ -561,6 +561,14 @@ pub enum Command {
     Grind {
         url: Option<String>,
     },
+    /// Install clud's bundled skills, agent types and workflows now, the same
+    /// files a launch installs. `--home` targets another home directory; the
+    /// real-harness tests (#1323) use it to populate an isolated config.
+    #[command(hide = true)]
+    InstallAssets {
+        #[arg(long = "home", value_name = "DIR")]
+        home: Option<std::path::PathBuf>,
+    },
     Wasm {
         module: String,
         #[arg(long = "invoke", default_value = "run")]
@@ -1241,6 +1249,7 @@ pub enum GcSubcommand {
 }
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
+    "install-assets",
     "loop",
     "up",
     "rebase",

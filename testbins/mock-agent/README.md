@@ -31,6 +31,10 @@ Output lands at `target/debug/mock-agent` (`.exe` on Windows). All
 
 ## Used by
 
+- **Real-harness tests** (`tests/harness/`) — `mock-agent serve` is the
+  scripted model behind a real Claude Code; see
+  [testing-tiers.md](../../docs/architecture/testing-tiers.md).
+
 - **Python integration tests** (`tests/integration/`) — `conftest.py`
   builds it once per session via the `mock_agent_binary` fixture, then
   the `mock_env` / `mock_env_codex_cmd` fixtures copy it as

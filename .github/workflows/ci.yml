@@ -166,6 +166,19 @@ jobs:
       runs-on: ubuntu-24.04
       suite: integration
 
+  # #1323: real Claude Code on the scripted mock agent backend. Full mode
+  # only (ci-full, merge queue): it installs Claude Code from npm.
+  test-linux-x64-harness:
+    name: Test linux-x64 (harness)
+    needs: [static, build-linux-x64]
+    if: needs.static.outputs.mode == 'full'
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      source_ref: ${{ needs.static.outputs.source_ref }}
+      target: x86_64-unknown-linux-gnu
+      runs-on: ubuntu-24.04
+      suite: harness
+
   build-windows-x64:
     name: Build windows-x64
     needs: static
@@ -326,6 +339,7 @@ jobs:
       - build-linux-x64
       - test-linux-x64-unit
       - test-linux-x64-integration
+      - test-linux-x64-harness
       - build-windows-x64
       - test-windows-x64
       - build-macos-arm
@@ -360,6 +374,7 @@ jobs:
             ${{ needs.test-windows-x64.result }}
           FULL: >-
             ${{ needs.dylint.result }}
+            ${{ needs.test-linux-x64-harness.result }}
             ${{ needs.build-macos-arm.result }}
             ${{ needs.test-macos-arm.result }}
             ${{ needs.build-linux-arm.result }}

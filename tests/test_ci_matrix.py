@@ -118,7 +118,22 @@ def test_pr_and_dispatch_source_ref_is_pinned_in_every_job():
         reusable = CI_YML.with_name(name).read_text(encoding="utf-8")
         assert "source_ref:" in reusable, name
         assert "ref: ${{ inputs.source_ref || github.sha }}" in reusable, name
-    assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 14
+    # 14 build/test/dylint jobs, plus the #1323 real-harness job.
+    assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 15
+
+
+def test_harness_suite_runs_in_full_mode_and_is_gated():
+    text = CI_YML.read_text(encoding="utf-8")
+    after = text.split("\n  test-linux-x64-harness:\n", 1)[1]
+    block = after.split("\n  build-windows-x64:\n", 1)[0]
+    assert "if: needs.static.outputs.mode == 'full'" in block
+    assert "suite: harness" in block
+    gate = text.split("\n  ci-ok:\n", 1)[1]
+    assert "- test-linux-x64-harness" in gate
+    assert "${{ needs.test-linux-x64-harness.result }}" in gate.split("FULL:", 1)[1]
+    run_tests = CI_YML.with_name("_run-tests.yml").read_text(encoding="utf-8")
+    assert "@anthropic-ai/claude-code@" in run_tests
+    assert "if: inputs.suite == 'harness'" in run_tests
 
 
 def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
