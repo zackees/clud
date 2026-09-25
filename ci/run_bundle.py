@@ -190,9 +190,10 @@ def install_wheel(bundle: Path, env: dict[str, str]) -> int:
 TERMINAL_HARNESS = "pty"
 # Makes `require_pty_or_skip!` fail instead of skip (tests/common/mod.rs).
 REQUIRE_PTY_ENV = "CLUD_REQUIRE_PTY"
-# Upper bound on the terminal harness; the job-level timeout is the backstop,
-# but a bounded wait here names the harness that wedged.
-TERMINAL_HARNESS_TIMEOUT_SECS = 900.0
+# Upper bound on one test of the terminal harness. Each test runs in its own
+# pseudo-terminal (see `run_terminal_harness`), so a hang costs this much and
+# names the test instead of swallowing the rest of the harness.
+TERMINAL_TEST_TIMEOUT_SECS = 180.0
 
 
 def needs_terminal(harness: Path) -> bool:
@@ -207,7 +208,9 @@ def needs_terminal(harness: Path) -> bool:
     return bool(sep) and name == TERMINAL_HARNESS
 
 
-def run_in_terminal(argv: list[str], env: dict[str, str]) -> int:
+def run_in_terminal(
+    argv: list[str], env: dict[str, str], timeout: float = TERMINAL_TEST_TIMEOUT_SECS
+) -> int:
     """Run `argv` inside a pseudo-terminal, echoing its output as it arrives.
 
     Inside the pseudo-terminal the harness's stdin and stdout are a console on
@@ -220,7 +223,7 @@ def run_in_terminal(argv: list[str], env: dict[str, str]) -> int:
     terminal = PseudoTerminalProcess(
         argv, cwd=ROOT, env=child_env, capture=True, rows=50, cols=200
     )
-    deadline = time.monotonic() + TERMINAL_HARNESS_TIMEOUT_SECS
+    deadline = time.monotonic() + timeout
     try:
         while time.monotonic() < deadline:
             try:
@@ -232,8 +235,8 @@ def run_in_terminal(argv: list[str], env: dict[str, str]) -> int:
                 break
         else:
             print(
-                f"::error::{argv[0]} did not finish within "
-                f"{TERMINAL_HARNESS_TIMEOUT_SECS:.0f}s inside the pseudo-terminal",
+                f"::error::{' '.join(argv)} did not finish within "
+                f"{timeout:.0f}s inside the pseudo-terminal",
                 file=sys.stderr,
             )
             terminal.kill()
@@ -241,6 +244,44 @@ def run_in_terminal(argv: list[str], env: dict[str, str]) -> int:
         return terminal.wait(timeout=30)
     finally:
         terminal.close()
+
+
+def list_tests(harness: Path, env: dict[str, str]) -> list[str]:
+    """Names of the tests in a libtest harness (`--list --format terse`)."""
+    result = process.run(
+        [str(harness), "--list", "--format", "terse"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return [
+        line.removesuffix(": test")
+        for line in (result.stdout or "").splitlines()
+        if line.endswith(": test")
+    ]
+
+
+def run_terminal_harness(argv: list[str], env: dict[str, str]) -> int:
+    """Run each test of the terminal harness in its own pseudo-terminal.
+
+    #1310: one hung PTY test used to hold the whole harness until its
+    timeout, and the kill discarded every earlier failure message. One test
+    per terminal bounds each hang and keeps each verdict and message.
+    """
+    names = list_tests(Path(argv[0]), env)
+    if not names:
+        print(f"::error::{argv[0]} listed no tests", file=sys.stderr)
+        return 1
+    failed = [
+        name
+        for name in names
+        if run_in_terminal([*argv, "--exact", name], env) != 0
+    ]
+    if failed:
+        print(f"::error::failing PTY tests: {', '.join(failed)}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
@@ -262,7 +303,7 @@ def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
             argv += ["--test-threads=1"]
         print(f"::group::{harness.name}", flush=True)
         if needs_terminal(harness):
-            rc = run_in_terminal(argv, env)
+            rc = run_terminal_harness(argv, env)
         else:
             rc = process.run(argv, cwd=ROOT, env=env).returncode
         print("::endgroup::", flush=True)
