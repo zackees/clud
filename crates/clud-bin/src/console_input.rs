@@ -11,6 +11,11 @@
 //!
 //! Keeping the generic translator in `running-process` prevents navigation
 //! keys from drifting between two implementations (issue #575).
+//!
+//! `running-process` also owns reassembling UTF-16 surrogate pairs that arrive
+//! split across separate `KEY_EVENT` records, which covers emoji and other
+//! supplementary-plane characters (issue #1351). This adapter only ever sees
+//! whole translated events, so it must not try to pair surrogates itself.
 
 #![cfg(windows)]
 
