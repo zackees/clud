@@ -517,6 +517,16 @@ pub fn store_inline_api_key(
     store_inline_api_key_with(&store, key)
 }
 
+/// The one line printed when a command-line key replaces the stored one
+/// (#1304). Shows only the last four characters.
+pub fn inline_key_saved_notice(descriptor: &AnthropicCompatProvider, key: &str) -> String {
+    format!(
+        "[clud] saved {} key {} to the native credential vault",
+        descriptor.display_name,
+        crate::secret_redaction::mask_key(key)
+    )
+}
+
 fn store_inline_api_key_with(store: &dyn SecretStore, key: &str) -> Result<bool, SecretStoreError> {
     if !stored_key_is_well_formed(key) {
         return Err(SecretStoreError::Malformed);
@@ -1273,6 +1283,38 @@ mod tests {
             store_inline_api_key_with(&broken, key),
             Err(SecretStoreError::Unavailable)
         );
+    }
+
+    /// #1304: an inline OpenRouter key overwrites the stored one, is then read
+    /// back by a bare launch, and is announced by its last four characters
+    /// only.
+    #[test]
+    fn an_inline_openrouter_key_is_saved_reused_and_announced_masked() {
+        let descriptor = provider_registry::descriptor_for(ModelProvider::OpenRouter).unwrap();
+        let old = "sk-or-v1-0000000000000000000000000000aaaa";
+        let new = "sk-or-v1-1111111111111111111111111111wxyz";
+        let store = InMemorySecretStore::default();
+        store.set(old).unwrap();
+        assert!(store_inline_api_key_with(&store, new).unwrap());
+        assert_eq!(store.get().unwrap().as_deref(), Some(new));
+        assert_eq!(
+            preflight_checked_with(
+                &store,
+                false,
+                || unreachable!(),
+                |key| {
+                    assert_eq!(key, new, "a bare launch uses the saved key");
+                    ProbeOutcome::Accepted
+                }
+            ),
+            Ok(())
+        );
+        let notice = inline_key_saved_notice(descriptor, new);
+        assert_eq!(
+            notice,
+            "[clud] saved OpenRouter key ****wxyz to the native credential vault"
+        );
+        assert!(!notice.contains("1111"));
     }
 
     /// Windows stores keys through Credential Manager directly (not the

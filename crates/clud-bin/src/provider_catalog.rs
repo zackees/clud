@@ -560,7 +560,7 @@ fn split_context_suffix(raw: &str) -> (&str, Option<&str>) {
         .map_or((raw, None), |model| (model, Some("1m")))
 }
 
-fn inferred_provider_from_wire(value: &str) -> Option<ModelProvider> {
+pub(crate) fn inferred_provider_from_wire(value: &str) -> Option<ModelProvider> {
     let lower = value.to_ascii_lowercase();
     ModelProvider::ALL.iter().copied().find(|provider| {
         provider

@@ -617,6 +617,25 @@ fn run(mut args: args::Args) {
                 std::process::exit(2);
             }
         };
+    // #1304: an explicit `--openrouter --model <id>` becomes the saved default
+    // the next plain `clud --openrouter` reuses. Saved before the credential
+    // preflight so the choice survives even a launch that stops for a key.
+    if let Some(model) = clud_settings::openrouter_model_to_remember(
+        launch_target.model_provider,
+        args.model.as_deref(),
+        args.dry_run,
+        args.resolved_model_selection
+            .as_ref()
+            .and_then(|selection| selection.model.as_deref()),
+        saved_selection.and_then(|saved| saved.model),
+    ) {
+        match clud_settings::save_openrouter_model(model.clone()) {
+            Ok(()) => eprintln!("[clud] saved OpenRouter model {model} as the default"),
+            Err(error) => {
+                eprintln!("[clud] warning: could not save the OpenRouter model: {error}")
+            }
+        }
+    }
     // A pin outside an explicit `--allow-model` fails here, before bootstrap
     // or the first turn: by the time a request is in flight the user has
     // waited, and the refusal would arrive wrapped in the harness's own
@@ -788,8 +807,8 @@ fn run(mut args: args::Args) {
         if let (Some(descriptor), false) = (descriptor, args.dry_run) {
             match provider_auth::store_inline_api_key(descriptor, key.expose()) {
                 Ok(true) => eprintln!(
-                    "[clud] {} API key stored in the native credential vault",
-                    descriptor.display_name
+                    "{}",
+                    provider_auth::inline_key_saved_notice(descriptor, key.expose())
                 ),
                 Ok(false) => {}
                 Err(error) => {

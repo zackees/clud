@@ -293,6 +293,24 @@ remains the frontend and receives the resolved main-model wire ID through its
    pre-launch OpenRouter picker, and cannot restrict the picker to the
    discovered set.
 
+A live `clud --openrouter --model <id>` also becomes OpenRouter's saved
+default (`providers.openrouter.model` in `~/.clud/settings.json`), so the next
+plain `clud --openrouter` resolves it with `model_source: provider_setting`
+(#1304). A later explicit `--model` wins and replaces it; `--dry-run` never
+writes it, and no other provider saves a model this way. Unlike the other
+profiles, OpenRouter's may hold a gateway wire ID that is not in the static
+catalog, because OpenRouter owns that namespace; another provider's wire ID is
+still refused there.
+
+The key follows one precedence: a key typed after the flag
+(`clud --openrouter sk-or-...`) is lifted out of the harness argv, overwrites
+the vault record, and is announced by its last four characters; otherwise the
+vault record `clud auth login openrouter` wrote is used. `OPENROUTER_API_KEY`
+is deliberately **not** a source: clud never reads it and scrubs it from the
+child environment, so an ambient variable cannot silently bill a different
+account than the one in the vault. The same flag-then-vault rule applies to
+`--deepseek` and `--kimi`.
+
 Every launch resolves a **model allowlist** that constrains every model the
 launch can reach -- the main model, the Fable, Opus, Sonnet, Haiku, and
 subagent role slots, the rows gateway discovery may advertise, and anything
