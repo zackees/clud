@@ -308,6 +308,62 @@ fn resize_impl_propagates_on_posix_and_noops_on_windows() {
     }
 }
 
+/// `clud::session::resize_pty` must change the master's reported size on
+/// every platform, including Windows (where the library's own `resize_impl`
+/// is a no-op). Issue #31, theory T2. Lives here rather than in the `--lib`
+/// tests so `require_pty_or_skip!` turns a PTY failure into a hard failure
+/// under `CLUD_REQUIRE_PTY=1` instead of a silent skip (#1348).
+#[test]
+fn resize_pty_updates_master_size_on_all_platforms() {
+    require_pty_or_skip!("resize_pty_updates_master_size_on_all_platforms");
+
+    let argv: Vec<String> = if cfg!(windows) {
+        // `ping -n 3 127.0.0.1` keeps the child alive ~2s without needing
+        // a console for stdout, which is enough for a resize roundtrip.
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "ping -n 3 127.0.0.1 > NUL".into(),
+        ]
+    } else {
+        vec!["/bin/sh".into(), "-c".into(), "sleep 2".into()]
+    };
+
+    let process = NativePtyProcess::new(argv, None, None, 20, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+
+    // Sanity: the master reports the initial size we requested.
+    {
+        let guard = process.handles.lock().expect("handles");
+        let handles = guard.as_ref().expect("handles present");
+        let before = handles.master.get_size().expect("get_size");
+        assert_eq!(
+            (before.rows, before.cols),
+            (20, 80),
+            "initial master size wrong: {:?}",
+            before
+        );
+    }
+
+    // Resize via the helper and verify the master advances.
+    clud::session::resize_pty(&process, 40, 120).expect("resize_pty");
+
+    {
+        let guard = process.handles.lock().expect("handles");
+        let handles = guard.as_ref().expect("handles present");
+        let after = handles.master.get_size().expect("get_size");
+        assert_eq!(
+            (after.rows, after.cols),
+            (40, 120),
+            "resize_pty did not propagate to master: {:?}",
+            after
+        );
+    }
+
+    let _ = process.close_impl();
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // T3 — extreme `cols` values
 // ─────────────────────────────────────────────────────────────────────────
