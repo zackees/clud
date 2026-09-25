@@ -126,6 +126,9 @@ pub struct HookPayloadView {
     /// present means a child. That is the whole basis for the recursive-
     /// delegation guard below — there is no depth counter to read.
     pub agent_id: Option<String>,
+    /// The subagent's type (`agent_type`), when the harness names it. The
+    /// `/grind` role caps key on it; see `block_bad_cmd_grind_caps`.
+    pub agent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +282,25 @@ pub fn hook_event_from_args<I: IntoIterator<Item = String>>(args: I) -> HookInvo
     }
 }
 
+/// Set to `1` to bypass every command-hook check for the session.
+pub const ALLOW_ALL_CMDS_ENV: &str = "CLUD_ALLOW_ALL_CMDS";
+
+fn allow_all_cmds(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// Whether the command text itself sets `CLUD_ALLOW_ALL_CMDS=1`, as a whole
+/// word (so `XCLUD_ALLOW_ALL_CMDS=1` or `=10` do not count).
+fn command_opts_out(command: &str) -> bool {
+    let needle = "CLUD_ALLOW_ALL_CMDS=1";
+    command.match_indices(needle).any(|(at, _)| {
+        let before = command[..at].chars().next_back();
+        let after = command[at + needle.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 /// The event a bare invocation serves.
 pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 
@@ -296,6 +318,18 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
         let parent = block_bad_cmd_cwd_changed::session_parent_root();
         return block_bad_cmd_cwd_changed::handle_cwd_changed(&stdin.text, parent.as_deref());
+    }
+
+    // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every
+    // command check below is skipped. It exists because a stale rm shim
+    // (e.g. after rebuilding `target/debug/clud-shim`) makes the identity
+    // check deny *every* shell call, which leaves the session unable to run
+    // the one command that would repair it.
+    if allow_all_cmds(std::env::var(ALLOW_ALL_CMDS_ENV).ok().as_deref()) {
+        append_log(&format!(
+            "{ALLOW_ALL_CMDS_ENV}=1: all command checks bypassed"
+        ));
+        return 0;
     }
 
     // Resolved before anything else can fail, because the gate's entire value
@@ -371,6 +405,22 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         payload.command
     ));
 
+    // The same switch, opted into per call: a command that carries
+    // `CLUD_ALLOW_ALL_CMDS=1` (as `export …` or a `VAR=… cmd` prefix) skips
+    // the checks for that call. Capped `/grind` roles cannot use it, or any
+    // worker could lift its own caps by typing it.
+    if command_opts_out(&payload.command)
+        && !payload
+            .agent_type
+            .as_deref()
+            .is_some_and(block_bad_cmd_grind_caps::is_grind_role)
+    {
+        append_log(&format!(
+            "{ALLOW_ALL_CMDS_ENV}=1 in command: all command checks bypassed"
+        ));
+        return 0;
+    }
+
     // #812: refuse a subagent creating another agent, before the descendant is
     // allocated or reaches the bridge. Checked ahead of the command rules
     // because an `Agent` call has no command for them to inspect — the
@@ -384,6 +434,16 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         println!("{}", deny_json(&reason));
         eprintln!("[clud] {reason}");
         return 2;
+    }
+
+    // `/grind` role caps: a capped agent's shell call must fit its role.
+    if event == PRE_TOOL_USE_EVENT {
+        if let Some(reason) = grind_caps_reason(&payload) {
+            append_log(&format!("GRIND-CAPS-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud grind caps] {reason}");
+            return 2;
+        }
     }
 
     // #1086: a shell-shaped tool whose command could not be extracted (an
@@ -1152,6 +1212,12 @@ pub fn parse_payload_value(value: &Value, process_cwd: &Path) -> Option<HookPayl
             .or_else(|| object.get("agentId"))
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
+            .map(str::to_string),
+        agent_type: object
+            .get("agent_type")
+            .or_else(|| object.get("agentType"))
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty())
             .map(str::to_string),
     })
 }
@@ -3322,6 +3388,22 @@ pub use block_bad_cmd_cd::{
 #[path = "block_bad_cmd_cwd_changed.rs"]
 mod block_bad_cmd_cwd_changed;
 
+#[path = "block_bad_cmd_grind_caps.rs"]
+mod block_bad_cmd_grind_caps;
+
+/// The `/grind` role-cap denial for this call, if its agent is a capped role.
+fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
+    let role = payload.agent_type.as_deref()?;
+    if !block_bad_cmd_grind_caps::is_grind_role(role)
+        || !block_bad_cmd_gate::gates_tool(&payload.tool_name)
+    {
+        return None;
+    }
+    let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
+    block_bad_cmd_grind_caps::shell_reason(role, &payload.command, &run)
+        .map(|reason| format!("Blocked by the /grind role caps: {reason}."))
+}
+
 /// The lexical repo-root walk, for callers outside this module.
 ///
 /// Deliberately not `loop_spec::git_root_from`, which returns `start` when
@@ -3760,6 +3842,7 @@ mod tests {
             cwd: std::path::PathBuf::from(r#"C:\repo"#),
             tool_input: None,
             agent_id: None,
+            agent_type: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, r#"C:\py\clud-block-bad-cmd.exe"#);
         assert_eq!(event["event"], "bad_cmd_denied");
@@ -3800,6 +3883,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp"),
             tool_input: None,
             agent_id: None,
+            agent_type: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, "");
         assert_eq!(event["match_mode"], "regex");
@@ -6067,6 +6151,27 @@ mod tests {
             recursive_agent_decision("Agent", Some("agent-7"), false),
             Decision::Allow
         );
+    }
+
+    /// Only an explicit `1` disables the hook; anything else keeps guarding.
+    #[test]
+    fn allow_all_cmds_requires_an_explicit_one() {
+        assert!(allow_all_cmds(Some("1")));
+        for value in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
+            assert!(!allow_all_cmds(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_can_opt_itself_out() {
+        assert!(command_opts_out(
+            "export CLUD_ALLOW_ALL_CMDS=1; rm -rf build"
+        ));
+        assert!(command_opts_out("CLUD_ALLOW_ALL_CMDS=1 cargo build"));
+        assert!(!command_opts_out("cargo build"));
+        assert!(!command_opts_out("XCLUD_ALLOW_ALL_CMDS=1 x"));
+        assert!(!command_opts_out("CLUD_ALLOW_ALL_CMDS=10 x"));
+        assert!(!command_opts_out("CLUD_ALLOW_ALL_CMDS=0 x"));
     }
 
     /// Both spellings. The harness has shipped camelCase and snake_case

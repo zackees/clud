@@ -22,14 +22,15 @@ const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
     r#"project_doc_fallback_filenames=["CLAUDE.md"]"#;
 
 /// Return a launch error when `grind` cannot honor its interactive-harness
-/// contract. Claude is the only harness that supplies a native `/loop` command.
+/// contract. Claude is the only harness with the Workflow tool and native `/loop`
+/// that the `/grind` router skill needs.
 pub fn grind_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&'static str> {
     if !matches!(&args.command, Some(Command::Grind { .. })) {
         return None;
     }
     if !matches!(target.effective_harness, Backend::Claude) {
         return Some(
-            "`clud grind` requires the Claude harness, whose interactive prompt supports `/loop`; use `--harness claude`",
+            "`clud grind` requires the Claude harness, whose Workflow tool and `/loop` the `/grind` skill drives; use `--harness claude`",
         );
     }
     if args.subprocess {

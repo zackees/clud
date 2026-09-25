@@ -494,6 +494,7 @@ which test tier a change belongs in — lives in
   fail-closed path consults when the hook could not parse its input at all —
   separate from the command-text probe next to it, because raw bytes may be
   truncated mid-token, write newlines as `\n`, and name the program by path.
+- `block_bad_cmd_grind_caps.rs` - per-role shell caps for the `/grind` agents, keyed on the payload's `agent_type` and `.clud/grind/run.json`; see [grind.md](../../../docs/architecture/grind.md#role-caps).
 - `block_bad_cmd_gate.rs` - the command gate: an **allowlist** requiring every
   statement in a shell tool call to be invoked through a wrapper (`tap` by
   default), so the wrapper sees post-expansion argv instead of the hook having
@@ -669,6 +670,7 @@ Diagnostics and misc:
 - `wasm.rs` - `wasmi`-based runner that loads a WASM module, registers a
   minimal `host.log` import, invokes a named export, and propagates the integer
   exit code.
+- `claude_files.rs` - installs the bundled `grind-*` agent types and `grind` workflow into `~/.claude/{agents,workflows}/` with the skill installer's `managed-by: clud` ownership rules.
 - `civil_time.rs` - issue #1206: the crate's one civil-date algorithm.
   `civil_from_unix_secs(unix_secs: i64) -> (year, month, day, hour, minute,
   second)` is Howard Hinnant's public-domain `civil_from_days` plus a

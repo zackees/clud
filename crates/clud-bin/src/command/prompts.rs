@@ -31,8 +31,8 @@ Then proceed with the validation process:
 pub(super) const DO_GOAL_TEMPLATE: &str = "\
 /goal read {url} and implement it. Record the starting branch. If this is a meta \
 issue launched via clud do, ask whether to work on independent children in \
-parallel; /meta-issue already approves parallelism. Use /clud-meta-work before \
-delegating. Parallel work may use separate worktrees, but each child needs its \
+parallel; /meta-issue already approves parallelism. Use /grind to \
+delegate them. Parallel work may use separate worktrees, but each child needs its \
 own branch and one or more PRs. Never combine children in one PR. Only a child’s \
 final PR closes it; child PRs must not close the parent. Record child→PR links, \
 then close the parent after all children are resolved. For every PR: show \
@@ -50,11 +50,11 @@ where each is validated, tested, pushed and merged. You must wait for the GHA's 
 with the PR to go green. then merge it. please add a watch. No cheating, no files \
 left behind. Rebase to local origin when done. All work must be done for this \
 repo. use a git worktree or sibling \
-checkout only when /clud-meta-work and repository guidance allow it; work can \
+checkout only when /grind and repository guidance allow it; work can \
 only land here. when you are done do a git status and make sure \
 it's clean. make sure that the local repo is rebased to the branch we started \
 from. Find out that branch right now. If this goal contains multiple independent \
-deliverables, invoke /clud-meta-work before delegating; otherwise keep the \
+deliverables, invoke /grind to delegate them; otherwise keep the \
 normal /goal workflow.";
 
 pub(super) fn build_do_prompt(target: &str) -> String {
@@ -182,17 +182,13 @@ pub(super) fn build_up_prompt(message: Option<&str>, publish: bool) -> String {
     prompt
 }
 
-pub(super) const GRIND_LOOP_TEMPLATE: &str = "\
-/loop look at {url} and select the next issue and then perform the task. \
-agent iteration is done when (a) the task is satisfied when the issue is \
-complete via a PR that is pushed, verified and merged (b) no files are left \
-behind (c) the local repo is rebased back to origin main (d) no files left \
-behind, NO CHEATING. Bias your action to fixing recent outstanding PRs by \
-fixing them up and moving them forward as sometimes the loop iteration will \
-end before the PRs are done. Loop terminates when all issues are done.";
+/// `clud grind` hands the whole run to the `/grind` router skill, which asks
+/// for the mode (parallel, sequential, or cron via the harness's own `/loop`)
+/// and drives the bundled `grind` workflow. See `docs/architecture/grind.md`.
+pub(super) const GRIND_TEMPLATE: &str = "/grind {url}";
 
 pub(super) fn build_grind_prompt(url: &str) -> String {
-    GRIND_LOOP_TEMPLATE.replace("{url}", url)
+    GRIND_TEMPLATE.replace("{url}", url)
 }
 
 pub(super) fn build_fix_prompt(url: Option<&str>) -> String {

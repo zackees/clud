@@ -51,8 +51,36 @@ pub struct BundledSkill {
 /// another `assets/skills/<name>/SKILL.md`.
 pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
-        name: "clud-meta-work",
-        skill_md: include_str!("../assets/skills/clud-meta-work/SKILL.md"),
+        name: "grind",
+        skill_md: include_str!("../assets/skills/grind/SKILL.md"),
+    },
+    BundledSkill {
+        name: "grind-intake",
+        skill_md: include_str!("../assets/skills/grind-intake/SKILL.md"),
+    },
+    BundledSkill {
+        name: "grind-plan",
+        skill_md: include_str!("../assets/skills/grind-plan/SKILL.md"),
+    },
+    BundledSkill {
+        name: "grind-work",
+        skill_md: include_str!("../assets/skills/grind-work/SKILL.md"),
+    },
+    BundledSkill {
+        name: "grind-review",
+        skill_md: include_str!("../assets/skills/grind-review/SKILL.md"),
+    },
+    BundledSkill {
+        name: "grind-integrate",
+        skill_md: include_str!("../assets/skills/grind-integrate/SKILL.md"),
+    },
+    BundledSkill {
+        name: "grind-land",
+        skill_md: include_str!("../assets/skills/grind-land/SKILL.md"),
+    },
+    BundledSkill {
+        name: "grind-cron",
+        skill_md: include_str!("../assets/skills/grind-cron/SKILL.md"),
     },
     BundledSkill {
         name: "clud-issue",
@@ -158,6 +186,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
 /// skills forked across the old dual source trees, so their removal is what
 /// finally makes one name mean one file.
 ///
+/// `clud-meta-work` was folded into the `/grind` DAG: `/grind` routes to
+/// capped `grind-*` agents and the bundled `grind` workflow, which do what the
+/// playbook described with enforcement instead of prose.
+///
 /// This is deliberately an explicit list rather than "sweep any clud-managed
 /// skill dir not in [`BUNDLED_SKILLS`]". An orphan sweep looks tempting and is
 /// destructive: skills such as `coding-standards` and `verification-loop` were
@@ -171,6 +203,7 @@ pub const PURGED_BUNDLED_SKILLS: &[&str] = &[
     "clud-fix",
     "clud-do",
     "clud-pr-merge",
+    "clud-meta-work",
 ];
 
 /// One CLI backend that consumes `SKILL.md` files. Adding support for a

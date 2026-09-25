@@ -3199,7 +3199,8 @@ file and leave it silently unarmed.
 
 ## DD-068: `grind` delegates looping to the interactive harness
 
-**Status:** Accepted
+**Status:** Accepted. Its direct `/loop look at …` prompt is superseded by
+DD-087; the ban on clud-side looping stands.
 
 **Context:** `grind` was mistakenly implemented as an external clud loop:
 clud added a completion-marker prompt, chose a fixed iteration count, and
@@ -3967,3 +3968,37 @@ more than they cost; the pump budget is its own work item.
 cost table) on every platform. Claude `clud loop` runs `claude -p`, so it is
 subprocess and streams progress through stream-json. Codex and `grind`
 without a terminal are subprocess. Guard: `backend::launch_mode_tests`.
+
+## DD-087: `grind` is a skill DAG with capped agent roles
+
+**Status:** Accepted. Supersedes DD-068's prompt text and retires
+`/clud-meta-work`.
+
+**Context:** Two orchestrators had grown for the same job. `/clud-meta-work`
+was a portable prose playbook with nothing enforcing it. A user-local
+`meta-work` workflow was deterministic but required `act` under `bosn` for
+every goal, built in a fresh worktree per goal, and admin-merged without
+waiting for CI. That burned CPU, cold-started caches, and relied on prompts
+alone to keep workers from building.
+
+**Decision:** `clud grind` seeds `/grind`, a router skill over
+`grind-intake → plan → work → review → integrate → land` leaf skills. A
+bundled `grind` workflow runs the parallel and sequential modes; cron mode is
+the harness's `/loop` over sequential runs of one issue each. Every workflow
+agent runs as a bundled `grind-<role>` agent type whose `tools:` list is its
+hard tool cap. Shell commands are capped per role by clud's existing
+PreToolUse hook, which reads the payload's `agent_type`. One integrator
+builds at a time, at most four other agents run at once, and `act` is
+optional, offered only when Docker works and `ci.yml` exists.
+
+**Rationale:** Skills keep each step readable and invocable on its own. The
+workflow makes ordering, concurrency and fix-round limits deterministic.
+Agent types plus the hook turn "workers do not build" from a request into a
+rule. Reusing the native hook adds no per-call process: it already runs on
+every shell call. Frontmatter-scoped hooks were tried and did not fire for
+subagents.
+
+**Consequences:** `grind` stays Claude-only; Codex keeps no inline fallback,
+since the Workflow tool is the point. A new role needs its agent file, a
+`claude_files.rs` entry and a policy in `block_bad_cmd_grind_caps.rs`. The
+contract is owned by [architecture/grind.md](architecture/grind.md).

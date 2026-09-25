@@ -259,6 +259,15 @@ impl HarnessSetupAction for BundledSkillsAction {
                 let _ = writeln!(ctx.out, "\x1b[32m[clud] updated /{name}\x1b[0m");
             }
         }
+        // The /grind agents and workflow ride along with the skills that
+        // route to them; they are Claude-only file kinds.
+        if self.backend == Backend::Claude {
+            if let Some(report) = crate::claude_files::ensure_installed_at(ctx.home)? {
+                for path in &report.refreshed {
+                    let _ = writeln!(ctx.out, "\x1b[32m[clud] updated ~/.claude/{path}\x1b[0m");
+                }
+            }
+        }
         Ok(())
     }
 }
