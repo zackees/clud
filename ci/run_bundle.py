@@ -193,7 +193,7 @@ REQUIRE_PTY_ENV = "CLUD_REQUIRE_PTY"
 # Upper bound on one test of the terminal harness. Each test runs in its own
 # pseudo-terminal (see `run_terminal_harness`), so a hang costs this much and
 # names the test instead of swallowing the rest of the harness.
-TERMINAL_TEST_TIMEOUT_SECS = 180.0
+TERMINAL_TEST_TIMEOUT_SECS = 60.0
 
 
 def needs_terminal(harness: Path) -> bool:

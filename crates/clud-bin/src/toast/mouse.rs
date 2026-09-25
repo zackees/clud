@@ -48,12 +48,6 @@ impl MouseFilter {
         Self::default()
     }
 
-    /// True while a partial report is held for its continuation; the PTY pump
-    /// shortens its wait so [`Self::flush_pending`] releases it promptly.
-    pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
     /// Filter one stdin chunk. clud consumes only clicks on its own visible
     /// controls and hover reports over the usage panel; all other bytes reach
     /// the child unchanged.

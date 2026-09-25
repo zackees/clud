@@ -911,66 +911,14 @@ struct PumpOptions {
     keyboard_enhancement_tracker: Option<Arc<KeyboardEnhancementTracker>>,
 }
 
-/// Idle cadence of the pump's main loop (#691).
-///
-/// Every input source — stdin, `extra_rx`, resize, and the output reader's
-/// close notice — arrives as a [`PumpEvent`] on one channel, and
-/// `recv_timeout` wakes the moment one is sent (mpsc's receiver is
-/// condvar-backed). So this bound never delays a keystroke or a resize; it
-/// only sets how often clud re-checks what cannot send an event: the
-/// `interrupted` flag (set from a signal handler), `on_tick` hooks such as
-/// the voice-transcript drain, and child exit on Windows, where ConPTY keeps
-/// the output pipe open after the child is gone. 50 ms matches the output
-/// reader's own poll and replaces the old 5 ms stdin poll, which alone was
-/// 200 idle wakeups a second per session.
-const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// How long a partial SGR mouse report held by the toast mouse filter (for
-/// example a lone Esc keypress) waits for its continuation before it is
-/// released to the child (#1189). Only armed while such bytes are pending,
-/// so it never raises the idle wakeup rate.
-const MOUSE_PENDING_FLUSH: std::time::Duration = std::time::Duration::from_millis(5);
-
-/// One unit of work for the pump's main loop. Every producer feeds the same
-/// channel so the loop blocks on a single `recv_timeout` instead of polling
-/// each source in turn (#691).
-enum PumpEvent {
-    /// Bytes from the byte-stream stdin reader.
-    Stdin(Vec<u8>),
-    /// Bytes from `extra_rx` (the Windows `console_input` reader or the OLE
-    /// drag-drop callback).
-    Extra(Vec<u8>),
-    /// A terminal resize as `(rows, cols)`.
-    Resize(u16, u16),
-    /// The output reader saw the PTY close.
-    ReaderClosed,
-}
-
-/// Forward every message from `rx` into the pump's event channel, wrapped by
-/// `wrap`. The thread blocks in `recv` — it costs no idle wakeups — and exits
-/// once either side disconnects.
-fn spawn_pump_forwarder<T, F>(
-    name: &str,
-    rx: std::sync::mpsc::Receiver<T>,
-    tx: std::sync::mpsc::Sender<PumpEvent>,
-    wrap: F,
-) where
-    T: Send + 'static,
-    F: Fn(T) -> PumpEvent + Send + 'static,
-{
-    let spawned = std::thread::Builder::new()
-        .name(name.to_string())
-        .spawn(move || {
-            while let Ok(message) = rx.recv() {
-                if tx.send(wrap(message)).is_err() {
-                    break;
-                }
-            }
-        });
-    if let Err(err) = spawned {
-        eprintln!("[clud] warning: failed to start pty pump forwarder {name}: {err}");
-    }
-}
+/// Idle poll cadence for the main loop's stdin wait when nothing is
+/// pending. `stdin_rx.recv_timeout` wakes immediately once a chunk is
+/// sent (mpsc's receiver is condvar-backed) — this bound only governs
+/// how often we re-check resize / hooks / exit / interrupt during
+/// genuine silence. It replaces the old design where stdin forwarding
+/// shared the same 10ms wait as the (now separate-thread) output
+/// reader — see issue #538.
+const STDIN_IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Blocking read timeout used by the dedicated output-reader thread
 /// (issue #538). This thread never gates stdin forwarding — it feeds a
@@ -1034,11 +982,10 @@ where
 ///   chunks into O(1) syscalls.
 /// * The **main thread** (this function body) only handles resize,
 ///   `extra_rx`, stdin forwarding, hook ticks, and exit/interrupt
-///   detection. Every input source feeds one [`PumpEvent`] channel and
-///   the thread blocks on `event_rx.recv_timeout` until the next event
-///   or the [`PUMP_TICK`] deadline (#691), so keystroke forwarding wakes
-///   as soon as a chunk is queued and an idle session wakes 20 times a
-///   second instead of 200.
+///   detection. It blocks on `stdin_rx.recv_timeout(STDIN_IDLE_POLL)`
+///   instead of the old output-read timeout, so keystroke forwarding
+///   wakes as soon as a chunk is queued rather than waiting out a
+///   fixed poll window.
 ///
 /// All three "threads" share `process: &NativePtyProcess` (its
 /// handles/reader state are internally `Mutex`-guarded and already
@@ -1068,7 +1015,7 @@ where
 {
     use std::sync::mpsc;
 
-    let (event_tx, event_rx) = mpsc::channel::<PumpEvent>();
+    let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>();
     let interactive_real_stdin = stdin_source_is_real_stdin::<R>() && terminals_are_interactive();
     let normalize_console_stdin =
         should_normalize_interactive_console_stdin(interactive_real_stdin);
@@ -1096,7 +1043,6 @@ where
     // wedge shutdown when the child exits — the process is terminating
     // anyway. See Step 12.
     if spawn_byte_stream_stdin_reader {
-        let stdin_tx = event_tx.clone();
         std::thread::spawn(move || {
             let mut reader = stdin_source;
             let mut buf = [0u8; 4096];
@@ -1108,7 +1054,7 @@ where
                         if normalize_console_stdin {
                             normalize_interactive_console_stdin_chunk(&mut chunk);
                         }
-                        if stdin_tx.send(PumpEvent::Stdin(chunk)).is_err() {
+                        if stdin_tx.send(chunk).is_err() {
                             break; // Main thread dropped the receiver → exit.
                         }
                     }
@@ -1117,25 +1063,12 @@ where
             }
         });
     } else {
-        // `console_input` is the sole consumer via `extra_rx`; nothing
-        // reads the byte-stream source.
+        // `console_input` is the sole consumer via `extra_rx`. Drop the
+        // unused stdin source and channel sender so the corresponding
+        // `stdin_rx.try_recv()` in the main loop returns `Empty`
+        // immediately (no thread will ever send on it).
         drop(stdin_source);
-    }
-    // #691: resize and `extra_rx` join the same event channel, so the main
-    // loop wakes on whichever arrives first instead of polling each.
-    spawn_pump_forwarder(
-        "clud-pty-resize",
-        resize_rx,
-        event_tx.clone(),
-        |(rows, cols)| PumpEvent::Resize(rows, cols),
-    );
-    if let Some(extra_rx) = extra_rx {
-        spawn_pump_forwarder(
-            "clud-pty-extra-input",
-            extra_rx,
-            event_tx.clone(),
-            PumpEvent::Extra,
-        );
+        drop(stdin_tx);
     }
 
     let mut observer = F3Observer::new();
@@ -1200,7 +1133,6 @@ where
         // stdout writer is silent — we own forwarding now.
         let normalize_bare_lf = options.normalize_bare_lf;
         let keyboard_enhancement_tracker = options.keyboard_enhancement_tracker.clone();
-        let closed_tx = event_tx.clone();
         scope.spawn(move || {
             let mut osc_strip = OscTitleStripper::new();
             // Codex-only (#1181): rewrites bare LF to CRLF after the OSC
@@ -1251,63 +1183,51 @@ where
                     Ok(None) => {}
                     Err(_) => {
                         reader_closed.store(true, Ordering::Release);
-                        // Wake the main loop now rather than at its next tick.
-                        let _ = closed_tx.send(PumpEvent::ReaderClosed);
                         break;
                     }
                 }
             }
         });
 
-        // The main thread holds `event_tx` for the whole loop, so the channel
-        // never disconnects: after stdin EOF `recv_timeout` still waits out
-        // its timeout instead of returning at once and spinning a core.
-        let _event_channel_open = &event_tx;
-        let mut next_tick = std::time::Instant::now() + PUMP_TICK;
         let exit_code = loop {
-            let until_tick = next_tick.saturating_duration_since(std::time::Instant::now());
-            let wait = if toast_input.is_some() && mouse.has_pending() {
-                until_tick.min(MOUSE_PENDING_FLUSH)
-            } else {
-                until_tick
-            };
-            // One blocking wait covers every input source (#691). Events
-            // are handled in arrival order; a keystroke, resize, or
-            // drag-drop wakes the loop immediately.
-            match event_rx.recv_timeout(wait) {
-                Ok(PumpEvent::Resize(rows, cols)) => {
-                    let pty_rows = options
-                        .graphics
-                        .as_ref()
-                        .map(|config| {
-                            redraw_graphics_header_for_resize(config, rows, cols, options.verbose)
-                        })
-                        .unwrap_or(rows);
-                    if let Err(err) = resize_pty(process, pty_rows, cols) {
-                        eprintln!("[clud] warning: failed to resize pty: {}", err);
-                    }
-                    if toast_input.is_some() {
-                        let _ = resize_out.send(OutputMsg::Resize {
-                            rows: pty_rows,
-                            cols,
-                        });
-                    }
+            // Drain resize events — always before stdin so a
+            // late-arriving resize doesn't wait on a chunk of typing
+            // to unblock the loop.
+            while let Ok((rows, cols)) = resize_rx.try_recv() {
+                let pty_rows = options
+                    .graphics
+                    .as_ref()
+                    .map(|config| {
+                        redraw_graphics_header_for_resize(config, rows, cols, options.verbose)
+                    })
+                    .unwrap_or(rows);
+                if let Err(err) = resize_pty(process, pty_rows, cols) {
+                    eprintln!("[clud] warning: failed to resize pty: {}", err);
                 }
-                // A side-channel chunk (Windows `console_input` keyboard or
-                // the drag-drop OLE callback) — pre-normalized bytes that
-                // bypass the bracketed-paste detector and go straight to
-                // the PTY.
-                //
-                // The 0x03 byte check is required on Windows: when the
-                // `console_input` reader (issue #141 / PR #144) is active,
-                // it turns off `ENABLE_PROCESSED_INPUT` so the OS no
-                // longer fires a `CTRL_C_EVENT` for Ctrl-C. The press
-                // arrives instead as a KEY_EVENT whose translated 0x03
-                // byte is delivered via this channel — without the check,
-                // clud forwards it to the child but never observes the
-                // interrupt itself.
-                Ok(PumpEvent::Extra(chunk)) => {
-                    // Unlike stdin, extra_rx is by construction
+                if toast_input.is_some() {
+                    let _ = resize_out.send(OutputMsg::Resize {
+                        rows: pty_rows,
+                        cols,
+                    });
+                }
+            }
+
+            // Drain one chunk from the side channel (drag-drop OLE
+            // callback) — these are pre-normalized path bytes that
+            // should bypass the bracketed-paste detector and go
+            // straight to the PTY.
+            //
+            // The 0x03 byte check is required on Windows: when the
+            // `console_input` reader (issue #141 / PR #144) is active,
+            // it turns off `ENABLE_PROCESSED_INPUT` so the OS no
+            // longer fires a `CTRL_C_EVENT` for Ctrl-C. The press
+            // arrives instead as a KEY_EVENT whose translated 0x03
+            // byte is delivered via this channel — without the check,
+            // clud forwards it to the child but never observes the
+            // interrupt itself.
+            if let Some(ref rx) = extra_rx {
+                if let Ok(chunk) = rx.try_recv() {
+                    // Unlike stdin_rx, extra_rx is by construction
                     // always user-driven (keyboard via
                     // console_input_rx on Windows, or OLE drag-drop
                     // callback) — never a piped test fixture — so we
@@ -1327,7 +1247,16 @@ where
                         break interrupt_pty_process(process, options.verbose);
                     }
                 }
-                Ok(PumpEvent::Stdin(chunk)) => {
+            }
+
+            // Block on stdin with a short idle timeout instead of the
+            // old per-iteration output-read wait. `recv_timeout` wakes
+            // as soon as a chunk is sent (mpsc's internal condvar), so
+            // a keystroke arriving mid-wait is forwarded immediately
+            // rather than after the wait window elapses — this is
+            // what removes the ~10ms idle floor (issue #538).
+            match stdin_rx.recv_timeout(STDIN_IDLE_POLL) {
+                Ok(chunk) => {
                     let requested_interrupt =
                         interrupt_on_ctrl_c_byte && stdin_chunk_requests_interrupt(&chunk);
                     let chunk = if interactive_real_stdin {
@@ -1410,9 +1339,6 @@ where
                         break interrupt_pty_process(process, options.verbose);
                     }
                 }
-                // The reader already set `reader_closed`; the exit check
-                // below acts on it.
-                Ok(PumpEvent::ReaderClosed) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     // #1189: release a partial report the mouse filter held
                     // (e.g. a lone Esc keypress) once input goes idle.
@@ -1424,13 +1350,17 @@ where
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // Unreachable while `_event_channel_open` holds a
-                    // sender; sleep rather than spin if that ever changes.
-                    std::thread::sleep(PUMP_TICK);
+                    // No stdin producer (EOF already hit, or the
+                    // byte-stream reader was never spawned because
+                    // `console_input`/OLE `extra_rx` is the sole input
+                    // source on this platform config — see
+                    // `should_spawn_byte_stream_stdin_reader`).
+                    // `recv_timeout` returns instantly on a
+                    // disconnected channel instead of honoring the
+                    // timeout, so without this sleep the loop would
+                    // busy-spin a full CPU core instead of idling.
+                    std::thread::sleep(STDIN_IDLE_POLL);
                 }
-            }
-            if std::time::Instant::now() >= next_tick {
-                next_tick = std::time::Instant::now() + PUMP_TICK;
             }
 
             {
