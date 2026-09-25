@@ -28,7 +28,7 @@ if [ ! -x "$BIN" ]; then
 fi
 
 mkdir -p "$WORK"
-python3 "$(dirname "$0")/generate_cases.py" --out-dir "$CASE_DIR" --cwd "$WORK"
+python3 "$(dirname "$0")/generate_cases.py" --out-dir "$CASE_DIR" --cwd "$WORK" # runs in the Debian image, no clud shim; python-name-lint: allow
 
 deny_total=0
 deny_failed=0

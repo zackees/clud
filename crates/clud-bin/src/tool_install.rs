@@ -307,7 +307,7 @@ mod tests {
         let target = target_path_at(tmp.path(), tool.rel_path);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         // Note: no `managed-by: clud` marker — this is a user-authored file.
-        let user_body = "#!/usr/bin/env python3\nprint('mine')\n";
+        let user_body = "#!/usr/bin/env python\nprint('mine')\n";
         fs::write(&target, user_body).unwrap();
 
         assert!(matches!(classify(&target, tool.body), Existing::UserEdited));
@@ -402,7 +402,7 @@ mod tests {
         };
         let target = target_path_at(tmp.path(), retired.rel_path);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
-        let body = "#!/usr/bin/env python3\nprint('mine')\n";
+        let body = "#!/usr/bin/env python\nprint('mine')\n";
         fs::write(&target, body).unwrap();
 
         let report = purge_retired_tools_at(tmp.path(), &[retired]);

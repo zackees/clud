@@ -140,6 +140,17 @@ After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, 
 
 The only narrowly permitted Rust exception is a test that must use raw `std::process::Command` because `running_process::NativeProcess` would change the behavior under test. Such a test requires a documented, filename-specific exemption in `ci/banned_imports.py`; do not add an exemption for ordinary tests or production code.
 
+### Interpreter name: `python`, never the versioned name
+
+Write `python` in hooks, scripts, shebangs, tests and docs. clud's shim
+installs both names and resolves them to one interpreter, but only `python`
+exists on every platform: stock Windows has no real versioned binary.
+`ci/banned_python3.py` fails `bash lint` on the versioned name and prints
+why. The shim modules are exempt. For a name outside clud's control (a
+distro package, a container image, the pre-clud `install`), mark the line
+`python-name-lint: allow`, or put `python-name-lint: allow-next-line` above
+a line that ends in a `\` continuation.
+
 ### Cross-cutting registries — extend in all required places
 
 Several features have a "single source of truth" registry that must be updated alongside the code change. Forgetting any of these causes silent misbehavior (passthrough instead of dispatch) or surprising failures (banned-import lint, missing bundled file). The full list:

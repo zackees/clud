@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Codex PreToolUse hook: route Rust toolchain calls through soldr.
 
 Codex sibling of `.claude/hooks/check-soldr.py`. Same intent and command

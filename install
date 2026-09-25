@@ -133,7 +133,8 @@ unzip_to_tmp() {
         "$target_dir/python" -c \
             "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
             "$1" "$tmp"
-    elif command -v python3 >/dev/null 2>&1; then
+    elif command -v python3 >/dev/null 2>&1; then # runs before clud (and its shim) exists; python-name-lint: allow
+        # Pre-clud fallback: no shim yet. python-name-lint: allow-next-line
         python3 -c \
             "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
             "$1" "$tmp"

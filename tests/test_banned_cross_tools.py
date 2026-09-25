@@ -155,6 +155,7 @@ REJECTED: list[tuple[str, str, str]] = [
     ),
     (
         "versioned Python module ziglang invocation",
+        # Fixture string. python-name-lint: allow-next-line
         'subprocess.run(["python3.13", "-m", "ziglang", "c++"])',
         ".py",
     ),

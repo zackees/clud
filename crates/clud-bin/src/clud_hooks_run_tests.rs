@@ -25,15 +25,13 @@ fn python_hook(dir: &Path, name: &str, body: &str) -> String {
 
 /// Python rather than a `.cmd`/`.sh` pair: divergent scripts would make a
 /// platform-specific failure look like a logic bug. Every CI exec lane
-/// installs Python, but the executable's name differs, so probe rather than
-/// assume.
+/// installs Python as `python`, the one name clud uses everywhere (see
+/// `ci/banned_python3.py`).
 fn python_exe() -> String {
-    for candidate in ["python3", "python"] {
-        if which::which(candidate).is_ok() {
-            return candidate.to_string();
-        }
+    if which::which("python").is_ok() {
+        return "python".to_string();
     }
-    panic!("no python3/python on PATH; the hook-execution tests need an interpreter");
+    panic!("no `python` on PATH; the hook-execution tests need an interpreter");
 }
 
 /// Forward slashes throughout: Python accepts them on every platform, and
