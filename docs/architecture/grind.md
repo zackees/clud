@@ -128,6 +128,16 @@ included.
 Other agents and the primary session are unaffected. The tests next to it
 own the exact allowlists.
 
+## Tests
+
+The workflow, the agent types and the caps run end to end on the real Claude
+Code in `tests/harness/test_grind.py`
+([testing-tiers.md](testing-tiers.md)). The mock backend plays each role, and
+the suite checks the ordering, concurrency, fix-round and cap behavior above.
+The router's questions are model behavior, which a scripted model can't
+exercise, so the suite starts `grind-run` directly and pins the router text
+separately.
+
 ## Boundary with `clud loop`
 
 `clud loop` remains a separate command with its own external runner,

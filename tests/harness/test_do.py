@@ -64,6 +64,8 @@ def test_h1_default_branch_single_issue(harness: Harness) -> None:
     _rendered(text)
     assert "Verdict: `default`" in text
     assert "Read the issue and implement it" in text
+    assert "## Finish (always, as the very last step)" in text
+    assert "git pull --ff-only origin main" in text
 
 
 def test_h2_open_pr_branch_is_in_progress(harness: Harness) -> None:
@@ -123,6 +125,7 @@ def test_h8_free_form_goal(harness: Harness) -> None:
     _rendered(text)
     assert "The goal: refactor the launcher" in text
     assert "validated, tested, pushed and merged" in text
+    assert "## Finish (always, as the very last step)" in text
 
 
 def test_h9_renders_with_permission_prompts_on(harness: Harness) -> None:

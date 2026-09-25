@@ -18,7 +18,8 @@ Issue one `/loop` whose body is:
 > Take the next open goal from <source> that has no open linked PR. If none
 > remain, end the loop. Otherwise start the Workflow named `grind-run` with
 > `mode: "sequential"`, that one goal, and these recorded answers: <models,
-> ci>. When it returns, rebase the checkout onto `origin/<main>` and confirm
+> ci>. When it returns, do `/grind`'s Finish step: no files left behind, and
+> the checkout rebased onto `origin/<main>`; confirm
 > `git status` is clean.
 
 `<source>` is what `/grind-intake` resolved: the meta issue's children, the
