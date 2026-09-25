@@ -740,6 +740,111 @@ fn set_stdin_raw_if_tty() {
 #[cfg(not(unix))]
 fn set_stdin_raw_if_tty() {}
 
+/// Non-blocking console input for `read_stdin_timed` on Windows (#1310).
+///
+/// Waits on the console input handle and drains it with `ReadConsoleInputW`,
+/// which returns only the records already queued, so nothing ever blocks. Key
+/// -down characters (UTF-16, honoring the repeat count) become UTF-8 bytes;
+/// ConPTY delivers the bytes written to the pseudo-terminal this way.
+#[cfg(windows)]
+mod windows_console {
+    use std::ffi::c_void;
+    use std::time::{Duration, Instant};
+
+    type Handle = *mut c_void;
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const WAIT_OBJECT_0: u32 = 0;
+    const KEY_EVENT: u16 = 0x0001;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct KeyEventRecord {
+        key_down: i32,
+        repeat_count: u16,
+        virtual_key_code: u16,
+        virtual_scan_code: u16,
+        unicode_char: u16,
+        control_key_state: u32,
+    }
+
+    /// `INPUT_RECORD`: a `WORD` tag, padding, then a 16-byte event union whose
+    /// key variant is the only one read here.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct InputRecord {
+        event_type: u16,
+        key_event: KeyEventRecord,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(std_handle: u32) -> Handle;
+        fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
+        fn WaitForSingleObject(handle: Handle, millis: u32) -> u32;
+        fn GetNumberOfConsoleInputEvents(handle: Handle, count: *mut u32) -> i32;
+        fn ReadConsoleInputW(
+            handle: Handle,
+            buffer: *mut InputRecord,
+            length: u32,
+            read: *mut u32,
+        ) -> i32;
+    }
+
+    /// `None` when stdin is not a console (the caller keeps its pipe reader);
+    /// otherwise whatever arrived before the deadline, possibly empty.
+    pub(super) fn read_timed(timeout_ms: u64) -> Option<Vec<u8>> {
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        let mut mode = 0u32;
+        if handle.is_null() || unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+            return None;
+        }
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut units: Vec<u16> = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let wait_ms = remaining.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+            if unsafe { WaitForSingleObject(handle, wait_ms) } != WAIT_OBJECT_0 {
+                continue;
+            }
+            let mut pending = 0u32;
+            if unsafe { GetNumberOfConsoleInputEvents(handle, &mut pending) } == 0 || pending == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            let mut records = vec![
+                InputRecord {
+                    event_type: 0,
+                    key_event: KeyEventRecord {
+                        key_down: 0,
+                        repeat_count: 0,
+                        virtual_key_code: 0,
+                        virtual_scan_code: 0,
+                        unicode_char: 0,
+                        control_key_state: 0,
+                    },
+                };
+                pending as usize
+            ];
+            let mut read = 0u32;
+            if unsafe { ReadConsoleInputW(handle, records.as_mut_ptr(), pending, &mut read) } == 0 {
+                break;
+            }
+            for record in &records[..read as usize] {
+                let key = record.key_event;
+                if record.event_type == KEY_EVENT && key.key_down != 0 && key.unicode_char != 0 {
+                    for _ in 0..key.repeat_count.max(1) {
+                        units.push(key.unicode_char);
+                    }
+                }
+            }
+        }
+        Some(String::from_utf16_lossy(&units).into_bytes())
+    }
+}
+
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
 fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
@@ -749,6 +854,15 @@ fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
     // newline-terminated bytes (like the F3 voice-mode transcript) forever
     // and they never reach the test's stdin capture.
     set_stdin_raw_if_tty();
+
+    // #1310: on a Windows console (ConPTY), a thread parked in a blocking
+    // console read kept the child from finishing: the report write and exit
+    // stalled behind it, so every PTY test that waits for this child to exit
+    // hung. Poll the console instead, so no read is ever left pending.
+    #[cfg(windows)]
+    if let Some(bytes) = windows_console::read_timed(timeout_ms) {
+        return (!bytes.is_empty()).then_some(bytes);
+    }
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
