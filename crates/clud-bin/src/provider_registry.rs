@@ -1,8 +1,8 @@
 //! Registry of "Anthropic-compatible API-key providers": providers that speak
 //! the Anthropic Messages API directly rather than needing a translation
-//! bridge (as Codex does). Today this is DeepSeek only; Kimi lands in Phase 3
-//! of #937 as a second row, per the design in #936's "Generalization"
-//! section.
+//! bridge (as Codex does): DeepSeek, Kimi, and OpenRouter. Each row drives
+//! the direct child-env overlay and, through `AnthropicCompatRoute`, the
+//! unified gateway's route list (#937, design in #936's "Generalization").
 //!
 //! This is a pure data hoist -- see #936 for why a `&'static` descriptor
 //! table plus guardrail tests was chosen over a `dyn Provider` trait object:
@@ -143,9 +143,7 @@ pub fn descriptor_for(provider: ModelProvider) -> Option<&'static AnthropicCompa
 
 /// A resolved unified-gateway route for one Anthropic-compatible provider:
 /// its base URL and the API key retrieved from the vault at launch time.
-/// Defined alongside the descriptor (rather than in `codex_bridge.rs`) so
-/// Phase 4's gateway-refactor lane and out-of-file-consumer lane can each
-/// depend on this type without depending on each other's landing order.
+/// `codex_bridge::UnifiedGatewayConfig` holds one per keyed provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnthropicCompatRoute {
     pub provider: ModelProvider,

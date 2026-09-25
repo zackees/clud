@@ -21,23 +21,31 @@ routes require that header. The gateway token is never serialized into a
 Claude credentials remain owned by Claude Code: clud preserves its incoming
 `Authorization`/`x-api-key` headers only on the native Claude route. The
 Codex route constructs its own OpenAI request through the existing translator;
-DeepSeek receives only the key from clud's native credential vault. Missing
+each Anthropic-compatible route (DeepSeek, Kimi, OpenRouter) receives only its
+own key from clud's native credential vault. Missing
 optional credentials omit only their discovery rows and produce one sanitized,
 actionable startup notice; native Claude remains usable.
 
 ## Routing
 
 `GET /v1/models` returns catalog rows from `provider_catalog::MODELS` for
-available Codex and DeepSeek routes. Synthetic IDs are in the reserved
+available Codex, DeepSeek, Kimi, and OpenRouter routes. Synthetic IDs are in the reserved
 `clud-claude-*` namespace. A selected synthetic ID is resolved before legacy
 Codex compatibility parsing: Codex IDs are rewritten to their reviewed wire
-model and translated to Responses; DeepSeek IDs are rewritten and proxied to
-its Anthropic-compatible endpoint. A persisted or continued session can also
+model and translated to Responses; DeepSeek, Kimi, and OpenRouter IDs are
+rewritten and proxied to that provider's Anthropic-compatible endpoint. A persisted or continued session can also
 name a known provider by wire ID or CLI alias (`gpt-5.6-terra`,
-`deepseek-v4-pro[1m]`); those resolve through the shared catalog to their own
+`deepseek-v4-pro[1m]`, `kimi-k3[1m]`); those resolve through the shared catalog to their own
 provider instead of leaking to Anthropic. Unknown reserved IDs fail locally
 rather than falling through to a paid provider. Ordinary Claude IDs are
 proxied unchanged to Anthropic.
+
+The Anthropic-compatible routes are one list, not per-provider fields:
+`UnifiedGatewayConfig` holds one `AnthropicCompatRoute` per
+`provider_registry` descriptor whose key the launch holds, and a single
+`provider_available` predicate decides discovery, the refusal ID list, and
+dispatch. A new Anthropic-compatible provider therefore needs a descriptor
+row and a catalog row, not new gateway fields (#937 Phase 4).
 
 Each Claude session/subagent identity also owns an active route epoch. Crossing
 a provider boundary clears Codex's provider-private canonical Responses items.
@@ -48,7 +56,8 @@ providers. Switching among Codex models can retain the current Codex epoch.
 `/clear`, eviction, and gateway shutdown remove both transcript and route state.
 
 `POST /v1/messages/count_tokens` is proxied for ordinary native Claude model
-IDs. Synthetic Codex and DeepSeek routes return an explicit local 404 because
+IDs. Synthetic Codex, DeepSeek, Kimi, and OpenRouter routes return an explicit
+local 404 because
 their upstream token-count contracts are not Anthropic-compatible; Claude Code
 falls back to its documented local estimation. Streaming message responses
 remain progressive; the proxy never buffers a complete upstream stream before
@@ -93,6 +102,7 @@ provider's catalog default after the final request value exists.
 | Native Claude | Preserve the request body byte-for-byte, including all of `thinking` and `output_config`, and forward the required caller-owned Anthropic headers. |
 | Codex Sol/Terra/Luna | Resolve the synthetic ID first, then use `codex_translate::effort_for`: `<model>@effort` > `output_config.effort` > stated thinking budget > catalog default. Unsupported stated values fail locally with zero upstream calls. |
 | DeepSeek Pro/Flash | Rewrite only the model ID and preserve `thinking` plus the complete `output_config`; do not apply Codex validation. DeepSeek maps `low`/`medium` to effective `high`, `high` to `high`, and `xhigh`/`max` to `max`. |
+| Kimi K3 | Same as DeepSeek: rewrite only the model ID to `kimi-k3[1m]` and pass `output_config` through; Moonshot owns how it calibrates the value. The catalog lists `low`, `high`, and `max`. |
 
 The same level name is calibrated differently by each model. Diagnostics may
 name the public provider/effort, but never credentials, prompts, reasoning
@@ -127,6 +137,10 @@ clean-looking end of stream. See DD-028's amendment and DD-079.
 | A mid-stream stall is reported in-band, never closed like a clean end of stream | `a_stalled_upstream_stream_reports_an_in_band_error` |
 | The upstream budget is byte-idle: a long turn that keeps streaming is not cut off | `a_long_but_continuously_streaming_turn_is_not_cut_off` |
 | Ambient effort preservation and no global default injection | `unified_overlay_preserves_claude_credentials_and_enables_discovery`, `unified_overlay_does_not_inject_a_global_effort_default` |
+| Kimi is advertised only with its key, routes `clud-claude-kimi-k3`/`kimi-k3`/`kimi-k3[1m]` with only its key, and token counts 404 locally | `unified_kimi_route_is_key_gated_and_credential_isolated` |
+| Claude -> Codex -> DeepSeek -> Kimi -> Claude -> Codex keeps Codex private items out of other epochs | `unified_route_epoch_cycle_includes_kimi` |
+| Routes come from the registry; a missing key drops only that route | `unified_routes_come_from_the_registry_and_drop_on_a_missing_key` |
+| Through the binary: a vault-held Kimi key advertises and serves the Kimi row, and logout removes it | `tests/integration/test_901_acceptance_matrix.py::test_kimi_joins_the_unified_gateway_from_its_own_vault_record` |
 | Missing optional credentials emit one sanitized, actionable notice | `unified_missing_provider_notices_are_sanitized_and_actionable` |
 | Installed-client `--effort low|high|xhigh|max` request shape | `tests/test_real_claude_unified_effort.py` (opt in with `CLUD_REAL_CLAUDE_TESTS=1`) |
 
@@ -155,7 +169,7 @@ copies, refreshes, or deletes Claude credentials.
 ## Validation boundary
 
 Focused protocol tests select every advertised synthetic ID against separate
-Claude, Codex, and DeepSeek canary upstreams, assert the exact wire model and
+Claude, Codex, DeepSeek, and Kimi canary upstreams, assert the exact wire model and
 credential boundary, exercise native token counting, reject unknown reserved
 IDs before any upstream request, and switch Claude -> Codex -> DeepSeek ->
 Claude in one conversation before verifying Codex is freshly seeded.

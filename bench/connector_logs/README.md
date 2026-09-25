@@ -1,7 +1,7 @@
 # Connector log inventory
 
 This read-only diagnostic identifies Claude transcripts and clud bridge logs
-that can be attributed to Codex or DeepSeek without printing conversation
+that can be attributed to Codex, DeepSeek, or Kimi without printing conversation
 content or raw provider error messages.
 
 From the repository root:
@@ -13,7 +13,7 @@ python -m bench.connector_logs.inventory --since-days 0 --show-unusable
 ```
 
 Claude transcripts are usable when their structured assistant records name a
-non-synthetic Codex or DeepSeek model and their `cwd` matches the requested
+non-synthetic Codex, DeepSeek, or Kimi model and their `cwd` matches the requested
 project. A `bridge.jsonl` file is usable for connector analysis only when its
 `<pid>__<epoch>` start time correlates with one of those transcripts inside the
 configured `--window-seconds` tolerance. Multiple transcript files in the same

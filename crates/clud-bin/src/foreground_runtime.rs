@@ -325,10 +325,30 @@ impl ForegroundRuntime {
                         store.get().ok().flatten()
                     })
                 });
+            // Kimi, like OpenRouter, has its own vault record. Integration
+            // runs probe it only when a Kimi fake exists, so a stored key can
+            // never reach the real Moonshot endpoint from a test.
+            let kimi_fake = integration_has_kimi(&integration_upstreams);
+            let kimi_key = if integration_upstreams.is_some() && (fixture_keys || !kimi_fake) {
+                None
+            } else {
+                crate::provider_auth::NativeSecretStore::new_for(
+                    crate::provider_auth::KIMI_VAULT_SERVICE,
+                    crate::provider_auth::KIMI_VAULT_ACCOUNT,
+                )
+                .ok()
+                .and_then(|store| {
+                    use crate::provider_auth::SecretStore as _;
+                    store.get().ok().flatten()
+                })
+            };
             let codex_available = integration_upstreams.is_some()
                 || crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
-            let mut startup_notices =
-                unified_startup_notices(codex_available, deepseek_key.is_some());
+            let mut startup_notices = unified_startup_notices(
+                codex_available,
+                deepseek_key.is_some(),
+                kimi_key.is_some() || (fixture_keys && kimi_fake),
+            );
             if openrouter_key.is_none() {
                 startup_notices.push(
                     "[clud] unified: OpenRouter is not configured; \
@@ -353,6 +373,7 @@ impl ForegroundRuntime {
             }
             let unified = UnifiedGatewayConfig::new(deepseek_key, codex_available)
                 .with_openrouter(openrouter_key)
+                .with_route(crate::backend::ModelProvider::Kimi, kimi_key)
                 .with_failover(failover);
             let unified = integration_upstreams
                 .as_ref()
@@ -861,7 +882,19 @@ fn is_unified(plan: &LaunchPlan) -> bool {
     plan.routing_mode == RoutingMode::Unified && plan.effective_harness() == Backend::Claude
 }
 
-fn unified_startup_notices(codex_available: bool, deepseek_available: bool) -> Vec<String> {
+fn integration_has_kimi(
+    upstreams: &Option<crate::codex_bridge::UnifiedIntegrationUpstreams>,
+) -> bool {
+    upstreams
+        .as_ref()
+        .is_some_and(crate::codex_bridge::UnifiedIntegrationUpstreams::has_kimi)
+}
+
+fn unified_startup_notices(
+    codex_available: bool,
+    deepseek_available: bool,
+    kimi_available: bool,
+) -> Vec<String> {
     let mut notices = Vec::new();
     if !codex_available {
         notices.push(
@@ -872,6 +905,12 @@ fn unified_startup_notices(codex_available: bool, deepseek_available: bool) -> V
     if !deepseek_available {
         notices.push(
             "[clud] unified gateway: DeepSeek models unavailable; run `clud auth login deepseek`"
+                .to_string(),
+        );
+    }
+    if !kimi_available {
+        notices.push(
+            "[clud] unified gateway: Kimi models unavailable; run `clud auth login kimi`"
                 .to_string(),
         );
     }
@@ -2048,12 +2087,18 @@ mod tests {
 
     #[test]
     fn unified_missing_provider_notices_are_sanitized_and_actionable() {
-        let notices = unified_startup_notices(false, false);
-        assert_eq!(notices.len(), 2);
+        let notices = unified_startup_notices(false, false, false);
+        assert_eq!(notices.len(), 3);
         assert!(notices[0].contains("clud auth login codex"));
         assert!(notices[1].contains("clud auth login deepseek"));
+        assert!(notices[2].contains("clud auth login kimi"));
         assert!(!notices.join(" ").to_ascii_lowercase().contains("secret"));
-        assert!(unified_startup_notices(true, true).is_empty());
+        assert!(unified_startup_notices(true, true, true).is_empty());
+        // One missing provider never takes the others' notices with it.
+        assert_eq!(
+            unified_startup_notices(true, true, false),
+            vec!["[clud] unified gateway: Kimi models unavailable; run `clud auth login kimi`"]
+        );
     }
 
     fn deepseek_plan_with(model: &str) -> LaunchPlan {

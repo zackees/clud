@@ -20,6 +20,7 @@ from typing import Any
 CONNECTOR_MODEL_PREFIXES = {
     "codex": ("gpt-", "codex"),
     "deepseek": ("deepseek-",),
+    "kimi": ("kimi-",),
 }
 
 # These labels are control-flow metadata, not provider-authored prose. Keep the

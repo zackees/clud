@@ -373,6 +373,24 @@ A timeout, connection failure, or other inconclusive status prints one warning
 and continues, so an offline machine can still launch. A malformed stored key
 is detected locally and is never sent over the network.
 
+Native-vault failure modes are the same for every provider and never fall
+back to anything weaker. A locked or absent OS vault (for example, no Secret
+Service on a headless Linux box) reports "the native credential vault is
+unavailable; retry after unlocking it" and stops a live launch; clud never
+stores the key in plaintext and never reads an ambient `MOONSHOT_API_KEY`,
+`DEEPSEEK_API_KEY`, or `ANTHROPIC_*` value in its place. In `--unified`, an
+unreadable record only omits that provider's rows and prints its
+`clud auth login <provider>` notice. Each provider's record is separate, so
+logging out of one never touches another.
+
+### Kimi: known provider-side limitation
+
+Kimi's Anthropic-compatible endpoint does not support Claude Code's
+WebFetch tool; a WebFetch call in a `--kimi` session fails upstream. This is
+a Moonshot limitation, and clud does not emulate or repair it. `/status` in
+the child should report the Moonshot endpoint and `kimi-k3[1m]`; the opt-in
+smoke procedure is [`bench/kimi_smoke.md`](../../bench/kimi_smoke.md).
+
 ## Gateway discovery adds picker rows, it does not constrain them
 
 Claude Code's `/model` picker belongs to the harness. Gateway discovery is one

@@ -4187,3 +4187,50 @@ destination window). Without a terminal, `-c` keeps Claude's `--continue`.
   locked, written atomically, owner-only, and kept out of logs and `--dry-run`.
 - Native Codex-harness history is out of scope.
 
+
+## DD-093: Anthropic-compatible providers are descriptor rows, and the gateway routes them as one list
+
+**Status:** Accepted
+
+**Context:** #936 and #937. DeepSeek arrived first and was wired by hand:
+its own vault identifiers, overlay function, preflight, settings strings, and
+two gateway fields (`deepseek_api_key`, `deepseek_base_url`) with matching
+`match` arms. OpenRouter copied the pattern. Adding Kimi that way would have
+meant a third copy at every site, and the silent fallbacks (`_ =>` arms,
+hand-written provider arrays) meant a missed site would route a request to the
+wrong provider rather than fail to compile.
+
+**Decision:** An Anthropic-compatible provider is one `&'static`
+`AnthropicCompatProvider` row in `provider_registry::ANTHROPIC_COMPAT_PROVIDERS`
+plus its `provider_catalog::MODELS` rows. Shared code (vault access, preflight,
+child-env overlay, settings, TUI, auth) is parameterized by the row. The
+unified gateway holds one `AnthropicCompatRoute { provider, base_url, api_key }`
+per provider whose key the launch holds, and a single `provider_available`
+predicate drives discovery, the refusal ID list, and dispatch. Kimi is routed
+directly to Moonshot's Anthropic-compatible endpoint, never through a
+translation bridge.
+
+**Rationale:**
+- A data table beats a `dyn Provider` trait: every provider is known at
+  compile time, the rows are plain data a test can iterate, and it matches the
+  repository's existing registries (`CatalogModel`, `BUNDLED_SKILLS`,
+  `BUNDLED_TOOLS`). A trait would add dynamic dispatch and hide the
+  differences, which are all data, behind methods.
+- Guardrail tests iterating `ModelProvider::ALL` turn a forgotten site into a
+  test failure instead of a silent fallback.
+- Direct routing keeps Kimi's credential on one hop: clud's vault to the
+  gateway (or child env) to Moonshot. A translation bridge would add a
+  second process holding the key and a second protocol to keep faithful, for
+  an endpoint that already speaks Anthropic Messages.
+- Vault identifiers are part of the stored credential's address, so each
+  row's `vault_service`/`vault_account` is frozen by a test. Renaming one
+  orphans every key already stored under it.
+
+**Consequences:**
+- A new Anthropic-compatible provider is a descriptor row, a catalog row, an
+  enum variant, and its clap flag; CLAUDE.md's "New model provider" entry lists
+  the steps and the test that catches each omission.
+- Provider-side gaps are documented, not repaired: Kimi's endpoint does not
+  support Claude Code's WebFetch, and clud does not emulate it.
+- Credentials still never cross the daemon wire, `LaunchPlan`, or dry-run
+  output; the route list lives only inside the launch-scoped gateway.

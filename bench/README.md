@@ -10,7 +10,10 @@ bounded loopback request path and reports RSS growth for #630.
 
 The [connector log inventory](connector_logs/README.md) is a read-only,
 content-safe diagnostic that identifies which Claude transcripts and clud
-bridge logs can be attributed to Codex or DeepSeek.
+bridge logs can be attributed to Codex, DeepSeek, or Kimi.
+
+The [Kimi real-key smoke](kimi_smoke.md) is the opt-in, manual check that a
+real Moonshot key works direct and through `--unified` without leaking.
 
 ## Runbook: real-daemon survival check (Tier 3, #674)
 

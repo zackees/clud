@@ -30,6 +30,7 @@ pub enum ConversationRoute {
     Claude,
     Codex,
     DeepSeek,
+    Kimi,
     OpenRouter,
 }
 
@@ -40,6 +41,7 @@ impl ConversationRoute {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::DeepSeek => "deepseek",
+            Self::Kimi => "kimi",
             Self::OpenRouter => "openrouter",
         }
     }

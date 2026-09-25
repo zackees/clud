@@ -169,6 +169,27 @@ Several features have a "single source of truth" registry that must be updated a
 
 - **New interactive selector / picker** → implement `selector::Selector` (`crates/clud-bin/src/selector.rs`): supply a `View` and handle `Key`s, and let `selector::run` own the terminal. *Gotcha*: never enable raw mode, read events, or write `writeln!`/escape sequences in the selector's own module. Raw mode clears `OPOST` on POSIX, so a bare `\n` walks the menu diagonally, and this bug shipped twice from per-module copies (#1063, #1195). Add the module to `migrated_selectors_never_drive_the_terminal_themselves` in `selector.rs`. See [DD-073](docs/DESIGN_DECISIONS.md#dd-073-every-inline-selector-renders-through-one-component).
 
+- **New model provider** (Anthropic-compatible, API-key) → 5 places:
+  1. `ModelProvider` variant and its `ALL` entry in `crates/clud-bin/src/backend.rs`; fix every
+     match the compiler flags. `model_provider_all_has_no_duplicates_and_matches_variant_count`
+     fails if `ALL` misses it, and `every_model_provider_round_trips_through_settings_str` if
+     the settings string does.
+  2. The `--<provider>` clap flag in `args.rs`, symmetric in every `conflicts_with_all`, plus
+     `AuthProvider` (a separate enum the compiler does **not** force) and the
+     `split_known_unknown` flag list.
+  3. A descriptor row in `provider_registry::ANTHROPIC_COMPAT_PROVIDERS`, with its vault
+     identifiers as `provider_auth` constants and a frozen-identifier test like
+     `kimi_vault_identifiers_are_frozen_for_credential_continuity`.
+     `every_descriptor_resolves_to_itself_and_appears_once` catches a duplicate row.
+  4. Catalog rows in `provider_catalog::MODELS` (wire prefix, efforts, contexts,
+     `claude_compact_window`, `discovery_id` in the reserved `clud-claude-*` namespace).
+     `inferred_provider_from_wire_matches_representative_ids` catches a missing prefix.
+  5. The unified gateway needs **no new fields**: `UnifiedGatewayConfig::with_route` takes
+     the key. Probe its vault in `foreground_runtime.rs`'s unified startup, add its
+     `ConversationRoute`, and map it in `failover::route_for`
+     (`every_catalog_provider_has_a_gateway_route` fails otherwise).
+  See [DD-093](docs/DESIGN_DECISIONS.md#dd-093-anthropic-compatible-providers-are-descriptor-rows-and-the-gateway-routes-them-as-one-list).
+
 - **Changing reap/spare logic** → decisions must be expressible against injected
   `ProcessFacts` (unit-testable, cross-platform). Add the case to the Tier 1
   decision table in `job_orphan_reaper`'s `lifecycle_tests` first, asserting

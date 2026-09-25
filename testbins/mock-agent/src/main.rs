@@ -60,6 +60,7 @@ fn main() {
     let mut codex_cache_identity_probe_to: Option<PathBuf> = None;
     let mut unified_route_probe_to: Option<PathBuf> = None;
     let mut unified_acceptance_probe_to: Option<PathBuf> = None;
+    let mut acceptance_extra_turn: Option<String> = None;
     // Emit canned `--output-format stream-json` lines from a file (one line
     // each, separated by `--mock-stream-delay-ms`). Used by integration tests
     // that exercise clud's stream-json renderer without needing a real
@@ -217,6 +218,11 @@ fn main() {
             if let Some(path) = args.get(i + 1) {
                 codex_cache_identity_probe_to = Some(PathBuf::from(path));
             }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-acceptance-extra-turn" {
+            acceptance_extra_turn = args.get(i + 1).cloned();
             skip_next = true;
             continue;
         }
@@ -411,7 +417,7 @@ fn main() {
         .as_deref()
         .map(run_codex_cache_identity_probe);
     if let Some(path) = unified_acceptance_probe_to.as_deref() {
-        run_unified_acceptance_probe(path);
+        run_unified_acceptance_probe(path, acceptance_extra_turn.as_deref());
     }
     let unified_route_probe = unified_route_probe_to
         .as_deref()
@@ -787,7 +793,9 @@ fn gateway_exchange(
 /// #901 acceptance probe: model discovery, then one conversation that crosses
 /// Claude -> Codex -> DeepSeek -> Claude with a different effort each turn,
 /// then an unknown reserved model id that must be rejected locally.
-fn run_unified_acceptance_probe(report_path: &Path) -> serde_json::Value {
+/// `extra_turn` appends one more model (at high effort) before the unknown id,
+/// so a suite can route a provider the fixed four turns do not cover.
+fn run_unified_acceptance_probe(report_path: &Path, extra_turn: Option<&str>) -> serde_json::Value {
     let mut report = serde_json::json!({
         "models_status": null,
         "models": [],
@@ -816,12 +824,15 @@ fn run_unified_acceptance_probe(report_path: &Path) -> serde_json::Value {
             })
             .unwrap_or_default()
             .into();
-        let turns = [
+        let mut turns = vec![
             ("claude-opus-4-1", "low"),
             ("clud-claude-codex-terra", "high"),
             ("clud-claude-deepseek-flash", "max"),
             ("claude-opus-4-1", "medium"),
         ];
+        if let Some(model) = extra_turn {
+            turns.push((model, "high"));
+        }
         let mut statuses = Vec::new();
         for (index, (model, effort)) in turns.into_iter().enumerate() {
             let body = serde_json::json!({

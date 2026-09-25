@@ -15,6 +15,7 @@ use crate::codex_upstream::{
 };
 use crate::failover::{FailoverLadder, FailoverRung};
 use crate::provider_catalog;
+use crate::provider_registry::AnthropicCompatRoute;
 use crate::route_health::{RouteLedger, RouteState, RouteVerdict};
 use base64::Engine as _;
 use std::collections::HashMap;
@@ -106,23 +107,21 @@ struct StatusUsageState {
 type SharedStatusUsage = Arc<Mutex<StatusUsageState>>;
 
 const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
-const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
-/// OpenRouter's native Anthropic Messages endpoint. Note the missing `/v1`:
-/// the path is appended by the proxy, and `https://openrouter.ai/api/v1` is a
-/// different (OpenAI-shaped) surface.
-const OPENROUTER_ANTHROPIC_BASE_URL: &str = "https://openrouter.ai/api";
 pub const UNIFIED_GATEWAY_TOKEN_HEADER: &str = "X-Clud-Gateway-Token";
 
 /// A launch-scoped multiplexer configuration. Secret material is intentionally
 /// opaque in Debug output and never reaches launch plans or daemon wire state.
 #[derive(Clone)]
 pub struct UnifiedGatewayConfig {
-    deepseek_api_key: Option<String>,
-    openrouter_api_key: Option<String>,
+    /// One entry per Anthropic-compatible provider (a `provider_registry`
+    /// descriptor) whose key this launch holds. A provider without an entry is
+    /// absent from discovery and refused if a stale picker selects it.
+    anthropic_routes: Vec<AnthropicCompatRoute>,
+    /// Test-only upstream replacements, kept apart from the routes so a key
+    /// added after an override still lands on the overridden URL.
+    route_base_url_overrides: Vec<(ModelProvider, String)>,
     codex_available: bool,
     anthropic_base_url: String,
-    deepseek_base_url: String,
-    openrouter_base_url: String,
     /// Ordered fallback routes. Empty by default, so a launch that did not ask
     /// for failover keeps exactly today's behavior and today's spend.
     failover: FailoverLadder,
@@ -136,22 +135,81 @@ pub struct UnifiedGatewayConfig {
 impl UnifiedGatewayConfig {
     pub fn new(deepseek_api_key: Option<String>, codex_available: bool) -> Self {
         Self {
-            deepseek_api_key,
-            openrouter_api_key: None,
+            anthropic_routes: Vec::new(),
+            route_base_url_overrides: Vec::new(),
             codex_available,
             anthropic_base_url: ANTHROPIC_MESSAGES_BASE_URL.to_string(),
-            deepseek_base_url: DEEPSEEK_ANTHROPIC_BASE_URL.to_string(),
-            openrouter_base_url: OPENROUTER_ANTHROPIC_BASE_URL.to_string(),
             failover: FailoverLadder::default(),
             route_ledger: Arc::new(Mutex::new(RouteLedger::new())),
         }
+        .with_route(ModelProvider::DeepSeek, deepseek_api_key)
     }
 
     /// OpenRouter's key, when the launch has one. Absent leaves the route out
     /// of discovery entirely rather than advertising a row that cannot serve.
-    pub fn with_openrouter(mut self, api_key: Option<String>) -> Self {
-        self.openrouter_api_key = api_key;
+    pub fn with_openrouter(self, api_key: Option<String>) -> Self {
+        self.with_route(ModelProvider::OpenRouter, api_key)
+    }
+
+    /// Set (or, with `None`, remove) one Anthropic-compatible provider's
+    /// route. A provider with no registry descriptor has no direct route and
+    /// is ignored: Claude is served natively and Codex through translation.
+    pub fn with_route(mut self, provider: ModelProvider, api_key: Option<String>) -> Self {
+        self.anthropic_routes
+            .retain(|route| route.provider != provider);
+        let Some(descriptor) = crate::provider_registry::descriptor_for(provider) else {
+            return self;
+        };
+        if let Some(api_key) = api_key {
+            let base_url = self
+                .base_url_override(provider)
+                .unwrap_or(descriptor.anthropic_base_url)
+                .to_string();
+            self.anthropic_routes.push(AnthropicCompatRoute {
+                provider,
+                base_url,
+                api_key,
+            });
+        }
         self
+    }
+
+    fn base_url_override(&self, provider: ModelProvider) -> Option<&str> {
+        self.route_base_url_overrides
+            .iter()
+            .find(|(candidate, _)| *candidate == provider)
+            .map(|(_, url)| url.as_str())
+    }
+
+    fn override_route_base_url(&mut self, provider: ModelProvider, base_url: String) {
+        self.route_base_url_overrides
+            .retain(|(candidate, _)| *candidate != provider);
+        for route in &mut self.anthropic_routes {
+            if route.provider == provider {
+                route.base_url = base_url.clone();
+            }
+        }
+        self.route_base_url_overrides.push((provider, base_url));
+    }
+
+    /// The direct route for `provider`, when this launch holds its key.
+    fn route_for(&self, provider: ModelProvider) -> Option<&AnthropicCompatRoute> {
+        self.anthropic_routes
+            .iter()
+            .find(|route| route.provider == provider)
+    }
+
+    /// Whether the gateway can serve `provider` at all. The single source for
+    /// discovery, the error-path ID list, and dispatch, so the three cannot
+    /// disagree about which rows exist.
+    fn provider_available(&self, provider: ModelProvider) -> bool {
+        match provider {
+            // Native Claude IDs pass through untouched and are never
+            // advertised as clud rows.
+            ModelProvider::Claude => false,
+            ModelProvider::Codex => self.codex_available,
+            other => self.route_for(other).is_some(),
+        }
     }
 
     pub fn with_failover(mut self, failover: FailoverLadder) -> Self {
@@ -170,26 +228,51 @@ impl UnifiedGatewayConfig {
         // #901: with the test vault active, keys come from what `clud auth`
         // stored there, so a logout really removes its route from discovery.
         if !crate::provider_auth::test_vault_active() {
-            self.deepseek_api_key = Some("clud-test-deepseek-key".to_string());
-            self.openrouter_api_key = Some("clud-test-openrouter-key".to_string());
+            self = self
+                .with_route(
+                    ModelProvider::DeepSeek,
+                    Some("clud-test-deepseek-key".to_string()),
+                )
+                .with_route(
+                    ModelProvider::OpenRouter,
+                    Some("clud-test-openrouter-key".to_string()),
+                );
+            if upstreams.kimi_base_url.is_some() {
+                self = self.with_route(ModelProvider::Kimi, Some("clud-test-kimi-key".to_string()));
+            }
         }
         self.codex_available = true;
         self.anthropic_base_url = upstreams.anthropic_base_url.clone();
-        self.deepseek_base_url = upstreams.deepseek_base_url.clone();
-        self.openrouter_base_url = upstreams.openrouter_base_url.clone();
+        self.override_route_base_url(ModelProvider::DeepSeek, upstreams.deepseek_base_url.clone());
+        self.override_route_base_url(
+            ModelProvider::OpenRouter,
+            upstreams.openrouter_base_url.clone(),
+        );
+        match &upstreams.kimi_base_url {
+            Some(url) => self.override_route_base_url(ModelProvider::Kimi, url.clone()),
+            // The Kimi fake is optional; with none, a vault-held Kimi key must
+            // not reach the real Moonshot endpoint from a test run.
+            None => self = self.with_route(ModelProvider::Kimi, None),
+        }
         self
     }
 
     #[cfg(test)]
     fn with_upstreams(mut self, anthropic_base_url: String, deepseek_base_url: String) -> Self {
         self.anthropic_base_url = anthropic_base_url;
-        self.deepseek_base_url = deepseek_base_url;
+        self.override_route_base_url(ModelProvider::DeepSeek, deepseek_base_url);
         self
     }
 
     #[cfg(test)]
     fn with_openrouter_upstream(mut self, base_url: String) -> Self {
-        self.openrouter_base_url = base_url;
+        self.override_route_base_url(ModelProvider::OpenRouter, base_url);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_route_upstream(mut self, provider: ModelProvider, base_url: String) -> Self {
+        self.override_route_base_url(provider, base_url);
         self
     }
 
@@ -221,8 +304,14 @@ impl fmt::Debug for UnifiedGatewayConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("UnifiedGatewayConfig")
-            .field("deepseek_configured", &self.deepseek_api_key.is_some())
-            .field("openrouter_configured", &self.openrouter_api_key.is_some())
+            .field(
+                "configured_routes",
+                &self
+                    .anthropic_routes
+                    .iter()
+                    .map(|route| route.provider.as_str())
+                    .collect::<Vec<_>>(),
+            )
             .field("codex_available", &self.codex_available)
             .field("failover_rungs", &self.failover.rungs().len())
             .finish()
@@ -1176,6 +1265,7 @@ fn serve_route_clear(stream: &mut TcpStream, unified: &UnifiedGatewayConfig, bod
         Some("claude") => Some(ConversationRoute::Claude),
         Some("codex") => Some(ConversationRoute::Codex),
         Some("deepseek") => Some(ConversationRoute::DeepSeek),
+        Some("kimi") => Some(ConversationRoute::Kimi),
         Some("openrouter") => Some(ConversationRoute::OpenRouter),
         _ => None,
     };
@@ -1184,7 +1274,7 @@ fn serve_route_clear(stream: &mut TcpStream, unified: &UnifiedGatewayConfig, bod
             stream,
             400,
             "application/json",
-            br#"{"error":{"type":"invalid_request_error","message":"route must be one of claude, codex, deepseek, openrouter"}}"#,
+            br#"{"error":{"type":"invalid_request_error","message":"route must be one of claude, codex, deepseek, kimi, openrouter"}}"#,
             false,
         );
         return;
@@ -1206,15 +1296,7 @@ fn serve_unified_catalog(
     };
     let advertised = provider_catalog::MODELS
         .iter()
-        .filter(|entry| match entry.provider {
-            ModelProvider::Codex => unified.codex_available,
-            ModelProvider::DeepSeek => unified.deepseek_api_key.is_some(),
-            // Phase 4 of #937 wires Kimi's unified route; until then it is
-            // never advertised, so a direct `--kimi` launch is unaffected.
-            ModelProvider::Kimi => false,
-            ModelProvider::OpenRouter => unified.openrouter_api_key.is_some(),
-            ModelProvider::Claude => false,
-        })
+        .filter(|entry| unified.provider_available(entry.provider))
         .filter_map(|entry| entry.discovery_id.map(|id| (id, entry.display_name)))
         // #1257: a pinned launch may only be *advertised* rows it would also
         // serve. Discovery adds rows and cannot subtract them from the
@@ -1678,12 +1760,7 @@ fn serve_unified_messages(
         },
         Some(entry) => Attempt {
             provider: entry.provider,
-            route: match entry.provider {
-                ModelProvider::Codex => ConversationRoute::Codex,
-                ModelProvider::DeepSeek => ConversationRoute::DeepSeek,
-                ModelProvider::OpenRouter => ConversationRoute::OpenRouter,
-                _ => ConversationRoute::Claude,
-            },
+            route: conversation_route_for(entry.provider),
             model: Some(codex_effort_suffix.map_or_else(
                 || entry.wire_id.to_string(),
                 |effort| format!("{}@{effort}", entry.wire_id),
@@ -1723,35 +1800,24 @@ fn serve_unified_messages(
                 cache_health,
                 &config.status_usage,
             ),
-            ModelProvider::DeepSeek if unified.deepseek_api_key.is_some() => {
+            provider @ (ModelProvider::DeepSeek
+            | ModelProvider::Kimi
+            | ModelProvider::OpenRouter)
+                if unified.route_for(provider).is_some() =>
+            {
+                let route = unified
+                    .route_for(provider)
+                    .expect("guarded by route_for above");
                 serve_unified_anthropic_proxy(
                     stream,
                     conversations,
                     conversation_key,
-                    ConversationRoute::DeepSeek,
-                    &unified.deepseek_base_url,
+                    attempt.route,
+                    &route.base_url,
                     "/v1/messages",
                     &payload,
                     headers,
-                    unified.deepseek_api_key.as_deref(),
-                    config.stream_idle_timeout,
-                    shutdown,
-                    probe,
-                    cache_health,
-                    &config.status_usage,
-                )
-            }
-            ModelProvider::OpenRouter if unified.openrouter_api_key.is_some() => {
-                serve_unified_anthropic_proxy(
-                    stream,
-                    conversations,
-                    conversation_key,
-                    ConversationRoute::OpenRouter,
-                    &unified.openrouter_base_url,
-                    "/v1/messages",
-                    &payload,
-                    headers,
-                    unified.openrouter_api_key.as_deref(),
+                    Some(&route.api_key),
                     config.stream_idle_timeout,
                     shutdown,
                     probe,
@@ -1777,9 +1843,14 @@ fn serve_unified_messages(
                 );
                 ProxyOutcome::local(200)
             }
-            _ => {
-                // Defense in depth: unavailable routes are omitted from
-                // discovery, but a stale picker must not reach any paid model.
+            // Only a registry provider whose key this launch lacks, or Codex
+            // without credentials, reaches here. Defense in depth: such routes
+            // are omitted from discovery, but a stale picker must not reach any
+            // paid model.
+            ModelProvider::DeepSeek
+            | ModelProvider::Kimi
+            | ModelProvider::OpenRouter
+            | ModelProvider::Codex => {
                 let body = serde_json::json!({
                     "type": "error",
                     "error": {
@@ -1885,16 +1956,15 @@ fn finish_without_failover(
     shutdown: &AtomicBool,
     cache_health: &SharedCacheHealth,
 ) {
-    let (base_url, key) = match route {
-        ConversationRoute::DeepSeek => (
-            unified.deepseek_base_url.as_str(),
-            unified.deepseek_api_key.as_deref(),
-        ),
-        ConversationRoute::OpenRouter => (
-            unified.openrouter_base_url.as_str(),
-            unified.openrouter_api_key.as_deref(),
-        ),
-        _ => (unified.anthropic_base_url.as_str(), None),
+    let direct = match route {
+        ConversationRoute::DeepSeek => unified.route_for(ModelProvider::DeepSeek),
+        ConversationRoute::Kimi => unified.route_for(ModelProvider::Kimi),
+        ConversationRoute::OpenRouter => unified.route_for(ModelProvider::OpenRouter),
+        ConversationRoute::Claude | ConversationRoute::Codex => None,
+    };
+    let (base_url, key) = match direct {
+        Some(route) => (route.base_url.as_str(), Some(route.api_key.as_str())),
+        None => (unified.anthropic_base_url.as_str(), None),
     };
     serve_unified_anthropic_proxy(
         stream,
@@ -1934,6 +2004,7 @@ fn serve_unified_anthropic_proxy(
     let provider = match route {
         ConversationRoute::Claude => AnthropicUsageProvider::Claude,
         ConversationRoute::DeepSeek => AnthropicUsageProvider::DeepSeek,
+        ConversationRoute::Kimi => AnthropicUsageProvider::Kimi,
         ConversationRoute::OpenRouter => AnthropicUsageProvider::OpenRouter,
         ConversationRoute::Codex => unreachable!("Codex does not use the Anthropic proxy"),
     };
@@ -2052,16 +2123,21 @@ fn serve_unified_count_tokens(
 fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
     provider_catalog::MODELS
         .iter()
-        .filter(|entry| match entry.provider {
-            ModelProvider::Codex => config.codex_available,
-            ModelProvider::DeepSeek => config.deepseek_api_key.is_some(),
-            // Phase 4 of #937 wires Kimi's unified route.
-            ModelProvider::Kimi => false,
-            ModelProvider::OpenRouter => config.openrouter_api_key.is_some(),
-            ModelProvider::Claude => false,
-        })
+        .filter(|entry| config.provider_available(entry.provider))
         .filter_map(|entry| entry.discovery_id)
         .collect()
+}
+
+/// The conversation route a catalog provider is served on. Every route
+/// change starts a new history epoch, so each provider needs its own.
+fn conversation_route_for(provider: ModelProvider) -> ConversationRoute {
+    match provider {
+        ModelProvider::Claude => ConversationRoute::Claude,
+        ModelProvider::Codex => ConversationRoute::Codex,
+        ModelProvider::DeepSeek => ConversationRoute::DeepSeek,
+        ModelProvider::Kimi => ConversationRoute::Kimi,
+        ModelProvider::OpenRouter => ConversationRoute::OpenRouter,
+    }
 }
 
 /// Proxy an Anthropic-compatible Messages response without buffering its body.
@@ -3035,6 +3111,7 @@ fn publish_status_usage(
     let provider = match provider {
         AnthropicUsageProvider::Claude => "claude",
         AnthropicUsageProvider::DeepSeek => "deepseek",
+        AnthropicUsageProvider::Kimi => "kimi",
         AnthropicUsageProvider::OpenRouter => "openrouter",
     };
     let published = {
@@ -3772,6 +3849,16 @@ pub(crate) struct UnifiedIntegrationUpstreams {
     anthropic_base_url: String,
     deepseek_base_url: String,
     openrouter_base_url: String,
+    /// Optional, unlike the rest: suites written before Kimi joined the
+    /// gateway set only four URLs, and leaving this out just drops Kimi's
+    /// route for that launch.
+    kimi_base_url: Option<String>,
+}
+
+impl UnifiedIntegrationUpstreams {
+    pub(crate) fn has_kimi(&self) -> bool {
+        self.kimi_base_url.is_some()
+    }
 }
 
 impl std::fmt::Debug for UnifiedIntegrationUpstreams {
@@ -3782,6 +3869,10 @@ impl std::fmt::Debug for UnifiedIntegrationUpstreams {
             .field("anthropic_base_url", &"[redacted]")
             .field("deepseek_base_url", &"[redacted]")
             .field("openrouter_base_url", &"[redacted]")
+            .field(
+                "kimi_base_url",
+                &self.kimi_base_url.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
@@ -3800,6 +3891,12 @@ pub(crate) fn unified_integration_upstreams_from_process() -> Option<UnifiedInte
         std::env::var("CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL").ok(),
         std::env::var("CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL").ok(),
     )
+    .map(|mut upstreams| {
+        upstreams.kimi_base_url = std::env::var("CLUD_TEST_UNIFIED_KIMI_UPSTREAM_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty());
+        upstreams
+    })
 }
 
 fn resolve_unified_integration_upstreams(
@@ -3818,6 +3915,7 @@ fn resolve_unified_integration_upstreams(
         anthropic_base_url: usable(anthropic_base_url)?,
         deepseek_base_url: usable(deepseek_base_url)?,
         openrouter_base_url: usable(openrouter_base_url)?,
+        kimi_base_url: None,
     })
 }
 
@@ -5676,6 +5774,146 @@ Connection: close
         );
     }
 
+    fn unified_catalog_ids_of(bridge: &BridgeHandle) -> Vec<String> {
+        let response = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "GET",
+                "/v1/models?limit=1000",
+                "native-claude-credential",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token())],
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        let catalog: serde_json::Value =
+            serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        catalog["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                format!(
+                    "{} | {}",
+                    row["id"].as_str().unwrap(),
+                    row["display_name"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    /// #937 Phase 4: Kimi is a unified route like DeepSeek -- advertised only
+    /// with its own key, served with only that key, and structurally unable
+    /// to see another provider's credential or have its key seen by one.
+    #[test]
+    fn unified_kimi_route_is_key_gated_and_credential_isolated() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let kimi = FakeResponses::start();
+
+        let without = BridgeHandle::start(
+            BridgeConfig::default().with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                    .with_route_upstream(ModelProvider::Kimi, kimi.base_url.clone()),
+            ),
+        )
+        .unwrap();
+        assert!(
+            !unified_catalog_ids_of(&without)
+                .iter()
+                .any(|row| row.contains("kimi")),
+            "no Kimi key, no Kimi row"
+        );
+        let refused = request(
+            without.socket_addr(),
+            &unified_message_request(&without, "clud-claude-kimi-k3", "no-kimi", "native-oauth"),
+        );
+        assert_eq!(status(&refused), 400, "{refused}");
+        assert!(
+            kimi.requests().is_empty(),
+            "a keyless route must never be dialed"
+        );
+
+        // The key is added after the upstream override on purpose: the
+        // override must survive, or a test key would dial the real endpoint.
+        let bridge = BridgeHandle::start(
+            BridgeConfig::default().with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                    .with_route_upstream(ModelProvider::Kimi, kimi.base_url.clone())
+                    .with_route(ModelProvider::Kimi, Some("kimi-vault-canary".to_string())),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            unified_catalog_ids_of(&bridge),
+            vec![
+                "clud-claude-deepseek-v4-pro-0813 | DeepSeek V4 Pro 0813",
+                "clud-claude-deepseek-flash | DeepSeek V4.1 Flash",
+                "clud-claude-kimi-k3 | Kimi K3",
+            ]
+        );
+        for model in ["clud-claude-kimi-k3", "kimi-k3", "kimi-k3[1m]"] {
+            let response = request(
+                bridge.socket_addr(),
+                &unified_message_request(&bridge, model, "kimi-session", "native-oauth-canary"),
+            );
+            assert_eq!(status(&response), 200, "{model}: {response}");
+        }
+        let deepseek_turn = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-flash",
+                "kimi-session",
+                "native-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&deepseek_turn), 200, "{deepseek_turn}");
+
+        let kimi_requests = kimi.requests();
+        assert_eq!(kimi_requests.len(), 3);
+        for raw in &kimi_requests {
+            assert!(raw.starts_with("POST /v1/messages "), "{raw}");
+            assert!(raw.contains("kimi-k3[1m]"), "{raw}");
+            assert!(raw.contains("Bearer kimi-vault-canary"), "{raw}");
+            for forbidden in [
+                bridge.bearer_token(),
+                "native-oauth-canary",
+                "native-claude-api-key",
+                "deepseek-vault-canary",
+            ] {
+                assert!(!raw.contains(forbidden), "Kimi leaked {forbidden}: {raw}");
+            }
+        }
+        let deepseek_requests = deepseek.requests();
+        assert_eq!(deepseek_requests.len(), 1);
+        assert!(deepseek_requests[0].contains("Bearer deepseek-vault-canary"));
+        assert!(!deepseek_requests[0].contains("kimi-vault-canary"));
+        assert!(
+            claude.requests().is_empty(),
+            "no Kimi or DeepSeek ID may fall through to Anthropic"
+        );
+        assert!(!format!("{bridge:?}").contains("kimi-vault-canary"));
+
+        // Token counting is provider-specific, so a Kimi ID gets the local
+        // 404 that makes Claude Code estimate instead of asking Anthropic.
+        let count = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages/count_tokens",
+                "native-oauth-canary",
+                r#"{"model":"clud-claude-kimi-k3","messages":[{"role":"user","content":"x"}]}"#,
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token())],
+            ),
+        );
+        assert_eq!(status(&count), 404, "{count}");
+        assert_eq!(kimi.requests().len(), 3, "count_tokens never reaches Kimi");
+        assert!(claude.requests().is_empty(), "or Anthropic");
+    }
+
     /// Build a raw upstream HTTP response for a canary to replay verbatim.
     fn raw_response(status: u16, reason: &str, body: &str) -> Vec<u8> {
         format!(
@@ -6253,6 +6491,114 @@ Connection: close
             !final_request.contains("msg_recovered"),
             "provider-private Codex output IDs crossed a route epoch: {final_request}"
         );
+    }
+
+    /// The epoch cycle with every route: Claude -> Codex -> DeepSeek -> Kimi
+    /// -> Claude -> Codex. Kimi is its own epoch, so Codex's private output
+    /// items still cannot survive the trip.
+    #[test]
+    fn unified_route_epoch_cycle_includes_kimi() {
+        let codex =
+            FakeResponses::start_with_responses(vec![Some(recovery_success_response()), None]);
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let kimi = FakeResponses::start();
+        let config = BridgeConfig::default()
+            .with_test_upstream_url(Some(codex.base_url.clone()))
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-route-key".to_string()), true)
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                    .with_route(ModelProvider::Kimi, Some("kimi-route-key".to_string()))
+                    .with_route_upstream(ModelProvider::Kimi, kimi.base_url.clone()),
+            );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let mut history = Vec::new();
+        let mut turn = |model: &str, prompt: &str, answer: Option<&str>| {
+            history.push(serde_json::json!({"role": "user", "content": prompt}));
+            let body = serde_json::json!({
+                "model": model,
+                "messages": history,
+                "stream": false,
+            })
+            .to_string();
+            let response = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    "native-route-credential",
+                    &body,
+                    &[
+                        (UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token()),
+                        ("X-Claude-Code-Session-Id", "kimi-epoch-session"),
+                        ("Anthropic-Version", "2023-06-01"),
+                    ],
+                ),
+            );
+            assert_eq!(status(&response), 200, "{model}: {response}");
+            if let Some(answer) = answer {
+                history.push(serde_json::json!({"role": "assistant", "content": answer}));
+            }
+        };
+        turn("claude-opus-4-1", "claude prompt", Some("claude answer"));
+        turn("clud-claude-codex-sol", "codex prompt", Some("recovered"));
+        turn(
+            "clud-claude-deepseek-flash",
+            "deepseek prompt",
+            Some("deepseek answer"),
+        );
+        turn("clud-claude-kimi-k3", "kimi prompt", Some("kimi answer"));
+        turn(
+            "claude-opus-4-1",
+            "second claude prompt",
+            Some("second claude answer"),
+        );
+        turn("clud-claude-codex-terra", "final codex prompt", None);
+
+        assert_eq!(kimi.requests().len(), 1);
+        assert!(kimi.requests()[0].contains("Bearer kimi-route-key"));
+        let requests = codex.requests();
+        assert_eq!(requests.len(), 2);
+        let final_request = &requests[1];
+        assert!(final_request.contains("kimi answer"));
+        assert!(final_request.contains("final codex prompt"));
+        assert!(
+            !final_request.contains("msg_recovered"),
+            "provider-private Codex output IDs crossed a route epoch: {final_request}"
+        );
+        for raw in codex.requests().iter().chain(deepseek.requests().iter()) {
+            assert!(!raw.contains("kimi-route-key"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn unified_routes_come_from_the_registry_and_drop_on_a_missing_key() {
+        let config = UnifiedGatewayConfig::new(Some("d".to_string()), false)
+            .with_openrouter(Some("o".to_string()))
+            .with_route(ModelProvider::Kimi, Some("k".to_string()));
+        for provider in [
+            ModelProvider::DeepSeek,
+            ModelProvider::Kimi,
+            ModelProvider::OpenRouter,
+        ] {
+            let route = config.route_for(provider).unwrap();
+            assert_eq!(
+                route.base_url,
+                crate::provider_registry::descriptor_for(provider)
+                    .unwrap()
+                    .anthropic_base_url
+            );
+            assert!(config.provider_available(provider));
+        }
+        // Claude and Codex have no descriptor, so no direct route.
+        let config = config
+            .with_route(ModelProvider::Claude, Some("c".to_string()))
+            .with_route(ModelProvider::Kimi, None);
+        assert!(config.route_for(ModelProvider::Claude).is_none());
+        assert!(!config.provider_available(ModelProvider::Claude));
+        assert!(!config.provider_available(ModelProvider::Kimi));
+        assert!(!config.provider_available(ModelProvider::Codex));
+        assert!(!format!("{config:?}").contains("\"d\""));
     }
 
     #[test]
