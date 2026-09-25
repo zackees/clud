@@ -187,7 +187,7 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
 /// finally makes one name mean one file.
 ///
 /// `clud-meta-work` was folded into the `/grind` DAG: `/grind` routes to
-/// capped `grind-*` agents and the bundled `grind` workflow, which do what the
+/// capped `grind-*` agents and the bundled `grind-run` workflow, which do what the
 /// playbook described with enforcement instead of prose.
 ///
 /// This is deliberately an explicit list rather than "sweep any clud-managed

@@ -184,7 +184,7 @@ pub(super) fn build_up_prompt(message: Option<&str>, publish: bool) -> String {
 
 /// `clud grind` hands the whole run to the `/grind` router skill, which asks
 /// for the mode (parallel, sequential, or cron via the harness's own `/loop`)
-/// and drives the bundled `grind` workflow. See `docs/architecture/grind.md`.
+/// and drives the bundled `grind-run` workflow. See `docs/architecture/grind.md`.
 pub(super) const GRIND_TEMPLATE: &str = "/grind {url}";
 
 pub(super) fn build_grind_prompt(url: &str) -> String {

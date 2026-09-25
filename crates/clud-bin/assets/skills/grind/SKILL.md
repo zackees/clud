@@ -11,12 +11,12 @@ triggers:
 # /grind
 
 Router for the grind DAG. It gathers every answer up front, then hands the
-deterministic part to the bundled `grind` workflow, which cannot ask
+deterministic part to the bundled `grind-run` workflow, which cannot ask
 questions once it runs.
 
 ```
 /grind ─ grind-intake ─ questions ─┬─ parallel   ─┐
-                                   ├─ sequential ─┼─ workflow grind: plan → work → review → integrate → land
+                                   ├─ sequential ─┼─ workflow grind-run: plan → work → review → integrate → land
                                    └─ cron ─ /grind-cron ─ /loop: sequential run, one issue per tick
 ```
 
@@ -83,7 +83,7 @@ on). Delete it when the run ends.
 ## 4. Run
 
 - Cron: invoke `/grind-cron` with the goal source and the answers.
-- Parallel or sequential: start the Workflow named `grind` with args
+- Parallel or sequential: start the Workflow named `grind-run` with args
   `{repo, main, mode, goals, ci, models: {planner, worker, reviewer,
   integrator}}`. Omit a model the user left at the session default.
 

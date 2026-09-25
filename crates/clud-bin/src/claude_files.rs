@@ -1,7 +1,7 @@
 //! Bundled Claude Code agent definitions and workflow scripts.
 //!
 //! The `/grind` DAG needs more than skills: capped agent types under
-//! `~/.claude/agents/` and the `grind` workflow under `~/.claude/workflows/`.
+//! `~/.claude/agents/` and the `grind-run` workflow under `~/.claude/workflows/`.
 //! Both are Claude-only file kinds, so this installer targets `~/.claude`
 //! alone and only when that directory already exists.
 //!
@@ -44,10 +44,19 @@ pub const BUNDLED_CLAUDE_FILES: &[BundledClaudeFile] = &[
         body: include_str!("../assets/agents/grind-lander.md"),
     },
     BundledClaudeFile {
-        rel_path: "workflows/grind.js",
-        body: include_str!("../assets/workflows/grind.js"),
+        rel_path: "workflows/grind-run.js",
+        body: include_str!("../assets/workflows/grind-run.js"),
     },
 ];
+
+/// Files clud used to install and has since retired or renamed. Each is
+/// deleted only while it still carries the `managed-by: clud` marker, so a
+/// user's own file at the same path is never touched.
+///
+/// `workflows/grind.js` was renamed to `grind-run.js`: a workflow named
+/// `grind` listed a second `/grind` beside the router skill, and picking it
+/// skipped the router's questions.
+pub const PURGED_CLAUDE_FILES: &[&str] = &["workflows/grind.js"];
 
 /// Result of one install pass.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -55,6 +64,7 @@ pub struct InstallReport {
     pub installed: Vec<&'static str>,
     pub skipped_existing: Vec<&'static str>,
     pub refreshed: Vec<&'static str>,
+    pub purged: Vec<&'static str>,
 }
 
 /// Install [`BUNDLED_CLAUDE_FILES`] under `home/.claude`, or do nothing when
@@ -64,7 +74,22 @@ pub fn ensure_installed_at(home: &Path) -> io::Result<Option<InstallReport>> {
     if !root.is_dir() {
         return Ok(None);
     }
-    install_to(&root, BUNDLED_CLAUDE_FILES).map(Some)
+    let mut report = install_to(&root, BUNDLED_CLAUDE_FILES)?;
+    report.purged = purge_retired(&root, PURGED_CLAUDE_FILES);
+    Ok(Some(report))
+}
+
+/// Delete each retired file that is still clud-managed; report what went.
+pub fn purge_retired(root: &Path, retired: &[&'static str]) -> Vec<&'static str> {
+    retired
+        .iter()
+        .copied()
+        .filter(|rel| {
+            let path = root.join(rel);
+            std::fs::read_to_string(&path).is_ok_and(|body| body.contains(MANAGED_BY_CLUD_MARKER))
+                && std::fs::remove_file(&path).is_ok()
+        })
+        .collect()
 }
 
 pub fn install_to(root: &Path, files: &[BundledClaudeFile]) -> io::Result<InstallReport> {
@@ -123,7 +148,8 @@ mod tests {
             let path = format!("agents/grind-{role}.md");
             assert!(paths.contains(&path.as_str()), "missing {path}");
         }
-        assert!(paths.contains(&"workflows/grind.js"));
+        assert!(paths.contains(&"workflows/grind-run.js"));
+        assert!(!paths.contains(&"workflows/grind.js"));
     }
 
     /// The agent `name:` must match its file, or the workflow's
@@ -184,11 +210,54 @@ mod tests {
         let second = install_to(root, BUNDLED_CLAUDE_FILES).unwrap();
         assert!(second.installed.is_empty() && second.refreshed.is_empty());
 
-        let owned = root.join("workflows/grind.js");
+        let owned = root.join("workflows/grind-run.js");
         std::fs::write(&owned, "// my own grind").unwrap();
         let third = install_to(root, BUNDLED_CLAUDE_FILES).unwrap();
-        assert!(third.skipped_existing.contains(&"workflows/grind.js"));
+        assert!(third.skipped_existing.contains(&"workflows/grind-run.js"));
         assert_eq!(std::fs::read_to_string(&owned).unwrap(), "// my own grind");
+    }
+
+    /// No workflow may share a skill's name, or Claude Code lists two
+    /// commands under one `/name`.
+    #[test]
+    fn workflow_names_never_collide_with_skills() {
+        for file in BUNDLED_CLAUDE_FILES {
+            let Some(stem) = file
+                .rel_path
+                .strip_prefix("workflows/")
+                .and_then(|p| p.strip_suffix(".js"))
+            else {
+                continue;
+            };
+            assert!(
+                file.body.contains(&format!("name: '{stem}'")),
+                "{} meta name must be {stem}",
+                file.rel_path
+            );
+            assert!(
+                !crate::skills::BUNDLED_SKILLS.iter().any(|s| s.name == stem),
+                "workflow {stem} collides with the bundled skill of the same name"
+            );
+        }
+    }
+
+    #[test]
+    fn retired_grind_workflow_is_purged_but_user_copies_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".claude");
+        std::fs::create_dir_all(root.join("workflows")).unwrap();
+        let old = root.join("workflows/grind.js");
+
+        std::fs::write(&old, "// managed-by: clud\nold").unwrap();
+        let report = ensure_installed_at(dir.path()).unwrap().unwrap();
+        assert_eq!(report.purged, vec!["workflows/grind.js"]);
+        assert!(!old.exists());
+        assert!(root.join("workflows/grind-run.js").is_file());
+
+        std::fs::write(&old, "// my own grind").unwrap();
+        let report = ensure_installed_at(dir.path()).unwrap().unwrap();
+        assert!(report.purged.is_empty());
+        assert!(old.exists());
     }
 
     #[test]
