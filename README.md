@@ -486,6 +486,16 @@ agent can repair a wedged guard. The one exception: `/grind`'s capped
 `grind-*` agents cannot lift their own caps this way. Only an explicit `1`
 counts.
 
+### Skip only the rm shim identity check
+
+`CLUD_SKIP_RM_IDENTITY=1` in the hook's environment skips just the rm-shim
+identity check; every other check, including the `/grind` role caps, still
+runs. clud sets it automatically when launched inside clud's own repo
+(detected by `crates/clud-bin/Cargo.toml` naming the `clud` package) and
+prints a yellow startup warning, because `bash build` replaces
+`target/debug/clud-shim` and would otherwise wedge every shell call. Unlike
+`CLUD_ALLOW_ALL_CMDS`, writing it into a command has no effect.
+
 ### Keep the agent from wandering out of the repo
 
 A `cd` in a Bash tool call moves the **session** cwd — not just that one

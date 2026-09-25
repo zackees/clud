@@ -498,7 +498,16 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
-    if event == PRE_TOOL_USE_EVENT && rm_identity_applies_to_tool(&payload.tool_name) {
+    // Inside clud's own repo the launcher sets this (see `clud_repo_dev`):
+    // rebuilding clud-shim would otherwise wedge every shell call.
+    let skip_rm_identity = crate::clud_repo_dev::skip_rm_identity_enabled();
+    if skip_rm_identity {
+        append_log("CLUD_SKIP_RM_IDENTITY=1: rm identity check skipped");
+    }
+    if event == PRE_TOOL_USE_EVENT
+        && !skip_rm_identity
+        && rm_identity_applies_to_tool(&payload.tool_name)
+    {
         let path = std::env::var("PATH").unwrap_or_default();
         if let Err(reason) = block_bad_cmd_rm_identity::check(&payload.command, &path) {
             append_log(&rm_identity_denial_log_line(&payload.tool_name, &reason));

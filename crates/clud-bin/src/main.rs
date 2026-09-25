@@ -889,6 +889,11 @@ fn run(mut args: args::Args) {
         hook_health::emit_launch_warnings();
     }
 
+    // Before any child starts, so the command hook inherits the switch.
+    if let Ok(cwd) = std::env::current_dir() {
+        clud::clud_repo_dev::apply(&loop_spec::git_root_from(&cwd));
+    }
+
     // Large-file guard runs only on actual backend launches (bare `clud`,
     // `clud --claude`, `clud --codex`, or piped/prompted variants). Skip
     // for every subcommand path: `clud tool run`, `clud loop`, `clud gc`,
