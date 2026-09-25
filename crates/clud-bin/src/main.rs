@@ -67,6 +67,24 @@ fn run(mut args: args::Args) {
             chain_b64: chain_b64.clone(),
         }));
     }
+    // #922: Claude Code runs `clud session-hook` at session start, compact and
+    // end. Like `statusline`, it must not touch the daemon or launch machinery.
+    if let Some(args::Command::SessionHook {
+        event,
+        route,
+        state_dir,
+        recovery_file,
+    }) = &args.command
+    {
+        std::process::exit(clud::session_history::hook::run(
+            &clud::session_history::hook::HookArgs {
+                event: event.clone(),
+                route: route.clone(),
+                state_dir: state_dir.clone(),
+                recovery_file: recovery_file.clone(),
+            },
+        ));
+    }
     // Fast tool path. Detect `clud tool ...` before
     // normal clud startup so hook/tool invocations do not connect to the
     // daemon, touch runtime-cache, start title keepers, or register as
@@ -411,6 +429,40 @@ fn run(mut args: args::Args) {
             }
         };
     let global_launch_preferences = launch_preferences.global;
+    // #922: interactive `clud -c` / `--last` on the Claude harness picks a
+    // session for this cwd and rewrites the args (provider, resume target,
+    // recovery) before the launch target is resolved from them.
+    if clud::session_history::launch::applies(&args, global_launch_preferences.harness) {
+        let environment = clud::daemon::default_state_dir().map(|state_dir| {
+            let home = dirs::home_dir().unwrap_or_default();
+            clud::session_history::launch::Environment {
+                state_dir,
+                claude_dir: clud::session_history::import::claude_config_dir(&home),
+                cwd: std::env::current_dir().unwrap_or_default(),
+                interactive: clud::session::terminals_are_interactive(),
+            }
+        });
+        match environment {
+            Ok(environment) => {
+                let result =
+                    clud::session_history::launch::prepare(&mut args, &environment, |candidates| {
+                        clud::session_history::picker::prompt(&mut io::stderr(), candidates)
+                    });
+                match result {
+                    Ok(Some(note)) => eprintln!("{note}"),
+                    Ok(None) => {}
+                    Err(error) if error == "cancelled" => std::process::exit(130),
+                    Err(error) => {
+                        eprintln!("[clud] error: {error}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("[clud] warning: session picker unavailable: {error}");
+            }
+        }
+    }
     let fallback_is_eligible = preferences_known
         && harness_picker::deepseek_fallback_candidate(
             &args,

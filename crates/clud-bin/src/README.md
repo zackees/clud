@@ -38,6 +38,10 @@ the integration tests.
   GitHub origin, last-known-good daemon-state cache, baked-in fallback, and
   weighted pricing for eligible OpenRouter models. See
   `docs/architecture/server-settings.md`.
+- [session_history/](session_history/README.md) - `clud -c` / `--last` (#922):
+  per-cwd index of Claude-harness sessions kept by the hidden `session-hook`,
+  the picker, and native/portable resume. See
+  `docs/architecture/session-history.md`.
 - [toast/](toast/README.md) - in-terminal toasts (#1189): toast model and
   hub, the PTY writer-thread compositor (kitty graphics, alternate-screen text
   cells, title/status-line fallback), Claude `statusLine` chaining, and

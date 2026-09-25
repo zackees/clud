@@ -15,6 +15,7 @@ re-explaining.
 | [architecture/daemon-environment.md](architecture/daemon-environment.md) | ~100 | Daemon session environment: login-baseline materialization, client overlay, refresh, worker snapshot compatibility |
 | [architecture/api-session-storage.md](architecture/api-session-storage.md) | ~160 | Durable API logical sessions above provider turns: immutable CWD, bounded events/idempotency, atomic persistence, restart recovery |
 | [architecture/session-lifecycle.md](architecture/session-lifecycle.md) | ~300 | PTY session pump, console mode setup, OSC title keeper, capture for attach, drag-drop and voice injection points |
+| [architecture/session-history.md](architecture/session-history.md) | ~110 | `clud -c` cwd session picker, per-cwd index kept by lifecycle hooks, native/forked/portable resume decision table, recovery payload (#922) |
 | [architecture/skill-system.md](architecture/skill-system.md) | ~200 | Skill bundling (`include_str!`), the single `skills.rs` installer over `assets/skills/`, the four-state install contract, selected-backend global setup |
 | [architecture/launch-setup.md](architecture/launch-setup.md) | ~70 | Session-only vs global launch setup, persistent setup actions, selected-backend gating |
 | [architecture/gc-and-registry.md](architecture/gc-and-registry.md) | ~250 | always-on `clud __daemon` single-owner redb model, session cap registry, worktree scanner, GC subcommands |

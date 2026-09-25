@@ -42,6 +42,17 @@ pub struct Args {
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<Option<String>>,
 
+    /// Continue the newest Claude-harness session in this directory without
+    /// opening the `-c` picker (#922).
+    #[arg(long = "last")]
+    pub last: bool,
+
+    /// How `-c`/`--last` resumes the selected session: `auto` (native when
+    /// safe, portable recovery otherwise), `native` (Claude's own resume), or
+    /// `portable` (a new session rebuilt from the transcript).
+    #[arg(long = "resume-mode", value_enum, default_value_t)]
+    pub resume_mode: crate::session_history::recover::ResumeMode,
+
     #[arg(long = "claude", conflicts_with_all = ["codex", "deepseek", "kimi", "openrouter"])]
     pub claude: bool,
 
@@ -809,6 +820,22 @@ pub enum Command {
         #[arg(long = "chain-b64")]
         chain_b64: Option<String>,
     },
+    /// Internal (#922): Claude lifecycle hook that keeps clud's per-cwd
+    /// session index current. Claude Code runs this; it reads the hook
+    /// payload on stdin and never fails the session.
+    #[command(name = "session-hook", hide = true)]
+    SessionHook {
+        #[arg(long = "event")]
+        event: String,
+        /// The launch's route: a provider name, or `unified`.
+        #[arg(long = "route")]
+        route: String,
+        #[arg(long = "state-dir")]
+        state_dir: PathBuf,
+        /// Portable recovery context to inject at `SessionStart`.
+        #[arg(long = "recovery-file")]
+        recovery_file: Option<PathBuf>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -1296,6 +1323,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "deepseek-auth",
     "run",
     "statusline",
+    "session-hook",
     "__daemon",
     "__worker",
 ];
@@ -1454,6 +1482,7 @@ const SPLITTER_VALUE_FLAGS: &[&str] = &[
     "--prompt",
     "--message",
     "--resume",
+    "--resume-mode",
     "--model",
     "--allow-model",
     "--provider",

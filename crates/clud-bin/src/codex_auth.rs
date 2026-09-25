@@ -191,7 +191,7 @@ fn save_locked(home: &Path, credentials: &SubscriptionCredentials) -> Result<(),
 /// inherited entries.  Administrators with backup/restore privileges remain
 /// an OS trust boundary; ordinary other local users cannot read this file.
 #[cfg(windows)]
-fn protect_windows_credential_file(path: &Path) -> Result<(), String> {
+pub(crate) fn protect_windows_credential_file(path: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::core::{w, PCWSTR};

@@ -4142,3 +4142,48 @@ supplies the goal's focused test. Adding a candidate or interpreter means
 changing `grind_scripts.rs` and its tests, not the router text. The contract is
 owned by [architecture/grind.md](architecture/grind.md#repository-linttest-scripts).
 
+## DD-092: clud indexes Claude-harness sessions per cwd and recovers them portably
+
+**Status:** Accepted
+
+**Context:** #922. `clud -c` forwarded `--continue` and left the rest to
+Claude Code, which cannot say which provider created a session, list a
+directory's sessions, pick a compact checkpoint, or move a conversation onto
+a model with a smaller window. A Codex-via-Claude session also keeps its
+canonical history in the bridge process, so it cannot be resumed natively
+once that process is gone. Claude's transcripts do hold everything needed,
+but a local survey found thousands of them, so scanning on every launch is
+the wrong steady state.
+
+**Decision:** clud keeps a small per-cwd index under its state directory,
+fed by a `clud session-hook` that every Claude-harness launch registers for
+`SessionStart`, `PostCompact` and `SessionEnd` with the route resolved in the
+`LaunchPlan`. Existing transcripts are imported once per cwd, with the route
+inferred from the model name and flagged as such. At a terminal, `clud -c`
+opens a picker, and `--last` takes the newest session. `--resume-mode auto`
+resumes natively when that is safe. It uses a forked native resume for a
+compatible provider switch, and portable recovery otherwise: a new session
+seeded through `SessionStart.additionalContext` with a marked, truncated
+context (compact summary plus the newest whole turns within half the
+destination window). Without a terminal, `-c` keeps Claude's `--continue`.
+
+**Rationale:**
+- The transcript stays the only source of conversation content, so the index
+  can't drift from it. It holds pointers and metadata, and a corrupt index is
+  simply rebuilt.
+- Recording the route at launch is authoritative. Model names are ambiguous
+  across gateways, so they are used only for legacy import, and an inferred
+  route never overwrites a recorded one.
+- The size estimate uses the content a resume would replay, never cumulative
+  usage, which overstates the live context by orders of magnitude.
+- Following `parentUuid` rather than file order is what makes a rewound
+  session recover the branch the user was actually on.
+
+**Consequences:**
+- Every Claude-harness launch now carries clud's session hook in its
+  launch-scoped `--settings`, in the same way the status line (DD-071) and
+  attribution (DD-089) are carried.
+- Previews, summaries and recovery files are local sensitive data. They are
+  locked, written atomically, owner-only, and kept out of logs and `--dry-run`.
+- Native Codex-harness history is out of scope.
+
