@@ -121,6 +121,7 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--transcript <PATH>` | Tee daemon-managed session output bytes to a transcript file |
 | `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
 | `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
+| `--coauthor[=TAG]` | Opt in to commit/PR attribution. clud hides Claude Code's `Co-Authored-By` trailer and "Generated with Claude Code" PR line by default; bare `--coauthor` keeps Claude's own, `=TAG` uses TAG for both (also `CLUD_COAUTHOR=1|TAG`; Claude harness only) |
 | `--dry-run` | Print what would be executed, then exit |
 | `-v`, `--verbose` | Show debug output |
 | `-h`, `--help` | Show help |

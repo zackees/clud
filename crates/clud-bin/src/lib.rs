@@ -6,6 +6,7 @@
 
 pub mod anthropic_usage;
 pub mod args;
+pub mod attribution;
 pub mod auth;
 pub mod backend;
 pub mod backend_bootstrap;

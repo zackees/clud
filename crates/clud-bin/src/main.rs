@@ -1120,6 +1120,7 @@ fn run(mut args: args::Args) {
             // selection -- the runtime prints a green startup line for the
             // inherited case (#1257).
             "pinned_from_previous_selection": plan.pinned_from_previous_selection,
+            "coauthor": plan.coauthor,
             // Routing must be auditable without a paid request, and a ladder
             // is routing: it decides which account serves the turn after the
             // first one declines.

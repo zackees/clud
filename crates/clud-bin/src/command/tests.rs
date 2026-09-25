@@ -786,6 +786,54 @@ fn test_unattended_is_not_forwarded_as_passthrough() {
     assert!(!p.command.iter().any(|a| a == "--unattended"));
 }
 
+/// #1317: Claude attribution is hidden by default and opt-in with
+/// `--coauthor[=TAG]`. The choice rides on the plan, so the argv is unchanged
+/// and the flag is never forwarded to the backend as passthrough.
+#[test]
+fn test_coauthor_is_hidden_by_default() {
+    if std::env::var_os(crate::attribution::COAUTHOR_ENV).is_some() {
+        return;
+    }
+    let p = plan(&["clud", "-p", "hello"]);
+    assert_eq!(p.coauthor, crate::attribution::Coauthor::Hidden);
+    assert!(!p.command.iter().any(|a| a == "--settings"));
+}
+
+#[test]
+fn test_coauthor_flag_opts_in_to_the_harness_attribution() {
+    let p = plan(&["clud", "--coauthor", "-p", "hello"]);
+    assert_eq!(p.coauthor, crate::attribution::Coauthor::Harness);
+    assert!(!p.command.iter().any(|a| a.starts_with("--coauthor")));
+    assert_eq!(p.command.last().map(String::as_str), Some("hello"));
+}
+
+#[test]
+fn test_coauthor_flag_carries_a_tag() {
+    let p = plan(&[
+        "clud",
+        "--coauthor=Co-Authored-By: Bot <b@x>",
+        "-p",
+        "hello",
+    ]);
+    assert_eq!(
+        p.coauthor,
+        crate::attribution::Coauthor::Tag("Co-Authored-By: Bot <b@x>".to_string())
+    );
+    assert!(!p.command.iter().any(|a| a.starts_with("--coauthor")));
+}
+
+/// A bare `--coauthor` must not swallow the next word as its tag: the value
+/// is `=`-joined only.
+#[test]
+fn test_bare_coauthor_does_not_eat_the_next_argument() {
+    let args = parse(&["clud", "--coauthor", "loop", "task"]);
+    assert_eq!(args.coauthor.as_deref(), Some(""));
+    assert!(matches!(
+        args.command,
+        Some(crate::args::Command::Loop { .. })
+    ));
+}
+
 #[test]
 fn test_safe_mode_no_yolo() {
     let p = plan(&["clud", "--safe", "-p", "hello"]);

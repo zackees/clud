@@ -4002,3 +4002,32 @@ subagents.
 since the Workflow tool is the point. A new role needs its agent file, a
 `claude_files.rs` entry and a policy in `block_bad_cmd_grind_caps.rs`. The
 contract is owned by [architecture/grind.md](architecture/grind.md).
+
+## DD-089: Claude commit/PR attribution is opt-in under clud
+
+**Status:** Accepted
+
+**Context:** #1317. Claude Code adds a `Co-Authored-By: Claude …` trailer to
+every commit and a "Generated with Claude Code" line to every PR body. It
+exposes both as `attribution.commit` and `attribution.pr` in its settings
+(`includeCoAuthoredBy` is the deprecated spelling), and an empty string hides
+each one. No environment variable controls them.
+
+**Decision:** clud hides both by default. `--coauthor` (or `CLUD_COAUTHOR=1`)
+keeps Claude Code's own attribution, and `--coauthor=TAG` (or
+`CLUD_COAUTHOR=TAG`) uses TAG for both. The choice is
+`LaunchPlan::coauthor`, shown in `--dry-run`. The runtime merges it into the
+launch's single `--settings` document, the same one hooks and the status line
+use, and adds only the keys the user's own `--settings` left unset. The TAG is
+`=`-joined only, so a bare `--coauthor` never swallows the next word.
+
+**Rationale:** The trailer is a statement about authorship that the user, not
+the harness, should choose to make. Carrying the choice on the plan rather
+than on the plan's argv keeps every existing argv contract intact, including
+a prompt that stays last. Settings the user wrote themselves outrank clud's
+default. Codex and the DeepSeek harness add no such lines, so the flag does
+nothing on them.
+
+**Consequences:** Like the status line (DD-071), this makes every Claude
+launch carry a launch-scoped `--settings`, even in a repo that declares no
+hooks. `--coauthor` restores the old argv.

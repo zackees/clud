@@ -246,6 +246,7 @@ fn transcript_forces_centralized_daemon() {
         safe: false,
         unattended: false,
         allow_plan_mode: false,
+        coauthor: None,
         dry_run: false,
         detach: false,
         detachable: false,
