@@ -259,7 +259,10 @@ fn extra_input_pipeline_matches_stdin_pipeline() {
         assert_eq!(via_extra, via_stdin, "input {:?}", input);
         dismissed |= via_extra.dismissed;
     }
-    assert!(dismissed, "click on the close button must dismiss via extra_rx");
+    assert!(
+        dismissed,
+        "click on the close button must dismiss via extra_rx"
+    );
 }
 
 /// Issue #1350: a toast close click arriving via `extra_rx` is swallowed.
@@ -310,7 +313,10 @@ fn extra_input_f3_is_observed() {
     let mut paste = BracketedPasteNormalizer::new();
     let mut mouse = crate::toast::mouse::MouseFilter::new();
     let result = filter_user_input_chunk(&prepared, &mut paste, &mut mouse, parity_targets());
-    assert_eq!(result.bytes, b"\x1bOR", "F3 is still forwarded to the child");
+    assert_eq!(
+        result.bytes, b"\x1bOR",
+        "F3 is still forwarded to the child"
+    );
     let mut observer = F3Observer::new();
     assert_eq!(observer.observe(&prepared).presses, 1);
 }
