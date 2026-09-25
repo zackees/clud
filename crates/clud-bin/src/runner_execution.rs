@@ -1,7 +1,7 @@
-use super::{lease_shared_rx, merge_extra_rx};
 use super::runner_exit::normalize_exit_code;
 use super::runner_terminal;
 use super::*;
+use super::{lease_shared_rx, merge_extra_rx};
 
 pub(super) fn run_with_inherited_stdio(
     process: &subprocess::ManagedSubprocess,

@@ -402,7 +402,10 @@ mod tests {
         let (leased, lease) = lease_shared_rx(&shared);
         let merged = merge_extra_rx(Some(leased), Some(other_rx0)).expect("merged rx");
         tx.send(b"a".to_vec()).expect("send in iteration 0");
-        assert_eq!(merged.recv_timeout(timeout).expect("iteration 0 chunk"), b"a");
+        assert_eq!(
+            merged.recv_timeout(timeout).expect("iteration 0 chunk"),
+            b"a"
+        );
         drop(merged);
         drop(lease);
 
@@ -414,7 +417,10 @@ mod tests {
         let (_other_tx1, other_rx1) = std::sync::mpsc::channel::<Vec<u8>>();
         let (leased, lease) = lease_shared_rx(&shared);
         let merged = merge_extra_rx(Some(leased), Some(other_rx1)).expect("merged rx");
-        assert_eq!(merged.recv_timeout(timeout).expect("iteration 1 chunk"), b"b");
+        assert_eq!(
+            merged.recv_timeout(timeout).expect("iteration 1 chunk"),
+            b"b"
+        );
         drop(merged);
         drop(lease);
     }
