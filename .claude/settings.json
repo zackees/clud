@@ -3,13 +3,13 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "*",
         "hooks": [
           {
-            "command": "'/home/niteris/dev/clud2-do/target/debug/clud-cmd-scan'",
-            "type": "command"
+            "type": "command",
+            "command": "clud-cmd-scan"
           }
-        ],
-        "matcher": "*"
+        ]
       }
     ]
   }
