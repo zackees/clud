@@ -96,7 +96,7 @@ fn raw_pump_forwards_stdin_bytes_verbatim() {
 
     // Wait for the child to enter its stdin read loop before we feed.
     // #1310: send only once the child's stdin mode is final.
-    wait_for_mock_ready(&ready);
+    wait_for_mock_ready(&process, &ready);
 
     let payload: &[u8] = b"hello\x1b[6n\x1bOR\x1bOP world\n";
     let interrupted = AtomicBool::new(false);
@@ -148,7 +148,7 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
     process.set_echo(false);
     process.start_impl().expect("start");
     // #1310: send only once the child's stdin mode is final.
-    wait_for_mock_ready(&ready);
+    wait_for_mock_ready(&process, &ready);
 
     // Three F3 presses embedded in surrounding text. Trailing `\n` is
     // important: the PTY slave defaults to canonical (line) mode, so the
@@ -213,7 +213,7 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
     process.set_echo(false);
     process.start_impl().expect("start");
     // #1310: send only once the child's stdin mode is final.
-    wait_for_mock_ready(&ready);
+    wait_for_mock_ready(&process, &ready);
 
     // Kitty F3 press (CSI u, functional encoding) then release. The
     // trailing `\n` is the canonical-mode trigger; without it the
@@ -590,7 +590,7 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
     process.set_echo(false);
     process.start_impl().expect("start");
     // #1310: send only once the child's stdin mode is final.
-    wait_for_mock_ready(&ready);
+    wait_for_mock_ready(&process, &ready);
 
     let core = std::sync::Arc::new(TerminalInputCore::new());
     {

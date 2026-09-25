@@ -173,12 +173,32 @@ pub fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
 /// the bytes arrive, so input sent before the child switches to VT mode loses
 /// its escape sequences. Panics after 20 s so a child that never starts fails
 /// loudly instead of hanging.
-pub fn wait_for_mock_ready(ready_file: &std::path::Path) {
-    assert!(
-        wait_until(Duration::from_secs(20), || ready_file.exists()),
-        "mock-agent never signalled ready at {}",
-        ready_file.display()
-    );
+///
+/// While waiting it also drains the child's startup output and answers
+/// ConPTY's `ESC[6n` cursor query: until something replies, ConPTY holds the
+/// child before its first line runs, so it could never write the ready file.
+/// Only startup noise is consumed; the test sends nothing before this returns.
+pub fn wait_for_mock_ready(process: &NativePtyProcess, ready_file: &std::path::Path) {
+    const DSR: &[u8] = b"\x1b[6n";
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut seen = Vec::new();
+    let mut answered = 0;
+    while !ready_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "mock-agent never signalled ready at {}; startup output: {:?}",
+            ready_file.display(),
+            String::from_utf8_lossy(&seen)
+        );
+        if let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.05)) {
+            seen.extend_from_slice(&chunk);
+        }
+        let queries = seen.windows(DSR.len()).filter(|w| *w == DSR).count();
+        while answered < queries {
+            let _ = process.write_impl(b"\x1b[1;1R", false);
+            answered += 1;
+        }
+    }
 }
 
 /// Drain all chunks from the PTY reader up to `overall_timeout` or child exit.
