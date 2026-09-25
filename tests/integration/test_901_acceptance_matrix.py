@@ -158,6 +158,27 @@ def test_auth_status_and_logout_run_through_the_binary(
     assert (vault / VAULT_FILES["openrouter"]).exists()
 
 
+@pytest.mark.parametrize("flag", ["--kimi", "--deepseek", "--openrouter"])
+def test_dry_run_makes_zero_vault_calls(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path, flag: str
+) -> None:
+    """#936: dry-run never touches the vault. The test vault points at a
+    regular file, so any read fails as "vault unavailable". The live control
+    launch proves the poison works; the dry run must not notice it."""
+    poison = tmp_path / "not-a-directory"
+    poison.write_text("", encoding="utf-8")
+    env = _env(mock_env, poison)
+
+    live = _run(clud_binary, flag, "-p", "hello", env=env)
+    assert live.returncode == 2, live.stderr
+    assert "the native credential vault is unavailable" in live.stderr
+
+    dry = _run(clud_binary, "--dry-run", flag, "-p", "hello", env=env)
+    assert dry.returncode == 0, dry.stderr
+    assert json.loads(dry.stdout)["model_provider"] == flag.removeprefix("--")
+    assert "vault" not in dry.stderr
+
+
 def test_unified_session_discovers_switches_routes_effort_and_isolates_credentials(
     clud_binary: Path, mock_env: dict[str, str], tmp_path: Path, upstreams
 ) -> None:
