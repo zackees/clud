@@ -15,6 +15,16 @@ bridge logs can be attributed to Codex, DeepSeek, or Kimi.
 The [Kimi real-key smoke](kimi_smoke.md) is the opt-in, manual check that a
 real Moonshot key works direct and through `--unified` without leaking.
 
+The command-gate replay (`clud-bench-gate-replay`, #1067) runs every Bash
+command in local Claude Code transcripts through the command gate's own
+classifier and prints counts only, never command text:
+
+```
+soldr cargo run -p clud --features bench --bin clud-bench-gate-replay -- [~/.claude/projects]
+```
+
+The recorded result and what it means for enabling the gate are in DD-056.
+
 ## Runbook: real-daemon survival check (Tier 3, #674)
 
 **Never gating.** The reaper's daemon-survival suite is hermetic on purpose —

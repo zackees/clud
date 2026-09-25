@@ -3385,6 +3385,8 @@ use block_bad_cmd_shell::*;
 
 #[path = "block_bad_cmd_gate.rs"]
 mod block_bad_cmd_gate;
+/// The gate's classifier, for the #1067 false-positive replay only.
+pub use block_bad_cmd_gate::{classify as classify_for_gate, GateClass};
 
 #[path = "block_bad_cmd_rm_identity.rs"]
 mod block_bad_cmd_rm_identity;

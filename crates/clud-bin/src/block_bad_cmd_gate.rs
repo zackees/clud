@@ -177,6 +177,62 @@ pub(super) fn gate_reason(command: &str, prefix: &str) -> Option<String> {
     None
 }
 
+/// How much work an agent's command needs before the gate admits it (#1067
+/// step 2). The false-positive measurement replays real, ungated commands, so
+/// almost none carry the prefix; what matters is how cheaply each could be
+/// restated, not whether it passed as written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GateClass {
+    /// Passes as written: already wrapped, or only exempt builtins and
+    /// assignments.
+    Allowed,
+    /// One statement; prefixing it with the wrapper is the whole fix.
+    PrefixSingle,
+    /// Several statements joined by `;`, `&&`, `|` and the like; each needs
+    /// the wrapper. A mechanical restatement, but a longer one.
+    PrefixCompound,
+    /// Refused even with every statement wrapped: the named construct
+    /// (command substitution, a subshell, control flow, bad quoting, ...)
+    /// has to be rewritten or split into separate tool calls.
+    Restructure(&'static str),
+}
+
+/// Classify `command` for the replay measurement. Shares [`decompose`] and
+/// the keyword and builtin tables with [`gate_reason`], so the two cannot
+/// disagree about what the gate refuses.
+pub fn classify(command: &str, prefix: &str) -> GateClass {
+    if gate_reason(command, prefix).is_none() {
+        return GateClass::Allowed;
+    }
+    if command.trim().is_empty() {
+        return GateClass::Restructure("an empty command");
+    }
+    let statements = match decompose(command) {
+        Decomposition::Statements(statements) => statements,
+        Decomposition::Opaque(construct) => return GateClass::Restructure(construct),
+    };
+    let programs: Vec<Vec<String>> = statements
+        .iter()
+        .map(|statement| gate_words(statement))
+        .filter(|words| !words.is_empty())
+        .collect();
+    if programs.is_empty() {
+        return GateClass::Restructure("no runnable statement");
+    }
+    for words in &programs {
+        let bare = words[0].trim_matches(&['\'', '"'][..]);
+        let bare = bare.rsplit(['/', '\\']).next().unwrap_or(bare);
+        if CONTROL_KEYWORDS.contains(&bare.to_ascii_lowercase().as_str()) {
+            return GateClass::Restructure("control flow");
+        }
+    }
+    if statements.len() == 1 {
+        GateClass::PrefixSingle
+    } else {
+        GateClass::PrefixCompound
+    }
+}
+
 fn statement_reason(statement: &str, prefix: &str) -> Option<String> {
     let words = gate_words(statement);
     // A pure assignment (`SP=/tmp`) runs no program. `tap` sees the expanded
@@ -563,6 +619,41 @@ mod gate_tests {
             !denied(command),
             "heredoc body must be masked, not parsed as statements"
         );
+    }
+
+    #[test]
+    fn classify_separates_mechanical_restatements_from_restructures() {
+        use GateClass::*;
+        assert_eq!(classify("tap ls -la", P), Allowed);
+        assert_eq!(classify("cd /tmp", P), Allowed);
+        assert_eq!(classify("ls -la", P), PrefixSingle);
+        assert_eq!(classify("cargo build 2>&1", P), PrefixSingle);
+        assert_eq!(classify("git status && git diff", P), PrefixCompound);
+        assert_eq!(classify("grep x f | head -5", P), PrefixCompound);
+        assert_eq!(classify("tap git add . && git commit", P), PrefixCompound);
+        assert_eq!(
+            classify("echo $(date)", P),
+            Restructure("command substitution")
+        );
+        assert_eq!(classify("(cd a && make)", P), Restructure("a subshell"));
+        assert_eq!(
+            classify("for f in *; do echo $f; done", P),
+            Restructure("control flow")
+        );
+        assert_eq!(
+            classify("echo 'open", P),
+            Restructure("an unterminated single quote")
+        );
+        assert_eq!(classify("   ", P), Restructure("an empty command"));
+        // Whatever classify calls restatable must really pass once wrapped.
+        for (raw, wrapped) in [
+            ("ls -la", "tap ls -la"),
+            ("git status && git diff", "tap git status && tap git diff"),
+            ("grep x f | head -5", "tap grep x f | tap head -5"),
+        ] {
+            assert!(classify(raw, P) != Allowed);
+            assert_eq!(classify(wrapped, P), Allowed, "{wrapped}");
+        }
     }
 
     #[test]
