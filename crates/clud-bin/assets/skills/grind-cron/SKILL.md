@@ -4,6 +4,7 @@ description: "/grind cron mode: hand repetition to the harness's native /loop, w
 triggers:
   - When /grind runs in cron mode
   - When clud grind starts without an explicit mode
+disable-model-invocation: true
 ---
 <!-- managed-by: clud -->
 

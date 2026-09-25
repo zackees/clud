@@ -3,6 +3,7 @@ name: grind-work
 description: "Carry out one /grind worker task: edit only the assigned files in the given checkout. May investigate with read-only gh and web search; never builds, lints or tests."
 triggers:
   - When the grind workflow assigns a worker task
+disable-model-invocation: true
 ---
 <!-- managed-by: clud -->
 

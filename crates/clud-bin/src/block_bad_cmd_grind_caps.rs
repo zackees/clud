@@ -132,6 +132,36 @@ fn main_checkout_from_gitdir(gitdir: &str) -> Option<std::path::PathBuf> {
     dot_git.parent().map(Path::to_path_buf)
 }
 
+/// Set to `1` to let an `Agent` call start a `grind-*` agent type directly,
+/// for testing one role by hand.
+pub(super) const ALLOW_GRIND_AGENTS_ENV: &str = "CLUD_ALLOW_GRIND_AGENTS";
+
+/// The denial for an `Agent` call that names a `grind-*` agent type, or
+/// `None` to allow. The workflow never uses the `Agent` tool (its `agent()`
+/// calls emit no tool event), so this only ever stops the model delegating
+/// to a grind role on its own.
+pub(super) fn agent_spawn_reason(
+    tool_name: &str,
+    tool_input: Option<&Value>,
+    allow_env: Option<&str>,
+) -> Option<String> {
+    if !tool_name.eq_ignore_ascii_case("agent") || allow_env == Some("1") {
+        return None;
+    }
+    let requested = tool_input?
+        .get("subagent_type")
+        .or_else(|| tool_input?.get("subagentType"))?
+        .as_str()?;
+    is_grind_role(requested).then(|| {
+        format!(
+            "Blocked: `{requested}` is an internal /grind role, started only by the \
+             `grind-run` workflow. Use /grind to run the workflow, or do the work \
+             yourself. To start this role by hand for testing, set \
+             {ALLOW_GRIND_AGENTS_ENV}=1."
+        )
+    })
+}
+
 /// Whether `agent_type` is a capped `/grind` role.
 pub(super) fn is_grind_role(agent_type: &str) -> bool {
     matches!(
@@ -504,6 +534,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(RunFacts::discover(&wt.join("src")), run(true, true));
+    }
+
+    #[test]
+    fn agent_calls_for_grind_roles_are_refused_unless_opted_in() {
+        let call = |ty: &str| serde_json::json!({"subagent_type": ty, "prompt": "x"});
+        let worker = call("grind-worker");
+        assert!(agent_spawn_reason("Agent", Some(&worker), None).is_some());
+        assert!(agent_spawn_reason("Agent", Some(&worker), Some("0")).is_some());
+        assert!(agent_spawn_reason("Agent", Some(&worker), Some("1")).is_none());
+        let explore = call("Explore");
+        assert!(agent_spawn_reason("Agent", Some(&explore), None).is_none());
+        // Only the Agent tool: a Bash call that mentions a role is not a spawn.
+        assert!(agent_spawn_reason("Bash", Some(&worker), None).is_none());
+        let reason = agent_spawn_reason("Agent", Some(&call("grind-lander")), None).unwrap();
+        assert!(reason.contains("grind-run") && reason.contains(ALLOW_GRIND_AGENTS_ENV));
     }
 
     #[test]

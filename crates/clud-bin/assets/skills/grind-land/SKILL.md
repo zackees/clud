@@ -4,6 +4,7 @@ description: "Land one /grind PR: watch its checks with pr_merge_watch, admin-me
 triggers:
   - When the grind workflow lands a pushed PR
   - When the user asks to watch a PR and merge it once green
+disable-model-invocation: true
 ---
 <!-- managed-by: clud -->
 

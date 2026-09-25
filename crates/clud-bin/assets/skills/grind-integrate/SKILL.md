@@ -4,6 +4,7 @@ description: "Integrate one reviewed /grind goal: commit, rebase onto its base, 
 triggers:
   - When the grind workflow integrates a reviewed goal
   - When the grind lander hands back a failing PR for a fix round
+disable-model-invocation: true
 ---
 <!-- managed-by: clud -->
 
