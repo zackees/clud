@@ -152,6 +152,20 @@ pub struct Args {
     #[arg(long = "allow-plan-mode")]
     pub allow_plan_mode: bool,
 
+    /// Opt in to Claude Code commit/PR attribution (#1317). clud hides the
+    /// `Co-Authored-By: Claude …` trailer and "Generated with Claude Code"
+    /// PR line by default; `--coauthor` keeps Claude Code's own, and
+    /// `--coauthor=TAG` uses TAG for both. `CLUD_COAUTHOR=1|TAG` does the
+    /// same. Claude harness only; other harnesses ignore it.
+    #[arg(
+        long = "coauthor",
+        value_name = "TAG",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = ""
+    )]
+    pub coauthor: Option<String>,
+
     #[arg(long = "dry-run", global = true)]
     pub dry_run: bool,
 
@@ -1442,6 +1456,10 @@ const SPLITTER_VALUE_FLAGS: &[&str] = &[
 ];
 const SPLITTER_SHORT_VALUE_FLAGS: &[&str] = &["-p", "-m", "-r"];
 
+/// Flags that take an optional `=`-joined value: bare, they are bool flags
+/// (and are listed in `bool_flags`); `--flag=value` carries the value.
+const OPTIONAL_VALUE_FLAGS: &[&str] = &["--coauthor"];
+
 fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
     let mut known = vec![raw[0].clone()];
     let mut unknown = Vec::new();
@@ -1463,6 +1481,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--safe",
         "--unattended",
         "--allow-plan-mode",
+        "--coauthor",
         "--dry-run",
         "--detach",
         "--detachable",
@@ -1564,7 +1583,9 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
 
         if arg.starts_with("--") {
             if let Some((prefix, _)) = arg.split_once('=') {
-                if value_flags.contains(&prefix) {
+                // `--coauthor` is a bool flag whose optional value must be
+                // `=`-joined (#1317), so its `=` form is clud's too.
+                if value_flags.contains(&prefix) || OPTIONAL_VALUE_FLAGS.contains(&prefix) {
                     known.push(arg.clone());
                     i += 1;
                     continue;

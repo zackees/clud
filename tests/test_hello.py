@@ -432,6 +432,48 @@ def test_dry_run_prompt() -> None:
     assert data["harness_source"] == "built_in_default"
 
 
+def _dry_run_coauthor(*args: str, env_value: str | None = None) -> dict:
+    with _copied_clud_tempdir() as temp_dir:
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        home.mkdir()
+        env = _isolated_clud_env(Path(CLUD), home, Path(temp_dir) / "state")
+        env.pop("CLUD_COAUTHOR", None)
+        if env_value is not None:
+            env["CLUD_COAUTHOR"] = env_value
+        result = process.run(
+            [str(launch), "--dry-run", *args, "-p", "hello"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert not any(arg.startswith("--coauthor") for arg in data["command"])
+    assert data["command"][-1] == "hello"
+    return data["coauthor"]
+
+
+def test_dry_run_coauthor_is_hidden_by_default() -> None:
+    """#1317: Claude attribution is off unless the launch opts in."""
+    assert _dry_run_coauthor() == {"mode": "hidden"}
+
+
+def test_dry_run_coauthor_flag_opts_in() -> None:
+    assert _dry_run_coauthor("--coauthor") == {"mode": "harness"}
+    assert _dry_run_coauthor("--coauthor=Made with clud") == {
+        "mode": "tag",
+        "tag": "Made with clud",
+    }
+
+
+def test_dry_run_coauthor_env_var() -> None:
+    assert _dry_run_coauthor(env_value="1") == {"mode": "harness"}
+    assert _dry_run_coauthor(env_value="0") == {"mode": "hidden"}
+    assert _dry_run_coauthor(env_value="Bot <b@x>") == {"mode": "tag", "tag": "Bot <b@x>"}
+
+
 def test_dry_run_codex() -> None:
     result = _run("--dry-run", "--codex", "-p", "hello")
     assert result.returncode == 0

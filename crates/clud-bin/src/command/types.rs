@@ -91,6 +91,11 @@ pub struct LaunchPlan {
     /// green startup line: the boundary exists, the user did not type it.
     #[serde(default)]
     pub pinned_from_previous_selection: bool,
+    /// Claude commit/PR attribution for this launch (#1317). Hidden unless
+    /// `--coauthor[=TAG]` or `CLUD_COAUTHOR` opts in; the serde default keeps
+    /// old worker payloads on the same default.
+    #[serde(default)]
+    pub coauthor: crate::attribution::Coauthor,
 }
 
 impl LaunchPlan {
@@ -138,6 +143,7 @@ mod tests {
             failover_allow_metered: false,
             allowed_models: Vec::new(),
             pinned_from_previous_selection: false,
+            coauthor: crate::attribution::Coauthor::default(),
         }
     }
 

@@ -274,6 +274,7 @@ impl ForegroundRuntime {
         // construction so refusal cannot bind a listener or expose settings.
         Self::preflight(plan)?;
         let mut runtime = Self::start_with_secret_store(plan, env, &store)?;
+        runtime.apply_attribution(plan)?;
         if !pin_notices.is_empty() {
             let mut notices = pin_notices;
             notices.append(&mut runtime.startup_notices);
@@ -529,7 +530,32 @@ impl ForegroundRuntime {
             );
             true
         };
+        self.merge_launch_settings(plan, compose)
+    }
 
+    /// Apply the plan's commit/PR attribution choice (#1317) to this
+    /// launch's Claude settings. clud hides Claude Code's attribution unless
+    /// the launch opted in; keys the user's own `--settings` set are kept.
+    pub(crate) fn apply_attribution(&mut self, plan: &LaunchPlan) -> Result<(), BridgeError> {
+        if plan.effective_harness() != Backend::Claude {
+            return Ok(());
+        }
+        let coauthor = plan.coauthor.clone();
+        self.merge_launch_settings(plan, |document| {
+            crate::attribution::merge_into(&coauthor, document)
+        })
+    }
+
+    /// Run `compose` over this launch's single Claude `--settings` document:
+    /// the launch-scoped file when one exists, otherwise the user's own
+    /// `--settings` (or an empty document), written to a new launch-scoped
+    /// file that replaces the user's argument. Nothing is written when
+    /// `compose` reports no change.
+    fn merge_launch_settings(
+        &mut self,
+        plan: &LaunchPlan,
+        compose: impl FnOnce(&mut serde_json::Value) -> bool,
+    ) -> Result<(), BridgeError> {
         if let Some(existing) = &self.claude_settings {
             let text = std::fs::read_to_string(&existing.value).map_err(|error| {
                 BridgeError::Settings(format!(
@@ -1866,6 +1892,7 @@ mod tests {
             failover_allow_metered: false,
             allowed_models: Vec::new(),
             pinned_from_previous_selection: false,
+            coauthor: crate::attribution::Coauthor::default(),
         }
     }
 
@@ -3874,14 +3901,54 @@ mod tests {
         let repo = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();
 
+        // `--coauthor` opts back in to Claude Code's own attribution, which is
+        // the only reason an undeclared repo's launch carries `--settings`.
+        let mut plan = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        plan.coauthor = crate::attribution::Coauthor::Harness;
+        let runtime = ForegroundRuntime::start(&plan, Vec::new()).unwrap();
+
+        assert_eq!(settings_argument(&runtime), None);
+        assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
+    }
+
+    /// #1317: by default a Claude launch hides the co-author trailer and the
+    /// PR line through its launch `--settings`.
+    #[test]
+    fn a_default_claude_launch_hides_attribution() {
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+
         let runtime = ForegroundRuntime::start(
             &plan_in(ModelProvider::Claude, Backend::Claude, repo.path()),
             Vec::new(),
         )
         .unwrap();
 
-        assert_eq!(settings_argument(&runtime), None);
-        assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
+        let path = settings_argument(&runtime).expect("--settings injected");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            document["attribution"],
+            serde_json::json!({"commit": "", "pr": ""})
+        );
+    }
+
+    #[test]
+    fn a_coauthor_tag_replaces_both_attribution_strings() {
+        let repo = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let mut plan = plan_in(ModelProvider::Claude, Backend::Claude, repo.path());
+        plan.coauthor = crate::attribution::Coauthor::Tag("Made with clud".to_string());
+
+        let runtime = ForegroundRuntime::start(&plan, Vec::new()).unwrap();
+
+        let path = settings_argument(&runtime).expect("--settings injected");
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            document["attribution"],
+            serde_json::json!({"commit": "Made with clud", "pr": "Made with clud"})
+        );
     }
 
     #[test]

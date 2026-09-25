@@ -40,6 +40,7 @@ fn plan(executable: PathBuf, cwd: &Path, args: Vec<String>) -> LaunchPlan {
         failover_allow_metered: false,
         allowed_models: Vec::new(),
         pinned_from_previous_selection: false,
+        coauthor: clud::attribution::Coauthor::default(),
     }
 }
 

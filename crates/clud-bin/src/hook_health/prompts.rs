@@ -226,6 +226,7 @@ fn backend_prompt_launch_plan(
         safe: args.safe,
         unattended: args.unattended,
         allow_plan_mode: args.allow_plan_mode,
+        coauthor: args.coauthor.clone(),
         dry_run: false,
         detach: false,
         detachable: false,
