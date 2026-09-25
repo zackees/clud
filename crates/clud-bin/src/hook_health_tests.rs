@@ -8,6 +8,20 @@ fn write(path: &Path, body: &str) {
 }
 
 #[test]
+fn format_launch_warnings_empty_is_none() {
+    assert_eq!(format_launch_warnings(&[]), None);
+}
+
+#[test]
+fn format_launch_warnings_composes_every_warning_into_one_block() {
+    let warnings = vec!["a".to_string(), "b".to_string()];
+    assert_eq!(
+        format_launch_warnings(&warnings).as_deref(),
+        Some("[clud] warning: a\n[clud] warning: b\n")
+    );
+}
+
+#[test]
 fn launch_hook_gate_follows_effective_harness_not_provider_flag() {
     let cross_route_args = Args::parse_from(["clud", "--codex", "--harness", "claude"]);
     let claude_harness = crate::backend::resolve_launch_target(
