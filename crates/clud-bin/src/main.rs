@@ -366,6 +366,25 @@ fn run(mut args: args::Args) {
             eprintln!("[clud] error: {error}");
             std::process::exit(2);
         }
+        // A meta issue seeds `/grind`, anything else `/do`. Deciding needs a
+        // GitHub query; when it cannot be answered, refuse rather than guess.
+        if let Some(args::Command::Do {
+            target: Some(target),
+        }) = &args.command
+        {
+            let kind = command::do_kind::classify(
+                target,
+                std::env::var(command::do_kind::DO_KIND_ENV).ok().as_deref(),
+                command::do_kind::query_sub_issues,
+            );
+            match kind {
+                Ok(kind) => args.do_meta = kind == command::do_kind::DoKind::Meta,
+                Err(error) => {
+                    eprintln!("[clud] error: {error}");
+                    std::process::exit(2);
+                }
+            }
+        }
     }
 
     // Resolve saved routing policy before the picker: installed executables

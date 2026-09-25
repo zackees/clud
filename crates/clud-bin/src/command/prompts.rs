@@ -28,58 +28,16 @@ After downloading and analyzing the logs:
 Then proceed with the validation process:
 {validation}";
 
-pub(super) const DO_GOAL_TEMPLATE: &str = "\
-/goal read {url} and implement it. Record the starting branch. If this is a meta \
-issue launched via clud do, ask whether to work on independent children in \
-parallel; /meta-issue already approves parallelism. Use /grind to \
-delegate them. Parallel work may use separate worktrees, but each child needs its \
-own branch and one or more PRs. Never combine children in one PR. Only a child’s \
-final PR closes it; child PRs must not close the parent. Record child→PR links, \
-then close the parent after all children are resolved. For every PR: show \
-RED→GREEN, review, test, push, watch CI to green, and merge. Merge separately; \
-update remaining branches as needed. Follow repo worktree rules, return to the \
-starting branch, and leave a clean status.
-
-Goal is satisfied when all PRs are merged, all referenced issues are closed as \
-complete. No cheating. No files left behind. Rebase to origin main or master \
-when done.";
-
-pub(super) const DO_GOAL_INPUT_TEMPLATE: &str = "\
-/goal {input}. goal is resolved when the requested work lands in one or more PRs \
-where each is validated, tested, pushed and merged. You must wait for the GHA's \
-with the PR to go green. then merge it. please add a watch. No cheating, no files \
-left behind. Rebase to local origin when done. All work must be done for this \
-repo. use a git worktree or sibling \
-checkout only when /grind and repository guidance allow it; work can \
-only land here. when you are done do a git status and make sure \
-it's clean. make sure that the local repo is rebased to the branch we started \
-from. Find out that branch right now. If this goal contains multiple independent \
-deliverables, invoke /grind to delegate them; otherwise keep the \
-normal /goal workflow.";
-
-pub(super) fn build_do_prompt(target: &str) -> String {
+/// `clud do`'s seeded prompt. The contract itself lives in the bundled `/do`
+/// skill; `/goal` keeps the session going until it is met. A meta issue
+/// (open native sub-issues, decided in `main` by `do_kind`) goes to `/grind`.
+pub(super) fn build_do_prompt(target: &str, meta: bool) -> String {
     let target = target.trim();
-    if is_url_like(target) {
-        DO_GOAL_TEMPLATE.replace("{url}", target)
+    if meta {
+        format!("/goal /grind {target}")
     } else {
-        DO_GOAL_INPUT_TEMPLATE.replace("{input}", target)
+        format!("/goal /do {target}")
     }
-}
-
-fn is_url_like(target: &str) -> bool {
-    if target.is_empty() || target.chars().any(char::is_whitespace) {
-        return false;
-    }
-    let lowercase = target.to_ascii_lowercase();
-    if lowercase.starts_with("https://") || lowercase.starts_with("http://") {
-        return target
-            .split_once("://")
-            .is_some_and(|(_, rest)| !rest.is_empty());
-    }
-    let Some((host, path)) = target.split_once('/') else {
-        return false;
-    };
-    !path.is_empty() && host.contains('.') && !host.starts_with('.') && !host.ends_with('.')
 }
 
 pub(super) const REBASE_PROMPT: &str = "\

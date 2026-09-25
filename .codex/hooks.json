@@ -2,22 +2,22 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
         "hooks": [
           {
-            "type": "command",
-            "command": "python .codex/hooks/check-soldr.py"
+            "command": "python .codex/hooks/check-soldr.py",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "Bash"
       },
       {
-        "matcher": "*",
         "hooks": [
           {
-            "type": "command",
-            "command": "clud-cmd-scan"
+            "command": "'/home/niteris/dev/clud2-do/target/debug/clud-cmd-scan'",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "*"
       }
     ]
   }

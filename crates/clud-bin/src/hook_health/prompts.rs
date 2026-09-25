@@ -227,6 +227,7 @@ fn backend_prompt_launch_plan(
         unattended: args.unattended,
         allow_plan_mode: args.allow_plan_mode,
         dry_run: false,
+        do_meta: false,
         detach: false,
         detachable: false,
         session_name: None,

@@ -859,11 +859,17 @@ including these caps.
 
 ## `clud do [url-or-goal]` — Implement to a Merged PR
 
-Launches an interactive agent session with the `/goal` implementation contract.
-URLs retain the issue-oriented contract; free-form text becomes the goal directly.
-For a target with genuinely independent deliverables, `/do` routes them to
-[`/grind`](docs/architecture/grind.md) to plan, review, and integrate those
-slices; single cohesive changes remain on the normal `/goal` path.
+Launches an interactive agent session seeded with `/goal /do <target>`. `/goal`
+keeps the session going until the bundled
+[`/do`](crates/clud-bin/assets/skills/do/SKILL.md) contract is met: the work lands
+in merged PRs, referenced issues are closed, and the checkout is clean and
+rebased. A single issue URL, a PR, or a free-form goal all go to `/do`.
+
+A GitHub issue with open sub-issues is a meta issue. clud checks this with
+`gh` before launch and seeds `/goal /grind <url>` instead, so the children are
+worked through [`/grind`](docs/architecture/grind.md). If clud can't tell (no
+`gh`, not signed in, offline, or a non-GitHub issue URL), it refuses to launch;
+set `CLUD_DO_KIND=single` or `CLUD_DO_KIND=meta` to choose yourself.
 With no target, an interactive foreground launch prompts for a URL or goal before
 starting the backend. Scripts, dry-runs, and background launches must provide the
 target explicitly so they never block on input.

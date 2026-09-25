@@ -1210,61 +1210,48 @@ fn test_fix_with_non_github_url() {
 fn test_do_command_resolves_goal_prompt() {
     let p = plan(&["clud", "do", "https://github.com/zackees/clud/issues/866"]);
     // `do` seeds an interactive session, so the prompt is the trailing
-    // positional (no `-p`), same shape as codex.
-    let prompt = last_arg(&p);
-    assert!(prompt.starts_with("/goal "));
-    assert!(prompt.contains("https://github.com/zackees/clud/issues/866"));
-    assert!(prompt.contains("/grind"));
-    assert!(!prompt.contains("/clud-meta-work"));
-    assert!(!prompt.contains("{url}"));
-}
-
-#[test]
-fn test_build_do_prompt_substitutes_url() {
-    let prompt = build_do_prompt("https://example.com/thing");
+    // positional (no `-p`), same shape as codex. The contract lives in the
+    // bundled `/do` skill; `/goal` keeps the session going until it is met.
     assert_eq!(
-        prompt,
-        "/goal read https://example.com/thing and implement it. Record the starting branch. \
-If this is a meta issue launched via clud do, ask whether to work on independent children in \
-parallel; /meta-issue already approves parallelism. Use /grind to delegate them. \
-Parallel work may use separate worktrees, but each child needs its own branch and one or more \
-PRs. Never combine children in one PR. Only a child’s final PR closes it; child PRs must not \
-close the parent. Record child→PR links, then close the parent after all children are resolved. \
-For every PR: show RED→GREEN, review, test, push, watch CI to green, and merge. Merge separately; \
-update remaining branches as needed. Follow repo worktree rules, return to the starting branch, \
-and leave a clean status.
-
-Goal is satisfied when all PRs are merged, all referenced issues are closed as complete. No \
-cheating. No files left behind. Rebase to origin main or master when done."
+        last_arg(&p),
+        "/goal /do https://github.com/zackees/clud/issues/866"
     );
 }
 
 #[test]
-fn test_build_do_prompt_accepts_bare_domain_url() {
-    let prompt = build_do_prompt("github.com/zackees/clud/issues/1036");
-    assert!(prompt.starts_with("/goal read github.com/zackees/clud/issues/1036"));
+fn test_do_command_on_a_meta_issue_seeds_grind() {
+    let mut args = parse(&["clud", "do", "https://github.com/zackees/clud/issues/900"]);
+    args.do_meta = true;
+    let backend = crate::backend::resolve_backend(args.claude, args.codex);
+    let p = build_launch_plan(&args, backend, backend.executable_name());
+    assert_eq!(
+        last_arg(&p),
+        "/goal /grind https://github.com/zackees/clud/issues/900"
+    );
 }
 
 #[test]
-fn test_build_do_prompt_treats_free_form_input_as_a_goal_not_a_url() {
-    for input in [
-        "refactor the launch mode classifier",
-        "README.md",
-        "v2.8.0",
-        "foo.rs",
-    ] {
-        let prompt = build_do_prompt(input);
-        assert!(
-            prompt.starts_with(&format!("/goal {input}")),
-            "prompt={prompt}"
-        );
-        assert!(!prompt.starts_with("/goal read "), "prompt={prompt}");
-        assert!(prompt.contains("validated, tested, pushed and merged"));
-        assert!(prompt.contains("/grind"));
-        assert!(
-            prompt.contains("No cheating, no files left behind. Rebase to local origin when done.")
-        );
-    }
+fn test_build_do_prompt_expands_to_goal_do() {
+    assert_eq!(
+        build_do_prompt("https://example.com/thing", false),
+        "/goal /do https://example.com/thing"
+    );
+    assert_eq!(
+        build_do_prompt("github.com/zackees/clud/issues/1036", false),
+        "/goal /do github.com/zackees/clud/issues/1036"
+    );
+    assert_eq!(
+        build_do_prompt("  refactor the launch mode classifier ", false),
+        "/goal /do refactor the launch mode classifier"
+    );
+}
+
+#[test]
+fn test_build_do_prompt_routes_meta_issues_to_grind() {
+    assert_eq!(
+        build_do_prompt("https://github.com/o/r/issues/1", true),
+        "/goal /grind https://github.com/o/r/issues/1"
+    );
 }
 
 #[test]

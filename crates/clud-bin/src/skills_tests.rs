@@ -262,6 +262,7 @@ fn bundled_skill_frontmatter_is_valid_yaml() {
 fn bundled_includes_all_known_skills() {
     let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
     assert!(names.contains(&"grind"));
+    assert!(names.contains(&"do"));
     assert!(names.contains(&"grind-intake"));
     assert!(names.contains(&"grind-plan"));
     assert!(names.contains(&"grind-work"));
@@ -940,4 +941,27 @@ fn os_debug_skill_keeps_its_privilege_boundaries() {
 #[test]
 fn os_debug_skill_warns_that_attaching_suspends_the_target() {
     assert!(flattened("clud-os-debug").contains("suspends the target"));
+}
+
+/// `clud do` seeds `/goal /do <target>`, so the `/do` skill is the whole
+/// completion contract that used to live in the seeded prompt.
+#[test]
+fn do_skill_carries_the_clud_do_contract() {
+    let skill = flattened("do");
+    for required in [
+        "Record the starting branch",
+        "never combine children in one PR",
+        "child PRs must not close the parent",
+        "watch CI to green, and merge",
+        "all referenced issues are closed as complete",
+        "No files left behind",
+        "Rebase to origin main or master",
+        "invoke `/grind` to delegate them",
+    ] {
+        assert!(skill.contains(required), "/do skill missing: {required:?}");
+    }
+    assert!(
+        !skill.contains("disable-model-invocation"),
+        "/goal /do needs the model to load /do"
+    );
 }

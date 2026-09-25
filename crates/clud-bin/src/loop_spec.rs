@@ -324,7 +324,7 @@ pub fn fetch_via_gh(
 /// Run `gh` with `args`, capturing combined stdout/stderr. Returns
 /// `(exit_code, captured_output)`. Uses `running-process-core` per the
 /// repo's subprocess policy (see ci/check-banned-imports).
-fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
+pub(crate) fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
     let mut argv = vec!["gh".to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
     let config = ProcessConfig {

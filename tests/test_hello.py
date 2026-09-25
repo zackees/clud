@@ -194,6 +194,9 @@ def _isolated_clud_env(source: Path, home: Path, state_dir: Path) -> dict[str, s
     env["CLUD_HOOK_HOME"] = str(home)
     env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
     env["CLUD_DATA_DB"] = str(state_dir / "data.redb")
+    # `clud do` asks GitHub whether an issue is a meta issue. Tests stay
+    # offline: the override answers instead; the refusal test removes it.
+    env["CLUD_DO_KIND"] = "single"
     return env
 
 
@@ -456,7 +459,7 @@ def test_dry_run_codex() -> None:
 @pytest.mark.parametrize(
     ("verb", "target", "prompt_fragment"),
     [
-        ("do", "https://github.com/zackees/clud/issues/1036", "/goal read https://"),
+        ("do", "https://github.com/zackees/clud/issues/1036", "/goal /do https://"),
         ("up", None, "codeup"),
         ("rebase", None, "git fetch"),
         ("fix", None, "linting"),
@@ -530,8 +533,8 @@ def test_do_dotted_free_form_goal_is_not_misclassified_as_a_url() -> None:
     result = _run("--dry-run", "--codex", "do", "README.md")
     assert result.returncode == 0, result.stderr
     prompt = json.loads(result.stdout)["command"][-1]
-    assert prompt.startswith("/goal README.md")
-    assert not prompt.startswith("/goal read ")
+    # The target passes through untouched; `/do` decides URL vs goal.
+    assert prompt == "/goal /do README.md"
 
 
 def test_dry_run_deepseek() -> None:
@@ -1481,23 +1484,46 @@ def test_dry_run_rebase() -> None:
     assert "rebase" in prompt.lower()
 
 
-def test_dry_run_do_carries_completion_and_meta_issue_contracts() -> None:
+def test_dry_run_do_seeds_goal_do_for_a_single_issue() -> None:
     result = _run("--dry-run", "--codex", "do", "https://github.com/o/r/issues/1")
     assert result.returncode == 0, result.stderr
-    prompt = json.loads(result.stdout)["command"][-1]
-    assert "Record the starting branch" in prompt
-    assert "meta issue launched via clud do" in prompt
-    assert "/meta-issue already approves parallelism" in prompt
-    assert "each child needs its own branch and one or more PRs" in prompt
-    assert "Never combine children in one PR" in prompt
-    assert "Only a child\u2019s final PR closes it" in prompt
-    assert "child PRs must not close the parent" in prompt
-    assert "Record child→PR links" in prompt
-    assert "show RED→GREEN, review, test, push, watch CI to green, and merge" in prompt
-    assert "return to the starting branch, and leave a clean status" in prompt
-    assert "all referenced issues are closed as complete" in prompt
-    assert "No cheating. No files left behind" in prompt
-    assert "Rebase to origin main or master when done" in prompt
+    assert json.loads(result.stdout)["command"][-1] == "/goal /do https://github.com/o/r/issues/1"
+
+
+def _run_do_with_kind(kind: str | None, target: str) -> process.CompletedProcess[str]:
+    with _copied_clud_tempdir() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        home.mkdir()
+        env = _isolated_clud_env(source, home, Path(temp_dir) / "state")
+        env.pop("CLUD_DO_KIND")
+        if kind is not None:
+            env["CLUD_DO_KIND"] = kind
+        return process.run(
+            [str(launch), "--dry-run", "--codex", "do", target],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+
+
+def test_dry_run_do_seeds_goal_grind_for_a_meta_issue() -> None:
+    result = _run_do_with_kind("meta", "https://github.com/o/r/issues/1")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["command"][-1] == "/goal /grind https://github.com/o/r/issues/1"
+
+
+def test_do_refuses_when_it_cannot_tell_whether_an_issue_is_meta() -> None:
+    # A non-GitHub issue cannot be queried for sub-issues, so clud refuses
+    # rather than guessing. No network is involved.
+    result = _run_do_with_kind(None, "https://gitlab.com/g/p/-/issues/3")
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "cannot tell whether" in result.stderr
+    assert "CLUD_DO_KIND" in result.stderr
+
 
 
 def test_dry_run_fix() -> None:
