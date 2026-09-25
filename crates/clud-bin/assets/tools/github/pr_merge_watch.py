@@ -28,6 +28,31 @@ Exit codes:
   2  new review activity (unresolved coderabbit/human review)
   3  PR closed or merged out from under us
   4  timeout (configurable via --timeout, default 60min)
+  5  approval required: a workflow run or check is `action_required` (a fork
+     PR waiting for a maintainer); reported immediately, never pending
+  6  never reported: a required check has no check run while every workflow
+     run on the head commit has finished (path/branch filters, a
+     `pull_request_target` run on the base commit, ...)
+  7  stale: GitHub marked a required check `stale` (14 days incomplete); it
+     never resolves on its own, a re-run is needed
+
+Supersession rule (#1330). Check runs are judged on the PR's *current* head
+commit only, grouped by (workflow file, check name) -- never the display
+`name:` -- and ordered by check-run id, not run id:
+  - a `cancelled` check is replaced by any newer check in its group, even one
+    still queued or in progress;
+  - a completed result is replaced only by a newer check that actually ran
+    (anything but `skipped`), so a skip never hides an older real failure;
+  - a cancelled check with no replacement fails only when no newer run of
+    its workflow exists on the head commit in any state (queued included);
+  - `success`, `neutral` and `skipped` pass, a required `skipped` included;
+  - a cancellation-derived failure is acted on only after re-reading the
+    PR's head: if the head moved, the verdict is dropped and the watch
+    continues on the new commit;
+  - on a failure in workflow X only X's runs at or below the failing run are
+    cancelled; newer runs and other workflows are left alone.
+`merge_group` runs and check runs for any other commit are ignored; legacy
+commit statuses keep GitHub's newest-per-context result.
 
 The exit code IS the result — do not pipe this through `tail`, `grep` or
 `head`. A pipeline reports the *last* stage's status, so every one of the
@@ -56,6 +81,9 @@ EXIT_REQUIRED_FAIL = 1
 EXIT_REVIEW_ACTIVITY = 2
 EXIT_PR_CLOSED = 3
 EXIT_TIMEOUT = 4
+EXIT_APPROVAL_REQUIRED = 5
+EXIT_NEVER_REPORTED = 6
+EXIT_STALE = 7
 
 CANCEL_ON_CHOICES = {"fail", "review", "timeout", "closed", "always", "never"}
 CANCEL_ON_DEFAULTS = {"fail", "review", "timeout", "closed"}
@@ -280,13 +308,14 @@ class PRSnapshot:
     mergeable: str  # MERGEABLE | CONFLICTING | UNKNOWN
     head_sha: str
     base_ref: str
+    head_ref: str = ""
 
     @classmethod
     def fetch(cls, pr: int, repo: str | None) -> PRSnapshot | None:
         args = ["pr", "view", str(pr)]
         if repo:
             args += ["--repo", repo]
-        args += ["--json", "number,state,mergeable,headRefOid,baseRefName"]
+        args += ["--json", "number,state,mergeable,headRefOid,baseRefName,headRefName"]
         data = gh_json(*args)
         if not isinstance(data, dict):
             return None
@@ -296,6 +325,7 @@ class PRSnapshot:
             mergeable=str(data.get("mergeable", "UNKNOWN")),
             head_sha=str(data.get("headRefOid", "")),
             base_ref=str(data.get("baseRefName", "main")),
+            head_ref=str(data.get("headRefName") or ""),
         )
 
 
@@ -321,6 +351,371 @@ def check_counts(checks: list[CheckRow]) -> dict[str, int]:
         else:
             counts["pending"] += 1
     return counts
+
+
+# ---------- head-commit check judgment (#1330) --------------------------------
+
+PASSING_CONCLUSIONS = {"success", "neutral", "skipped"}
+# A full-mode PR with re-runs passes 100 check runs; a runaway guard only.
+MAX_PAGES = 50
+PER_PAGE = 100
+
+
+@dataclass(frozen=True)
+class HeadChecks:
+    """Raw REST data for one head commit, as GitHub returned it."""
+
+    check_runs: list[dict]
+    workflow_runs: list[dict]
+    statuses: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class CheckJudgment:
+    """The judged state of one (workflow file, check name) group."""
+
+    name: str
+    workflow: str
+    state: str  # pass | fail | pending | approval_required | stale | superseded
+    conclusion: str
+    check_run_id: int | None
+    run_id: int | None
+    link: str | None
+    required: bool
+    workflow_broken: bool = False  # startup_failure: the workflow, not the code
+    cancelled: bool = False  # the failure is derived from a cancellation
+
+    def as_check_row(self) -> CheckRow:
+        bucket = {"pass": "pass", "superseded": "pass", "pending": "pending"}.get(
+            self.state, "fail"
+        )
+        return CheckRow(self.name, bucket, self.conclusion.upper(), self.link)
+
+
+@dataclass
+class Verdict:
+    """What the head commit's checks say, after the supersession rule."""
+
+    state: str  # pending | pass | fail | approval_required | never_reported | stale
+    judgments: list[CheckJudgment]
+    failing: list[CheckJudgment]
+    advisory_failing: list[CheckJudgment]
+    # workflow key -> highest failing run id: the cancellation scope.
+    failing_run_ids: dict[str, int]
+    missing: list[str]
+    notes: list[str]
+
+    @property
+    def cancellation_derived(self) -> bool:
+        return any(j.cancelled for j in self.failing)
+
+
+def _as_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _lower(value: object) -> str:
+    return str(value or "").lower()
+
+
+def _workflow_key(run: dict) -> str:
+    """The workflow's file path (or id), never its display `name:`."""
+    path = run.get("path")
+    if isinstance(path, str) and path:
+        return path.split("@", 1)[0]
+    workflow_id = _as_int(run.get("workflow_id"))
+    if workflow_id is not None:
+        return f"workflow:{workflow_id}"
+    return f"run:{run.get('id')}"
+
+
+def _is_cancelled(check: dict) -> bool:
+    return _lower(check.get("status")) == "completed" and _lower(check.get("conclusion")) == (
+        "cancelled"
+    )
+
+
+def _is_skipped(check: dict) -> bool:
+    return _lower(check.get("status")) == "completed" and _lower(check.get("conclusion")) == (
+        "skipped"
+    )
+
+
+def _effective(entries: list[tuple[dict, dict | None]]) -> tuple[dict, dict | None]:
+    """The entry that stands for a group, in check-run id order.
+
+    A cancelled check is replaced by anything newer. A newer cancellation
+    never hides an older result, and a newer skip never hides an older result
+    that actually ran.
+    """
+    ordered = sorted(entries, key=lambda entry: entry[0]["id"])
+    current = ordered[0]
+    for entry in ordered[1:]:
+        check = entry[0]
+        if _is_cancelled(current[0]):
+            current = entry
+        elif _is_cancelled(check):
+            continue
+        elif _is_skipped(check) and not _is_skipped(current[0]):
+            continue
+        else:
+            current = entry
+    return current
+
+
+def judge_check_runs(
+    check_runs: list[dict],
+    workflow_runs: list[dict],
+    head_sha: str,
+    required: set[str] | None,
+    *,
+    statuses: list[dict] | None = None,
+    head_branch: str | None = None,
+    require_re: re.Pattern[str] | None = None,
+) -> Verdict:
+    """Judge the head commit's checks. Pure: no network, no clock.
+
+    `check_runs` are `repos/{r}/commits/{sha}/check-runs` items and
+    `workflow_runs` are `actions/runs?head_sha=` items, all pages. See the
+    module docstring for the supersession rule this implements.
+    """
+
+    def is_required(name: str) -> bool:
+        if require_re is not None:
+            return bool(require_re.search(name))
+        if not required:
+            return True
+        return name in required
+
+    runs_by_id: dict[int, dict] = {}
+    runs_by_suite: dict[int, dict] = {}
+    for run in workflow_runs:
+        if not isinstance(run, dict):
+            continue
+        run_id = _as_int(run.get("id"))
+        if run_id is None:
+            continue
+        runs_by_id[run_id] = run
+        suite = _as_int(run.get("check_suite_id"))
+        if suite is not None:
+            runs_by_suite[suite] = run
+
+    def on_head(run: dict) -> bool:
+        if run.get("head_sha") != head_sha or run.get("event") == "merge_group":
+            return False
+        branch = run.get("head_branch")
+        return not (head_branch and branch and branch != head_branch)
+
+    head_runs = [run for run in runs_by_id.values() if on_head(run)]
+
+    def newer_runs(key: str, run_id: int) -> list[dict]:
+        return [r for r in head_runs if _workflow_key(r) == key and r["id"] > run_id]
+
+    groups: dict[tuple[str, str], list[tuple[dict, dict | None]]] = {}
+    for check in check_runs:
+        if not isinstance(check, dict) or check.get("head_sha") != head_sha:
+            continue
+        name = check.get("name")
+        if _as_int(check.get("id")) is None or not isinstance(name, str):
+            continue
+        run: dict | None = None
+        linked = _extract_run_id_from_link(check.get("details_url") or check.get("html_url"))
+        if linked:
+            run = runs_by_id.get(int(linked))
+        if run is None:
+            suite = _as_int((check.get("check_suite") or {}).get("id"))
+            if suite is not None:
+                run = runs_by_suite.get(suite)
+        if run is not None:
+            if not on_head(run):
+                continue
+            key = _workflow_key(run)
+        else:
+            key = f"app:{(check.get('app') or {}).get('slug') or 'unknown'}"
+        groups.setdefault((key, name), []).append((check, run))
+
+    judgments: list[CheckJudgment] = []
+    notes: list[str] = []
+    for (key, name), entries in groups.items():
+        events = {str(run.get("event")) for _check, run in entries if run is not None}
+        if len(events) > 1:
+            notes.append(
+                f"{name} ({key}) reported by runs from events {sorted(events)}; "
+                "the newest check counts"
+            )
+        check, run = _effective(entries)
+        status = _lower(check.get("status"))
+        conclusion = _lower(check.get("conclusion"))
+        run_id = _as_int(run.get("id")) if run is not None else None
+        cancelled = False
+        if status != "completed":
+            state = "pending"
+        elif conclusion in PASSING_CONCLUSIONS:
+            state = "pass"
+        elif conclusion == "action_required":
+            state = "approval_required"
+        elif conclusion == "stale":
+            state = "stale"
+        elif conclusion == "cancelled":
+            cancelled = True
+            newer = newer_runs(key, run_id) if run_id is not None else []
+            if run is not None and _lower(run.get("status")) != "completed":
+                state = "pending"  # its own run is re-running
+            elif not newer:
+                state = "fail"
+            elif any(_lower(r.get("status")) != "completed" for r in newer):
+                state = "pending"
+            else:
+                state = "superseded"
+        else:
+            state = "fail"
+            # An `if: always()` gate fails because its run was cancelled; a
+            # newer run of the workflow supersedes it.
+            if run is not None and run_id is not None and _lower(run.get("conclusion")) == (
+                "cancelled"
+            ):
+                newer = newer_runs(key, run_id)
+                if newer:
+                    state = (
+                        "pending"
+                        if any(_lower(r.get("status")) != "completed" for r in newer)
+                        else "superseded"
+                    )
+        judgments.append(
+            CheckJudgment(
+                name=name,
+                workflow=key,
+                state=state,
+                conclusion=conclusion or status,
+                check_run_id=_as_int(check.get("id")),
+                run_id=run_id,
+                link=check.get("details_url") or check.get("html_url") or None,
+                required=is_required(name),
+                workflow_broken=conclusion == "startup_failure",
+                cancelled=cancelled,
+            )
+        )
+
+    # Run-level results that produce no check runs at all.
+    for run in head_runs:
+        if _lower(run.get("status")) != "completed":
+            continue
+        conclusion = _lower(run.get("conclusion"))
+        if conclusion not in {"startup_failure", "action_required"}:
+            continue
+        key = _workflow_key(run)
+        if newer_runs(key, run["id"]) or any(j.run_id == run["id"] for j in judgments):
+            continue
+        judgments.append(
+            CheckJudgment(
+                name=str(run.get("name") or key),
+                workflow=key,
+                state="fail" if conclusion == "startup_failure" else "approval_required",
+                conclusion=conclusion,
+                check_run_id=None,
+                run_id=run["id"],
+                link=run.get("html_url") or None,
+                required=True,
+                workflow_broken=conclusion == "startup_failure",
+            )
+        )
+
+    # Legacy commit statuses: newest per context (highest id when present).
+    seen_contexts: set[str] = set()
+    for status_item in sorted(
+        (s for s in statuses or [] if isinstance(s, dict)),
+        key=lambda s: -(_as_int(s.get("id")) or 0),
+    ):
+        context = status_item.get("context")
+        if not isinstance(context, str) or context in seen_contexts:
+            continue
+        seen_contexts.add(context)
+        raw = _lower(status_item.get("state"))
+        state = (
+            "pass" if raw == "success" else "pending" if raw in {"pending", "expected"} else "fail"
+        )
+        judgments.append(
+            CheckJudgment(
+                name=context,
+                workflow="status",
+                state=state,
+                conclusion=raw,
+                check_run_id=None,
+                run_id=None,
+                link=status_item.get("target_url") or None,
+                required=is_required(context),
+            )
+        )
+
+    missing: list[str] = []
+    if required and require_re is None:
+        reported = {j.name for j in judgments}
+        missing = sorted(required - reported)
+    all_runs_done = bool(head_runs) and all(
+        _lower(r.get("status")) == "completed" for r in head_runs
+    )
+
+    req = [j for j in judgments if j.required]
+    real_failure_runs = {
+        j.run_id for j in req if j.state == "fail" and not j.cancelled and j.run_id is not None
+    }
+    # Fail-fast siblings of a real failure in the same run are not the cause.
+    failing = [
+        j
+        for j in req
+        if j.state == "fail" and not (j.cancelled and j.run_id in real_failure_runs)
+    ]
+    advisory = [j for j in judgments if not j.required and j.state in {"fail", "stale"}]
+    failing_run_ids: dict[str, int] = {}
+    for j in failing:
+        if j.run_id is not None and j.workflow not in {"status"}:
+            failing_run_ids[j.workflow] = max(failing_run_ids.get(j.workflow, 0), j.run_id)
+
+    if any(j.state == "approval_required" for j in req):
+        state = "approval_required"
+    elif failing:
+        state = "fail"
+    elif any(j.state == "stale" for j in req):
+        state = "stale"
+    elif any(j.state == "pending" for j in req):
+        state = "pending"
+    elif missing:
+        state = "never_reported" if all_runs_done else "pending"
+    elif not judgments:
+        state = "pass" if all_runs_done else "pending"
+    else:
+        state = "pass"
+    return Verdict(state, judgments, failing, advisory, failing_run_ids, missing, notes)
+
+
+def paginate(path: str, key: str) -> list[dict] | None:
+    """Every page of a REST list endpoint; None if any page is unreadable."""
+    sep = "&" if "?" in path else "?"
+    items: list[dict] = []
+    for page in range(1, MAX_PAGES + 1):
+        data = gh_json("api", f"{path}{sep}per_page={PER_PAGE}&page={page}")
+        if not isinstance(data, dict) or not isinstance(data.get(key), list):
+            return None
+        batch = [item for item in data[key] if isinstance(item, dict)]
+        items.extend(batch)
+        if len(data[key]) < PER_PAGE:
+            break
+    return items
+
+
+def fetch_head_checks(
+    repo: str, head_sha: str, statuses: list[dict] | None = None
+) -> HeadChecks | None:
+    """All check runs and workflow runs for one commit, every page."""
+    if not head_sha:
+        return None
+    check_runs = paginate(f"repos/{repo}/commits/{head_sha}/check-runs?filter=all", "check_runs")
+    if check_runs is None:
+        return None
+    runs = paginate(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+    if runs is None:
+        return None
+    return HeadChecks(check_runs, runs, list(statuses or []))
 
 
 def fetch_checks(pr: int, repo: str | None) -> list[CheckRow] | None:
@@ -594,6 +989,9 @@ class GateSnapshot:
     human_review_ids: frozenset[int]
     coderabbit_probe: CodeRabbitProbe | None
     coderabbit: CodeRabbitObservation | None
+    # REST check runs + workflow runs for the head commit (#1330); None when
+    # unavailable, in which case the rollup rows above are judged instead.
+    head_checks: HeadChecks | None = None
 
 
 def _rollup_check(node: dict) -> CheckRow | None:
@@ -646,7 +1044,7 @@ def fetch_gate_snapshot(repo: str, pr: int, *, include_coderabbit: bool) -> Gate
 query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
-      number state mergeable headRefOid baseRefName
+      number state mergeable headRefOid baseRefName headRefName
       reviews(first:100){nodes{databaseId state author{login}} pageInfo{hasNextPage}}
       reviewThreads(first:100) @include(if:$includeCoderabbit){
         nodes{isResolved comments(first:20){
@@ -715,6 +1113,16 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
     else:
         return None
     checks = [row for node in rollup_nodes if (row := _rollup_check(node)) is not None]
+    # GitHub already keeps only the newest status per context in the rollup.
+    statuses = [
+        {
+            "context": node.get("context"),
+            "state": str(node.get("state", "")).lower(),
+            "target_url": node.get("targetUrl"),
+        }
+        for node in rollup_nodes
+        if node.get("__typename") == "StatusContext"
+    ]
 
     review_nodes = reviews_connection.get("nodes") or []
     human_ids = (
@@ -787,11 +1195,13 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
             mergeable=str(pull.get("mergeable", "UNKNOWN")),
             head_sha=str(pull.get("headRefOid", "")),
             base_ref=str(pull.get("baseRefName", "main")),
+            head_ref=str(pull.get("headRefName") or ""),
         ),
         checks=checks,
         human_review_ids=human_ids,
         coderabbit_probe=probe,
         coderabbit=observation,
+        head_checks=fetch_head_checks(repo, str(pull.get("headRefOid", "")), statuses),
     )
 
 
@@ -924,8 +1334,14 @@ def cancel_pr_runs(
     head_sha: str,
     opts: CancelOptions,
     log: WatchLog | None = None,
+    *,
+    scope: dict[str, int] | None = None,
 ) -> int:
     """Cancel non-completed workflow runs on the PR's head SHA.
+
+    `scope` (workflow key -> failing run id) limits cancellation to the
+    failing workflows' runs at or below the failing run: never a newer run,
+    never another workflow (#1330).
 
     Returns the number of cancel attempts. Failures are surfaced as
     `CANCEL <id> status=…` lines on stdout.
@@ -942,15 +1358,10 @@ def cancel_pr_runs(
         if log:
             log.emit("cancel_item", status="skipped", reason="repo_unresolved")
         return 0
-    runs_resp = gh_json("api", f"repos/{repo_arg}/actions/runs?head_sha={head_sha}&per_page=100")
-    if not isinstance(runs_resp, dict):
+    runs = paginate(f"repos/{repo_arg}/actions/runs?head_sha={head_sha}", "workflow_runs")
+    if runs is None:
         if log:
             log.emit("api_degraded", source="cancel_runs", reason="fetch_failed")
-        return 0
-    runs = runs_resp.get("workflow_runs", [])
-    if not isinstance(runs, list):
-        if log:
-            log.emit("api_degraded", source="cancel_runs", reason="malformed_payload")
         return 0
     attempts = 0
     for r in runs:
@@ -971,6 +1382,18 @@ def cancel_pr_runs(
                     reason=("head_sha_mismatch" if run_head_sha else "head_sha_missing"),
                 )
             continue
+        if scope is not None:
+            limit = scope.get(_workflow_key(r))
+            if limit is None or rid > limit:
+                if log:
+                    log.emit(
+                        "cancel_item",
+                        mode=opts.mode,
+                        run_id=rid,
+                        status="skipped",
+                        reason="out_of_scope",
+                    )
+                continue
         if opts.mode == "runs":
             attempts += 1
             if opts.dry_run:
@@ -1093,9 +1516,13 @@ def _cancel_for_exit(
     head_sha: str,
     opts: CancelOptions,
     log: WatchLog | None = None,
+    scope: dict[str, int] | None = None,
 ) -> None:
     if on_label in opts.on or "always" in opts.on:
-        attempts = cancel_pr_runs(pr, repo, head_sha, opts, log)
+        if scope is None:
+            attempts = cancel_pr_runs(pr, repo, head_sha, opts, log)
+        else:
+            attempts = cancel_pr_runs(pr, repo, head_sha, opts, log, scope=scope)
         if log:
             log.emit("cancel", trigger=on_label, attempts=attempts, mode=opts.mode)
 
@@ -1354,12 +1781,26 @@ def watch(
             label = "merged" if snapshot.state == "MERGED" else "closed"
             _exit_after_cancel(code, label, pr, repo, snapshot.head_sha, opts, log)
 
-        # 1. Check rollup and required-failure classification.
+        # 1. Judge the head commit's checks. The REST check runs (every page)
+        # are judged by the supersession rule; the rollup rows are the
+        # fallback when that data is unavailable.
+        verdict: Verdict | None = None
         checks = gate.checks
+        if gate.head_checks is not None:
+            verdict = judge_check_runs(
+                gate.head_checks.check_runs,
+                gate.head_checks.workflow_runs,
+                snapshot.head_sha,
+                required_names,
+                statuses=gate.head_checks.statuses,
+                head_branch=snapshot.head_ref or None,
+                require_re=require_re,
+            )
+            checks = [j.as_check_row() for j in verdict.judgments]
         pending = [c for c in checks if c.bucket == "pending"]
         failing = [c for c in checks if c.bucket in {"fail", "cancel"}]
         counts = check_counts(checks)
-        if counts["total"] == 0:
+        if counts["total"] == 0 and (verdict is None or verdict.state == "pending"):
             # A fresh push registers no checks for the first few seconds; an
             # empty rollup must read as "no data yet", never as green.
             if log:
@@ -1376,41 +1817,49 @@ def watch(
                 flush=True,
             )
 
-        # Classify each failing check as required or advisory.
-        for c in failing:
-            if not _is_required(c, required_names, require_re):
+        if verdict is not None:
+            if _act_on_verdict(verdict, pr, repo, repo_for_protection, snapshot, opts, log):
+                # The head moved under a cancellation-derived verdict: drop
+                # it and judge the new head on the next poll.
+                _sleep_remaining_interval(poll_started, interval)
                 continue
-            # First failing required check → bail.
-            if log:
-                log.emit(
-                    "required_failure",
-                    check={
-                        "name": c.name,
-                        "state": c.state or c.bucket,
-                        "link": c.link,
-                    },
-                )
-            # Diagnose first, then cancel. The probe is one bounded request
-            # against the failing *job*, so the matrix minutes this costs are
-            # seconds; cancelling first raced the log's availability and left
-            # the caller with a bare "FAIL <name>" and nothing to act on,
-            # which is the opposite of what failing fast is for.
-            report = _build_failure_report(c, repo_for_protection)
-            _cancel_for_exit("fail", pr, repo, snapshot.head_sha, opts, log)
-            if "fail" in opts.on or "always" in opts.on:
-                print(
-                    f"NOTE  {len(pending)} check(s) still running on this head SHA; "
-                    "cancelling this PR's remaining runs — push a fix to supersede them"
-                )
-            print(report.render())
-            if log and (report.first_error or report.classifier):
-                log.emit(
-                    "failure_diagnostic",
-                    check_name=c.name,
-                    first_error=report.first_error,
-                    classifier=report.classifier,
-                )
-            _finish_exit(EXIT_REQUIRED_FAIL, "fail", log)
+            failing = [j.as_check_row() for j in verdict.advisory_failing]
+        else:
+            # Classify each failing check as required or advisory.
+            for c in failing:
+                if not _is_required(c, required_names, require_re):
+                    continue
+                # First failing required check → bail.
+                if log:
+                    log.emit(
+                        "required_failure",
+                        check={
+                            "name": c.name,
+                            "state": c.state or c.bucket,
+                            "link": c.link,
+                        },
+                    )
+                # Diagnose first, then cancel. The probe is one bounded request
+                # against the failing *job*, so the matrix minutes this costs are
+                # seconds; cancelling first raced the log's availability and left
+                # the caller with a bare "FAIL <name>" and nothing to act on,
+                # which is the opposite of what failing fast is for.
+                report = _build_failure_report(c, repo_for_protection)
+                _cancel_for_exit("fail", pr, repo, snapshot.head_sha, opts, log)
+                if "fail" in opts.on or "always" in opts.on:
+                    print(
+                        f"NOTE  {len(pending)} check(s) still running on this head SHA; "
+                        "cancelling this PR's remaining runs — push a fix to supersede them"
+                    )
+                print(report.render())
+                if log and (report.first_error or report.classifier):
+                    log.emit(
+                        "failure_diagnostic",
+                        check_name=c.name,
+                        first_error=report.first_error,
+                        classifier=report.classifier,
+                    )
+                _finish_exit(EXIT_REQUIRED_FAIL, "fail", log)
 
         if not coderabbit_probe_complete:
             probe = gate.coderabbit_probe or CodeRabbitProbe("degraded", 0)
@@ -1445,7 +1894,8 @@ def watch(
 
         # CI and review state came from the same GraphQL response, so green
         # does not initiate or wait for an additional CodeRabbit request.
-        if not pending and snapshot.mergeable == "MERGEABLE":
+        checks_green = verdict.state == "pass" if verdict is not None else not pending
+        if checks_green and snapshot.mergeable == "MERGEABLE":
             for c in failing:
                 print(f"ADVISORY-FAIL  {c.name} (not in required set)")
             print(f"GREEN  #{pr} all required checks passed")
@@ -1467,6 +1917,99 @@ def watch(
             print(f"NOTE  progress report failed: {exc}", file=sys.stderr)
 
         _sleep_remaining_interval(poll_started, interval)
+
+
+def _act_on_verdict(
+    verdict: Verdict,
+    pr: int,
+    repo: str | None,
+    repo_for_reports: str | None,
+    snapshot: PRSnapshot,
+    opts: CancelOptions,
+    log: WatchLog | None = None,
+) -> bool:
+    """Exit on a terminal verdict. Returns True when the verdict was dropped
+    because the PR's head moved; False when it is pending or passing."""
+    for note in verdict.notes:
+        print(f"NOTE  {note}", file=sys.stderr)
+        if log:
+            log.emit("check_note", note=note)
+    if verdict.state == "approval_required":
+        names = [j.name for j in verdict.judgments if j.state == "approval_required"]
+        print(f"APPROVAL-REQUIRED  {', '.join(names)}: a maintainer must approve the run(s)")
+        if log:
+            log.emit("approval_required", checks=names)
+        _finish_exit(EXIT_APPROVAL_REQUIRED, "approval_required", log)
+    if verdict.state == "never_reported":
+        print(
+            f"NEVER-REPORTED  {', '.join(verdict.missing)}: required but no check run exists "
+            "and every workflow run on this head commit has finished"
+        )
+        if log:
+            log.emit("never_reported", checks=verdict.missing)
+        _finish_exit(EXIT_NEVER_REPORTED, "never_reported", log)
+    if verdict.state == "stale":
+        names = [j.name for j in verdict.judgments if j.required and j.state == "stale"]
+        print(f"STALE  {', '.join(names)}: GitHub marked the check stale; re-run needed")
+        if log:
+            log.emit("stale", checks=names)
+        _finish_exit(EXIT_STALE, "stale", log)
+    if verdict.state != "fail":
+        return False
+
+    if verdict.cancellation_derived:
+        # A cancellation is often concurrency reacting to a new push. Never
+        # exit on stale data: confirm the head before acting.
+        fresh = PRSnapshot.fetch(pr, repo)
+        if fresh is None or fresh.head_sha != snapshot.head_sha:
+            moved_to = fresh.head_sha if fresh is not None else None
+            print(
+                f"NOTE  head moved {snapshot.head_sha[:7]} -> {(moved_to or '?')[:7]}; "
+                "dropping the verdict",
+                file=sys.stderr,
+            )
+            if log:
+                log.emit("head_moved", old=snapshot.head_sha, new=moved_to)
+            return True
+
+    first = verdict.failing[0]
+    if log:
+        log.emit(
+            "required_failure",
+            check={
+                "name": first.name,
+                "state": first.conclusion,
+                "link": first.link,
+                "workflow": first.workflow,
+            },
+        )
+    # Diagnose first, then cancel (see the rollup path for why).
+    reports = [_build_failure_report(first.as_check_row(), repo_for_reports)]
+    reports += [
+        FailureReport(j.as_check_row(), str(j.run_id) if j.run_id else None, "", None)
+        for j in verdict.failing[1:]
+    ]
+    _cancel_for_exit(
+        "fail", pr, repo, snapshot.head_sha, opts, log, scope=dict(verdict.failing_run_ids)
+    )
+    if "fail" in opts.on or "always" in opts.on:
+        print(
+            "NOTE  cancelling the failing workflow's runs at or below the failing run; "
+            "newer runs and other workflows are left alone"
+        )
+    for judgment, report in zip(verdict.failing, reports):
+        print(report.render())
+        if judgment.workflow_broken:
+            print("  note:       startup_failure: the workflow is broken, not the code")
+    if log and (reports[0].first_error or reports[0].classifier):
+        log.emit(
+            "failure_diagnostic",
+            check_name=first.name,
+            first_error=reports[0].first_error,
+            classifier=reports[0].classifier,
+        )
+    _finish_exit(EXIT_REQUIRED_FAIL, "fail", log)
+    return False
 
 
 def _is_required(
@@ -1514,6 +2057,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="pr_merge_watch",
         description="Fail-fast PR-check waiter for clud (issue #408).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "exit codes: 0 green, 1 required check failed, 2 review activity, "
+            "3 PR closed, 4 timeout, 5 approval required, 6 required check never "
+            "reported, 7 stale (re-run needed)\n\n"
+            "supersession rule (#1330): checks on the PR's current head commit are "
+            "grouped by (workflow file, check name) and ordered by check-run id. A "
+            "cancelled check is replaced by any newer check, even a queued one; a "
+            "completed result only by a newer check that actually ran (not skipped). "
+            "A cancelled check with no newer check and no newer run of its workflow "
+            "fails. success, neutral and skipped pass. A cancellation-derived failure "
+            "is acted on only after re-reading the head; on failure only the failing "
+            "workflow's runs at or below the failing run are cancelled."
+        ),
     )
     p.add_argument("pr_number", type=int, help="PR number to watch")
     p.add_argument("--repo", help="owner/name (defaults to current repo's origin)")

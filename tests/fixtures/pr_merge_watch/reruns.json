@@ -1,0 +1,225 @@
+{
+ "R1": {
+  "head_sha": "abc123",
+  "required": [
+   "test"
+  ],
+  "check_runs": [
+   {
+    "id": 9001,
+    "name": "test",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 9002,
+    "name": "test",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9002",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 100,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 1001,
+    "run_attempt": 2,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite_id": 50100,
+    "html_url": "https://github.com/zackees/clud/actions/runs/100"
+   }
+  ]
+ },
+ "R2": {
+  "head_sha": "abc123",
+  "required": [
+   "X",
+   "Y"
+  ],
+  "check_runs": [
+   {
+    "id": 9001,
+    "name": "X",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 9002,
+    "name": "Y",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9002",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 9003,
+    "name": "X",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9003",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 100,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 1001,
+    "run_attempt": 2,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite_id": 50100,
+    "html_url": "https://github.com/zackees/clud/actions/runs/100"
+   }
+  ]
+ },
+ "R3": {
+  "head_sha": "abc123",
+  "required": [
+   "X"
+  ],
+  "check_runs": [
+   {
+    "id": 9001,
+    "name": "X",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 9002,
+    "name": "X",
+    "head_sha": "abc123",
+    "status": "in_progress",
+    "conclusion": null,
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9002",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 100,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 1001,
+    "run_attempt": 2,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "abc123",
+    "status": "in_progress",
+    "conclusion": null,
+    "check_suite_id": 50100,
+    "html_url": "https://github.com/zackees/clud/actions/runs/100"
+   }
+  ]
+ },
+ "R4": {
+  "head_sha": "abc123",
+  "required": [
+   "X"
+  ],
+  "check_runs": [
+   {
+    "id": 9001,
+    "name": "X",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 9002,
+    "name": "X",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 50100
+    },
+    "details_url": "https://github.com/zackees/clud/actions/runs/100/job/9002",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 100,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 1001,
+    "run_attempt": 2,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "abc123",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite_id": 50100,
+    "html_url": "https://github.com/zackees/clud/actions/runs/100"
+   }
+  ]
+ }
+}
