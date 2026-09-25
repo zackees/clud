@@ -21,14 +21,9 @@ The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
 `clud grind`
 
-`grind` opens one normal interactive PTY session seeded with `/grind`,
-which asks for a mode (parallel worktrees, sequential in the local checkout,
-or one issue per native `/loop` tick) and the model for each role, then runs
-the bundled plan → work → review → integrate → land workflow with per-role
-tool caps. clud never relaunches the agent, imposes an iteration ceiling, or
-uses DONE/BLOCKED marker files for `grind`. See the
-[grind contract](docs/architecture/grind.md). It requires the Claude harness;
-for another model provider, use `--harness claude`.
+Plans, writes, reviews and lands a whole issue list as merged PRs, with each
+agent role capped to its job. See [`clud grind`](#clud-grind--burn-down-issues-to-merged-prs)
+below.
 
 [![CI](https://github.com/zackees/clud/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/zackees/clud/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Auto Release](https://github.com/zackees/clud/actions/workflows/auto-release.yml/badge.svg?event=push)](https://github.com/zackees/clud/actions/workflows/auto-release.yml?query=event%3Apush)
@@ -780,6 +775,58 @@ Detects linting and test tools in your repo, runs them, and fixes failures in a 
 ```bash
 clud fix
 ```
+
+## `clud grind` — Burn Down Issues to Merged PRs
+
+```bash
+clud grind                                          # this repo's open issues
+clud grind https://github.com/<owner>/<repo>/issues/<N>  # a meta issue's sub-issues
+clud --codex --harness claude grind                 # a Codex model on the Claude harness
+```
+
+`clud grind [url]` opens one interactive Claude session seeded with `/grind`.
+Inside a session you can also type `/grind <meta issue | issue list | goal>`
+directly. Before anything runs, `/grind` asks:
+
+| Question | Choices |
+|---|---|
+| Mode | **parallel**: a git worktree per goal; server-side CI runs concurrently. **sequential**: one goal at a time in the local checkout, with no worktrees, so a heavy C++/Rust build cache stays warm. **cron**: one issue per native `/loop` tick. |
+| Models | planner, worker, reviewer, integrator. Each defaults to the session's model, including whatever `--deepseek`, `--codex` or OpenRouter resolved. |
+| Local CI | run the `ci.yml` job under `act` before each push. Only offered when Docker works and `.github/workflows/ci.yml` exists. |
+
+Then the bundled workflow takes each goal through five roles. Each role is its
+own agent type with hard caps:
+
+| Stage | Agent type | May | May not |
+|---|---|---|---|
+| Plan | `grind-planner` | read code; read-only `git`/`gh`; add a worktree in parallel mode | edit files, build |
+| Work | `grind-worker` | edit its assigned files; read-only `gh`; web search | build, lint, test |
+| Review | `grind-reviewer` | same as worker | same as worker |
+| Integrate | `grind-integrator` | rebase, lint, build, test, push, open the PR; **one at a time** | `bosn`, direct `docker`, new worktrees |
+| Land | `grind-lander` | watch with `pr_merge_watch`, admin-merge when green | edit, build; failures go back to the integrator (≤10 rounds) |
+
+At most four plan/work/review agents run at once, and only the integrator
+builds, so builds never overlap. A goal that depends on another lands after
+it. The run ends with the checkout rebased onto `origin/main` and a clean
+`git status`. `grind` requires the Claude harness; clud never runs its own
+loop for it.
+
+**Where it lives in the repo:**
+
+| What | Where |
+|---|---|
+| Contract and design | [`docs/architecture/grind.md`](docs/architecture/grind.md), [DD-087](docs/DESIGN_DECISIONS.md#dd-087-grind-is-a-skill-dag-with-capped-agent-roles) |
+| Router skill | [`assets/skills/grind/SKILL.md`](crates/clud-bin/assets/skills/grind/SKILL.md) |
+| Leaf skills | [`grind-intake`](crates/clud-bin/assets/skills/grind-intake/SKILL.md), [`grind-plan`](crates/clud-bin/assets/skills/grind-plan/SKILL.md), [`grind-work`](crates/clud-bin/assets/skills/grind-work/SKILL.md), [`grind-review`](crates/clud-bin/assets/skills/grind-review/SKILL.md), [`grind-integrate`](crates/clud-bin/assets/skills/grind-integrate/SKILL.md), [`grind-land`](crates/clud-bin/assets/skills/grind-land/SKILL.md), [`grind-cron`](crates/clud-bin/assets/skills/grind-cron/SKILL.md) |
+| Workflow script | [`assets/workflows/grind.js`](crates/clud-bin/assets/workflows/grind.js) |
+| Agent types | [`assets/agents/`](crates/clud-bin/assets/agents/) (`grind-planner.md` … `grind-lander.md`) |
+| Installer for agents + workflow | [`src/claude_files.rs`](crates/clud-bin/src/claude_files.rs) |
+| Per-role shell caps (hook) | [`src/block_bad_cmd_grind_caps.rs`](crates/clud-bin/src/block_bad_cmd_grind_caps.rs) |
+| `clud grind` launch + prompt | [`src/command/prompts.rs`](crates/clud-bin/src/command/prompts.rs) (`GRIND_TEMPLATE`), [`src/command/builder.rs`](crates/clud-bin/src/command/builder.rs) (`grind_launch_error`), [`src/grind.rs`](crates/clud-bin/src/grind.rs) (issues-URL resolution) |
+| PR watcher used by the lander | [`assets/tools/github/pr_merge_watch.py`](crates/clud-bin/assets/tools/github/pr_merge_watch.py) |
+
+`CLUD_ALLOW_ALL_CMDS=1` in the environment turns clud's command hook off,
+including these caps.
 
 ## `clud do [url-or-goal]` — Implement to a Merged PR
 
