@@ -656,3 +656,39 @@ fn cursor_query_detection_finds_the_sequence_anywhere_in_a_chunk() {
     assert!(!contains_cursor_query(b"\x1b[1;1R"));
     assert!(!contains_cursor_query(b""));
 }
+
+/// #1347: capability probes other than `ESC[6n` get a stub reply too.
+#[test]
+fn terminal_query_replies_cover_da_kitty_and_osc_colour() {
+    assert_eq!(terminal_query_replies(b"\x1b[c"), b"\x1b[?1;2c");
+    assert_eq!(terminal_query_replies(b"\x1b[0c"), b"\x1b[?1;2c");
+    assert_eq!(terminal_query_replies(b"\x1b[>c"), b"\x1b[>0;0;0c");
+    assert_eq!(terminal_query_replies(b"\x1b[>0c"), b"\x1b[>0;0;0c");
+    assert_eq!(terminal_query_replies(b"\x1b[?u"), b"\x1b[?0u");
+    assert_eq!(
+        terminal_query_replies(b"\x1b]10;?\x07"),
+        b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"
+    );
+    assert_eq!(
+        terminal_query_replies(b"\x1b]11;?\x1b\\"),
+        b"\x1b]11;rgb:0000/0000/0000\x1b\\"
+    );
+    assert_eq!(
+        terminal_query_replies(b"\x1b[?9001h\x1b[c\x1b[?u"),
+        b"\x1b[?1;2c\x1b[?0u"
+    );
+    for not_a_query in [
+        &b"\x1b[6n"[..],
+        b"\x1b[?1;2c",
+        b"\x1b[?0u",
+        b"\x1b[1;1R",
+        b"\x1b[?1004h",
+        b"",
+        b"\x1b[",
+    ] {
+        assert!(
+            terminal_query_replies(not_a_query).is_empty(),
+            "{not_a_query:?}"
+        );
+    }
+}

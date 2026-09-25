@@ -941,6 +941,40 @@ fn contains_cursor_query(chunk: &[u8]) -> bool {
     chunk.windows(4).any(|window| window == b"\x1b[6n")
 }
 
+/// Stub replies for the capability probes a child TUI may block on besides
+/// `ESC[6n` (#1347, follow-up to #1310): DA1, DA2, the kitty keyboard query,
+/// and OSC 10/11 colour queries. Each pattern must match exactly at an ESC,
+/// so replies such as `ESC[?1;2c` are never mistaken for queries. The cursor
+/// query stays with `respond_to_queries_impl`.
+const TERMINAL_QUERY_REPLIES: &[(&[u8], &[u8])] = &[
+    (b"\x1b[c", b"\x1b[?1;2c"),
+    (b"\x1b[0c", b"\x1b[?1;2c"),
+    (b"\x1b[>c", b"\x1b[>0;0;0c"),
+    (b"\x1b[>0c", b"\x1b[>0;0;0c"),
+    (b"\x1b[?u", b"\x1b[?0u"),
+    (b"\x1b]10;?\x07", b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+    (b"\x1b]10;?\x1b\\", b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+    (b"\x1b]11;?\x07", b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+    (b"\x1b]11;?\x1b\\", b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+];
+
+fn terminal_query_replies(chunk: &[u8]) -> Vec<u8> {
+    let mut replies = Vec::new();
+    for (start, &byte) in chunk.iter().enumerate() {
+        if byte != 0x1b {
+            continue;
+        }
+        let rest = &chunk[start..];
+        if let Some((_, reply)) = TERMINAL_QUERY_REPLIES
+            .iter()
+            .find(|(query, _)| rest.starts_with(query))
+        {
+            replies.extend_from_slice(reply);
+        }
+    }
+    replies
+}
+
 /// Environment switch that forces the pump's verbose trace on (#1310).
 pub const PUMP_TRACE_ENV: &str = "CLUD_PTY_PUMP_TRACE";
 
@@ -1249,6 +1283,16 @@ where
                         verbose_log::log("[clud] pty pump: answering child cursor query");
                     }
                     let _ = process.respond_to_queries_impl(chunk);
+                }
+                // #1347: DA1/DA2, kitty keyboard and OSC colour probes.
+                if answer_cursor_queries {
+                    let replies = terminal_query_replies(chunk);
+                    if !replies.is_empty() {
+                        if verbose {
+                            verbose_log::log("[clud] pty pump: answering child capability query");
+                        }
+                        let _ = process.write_impl(&replies, false);
+                    }
                 }
                 filter(chunk)
             };
