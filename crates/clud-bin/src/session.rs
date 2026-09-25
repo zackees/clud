@@ -925,6 +925,22 @@ struct PumpOptions {
 /// 200 idle wakeups a second per session.
 const PUMP_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Whether the pump must answer the child's `ESC[6n` cursor queries itself.
+///
+/// ConPTY sends that query when it starts and holds the child until a
+/// terminal replies (#1310). With a real interactive console on stdin, the
+/// terminal answers through the pump's stdin path, and a clud stub would be
+/// a second, wrong reply (#31). With anything else — piped stdin, a test's
+/// in-memory reader — nothing would ever answer, and the child never runs.
+/// POSIX PTYs send no such query.
+fn should_answer_cursor_queries(interactive_real_stdin: bool) -> bool {
+    cfg!(windows) && !interactive_real_stdin
+}
+
+fn contains_cursor_query(chunk: &[u8]) -> bool {
+    chunk.windows(4).any(|window| window == b"\x1b[6n")
+}
+
 /// Environment switch that forces the pump's verbose trace on (#1310).
 pub const PUMP_TRACE_ENV: &str = "CLUD_PTY_PUMP_TRACE";
 
@@ -1207,6 +1223,8 @@ where
         let normalize_bare_lf = options.normalize_bare_lf;
         let keyboard_enhancement_tracker = options.keyboard_enhancement_tracker.clone();
         let closed_tx = event_tx.clone();
+        let answer_cursor_queries = should_answer_cursor_queries(interactive_real_stdin);
+        let verbose = options.verbose;
         scope.spawn(move || {
             let mut osc_strip = OscTitleStripper::new();
             // Codex-only (#1181): rewrites bare LF to CRLF after the OSC
@@ -1224,6 +1242,13 @@ where
             let mut observe_and_filter = |chunk: &[u8]| {
                 if let Some(tracker) = &keyboard_enhancement_tracker {
                     tracker.observe(chunk);
+                }
+                // #1310: see `should_answer_cursor_queries`.
+                if answer_cursor_queries && contains_cursor_query(chunk) {
+                    if verbose {
+                        verbose_log::log("[clud] pty pump: answering child cursor query");
+                    }
+                    let _ = process.respond_to_queries_impl(chunk);
                 }
                 filter(chunk)
             };

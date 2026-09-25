@@ -639,3 +639,20 @@ fn malformed_csi_u_sequences_do_not_request_interrupt_or_panic() {
     assert!(!stdin_chunk_requests_interrupt(b"\x1b"));
     assert!(!stdin_chunk_requests_interrupt(&[0x1b, b'[', 0xff, b'u']));
 }
+
+/// #1310: ConPTY's startup `ESC[6n` must be answered by clud only when no
+/// real console on stdin can answer it, and only on Windows.
+#[test]
+fn cursor_queries_are_answered_only_without_an_interactive_console() {
+    assert!(!should_answer_cursor_queries(true));
+    assert_eq!(should_answer_cursor_queries(false), cfg!(windows));
+}
+
+#[test]
+fn cursor_query_detection_finds_the_sequence_anywhere_in_a_chunk() {
+    assert!(contains_cursor_query(b"\x1b[6n"));
+    assert!(contains_cursor_query(b"\x1b[?9001h\x1b[6n\x1b[?1004h"));
+    assert!(!contains_cursor_query(b"\x1b[6"));
+    assert!(!contains_cursor_query(b"\x1b[1;1R"));
+    assert!(!contains_cursor_query(b""));
+}
