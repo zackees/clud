@@ -5,8 +5,17 @@ triggers:
   - When the user runs /grind or clud grind
   - When clud do or /goal has several independent deliverables to implement
   - When the user asks to burn down a meta issue, an issue list, or the issues page
+allowed-tools: Bash(clud grind-scripts:*)
 ---
 <!-- managed-by: clud -->
+
+!`clud grind-scripts`
+
+The line above lists the repository's `./lint` and `./test` scripts and the
+files they delegate to. If it still shows a command instead of that report
+(the harness did not run it, or `clud` is missing), run `clud grind-scripts`
+yourself from the repository root. If that fails too, treat the repository as
+having no scripts and skip the scripts question.
 
 # /grind
 
@@ -67,14 +76,25 @@ Second call:
 
   The question: run the relevant `ci.yml` job locally under `act` before
   each push?
+- **Scripts**, asked once per run and only when the `clud grind-scripts`
+  report above found a `./lint` or `./test`: "Found `./lint` and `./test`.
+  Run them before each push?" (name only what was found). Options: lint and
+  test together, each alone when both exist, and up to four test modes (for
+  example `./test --integration`) discovered by *reading*, never executing,
+  the delegation files the report lists; their help text and comments give
+  each option's description. Always include a "Neither" option.
 
 ## 3. Record the run
 
 Write `.clud/grind/run.json` at the repository root:
 
 ```json
-{"mode": "parallel", "ci": false}
+{"mode": "parallel", "ci": false, "scripts": {"lint": "./lint", "test": "./test --integration"}}
 ```
+
+`scripts` holds the chosen commands; omit a key the user did not pick, and
+set `scripts` to `null` (or omit it) when they chose "Neither" or none were
+found.
 
 clud's command hook reads it to apply the per-role caps (the planner may add
 worktrees only in parallel mode; the integrator may run `act` only when CI is
@@ -84,8 +104,9 @@ on). Delete it when the run ends.
 
 - Cron: read `../grind-cron/SKILL.md` and follow it with the goal source and the answers.
 - Parallel or sequential: start the Workflow named `grind-run` with args
-  `{repo, main, mode, goals, ci, models: {planner, worker, reviewer,
-  integrator}}`. Omit a model the user left at the session default.
+  `{repo, main, mode, goals, ci, scripts, models: {planner, worker, reviewer,
+  integrator}}`. Omit a model the user left at the session default, and omit
+  `scripts` when none were chosen.
 
 Concurrency is fixed by the workflow: at most 4 planner/worker/reviewer
 agents at once, and exactly one integrator.

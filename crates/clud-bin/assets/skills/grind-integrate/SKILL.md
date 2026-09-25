@@ -26,6 +26,15 @@ You hold the run's build lock, so nothing else builds while you do.
    reproduction), then passes with it.
 4. **Verify.** Run the plan's lint, build and test commands. Fix failures by
    editing, commit, and rerun until green. Do not skip or weaken a test.
+   **Run scripts.** When the prompt lists the repo's `./lint` / `./test`,
+   run lint before test before every push, fix rounds included, after the
+   focused test:
+   - A script likely to exceed the 600s Bash cap runs with
+     `run_in_background`; judge it by its exit code, not by its output.
+   - After any fix, rerun both scripts until both are green.
+   - If a script fails on untouched `origin/<main>` too, fix it and commit
+     that fix separately as `fix: pre-existing lint failure` (or
+     `fix: pre-existing test failure`), apart from the goal's commit.
 5. **Local CI**, only when on: run the named `ci.yml` job with
    `act -W .github/workflows/ci.yml -j <job> --pull=false`. Do not wrap it
    in `bosn` or start containers yourself.
@@ -36,7 +45,8 @@ You hold the run's build lock, so nothing else builds while you do.
    for it here.
 
 **Fix round.** When the prompt carries a failure from the lander: read it,
-reproduce locally when possible, fix, rerun the verify commands, commit and
+reproduce locally when possible, fix, rerun the verify commands (and the run
+scripts, lint then test), commit and
 push to the same branch. Return the same PR URL.
 
 On a failure you cannot fix, return `pushed=false` with the failing command
