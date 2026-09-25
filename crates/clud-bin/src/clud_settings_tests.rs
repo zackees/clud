@@ -1041,6 +1041,111 @@ fn provider_profile_rejects_deepseek_model_on_kimi_profile() {
     ));
 }
 
+/// #1304: OpenRouter remembers `--model <wire-id>` verbatim, because its
+/// inventory is the gateway's, not the static catalog's (DD-054).
+#[test]
+fn openrouter_profile_keeps_a_gateway_wire_id_and_it_resolves_at_launch() {
+    let home = tempdir().unwrap();
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            provider_profiles: vec![ProviderProfilePatch {
+                provider: Some(ModelProvider::OpenRouter),
+                model: Some("openai/gpt-5.5".to_string()),
+                ..ProviderProfilePatch::default()
+            }],
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+    let snapshot = load_launch_preferences_read_only_at(home.path()).unwrap();
+    let profile = snapshot.profile(ModelProvider::OpenRouter).unwrap();
+    assert_eq!(profile.model.as_deref(), Some("openai/gpt-5.5"));
+    let selection = crate::provider_catalog::resolve_for_launch_with_server_default(
+        ModelProvider::OpenRouter,
+        None,
+        None,
+        None,
+        Some(profile.selection_defaults()),
+        true,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(selection.wire_model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(
+        selection.model_source,
+        Some(crate::provider_catalog::SelectionSource::ProviderSetting)
+    );
+}
+
+#[test]
+fn only_openrouter_profiles_accept_non_catalog_models() {
+    for (settings, provider) in [
+        // Another provider's wire ID is still refused on OpenRouter.
+        (
+            r#"{"providers":{"openrouter":{"model":"deepseek-flash[1m]"}}}"#,
+            ModelProvider::OpenRouter,
+        ),
+        (
+            r#"{"providers":{"deepseek":{"model":"openai/gpt-5.5"}}}"#,
+            ModelProvider::DeepSeek,
+        ),
+        (
+            r#"{"providers":{"kimi":{"model":"openai/gpt-5.5"}}}"#,
+            ModelProvider::Kimi,
+        ),
+    ] {
+        let home = tempdir().unwrap();
+        write_provider_settings(home.path(), settings);
+        let result = load_launch_preferences_read_only_at(home.path());
+        assert!(
+            matches!(
+                &result,
+                Err(SettingsError::InvalidProviderProfile { provider: p, .. }) if *p == provider
+            ),
+            "{settings}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn only_an_explicit_live_openrouter_model_is_remembered() {
+    use crate::clud_settings::openrouter_model_to_remember as remember;
+    let or = ModelProvider::OpenRouter;
+    assert_eq!(
+        remember(
+            or,
+            Some("openai/gpt-5.5"),
+            false,
+            Some("openai/gpt-5.5"),
+            None
+        ),
+        Some("openai/gpt-5.5".to_string())
+    );
+    // A different explicit model replaces the saved one.
+    assert_eq!(
+        remember(or, Some("x/y"), false, Some("x/y"), Some("openai/gpt-5.5")),
+        Some("x/y".to_string())
+    );
+    // Same model again: nothing to write.
+    assert_eq!(
+        remember(or, Some("x/y"), false, Some("x/y"), Some("x/y")),
+        None
+    );
+    // Dry runs, implicit selections and other providers never write.
+    assert_eq!(remember(or, Some("x/y"), true, Some("x/y"), None), None);
+    assert_eq!(remember(or, None, false, Some("x/y"), None), None);
+    for provider in [
+        ModelProvider::Claude,
+        ModelProvider::Codex,
+        ModelProvider::DeepSeek,
+        ModelProvider::Kimi,
+    ] {
+        assert_eq!(remember(provider, Some("m"), false, Some("m"), None), None);
+    }
+}
+
 #[test]
 fn provider_profile_rejects_unknown_effort() {
     let home = tempdir().unwrap();

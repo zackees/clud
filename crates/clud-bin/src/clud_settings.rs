@@ -97,6 +97,38 @@ pub struct ProviderProfilePatch {
     pub context_window: Option<Option<String>>,
 }
 
+/// #1304: the OpenRouter model a launch should remember as the next default,
+/// if any. Only an explicit `--model` on a live `--openrouter` launch counts:
+/// a dry run changes nothing, and re-saving the model already stored is a
+/// no-op so the settings file is not rewritten on every launch.
+pub fn openrouter_model_to_remember(
+    provider: ModelProvider,
+    cli_model: Option<&str>,
+    dry_run: bool,
+    resolved_model: Option<&str>,
+    saved_model: Option<&str>,
+) -> Option<String> {
+    if provider != ModelProvider::OpenRouter || cli_model.is_none() || dry_run {
+        return None;
+    }
+    resolved_model
+        .filter(|model| Some(*model) != saved_model)
+        .map(str::to_string)
+}
+
+/// Persist `model` as OpenRouter's saved default, leaving the rest of its
+/// profile untouched.
+pub fn save_openrouter_model(model: String) -> Result<(), SettingsError> {
+    save_settings_patch(GlobalSettingsPatch {
+        provider_profiles: vec![ProviderProfilePatch {
+            provider: Some(ModelProvider::OpenRouter),
+            model: Some(model),
+            ..ProviderProfilePatch::default()
+        }],
+        ..GlobalSettingsPatch::default()
+    })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchPreferencesSnapshot {
     pub global: GlobalLaunchPreferences,
@@ -465,13 +497,25 @@ fn provider_profile_from_document(
             // A canonical ID retired by a provider rename (#1192) still loads,
             // normalized to its successor; wire IDs and shorthand stay rejected.
             let entry = provider_catalog::model_by_cli_id(value)
-                .or_else(|| provider_catalog::model_by_retired_cli_id(value))
-                .ok_or_else(|| {
-                    invalid_provider_profile(
+                .or_else(|| provider_catalog::model_by_retired_cli_id(value));
+            let entry = match entry {
+                Some(entry) => entry,
+                // #1304: OpenRouter is a gateway whose inventory changes under
+                // us (DD-054), so `--model <wire-id>` is remembered verbatim.
+                // The final `resolve` below still vets it like a CLI value.
+                None if provider == ModelProvider::OpenRouter
+                    && provider_catalog::inferred_provider_from_wire(value)
+                        .is_none_or(|owner| owner == ModelProvider::OpenRouter) =>
+                {
+                    return Ok(value.to_string());
+                }
+                None => {
+                    return Err(invalid_provider_profile(
                         provider,
                         format!("model '{value}' is not a canonical catalog ID"),
-                    )
-                })?;
+                    ))
+                }
+            };
             if entry.provider != provider {
                 return Err(invalid_provider_profile(
                     provider,
