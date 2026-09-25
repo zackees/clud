@@ -33,7 +33,7 @@ not emulate the workflow by hand.
 
 ## 1. Intake
 
-Invoke `/grind-intake` with the user's argument. It returns the goal list
+Read `../grind-intake/SKILL.md`, next to this skill's base directory, and follow it with the user's argument (the leaf skills are hidden from the model, so they are read rather than invoked). It returns the goal list
 (`[{id, title, brief}]`) in order, plus the repository root and its default
 branch (`main` or `master`).
 
@@ -82,7 +82,7 @@ on). Delete it when the run ends.
 
 ## 4. Run
 
-- Cron: invoke `/grind-cron` with the goal source and the answers.
+- Cron: read `../grind-cron/SKILL.md` and follow it with the goal source and the answers.
 - Parallel or sequential: start the Workflow named `grind-run` with args
   `{repo, main, mode, goals, ci, models: {planner, worker, reviewer,
   integrator}}`. Omit a model the user left at the session default.

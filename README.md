@@ -854,6 +854,11 @@ loop for it.
 | `clud grind` launch + prompt | [`src/command/prompts.rs`](crates/clud-bin/src/command/prompts.rs) (`GRIND_TEMPLATE`), [`src/command/builder.rs`](crates/clud-bin/src/command/builder.rs) (`grind_launch_error`), [`src/grind.rs`](crates/clud-bin/src/grind.rs) (issues-URL resolution) |
 | PR watcher used by the lander | [`assets/tools/github/pr_merge_watch.py`](crates/clud-bin/assets/tools/github/pr_merge_watch.py) |
 
+Only `/grind` is offered to the model. The `grind-*` leaf skills are hidden
+from it, though you can still type one (e.g. `/grind-work`) to test it. The
+`grind-*` agent types are refused when the model tries to delegate to them
+directly; set `CLUD_ALLOW_GRIND_AGENTS=1` to start one by hand.
+
 `CLUD_ALLOW_ALL_CMDS=1` in the environment turns clud's command hook off,
 including these caps.
 

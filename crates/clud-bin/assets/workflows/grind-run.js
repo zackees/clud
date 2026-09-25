@@ -83,7 +83,7 @@ const ctx = (g) => `Repo: ${REPO} (default branch ${MAIN}). Mode: ${args.mode}. 
 const others = (g) => args.goals.filter(o => o.id !== g.id).map(o => `${o.id}: ${o.title}`).join('\n') || '(none)'
 
 const plan = (g) => light(() => agent(
-  `Invoke the /grind-plan skill and follow it.\n\n${ctx(g)}\n\nOther goals in this run (for depends_on):\n${others(g)}`,
+  `Follow your built-in /grind-plan procedure.\n\n${ctx(g)}\n\nOther goals in this run (for depends_on):\n${others(g)}`,
   opts('planner', `plan:${g.id}`, 'Plan', PLAN)))
 
 const work = (p, g) => (PARALLEL
@@ -91,21 +91,21 @@ const work = (p, g) => (PARALLEL
   : p.tasks.reduce((acc, t) => acc.then(rs => runTask(p, g, t).then(r => [...rs, r])), Promise.resolve([])))
   .then(rs => ({ p, results: rs.filter(Boolean) }))
 const runTask = (p, g, t) => agent(
-  `Invoke the /grind-work skill and follow it.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nTask ${t.id}. Files you own: ${t.files.join(', ')}\n\n${t.instructions}`,
+  `Follow your built-in /grind-work procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nTask ${t.id}. Files you own: ${t.files.join(', ')}\n\n${t.instructions}`,
   opts('worker', `work:${g.id}/${t.id}`, 'Work', WORK))
 
 const review = ({ p, results }, g) => light(() => agent(
-  `Invoke the /grind-review skill and follow it.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nWorker reports:\n${JSON.stringify(results, null, 1)}`,
+  `Follow your built-in /grind-review procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nWorker reports:\n${JSON.stringify(results, null, 1)}`,
   opts('reviewer', `review:${g.id}`, 'Review', REVIEW))).then(r => ({ p, review: r }))
 
 const integrate = (p, g, note) => exclusive(() => agent(
-  `Invoke the /grind-integrate skill and follow it.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nBranch: ${p.branch}\n` +
+  `Follow your built-in /grind-integrate procedure.\n\n${ctx(g)}\n\nCheckout: ${p.checkout}\nBranch: ${p.branch}\n` +
   `Base: origin/${MAIN}${p.depends_on.length ? ` (it already contains ${p.depends_on.join(', ')}, which landed first)` : ''}\n` +
   `Verify commands:\n${p.verify}\n\n${note}`,
   opts('integrator', `integrate:${g.id}`, 'Integrate', INTEG)))
 
 const land = (p, g, pr, round) => agent(
-  `Invoke the /grind-land skill and follow it.\n\n${ctx(g)}\n\nPR: ${pr}\nBranch: ${p.branch}\nFix rounds used: ${round} of ${MAX_FIX}.`,
+  `Follow your built-in /grind-land procedure.\n\n${ctx(g)}\n\nPR: ${pr}\nBranch: ${p.branch}\nFix rounds used: ${round} of ${MAX_FIX}.`,
   opts('lander', `land:${g.id}#${round}`, 'Land', LAND))
 
 // Dependents wait until what they depend on has merged, then rebase onto the

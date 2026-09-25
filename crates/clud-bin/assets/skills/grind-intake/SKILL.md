@@ -4,6 +4,7 @@ description: "Turn a /grind argument (meta issue URL, issue numbers or URLs, fre
 triggers:
   - When /grind needs its goal list
   - When the user asks which goals a meta issue or issue list expands to
+disable-model-invocation: true
 ---
 <!-- managed-by: clud -->
 

@@ -436,6 +436,24 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 2;
     }
 
+    // The `grind-*` agent types belong to the `grind-run` workflow, which
+    // starts them without an `Agent` call. An `Agent` call for one is the
+    // model delegating to it from an ordinary prompt, so refuse it.
+    if event == PRE_TOOL_USE_EVENT {
+        if let Some(reason) = block_bad_cmd_grind_caps::agent_spawn_reason(
+            &payload.tool_name,
+            payload.tool_input.as_ref(),
+            std::env::var(block_bad_cmd_grind_caps::ALLOW_GRIND_AGENTS_ENV)
+                .ok()
+                .as_deref(),
+        ) {
+            append_log(&format!("GRIND-AGENT-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud grind caps] {reason}");
+            return 2;
+        }
+    }
+
     // `/grind` role caps: a capped agent's shell call must fit its role.
     if event == PRE_TOOL_USE_EVENT {
         if let Some(reason) = grind_caps_reason(&payload) {

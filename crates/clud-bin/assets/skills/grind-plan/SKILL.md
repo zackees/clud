@@ -4,6 +4,7 @@ description: "Plan one /grind goal: pick its checkout, split it into worker task
 triggers:
   - When the grind workflow's planner starts a goal
   - When the user asks to plan a goal into disjoint worker tasks
+disable-model-invocation: true
 ---
 <!-- managed-by: clud -->
 

@@ -16,9 +16,45 @@ use std::path::Path;
 const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 
 /// One bundled file: its path relative to `~/.claude`, and its body.
+///
+/// `procedure` names a bundled skill whose body is appended to an agent
+/// file at install. The `/grind` leaf skills are `disable-model-invocation`
+/// so a user's prompt never pulls them in, which also means an agent cannot
+/// load them with the `Skill` tool or `skills:` preload. Appending keeps the
+/// skill the single source of the procedure.
 pub struct BundledClaudeFile {
     pub rel_path: &'static str,
     pub body: &'static str,
+    pub procedure: Option<&'static str>,
+}
+
+impl BundledClaudeFile {
+    /// The exact text written to disk.
+    pub fn rendered(&self) -> String {
+        let Some(skill) = self.procedure else {
+            return self.body.to_string();
+        };
+        let skill_md = crate::skills::BUNDLED_SKILLS
+            .iter()
+            .find(|s| s.name == skill)
+            .map_or("", |s| s.skill_md);
+        format!(
+            "{}\n## Procedure (`/{skill}`, appended by clud)\n\n{}",
+            self.body.trim_end(),
+            skill_body(skill_md).trim_start()
+        )
+    }
+}
+
+/// A `SKILL.md` without its YAML frontmatter and ownership marker.
+fn skill_body(skill_md: &str) -> &str {
+    let rest = skill_md
+        .strip_prefix("---")
+        .and_then(|r| r.split_once("\n---"))
+        .map_or(skill_md, |(_, body)| body);
+    rest.trim_start()
+        .strip_prefix("<!-- managed-by: clud -->")
+        .unwrap_or(rest)
 }
 
 /// Every bundled agent definition and workflow script.
@@ -26,26 +62,32 @@ pub const BUNDLED_CLAUDE_FILES: &[BundledClaudeFile] = &[
     BundledClaudeFile {
         rel_path: "agents/grind-planner.md",
         body: include_str!("../assets/agents/grind-planner.md"),
+        procedure: Some("grind-plan"),
     },
     BundledClaudeFile {
         rel_path: "agents/grind-worker.md",
         body: include_str!("../assets/agents/grind-worker.md"),
+        procedure: Some("grind-work"),
     },
     BundledClaudeFile {
         rel_path: "agents/grind-reviewer.md",
         body: include_str!("../assets/agents/grind-reviewer.md"),
+        procedure: Some("grind-review"),
     },
     BundledClaudeFile {
         rel_path: "agents/grind-integrator.md",
         body: include_str!("../assets/agents/grind-integrator.md"),
+        procedure: Some("grind-integrate"),
     },
     BundledClaudeFile {
         rel_path: "agents/grind-lander.md",
         body: include_str!("../assets/agents/grind-lander.md"),
+        procedure: Some("grind-land"),
     },
     BundledClaudeFile {
         rel_path: "workflows/grind-run.js",
         body: include_str!("../assets/workflows/grind-run.js"),
+        procedure: None,
     },
 ];
 
@@ -96,6 +138,7 @@ pub fn install_to(root: &Path, files: &[BundledClaudeFile]) -> io::Result<Instal
     let mut report = InstallReport::default();
     for file in files {
         let path = root.join(file.rel_path);
+        let body = file.rendered();
         match std::fs::read_to_string(&path) {
             // Only a missing file is ours to write. Any other read failure
             // (permissions, non-UTF-8 content) may be a user's file.
@@ -104,17 +147,17 @@ pub fn install_to(root: &Path, files: &[BundledClaudeFile]) -> io::Result<Instal
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&path, file.body)?;
+                std::fs::write(&path, &body)?;
                 report.installed.push(file.rel_path);
             }
             Ok(existing) if !existing.contains(MANAGED_BY_CLUD_MARKER) => {
                 report.skipped_existing.push(file.rel_path);
             }
-            Ok(existing) if normalize(&existing) == normalize(file.body) => {
+            Ok(existing) if normalize(&existing) == normalize(&body) => {
                 report.skipped_existing.push(file.rel_path);
             }
             Ok(_) => {
-                std::fs::write(&path, file.body)?;
+                std::fs::write(&path, &body)?;
                 report.refreshed.push(file.rel_path);
             }
         }
@@ -258,6 +301,45 @@ mod tests {
         let report = ensure_installed_at(dir.path()).unwrap().unwrap();
         assert!(report.purged.is_empty());
         assert!(old.exists());
+    }
+
+    /// Each grind agent carries its leaf skill's procedure, since a hidden
+    /// skill cannot be loaded by the agent itself.
+    #[test]
+    fn agents_carry_their_leaf_procedure() {
+        for file in BUNDLED_CLAUDE_FILES {
+            let Some(skill) = file.procedure else {
+                continue;
+            };
+            let bundled = crate::skills::BUNDLED_SKILLS
+                .iter()
+                .find(|s| s.name == skill)
+                .unwrap_or_else(|| panic!("{} names unknown skill {skill}", file.rel_path));
+            let rendered = file.rendered();
+            assert!(rendered.starts_with(file.body.trim_end()));
+            assert!(rendered.contains(skill_body(bundled.skill_md).trim()));
+            assert!(
+                !rendered.contains("disable-model-invocation"),
+                "frontmatter must not leak"
+            );
+            assert_eq!(rendered.matches(MANAGED_BY_CLUD_MARKER).count(), 1);
+        }
+    }
+
+    /// The router may be pulled in by the model (clud do names it); every
+    /// leaf is for the workflow and for explicit `/name` testing only.
+    #[test]
+    fn grind_leaf_skills_are_hidden_from_the_model() {
+        for skill in crate::skills::BUNDLED_SKILLS {
+            let hidden = skill
+                .skill_md
+                .contains("\ndisable-model-invocation: true\n");
+            if skill.name.starts_with("grind-") {
+                assert!(hidden, "{} must be disable-model-invocation", skill.name);
+            } else if skill.name == "grind" {
+                assert!(!hidden, "the /grind router must stay model-invocable");
+            }
+        }
     }
 
     #[test]

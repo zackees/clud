@@ -3,6 +3,7 @@ name: grind-review
 description: "Review one /grind goal's worker output against the goal and correct it by editing. May investigate with read-only gh and web search; never builds, lints or tests."
 triggers:
   - When the grind workflow reviews a goal's worker output
+disable-model-invocation: true
 ---
 <!-- managed-by: clud -->
 
