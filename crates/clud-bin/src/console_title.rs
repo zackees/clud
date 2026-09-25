@@ -196,7 +196,24 @@ pub fn set_for_current_cwd() {
 /// is the safety net for subprocess mode).
 pub fn keep_setting_in_background() {
     static STARTED: OnceLock<()> = OnceLock::new();
-    STARTED.get_or_init(spawn_keeper_thread);
+    STARTED.get_or_init(|| {
+        spawn_keeper_thread();
+    });
+}
+
+/// #706: whether the keeper thread may start, given the console probe.
+///
+/// Pure seam so the console-less guard is testable on every platform without
+/// a real console, a thread, or `FreeConsole`.
+#[cfg(any(windows, test))]
+fn should_spawn_keeper(console_attached: impl FnOnce() -> bool) -> bool {
+    console_attached()
+}
+
+/// `GetConsoleCP` returns 0 exactly when the process has no console (#706).
+#[cfg(any(windows, test))]
+fn code_page_means_console(code_page: u32) -> bool {
+    code_page != 0
 }
 
 /// Does this process have a console whose title it could keep?
@@ -219,12 +236,18 @@ fn console_is_attached() -> bool {
         fn GetConsoleCP() -> u32;
     }
     // SAFETY: no arguments, no out-params, no handles retained.
-    let code_page = unsafe { GetConsoleCP() };
-    code_page != 0
+    code_page_means_console(unsafe { GetConsoleCP() })
 }
 
 #[cfg(windows)]
-fn spawn_keeper_thread() {
+fn spawn_keeper_thread() -> bool {
+    spawn_keeper_thread_with(console_is_attached)
+}
+
+/// Spawn the keeper unless `attached` reports no console. Returns whether a
+/// thread was started.
+#[cfg(windows)]
+fn spawn_keeper_thread_with(attached: impl FnOnce() -> bool) -> bool {
     // #706: without a console there is nothing to stamp *and* nothing to read
     // back, so `read_console_title()` returns `None` on every pass, the
     // `current != want` comparison is always true, `changed` is pinned true,
@@ -233,8 +256,8 @@ fn spawn_keeper_thread() {
     // running forever in exactly the processes that are supposed to be idle:
     // the long-lived daemon and every worker. #547's backoff was correct; it
     // just could never engage here.
-    if !console_is_attached() {
-        return;
+    if !should_spawn_keeper(attached) {
+        return false;
     }
     let _ = std::thread::Builder::new()
         .name("clud-title-keeper".into())
@@ -279,6 +302,7 @@ fn spawn_keeper_thread() {
                 std::thread::sleep(cadence.interval());
             }
         });
+    true
 }
 
 #[cfg(not(windows))]
@@ -586,6 +610,36 @@ mod tests {
                  the backoff cannot rescue it, so it must not be spawned"
             );
         }
+    }
+
+    // #706 / #1364: the console-less keeper guard itself.
+
+    #[test]
+    fn keeper_guard_refuses_to_spawn_without_a_console() {
+        let probed = std::cell::Cell::new(false);
+        assert!(!should_spawn_keeper(|| {
+            probed.set(true);
+            false
+        }));
+        assert!(probed.get(), "the guard must consult the console probe");
+    }
+
+    #[test]
+    fn keeper_guard_spawns_with_a_console() {
+        assert!(should_spawn_keeper(|| true));
+    }
+
+    #[test]
+    fn code_page_zero_means_no_console() {
+        assert!(!code_page_means_console(0));
+        assert!(code_page_means_console(65001));
+        assert!(code_page_means_console(437));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_keeper_thread_with_no_console_returns_without_spawning() {
+        assert!(!spawn_keeper_thread_with(|| false));
     }
 
     #[test]
