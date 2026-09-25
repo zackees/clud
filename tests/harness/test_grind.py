@@ -349,3 +349,5 @@ def test_router_skill_carries_the_docker_and_ci_preconditions(harness: Harness) 
     after = json.dumps([r["messages"] for r in result.requests if r["turn"] == 1])
     assert "Docker/github actions disabled due to no docker running" in after
     assert ".github/workflows/ci.yml" in after
+    assert "Finish (always, as the very last step)" in after
+    assert "git pull --ff-only origin <main>" in after

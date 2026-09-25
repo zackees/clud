@@ -179,6 +179,26 @@ clean, and make sure the local repo is rebased to the starting branch.
 If the goal contains several independent deliverables, invoke `/grind` to \
 delegate them; otherwise keep the normal `/goal` workflow.";
 
+/// The mandatory last step, shared with `/grind`'s router. `default` is the
+/// repository's default branch.
+pub fn finish_step(default: &str) -> String {
+    format!(
+        "## Finish (always, as the very last step)\n\n\
+When the work is done, and before you report or stop, clean up the local \
+repository:\n\n\
+1. **No files left behind.** `git status --porcelain` prints nothing: no \
+untracked files, no uncommitted changes, no stash you created (`git stash \
+list`), and no temp or scratch files in the repo. Remove every worktree and \
+temporary branch you created, but only after confirming its work is pushed \
+or merged.\n\
+2. **Rebased to the default branch.** `git fetch origin`, then \
+`git switch {default}` and `git pull --ff-only origin {default}`, so the \
+checkout sits on an up-to-date `origin/{default}`.\n\
+3. **Report what you could not clean**, and why. Never delete work you \
+did not create to get a clean status; ask instead.\n"
+    )
+}
+
 /// The whole rendered prompt.
 pub fn render(
     target: &str,
@@ -201,6 +221,10 @@ pub fn render(
         return out;
     }
     let issue = do_kind::github_issue(target).map(|i| i.number);
+    let default = facts
+        .as_ref()
+        .map(|f| f.default_branch.clone())
+        .unwrap_or_else(|_| "main".to_string());
 
     out.push_str("## Starting point\n\n");
     match facts {
@@ -220,12 +244,14 @@ pub fn render(
         )),
         Ok(DoKind::Single) if issue.is_some() || target.contains("://") => {
             out.push_str(ISSUE_CONTRACT);
-            out.push('\n');
+            out.push_str("\n\n");
+            out.push_str(&finish_step(&default));
         }
         Ok(DoKind::Single) => {
             out.push_str(&format!("The goal: {target}\n\n"));
             out.push_str(GOAL_CONTRACT);
-            out.push('\n');
+            out.push_str("\n\n");
+            out.push_str(&finish_step(&default));
         }
         Err(error) => out.push_str(&format!(
             "Stop. Tell the user: {error} Do not start work.\n"
@@ -482,6 +508,31 @@ mod tests {
         assert!(out.contains("Verdict: `stale_merged`"));
         assert!(out.contains("PR #812 is merged"));
         assert!(out.contains("git switch main && git pull --ff-only"));
+    }
+
+    #[test]
+    fn contracts_end_with_the_finish_step_on_the_real_default_branch() {
+        let mut on_master = facts("master");
+        on_master.default_branch = "master".into();
+        for target in ["https://github.com/o/r/issues/7", "refactor the launcher"] {
+            let out = render(target, &Ok(DoKind::Single), &Ok(on_master.clone()));
+            let finish = out
+                .find("## Finish (always, as the very last step)")
+                .expect(target);
+            assert!(
+                finish > out.find("## What to do").unwrap(),
+                "finish comes last"
+            );
+            assert!(out.contains("`git status --porcelain` prints nothing"));
+            assert!(out.contains("`git pull --ff-only origin master`"));
+        }
+        // A stop has no finish step: nothing was started.
+        let stop = render(
+            "https://github.com/o/r/issues/7",
+            &Err("gh down.".into()),
+            &Ok(on_master),
+        );
+        assert!(!stop.contains("## Finish"));
     }
 
     #[test]

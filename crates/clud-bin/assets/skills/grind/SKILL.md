@@ -90,12 +90,22 @@ on). Delete it when the run ends.
 Concurrency is fixed by the workflow: at most 4 planner/worker/reviewer
 agents at once, and exactly one integrator.
 
-## 5. Finish
+## 5. Finish (always, as the very last step)
 
-Report each goal's PR and whether it merged; list anything left open with
-its reason. Then fetch and rebase the local checkout onto `origin/<main>`,
-remove `.clud/grind/run.json`, and confirm `git status` is clean. Remove a
-worktree only after checking it has no unpushed work (see `/clud-git`).
+After the workflow returns, whether or not every goal merged:
+
+1. **Report** each goal's PR and whether it merged, and list anything left
+   open with its reason.
+2. **No files left behind.** Remove `.clud/grind/run.json`. Remove every
+   worktree and temporary branch the run created, but only after checking
+   it has no unpushed work (see `/clud-git`). Then `git status --porcelain`
+   prints nothing: no untracked files, no uncommitted changes, and no stash
+   the run created.
+3. **Rebased to the default branch.** `git fetch origin`, then
+   `git switch <main>` and `git pull --ff-only origin <main>`, where `<main>`
+   is `main` or `master`.
+4. **Report what you could not clean**, and why. Never delete work the run
+   did not create to get a clean status; ask instead.
 
 ## The DAG
 
