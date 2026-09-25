@@ -163,6 +163,12 @@ Three structural claims, in the order they matter:
 
 ## Target tiers — using scarce runners sparingly
 
+The `ci-windows` label is an iteration mode for Windows-only work (#1310): it
+runs static checks plus the Windows x64 build and both Windows suites, and
+skips every Linux and macOS lane. `CI OK` reports whether those lanes passed
+and then fails on purpose, so the label can never be the coverage a PR merges
+on; remove it (or add `ci-test`/`ci-full`, which take precedence) before
+merging.
 `ci/ci_matrix.py` defines the target inventory consumed by the workflow. Not
 every push needs all six targets.
 
@@ -170,6 +176,7 @@ every push needs all six targets.
 | --- | --- | --- |
 | `minimal` | `x86_64-unknown-linux-gnu` build + unit suite | ordinary PR and `main` push |
 | `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
+| `windows` | static + `x86_64-pc-windows-msvc` build, unit and integration only; `CI OK` always fails | PR labeled `ci-windows` (iteration only) |
 | `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples, and Dylint | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
 
 `ci-test` covers Linux and Windows. Both hosted macOS architectures run only
