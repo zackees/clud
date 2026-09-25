@@ -573,9 +573,11 @@ where
 /// internally and passes through to `run_raw_pty_pump_full`.
 ///
 /// `extra_rx` chunks are interleaved with stdin chunks and forwarded to
-/// the PTY exactly like real stdin, EXCEPT they bypass the
-/// bracketed-paste normalizer (the OLE/IDropTarget callback already
-/// hands us a normalized, newline-joined path).
+/// the PTY through the same pipeline as real stdin (`forward_user_input`,
+/// issue #1350): Backspace normalization, bracketed paste, toast mouse
+/// filter and F3. Drop chunks carry no paste markers or ESC bytes, so
+/// those steps pass them through unchanged. Only Ctrl+V image expansion
+/// is stdin-only.
 pub fn run_raw_pty_pump_with_extra_rx<H, R>(
     process: &NativePtyProcess,
     interrupted: &AtomicBool,
@@ -1058,6 +1060,111 @@ where
     )
 }
 
+/// The toast hit targets the mouse filter checks, snapshotted per chunk.
+#[derive(Debug, Clone, Copy)]
+struct ToastHitTargets {
+    close: Option<crate::toast::text_tier::CellRect>,
+    usage: Option<crate::toast::text_tier::CellRect>,
+    hover_armed: bool,
+}
+
+/// Issue #1350: prepares a `console_input` / drag-drop chunk for the shared
+/// user-input pipeline. On Windows the `console_input` reader replaces the
+/// byte-stream reader, so the Backspace normalization that reader applies
+/// must happen here instead.
+fn extra_chunk_for_pipeline(chunk: &[u8], normalize_console_stdin: bool) -> Vec<u8> {
+    let mut chunk = chunk.to_vec();
+    if normalize_console_stdin {
+        normalize_interactive_console_stdin_chunk(&mut chunk);
+    }
+    chunk
+}
+
+/// The pure byte transform every user-input chunk goes through before it
+/// reaches the PTY: bracketed-paste normalization, then the toast mouse
+/// filter (#1189) when a toast is armed.
+///
+/// Drag-drop chunks (`dnd::injectors::join_paths_for_injection`) are plain
+/// newline-joined paths with no bracketed-paste markers, so the paste step
+/// passes them through byte-for-byte, as does the mouse filter (no ESC).
+fn filter_user_input_chunk(
+    chunk: &[u8],
+    paste: &mut BracketedPasteNormalizer,
+    mouse: &mut crate::toast::mouse::MouseFilter,
+    targets: Option<ToastHitTargets>,
+) -> crate::toast::mouse::MouseResult {
+    let outgoing = paste.process(chunk);
+    match targets {
+        Some(t) => mouse.process(&outgoing, t.close, t.usage, t.hover_armed),
+        None => crate::toast::mouse::MouseResult {
+            bytes: outgoing,
+            ..Default::default()
+        },
+    }
+}
+
+/// Issue #1350: the single post-read pipeline shared by the byte-stream
+/// stdin arm and the `console_input` / drag-drop (`extra_rx`) arm, so the
+/// two input sources cannot drift apart again: paste + toast mouse filter,
+/// toast side effects, the PTY write, then F3 voice-hotkey observation.
+#[allow(clippy::too_many_arguments)]
+fn forward_user_input<H: InteractiveHooks>(
+    process: &NativePtyProcess,
+    hooks: &mut H,
+    observer: &mut F3Observer,
+    paste: &mut BracketedPasteNormalizer,
+    mouse: &mut crate::toast::mouse::MouseFilter,
+    toast_input: Option<&crate::toast::compositor::ToastInput>,
+    toast_hub: Option<&crate::toast::ToastHub>,
+    chunk: &[u8],
+    source: &str,
+) {
+    let targets = toast_input.map(|input| ToastHitTargets {
+        close: input.close_rect(),
+        usage: input.usage_rect(),
+        hover_armed: input.usage_hover_armed(),
+    });
+    let result = filter_user_input_chunk(chunk, paste, mouse, targets);
+    if result.dismissed {
+        if let Some(hub) = toast_hub {
+            hub.dismiss_visible(std::time::Instant::now());
+        }
+    }
+    if let Some(input) = toast_input {
+        if result.usage_toggled {
+            input.toggle_usage();
+        }
+        if let Some(hovering) = result.usage_hover {
+            input.set_usage_hover(hovering);
+        }
+    }
+    let write_result = if result.bytes.is_empty() {
+        Ok(())
+    } else {
+        process.write_impl(&result.bytes, false)
+    };
+    if let Err(err) = write_result {
+        eprintln!("[clud] warning: failed to forward {source} to pty: {}", err);
+    } else if hooks.intercept_f3() {
+        // F3 detection runs over the user input (after Ctrl+V image
+        // expansion on the stdin path) but before any backend write side
+        // effects. A press inside paste text is unusual but should keep
+        // detection symmetry with raw forwarding.
+        let events = observer.observe(chunk);
+        let mut sink = NativePtyProcessSink::new(process);
+        for _ in 0..events.presses {
+            if let Err(err) = hooks.on_f3_press(&mut sink) {
+                eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
+            }
+        }
+        for _ in 0..events.releases {
+            if let Err(err) = hooks.on_f3_release(&mut sink) {
+                eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
+            }
+        }
+    }
+}
+
 /// Drains `rx`, coalescing every chunk already queued into one
 /// `write_all` + one `flush` per wakeup, until the channel disconnects
 /// (draining and flushing anything left one last time before
@@ -1380,9 +1487,11 @@ where
                     }
                 }
                 // A side-channel chunk (Windows `console_input` keyboard or
-                // the drag-drop OLE callback) — pre-normalized bytes that
-                // bypass the bracketed-paste detector and go straight to
-                // the PTY.
+                // the drag-drop OLE callback). Issue #1350: on Windows this
+                // is the *only* keyboard source, so it runs the same
+                // `forward_user_input` pipeline as stdin (Backspace
+                // normalization, bracketed paste, toast mouse filter, F3).
+                // Ctrl+V image expansion stays stdin-only.
                 //
                 // The 0x03 byte check is required on Windows: when the
                 // `console_input` reader (issue #141 / PR #144) is active,
@@ -1400,12 +1509,18 @@ where
                     // don't need the `interrupt_on_ctrl_c_byte` gate
                     // that skips 0x03 detection on piped stdin.
                     let requested_interrupt = stdin_chunk_requests_interrupt(&chunk);
-                    if let Err(err) = process.write_impl(&chunk, false) {
-                        eprintln!(
-                            "[clud] warning: failed to forward dropped paths to pty: {}",
-                            err
-                        );
-                    }
+                    let chunk = extra_chunk_for_pipeline(&chunk, normalize_console_stdin);
+                    forward_user_input(
+                        process,
+                        hooks,
+                        &mut observer,
+                        &mut paste,
+                        &mut mouse,
+                        toast_input.as_deref(),
+                        toast_hub.as_deref(),
+                        &chunk,
+                        "console input",
+                    );
                     if requested_interrupt {
                         if options.verbose {
                             verbose_log::log("[clud] pty pump: interrupt via extra_rx Ctrl+C byte");
@@ -1423,64 +1538,17 @@ where
                     } else {
                         std::borrow::Cow::Borrowed(chunk.as_slice())
                     };
-                    // Run the bracketed-paste normalizer over the
-                    // chunk BEFORE forwarding to the PTY. Non-paste
-                    // bytes pass through with O(1) state cost (just a
-                    // 6-byte prefix matcher); paste bodies are
-                    // buffered and rewritten in place.
-                    let outgoing = paste.process(chunk.as_ref());
-                    // #1189: a click on the toast's close button is clud's,
-                    // not the child's.
-                    let outgoing = match toast_input.as_ref() {
-                        Some(input) => {
-                            let result = mouse.process(
-                                &outgoing,
-                                input.close_rect(),
-                                input.usage_rect(),
-                                input.usage_hover_armed(),
-                            );
-                            if result.dismissed {
-                                if let Some(hub) = toast_hub.as_ref() {
-                                    hub.dismiss_visible(std::time::Instant::now());
-                                }
-                            }
-                            if result.usage_toggled {
-                                input.toggle_usage();
-                            }
-                            if let Some(hovering) = result.usage_hover {
-                                input.set_usage_hover(hovering);
-                            }
-                            result.bytes
-                        }
-                        None => outgoing,
-                    };
-                    let write_result = if outgoing.is_empty() {
-                        Ok(())
-                    } else {
-                        process.write_impl(&outgoing, false)
-                    };
-                    if let Err(err) = write_result {
-                        eprintln!("[clud] warning: failed to forward stdin to pty: {}", err);
-                    } else if hooks.intercept_f3() {
-                        // F3 detection runs over the outgoing user
-                        // input after Ctrl+V image expansion but
-                        // before any backend write side effects. A
-                        // press inside paste text is unusual but
-                        // should keep detection symmetry with raw
-                        // forwarding.
-                        let events = observer.observe(chunk.as_ref());
-                        let mut sink = NativePtyProcessSink::new(process);
-                        for _ in 0..events.presses {
-                            if let Err(err) = hooks.on_f3_press(&mut sink) {
-                                eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
-                            }
-                        }
-                        for _ in 0..events.releases {
-                            if let Err(err) = hooks.on_f3_release(&mut sink) {
-                                eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
-                            }
-                        }
-                    }
+                    forward_user_input(
+                        process,
+                        hooks,
+                        &mut observer,
+                        &mut paste,
+                        &mut mouse,
+                        toast_input.as_deref(),
+                        toast_hub.as_deref(),
+                        chunk.as_ref(),
+                        "stdin",
+                    );
 
                     if requested_interrupt || interrupted.load(Ordering::SeqCst) {
                         if options.verbose {

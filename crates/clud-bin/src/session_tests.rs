@@ -214,6 +214,113 @@ fn console_stdin_normalization_is_windows_only() {
     }
 }
 
+// ─── Issue #1350: console-input (extra_rx) parity with stdin ─────────
+
+const PARITY_CLOSE: crate::toast::text_tier::CellRect = crate::toast::text_tier::CellRect {
+    row: 0,
+    col: 70,
+    width: 3,
+    height: 1,
+};
+
+fn parity_targets() -> Option<ToastHitTargets> {
+    Some(ToastHitTargets {
+        close: Some(PARITY_CLOSE),
+        usage: None,
+        hover_armed: false,
+    })
+}
+
+/// Issue #1350: the `extra_rx` path used to write raw bytes to the PTY,
+/// skipping the paste normalizer and the toast mouse filter. Both arms now
+/// share one pipeline and must produce identical bytes and dismiss flags.
+#[test]
+fn extra_input_pipeline_matches_stdin_pipeline() {
+    let inputs: [&[u8]; 3] = [
+        b"\x1b[200~\"C:\\Users\\me\\my file.txt\"\x1b[201~",
+        b"a\x1b[<0;71;1Mb\x1b[<0;71;1mc",
+        b"hello world\r",
+    ];
+    let mut stdin_paste = BracketedPasteNormalizer::new();
+    let mut stdin_mouse = crate::toast::mouse::MouseFilter::new();
+    let mut extra_paste = BracketedPasteNormalizer::new();
+    let mut extra_mouse = crate::toast::mouse::MouseFilter::new();
+    let mut dismissed = false;
+    for input in inputs {
+        let via_stdin =
+            filter_user_input_chunk(input, &mut stdin_paste, &mut stdin_mouse, parity_targets());
+        let prepared = extra_chunk_for_pipeline(input, false);
+        let via_extra = filter_user_input_chunk(
+            &prepared,
+            &mut extra_paste,
+            &mut extra_mouse,
+            parity_targets(),
+        );
+        assert_eq!(via_extra, via_stdin, "input {:?}", input);
+        dismissed |= via_extra.dismissed;
+    }
+    assert!(
+        dismissed,
+        "click on the close button must dismiss via extra_rx"
+    );
+}
+
+/// Issue #1350: a toast close click arriving via `extra_rx` is swallowed.
+#[test]
+fn extra_input_close_click_is_swallowed_and_dismisses() {
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let prepared = extra_chunk_for_pipeline(b"a\x1b[<0;71;1Mb\x1b[<0;71;1mc", false);
+    let result = filter_user_input_chunk(&prepared, &mut paste, &mut mouse, parity_targets());
+    assert!(result.dismissed);
+    assert_eq!(result.bytes, b"abc");
+}
+
+/// Issue #1350: drag-drop chunks (plain newline-joined paths) pass through
+/// the shared pipeline byte-for-byte.
+#[test]
+fn extra_input_drop_paths_pass_through_unchanged() {
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let drop = b"C:\\a b\\x.txt\nC:\\y.txt ";
+    let prepared = extra_chunk_for_pipeline(drop, false);
+    let result = filter_user_input_chunk(&prepared, &mut paste, &mut mouse, None);
+    assert_eq!(result.bytes, drop);
+}
+
+/// Issue #1350: Backspace from `console_input` gets the same Windows
+/// 0x08 -> 0x7f normalization the byte-stream reader applies.
+#[test]
+fn extra_input_backspace_normalization_is_windows_only() {
+    let normalize = should_normalize_interactive_console_stdin(true);
+    let prepared = extra_chunk_for_pipeline(&[b'a', 0x08, b'z'], normalize);
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let result = filter_user_input_chunk(&prepared, &mut paste, &mut mouse, None);
+    if cfg!(windows) {
+        assert_eq!(result.bytes, vec![b'a', 0x7f, b'z']);
+    } else {
+        assert_eq!(result.bytes, vec![b'a', 0x08, b'z']);
+    }
+}
+
+/// Issue #1350: F3 arriving via `console_input` must reach the voice
+/// observer; the shared pipeline observes the prepared extra chunk.
+#[test]
+fn extra_input_f3_is_observed() {
+    let normalize = should_normalize_interactive_console_stdin(true);
+    let prepared = extra_chunk_for_pipeline(b"\x1bOR", normalize);
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let result = filter_user_input_chunk(&prepared, &mut paste, &mut mouse, parity_targets());
+    assert_eq!(
+        result.bytes, b"\x1bOR",
+        "F3 is still forwarded to the child"
+    );
+    let mut observer = F3Observer::new();
+    assert_eq!(observer.observe(&prepared).presses, 1);
+}
+
 #[test]
 fn ctrl_c_byte_requests_interrupt() {
     assert!(!stdin_chunk_requests_interrupt(b"abc"));
