@@ -99,6 +99,7 @@ class Harness:
                 raise RuntimeError(
                     f"{binary} is missing; build it first (`bash build` or soldr cargo build)"
                 )
+        self.hide_clud = False
         self.gh_state = root / "gh-state.json"
         self.write_gh_state({"repo": "o/r", "issues": {}, "prs": []})
         self._install_bin()
@@ -178,6 +179,11 @@ class Harness:
                 continue
             if entry not in keep:
                 keep.append(entry)
+        if self.hide_clud:
+            # Simulate "clud is not installed": drop every directory that
+            # holds a `clud`, including the build dir. Hooks and fixture
+            # scripts use absolute paths, so they keep working.
+            keep = [d for d in keep if not (Path(d) / f"clud{EXE}").exists()]
         return os.pathsep.join(keep)
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:

@@ -13,7 +13,7 @@ disable-model-invocation: true
 The integrator already proved RED -> GREEN locally; you confirm it on the
 server and merge.
 
-1. Watch: `"$CLUD_EXE" tool run github/pr_merge_watch.py --pr <n>`. Run it
+1. Watch: `"$CLUD_EXE" tool run github/pr_merge_watch.py <n>`. Run it
    bare; its exit code is the result (do not pipe it through `tail`).
 2. By exit code:
    - `0` (checks green, mergeable): `gh pr merge <n> --admin --squash

@@ -327,9 +327,20 @@ pub fn fetch_via_gh(
 pub(crate) fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
     let mut argv = vec!["gh".to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
+    run_capture(argv, None)
+}
+
+/// Run `argv` (in `cwd`, when given), capturing combined stdout/stderr.
+/// Returns `(exit_code, captured_output)`. Shared by the `gh` and `git`
+/// helpers so every piped helper goes through one running-process path.
+pub(crate) fn run_capture(
+    argv: Vec<String>,
+    cwd: Option<&std::path::Path>,
+) -> Result<(i32, String), String> {
+    let program = argv.first().cloned().unwrap_or_default();
     let config = ProcessConfig {
         command: subprocess::command_spec_for_subprocess(argv),
-        cwd: None,
+        cwd: cwd.map(std::path::Path::to_path_buf),
         env: None,
         capture: true,
         stderr_mode: StderrMode::Stdout,
@@ -345,7 +356,7 @@ pub(crate) fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
     let process = NativeProcess::new(config);
     process
         .start()
-        .map_err(|e| format!("failed to start `gh`: {e}"))?;
+        .map_err(|e| format!("failed to start `{program}`: {e}"))?;
 
     let mut buf = Vec::<u8>::new();
     loop {
@@ -364,7 +375,7 @@ pub(crate) fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
     }
     let exit_code = process
         .wait(Some(Duration::from_secs(30)))
-        .map_err(|e| format!("waiting for gh: {e}"))?;
+        .map_err(|e| format!("waiting for {program}: {e}"))?;
     Ok((exit_code, String::from_utf8_lossy(&buf).to_string()))
 }
 

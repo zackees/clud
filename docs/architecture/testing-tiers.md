@@ -78,7 +78,25 @@ pinned in `.github/workflows/_run-tests.yml`.
 5. **Streaming is the default**, so the backend must speak SSE, including
    `input_json_delta` for tool input.
 
+### Rendered skills (`!` lines), as pinned by the `/do` suite
+
+`/do`'s body is one line, `` !`clud do-prompt "$ARGUMENTS"` ``, and the suite
+pins how Claude Code treats it:
+
+- **Permissions:** `allowed-tools: Bash(clud do-prompt:*)` lets it run with
+  permission prompts on (H9).
+- **Command guard:** the `!` expansion is not a tool call, so it never reaches
+  PreToolUse or `clud-cmd-scan` (H10).
+- **Failure:** if the command fails (for example, `clud` is not on PATH),
+  Claude Code aborts the skill *before* any model call and shows the user
+  `Shell command failed for pattern …`. The model never sees a half-rendered
+  prompt (H11).
+- **Codex** skills have no `!` lines. There the skill's fallback text tells the
+  model to run `clud do-prompt <target>` itself, which makes it B tier.
+- **Windows:** not yet covered; the harness job runs on Linux.
+
 ## Suites
 
 - `tests/harness/test_smoke.py`: the framework itself (#1323).
-- The `/do` suite (#1322) and the `/grind` suite (#1324) build on it.
+- `tests/harness/test_do.py`: `/do` typed in Claude Code, scenarios H1–H12 (#1322).
+- The `/grind` suite (#1324) builds on the same fixture.
