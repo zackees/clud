@@ -300,7 +300,7 @@ def report_pytest_exit(returncode: int) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a prebuilt CI test bundle")
     parser.add_argument("--bundle", type=Path, required=True)
-    parser.add_argument("--suite", choices=("unit", "integration"), required=True)
+    parser.add_argument("--suite", choices=("unit", "integration", "harness"), required=True)
     parser.add_argument("pytest_args", nargs="*")
     args = parser.parse_args(argv)
 
@@ -314,6 +314,25 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         rc = run_pytest("not integration", env, args.pytest_args, suite="unit")
         return 0 if report_pytest_exit(rc) else 1
+
+    if args.suite == "harness":
+        # #1323: real Claude Code on `mock-agent serve`. The fixture runs the
+        # bundle's own clud and mock-agent; `_run-tests.yml` installs the
+        # pinned Claude Code for this suite only.
+        env = env.copy()
+        bin_dir = Path(env["CLUD_TEST_MOCK_AGENT_BINARY"]).parent
+        env["CLUD_HARNESS_CLUD"] = str(bin_dir / _exe("clud", manifest))
+        env["CLUD_HARNESS_MOCK_AGENT"] = str(bin_dir / _exe("mock-agent", manifest))
+        env["CLUD_REAL_CLAUDE_TESTS"] = "1"
+        return (
+            0
+            if report_pytest_exit(
+                run_pytest(
+                    "real_claude", env, ["-v", "tests/harness", *args.pytest_args], suite="harness"
+                )
+            )
+            else 1
+        )
 
     if install_wheel(bundle, env) != 0:
         return 1

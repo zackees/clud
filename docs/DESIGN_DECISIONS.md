@@ -4031,3 +4031,34 @@ nothing on them.
 **Consequences:** Like the status line (DD-071), this makes every Claude
 launch carry a launch-scoped `--settings`, even in a repo that declares no
 hooks. `--coauthor` restores the old argv.
+
+## DD-090: Test Claude Code integrations by mocking the model, not the harness
+
+**Status:** Accepted.
+
+**Context:** Everything clud installs into Claude Code (skills, agent types,
+workflows, hooks) is interpreted by Claude Code itself. `mock-agent` replaces
+the harness, so it can prove how clud *launches* Claude Code but nothing about
+what Claude Code then *does*. `/grind` shipped with its workflow never
+executed, and several of its assumptions were answerable only by running
+it: do workflow agents' tool calls reach hooks, and how are skills rendered?
+
+**Decision:** Add a third test tier that runs the real, pinned Claude Code
+with `ANTHROPIC_BASE_URL` pointed at `mock-agent serve`, which plays the
+model from a per-role script (see `docs/architecture/testing-tiers.md`). The
+`tests/harness/` fixture installs clud's real assets into an isolated config
+with `clud install-assets --home`, and asserts on the requests that reached
+the model, the hook log and the world state.
+
+**Rationale:** Faking the model keeps the part under test real. A step keyed
+on the assistant-turn count makes each request self-describing, so the server
+needs no state, and Claude Code's extra user messages cannot desynchronize it.
+It is opt-in because it needs an installed Claude Code; it runs in CI's full
+mode against a pinned version, because the request shapes it answers are
+version-specific.
+
+**Consequences:** Upgrading the pinned Claude Code can break the tier and
+should be done deliberately. The fixture has to work around clud's own
+session machinery (the `python` shim, the rm-identity check), as its module
+docs describe.
+

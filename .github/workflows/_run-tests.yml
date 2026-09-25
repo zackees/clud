@@ -21,7 +21,7 @@ on:
         required: true
         type: string
       suite:
-        description: 'unit | integration'
+        description: 'unit | integration | harness'
         required: true
         type: string
 
@@ -65,6 +65,11 @@ jobs:
       # build-backend = "soldr", so `uv run` would sync the project and trigger
       # a PEP 517 maturin build -- which on this runner hits the removed
       # toolchain and fails every job. See lint:8-24.
+      # #1323: the harness suite drives the real Claude Code, pinned so the
+      # request shapes the mock backend speaks stay fixed.
+      - name: Install pinned Claude Code
+        if: inputs.suite == 'harness'
+        run: npm install -g @anthropic-ai/claude-code@2.1.282
       - name: Run ${{ inputs.suite }} suite
         shell: bash
         run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'

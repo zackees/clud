@@ -571,6 +571,9 @@ fn build_launch_plan_for_target_at(
         Some(Command::Wasm { .. }) => {
             unreachable!("wasm execution is handled directly in main")
         }
+        Some(Command::InstallAssets { .. }) => {
+            unreachable!("install-assets is handled directly in main")
+        }
         Some(Command::Grind { url }) => {
             // `main` rejects harnesses without native interactive `/loop`
             // support. Keep this plan free of every clud loop mechanism: the
