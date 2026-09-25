@@ -123,6 +123,16 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "github/is_meta_issue.py",
+        body: include_str!("../assets/tools/github/is_meta_issue.py"),
+        // Read-only GitHub query (#1404): classifies an issue as meta or
+        // not. Killing it loses no work — `Resumable`.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "git/clud-git-diff.py",
         body: include_str!("../assets/tools/git/clud-git-diff.py"),
         // Native OS webview diff viewer (pywebview). The world (git
@@ -458,6 +468,35 @@ mod tests {
             names.contains(&"github/pr_merge_watch.py"),
             "BUNDLED_TOOLS must include github/pr_merge_watch.py; \
              got {names:?}",
+        );
+    }
+
+    /// Issue #1404: the is_meta_issue.py tool ships in the bundle.
+    #[test]
+    fn bundled_includes_is_meta_issue() {
+        let names: Vec<&str> = BUNDLED_TOOLS.iter().map(|t| t.rel_path).collect();
+        assert!(
+            names.contains(&"github/is_meta_issue.py"),
+            "BUNDLED_TOOLS must include github/is_meta_issue.py; \
+             got {names:?}",
+        );
+    }
+
+    /// is_meta_issue.py must carry the managed marker (so the installer
+    /// can update/purge it) and must not use the banned subprocess module.
+    #[test]
+    fn is_meta_issue_is_managed_and_subprocess_free() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/is_meta_issue.py")
+            .expect("is_meta_issue.py must be in BUNDLED_TOOLS");
+        assert!(
+            tool.body.contains("managed-by: clud"),
+            "is_meta_issue.py must carry the managed-by: clud marker",
+        );
+        assert!(
+            !tool.body.contains("import subprocess"),
+            "is_meta_issue.py must not import subprocess",
         );
     }
 
