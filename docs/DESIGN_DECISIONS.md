@@ -4025,7 +4025,10 @@ HOME and working directory. `ci/run_bundle.py` runs the `pty` harness inside
 a pseudo-terminal with `CLUD_REQUIRE_PTY=1`, and the canary answers ConPTY's
 `ESC[6n` cursor query the way a terminal would. The `ci-windows` PR label
 runs only static checks plus Windows x64, so Windows fixes iterate quickly.
-It deliberately leaves `CI OK` red and can never gate a merge.
+`CI OK` passes exactly when those lanes pass. That is
+safe because the merge queue always runs the full matrix. An always-red
+gate was tried first, but `pr_merge_watch` cancels a run on the first red
+`CI OK`, which made the label unusable.
 
 **Rationale:** An event wakes the loop immediately, so keystroke latency
 stays where DD-018 put it. Only the idle re-checks move to the tick.

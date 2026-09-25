@@ -26,9 +26,9 @@ Mode = Literal["minimal", "extended", "full", "windows"]
 
 FULL_TIER_LABEL = "ci-full"
 EXTENDED_TIER_LABEL = "ci-test"
-#: Iteration-only mode (#1310): static checks plus Windows x64 build and tests,
-#: nothing else. `CI OK` refuses to pass in this mode, so it can never be the
-#: coverage a PR merges on.
+#: Windows iteration mode (#1310): static checks plus Windows x64 build and
+#: tests, nothing else. `CI OK` passes when those lanes pass; the merge queue
+#: still runs the full matrix before anything merges.
 WINDOWS_TIER_LABEL = "ci-windows"
 LEGACY_FULL_TIER_LABEL = "ci:full"
 

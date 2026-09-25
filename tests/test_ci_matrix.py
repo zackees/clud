@@ -420,7 +420,7 @@ def test_ci_windows_label_selects_only_windows_x64():
     assert resolve_tier("pull_request", "", "ci-windows,ci-full") == "full"
 
 
-def test_ci_windows_mode_skips_linux_and_never_passes_ci_ok():
+def test_ci_windows_mode_skips_linux_and_gates_on_windows_lanes():
     text = CI_YML.read_text(encoding="utf-8")
     linux = text.split("\n  build-linux-x64:\n", 1)[1].split("\n\n", 1)[0]
     assert "needs.static.outputs.mode != 'windows'" in linux
@@ -430,6 +430,6 @@ def test_ci_windows_mode_skips_linux_and_never_passes_ci_ok():
     assert "needs.static.outputs.mode == 'windows'" in windows
     gate = text.split("\n  ci-ok:\n", 1)[1]
     branch = gate.split('if [ "$MODE" = "windows" ]; then', 1)[1].split("\n          fi\n", 1)[0]
-    # The mode's last word is an unconditional failure after the lane check.
-    assert branch.rstrip().endswith("exit 1")
-    assert "remove the ci-windows label" in branch
+    # Any failed static/Windows lane fails the gate; otherwise the mode passes.
+    assert "for result in $STATIC $WINDOWS; do" in branch
+    assert branch.rstrip().endswith("exit 0")

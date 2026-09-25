@@ -384,9 +384,9 @@ jobs:
             echo "::error::CI mode was not resolved (got '$MODE')"
             exit 1;;
           esac
-          # ci-windows (#1310) runs static checks plus Windows x64 only. Report
-          # whether those lanes passed, then fail regardless: skipped Linux and
-          # macOS lanes are not coverage, so this mode can never gate a merge.
+          # ci-windows (#1310) runs static checks plus Windows x64 only, and
+          # passes exactly when those lanes pass. It is safe as a PR signal
+          # because the merge queue always runs the full matrix before merge.
           if [ "$MODE" = "windows" ]; then
             for result in $STATIC $WINDOWS; do
               if [ "$result" != "success" ]; then
@@ -394,8 +394,8 @@ jobs:
                 exit 1
               fi
             done
-            echo "::error::ci-windows lanes passed; remove the ci-windows label (or add ci-test/ci-full) for merge-gating CI"
-            exit 1
+            echo "ci-windows: static + Windows x64 lanes passed (Linux/macOS not run)"
+            exit 0
           fi
           for result in $MINIMAL; do
             if [ "$result" != "success" ]; then
