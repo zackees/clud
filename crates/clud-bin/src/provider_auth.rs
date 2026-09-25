@@ -101,6 +101,46 @@ impl NativeSecretStore {
     }
 }
 
+/// Test-only vault (#901): with `CLUD_INTEGRATION_TESTS=1` and
+/// `CLUD_TEST_SECRET_STORE_DIR` set in a *debug* build, secrets live in
+/// owner-only files in that directory instead of the OS keyring, so an
+/// integration test can run `clud auth login/status/logout` through the real
+/// binary on a CI runner that has no keyring. Release builds never honour it.
+pub const TEST_SECRET_STORE_DIR_ENV: &str = "CLUD_TEST_SECRET_STORE_DIR";
+
+pub fn test_vault_dir() -> Option<std::path::PathBuf> {
+    resolve_test_vault_dir(
+        cfg!(debug_assertions),
+        std::env::var_os("CLUD_INTEGRATION_TESTS").is_some_and(|value| value == "1"),
+        std::env::var_os(TEST_SECRET_STORE_DIR_ENV),
+    )
+}
+
+/// True when the test vault replaces the native one for this process.
+pub fn test_vault_active() -> bool {
+    test_vault_dir().is_some()
+}
+
+fn resolve_test_vault_dir(
+    debug_build: bool,
+    integration: bool,
+    value: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    (debug_build && integration)
+        .then_some(value?)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+fn test_vault_path(dir: &std::path::Path, service: &str, account: &str) -> std::path::PathBuf {
+    let safe = |text: &str| -> String {
+        text.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    };
+    dir.join(format!("{}--{}.secret", safe(service), safe(account)))
+}
+
 #[cfg(not(windows))]
 fn with_native_vault<T: Send + 'static>(
     service: &'static str,
@@ -248,6 +288,14 @@ mod windows_vault {
 
 impl SecretStore for NativeSecretStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError> {
+        if let Some(dir) = test_vault_dir() {
+            return match std::fs::read_to_string(test_vault_path(&dir, self.service, self.account))
+            {
+                Ok(secret) => Ok(Some(secret)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(SecretStoreError::Unavailable),
+            };
+        }
         #[cfg(windows)]
         return windows_vault::get(&vault_target(self.service, self.account));
         #[cfg(not(windows))]
@@ -261,6 +309,13 @@ impl SecretStore for NativeSecretStore {
     }
 
     fn set(&self, secret: &str) -> Result<(), SecretStoreError> {
+        if let Some(dir) = test_vault_dir() {
+            return crate::fs_private::write_private_atomic(
+                &test_vault_path(&dir, self.service, self.account),
+                secret.as_bytes(),
+            )
+            .map_err(|_| SecretStoreError::Unavailable);
+        }
         #[cfg(windows)]
         return windows_vault::set(&vault_target(self.service, self.account), secret);
         #[cfg(not(windows))]
@@ -275,6 +330,13 @@ impl SecretStore for NativeSecretStore {
     }
 
     fn delete(&self) -> Result<(), SecretStoreError> {
+        if let Some(dir) = test_vault_dir() {
+            return match std::fs::remove_file(test_vault_path(&dir, self.service, self.account)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(_) => Err(SecretStoreError::Unavailable),
+            };
+        }
         #[cfg(windows)]
         return windows_vault::delete(&vault_target(self.service, self.account));
         #[cfg(not(windows))]
@@ -1389,6 +1451,34 @@ mod tests {
             preflight_with(&store, false, || unreachable!()),
             Err(PreflightError::Unavailable)
         );
+    }
+
+    /// #901: the file-backed test vault needs a debug build, the explicit
+    /// integration opt-in and a non-empty directory. A release build ignores
+    /// it even with both variables set.
+    #[test]
+    fn test_vault_requires_debug_build_and_integration_opt_in() {
+        let dir = Some(std::ffi::OsString::from("/tmp/vault"));
+        assert_eq!(
+            resolve_test_vault_dir(true, true, dir.clone()),
+            Some(std::path::PathBuf::from("/tmp/vault"))
+        );
+        assert_eq!(resolve_test_vault_dir(false, true, dir.clone()), None);
+        assert_eq!(resolve_test_vault_dir(true, false, dir), None);
+        assert_eq!(resolve_test_vault_dir(true, true, Some("".into())), None);
+        assert_eq!(resolve_test_vault_dir(true, true, None), None);
+    }
+
+    #[test]
+    fn test_vault_paths_keep_provider_records_apart_and_filename_safe() {
+        let dir = std::path::Path::new("/v");
+        let deepseek = test_vault_path(dir, DEEPSEEK_VAULT_SERVICE, DEEPSEEK_VAULT_ACCOUNT);
+        let openrouter = test_vault_path(dir, OPENROUTER_VAULT_SERVICE, OPENROUTER_VAULT_ACCOUNT);
+        assert_ne!(deepseek, openrouter);
+        let name = deepseek.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'));
     }
 
     #[test]

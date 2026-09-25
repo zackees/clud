@@ -301,17 +301,19 @@ impl ForegroundRuntime {
             // Optional routes must never block native Claude. Resolve only
             // availability metadata here; the actual credentials stay inside
             // the launch-scoped bridge and are not serialized into the plan.
-            let deepseek_key = integration_upstreams
-                .as_ref()
-                .map(|_| "clud-test-deepseek-key".to_string())
+            // #901: fixed fixture keys unless the test vault holds the real
+            // (test) credentials, so logout is observable end to end.
+            let fixture_keys =
+                integration_upstreams.is_some() && !crate::provider_auth::test_vault_active();
+            let deepseek_key = fixture_keys
+                .then(|| "clud-test-deepseek-key".to_string())
                 .or_else(|| store.get().ok().flatten());
             // OpenRouter keeps its own vault record, so it needs its own store
             // rather than the injected DeepSeek-scoped one. Probed inline for
             // the same reason `codex_available` is: an absent optional
             // credential must omit a discovery row, never fail the launch.
-            let openrouter_key = integration_upstreams
-                .as_ref()
-                .map(|_| "clud-test-openrouter-key".to_string())
+            let openrouter_key = fixture_keys
+                .then(|| "clud-test-openrouter-key".to_string())
                 .or_else(|| {
                     crate::provider_auth::NativeSecretStore::new_for(
                         crate::provider_auth::OPENROUTER_VAULT_SERVICE,

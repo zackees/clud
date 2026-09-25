@@ -167,8 +167,12 @@ impl UnifiedGatewayConfig {
         mut self,
         upstreams: &UnifiedIntegrationUpstreams,
     ) -> Self {
-        self.deepseek_api_key = Some("clud-test-deepseek-key".to_string());
-        self.openrouter_api_key = Some("clud-test-openrouter-key".to_string());
+        // #901: with the test vault active, keys come from what `clud auth`
+        // stored there, so a logout really removes its route from discovery.
+        if !crate::provider_auth::test_vault_active() {
+            self.deepseek_api_key = Some("clud-test-deepseek-key".to_string());
+            self.openrouter_api_key = Some("clud-test-openrouter-key".to_string());
+        }
         self.codex_available = true;
         self.anthropic_base_url = upstreams.anthropic_base_url.clone();
         self.deepseek_base_url = upstreams.deepseek_base_url.clone();

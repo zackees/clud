@@ -59,6 +59,7 @@ fn main() {
     let mut codex_bridge_probe_to: Option<PathBuf> = None;
     let mut codex_cache_identity_probe_to: Option<PathBuf> = None;
     let mut unified_route_probe_to: Option<PathBuf> = None;
+    let mut unified_acceptance_probe_to: Option<PathBuf> = None;
     // Emit canned `--output-format stream-json` lines from a file (one line
     // each, separated by `--mock-stream-delay-ms`). Used by integration tests
     // that exercise clud's stream-json renderer without needing a real
@@ -215,6 +216,13 @@ fn main() {
         if arg == "--mock-codex-cache-identity-probe" {
             if let Some(path) = args.get(i + 1) {
                 codex_cache_identity_probe_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-unified-acceptance-probe" {
+            if let Some(path) = args.get(i + 1) {
+                unified_acceptance_probe_to = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -402,6 +410,9 @@ fn main() {
     let cache_identity_probe = codex_cache_identity_probe_to
         .as_deref()
         .map(run_codex_cache_identity_probe);
+    if let Some(path) = unified_acceptance_probe_to.as_deref() {
+        run_unified_acceptance_probe(path);
+    }
     let unified_route_probe = unified_route_probe_to
         .as_deref()
         .map(run_unified_route_probe);
@@ -724,6 +735,118 @@ fn run_unified_route_probe(report_path: &Path) -> serde_json::Value {
         }
         report["statuses"] = serde_json::json!(statuses);
         report["response_count"] = responses.into();
+        Ok(())
+    })();
+    if let Err(error) = result {
+        report["error"] = error.into();
+    }
+    if let Some(parent) = report_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(report_path, serde_json::to_vec(&report).unwrap_or_default());
+    report
+}
+
+/// One HTTP/1.1 exchange with the gateway; returns (status, body).
+fn gateway_exchange(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<&str>,
+) -> Result<(u16, String), String> {
+    let body = body.unwrap_or("");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Clud-Gateway-Token: {token}\r\nContent-Type: application/json\r\nX-Claude-Code-Session-Id: acceptance-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|error| format!("connect failed: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("read timeout failed: {error}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write failed: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("read failed: {error}"))?;
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or("missing HTTP status")?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    Ok((status, body))
+}
+
+/// #901 acceptance probe: model discovery, then one conversation that crosses
+/// Claude -> Codex -> DeepSeek -> Claude with a different effort each turn,
+/// then an unknown reserved model id that must be rejected locally.
+fn run_unified_acceptance_probe(report_path: &Path) -> serde_json::Value {
+    let mut report = serde_json::json!({
+        "models_status": null,
+        "models": [],
+        "turn_statuses": [],
+        "unknown_model_status": null,
+        "error": null,
+    });
+    let result = (|| -> Result<(), String> {
+        let base_url = std::env::var("ANTHROPIC_BASE_URL").map_err(|_| "missing bridge URL")?;
+        let token = std::env::var("CLUD_GATEWAY_TOKEN").map_err(|_| "missing gateway token")?;
+        let address: SocketAddr = base_url
+            .strip_prefix("http://")
+            .ok_or("bridge URL is not HTTP")?
+            .parse()
+            .map_err(|_| "bridge URL is not a socket address")?;
+        let (status, body) =
+            gateway_exchange(address, "GET", "/v1/models?limit=1000", &token, None)?;
+        report["models_status"] = status.into();
+        let listing: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        report["models"] = listing["data"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| serde_json::json!({"id": row["id"], "display_name": row["display_name"]}))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into();
+        let turns = [
+            ("claude-opus-4-1", "low"),
+            ("clud-claude-codex-terra", "high"),
+            ("clud-claude-deepseek-flash", "max"),
+            ("claude-opus-4-1", "medium"),
+        ];
+        let mut statuses = Vec::new();
+        for (index, (model, effort)) in turns.into_iter().enumerate() {
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": 64,
+                "output_config": {"effort": effort},
+                "messages": [{"role": "user", "content": format!("acceptance-turn-{index}")}],
+                "stream": false,
+            })
+            .to_string();
+            statuses
+                .push(gateway_exchange(address, "POST", "/v1/messages", &token, Some(&body))?.0);
+        }
+        report["turn_statuses"] = serde_json::json!(statuses);
+        let unknown = serde_json::json!({
+            "model": "clud-claude-nonexistent-route",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "unknown"}],
+            "stream": false,
+        })
+        .to_string();
+        report["unknown_model_status"] =
+            gateway_exchange(address, "POST", "/v1/messages", &token, Some(&unknown))?
+                .0
+                .into();
         Ok(())
     })();
     if let Err(error) = result {
