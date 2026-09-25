@@ -700,9 +700,12 @@ impl SessionRuntime {
         }
     }
 
+    /// Resize a daemon-managed PTY session. Routed through the shared
+    /// `session::resize_pty` helper because running-process's own resize is
+    /// a no-op on Windows, so ConPTY sessions never resized (#1356).
     pub(super) fn resize(&self, rows: u16, cols: u16) {
         if let Self::Pty(process) = self {
-            let _ = process.resize_impl(rows, cols);
+            let _ = crate::session::resize_pty(process, rows, cols);
         }
     }
 
@@ -1118,5 +1121,71 @@ mod tests {
         assert_eq!(row.reason.as_deref(), Some("pinned: something"));
         assert!(!row.reclaimable);
         assert_eq!(row.evaluated_unix, Some(42));
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    /// #1356: running-process's `resize_impl` is a no-op on Windows, so the
+    /// daemon's resize must go through the shared `session::resize_pty`.
+    #[test]
+    fn session_runtime_resize_does_not_call_library_resize_impl() {
+        let src = include_str!("types.rs");
+        let start_needle = concat!("fn resize(&self, rows: u16, ", "cols: u16)");
+        let start = src.find(start_needle).expect("resize fn present");
+        let rest = &src[start..];
+        let end = rest
+            .find(concat!("pub(super) ", "fn"))
+            .expect("a following pub(super) fn");
+        let body = &rest[..end];
+        assert!(
+            !body.contains(concat!("resize_", "impl(")),
+            "SessionRuntime::resize must not call the library resize (no-op on Windows): {body}"
+        );
+        assert!(
+            body.contains(concat!("resize_", "pty(")),
+            "SessionRuntime::resize must route through session::resize_pty: {body}"
+        );
+    }
+
+    #[test]
+    fn session_runtime_resize_updates_pty_master_size() {
+        let argv: Vec<String> = if cfg!(windows) {
+            vec![
+                "cmd.exe".into(),
+                "/c".into(),
+                "ping -n 3 127.0.0.1 > NUL".into(),
+            ]
+        } else {
+            vec!["/bin/sh".into(), "-c".into(), "sleep 2".into()]
+        };
+        let Ok(process) = NativePtyProcess::new(argv, None, None, 20, 80, None) else {
+            eprintln!("session_runtime_resize_updates_pty_master_size: SKIP (PTY unavailable)");
+            return;
+        };
+        process.set_echo(false);
+        if process.start_impl().is_err() {
+            eprintln!("session_runtime_resize_updates_pty_master_size: SKIP (PTY spawn failed)");
+            return;
+        }
+        let process = Arc::new(process);
+        let runtime = SessionRuntime::Pty(Arc::clone(&process));
+        runtime.resize(40, 120);
+
+        {
+            let guard = process.handles.lock().expect("handles");
+            let handles = guard.as_ref().expect("handles present");
+            let after = handles.master.get_size().expect("get_size");
+            assert_eq!(
+                (after.rows, after.cols),
+                (40, 120),
+                "SessionRuntime::resize did not propagate to master: {:?}",
+                after
+            );
+        }
+
+        let _ = process.close_impl();
     }
 }
