@@ -9,6 +9,14 @@ from pathlib import Path
 
 import pytest
 
+from ci.env import scrub_clud_session_env
+
+# A clud session exports state such as CLUD_SKIP_RM_IDENTITY (auto-on in
+# clud's own repo) and CLUD_ROUTE_CONTEXT. Inherited by the hook binaries
+# under test, they flip the behavior those tests assert (#1423). Tests set
+# only the CLUD_* variables they need; everything else starts clean.
+scrub_clud_session_env(os.environ)
+
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Skip integration tests unless CLUD_INTEGRATION_TESTS=1."""

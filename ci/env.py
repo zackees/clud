@@ -251,6 +251,53 @@ def activate() -> None:
     )
 
 
+# `CLUD_*` variables the test harness itself owns. Every other `CLUD_*`
+# variable is clud *session* state (e.g. `CLUD_SKIP_RM_IDENTITY`, which clud
+# auto-enables in its own repo, or `CLUD_ROUTE_CONTEXT`) that leaks into
+# `bash test` when it runs from inside a clud session and flips hook
+# behavior under test (#1423).
+_TEST_HARNESS_CLUD_PREFIXES = ("CLUD_TEST_", "CLUD_HARNESS_", "CLUD_REAL_CLAUDE")
+_TEST_HARNESS_CLUD_NAMES = frozenset(
+    {
+        "CLUD_INTEGRATION_TESTS",
+        "CLUD_NO_UNLOCK",
+        "CLUD_USE_RUNTIME_CACHE",
+        "CLUD_USE_SOLDR_SHIMS",
+        "CLUD_XBUILD_SKIP_PREPARE",
+        "CLUD_REQUIRE_PTY",
+        "CLUD_PTY_PUMP_TRACE",
+        # Plumbing, not behavior: a clud session puts its `python` shim on
+        # PATH, and the shim exits 127 without its target (#1423).
+        "CLUD_PYTHON_SHIM_TARGET",
+    }
+)
+
+
+def is_clud_session_var(name: str) -> bool:
+    """True for a `CLUD_*` variable that is session state, not test config."""
+    upper = name.upper()
+    if not upper.startswith("CLUD_"):
+        return False
+    if upper in _TEST_HARNESS_CLUD_NAMES:
+        return False
+    return not upper.startswith(_TEST_HARNESS_CLUD_PREFIXES)
+
+
+def scrub_clud_session_env(env: dict[str, str] | os._Environ[str]) -> list[str]:
+    """Remove inherited clud session variables in place; return what was removed."""
+    removed = [name for name in list(env) if is_clud_session_var(name)]
+    for name in removed:
+        del env[name]
+    return removed
+
+
+def suite_env() -> dict[str, str]:
+    """`clean_env()` minus inherited clud session variables (#1423)."""
+    env = clean_env()
+    scrub_clud_session_env(env)
+    return env
+
+
 def clean_env() -> dict[str, str]:
     activate()
     env = os.environ.copy()

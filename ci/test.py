@@ -156,10 +156,10 @@ def _marked_test_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from ci.env import activate, clean_env
+    from ci.env import activate, suite_env
 
     activate()
-    env = clean_env()
+    env = suite_env()
 
     argv = list(sys.argv[1:] if argv is None else argv)
     run_unit, run_integration, pytest_args = _select_suites(argv)
