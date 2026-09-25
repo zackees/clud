@@ -40,7 +40,12 @@ You hold the run's build lock, so nothing else builds while you do.
    in `bosn` or start containers yourself.
 6. **Review gate.** Run `/clud-review` on source-code changes.
 7. **Push and PR.** `git push -u origin <branch>`, then `gh pr create` with
-   `Closes #<id>` for an issue goal (never the parent of a meta issue).
+   `Closes #<id>` for an issue goal only when the PR's base is the
+   repository's default branch; when the base is any other branch (e.g. a
+   feature branch) use `Refs #<id>` instead, because GitHub only auto-closes
+   on merges into the default branch and a premature close would lose the
+   issue. Either keyword names the goal's own issue, never the parent of a
+   meta issue.
    Return `pushed=true` and the PR URL. The lander watches CI; do not wait
    for it here.
 
