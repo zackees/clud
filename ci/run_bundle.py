@@ -29,9 +29,10 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
-from running_process import RunningProcess
+from running_process import PseudoTerminalProcess, RunningProcess
 
 from ci import process
 
@@ -184,6 +185,139 @@ def install_wheel(bundle: Path, env: dict[str, str]) -> int:
     return do_install(wheel, env=env)
 
 
+# The Rust harness whose tests drive a real PTY (crates/clud-bin/tests/pty/).
+# Cargo names its binary `pty-<hash>[.exe]`.
+TERMINAL_HARNESS = "pty"
+# Makes `require_pty_or_skip!` fail instead of skip (tests/common/mod.rs).
+REQUIRE_PTY_ENV = "CLUD_REQUIRE_PTY"
+# Upper bound on one test of the terminal harness. Each test runs in its own
+# pseudo-terminal (see `run_terminal_harness`), so a hang costs this much and
+# names the test instead of swallowing the rest of the harness.
+TERMINAL_TEST_TIMEOUT_SECS = 60.0
+
+
+def needs_terminal(harness: Path) -> bool:
+    """True for the harness that must run with a terminal as its stdout.
+
+    #691: ConPTY stops relaying child output when the *spawning* process's
+    stdout is a pipe, which is what `process.run` gives every harness. The PTY
+    tests then skipped silently on Windows, so the configuration interactive
+    launches ship -- clud under a real terminal -- had no coverage there.
+    """
+    name, sep, _hash = harness.name.removesuffix(".exe").rpartition("-")
+    return bool(sep) and name == TERMINAL_HARNESS
+
+
+def run_in_terminal(
+    argv: list[str], env: dict[str, str], timeout: float = TERMINAL_TEST_TIMEOUT_SECS
+) -> int:
+    """Run `argv` inside a pseudo-terminal, echoing its output as it arrives.
+
+    Inside the pseudo-terminal the harness's stdin and stdout are a console on
+    Windows and a TTY on POSIX, exactly as when a user launches clud, so the
+    PTY canary is expected to pass and `CLUD_REQUIRE_PTY=1` turns any failure
+    into a red test instead of a skip.
+    """
+    child_env = dict(env)
+    child_env[REQUIRE_PTY_ENV] = "1"
+    terminal = PseudoTerminalProcess(
+        argv, cwd=ROOT, env=child_env, capture=True, rows=50, cols=200
+    )
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            try:
+                sys.stdout.write(terminal.read_text(timeout=0.5))
+                sys.stdout.flush()
+            except TimeoutError:
+                # ConPTY keeps its output pipe open after the child exits, so
+                # EOF may never come on Windows: an exited child is the end.
+                if terminal.poll() is not None:
+                    _echo_remaining(terminal)
+                    break
+            except EOFError:
+                break
+        else:
+            print(
+                f"::error::{' '.join(argv)} did not finish within "
+                f"{timeout:.0f}s inside the pseudo-terminal",
+                file=sys.stderr,
+            )
+            terminal.kill()
+            return 1
+        return terminal.wait(timeout=30)
+    finally:
+        terminal.close()
+
+
+def _echo_remaining(terminal: PseudoTerminalProcess) -> None:
+    """Echo whatever output is already buffered, without waiting for more."""
+    while True:
+        try:
+            chunk = terminal.read_non_blocking()
+        except EOFError:
+            return
+        if not chunk:
+            return
+        text = chunk.decode(terminal.encoding, "replace") if isinstance(chunk, bytes) else chunk
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def list_tests(harness: Path, env: dict[str, str]) -> list[str]:
+    """Names of the tests in a libtest harness (`--list --format terse`)."""
+    result = process.run(
+        [str(harness), "--list", "--format", "terse"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return [
+        line.removesuffix(": test")
+        for line in (result.stdout or "").splitlines()
+        if line.endswith(": test")
+    ]
+
+
+def dump_traces(name: str, trace_dir: Path) -> None:
+    """Print the mock-agent stage traces a failed or hung PTY test left (#1310)."""
+    logs = sorted(trace_dir.glob("*.log")) if trace_dir.is_dir() else []
+    if not logs:
+        print(f"[pty-trace] {name}: no mock-agent trace (child never started?)", flush=True)
+        return
+    for log in logs:
+        print(f"[pty-trace] {name}: {log.name}", flush=True)
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            print(f"[pty-trace]   {line}", flush=True)
+
+
+def run_terminal_harness(argv: list[str], env: dict[str, str]) -> int:
+    """Run each test of the terminal harness in its own pseudo-terminal.
+
+    #1310: one hung PTY test used to hold the whole harness until its
+    timeout, and the kill discarded every earlier failure message. One test
+    per terminal bounds each hang and keeps each verdict and message.
+    """
+    names = list_tests(Path(argv[0]), env)
+    if not names:
+        print(f"::error::{argv[0]} listed no tests", file=sys.stderr)
+        return 1
+    failed = []
+    for name in names:
+        trace_dir = LOG_DIR / "pty-trace" / name.replace("::", "__")
+        test_env = dict(env)
+        test_env["MOCK_AGENT_TRACE_DIR"] = str(trace_dir)
+        test_env["CLUD_PTY_PUMP_TRACE"] = "1"
+        if run_in_terminal([*argv, "--exact", name, "--nocapture"], test_env) != 0:
+            failed.append(name)
+            dump_traces(name, trace_dir)
+    if failed:
+        print(f"::error::failing PTY tests: {', '.join(failed)}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
     """Run every `cargo test --no-run` harness binary shipped in the bundle."""
     tests_dir = bundle / "tests"
@@ -202,7 +336,10 @@ def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
         if sys.platform == "win32":
             argv += ["--test-threads=1"]
         print(f"::group::{harness.name}", flush=True)
-        rc = process.run(argv, cwd=ROOT, env=env).returncode
+        if needs_terminal(harness):
+            rc = run_terminal_harness(argv, env)
+        else:
+            rc = process.run(argv, cwd=ROOT, env=env).returncode
         print("::endgroup::", flush=True)
         if rc != 0:
             failures.append(f"{harness.name} (rc={rc})")

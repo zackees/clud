@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use running_process::pty::NativePtyProcess;
 
-use crate::common::{drain_reader, mock_agent_path};
+use crate::common::{drain_reader, mock_agent_path, through_pty_input, wait_for_mock_ready};
 
 /// Counting hooks for pump integration tests. Records F3 presses,
 /// releases, ticks, and can opt into voice interception via `intercept`.
@@ -78,6 +78,7 @@ fn raw_pump_forwards_stdin_bytes_verbatim() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -85,14 +86,17 @@ fn raw_pump_forwards_stdin_bytes_verbatim() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
 
-    // Give the child a moment to enter its stdin read loop before we feed.
-    std::thread::sleep(Duration::from_millis(150));
+    // Wait for the child to enter its stdin read loop before we feed.
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&process, &ready);
 
     let payload: &[u8] = b"hello\x1b[6n\x1bOR\x1bOP world\n";
     let interrupted = AtomicBool::new(false);
@@ -110,10 +114,11 @@ fn raw_pump_forwards_stdin_bytes_verbatim() {
     let _ = process.close_impl();
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    let expected = through_pty_input(payload);
     assert_eq!(
-        got, payload,
+        got, expected,
         "pump must forward stdin bytes verbatim; got {:?}, expected {:?}",
-        got, payload
+        got, expected
     );
 }
 
@@ -128,6 +133,7 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -135,12 +141,15 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
-    std::thread::sleep(Duration::from_millis(150));
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&process, &ready);
 
     // Three F3 presses embedded in surrounding text. Trailing `\n` is
     // important: the PTY slave defaults to canonical (line) mode, so the
@@ -166,10 +175,11 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
     let _ = process.close_impl();
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    let expected = through_pty_input(payload);
     assert_eq!(
-        got, payload,
+        got, expected,
         "F3 interception must NOT eat bytes; child should still see {:?}, got {:?}",
-        payload, got
+        expected, got
     );
     assert_eq!(
         presses.load(std::sync::atomic::Ordering::SeqCst),
@@ -189,6 +199,7 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -196,12 +207,15 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
-    std::thread::sleep(Duration::from_millis(150));
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&process, &ready);
 
     // Kitty F3 press (CSI u, functional encoding) then release. The
     // trailing `\n` is the canonical-mode trigger; without it the
@@ -226,7 +240,8 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
     assert_eq!(
-        got, payload,
+        got,
+        through_pty_input(payload),
         "kitty release detection must NOT eat bytes; child should still see the full payload"
     );
     assert_eq!(
@@ -562,6 +577,7 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -569,12 +585,15 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
-    std::thread::sleep(Duration::from_millis(150));
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&process, &ready);
 
     let core = std::sync::Arc::new(TerminalInputCore::new());
     {
@@ -628,11 +647,22 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
             .any(|window| window == b"\x1b[D\x1b[B\x1b[C\x1b[A"),
         "complete navigation sequences must reach the child PTY; got {got:?}"
     );
-    assert!(
-        got.contains(&b'\n'),
-        "Shift+Enter translation must produce a literal \\n in the child's stdin; got {:?}",
-        got
-    );
+    // Shift+Enter is sent as a literal LF. ConPTY turns that into Enter, so
+    // on Windows the child cannot tell it from plain Enter (#1369).
+    if cfg!(windows) {
+        assert_eq!(
+            got.iter().filter(|&&byte| byte == b'\r').count(),
+            2,
+            "under ConPTY both Shift+Enter (LF) and Enter arrive as CR; got {:?}",
+            got
+        );
+    } else {
+        assert!(
+            got.contains(&b'\n'),
+            "Shift+Enter translation must produce a literal \\n in the child's stdin; got {:?}",
+            got
+        );
+    }
     assert!(
         got.contains(&b'\r'),
         "plain Enter translation must produce a \\r in the child's stdin; got {:?}",

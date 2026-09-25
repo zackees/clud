@@ -27,6 +27,7 @@ const CODEX_BRIDGE_PROBE_REQUEST: &str = include_str!("../assets/codex_bridge_pr
 mod serve;
 
 fn main() {
+    trace("start");
     let args: Vec<String> = std::env::args().collect();
 
     // `mock-agent serve …`: the scripted model backend for the real-harness
@@ -48,6 +49,7 @@ fn main() {
     let mut write_blocked_body = String::from("mock-blocked");
     let mut write_marker_on_iter: u32 = 0;
     let mut stdin_raw_to: Option<PathBuf> = None;
+    let mut ready_file: Option<PathBuf> = None;
     let mut pty_size_report_to: Option<PathBuf> = None;
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
@@ -143,6 +145,13 @@ fn main() {
         if arg == "--mock-report-file" {
             if let Some(path) = args.get(i + 1) {
                 report_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-ready-file" {
+            if let Some(path) = args.get(i + 1) {
+                ready_file = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -330,7 +339,13 @@ fn main() {
 
     // Read stdin: either timed read (--mock-read-stdin-ms) or pipe-mode read
     let stdin_bytes: Option<Vec<u8>> = if read_stdin_ms > 0 {
-        read_stdin_timed(read_stdin_ms)
+        trace("stdin read start");
+        let bytes = read_stdin_timed(read_stdin_ms, ready_file.as_deref());
+        trace(&format!(
+            "stdin read done: {} bytes",
+            bytes.as_ref().map_or(0, Vec::len)
+        ));
+        bytes
     } else if !stdin_is_terminal {
         let mut buf = Vec::new();
         io::stdin().read_to_end(&mut buf).ok();
@@ -437,7 +452,9 @@ fn main() {
         eprintln!("mock-agent refused to serialize a bridge credential");
         std::process::exit(86);
     }
+    trace("report write start");
     println!("{}", report_str);
+    trace("report write done");
 
     // Also write to file if requested (useful when stdout is captured by PTY)
     if let Some(path) = report_file {
@@ -447,7 +464,32 @@ fn main() {
         let _ = std::fs::write(&path, &report_str);
     }
 
+    trace(&format!("exit {exit_code}"));
     std::process::exit(exit_code);
+}
+
+/// Append one timestamped stage line to `$MOCK_AGENT_TRACE_DIR/mock-<pid>.log`
+/// (#1310). CI dumps these files when a PTY test times out, so a hang shows
+/// whether the child stalled reading stdin, writing its report, or exiting.
+/// A no-op unless the variable is set.
+fn trace(stage: &str) {
+    let Some(dir) = std::env::var_os("MOCK_AGENT_TRACE_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    let path = dir.join(format!("mock-{}.log", std::process::id()));
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{millis} {stage}");
+    }
 }
 
 fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {
@@ -711,18 +753,67 @@ fn set_stdin_raw_if_tty() {
     let _ = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
 }
 
-#[cfg(not(unix))]
+/// Windows twin of the POSIX `cfmakeraw` above (#1310). A console TUI such as
+/// Claude Code or Codex switches its input to VT mode: `ENABLE_VIRTUAL_
+/// TERMINAL_INPUT` on, line/echo/processed input off. Left in the default
+/// cooked mode, conhost turns the escape sequences the pump forwards into
+/// key events that `ReadFile` drops, and line-buffers input with `\r\n`, so
+/// the mock never sees the bytes a real child would.
+#[cfg(windows)]
+fn set_stdin_raw_if_tty() {
+    use std::ffi::c_void;
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+    const ENABLE_LINE_INPUT: u32 = 0x0002;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(std_handle: u32) -> *mut c_void;
+        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
+        fn GetLastError() -> u32;
+    }
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut mode = 0u32;
+    if handle.is_null() || unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+        trace("stdin console mode: not a console");
+        return; // not a console: a pipe needs no mode change
+    }
+    let raw = (mode & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+        | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    let ok = unsafe { SetConsoleMode(handle, raw) };
+    let error = if ok == 0 {
+        unsafe { GetLastError() }
+    } else {
+        0
+    };
+    let mut after = 0u32;
+    unsafe { GetConsoleMode(handle, &mut after) };
+    trace(&format!(
+        "stdin console mode {mode:#06x} -> requested {raw:#06x}, set ok={ok} err={error}, now {after:#06x}"
+    ));
+}
+
+#[cfg(not(any(unix, windows)))]
 fn set_stdin_raw_if_tty() {}
 
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
-fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
+fn read_stdin_timed(timeout_ms: u64, ready_file: Option<&Path>) -> Option<Vec<u8>> {
     // Real TUI children (e.g., codex Ink) put their PTY slave into raw mode
     // before reading. The mock-agent must do the same when its stdin is a PTY
     // slave, otherwise the kernel's canonical line discipline holds non-
     // newline-terminated bytes (like the F3 voice-mode transcript) forever
     // and they never reach the test's stdin capture.
     set_stdin_raw_if_tty();
+    // #1310: tell the test its input mode is final. On Windows, ConPTY turns
+    // input into key records as the bytes arrive, under the console mode of
+    // that moment, so bytes sent before this point lose their escape
+    // sequences. A test sends only after this file exists.
+    if let Some(path) = ready_file {
+        let _ = std::fs::write(path, b"ready");
+    }
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {

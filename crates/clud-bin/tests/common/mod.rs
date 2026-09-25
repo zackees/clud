@@ -167,6 +167,84 @@ pub fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     false
 }
 
+/// What a child reads when `sent` is written to its PTY input.
+///
+/// POSIX PTYs in raw mode pass bytes through unchanged. ConPTY parses its
+/// input into key events and turns a bare LF into the Enter key, which the
+/// child reads as CR; escape sequences survive byte-for-byte once the child
+/// is in VT input mode (#1310). Tests compare against this, not `sent`.
+pub fn through_pty_input(sent: &[u8]) -> Vec<u8> {
+    if cfg!(windows) {
+        sent.iter()
+            .map(|&byte| if byte == b'\n' { b'\r' } else { byte })
+            .collect()
+    } else {
+        sent.to_vec()
+    }
+}
+
+/// Wait until mock-agent's `--mock-ready-file` exists: its stdin mode is
+/// final and bytes sent from now on arrive intact (#1310). On Windows,
+/// ConPTY converts input to key records under the console mode current when
+/// the bytes arrive, so input sent before the child switches to VT mode loses
+/// its escape sequences. Panics after 20 s so a child that never starts fails
+/// loudly instead of hanging.
+///
+/// While waiting it also drains the child's startup output and answers
+/// ConPTY's `ESC[6n` cursor query: until something replies, ConPTY holds the
+/// child before its first line runs, so it could never write the ready file.
+/// Only startup noise is consumed; the test sends nothing before this returns.
+pub fn wait_for_mock_ready(process: &NativePtyProcess, ready_file: &std::path::Path) {
+    let outcome =
+        wait_answering_cursor_queries(process, Duration::from_secs(20), || ready_file.exists());
+    assert!(
+        outcome.met,
+        "mock-agent never signalled ready at {}; startup output: {:?}",
+        ready_file.display(),
+        String::from_utf8_lossy(&outcome.output)
+    );
+}
+
+/// Result of [`wait_answering_cursor_queries`].
+pub struct CursorQueryWait {
+    /// Whether the condition held before the timeout.
+    pub met: bool,
+    /// Everything the child printed while waiting, for failure messages.
+    pub output: Vec<u8>,
+}
+
+/// Wait until `condition` holds, reading the child's output and answering
+/// each `ESC[6n` cursor query as a terminal would (#1310). A test that talks
+/// to a PTY child directly, without the pump, must use this: until the
+/// query is answered, ConPTY holds the child before its first line runs, so
+/// any artifact the test is waiting for would never appear on Windows.
+pub fn wait_answering_cursor_queries(
+    process: &NativePtyProcess,
+    timeout: Duration,
+    mut condition: impl FnMut() -> bool,
+) -> CursorQueryWait {
+    const DSR: &[u8] = b"\x1b[6n";
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    let mut answered = 0;
+    loop {
+        if condition() {
+            return CursorQueryWait { met: true, output };
+        }
+        if Instant::now() >= deadline {
+            return CursorQueryWait { met: false, output };
+        }
+        if let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.05)) {
+            output.extend_from_slice(&chunk);
+        }
+        let queries = output.windows(DSR.len()).filter(|w| *w == DSR).count();
+        while answered < queries {
+            let _ = process.write_impl(b"\x1b[1;1R", false);
+            answered += 1;
+        }
+    }
+}
+
 /// Drain all chunks from the PTY reader up to `overall_timeout` or child exit.
 pub fn drain_reader(process: &NativePtyProcess, overall_timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + overall_timeout;
@@ -196,35 +274,108 @@ pub fn drain_reader(process: &NativePtyProcess, overall_timeout: Duration) -> Ve
 /// process's stdout is redirected (nested shells, captured cargo test).
 /// We cache the result so the probe only runs once per test binary.
 pub fn pty_canary() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
+    canary_result().is_ok()
+}
+
+/// What the canary saw when it failed, for the `CLUD_REQUIRE_PTY` panic.
+pub fn pty_canary_diagnostic() -> String {
+    match canary_result() {
+        Ok(()) => "canary passed".to_string(),
+        Err(detail) => detail.clone(),
+    }
+}
+
+fn canary_result() -> &'static Result<(), String> {
+    static CACHED: OnceLock<Result<(), String>> = OnceLock::new();
+    CACHED.get_or_init(|| {
         let argv: Vec<String> = if cfg!(windows) {
             vec!["cmd.exe".into(), "/c".into(), "echo clud_canary".into()]
         } else {
             vec!["/bin/sh".into(), "-c".into(), "echo clud_canary".into()]
         };
-        let Ok(process) = NativePtyProcess::new(argv, None, None, 24, 80, None) else {
-            return false;
-        };
+        let process = NativePtyProcess::new(argv, None, None, 24, 80, None)
+            .map_err(|err| format!("spawn failed: {err}"))?;
         process.set_echo(false);
-        if process.start_impl().is_err() {
-            return false;
-        }
-        let buf = drain_reader(&process, Duration::from_secs(3));
+        process
+            .start_impl()
+            .map_err(|err| format!("start failed: {err}"))?;
+        let buf = drain_answering_cursor_queries(&process, Duration::from_secs(5));
         let _ = process.wait_impl(Some(2.0));
         let _ = process.close_impl();
-        String::from_utf8_lossy(&buf).contains("clud_canary")
+        if String::from_utf8_lossy(&buf).contains("clud_canary") {
+            Ok(())
+        } else {
+            Err(format!(
+                "received {} bytes: {:?}",
+                buf.len(),
+                String::from_utf8_lossy(&buf)
+            ))
+        }
+    })
+}
+
+/// Like [`drain_reader`], but answers each `ESC [ 6 n` cursor-position query
+/// with `ESC [ 1 ; 1 R`. ConPTY sends that query when it starts and can hold
+/// back the child's output until a terminal replies. A real terminal answers
+/// it through clud's pump; a bare test harness has nothing to answer it.
+pub fn drain_answering_cursor_queries(
+    process: &NativePtyProcess,
+    overall_timeout: Duration,
+) -> Vec<u8> {
+    const DSR: &[u8] = b"\x1b[6n";
+    let deadline = Instant::now() + overall_timeout;
+    let mut buf = Vec::new();
+    let mut answered = 0;
+    while Instant::now() < deadline {
+        match process.read_chunk_impl(Some(0.2)) {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        let queries = buf.windows(DSR.len()).filter(|w| *w == DSR).count();
+        while answered < queries {
+            let _ = process.write_impl(b"\x1b[1;1R", false);
+            answered += 1;
+        }
+        if String::from_utf8_lossy(&buf).contains("clud_canary") {
+            break;
+        }
+    }
+    buf
+}
+
+/// Environment variable that turns a failed PTY canary from a skip into a
+/// test failure. CI sets it on the harness it runs inside a pseudo-terminal
+/// (`ci/run_bundle.py`), so the configuration interactive launches ship —
+/// clud under a real terminal — cannot silently lose its coverage (#691).
+pub const REQUIRE_PTY_ENV: &str = "CLUD_REQUIRE_PTY";
+
+/// Whether `CLUD_REQUIRE_PTY` asks for a hard failure: set and not
+/// `0`/`false`/empty.
+pub fn pty_required() -> bool {
+    std::env::var(REQUIRE_PTY_ENV).is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
     })
 }
 
 /// Skip the current test when the PTY subsystem isn't reliably relaying
 /// output in this host environment (typically: nested Windows shells where
 /// the parent stdout is a pipe, so ConPTY can't attach a real console).
-/// Leaves a diagnostic on stderr so CI logs show the reason.
+/// Leaves a diagnostic on stderr so CI logs show the reason. Under
+/// `CLUD_REQUIRE_PTY=1` the canary failure panics instead.
 #[macro_export]
 macro_rules! require_pty_or_skip {
     ($test_name:literal) => {
         if !$crate::common::pty_canary() {
+            if $crate::common::pty_required() {
+                panic!(
+                    "[{}] PTY canary failed and {}=1 requires a working PTY: {}",
+                    $test_name,
+                    $crate::common::REQUIRE_PTY_ENV,
+                    $crate::common::pty_canary_diagnostic()
+                );
+            }
             eprintln!(
                 "[{}] SKIP: PTY canary failed in this host environment (parent stdout is not a real console).",
                 $test_name

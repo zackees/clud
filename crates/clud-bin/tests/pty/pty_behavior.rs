@@ -7,9 +7,13 @@
 //! so the fix can be landed as a test flip rather than a quiet regression.
 //!
 //! Theories covered:
-//!   T1 — `respond_to_queries_impl` DSR stub
-//!        (Windows stubs `\x1b[1;1R`, POSIX is a no-op).
-//!        clud's fix: stop calling it (session.rs / daemon.rs).
+//!   T1 — `respond_to_queries_impl` DSR stub. Windows writes a hardcoded
+//!        `\x1b[1;1R` per query into the PTY input and POSIX is a no-op, but
+//!        on a real ConPTY the stub never reaches the child: ConPTY takes a
+//!        cursor-position report on its input as the answer to its own DSR
+//!        (#1310, first observed once these tests stopped skipping on CI).
+//!        So on every platform the child sees nothing. clud's fix: stop
+//!        calling it (session.rs / daemon.rs).
 //!   T2 — `resize_impl` is a no-op on Windows; forwards on POSIX.
 //!        clud's fix: `session::resize_pty` reaches master.resize() directly.
 //!   T3 — Spawn accepts `cols=32767` (the old clud fallback) without panicking.
@@ -37,7 +41,9 @@ use std::time::Duration;
 use running_process::pty::NativePtyProcess;
 use serde_json::Value;
 
-use crate::common::{cargo_built_executable_path, drain_reader, mock_agent_path, wait_until};
+use crate::common::{
+    cargo_built_executable_path, drain_reader, mock_agent_path, wait_answering_cursor_queries,
+};
 
 #[test]
 fn cargo_build_output_reports_mock_agent_executable() {
@@ -64,9 +70,9 @@ fn cargo_build_output_reports_mock_agent_executable() {
 /// Feed one `\x1b[6n` DSR query into the `respond_to_queries_impl` handler
 /// and assert what the PTY child actually received on stdin.
 ///
-/// - Windows: handler writes exactly one hardcoded `\x1b[1;1R` into the
-///   child's stdin regardless of where the cursor actually is (issue #31,
-///   theory T1). This is the bug.
+/// - Windows: handler writes one hardcoded `\x1b[1;1R` into the PTY input
+///   (issue #31, theory T1), and ConPTY consumes it as a cursor-position
+///   report, so the child receives nothing (#1310).
 /// - POSIX: handler is a no-op; the child receives zero bytes.
 #[test]
 fn respond_to_queries_matches_platform_stub() {
@@ -101,23 +107,16 @@ fn respond_to_queries_matches_platform_stub() {
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
 
-    if cfg!(windows) {
-        assert_eq!(
-            got, b"\x1b[1;1R",
-            "Windows respond_to_queries should inject exactly one hardcoded DSR reply; got {:?}",
-            got
-        );
-    } else {
-        assert!(
-            got.is_empty(),
-            "POSIX respond_to_queries should be a no-op, but child received {:?}",
-            got
-        );
-    }
+    assert!(
+        got.is_empty(),
+        "no DSR reply may reach the child (POSIX: no-op; Windows: ConPTY consumes the stub); \
+         child received {:?}",
+        got
+    );
 }
 
-/// A chunk containing N DSR queries produces N stubbed replies on Windows
-/// and still nothing on POSIX.
+/// A chunk containing N DSR queries still delivers nothing to the child on
+/// any platform: Windows' N stubs are consumed by ConPTY (#1310).
 #[test]
 fn respond_to_queries_is_linear_in_query_count() {
     require_pty_or_skip!("respond_to_queries_is_linear_in_query_count");
@@ -149,20 +148,11 @@ fn respond_to_queries_is_linear_in_query_count() {
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
 
-    if cfg!(windows) {
-        let expected: Vec<u8> = b"\x1b[1;1R\x1b[1;1R\x1b[1;1R".to_vec();
-        assert_eq!(
-            got, expected,
-            "Windows should emit one stub per query; got {:?}",
-            got
-        );
-    } else {
-        assert!(
-            got.is_empty(),
-            "POSIX should emit nothing regardless of query count; got {:?}",
-            got
-        );
-    }
+    assert!(
+        got.is_empty(),
+        "no DSR reply may reach the child regardless of query count; got {:?}",
+        got
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -192,7 +182,9 @@ fn initial_pty_size_is_forwarded_to_child() {
     process.set_echo(false);
     process.start_impl().expect("start");
 
-    let _ = wait_until(Duration::from_secs(5), || {
+    // #1310: answer ConPTY's startup cursor query while waiting, or the
+    // Windows child never runs and the report never appears.
+    let wait = wait_answering_cursor_queries(&process, Duration::from_secs(10), || {
         std::fs::metadata(&size_report)
             .map(|m| m.len() > 2)
             .unwrap_or(false)
@@ -202,35 +194,29 @@ fn initial_pty_size_is_forwarded_to_child() {
     let _ = drain_reader(&process, Duration::from_millis(300));
     let _ = process.close_impl();
 
-    let body = std::fs::read_to_string(&size_report).unwrap_or_default();
-    if body.is_empty() {
-        // Environment couldn't deliver the report file (extremely nested
-        // shells on Windows). Canary passed so we still attempted — but
-        // don't hard-fail here; the POSIX variant is the load-bearing
-        // assertion in this theory.
-        eprintln!("initial_pty_size: size report empty, skipping assertion");
-        return;
-    }
+    assert!(
+        wait.met,
+        "child never wrote its size report; output: {:?}",
+        String::from_utf8_lossy(&wait.output)
+    );
+    let body = std::fs::read_to_string(&size_report).expect("read size report");
     let samples: Value = serde_json::from_str(&body).expect("parse size report");
     let samples = samples.as_array().expect("array");
     assert!(!samples.is_empty(), "no samples recorded");
 
     let first = &samples[0];
-    let cols = first["cols"].as_u64();
-    let rows = first["rows"].as_u64();
-
-    if cfg!(windows) {
-        // ConPTY honors the requested size when attached to a real console.
-        // Headless-ConPTY CI boxes sometimes report `None`; accept either
-        // the exact match or `None`. A regression would be a *wrong*
-        // non-None value.
-        if let (Some(c), Some(r)) = (cols, rows) {
-            assert_eq!((c, r), (100, 30), "ConPTY reported wrong size: {:?}", first);
-        }
-    } else {
-        assert_eq!(cols, Some(100), "POSIX PTY cols mismatch: {:?}", first);
-        assert_eq!(rows, Some(30), "POSIX PTY rows mismatch: {:?}", first);
-    }
+    assert_eq!(
+        first["cols"].as_u64(),
+        Some(100),
+        "PTY cols mismatch: {:?}",
+        first
+    );
+    assert_eq!(
+        first["rows"].as_u64(),
+        Some(30),
+        "PTY rows mismatch: {:?}",
+        first
+    );
 }
 
 /// Document what `running_process::pty::NativePtyProcess::resize_impl`
@@ -265,17 +251,18 @@ fn resize_impl_propagates_on_posix_and_noops_on_windows() {
     process.set_echo(false);
     process.start_impl().expect("start");
 
-    let got_first = wait_until(Duration::from_secs(3), || {
+    // #1310: answer ConPTY's startup cursor query while waiting.
+    let wait = wait_answering_cursor_queries(&process, Duration::from_secs(10), || {
         std::fs::metadata(&size_report)
             .map(|m| m.len() > 2)
             .unwrap_or(false)
     });
-    if !got_first {
-        // See note above — don't force-fail on environments where the
-        // child can't deliver its artifacts.
+    if !wait.met {
         let _ = process.close_impl();
-        eprintln!("resize_impl: never observed initial sample, skipping");
-        return;
+        panic!(
+            "child never wrote its first size sample; output: {:?}",
+            String::from_utf8_lossy(&wait.output)
+        );
     }
 
     std::thread::sleep(Duration::from_millis(80));
@@ -289,10 +276,7 @@ fn resize_impl_propagates_on_posix_and_noops_on_windows() {
     let samples: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     let samples = match samples.as_array() {
         Some(arr) if !arr.is_empty() => arr.clone(),
-        _ => {
-            eprintln!("resize_impl: empty samples, skipping");
-            return;
-        }
+        _ => panic!("size report has no samples: {body:?}"),
     };
 
     let first = &samples[0];
@@ -354,7 +338,9 @@ fn extreme_cols_does_not_crash_at_spawn() {
         .start_impl()
         .expect("portable-pty rejected cols=32767 at spawn");
 
-    let _ = wait_until(Duration::from_secs(5), || {
+    // #1310: answer ConPTY's startup cursor query, or the Windows child never
+    // runs and this waits out the full timeout.
+    let _ = wait_answering_cursor_queries(&process, Duration::from_secs(5), || {
         std::fs::metadata(&size_report)
             .map(|m| m.len() > 2)
             .unwrap_or(false)

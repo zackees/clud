@@ -22,10 +22,14 @@ from typing import Literal
 # uses it (#863).
 Strategy = Literal["native", "soldr"]
 TargetTier = Literal["core", "full"]
-Mode = Literal["minimal", "extended", "full"]
+Mode = Literal["minimal", "extended", "full", "windows"]
 
 FULL_TIER_LABEL = "ci-full"
 EXTENDED_TIER_LABEL = "ci-test"
+#: Windows iteration mode (#1310): static checks plus Windows x64 build and
+#: tests, nothing else. `CI OK` passes when those lanes pass; the merge queue
+#: still runs the full matrix before anything merges.
+WINDOWS_TIER_LABEL = "ci-windows"
 LEGACY_FULL_TIER_LABEL = "ci:full"
 
 
@@ -91,6 +95,7 @@ def resolve_tier(
     unknown = {label for label in labels if label.startswith("ci-")} - {
         FULL_TIER_LABEL,
         EXTENDED_TIER_LABEL,
+        WINDOWS_TIER_LABEL,
     }
     if unknown:
         raise ValueError(f"unknown CI labels: {', '.join(sorted(unknown))}")
@@ -98,6 +103,8 @@ def resolve_tier(
         return "full"
     if EXTENDED_TIER_LABEL in labels:
         return "extended"
+    if WINDOWS_TIER_LABEL in labels:
+        return "windows"
     return "minimal"
 
 
@@ -108,6 +115,8 @@ def selected(tier: Mode | TargetTier) -> list[Target]:
         return [target for target in TARGETS if target.tier == "core"]
     if tier == "minimal":
         return [TARGETS[0]]
+    if tier == "windows":
+        return [target for target in TARGETS if target.triple == "x86_64-pc-windows-msvc"]
     raise ValueError(f"unsupported CI tier: {tier}")
 
 

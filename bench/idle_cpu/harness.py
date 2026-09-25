@@ -3,6 +3,11 @@
 Run with ``python -m bench.idle_cpu.harness``. This module intentionally stays
 outside pytest: the default sample is 60 seconds, while unit tests cover the
 report math without creating processes.
+
+``--mode daemon`` (the default) measures detached, daemon-managed subprocess
+sessions. ``--mode pty`` measures the foreground PTY pump instead: each session
+is ``clud --pty`` running inside a pseudo-terminal, so clud sees a real TTY on
+stdin and stdout exactly as it does in an interactive launch (#691).
 """
 
 from __future__ import annotations
@@ -20,12 +25,21 @@ from pathlib import Path
 from typing import Any
 
 import psutil
-from running_process import PIPE, RunningProcess, terminate_process_tree
+from running_process import (
+    PIPE,
+    PseudoTerminalProcess,
+    RunningProcess,
+    terminate_process_tree,
+)
 
 from .report import assemble_report, budget_violations
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE_DIR = ROOT / "bench" / "idle_cpu"
+MODES = ("daemon", "pty")
+# Startup work (skill sync, hook install, first paint) must finish before the
+# window opens, or the PTY sample measures launch cost instead of idle cost.
+PTY_SETTLE_SECS = 5.0
 
 
 @dataclass(frozen=True)
@@ -106,10 +120,12 @@ def _read_session_id(proc: RunningProcess, timeout: float = 10.0) -> str:
     raise RuntimeError("timed out waiting for detached session id")
 
 
-def _start_daemon(clud_binary: Path, env: dict[str, str], state_dir: Path) -> int:
+def _start_daemon(
+    clud_binary: Path, env: dict[str, str], state_dir: Path, workdir: Path
+) -> int:
     result = RunningProcess.run(
         [str(clud_binary), "daemon", "restart"],
-        cwd=ROOT,
+        cwd=workdir,
         env=env,
         capture_output=True,
         text=True,
@@ -122,7 +138,7 @@ def _start_daemon(clud_binary: Path, env: dict[str, str], state_dir: Path) -> in
 
 
 def _launch_session(
-    clud_binary: Path, env: dict[str, str], index: int, sleep_ms: int
+    clud_binary: Path, env: dict[str, str], index: int, sleep_ms: int, workdir: Path
 ) -> tuple[RunningProcess, str]:
     proc = RunningProcess(
         [
@@ -135,13 +151,85 @@ def _launch_session(
             "--mock-sleep-ms",
             str(sleep_ms),
         ],
-        cwd=ROOT,
+        cwd=workdir,
         env=env,
         capture=True,
         stderr=PIPE,
         text=True,
     )
     return proc, _read_session_id(proc)
+
+
+def _launch_pty_session(
+    clud_binary: Path, env: dict[str, str], index: int, sleep_ms: int, workdir: Path
+) -> PseudoTerminalProcess:
+    """Start one foreground ``clud --pty`` session inside a pseudo-terminal.
+
+    ``capture=True`` keeps the host side draining the PTY master, so clud's
+    output writer never blocks on a full kernel buffer during the window.
+    """
+    return PseudoTerminalProcess(
+        [
+            str(clud_binary),
+            "--pty",
+            "-p",
+            f"idle CPU benchmark session {index}",
+            "--",
+            "--mock-sleep-ms",
+            str(sleep_ms),
+        ],
+        cwd=workdir,
+        env=env,
+        capture=True,
+        rows=40,
+        cols=120,
+    )
+
+
+def _is_backend(process: psutil.Process) -> bool:
+    try:
+        name = process.name().lower()
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        return False
+    return name.startswith("claude") or name.startswith("mock-agent")
+
+
+def _pty_child_role(process: psutil.Process) -> str:
+    """Role for a process below the foreground clud.
+
+    The foreground session starts the daemon (`clud __daemon`) as its own
+    child; report it as `daemon` so its cost lands in `daemon_cpu_seconds`
+    rather than inflating the pump's `client_cpu_seconds`.
+    """
+    if _is_backend(process):
+        return "pty-backend"
+    try:
+        if "__daemon" in process.cmdline():
+            return "daemon"
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        pass
+    return "pty-helper"
+
+
+def _pty_roles(pid: int, timeout: float = 20.0) -> dict[int, str]:
+    """Map the foreground clud PID and its descendants to report roles.
+
+    Waits until the backend child exists, so a session is only sampled once
+    clud has actually entered the pump.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            children = psutil.Process(pid).children(recursive=True)
+        except psutil.NoSuchProcess as error:
+            raise RuntimeError(f"clud PID {pid} exited before its backend started") from error
+        if any(_is_backend(child) for child in children):
+            roles = {pid: "pty-client"}
+            for child in children:
+                roles[child.pid] = _pty_child_role(child)
+            return roles
+        time.sleep(0.1)
+    raise RuntimeError(f"timed out waiting for clud PID {pid} to start its backend")
 
 
 def _count_event_lines(state_dir: Path) -> int:
@@ -239,8 +327,39 @@ def _discard_reused_pids(
     }
 
 
-def run_harness(sessions: int, window_secs: float) -> dict[str, Any]:
+def _isolated_env(temp_dir: Path, mock_dir: Path, state_dir: Path) -> dict[str, str]:
+    """Environment for benchmark launches, sandboxed away from the real HOME.
+
+    A dev build of clud rewrites per-user state at launch -- skills, hooks and
+    the `~/.clud/state/rm-shim/rm` shim. Pointed at the developer's real HOME,
+    a benchmark run would replace the installed clud's shim with the dev
+    build's, and the installed `clud-cmd-scan` hook then refuses every shell
+    command until the shim is restored. Mirrors the `mock_env` fixture in
+    tests/integration/conftest.py.
+    """
+    home = temp_dir / "home"
+    home.mkdir()
+    env = os.environ.copy()
+    env["PATH"] = str(mock_dir) + os.pathsep + env.get("PATH", "")
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["LOCALAPPDATA"] = str(home / "local-app-data")
+    env["XDG_STATE_HOME"] = str(home / ".local" / "state")
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["CLUD_HOOK_HOME"] = str(home)
+    env["SOLDR_BROKER_AUTOSPAWN"] = "0"
+    env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
+    env["CLUD_SESSION_DB"] = str(temp_dir / "sessions.redb")
+    env["CLUD_SESSION_LOCK"] = str(temp_dir / "sessions.lock")
+    env["CLUD_NO_UNLOCK"] = "1"
+    env.pop("VIRTUAL_ENV", None)
+    return env
+
+
+def run_harness(sessions: int, window_secs: float, mode: str = "daemon") -> dict[str, Any]:
     """Perform one fully cleaned-up benchmark sample and return its report."""
+    if mode not in MODES:
+        raise ValueError(f"--mode must be one of {', '.join(MODES)}")
     if sessions < 1:
         raise ValueError("--sessions must be at least 1")
     if window_secs <= 0:
@@ -250,8 +369,9 @@ def run_harness(sessions: int, window_secs: float) -> dict[str, Any]:
     mock_agent = _ensure_binary("mock-agent", "CLUD_TEST_MOCK_AGENT_BINARY")
     tracked_processes: list[ProcessIdentity] = []
     launchers: list[RunningProcess] = []
+    terminals: list[PseudoTerminalProcess] = []
 
-    with tempfile.TemporaryDirectory(prefix="clud-idle-cpu-") as temp:
+    with tempfile.TemporaryDirectory(prefix="clud-idle-cpu-", ignore_cleanup_errors=True) as temp:
         temp_dir = Path(temp)
         state_dir = temp_dir / "state"
         mock_dir = temp_dir / "mock-agent"
@@ -261,31 +381,51 @@ def run_harness(sessions: int, window_secs: float) -> dict[str, Any]:
             shutil.copy2(mock_agent, target)
             if sys.platform != "win32":
                 target.chmod(0o755)
-        env = os.environ.copy()
-        env["PATH"] = str(mock_dir) + os.pathsep + env.get("PATH", "")
-        env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
-        env["CLUD_NO_UNLOCK"] = "1"
-        env.pop("VIRTUAL_ENV", None)
+        env = _isolated_env(temp_dir, mock_dir, state_dir)
+        # clud installs per-repo hook config into its launch directory; a
+        # scratch directory keeps a dev build from rewriting this checkout's
+        # .claude/settings.json and .codex/hooks.json.
+        workdir = temp_dir / "workspace"
+        workdir.mkdir()
 
         try:
-            daemon_pid = _start_daemon(clud_binary, env, state_dir)
-            daemon_identity = _process_identity(daemon_pid)
-            if daemon_identity is None:
-                raise RuntimeError(f"daemon PID {daemon_pid} exited before sampling began")
-            tracked_processes.append(daemon_identity)
-            roles: dict[int, str] = {daemon_pid: "daemon"}
+            roles: dict[int, str] = {}
             sleep_ms = int((window_secs + 30) * 1000)
-            for index in range(sessions):
-                launcher, session_id = _launch_session(clud_binary, env, index + 1, sleep_ms)
-                launchers.append(launcher)
-                metadata = _read_json(state_dir / "sessions" / f"{session_id}.json")
-                for key, role in (("root_pid", "client-root"), ("worker_pid", "client-worker")):
-                    pid = metadata.get(key)
-                    if isinstance(pid, int) and pid not in roles:
+            if mode == "pty":
+                for index in range(sessions):
+                    terminal = _launch_pty_session(clud_binary, env, index + 1, sleep_ms, workdir)
+                    terminals.append(terminal)
+                    if terminal.pid is None:
+                        raise RuntimeError("clud PTY session did not report a PID")
+                    for pid, role in _pty_roles(terminal.pid).items():
                         roles[pid] = role
                         identity = _process_identity(pid)
                         if identity is not None:
                             tracked_processes.append(identity)
+                time.sleep(PTY_SETTLE_SECS)
+            else:
+                daemon_pid = _start_daemon(clud_binary, env, state_dir, workdir)
+                daemon_identity = _process_identity(daemon_pid)
+                if daemon_identity is None:
+                    raise RuntimeError(f"daemon PID {daemon_pid} exited before sampling began")
+                tracked_processes.append(daemon_identity)
+                roles[daemon_pid] = "daemon"
+                for index in range(sessions):
+                    launcher, session_id = _launch_session(
+                        clud_binary, env, index + 1, sleep_ms, workdir
+                    )
+                    launchers.append(launcher)
+                    metadata = _read_json(state_dir / "sessions" / f"{session_id}.json")
+                    for key, role in (
+                        ("root_pid", "client-root"),
+                        ("worker_pid", "client-worker"),
+                    ):
+                        pid = metadata.get(key)
+                        if isinstance(pid, int) and pid not in roles:
+                            roles[pid] = role
+                            identity = _process_identity(pid)
+                            if identity is not None:
+                                tracked_processes.append(identity)
 
             before = _sample(list(roles))
             event_lines_before = _count_event_lines(state_dir)
@@ -301,19 +441,30 @@ def run_harness(sessions: int, window_secs: float) -> dict[str, Any]:
                 after=after,
                 event_lines_before=event_lines_before,
                 event_lines_after=_count_event_lines(state_dir),
+                mode=mode,
             )
         finally:
             for launcher in launchers:
                 if launcher.poll() is None:
                     launcher.kill()
+            for terminal in terminals:
+                if terminal.poll() is None:
+                    terminal.kill()
+                terminal.close()
             for identity in reversed(tracked_processes):
                 _kill_tree(identity)
             if survivors := _wait_gone(tracked_processes):
                 raise RuntimeError(f"benchmark leaked processes: {survivors}")
 
 
+def _baseline_name(mode: str, sessions: int) -> str:
+    prefix = "baseline_pty" if mode == "pty" else "baseline"
+    return f"{prefix}_n{sessions}.json"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=MODES, default="daemon")
     parser.add_argument("--sessions", type=int, default=1)
     parser.add_argument("--window-secs", type=float, default=60.0)
     parser.add_argument("--json", type=Path, help="write JSON here instead of stdout")
@@ -326,7 +477,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    report = run_harness(args.sessions, args.window_secs)
+    report = run_harness(args.sessions, args.window_secs, args.mode)
     payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -338,7 +489,9 @@ def main() -> int:
     budget_enabled = args.budget or os.environ.get("CLUD_BENCH_BUDGET") == "1"
     if not budget_enabled:
         return 0
-    baseline_path = args.baseline or DEFAULT_BASELINE_DIR / f"baseline_n{args.sessions}.json"
+    baseline_path = args.baseline or DEFAULT_BASELINE_DIR / _baseline_name(
+        args.mode, args.sessions
+    )
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     if violations := budget_violations(report, baseline):
         print("idle CPU budget failed:", *violations, sep="\n  ", file=sys.stderr)
