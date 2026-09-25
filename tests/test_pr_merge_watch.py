@@ -94,7 +94,7 @@ def test_main_announces_log_before_entering_watcher(
 ) -> None:
     monkeypatch.setattr(watcher, "_watch_root", lambda: tmp_path)
 
-    def fake_watch(*_args) -> int:
+    def fake_watch(*_args, **_kwargs) -> int:
         assert capsys.readouterr().err.startswith("LOG .clud/logs/pr-merge-watch/")
         return watcher.EXIT_GREEN
 
