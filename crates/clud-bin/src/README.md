@@ -575,6 +575,10 @@ Skills and hooks:
   from `.agents/skills/` and retired names in `PURGED_BUNDLED_SKILLS` from every
   backend's skills dir. See
   [DD-039](../../../docs/DESIGN_DECISIONS.md#dd-039-single-skill-installer-over-a-single-source-tree).
+- `tools.rs` - `BUNDLED_TOOLS` registry of `assets/tools/` scripts, including
+  `github/pr_merge_watch.py` and `github/is_meta_issue.py` (prints JSON
+  `{meta, sub_issues, task_list_refs}`; errors on `gh` failure, never reports
+  "not meta"; #1404).
 - `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
   remediation. `codex_trust.rs` also owns `codex_project_trusted` — the
   `[projects."<key>"] trust_level = "trusted"` check against
