@@ -196,25 +196,74 @@ pub fn drain_reader(process: &NativePtyProcess, overall_timeout: Duration) -> Ve
 /// process's stdout is redirected (nested shells, captured cargo test).
 /// We cache the result so the probe only runs once per test binary.
 pub fn pty_canary() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
+    canary_result().is_ok()
+}
+
+/// What the canary saw when it failed, for the `CLUD_REQUIRE_PTY` panic.
+pub fn pty_canary_diagnostic() -> String {
+    match canary_result() {
+        Ok(()) => "canary passed".to_string(),
+        Err(detail) => detail.clone(),
+    }
+}
+
+fn canary_result() -> &'static Result<(), String> {
+    static CACHED: OnceLock<Result<(), String>> = OnceLock::new();
+    CACHED.get_or_init(|| {
         let argv: Vec<String> = if cfg!(windows) {
             vec!["cmd.exe".into(), "/c".into(), "echo clud_canary".into()]
         } else {
             vec!["/bin/sh".into(), "-c".into(), "echo clud_canary".into()]
         };
-        let Ok(process) = NativePtyProcess::new(argv, None, None, 24, 80, None) else {
-            return false;
-        };
+        let process = NativePtyProcess::new(argv, None, None, 24, 80, None)
+            .map_err(|err| format!("spawn failed: {err}"))?;
         process.set_echo(false);
-        if process.start_impl().is_err() {
-            return false;
-        }
-        let buf = drain_reader(&process, Duration::from_secs(3));
+        process
+            .start_impl()
+            .map_err(|err| format!("start failed: {err}"))?;
+        let buf = drain_answering_cursor_queries(&process, Duration::from_secs(5));
         let _ = process.wait_impl(Some(2.0));
         let _ = process.close_impl();
-        String::from_utf8_lossy(&buf).contains("clud_canary")
+        if String::from_utf8_lossy(&buf).contains("clud_canary") {
+            Ok(())
+        } else {
+            Err(format!(
+                "received {} bytes: {:?}",
+                buf.len(),
+                String::from_utf8_lossy(&buf)
+            ))
+        }
     })
+}
+
+/// Like [`drain_reader`], but answers each `ESC [ 6 n` cursor-position query
+/// with `ESC [ 1 ; 1 R`. ConPTY sends that query when it starts and can hold
+/// back the child's output until a terminal replies. A real terminal answers
+/// it through clud's pump; a bare test harness has nothing to answer it.
+pub fn drain_answering_cursor_queries(
+    process: &NativePtyProcess,
+    overall_timeout: Duration,
+) -> Vec<u8> {
+    const DSR: &[u8] = b"\x1b[6n";
+    let deadline = Instant::now() + overall_timeout;
+    let mut buf = Vec::new();
+    let mut answered = 0;
+    while Instant::now() < deadline {
+        match process.read_chunk_impl(Some(0.2)) {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        let queries = buf.windows(DSR.len()).filter(|w| *w == DSR).count();
+        while answered < queries {
+            let _ = process.write_impl(b"\x1b[1;1R", false);
+            answered += 1;
+        }
+        if String::from_utf8_lossy(&buf).contains("clud_canary") {
+            break;
+        }
+    }
+    buf
 }
 
 /// Environment variable that turns a failed PTY canary from a skip into a
@@ -243,9 +292,10 @@ macro_rules! require_pty_or_skip {
         if !$crate::common::pty_canary() {
             if $crate::common::pty_required() {
                 panic!(
-                    "[{}] PTY canary failed and {}=1 requires a working PTY (parent stdout is not a real console?)",
+                    "[{}] PTY canary failed and {}=1 requires a working PTY: {}",
                     $test_name,
-                    $crate::common::REQUIRE_PTY_ENV
+                    $crate::common::REQUIRE_PTY_ENV,
+                    $crate::common::pty_canary_diagnostic()
                 );
             }
             eprintln!(
