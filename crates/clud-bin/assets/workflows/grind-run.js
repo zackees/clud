@@ -77,7 +77,7 @@ const PLAN = {
     depends_on: { type: 'array', items: { type: 'string' }, description: 'ids of other goals this one must land after; [] means isolated' },
     verify: { type: 'string', description: 'exact lint/build/test commands for the integrator, newline separated' },
     tasks: { type: 'array', items: { type: 'object', required: ['id', 'files', 'instructions'], properties: {
-      id: { type: 'string' }, files: { type: 'array', items: { type: 'string' } }, instructions: { type: 'string' } } } },
+      id: { type: 'string' }, files: { type: 'array', items: { type: 'string' }, description: 'files this task writes; a check that writes nothing belongs in verify' }, instructions: { type: 'string' } } } },
   },
 }
 const WORK = { type: 'object', required: ['files_touched', 'summary'], properties: {
@@ -140,6 +140,22 @@ const earlierDeps = (p, g) => {
   return { ...p, depends_on: kept }
 }
 
+// Workers and reviewers cannot run commands (#1397), so a task that writes no
+// file is a check: hand it to the integrator's verify instead of a worker.
+const routeCheckTasks = (p) => {
+  const tasks = p.tasks || []
+  const writes = (t) => (t.files || []).length > 0
+  const checks = tasks.filter(t => !writes(t))
+  if (!checks.length) return { ...p, tasks }
+  log(`moving file-less task(s) ${checks.map(t => t.id).join(', ')} into verify`)
+  return {
+    ...p,
+    tasks: tasks.filter(writes),
+    verify: [p.verify, ...checks.map(t => `# from planned task ${t.id} (may be prose; run the equivalent checks):\n${t.instructions}`)]
+      .filter(Boolean).join('\n'),
+  }
+}
+
 const integrateAndLand = async ({ p, review: rv }, g) => {
   if (!rv || !rv.approved) return { merged: false, note: `review rejected: ${rv ? rv.summary : 'no review'}` }
   for (const dep of p.depends_on) {
@@ -164,7 +180,8 @@ const runGoal = async (g) => {
   try {
     const planned = await plan(g)
     if (!planned) return (result = { merged: false, note: 'planner died' })
-    const p = earlierDeps(planned, g)
+    const p = routeCheckTasks(earlierDeps(planned, g))
+    if (!p.tasks.length) return (result = { merged: false, note: 'plan had no file-writing tasks; nothing for workers to do' })
     result = await integrateAndLand(await review(await work(p, g), g), g)
     return result
   } catch (e) {

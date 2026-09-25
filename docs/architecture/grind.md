@@ -131,6 +131,11 @@ Issue [#1336](https://github.com/zackees/clud/issues/1336).
 - **Caps.** The integrator's shell is a denylist, so the scripts run.
   `grind-worker` and `grind-reviewer` are denied them like any other build,
   lint or test command.
+- **Checks are never worker tasks (#1397).** Every planned task writes at
+  least one file. `grind-run.js::routeCheckTasks` moves a file-less task
+  (for example "verify build and tests") into the integrator's verify
+  commands, and a plan left with no file-writing tasks ends the goal
+  unmerged instead of running an empty review.
 
 The rationale is in
 [DD-091](../DESIGN_DECISIONS.md#dd-091-grind-gets-repo-linttest-scripts-from-a-clud-subcommand-asked-once-per-run).

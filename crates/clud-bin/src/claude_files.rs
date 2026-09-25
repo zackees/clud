@@ -342,6 +342,28 @@ mod tests {
         }
     }
 
+    /// Workers and reviewers cannot run commands, so a planned task that
+    /// writes no file (e.g. "verify build and tests") can only end "Not
+    /// done" (#1397). The planner must put checks in `verify`, and the
+    /// workflow must route any file-less task there instead of to a worker.
+    #[test]
+    fn grind_routes_file_less_tasks_to_the_integrator() {
+        let workflow = include_str!("../assets/workflows/grind-run.js");
+        assert!(
+            workflow.contains("const routeCheckTasks = "),
+            "grind-run.js must move file-less tasks into verify"
+        );
+        assert!(
+            workflow.contains("routeCheckTasks(earlierDeps(planned, g))"),
+            "runGoal must apply routeCheckTasks before work()"
+        );
+        let plan_skill = include_str!("../assets/skills/grind-plan/SKILL.md");
+        assert!(
+            plan_skill.contains("Never plan a task that only runs commands"),
+            "grind-plan must forbid verify-only tasks"
+        );
+    }
+
     #[test]
     fn missing_claude_home_installs_nothing() {
         let dir = tempfile::tempdir().unwrap();

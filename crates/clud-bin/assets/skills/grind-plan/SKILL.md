@@ -26,6 +26,9 @@ later, one goal at a time.
    complete for a worker that cannot run anything: exact paths, what to
    change, what done looks like, which existing code to mirror, and the
    RED -> GREEN regression test to write for a code change.
+   Never plan a task that only runs commands ("verify build and tests",
+   "run clippy"): workers and reviewers cannot run anything, so it can only
+   end "Not done". Every task writes at least one file; checks go in step 5.
 4. **Dependencies.** `depends_on` lists other goals in this run that must
    land first (shared files, an API this goal consumes). Only goals listed
    before this one count; the workflow ignores any other. An empty list
