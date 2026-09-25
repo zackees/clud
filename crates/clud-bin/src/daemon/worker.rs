@@ -581,10 +581,21 @@ fn start_pty_session(
     let read_handle = {
         let process = Arc::clone(&process);
         let shared = Arc::clone(shared);
+        let mut cpr = CprScanner::default();
         thread::spawn(move || loop {
             match process.read_chunk_impl(Some(0.1)) {
                 Ok(Some(chunk)) => {
+                    // #1366: ConPTY emits ESC[6n at startup and blocks until
+                    // it gets a cursor report. A `--detach` session has no
+                    // client to answer, so the worker answers while nobody
+                    // is attached; an attached client's pump owns the reply.
+                    let queries = cpr.scan(&chunk);
                     shared.push_output(chunk);
+                    if queries > 0 && !shared.has_client() {
+                        for _ in 0..queries {
+                            let _ = process.write_impl(&cpr_reply(), false);
+                        }
+                    }
                 }
                 Ok(None) => {
                     if process.wait_impl(Some(0.0)).is_ok() {
@@ -610,6 +621,43 @@ fn start_pty_session(
     }
 
     Ok(SessionRuntime::Pty(process))
+}
+
+/// Cursor-position query (DSR 6) a PTY child sends to its terminal.
+const CPR_QUERY: &[u8] = b"\x1b[6n";
+
+/// Counts complete `ESC[6n` queries across a stream of PTY output chunks.
+/// Carries at most `CPR_QUERY.len() - 1` trailing bytes (only a proper prefix
+/// of the query) so a sequence split across chunks is counted exactly once.
+#[derive(Default)]
+struct CprScanner {
+    tail: Vec<u8>,
+}
+
+impl CprScanner {
+    fn scan(&mut self, chunk: &[u8]) -> usize {
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.extend_from_slice(chunk);
+        let count = buf
+            .windows(CPR_QUERY.len())
+            .filter(|w| *w == CPR_QUERY)
+            .count();
+        let max_keep = (CPR_QUERY.len() - 1).min(buf.len());
+        for keep in (1..=max_keep).rev() {
+            let suffix = &buf[buf.len() - keep..];
+            if CPR_QUERY.starts_with(suffix) {
+                self.tail = suffix.to_vec();
+                break;
+            }
+        }
+        count
+    }
+}
+
+/// Reply to a cursor-position query: row 1, column 1, which is what a fresh
+/// terminal reports.
+fn cpr_reply() -> Vec<u8> {
+    b"\x1b[1;1R".to_vec()
 }
 
 fn handle_worker_client(
@@ -894,3 +942,40 @@ use Write as _;
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod cpr_tests {
+    use super::{cpr_reply, CprScanner};
+
+    #[test]
+    fn cpr_scanner_detects_query_in_single_chunk() {
+        let mut s = CprScanner::default();
+        assert_eq!(s.scan(b"abc\x1b[6ndef"), 1);
+    }
+
+    #[test]
+    fn cpr_scanner_detects_query_split_across_chunks() {
+        let mut s = CprScanner::default();
+        assert_eq!(s.scan(b"ab\x1b["), 0);
+        assert_eq!(s.scan(b"6nzz"), 1);
+    }
+
+    #[test]
+    fn cpr_scanner_counts_multiple_and_ignores_other_csi() {
+        let mut s = CprScanner::default();
+        assert_eq!(s.scan(b"\x1b[6n\x1b[5n\x1b[6n"), 2);
+        assert_eq!(s.scan(b"\x1b[c"), 0);
+    }
+
+    #[test]
+    fn cpr_scanner_does_not_double_count_tail() {
+        let mut s = CprScanner::default();
+        assert_eq!(s.scan(b"\x1b[6n"), 1);
+        assert_eq!(s.scan(b"x"), 0);
+    }
+
+    #[test]
+    fn cpr_scanner_reply_is_row1_col1() {
+        assert_eq!(cpr_reply(), b"\x1b[1;1R".to_vec());
+    }
+}
