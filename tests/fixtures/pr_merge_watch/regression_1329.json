@@ -1,0 +1,15 @@
+{
+ "_source": "gh api repos/zackees/clud/commits/1ff454d5/check-runs?filter=all and actions/runs?head_sha=1ff454d5 (PR #1325), Static checks rows only",
+ "head_sha": "1ff454d5d8736fe57f05dd0561d65d8d46e520c9",
+ "required": ["Static checks"],
+ "check_runs": [
+  {"id": 107987214992, "name": "Static checks", "head_sha": "1ff454d5d8736fe57f05dd0561d65d8d46e520c9", "status": "completed", "conclusion": "success", "started_at": "2026-09-25T07:15:51Z", "completed_at": "2026-09-25T07:16:57Z", "check_suite": {"id": 97775263683}, "details_url": "https://github.com/zackees/clud/actions/runs/36106610035/job/107987214992", "app": {"slug": "github-actions"}},
+  {"id": 107980922526, "name": "Static checks", "head_sha": "1ff454d5d8736fe57f05dd0561d65d8d46e520c9", "status": "completed", "conclusion": "success", "started_at": "2026-09-25T07:15:51Z", "completed_at": "2026-09-25T07:16:57Z", "check_suite": {"id": 97775263683}, "details_url": "https://github.com/zackees/clud/actions/runs/36106610035/job/107980922526", "app": {"slug": "github-actions"}},
+  {"id": 107980504145, "name": "Static checks", "head_sha": "1ff454d5d8736fe57f05dd0561d65d8d46e520c9", "status": "completed", "conclusion": "success", "started_at": "2026-09-25T07:14:15Z", "completed_at": "2026-09-25T07:14:57Z", "check_suite": {"id": 97775263683}, "details_url": "https://github.com/zackees/clud/actions/runs/36106610035/job/107980504145", "app": {"slug": "github-actions"}},
+  {"id": 107980469212, "name": "Static checks", "head_sha": "1ff454d5d8736fe57f05dd0561d65d8d46e520c9", "status": "completed", "conclusion": "cancelled", "started_at": "2026-09-25T07:14:04Z", "completed_at": "2026-09-25T07:14:05Z", "check_suite": {"id": 97775260292}, "details_url": "https://github.com/zackees/clud/actions/runs/36106608580/job/107980469212", "app": {"slug": "github-actions"}}
+ ],
+ "workflow_runs": [
+  {"id": 36106610035, "name": "CI", "path": ".github/workflows/ci.yml", "workflow_id": 322577277, "run_attempt": 3, "event": "pull_request", "head_branch": "test/harness", "head_sha": "1ff454d5d8736fe57f05dd0561d65d8d46e520c9", "status": "completed", "conclusion": "success", "check_suite_id": 97775263683},
+  {"id": 36106608580, "name": "CI", "path": ".github/workflows/ci.yml", "workflow_id": 322577277, "run_attempt": 1, "event": "pull_request", "head_branch": "test/harness", "head_sha": "1ff454d5d8736fe57f05dd0561d65d8d46e520c9", "status": "completed", "conclusion": "cancelled", "check_suite_id": 97775260292}
+ ]
+}

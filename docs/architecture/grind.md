@@ -104,6 +104,13 @@ root for the hook below, and removes it when the run ends.
   new review it hands the failure back to the integrator, which fixes,
   re-verifies and pushes. That is at most 10 rounds; after that the PR is
   left open and reported.
+- `pr_merge_watch` exits `0` green, `1` failed, `2` new review, `3` closed,
+  `4` timeout, `5` approval required (fork `action_required`; report, no
+  retry), `6` never reported (required check never ran; blocked), `7` stale
+  (older than 14 days; re-run once). It judges each check by the newest run of
+  its workflow, so a superseded cancelled run is not a failure; the full rule
+  lives in the watcher's docstring
+  (`crates/clud-bin/assets/tools/github/pr_merge_watch.py`).
 
 ### Role caps
 

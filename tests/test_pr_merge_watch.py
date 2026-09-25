@@ -1139,3 +1139,482 @@ def test_a_failed_cancel_is_classified_and_never_raises(
     )
     out = capsys.readouterr().out
     assert f"CANCEL  id=123 status={status}" in out
+
+
+# -- #1330: judge checks by newest run per workflow ---------------------------
+#
+# Every case below is driven by recorded REST shapes under
+# tests/fixtures/pr_merge_watch/ (`commits/{sha}/check-runs` items and
+# `actions/runs?head_sha=` items). No test makes a live gh call.
+
+FIXTURES = ROOT / "tests" / "fixtures" / "pr_merge_watch"
+CI_YML = ".github/workflows/ci.yml"
+
+
+def load_case(family: str, case_id: str) -> dict:
+    return json.loads((FIXTURES / f"{family}.json").read_text(encoding="utf-8"))[case_id]
+
+
+def judge(watcher, case: dict, **overrides):
+    kwargs = {"statuses": case.get("statuses"), "head_branch": case.get("head_branch")}
+    kwargs.update(overrides)
+    return watcher.judge_check_runs(
+        case["check_runs"],
+        case["workflow_runs"],
+        case["head_sha"],
+        set(case["required"]),
+        **kwargs,
+    )
+
+
+def by_name(verdict, name: str) -> list:
+    return [j for j in verdict.judgments if j.name == name]
+
+
+def head_gate(watcher, poll: dict, statuses: list | None = None):
+    return watcher.GateSnapshot(
+        pr=watcher.PRSnapshot(527, "OPEN", "MERGEABLE", poll["head_sha"], "main"),
+        checks=[watcher.CheckRow("rollup", "pending", "IN_PROGRESS")],
+        human_review_ids=frozenset(),
+        coderabbit_probe=watcher.CodeRabbitProbe("not_detected", 0),
+        coderabbit=watcher.CodeRabbitObservation("quiet"),
+        head_checks=watcher.HeadChecks(
+            poll["check_runs"], poll["workflow_runs"], list(statuses or poll.get("statuses") or [])
+        ),
+    )
+
+
+def run_watch(watcher, tmp_path, monkeypatch, polls: list[dict], required, *, reread=None):
+    """Drive `watch()` over recorded polls; return (exit code, polls, cancel calls)."""
+    log = watcher.WatchLog.create(527, "zackees/clud", root=tmp_path)
+    first = polls[0]["head_sha"]
+    rereads = iter(reread or [])
+    fetches = {"n": 0}
+
+    def fetch(*_args):
+        # The first fetch is watch()'s initial snapshot; later ones are the
+        # head re-reads before acting on a cancellation-derived verdict.
+        fetches["n"] += 1
+        head = first if fetches["n"] == 1 else (next(rereads, None) or first)
+        return watcher.PRSnapshot(527, "OPEN", "MERGEABLE", head, "main")
+
+    monkeypatch.setattr(watcher.PRSnapshot, "fetch", fetch)
+    monkeypatch.setattr(watcher, "fetch_required_check_names", lambda *args: set(required))
+    monkeypatch.setattr(watcher, "_sleep_remaining_interval", lambda *args: None)
+    monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
+    monkeypatch.setattr(
+        watcher,
+        "_build_failure_report",
+        lambda check, _repo: watcher.FailureReport(check, None, "", None),
+    )
+    seen = {"polls": 0}
+
+    def gates(*_args, **_kwargs):
+        index = min(seen["polls"], len(polls) - 1)
+        seen["polls"] += 1
+        return head_gate(watcher, polls[index])
+
+    monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
+    cancels: list[dict] = []
+    monkeypatch.setattr(
+        watcher,
+        "cancel_pr_runs",
+        lambda *args, **kwargs: cancels.append({"args": args, "kwargs": kwargs}) or 1,
+    )
+    opts = watcher.CancelOptions({"fail"}, "runs", 30, False, False, True, False)
+    with pytest.raises(SystemExit) as exc:
+        watcher.watch(527, "zackees/clud", 20, 3600, None, opts, log)
+    return exc.value.code, seen["polls"], cancels
+
+
+def scoped_cancel(watcher, monkeypatch, case: dict, scope: dict[str, int]) -> list[int]:
+    monkeypatch.setattr(
+        watcher, "gh_json", lambda *args: {"workflow_runs": case["workflow_runs"]}
+    )
+    cancelled: list[int] = []
+
+    def fake_gh(*args, **_kwargs):
+        cancelled.append(int(args[-1].split("/")[-2]))
+        return watcher.GhResult(0, "", "")
+
+    monkeypatch.setattr(watcher, "gh", fake_gh)
+    opts = watcher.CancelOptions({"fail"}, "runs", 30, False, False, True, False)
+    watcher.cancel_pr_runs(527, "zackees/clud", case["head_sha"], opts, None, scope=scope)
+    return cancelled
+
+
+# ---- exit codes ----
+
+
+def test_new_exit_codes_are_distinct_and_documented(watcher) -> None:
+    assert watcher.EXIT_APPROVAL_REQUIRED == 5
+    assert watcher.EXIT_NEVER_REPORTED == 6
+    assert watcher.EXIT_STALE == 7
+    codes = [
+        watcher.EXIT_GREEN,
+        watcher.EXIT_REQUIRED_FAIL,
+        watcher.EXIT_REVIEW_ACTIVITY,
+        watcher.EXIT_PR_CLOSED,
+        watcher.EXIT_TIMEOUT,
+        watcher.EXIT_APPROVAL_REQUIRED,
+        watcher.EXIT_NEVER_REPORTED,
+        watcher.EXIT_STALE,
+    ]
+    assert len(set(codes)) == len(codes)
+    doc = watcher.__doc__
+    for code in ("5  approval required", "6  never reported", "7  stale"):
+        assert code in doc
+    assert "Supersession rule" in doc
+
+
+def test_help_states_the_supersession_rule(watcher, capsys) -> None:
+    with pytest.raises(SystemExit):
+        watcher.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "supersession rule" in out
+    assert "7 stale" in out
+
+
+# ---- #1329 regression ----
+
+
+def test_regression_1329_cancelled_then_superseded_static_checks_pass(
+    watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = json.loads((FIXTURES / "regression_1329.json").read_text(encoding="utf-8"))
+    verdict = judge(watcher, case)
+    assert verdict.state == "pass"
+    assert verdict.failing == []
+
+    code, _polls, cancels = run_watch(watcher, tmp_path, monkeypatch, [case], case["required"])
+    assert code == watcher.EXIT_GREEN
+    assert cancels == []
+
+
+# ---- C: concurrency and supersession ----
+
+
+def test_c1_cancelled_run_waits_on_its_in_progress_replacement(watcher) -> None:
+    verdict = judge(watcher, load_case("concurrency", "C1"))
+    assert verdict.state == "pending"
+    assert verdict.failing == []
+    assert verdict.failing_run_ids == {}
+
+
+def test_c2_replacement_green_passes(watcher, tmp_path, monkeypatch) -> None:
+    case = load_case("concurrency", "C2")
+    assert judge(watcher, case).state == "pass"
+    code, _polls, cancels = run_watch(watcher, tmp_path, monkeypatch, [case], case["required"])
+    assert code == watcher.EXIT_GREEN
+    assert cancels == []
+
+
+def test_c3_replacement_fails_and_cancels_only_it(watcher, tmp_path, monkeypatch) -> None:
+    case = load_case("concurrency", "C3")
+    verdict = judge(watcher, case)
+    assert verdict.state == "fail"
+    assert [j.name for j in verdict.failing] == ["Static checks"]
+    assert verdict.failing_run_ids == {CI_YML: 101}
+    # Run 100 is completed and run 102 is newer than the failing run.
+    assert scoped_cancel(watcher, monkeypatch, case, verdict.failing_run_ids) == [101]
+
+
+def test_c3_watch_exits_one_with_the_scoped_cancel(watcher, tmp_path, monkeypatch) -> None:
+    case = load_case("concurrency", "C3")
+    code, _polls, cancels = run_watch(watcher, tmp_path, monkeypatch, [case], case["required"])
+    assert code == watcher.EXIT_REQUIRED_FAIL
+    assert [c["kwargs"]["scope"] for c in cancels] == [{CI_YML: 101}]
+
+
+def test_c4_cancelled_with_queued_replacement_is_pending(watcher) -> None:
+    assert judge(watcher, load_case("concurrency", "C4")).state == "pending"
+
+
+def test_c5_cancelled_with_no_newer_run_fails(watcher, tmp_path, monkeypatch) -> None:
+    case = load_case("concurrency", "C5")
+    verdict = judge(watcher, case)
+    assert verdict.state == "fail"
+    assert verdict.cancellation_derived
+    code, _polls, _cancels = run_watch(
+        watcher, tmp_path, monkeypatch, [case], case["required"]
+    )
+    assert code == watcher.EXIT_REQUIRED_FAIL
+
+
+def test_c6_cancelled_pending_run_is_ignored(watcher) -> None:
+    verdict = judge(watcher, load_case("concurrency", "C6"))
+    (refresh,) = by_name(verdict, "refresh")
+    assert refresh.check_run_id == 9101  # A, still running, is what is judged
+    assert refresh.state == "pending"
+    assert verdict.failing == []
+
+
+def test_c7_job_level_cancel_replaced_by_newer_green_job(watcher) -> None:
+    verdict = judge(watcher, load_case("concurrency", "C7"))
+    assert verdict.state == "pass"
+    assert by_name(verdict, "J")[0].check_run_id == 9003
+
+
+def test_c8_job_level_cancel_without_newer_job_fails(watcher) -> None:
+    verdict = judge(watcher, load_case("concurrency", "C8"))
+    assert verdict.state == "fail"
+    assert [j.name for j in verdict.failing] == ["J"]
+
+
+def test_c9_no_concurrency_newest_run_per_check_counts(watcher) -> None:
+    verdict = judge(watcher, load_case("concurrency", "C9"))
+    assert verdict.state == "pass"
+    assert by_name(verdict, "test")[0].check_run_id == 9002
+
+
+def test_c10_same_job_name_in_two_workflows_is_judged_separately(watcher) -> None:
+    verdict = judge(watcher, load_case("concurrency", "C10"))
+    tests = by_name(verdict, "test")
+    assert sorted(j.workflow for j in tests) == [CI_YML, ".github/workflows/lint.yml"]
+    assert verdict.state == "fail"
+    assert [j.workflow for j in verdict.failing] == [CI_YML]
+
+
+def test_c11_dispatch_and_pr_runs_newest_counts_and_mismatch_logged(watcher) -> None:
+    verdict = judge(watcher, load_case("concurrency", "C11"))
+    assert verdict.state == "pass"
+    assert any("workflow_dispatch" in note and "pull_request" in note for note in verdict.notes)
+
+
+# ---- R: re-runs ----
+
+
+def test_r1_rerun_all_green_passes(watcher) -> None:
+    assert judge(watcher, load_case("reruns", "R1")).state == "pass"
+
+
+def test_r2_rerun_failed_jobs_green_passes(watcher) -> None:
+    assert judge(watcher, load_case("reruns", "R2")).state == "pass"
+
+
+def test_r3_rerun_in_progress_is_pending(watcher) -> None:
+    verdict = judge(watcher, load_case("reruns", "R3"))
+    assert verdict.state == "pending"
+    assert verdict.failing == []
+
+
+def test_r4_cancelled_attempt_then_green_attempt_passes(watcher) -> None:
+    assert judge(watcher, load_case("reruns", "R4")).state == "pass"
+
+
+# ---- H: head commit changes ----
+
+
+def test_h1_old_commits_cancelled_checks_are_ignored(watcher) -> None:
+    verdict = judge(watcher, load_case("head", "H1"))
+    assert verdict.state == "pass"
+    assert [j.check_run_id for j in verdict.judgments] == [9002]
+
+
+def test_h2_head_change_mid_watch_resets_verdict(watcher, tmp_path, monkeypatch) -> None:
+    case = load_case("head", "H2")
+    code, polls, cancels = run_watch(
+        watcher, tmp_path, monkeypatch, case["polls"], case["required"],
+        reread=[case["reread_head"]],
+    )
+    assert code == watcher.EXIT_GREEN
+    assert polls == 2
+    assert cancels == []
+
+
+# ---- T: terminal results ----
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "timed_out"])
+def test_t1_failure_or_timed_out_fails(watcher, conclusion: str) -> None:
+    case = load_case("terminal", "T1")
+    case["check_runs"][0]["conclusion"] = conclusion
+    verdict = judge(watcher, case)
+    assert verdict.state == "fail"
+    assert not verdict.cancellation_derived
+
+
+def test_t2_startup_failure_fails_as_a_broken_workflow(watcher) -> None:
+    verdict = judge(watcher, load_case("terminal", "T2"))
+    assert verdict.state == "fail"
+    assert [j.workflow_broken for j in verdict.failing] == [True]
+
+
+def test_t3_action_required_is_approval_required(watcher) -> None:
+    assert judge(watcher, load_case("terminal", "T3")).state == "approval_required"
+
+
+def test_t4_skipped_not_required_is_ignored(watcher) -> None:
+    verdict = judge(watcher, load_case("terminal", "T4"))
+    assert verdict.state == "pass"
+    (docs,) = by_name(verdict, "docs")
+    assert not docs.required
+
+
+def test_t5_skipped_required_passes(watcher) -> None:
+    assert judge(watcher, load_case("terminal", "T5")).state == "pass"
+
+
+def test_t6_neutral_passes(watcher) -> None:
+    assert judge(watcher, load_case("terminal", "T6")).state == "pass"
+
+
+def test_t7_stale_is_stale_not_pending(watcher) -> None:
+    assert judge(watcher, load_case("terminal", "T7")).state == "stale"
+
+
+def test_t8_always_gate_failure_from_a_superseded_run_is_ignored(watcher) -> None:
+    verdict = judge(watcher, load_case("terminal", "T8"))
+    assert verdict.state == "pending"
+    assert verdict.failing == []
+    assert by_name(verdict, "CI OK")[0].state == "pending"
+
+
+# ---- S: non-Actions sources ----
+
+
+def test_s1_commit_status_newest_per_context_counts(watcher) -> None:
+    verdict = judge(watcher, load_case("sources", "S1"))
+    assert verdict.state == "pass"
+    (rabbit,) = by_name(verdict, "CodeRabbit")
+    assert rabbit.state == "pass"
+
+
+def test_s2_merge_group_run_is_not_part_of_the_verdict(watcher) -> None:
+    verdict = judge(watcher, load_case("sources", "S2"))
+    assert verdict.state == "pass"
+    assert [j.check_run_id for j in verdict.judgments] == [9001]
+
+
+# ---- A: review findings ----
+
+
+def test_a1_rerun_of_older_run_failing_again_fails(watcher) -> None:
+    verdict = judge(watcher, load_case("review", "A1"))
+    assert verdict.state == "fail"
+    assert verdict.failing[0].check_run_id == 9003
+
+
+def test_a2_rerun_of_older_run_green_passes(watcher) -> None:
+    assert judge(watcher, load_case("review", "A2")).state == "pass"
+
+
+def test_a3_newer_skip_does_not_hide_older_failure(watcher) -> None:
+    verdict = judge(watcher, load_case("review", "A3"))
+    assert verdict.state == "fail"
+    assert verdict.failing[0].check_run_id == 9001
+
+
+def test_a4_newer_skip_replaces_older_cancellation(watcher) -> None:
+    assert judge(watcher, load_case("review", "A4")).state == "pass"
+
+
+def test_a5_cancelled_run_on_old_head_restarts_on_new_head(
+    watcher, tmp_path, monkeypatch
+) -> None:
+    case = load_case("review", "A5")
+    code, polls, cancels = run_watch(
+        watcher, tmp_path, monkeypatch, case["polls"], case["required"],
+        reread=[case["reread_head"]],
+    )
+    assert code == watcher.EXIT_GREEN
+    assert polls == 2
+    assert cancels == []
+
+
+def test_a6_required_check_never_reported_exits_six(watcher, tmp_path, monkeypatch) -> None:
+    case = load_case("review", "A6")
+    verdict = judge(watcher, case)
+    assert verdict.state == "never_reported"
+    assert verdict.missing == ["docs"]
+    code, _polls, _cancels = run_watch(
+        watcher, tmp_path, monkeypatch, [case], case["required"]
+    )
+    assert code == watcher.EXIT_NEVER_REPORTED
+
+
+def test_a7_two_files_with_the_same_display_name_are_judged_separately(watcher) -> None:
+    verdict = judge(watcher, load_case("review", "A7"))
+    assert sorted(j.workflow for j in by_name(verdict, "test")) == [
+        ".github/workflows/ci-nightly.yml",
+        CI_YML,
+    ]
+    assert verdict.state == "fail"
+
+
+def test_a8_every_page_is_read_and_the_newest_wins(watcher, monkeypatch) -> None:
+    case = load_case("review", "A8")
+    filler = case["page1_filler"]
+    page1 = [case["page1_first"]] + [
+        {**filler, "id": filler["id"] + n, "name": f"shard-{n}"} for n in range(99)
+    ]
+    requested: list[str] = []
+
+    def fake_gh_json(*args):
+        path = args[-1]
+        requested.append(path)
+        if "/check-runs" in path:
+            page = 1 if path.endswith("page=1") else 2
+            return {"total_count": 101, "check_runs": page1 if page == 1 else case["page2"]}
+        return {"total_count": 2, "workflow_runs": case["workflow_runs"]}
+
+    monkeypatch.setattr(watcher, "gh_json", fake_gh_json)
+    head = watcher.fetch_head_checks("zackees/clud", case["head_sha"])
+    assert head is not None
+    assert len(head.check_runs) == 101
+    assert any("/check-runs" in p and p.endswith("page=2") for p in requested)
+    assert any("filter=all" in p for p in requested)
+    verdict = watcher.judge_check_runs(
+        head.check_runs, head.workflow_runs, case["head_sha"], set(case["required"])
+    )
+    assert verdict.state == "pass"
+    assert by_name(verdict, "linux")[0].check_run_id == 9500
+
+
+def test_a9_action_required_exits_five_immediately(watcher, tmp_path, monkeypatch) -> None:
+    case = load_case("review", "A9")
+    assert judge(watcher, case).state == "approval_required"
+    code, polls, _cancels = run_watch(
+        watcher, tmp_path, monkeypatch, [case], case["required"]
+    )
+    assert code == watcher.EXIT_APPROVAL_REQUIRED
+    assert polls == 1
+
+
+def test_a10_stale_exits_seven_with_rerun_needed(
+    watcher, tmp_path, monkeypatch, capsys
+) -> None:
+    case = load_case("review", "A10")
+    code, _polls, _cancels = run_watch(
+        watcher, tmp_path, monkeypatch, [case], case["required"]
+    )
+    assert code == watcher.EXIT_STALE
+    assert "re-run needed" in capsys.readouterr().out
+
+
+def test_a11_required_skipped_passes(watcher) -> None:
+    assert judge(watcher, load_case("review", "A11")).state == "pass"
+
+
+def test_a12_fail_fast_siblings_are_not_reported(watcher) -> None:
+    verdict = judge(watcher, load_case("review", "A12"))
+    assert verdict.state == "fail"
+    assert [j.name for j in verdict.failing] == ["L1"]
+
+
+def test_a13_other_prs_run_on_the_shared_commit_is_ignored(watcher) -> None:
+    case = load_case("review", "A13")
+    verdict = judge(watcher, case)
+    assert verdict.state == "pass"
+    assert [j.check_run_id for j in verdict.judgments] == [9001]
+
+
+def test_a14_cancel_scope_is_the_failing_workflow_at_or_below_the_run(
+    watcher, monkeypatch
+) -> None:
+    case = load_case("review", "A14")
+    verdict = judge(watcher, case)
+    assert verdict.state == "fail"
+    assert verdict.failing_run_ids == {CI_YML: 200}
+    # 201 is newer than the failing run; 300 is another workflow.
+    assert scoped_cancel(watcher, monkeypatch, case, verdict.failing_run_ids) == [198, 200]
