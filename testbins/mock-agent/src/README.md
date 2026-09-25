@@ -102,14 +102,20 @@ Script format:
 ```
 
 - **Role:** the first role whose `match` substring is in the request's system
-  prompt; a role with no `match` is the fallback.
+  prompt, and whose optional `match_prompt` (a string, or a list that must all
+  appear) is in its messages; a role with no `match` is the fallback.
+  `match_prompt` tells apart several agents of one role, such as one `/grind`
+  planner per goal (`"Goal g1:"`).
 - **Step:** the number of assistant turns already in the request's messages.
   Past the last step, or when a step's tool isn't offered in the request, the
   reply is `default_text`.
 - **Step kinds:** `tool_use {name, input}`, `structured {…}` (a
   `StructuredOutput` call), `text`, and `error {status}` (an HTTP error reply).
+- **`delay_ms`** on any step holds the reply open, so concurrent agents
+  visibly overlap in the log's `t_start` / `t_end` (epoch milliseconds).
 - **`expect`** checks the `tool_result`s sent back for the previous step
   (`is_error`, `content_contains`). A mismatch replies
   `MOCK_EXPECT_FAILED: …` and is recorded in the log's `note`.
-- **Log:** one JSON line per request, with `role`, `turn`, `step`, `note`,
-  `tools`, `tool_results`, `system` and `messages`.
+- **Log:** one JSON line per request, with `n`, `role`, `turn`, `step`,
+  `note`, `t_start`, `t_end`, `tools`, `tool_results`, `system` and
+  `messages`.

@@ -137,7 +137,15 @@ def main(argv: list[str]) -> int:
             if target.rstrip("/").rsplit("/", 1)[-1].isdigit()
             else None
         )
-        pr = next((p for p in state.get("prs", []) if p["number"] == number), None)
+        pr = next(
+            (
+                p
+                for p in state.get("prs", [])
+                if (number is not None and p["number"] == number)
+                or (number is None and p.get("head") == target)
+            ),
+            None,
+        )
         if pr is None:
             print(f"gh: pull request {target} not found", file=sys.stderr)
             return 1

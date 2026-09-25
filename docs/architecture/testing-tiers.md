@@ -99,4 +99,9 @@ pins how Claude Code treats it:
 
 - `tests/harness/test_smoke.py`: the framework itself (#1323).
 - `tests/harness/test_do.py`: `/do` typed in Claude Code, scenarios H1–H12 (#1322).
-- The `/grind` suite (#1324) builds on the same fixture.
+- `tests/harness/test_grind.py`: the `grind-run` workflow with all five
+  roles played per goal (#1324). It covers sequential and parallel runs, the
+  concurrency caps (at most 4 plan/work/review agents, 1 integrator),
+  dependency order, fix rounds and their cap, the worker shell caps, a dead
+  planner, per-role procedures and tool lists, the internal-only agents, and
+  the router's Docker and `ci.yml` text.

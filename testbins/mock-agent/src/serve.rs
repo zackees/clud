@@ -148,6 +148,13 @@ fn handle(server: &Server, stream: TcpStream) -> std::io::Result<()> {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn write_json(stream: &mut TcpStream, status: u16, value: &Value) -> std::io::Result<()> {
     let body = value.to_string();
     write!(
@@ -228,14 +235,31 @@ fn plan(script: &Value, request: &Value) -> (String, usize, Value, Option<String
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // `match_prompt`, when present, must also appear in the conversation's
+    // messages: it tells apart several agents of one role (one per goal).
+    let conversation = serde_json::to_string(&messages).unwrap_or_default();
+    // A string, or a list of strings that must all appear.
+    let prompt_ok = |r: &Value| match r.get("match_prompt") {
+        None => true,
+        Some(Value::String(m)) => conversation.contains(m.as_str()),
+        Some(Value::Array(all)) => all
+            .iter()
+            .all(|m| m.as_str().is_some_and(|m| conversation.contains(m))),
+        Some(_) => false,
+    };
     let matched = roles
         .iter()
         .find(|r| {
             r.get("match")
                 .and_then(Value::as_str)
                 .is_some_and(|m| system.contains(m))
+                && prompt_ok(r)
         })
-        .or_else(|| roles.iter().find(|r| r.get("match").is_none()));
+        .or_else(|| {
+            roles
+                .iter()
+                .find(|r| r.get("match").is_none() && prompt_ok(r))
+        });
     let default_text = script
         .get("default_text")
         .and_then(Value::as_str)
@@ -319,6 +343,12 @@ fn respond_messages(
 ) -> std::io::Result<()> {
     let (role, turn, step, note) = plan(&server.script, request);
     let n = server.counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let t_start = now_ms();
+    // `delay_ms` holds the reply open, so concurrent agents visibly overlap
+    // in the log's `t_start`/`t_end` (the /grind concurrency tests).
+    if let Some(ms) = step.get("delay_ms").and_then(Value::as_u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let model = request
         .get("model")
         .and_then(Value::as_str)
@@ -337,6 +367,7 @@ fn respond_messages(
                 .unwrap_or_default();
             let entry = json!({
                 "n": n, "role": role, "turn": turn, "step": step, "note": note,
+                "t_start": t_start, "t_end": now_ms(),
                 "stream": request.get("stream"), "tools": tools,
                 "tool_results": recent_tool_results(&messages),
                 "system": system_text(request),
@@ -523,6 +554,23 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("MOCK_EXPECT_FAILED"));
+    }
+
+    #[test]
+    fn match_prompt_separates_agents_of_one_role() {
+        let script = json!({"roles": [
+            {"name": "plan-a", "match": "planner", "match_prompt": "Goal A:", "steps": [{"text": "A"}]},
+            {"name": "plan-b", "match": "planner", "match_prompt": "Goal B:", "steps": [{"text": "B"}]}
+        ]});
+        let ask = |goal: &str| {
+            request(
+                "You are the planner",
+                json!([{"role": "user", "content": format!("Goal {goal}: do it")}]),
+                &[],
+            )
+        };
+        assert_eq!(plan(&script, &ask("A")).0, "plan-a");
+        assert_eq!(plan(&script, &ask("B")).0, "plan-b");
     }
 
     #[test]
