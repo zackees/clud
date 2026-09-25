@@ -7,9 +7,13 @@
 //! so the fix can be landed as a test flip rather than a quiet regression.
 //!
 //! Theories covered:
-//!   T1 — `respond_to_queries_impl` DSR stub
-//!        (Windows stubs `\x1b[1;1R`, POSIX is a no-op).
-//!        clud's fix: stop calling it (session.rs / daemon.rs).
+//!   T1 — `respond_to_queries_impl` DSR stub. Windows writes a hardcoded
+//!        `\x1b[1;1R` per query into the PTY input and POSIX is a no-op, but
+//!        on a real ConPTY the stub never reaches the child: ConPTY takes a
+//!        cursor-position report on its input as the answer to its own DSR
+//!        (#1310, first observed once these tests stopped skipping on CI).
+//!        So on every platform the child sees nothing. clud's fix: stop
+//!        calling it (session.rs / daemon.rs).
 //!   T2 — `resize_impl` is a no-op on Windows; forwards on POSIX.
 //!        clud's fix: `session::resize_pty` reaches master.resize() directly.
 //!   T3 — Spawn accepts `cols=32767` (the old clud fallback) without panicking.
@@ -64,9 +68,9 @@ fn cargo_build_output_reports_mock_agent_executable() {
 /// Feed one `\x1b[6n` DSR query into the `respond_to_queries_impl` handler
 /// and assert what the PTY child actually received on stdin.
 ///
-/// - Windows: handler writes exactly one hardcoded `\x1b[1;1R` into the
-///   child's stdin regardless of where the cursor actually is (issue #31,
-///   theory T1). This is the bug.
+/// - Windows: handler writes one hardcoded `\x1b[1;1R` into the PTY input
+///   (issue #31, theory T1), and ConPTY consumes it as a cursor-position
+///   report, so the child receives nothing (#1310).
 /// - POSIX: handler is a no-op; the child receives zero bytes.
 #[test]
 fn respond_to_queries_matches_platform_stub() {
@@ -101,23 +105,16 @@ fn respond_to_queries_matches_platform_stub() {
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
 
-    if cfg!(windows) {
-        assert_eq!(
-            got, b"\x1b[1;1R",
-            "Windows respond_to_queries should inject exactly one hardcoded DSR reply; got {:?}",
-            got
-        );
-    } else {
-        assert!(
-            got.is_empty(),
-            "POSIX respond_to_queries should be a no-op, but child received {:?}",
-            got
-        );
-    }
+    assert!(
+        got.is_empty(),
+        "no DSR reply may reach the child (POSIX: no-op; Windows: ConPTY consumes the stub); \
+         child received {:?}",
+        got
+    );
 }
 
-/// A chunk containing N DSR queries produces N stubbed replies on Windows
-/// and still nothing on POSIX.
+/// A chunk containing N DSR queries still delivers nothing to the child on
+/// any platform: Windows' N stubs are consumed by ConPTY (#1310).
 #[test]
 fn respond_to_queries_is_linear_in_query_count() {
     require_pty_or_skip!("respond_to_queries_is_linear_in_query_count");
@@ -149,20 +146,11 @@ fn respond_to_queries_is_linear_in_query_count() {
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
 
-    if cfg!(windows) {
-        let expected: Vec<u8> = b"\x1b[1;1R\x1b[1;1R\x1b[1;1R".to_vec();
-        assert_eq!(
-            got, expected,
-            "Windows should emit one stub per query; got {:?}",
-            got
-        );
-    } else {
-        assert!(
-            got.is_empty(),
-            "POSIX should emit nothing regardless of query count; got {:?}",
-            got
-        );
-    }
+    assert!(
+        got.is_empty(),
+        "no DSR reply may reach the child regardless of query count; got {:?}",
+        got
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────

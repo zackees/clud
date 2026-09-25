@@ -230,7 +230,11 @@ def run_in_terminal(
                 sys.stdout.write(terminal.read_text(timeout=0.5))
                 sys.stdout.flush()
             except TimeoutError:
-                continue
+                # ConPTY keeps its output pipe open after the child exits, so
+                # EOF may never come on Windows: an exited child is the end.
+                if terminal.poll() is not None:
+                    _echo_remaining(terminal)
+                    break
             except EOFError:
                 break
         else:
@@ -244,6 +248,20 @@ def run_in_terminal(
         return terminal.wait(timeout=30)
     finally:
         terminal.close()
+
+
+def _echo_remaining(terminal: PseudoTerminalProcess) -> None:
+    """Echo whatever output is already buffered, without waiting for more."""
+    while True:
+        try:
+            chunk = terminal.read_non_blocking()
+        except EOFError:
+            return
+        if not chunk:
+            return
+        text = chunk.decode(terminal.encoding, "replace") if isinstance(chunk, bytes) else chunk
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
 
 def list_tests(harness: Path, env: dict[str, str]) -> list[str]:
