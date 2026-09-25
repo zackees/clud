@@ -188,7 +188,10 @@ mod tests {
     fn shift_enter_honors_repeat_count() {
         let mut upstream = event(b"\x1b[13;2u\x1b[13;2u", VK_RETURN, true, false, false);
         upstream.repeat_count = 2;
-        assert_eq!(adapt_event_with_clipboard(upstream, || None), b"\x1b\r\x1b\r");
+        assert_eq!(
+            adapt_event_with_clipboard(upstream, || None),
+            b"\x1b\r\x1b\r"
+        );
     }
 
     #[test]
