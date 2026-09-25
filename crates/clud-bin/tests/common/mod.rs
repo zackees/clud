@@ -167,6 +167,20 @@ pub fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     false
 }
 
+/// Wait until mock-agent's `--mock-ready-file` exists: its stdin mode is
+/// final and bytes sent from now on arrive intact (#1310). On Windows,
+/// ConPTY converts input to key records under the console mode current when
+/// the bytes arrive, so input sent before the child switches to VT mode loses
+/// its escape sequences. Panics after 20 s so a child that never starts fails
+/// loudly instead of hanging.
+pub fn wait_for_mock_ready(ready_file: &std::path::Path) {
+    assert!(
+        wait_until(Duration::from_secs(20), || ready_file.exists()),
+        "mock-agent never signalled ready at {}",
+        ready_file.display()
+    );
+}
+
 /// Drain all chunks from the PTY reader up to `overall_timeout` or child exit.
 pub fn drain_reader(process: &NativePtyProcess, overall_timeout: Duration) -> Vec<u8> {
     let deadline = Instant::now() + overall_timeout;

@@ -41,6 +41,7 @@ fn main() {
     let mut write_blocked_body = String::from("mock-blocked");
     let mut write_marker_on_iter: u32 = 0;
     let mut stdin_raw_to: Option<PathBuf> = None;
+    let mut ready_file: Option<PathBuf> = None;
     let mut pty_size_report_to: Option<PathBuf> = None;
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
@@ -136,6 +137,13 @@ fn main() {
         if arg == "--mock-report-file" {
             if let Some(path) = args.get(i + 1) {
                 report_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-ready-file" {
+            if let Some(path) = args.get(i + 1) {
+                ready_file = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -324,7 +332,7 @@ fn main() {
     // Read stdin: either timed read (--mock-read-stdin-ms) or pipe-mode read
     let stdin_bytes: Option<Vec<u8>> = if read_stdin_ms > 0 {
         trace("stdin read start");
-        let bytes = read_stdin_timed(read_stdin_ms);
+        let bytes = read_stdin_timed(read_stdin_ms, ready_file.as_deref());
         trace(&format!(
             "stdin read done: {} bytes",
             bytes.as_ref().map_or(0, Vec::len)
@@ -784,13 +792,20 @@ fn set_stdin_raw_if_tty() {}
 
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
-fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
+fn read_stdin_timed(timeout_ms: u64, ready_file: Option<&Path>) -> Option<Vec<u8>> {
     // Real TUI children (e.g., codex Ink) put their PTY slave into raw mode
     // before reading. The mock-agent must do the same when its stdin is a PTY
     // slave, otherwise the kernel's canonical line discipline holds non-
     // newline-terminated bytes (like the F3 voice-mode transcript) forever
     // and they never reach the test's stdin capture.
     set_stdin_raw_if_tty();
+    // #1310: tell the test its input mode is final. On Windows, ConPTY turns
+    // input into key records as the bytes arrive, under the console mode of
+    // that moment, so bytes sent before this point lose their escape
+    // sequences. A test sends only after this file exists.
+    if let Some(path) = ready_file {
+        let _ = std::fs::write(path, b"ready");
+    }
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use running_process::pty::NativePtyProcess;
 
-use crate::common::{drain_reader, mock_agent_path};
+use crate::common::{drain_reader, mock_agent_path, wait_for_mock_ready};
 
 /// Counting hooks for pump integration tests. Records F3 presses,
 /// releases, ticks, and can opt into voice interception via `intercept`.
@@ -78,6 +78,7 @@ fn raw_pump_forwards_stdin_bytes_verbatim() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -85,14 +86,17 @@ fn raw_pump_forwards_stdin_bytes_verbatim() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
 
-    // Give the child a moment to enter its stdin read loop before we feed.
-    std::thread::sleep(Duration::from_millis(150));
+    // Wait for the child to enter its stdin read loop before we feed.
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&ready);
 
     let payload: &[u8] = b"hello\x1b[6n\x1bOR\x1bOP world\n";
     let interrupted = AtomicBool::new(false);
@@ -128,6 +132,7 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -135,12 +140,15 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
-    std::thread::sleep(Duration::from_millis(150));
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&ready);
 
     // Three F3 presses embedded in surrounding text. Trailing `\n` is
     // important: the PTY slave defaults to canonical (line) mode, so the
@@ -189,6 +197,7 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -196,12 +205,15 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
-    std::thread::sleep(Duration::from_millis(150));
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&ready);
 
     // Kitty F3 press (CSI u, functional encoding) then release. The
     // trailing `\n` is the canonical-mode trigger; without it the
@@ -562,6 +574,7 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
 
     let argv = vec![
         agent.to_string_lossy().to_string(),
@@ -569,12 +582,15 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
         "800".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
     ];
 
     let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
     process.set_echo(false);
     process.start_impl().expect("start");
-    std::thread::sleep(Duration::from_millis(150));
+    // #1310: send only once the child's stdin mode is final.
+    wait_for_mock_ready(&ready);
 
     let core = std::sync::Arc::new(TerminalInputCore::new());
     {
