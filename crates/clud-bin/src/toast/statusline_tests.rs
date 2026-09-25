@@ -635,6 +635,66 @@ fn the_chain_runs_through_the_platform_shell_with_claudes_stdin() {
     );
 }
 
+fn argv_of(spec: CommandSpec) -> Vec<String> {
+    match spec {
+        CommandSpec::Argv(argv) => argv,
+        _ => panic!("expected CommandSpec::Argv"),
+    }
+}
+
+#[test]
+fn windows_chain_spec_uses_valid_git_bash_env_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let bash = dir.path().join("bash.exe");
+    std::fs::write(&bash, b"").unwrap();
+    let spec = windows_chain_spec("echo hi", Some(bash.clone().into_os_string()), || {
+        panic!("which must not run when the env path is a file")
+    });
+    assert_eq!(
+        argv_of(spec),
+        vec![
+            bash.to_string_lossy().into_owned(),
+            "-c".to_string(),
+            "echo hi".to_string()
+        ]
+    );
+}
+
+#[test]
+fn windows_chain_spec_ignores_missing_env_path_and_uses_which() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such-bash.exe");
+    let spec = windows_chain_spec("echo hi", Some(missing.into_os_string()), || {
+        Some(std::path::PathBuf::from("/x/bash"))
+    });
+    assert_eq!(argv_of(spec), vec!["/x/bash", "-c", "echo hi"]);
+}
+
+#[test]
+fn windows_chain_spec_ignores_directory_env_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = windows_chain_spec(
+        "echo hi",
+        Some(dir.path().as_os_str().to_os_string()),
+        || Some(std::path::PathBuf::from("/x/bash")),
+    );
+    assert_eq!(argv_of(spec), vec!["/x/bash", "-c", "echo hi"]);
+}
+
+#[test]
+fn windows_chain_spec_falls_back_to_shell_when_no_bash() {
+    match windows_chain_spec("echo hi", None, || None) {
+        CommandSpec::Shell(cmd) => assert_eq!(cmd, "echo hi"),
+        _ => panic!("expected CommandSpec::Shell"),
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn chain_spec_non_windows_uses_sh() {
+    assert_eq!(argv_of(chain_spec("echo hi")), vec!["sh", "-c", "echo hi"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn the_chain_receives_the_session_json_on_stdin() {
