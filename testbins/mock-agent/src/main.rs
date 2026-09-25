@@ -756,15 +756,27 @@ fn set_stdin_raw_if_tty() {
         fn GetStdHandle(std_handle: u32) -> *mut c_void;
         fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
         fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
+        fn GetLastError() -> u32;
     }
     let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
     let mut mode = 0u32;
     if handle.is_null() || unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+        trace("stdin console mode: not a console");
         return; // not a console: a pipe needs no mode change
     }
     let raw = (mode & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
         | ENABLE_VIRTUAL_TERMINAL_INPUT;
-    let _ = unsafe { SetConsoleMode(handle, raw) };
+    let ok = unsafe { SetConsoleMode(handle, raw) };
+    let error = if ok == 0 {
+        unsafe { GetLastError() }
+    } else {
+        0
+    };
+    let mut after = 0u32;
+    unsafe { GetConsoleMode(handle, &mut after) };
+    trace(&format!(
+        "stdin console mode {mode:#06x} -> requested {raw:#06x}, set ok={ok} err={error}, now {after:#06x}"
+    ));
 }
 
 #[cfg(not(any(unix, windows)))]
