@@ -615,8 +615,18 @@ fn start_pty_session(
                 Ok(code) => code,
                 Err(_) => return,
             };
-            let _ = read_handle.join();
-            shared.broadcast_exit(code);
+            // #1354: release the ConPTY after the reader drains, or conhost leaks.
+            let closer = Arc::clone(&process);
+            finish_pty_exit(
+                code,
+                || {
+                    let _ = read_handle.join();
+                },
+                || {
+                    let _ = closer.close_impl();
+                },
+                |code| shared.broadcast_exit(code),
+            );
         });
     }
 
@@ -658,6 +668,20 @@ impl CprScanner {
 /// terminal reports.
 fn cpr_reply() -> Vec<u8> {
     b"\x1b[1;1R".to_vec()
+}
+
+/// Post-exit sequence for a PTY session: drain the reader, release the
+/// pseudo-console, then broadcast `Exited`. Close must follow the reader
+/// join so the final chunk is never lost (#1354).
+fn finish_pty_exit<C>(
+    code: C,
+    join_reader: impl FnOnce(),
+    close_pty: impl FnOnce(),
+    broadcast: impl FnOnce(C),
+) {
+    join_reader();
+    close_pty();
+    broadcast(code);
 }
 
 fn handle_worker_client(
@@ -977,5 +1001,28 @@ mod cpr_tests {
     #[test]
     fn cpr_scanner_reply_is_row1_col1() {
         assert_eq!(cpr_reply(), b"\x1b[1;1R".to_vec());
+    }
+}
+
+#[cfg(test)]
+mod pty_exit_tests {
+    use super::finish_pty_exit;
+    use std::cell::RefCell;
+
+    #[test]
+    fn pty_exit_closes_pseudo_console_after_reader_join_before_broadcast() {
+        let order: RefCell<Vec<&str>> = RefCell::new(Vec::new());
+        let seen_code = RefCell::new(None);
+        finish_pty_exit(
+            7,
+            || order.borrow_mut().push("join"),
+            || order.borrow_mut().push("close"),
+            |code| {
+                order.borrow_mut().push("broadcast");
+                *seen_code.borrow_mut() = Some(code);
+            },
+        );
+        assert_eq!(*order.borrow(), vec!["join", "close", "broadcast"]);
+        assert_eq!(*seen_code.borrow(), Some(7));
     }
 }
