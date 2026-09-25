@@ -25,7 +25,7 @@ const CODEX_CONFIG_OVERRIDES_NOTE: &str =
 const SHELL_DISABLE_POWERSHELL_NOTE: &str =
     "When true, clud injects a PreToolUse hook into Claude and Codex that denies any Bash/Shell call resolving to powershell.exe / pwsh / *.ps1. For Claude it also sets CLAUDE_CODE_USE_POWERSHELL_TOOL=0 + CLAUDE_CODE_GIT_BASH_PATH to a vendored bash. Also sets CLUD_DISABLE_POWERSHELL=1 in the backend env so skills/CLAUDE.md content can branch on it. Per-backend overrides under shell.claude.disable_powershell / shell.codex.disable_powershell take precedence; null inherits the top-level value. Default false. See https://github.com/zackees/clud/issues/447.";
 const GIT_PR_WAIT_FAIL_FAST_NOTE: &str =
-    "When true, cmd-scan denies raw `gh pr checks --watch` / `gh run watch` / `gh pr merge --auto` and hand-rolled PR-status polling loops, pointing the agent at the bundled fail-fast waiter (`clud tool run github/pr_merge_watch.py <PR>`) instead. On by default (DD-065); toggle with `clud settings`.";
+    "When true, cmd-scan denies raw `gh pr checks --watch` / `gh run watch` and hand-rolled PR-status polling loops, pointing the agent at the bundled fail-fast waiter (`clud tool run github/pr_merge_watch.py <PR>`) instead. On by default (DD-065); toggle with `clud settings`.";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GlobalLaunchPreferences {

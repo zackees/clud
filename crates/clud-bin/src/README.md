@@ -354,7 +354,7 @@ which test tier a change belongs in — lives in
   `block-bad-cmd`; `clud-block-bad-cmd` still ships as a compat binary, see
   `block_bad_cmd_rollout.rs`). Enforces three things per Bash command:
   hardcoded Rust-toolchain rules (`RUST_TOOLS` → `soldr <tool>`); GitHub PR
-  waiter rules (`gh ... --watch`, `gh pr merge --auto`, polling loops →
+  waiter rules (`gh ... --watch`, polling loops; `gh pr merge --auto` is allowed, DD-094 →
   `github/pr_merge_watch.py`), gated behind the `git.pr_wait_fail_fast`
   toggle (on by default, DD-065, see `settings_tui.rs`; the guard sees
   through the `tap` gate prefix); and the config-driven `bad_commands`/`bad_pipelines`

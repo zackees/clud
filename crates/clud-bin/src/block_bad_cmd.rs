@@ -1754,12 +1754,8 @@ fn native_gh_waiter(words: &[String]) -> bool {
             .iter()
             .any(|word| word == "--watch" || word.starts_with("--watch=")))
         || positionals.starts_with(&["run", "watch"])
-        // `--auto` enqueues a merge that GitHub blocks on the full matrix —
-        // the slowest-lane wait this guard exists to prevent.
-        || (positionals.starts_with(&["pr", "merge"])
-            && words
-                .iter()
-                .any(|word| word == "--auto" || word.starts_with("--auto=")))
+    // `gh pr merge --auto` is deliberately allowed (DD-094): it hands the
+    // wait to GitHub and returns at once, so nothing blocks locally.
 }
 
 fn gh_poll_target(words: &[String]) -> bool {
@@ -3981,12 +3977,9 @@ mod tests {
             "gh run watch 123456 --exit-status",
             "gh run --repo zackees/clud watch 123456",
             "env GH_HOST=github.com gh run watch 123456",
-            "gh pr merge 528 --auto",
-            "gh pr merge --repo zackees/clud 528 --auto",
             // Gated sessions wrap the command with the gate prefix; the
             // guard must see through it.
             "tap gh pr checks 528 --watch",
-            "tap gh pr merge 528 --auto",
         ] {
             let reason = evaluate_command(command, None, false, &[])
                 .reason
@@ -3994,6 +3987,21 @@ mod tests {
             assert!(
                 reason.contains("clud tool run github/pr_merge_watch.py <PR>"),
                 "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_gh_pr_merge_auto() {
+        // DD-094: `--auto` returns immediately; GitHub owns the wait.
+        for command in [
+            "gh pr merge 528 --auto --squash",
+            "gh pr merge --repo zackees/clud 528 --auto",
+            "tap gh pr merge 528 --auto",
+        ] {
+            assert!(
+                evaluate_command(command, None, false, &[]).reason.is_none(),
+                "{command} should be allowed"
             );
         }
     }
