@@ -100,6 +100,21 @@ def test_deepseek_transcript_is_usable_without_a_bridge(tmp_path: Path) -> None:
     )
 
 
+def test_kimi_transcript_is_usable_without_a_bridge(tmp_path: Path) -> None:
+    # Direct `--kimi` launches, like DeepSeek's, talk to Moonshot without a
+    # clud bridge, so the transcript alone must be enough.
+    project = tmp_path / "repo"
+    project.mkdir()
+    transcript_path = tmp_path / "kimi.jsonl"
+    write_jsonl(
+        transcript_path,
+        [assistant(project, "2026-09-25T12:00:00Z", "kimi-k3[1m]")],
+    )
+    transcript = inventory_transcript(transcript_path, project)
+    assert transcript.usable
+    assert transcript.providers == ["kimi"]
+
+
 def test_unmatched_bridge_stays_unattributed(tmp_path: Path) -> None:
     bridge_path = tmp_path / "123__1786536000" / "bridge.jsonl"
     write_jsonl(bridge_path, [{"event": "pipeline_failure", "kind": "timeout"}])

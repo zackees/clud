@@ -13,6 +13,7 @@ const MAX_DIRECT_JSON_BYTES: usize = 64 * 1024;
 pub enum Provider {
     Claude,
     DeepSeek,
+    Kimi,
     OpenRouter,
 }
 
@@ -118,7 +119,10 @@ impl StreamingUsage {
         match self.provider {
             Provider::Claude => self.observe_claude(usage),
             Provider::DeepSeek => self.observe_deepseek(usage),
-            Provider::OpenRouter => self.observe_openrouter(usage),
+            // Moonshot's Anthropic endpoint reports Claude-shaped usage; the
+            // OpenRouter adapter reads that shape and keeps the permissive
+            // OpenAI-field fallback for anything else.
+            Provider::Kimi | Provider::OpenRouter => self.observe_openrouter(usage),
         }
     }
 

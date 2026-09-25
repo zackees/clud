@@ -42,8 +42,10 @@ ALL_CANARIES = (DEEPSEEK_CANARY, OPENROUTER_CANARY, AMBIENT_CANARY)
 # Mirrors provider_auth::test_vault_path for each provider's vault identifiers.
 VAULT_FILES = {
     "deepseek": "clud_deepseek--api_key_v1.secret",
+    "kimi": "clud_kimi--api_key_v1.secret",
     "openrouter": "clud_openrouter--api_key_v1.secret",
 }
+KIMI_CANARY = "sk-canary-kimi-937"
 
 
 @pytest.fixture
@@ -96,7 +98,7 @@ def _status(clud: Path, env: dict[str, str]) -> dict[str, str]:
 
 
 def _launch_unified(
-    clud: Path, env: dict[str, str], probe: Path
+    clud: Path, env: dict[str, str], probe: Path, *probe_args: str
 ) -> tuple[process.CompletedProcess[str], dict[str, Any]]:
     result = _run(
         clud,
@@ -109,6 +111,7 @@ def _launch_unified(
         "--",
         "--mock-unified-acceptance-probe",
         str(probe),
+        *probe_args,
         env=env,
     )
     assert result.returncode == 0, result.stderr
@@ -231,3 +234,54 @@ def test_logging_out_one_provider_removes_only_its_discovery_rows(
     deepseek_rows = {row for row in _row_ids(before) if row.startswith("clud-claude-deepseek-")}
     assert deepseek_rows, "DeepSeek rows were advertised while logged in"
     assert _row_ids(after) == _row_ids(before) - deepseek_rows
+
+
+def test_kimi_joins_the_unified_gateway_from_its_own_vault_record(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path, upstreams
+) -> None:
+    """#937 Phase 4 through the binary: the Kimi key `clud auth` stored is
+    what advertises `clud-claude-kimi-k3`, reaches only the Kimi upstream, and
+    disappears from discovery on logout."""
+    kimi = _FakeAnthropicServer("kimi")
+    try:
+        vault = _vault(tmp_path)
+        _seed(vault, "deepseek", DEEPSEEK_CANARY)
+        _seed(vault, "kimi", KIMI_CANARY)
+        env = _env(mock_env, vault, upstreams)
+        env["CLUD_TEST_UNIFIED_KIMI_UPSTREAM_URL"] = kimi.base_url
+        assert _status(clud_binary, env)["kimi"] == "configured"
+
+        result, probe = _launch_unified(
+            clud_binary,
+            env,
+            tmp_path / "kimi.json",
+            "--mock-acceptance-extra-turn",
+            "clud-claude-kimi-k3",
+        )
+        assert probe["error"] is None, probe
+        rows = {row["id"]: row["display_name"] for row in probe["models"]}
+        assert rows.get("clud-claude-kimi-k3") == "Kimi K3", rows
+        assert probe["turn_statuses"] == [200, 200, 200, 200, 200]
+        assert "Kimi models unavailable" not in result.stderr
+
+        assert len(kimi.requests) == 1
+        head, body = _split(kimi.requests[0])
+        assert body["model"] == "kimi-k3[1m]"
+        assert _header(head, b"authorization") == f"Bearer {KIMI_CANARY}".encode()
+        assert _header(head, b"x-clud-gateway-token") is None
+        for canary in (DEEPSEEK_CANARY, OPENROUTER_CANARY, AMBIENT_CANARY):
+            assert canary.encode() not in kimi.requests[0], canary
+        responses, anthropic = upstreams
+        for raw in list(responses.requests) + [
+            raw for server in anthropic.values() for raw in server.requests
+        ]:
+            assert KIMI_CANARY.encode() not in raw
+        assert KIMI_CANARY not in result.stdout + result.stderr
+
+        assert _auth(clud_binary, env, "logout", "kimi") == {"removed": True}
+        result, after = _launch_unified(clud_binary, env, tmp_path / "after.json")
+        assert "clud-claude-kimi-k3" not in _row_ids(after)
+        assert "clud auth login kimi" in result.stderr
+        assert {row for row in _row_ids(after) if "deepseek" in row}, "DeepSeek kept"
+    finally:
+        kimi.close()

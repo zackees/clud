@@ -109,9 +109,7 @@ fn route_for(provider: ModelProvider) -> Option<ConversationRoute> {
         ModelProvider::Codex => Some(ConversationRoute::Codex),
         ModelProvider::DeepSeek => Some(ConversationRoute::DeepSeek),
         ModelProvider::OpenRouter => Some(ConversationRoute::OpenRouter),
-        // Still direct-launch only. A rung that cannot be served is worse than
-        // no rung: it would consume a descent and then fail.
-        ModelProvider::Kimi => None,
+        ModelProvider::Kimi => Some(ConversationRoute::Kimi),
     }
 }
 
@@ -281,16 +279,15 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_without_a_gateway_route_is_rejected_at_parse_time() {
-        let error = FailoverLadder::parse("kimi-k3", true).unwrap_err();
-        assert_eq!(
-            error,
-            LadderError::Unroutable {
-                spec: "kimi-k3".to_string(),
-                provider: "kimi",
-            },
-            "a rung that cannot be served must fail the launch, not a turn"
-        );
+    fn every_catalog_provider_has_a_gateway_route() {
+        // #937 Phase 4 gave Kimi its unified route; before that a `kimi-k3`
+        // rung failed at parse time with `Unroutable`. Every provider must now
+        // map to its own route, so no rung can be accepted and then fail.
+        for provider in ModelProvider::ALL {
+            assert!(route_for(*provider).is_some(), "{provider:?} has no route");
+        }
+        let ladder = FailoverLadder::parse("kimi-k3", true).unwrap();
+        assert_eq!(ladder.rungs()[0].route, ConversationRoute::Kimi);
     }
 
     #[test]

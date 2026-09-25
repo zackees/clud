@@ -64,8 +64,8 @@ what makes this fixable at the gateway.
 ## 1. Give OpenRouter a unified route
 
 This is a prerequisite, not new invention: it is the same direct-to-routed
-promotion #937 already defines as Kimi's phase 4 (`// Phase 4 of #937 wires
-Kimi's unified route`). OpenRouter needs a `discovery_id` in the reserved
+promotion #937's phase 4 later gave Kimi, which now routes (and can be a
+failover rung) through the gateway's registry-driven route list. OpenRouter needs a `discovery_id` in the reserved
 `clud-claude-*` namespace, both `=> false` catalog filters flipped, and
 inclusion in the wire-ID resolver so a persisted `~anthropic/*` ID routes to
 OpenRouter instead of leaking to Anthropic.

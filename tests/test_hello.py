@@ -789,13 +789,42 @@ def test_dry_run_exposes_the_failover_ladder() -> None:
     assert data["failover_allow_metered"] is False
 
 
-def test_dry_run_rejects_a_rung_the_gateway_cannot_route() -> None:
-    """An unroutable rung must fail the launch, not the turn that needed it."""
+def test_dry_run_accepts_a_kimi_rung_now_that_the_gateway_routes_kimi() -> None:
+    """#937 Phase 4: Kimi has a unified route, so a `kimi-k3` rung parses.
+    Before, it failed the launch as unroutable."""
     result = _run("--dry-run", "--unified", "--failover", "kimi-k3", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["failover"] == "kimi-k3"
+
+
+def test_dry_run_kimi() -> None:
+    result = _run("--dry-run", "--kimi", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["backend"] == "claude"
+    assert data["model_provider"] == "kimi"
+    assert data["effective_harness"] == "claude"
+    assert data["provider_source"] == "cli"
+    assert data["model_selection"]["provider"] == "kimi"
+    assert data["model_selection"]["model"] == "kimi-k3"
+    assert data["model_selection"]["wire_model"] == "kimi-k3[1m]"
+    # #1097: direct-provider launches default to low effort on the session.
+    assert data["model_selection"]["effort"] == "low"
+    assert data["model_selection"]["context_window"] == "1m"
+    # Same vault contract as DeepSeek: this isolated HOME has no Kimi key, so
+    # any vault read or login prompt would hang or error instead.
+    assert "sk-" not in result.stdout + result.stderr
+
+
+def test_dry_run_kimi_rejects_codex_harness_and_conflicting_flags() -> None:
+    result = _run("--dry-run", "--kimi", "--harness", "codex", "-p", "hello")
     assert result.returncode == 2
-    output = (result.stdout or "") + (result.stderr or "")
-    assert "kimi-k3" in output
-    assert "does not route" in output
+    assert "kimi" in result.stderr.lower()
+    assert "cannot use the codex harness" in result.stderr.lower()
+    for other in ("--claude", "--codex", "--deepseek", "--unified"):
+        result = _run("--dry-run", "--kimi", other, "-p", "hello")
+        assert result.returncode != 0, other
+        assert result.stdout == "", other
 
 
 def test_failover_on_a_direct_launch_warns_that_it_does_nothing() -> None:

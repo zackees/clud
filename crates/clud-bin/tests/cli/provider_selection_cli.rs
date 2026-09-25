@@ -74,6 +74,22 @@ fn rejected_selection_does_not_persist_no_fix_hooks() {
 }
 
 #[test]
+fn rejected_kimi_on_the_codex_harness_writes_no_settings() {
+    // Kimi speaks only the Anthropic protocol, so the Codex harness is
+    // refused during target resolution -- before any vault access and before
+    // anything is persisted.
+    for harness_args in [&["--harness", "codex"][..], &["--codex"][..]] {
+        let home = tempfile::tempdir().unwrap();
+        let mut args = vec!["--no-fix-hooks", "--kimi"];
+        args.extend_from_slice(harness_args);
+        args.extend_from_slice(&["-p", "hello"]);
+        let (exit, output) = run_isolated(home.path(), &args);
+        assert_eq!(exit, 2, "{}", String::from_utf8_lossy(&output));
+        assert!(!home.path().join(".clud").join("settings.json").exists());
+    }
+}
+
+#[test]
 fn default_claude_keeps_a_custom_wire_model_reachable() {
     let home = tempfile::tempdir().unwrap();
     let (exit, output) = run_isolated(home.path(), &["--dry-run", "--model", "my-gateway-model"]);
