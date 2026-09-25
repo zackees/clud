@@ -737,7 +737,37 @@ fn set_stdin_raw_if_tty() {
     let _ = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
 }
 
-#[cfg(not(unix))]
+/// Windows twin of the POSIX `cfmakeraw` above (#1310). A console TUI such as
+/// Claude Code or Codex switches its input to VT mode: `ENABLE_VIRTUAL_
+/// TERMINAL_INPUT` on, line/echo/processed input off. Left in the default
+/// cooked mode, conhost turns the escape sequences the pump forwards into
+/// key events that `ReadFile` drops, and line-buffers input with `\r\n`, so
+/// the mock never sees the bytes a real child would.
+#[cfg(windows)]
+fn set_stdin_raw_if_tty() {
+    use std::ffi::c_void;
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+    const ENABLE_LINE_INPUT: u32 = 0x0002;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(std_handle: u32) -> *mut c_void;
+        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
+    }
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut mode = 0u32;
+    if handle.is_null() || unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+        return; // not a console: a pipe needs no mode change
+    }
+    let raw = (mode & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+        | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    let _ = unsafe { SetConsoleMode(handle, raw) };
+}
+
+#[cfg(not(any(unix, windows)))]
 fn set_stdin_raw_if_tty() {}
 
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.

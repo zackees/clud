@@ -1294,6 +1294,17 @@ where
         // never disconnects: after stdin EOF `recv_timeout` still waits out
         // its timeout instead of returning at once and spinning a core.
         let _event_channel_open = &event_tx;
+        // #1310: stop the reader even when a hook panics out of this loop.
+        // `thread::scope` joins the reader before re-raising the panic, and
+        // on Windows ConPTY never closes its pipe, so a reader that is never
+        // told to stop would keep the unwind waiting forever.
+        struct StopReaderOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopReaderOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let _stop_reader_on_unwind = StopReaderOnDrop(stop_reader);
         let mut next_tick = std::time::Instant::now() + PUMP_TICK;
         let exit_code = loop {
             let until_tick = next_tick.saturating_duration_since(std::time::Instant::now());
