@@ -135,14 +135,15 @@ and splits the work three ways:
    Exits when the channel disconnects (reader thread gone), which is also
    what guarantees any trailing output is flushed before the pump returns.
 3. **Main thread** (the loop body in `run_raw_pty_pump_full_verbose_with_writer`
-   itself) never touches output at all anymore. Each turn: drain resize
-   events, drain one `extra_rx` chunk, then block on
-   `stdin_rx.recv_timeout(STDIN_IDLE_POLL)` (`STDIN_IDLE_POLL` = 5 ms).
-   `recv_timeout` wakes as soon as a chunk is sent — the 5 ms bound only
-   governs genuine idle re-polling of resize/hooks/exit/interrupt, not
-   keystroke latency, which is what removes the old ~10 ms floor. Then
+   itself) never touches output at all anymore. Stdin, `extra_rx`,
+   resize, and the reader's close notice all arrive as `PumpEvent`s on
+   one channel (#691), and each turn blocks on `event_rx.recv_timeout`
+   until the next event or the `PUMP_TICK` deadline (50 ms). An event
+   wakes the loop immediately, so the tick bounds only idle re-checks of
+   hooks/exit/interrupt, not keystroke or resize latency. Then
    `hooks.on_tick`, then check `reader_closed` / `poll_pty_process` /
-   `interrupted` for shutdown.
+   `interrupted` for shutdown. Idle cost is measured by
+   `python -m bench.idle_cpu.harness --mode pty` ([DD-086](../DESIGN_DECISIONS.md#dd-086-interactive-claude-runs-through-the-pty-pump-when-both-stdio-ends-are-terminals)).
 
 A test-only seam, `run_raw_pty_pump_full_with_writer_for_test`
 (`session.rs:587`, `#[doc(hidden)]`), takes the destination writer as a

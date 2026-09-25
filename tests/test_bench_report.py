@@ -77,7 +77,16 @@ def test_budget_pass_and_fail_boundaries() -> None:
 
 def test_report_json_shape_is_stable() -> None:
     report = _report()
-    assert set(report) == {"head", "timestamp", "sessions", "window_secs", "per_process", "totals"}
+    assert set(report) == {
+        "head",
+        "mode",
+        "timestamp",
+        "sessions",
+        "window_secs",
+        "per_process",
+        "totals",
+    }
+    assert report["mode"] == "daemon"
     assert set(report["per_process"][0]) == {
         "role",
         "pid",
@@ -115,3 +124,28 @@ def test_baseline_files_parse() -> None:
             "daemon_cpu_seconds",
             "event_lines_appended",
         }
+
+
+def test_pty_mode_has_its_own_baselines() -> None:
+    from bench.idle_cpu.harness import _baseline_name
+
+    assert _baseline_name("daemon", 1) == "baseline_n1.json"
+    assert _baseline_name("pty", 6) == "baseline_pty_n6.json"
+    root = Path(__file__).resolve().parents[1] / "bench" / "idle_cpu"
+    for sessions in (1, 6):
+        path = root / _baseline_name("pty", sessions)
+        baseline = json.loads(path.read_text(encoding="utf-8"))
+        assert baseline["mode"] == "pty"
+        assert baseline["sessions"] == sessions
+
+
+def test_isolated_env_never_points_at_the_real_home(tmp_path: Path) -> None:
+    import os
+
+    from bench.idle_cpu.harness import _isolated_env
+
+    env = _isolated_env(tmp_path, tmp_path / "mock", tmp_path / "state")
+    for key in ("HOME", "USERPROFILE", "CLUD_HOOK_HOME"):
+        assert env[key] == str(tmp_path / "home")
+        assert env[key] != os.environ.get(key)
+    assert env["PATH"].startswith(str(tmp_path / "mock"))

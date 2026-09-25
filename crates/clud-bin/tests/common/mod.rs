@@ -217,14 +217,37 @@ pub fn pty_canary() -> bool {
     })
 }
 
+/// Environment variable that turns a failed PTY canary from a skip into a
+/// test failure. CI sets it on the harness it runs inside a pseudo-terminal
+/// (`ci/run_bundle.py`), so the configuration interactive launches ship —
+/// clud under a real terminal — cannot silently lose its coverage (#691).
+pub const REQUIRE_PTY_ENV: &str = "CLUD_REQUIRE_PTY";
+
+/// Whether `CLUD_REQUIRE_PTY` asks for a hard failure: set and not
+/// `0`/`false`/empty.
+pub fn pty_required() -> bool {
+    std::env::var(REQUIRE_PTY_ENV).is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
 /// Skip the current test when the PTY subsystem isn't reliably relaying
 /// output in this host environment (typically: nested Windows shells where
 /// the parent stdout is a pipe, so ConPTY can't attach a real console).
-/// Leaves a diagnostic on stderr so CI logs show the reason.
+/// Leaves a diagnostic on stderr so CI logs show the reason. Under
+/// `CLUD_REQUIRE_PTY=1` the canary failure panics instead.
 #[macro_export]
 macro_rules! require_pty_or_skip {
     ($test_name:literal) => {
         if !$crate::common::pty_canary() {
+            if $crate::common::pty_required() {
+                panic!(
+                    "[{}] PTY canary failed and {}=1 requires a working PTY (parent stdout is not a real console?)",
+                    $test_name,
+                    $crate::common::REQUIRE_PTY_ENV
+                );
+            }
             eprintln!(
                 "[{}] SKIP: PTY canary failed in this host environment (parent stdout is not a real console).",
                 $test_name

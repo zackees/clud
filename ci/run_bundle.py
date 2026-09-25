@@ -29,9 +29,10 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
-from running_process import RunningProcess
+from running_process import PseudoTerminalProcess, RunningProcess
 
 from ci import process
 
@@ -184,6 +185,64 @@ def install_wheel(bundle: Path, env: dict[str, str]) -> int:
     return do_install(wheel, env=env)
 
 
+# The Rust harness whose tests drive a real PTY (crates/clud-bin/tests/pty/).
+# Cargo names its binary `pty-<hash>[.exe]`.
+TERMINAL_HARNESS = "pty"
+# Makes `require_pty_or_skip!` fail instead of skip (tests/common/mod.rs).
+REQUIRE_PTY_ENV = "CLUD_REQUIRE_PTY"
+# Upper bound on the terminal harness; the job-level timeout is the backstop,
+# but a bounded wait here names the harness that wedged.
+TERMINAL_HARNESS_TIMEOUT_SECS = 900.0
+
+
+def needs_terminal(harness: Path) -> bool:
+    """True for the harness that must run with a terminal as its stdout.
+
+    #691: ConPTY stops relaying child output when the *spawning* process's
+    stdout is a pipe, which is what `process.run` gives every harness. The PTY
+    tests then skipped silently on Windows, so the configuration interactive
+    launches ship -- clud under a real terminal -- had no coverage there.
+    """
+    name, sep, _hash = harness.name.removesuffix(".exe").rpartition("-")
+    return bool(sep) and name == TERMINAL_HARNESS
+
+
+def run_in_terminal(argv: list[str], env: dict[str, str]) -> int:
+    """Run `argv` inside a pseudo-terminal, echoing its output as it arrives.
+
+    Inside the pseudo-terminal the harness's stdin and stdout are a console on
+    Windows and a TTY on POSIX, exactly as when a user launches clud, so the
+    PTY canary is expected to pass and `CLUD_REQUIRE_PTY=1` turns any failure
+    into a red test instead of a skip.
+    """
+    child_env = dict(env)
+    child_env[REQUIRE_PTY_ENV] = "1"
+    terminal = PseudoTerminalProcess(
+        argv, cwd=ROOT, env=child_env, capture=True, rows=50, cols=200
+    )
+    deadline = time.monotonic() + TERMINAL_HARNESS_TIMEOUT_SECS
+    try:
+        while time.monotonic() < deadline:
+            try:
+                sys.stdout.write(terminal.read_text(timeout=0.5))
+                sys.stdout.flush()
+            except TimeoutError:
+                continue
+            except EOFError:
+                break
+        else:
+            print(
+                f"::error::{argv[0]} did not finish within "
+                f"{TERMINAL_HARNESS_TIMEOUT_SECS:.0f}s inside the pseudo-terminal",
+                file=sys.stderr,
+            )
+            terminal.kill()
+            return 1
+        return terminal.wait(timeout=30)
+    finally:
+        terminal.close()
+
+
 def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
     """Run every `cargo test --no-run` harness binary shipped in the bundle."""
     tests_dir = bundle / "tests"
@@ -202,7 +261,10 @@ def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
         if sys.platform == "win32":
             argv += ["--test-threads=1"]
         print(f"::group::{harness.name}", flush=True)
-        rc = process.run(argv, cwd=ROOT, env=env).returncode
+        if needs_terminal(harness):
+            rc = run_in_terminal(argv, env)
+        else:
+            rc = process.run(argv, cwd=ROOT, env=env).returncode
         print("::endgroup::", flush=True)
         if rc != 0:
             failures.append(f"{harness.name} (rc={rc})")

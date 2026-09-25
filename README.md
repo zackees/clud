@@ -62,7 +62,7 @@ pip install clud       # plain pip; you must ensure the install bin dir is on PA
 ## Usage
 
 ```bash
-clud                              # Launch Claude in YOLO mode via subprocess
+clud                              # Launch Claude in YOLO mode (PTY in a terminal)
 clud --codex                      # Use Codex as the backend
 clud --claude                     # Use Claude as the backend (default)
 clud --deepseek                   # Use DeepSeek through the Claude harness
@@ -171,8 +171,12 @@ model-not-found errors, run `/logout` once inside Claude Code, exit, and
 relaunch `clud --openrouter`. Use `clud --claude` to return to native Claude
 routing.
 
-`clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
-to opt back into PTY while Claude PTY issues are being investigated.
+Interactive Claude launched from a real terminal (stdin and stdout both TTYs)
+runs through clud's PTY pump. Piped or redirected stdio, `-p`, and `--repeat`
+run as a subprocess. `--subprocess` (or `CLUD_PTY_DEFAULT=0` in the
+environment) restores the subprocess default for interactive launches;
+`--pty` or `CLUD_PTY_DEFAULT=1` forces PTY. See DD-086 in
+[docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md).
 
 ## PTY Graphics Headers
 

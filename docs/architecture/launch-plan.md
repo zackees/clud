@@ -99,6 +99,7 @@ production entrypoint in `crates/clud-bin/src/command/builder.rs`. In order, it:
    arguments.
 7. **Resolves launch mode** from `--pty`/`--subprocess`, the effective harness,
    whether Codex uses `exec`, loop state, and parent-TTY detection. Interactive
+   Claude with both stdio ends on a terminal is PTY (DD-086, #691). Interactive
    Codex is PTY everywhere except Windows-with-a-TTY, which inherits the
    console (DD-070, #1181).
 8. **Injects stream-json progress flags** for Claude subprocess-mode loops.

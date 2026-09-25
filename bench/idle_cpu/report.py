@@ -26,6 +26,7 @@ def assemble_report(
     after: Mapping[int, Mapping[str, float | int | None]],
     event_lines_before: int,
     event_lines_after: int,
+    mode: str = "daemon",
 ) -> dict[str, Any]:
     """Build a stable, JSON-ready report from two synthetic or real samples."""
     per_process: list[dict[str, Any]] = []
@@ -54,6 +55,7 @@ def assemble_report(
 
     return {
         "head": head,
+        "mode": mode,
         "timestamp": timestamp,
         "sessions": sessions,
         "window_secs": window_secs,

@@ -644,14 +644,18 @@ fn build_launch_plan_for_target_at(
     let launch_mode = if matches!(&args.command, Some(Command::Grind { .. })) {
         LaunchMode::Pty
     } else {
-        crate::backend::resolve_launch_mode(
-            args.pty,
-            args.subprocess,
+        crate::backend::resolve_launch_mode(crate::backend::LaunchModeRequest {
+            pty: args.pty,
+            subprocess: args.subprocess,
             backend,
             codex_uses_exec,
             is_loop,
             parent_has_tty,
-        )
+            // Same test the daemon uses to pick a worker's session kind
+            // (`daemon/entry.rs::select_session_kind`), plus `--repeat`.
+            interactive_session: !has_noninteractive_prompt(args, backend)
+                && repeat_schedule.is_none(),
+        })
     };
 
     // Issue: subprocess-mode loops on claude went silent until the iteration

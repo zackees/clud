@@ -1,0 +1,35 @@
+{
+  "head": "d5a5002bd7fb2ffadaa4dc63c182c2eff813a5bb",
+  "mode": "pty",
+  "per_process": [
+    {
+      "cpu_seconds": 0.92,
+      "ctx_switches": 1221,
+      "missing_at_end": false,
+      "pid": 982964,
+      "role": "pty-client"
+    },
+    {
+      "cpu_seconds": 0.55,
+      "ctx_switches": 1229,
+      "missing_at_end": false,
+      "pid": 983541,
+      "role": "daemon"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 983713,
+      "role": "pty-backend"
+    }
+  ],
+  "sessions": 1,
+  "timestamp": "2026-09-25T02:29:58.009937+00:00",
+  "totals": {
+    "client_cpu_seconds": 0.92,
+    "daemon_cpu_seconds": 0.55,
+    "event_lines_appended": 2
+  },
+  "window_secs": 60.0
+}

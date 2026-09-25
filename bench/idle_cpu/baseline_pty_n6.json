@@ -1,0 +1,105 @@
+{
+  "head": "d5a5002bd7fb2ffadaa4dc63c182c2eff813a5bb",
+  "mode": "pty",
+  "per_process": [
+    {
+      "cpu_seconds": 0.87,
+      "ctx_switches": 1235,
+      "missing_at_end": false,
+      "pid": 1002040,
+      "role": "pty-client"
+    },
+    {
+      "cpu_seconds": 0.35,
+      "ctx_switches": 1246,
+      "missing_at_end": false,
+      "pid": 1002424,
+      "role": "daemon"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 1002613,
+      "role": "pty-backend"
+    },
+    {
+      "cpu_seconds": 0.86,
+      "ctx_switches": 1210,
+      "missing_at_end": false,
+      "pid": 1002627,
+      "role": "pty-client"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 1002934,
+      "role": "pty-backend"
+    },
+    {
+      "cpu_seconds": 0.82,
+      "ctx_switches": 1220,
+      "missing_at_end": false,
+      "pid": 1002947,
+      "role": "pty-client"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 1003325,
+      "role": "pty-backend"
+    },
+    {
+      "cpu_seconds": 0.86,
+      "ctx_switches": 1227,
+      "missing_at_end": false,
+      "pid": 1003405,
+      "role": "pty-client"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 1003927,
+      "role": "pty-backend"
+    },
+    {
+      "cpu_seconds": 0.83,
+      "ctx_switches": 1214,
+      "missing_at_end": false,
+      "pid": 1003975,
+      "role": "pty-client"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 1004601,
+      "role": "pty-backend"
+    },
+    {
+      "cpu_seconds": 0.84,
+      "ctx_switches": 1229,
+      "missing_at_end": false,
+      "pid": 1004653,
+      "role": "pty-client"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 1005172,
+      "role": "pty-backend"
+    }
+  ],
+  "sessions": 6,
+  "timestamp": "2026-09-25T02:32:37.847985+00:00",
+  "totals": {
+    "client_cpu_seconds": 5.079999999999999,
+    "daemon_cpu_seconds": 0.35,
+    "event_lines_appended": 2
+  },
+  "window_secs": 60.0
+}

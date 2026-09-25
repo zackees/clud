@@ -3935,3 +3935,52 @@ later build apply another weighting without scraping OpenRouter at launch.
 **Consequences:** Prices may be six hours stale on a healthy install, or older
 when fetches keep failing. The producer fails visibly on invalid upstream data
 and commits only validated deterministic output.
+
+## DD-086: Interactive Claude runs through the PTY pump when both stdio ends are terminals
+
+**Status:** Accepted
+
+**Context:** #691. PTY was clud's original default (`2ebba3f`); two days later
+`a4ef5f5` moved Claude to subprocess with no recorded rationale, and every
+reason later cited for keeping it there was stale or mis-cited (#38 and #328
+closed, #46 vs PR #47; see #737). Meanwhile owning the byte stream is a
+precondition for per-tab focus (#676), title handling without a keeper
+thread, and a uniform replay shape (#679). Two facts blocked a flip: nothing
+measured the PTY pump's idle cost, and CI never proved the pump works on
+Windows with a real console, because `require_pty_or_skip!` skipped every PTY
+test whenever the harness's stdout was a pipe, which is how CI ran it.
+
+**Decision:** `resolve_launch_mode` picks PTY for Claude when clud's stdin and
+stdout are both terminals and the launch is interactive (no `-p`/`loop` or
+other non-interactive prompt, no `--repeat`) — the same interactivity test the
+daemon already uses to pick a worker's session kind. Everything else stays a
+subprocess. `--subprocess` and `--pty` still win; `CLUD_PTY_DEFAULT` becomes a
+tri-state (`0` restores the old default, `1` forces PTY for every Claude
+launch). Windows `clud loop` stays subprocess: a loop is non-interactive and
+its stream-json progress view and `<<<CLUD_LOOP_DONE>>>` fallback exist only
+on the subprocess path. Before the flip the pump was budgeted: every input
+source (stdin, `extra_rx`, resize, reader close) now feeds one channel, and
+the main loop blocks on it with a 50 ms tick instead of polling stdin every
+5 ms. CI runs the `pty` harness inside a pseudo-terminal with
+`CLUD_REQUIRE_PTY=1`, so a canary failure is a red test rather than a skip.
+
+**Rationale:** Gating on stdout, not only stdin, is what makes the flip safe:
+`CreatePseudoConsole` stops relaying child output when the spawning process's
+stdout is redirected, so `clud > out.txt` would hang. Non-interactive runs
+gain nothing from a PTY and would pay its per-byte cost. The pump budget was
+measured with `bench/idle_cpu --mode pty` on Linux, same host, 60 s windows,
+back to back: one idle session went from 11,314 to 1,221 context switches and
+1.89 to 0.92 CPU-seconds; six went from 69,692 to 7,335 and 7.6 to 5.08. The
+merged channel keeps keystroke latency where DD-018 put it: an event wakes the
+loop immediately, and the tick only bounds idle re-checks of the interrupt
+flag, hooks, and Windows child exit (ConPTY keeps the output pipe open after
+the child exits).
+
+**Consequences:** Interactive Claude gets the PTY-only features (drag-drop
+path normalization, Ctrl+V image paste, F3 voice, in-grid toasts) on every
+platform, and ConPTY's attach-time repaint (#515) now applies to Claude on
+Windows too. The Windows resize watcher still polls every 150 ms and the
+`console_input` adapter still waits in 100 ms slices; both need upstream
+`running-process` support to become event-driven. Per-tab focus, the one-shot
+title stamp, and uniform replay remain #676/#679 work. Python `--dry-run`
+tests are unaffected because they run without a TTY.
