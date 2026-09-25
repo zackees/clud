@@ -90,6 +90,7 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
     keys.push(crate::shell::completion_guard::SUPPRESS_KEY);
     keys.push(crate::shell::nounset::BASH_ENV_KEY);
     keys.push(crate::shell::nounset::PREV_KEY);
+    keys.push(crate::shell::cmd_gate::GATE_KEY);
     keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
     keys
 }
@@ -222,6 +223,12 @@ fn apply_child_env_policy_with_nounset_opt_out(
         push_or_replace(&mut env, &key, &value);
     }
 
+    // Issue #1067 step 3: opt-in (`CLUD_CMD_GATE_AUTO=1`) command gate, set
+    // only when the wrapper resolves on this env's PATH. See shell::cmd_gate.
+    for (key, value) in crate::shell::cmd_gate::env_overrides(&env) {
+        push_or_replace(&mut env, &key, &value);
+    }
+
     crate::shim_session::activate_rm(&mut env);
     env
 }
@@ -326,6 +333,42 @@ mod tests {
         );
         let expected = std::env::current_exe().unwrap();
         assert_eq!(value(&env, "CLUD_EXE"), expected.to_str());
+    }
+
+    /// #1067 step 3 through the real builder and a real PATH lookup: opting
+    /// in gates the session only once a `tap` executable is on its PATH.
+    #[test]
+    fn opted_in_session_is_gated_only_when_tap_is_on_path() {
+        let bin = tempdir().unwrap();
+        let path = bin.path().to_str().unwrap().to_string();
+        let base = |path: &str| {
+            vec![
+                ("CLUD_CMD_GATE_AUTO".to_string(), "1".to_string()),
+                ("PATH".to_string(), path.to_string()),
+            ]
+        };
+        let env = apply_child_env_policy_with_nounset_opt_out(base(&path), false, true);
+        assert_eq!(value(&env, "CLUD_CMD_GATE"), None, "no tap, no gate");
+
+        let tap = bin
+            .path()
+            .join(if cfg!(windows) { "tap.exe" } else { "tap" });
+        std::fs::write(&tap, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tap, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = apply_child_env_policy_with_nounset_opt_out(base(&path), false, true);
+        assert_eq!(value(&env, "CLUD_CMD_GATE"), Some("enforce"));
+
+        // Without the opt-in, a tap on PATH changes nothing.
+        let env = apply_child_env_policy_with_nounset_opt_out(
+            vec![("PATH".to_string(), path.clone())],
+            false,
+            true,
+        );
+        assert_eq!(value(&env, "CLUD_CMD_GATE"), None);
     }
 
     #[test]

@@ -241,6 +241,13 @@ name = "clud-bench-proc-sampler"
 path = "src/bin/clud_bench_proc_sampler.rs"
 required-features = ["bench"]
 
+# Issue #1067 step 2: replay recorded agent Bash commands through the command
+# gate and report what it would cost. Opt-in for the same reason as above.
+[[bin]]
+name = "clud-bench-gate-replay"
+path = "src/bin/clud_bench_gate_replay.rs"
+required-features = ["bench"]
+
 # Slice 1 of #406 / #409: tiny PATH-resolved relay that lives at
 # `~/.clud/state/shims/python` etc. so any `python` invocation inside a
 # clud session goes through the daemon's ResolveInterpreter RPC.

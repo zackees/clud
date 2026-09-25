@@ -2640,8 +2640,9 @@ stays in place rather than being retired on arrival.
 
 ### Rollout, and how to turn it off (#1067)
 
-`tap` v0 ships as the `tap` binary in `crates/tap`. It exists; it is not on by
-default, and clud does not set `CLUD_CMD_GATE`.
+`tap` v0 ships as the `tap` binary in `crates/tap`. It is not on by default.
+clud sets `CLUD_CMD_GATE` only when you opt in with `CLUD_CMD_GATE_AUTO` (step 3
+below).
 
 The gate is controlled entirely by two environment variables, both read by
 `block_bad_cmd_gate`:
@@ -2650,23 +2651,45 @@ The gate is controlled entirely by two environment variables, both read by
 |---|---|
 | `CLUD_CMD_GATE` | `enforce`, `1`, or `on` turns the gate on. Anything else, including unset, leaves it off. |
 | `CLUD_CMD_GATE_PREFIX` | The required wrapper. Defaults to `tap`. |
+| `CLUD_CMD_GATE_AUTO` | Read by clud, not the gate: `1`/`true`/`yes`/`on` makes clud set `CLUD_CMD_GATE=enforce` in the session it launches, **only if** the wrapper resolves on that session's `PATH` and `CLUD_CMD_GATE` is not already set. |
 
 **Disabling returns to post-#1064 behaviour exactly.** Unsetting
-`CLUD_CMD_GATE` is the whole revert: the gate's own entry point short-circuits
+`CLUD_CMD_GATE` (and `CLUD_CMD_GATE_AUTO`, if you opted in) is the whole revert: the gate's own entry point short-circuits
 on it before inspecting anything, so no other code path changes. Removing the
 `tap` binary is not required and does nothing on its own -- an enabled gate
 with no `tap` on `PATH` refuses everything, which is the failure-closed
 direction but not a useful state.
 
-The enablement sequence in #1067 is deliberately staged, and steps 2-4 are not
-taken here:
+The enablement sequence in #1067 is deliberately staged:
 
-1. **Ship `tap` and dogfood it opt-in** — where this is. Turn it on for a
-   session with `CLUD_CMD_GATE=enforce`.
-2. **Measure the false-positive rate** from the hook log before going further.
-3. Set `CLUD_CMD_GATE` from the `LaunchPlan` where `tap` is on `PATH`, behind
-   a clud-side flag.
-4. Default-on for clud-launched sessions.
+1. **Ship `tap` and dogfood it opt-in.** Done: `CLUD_CMD_GATE=enforce`.
+2. **Measure the false-positive rate.** Done, by replay rather than a dogfood
+   log: `clud-bench-gate-replay` (`--features bench`) runs every Bash command
+   recorded in Claude Code transcripts through the gate's own classifier
+   (`block_bad_cmd_gate::classify`) and reports counts only. On 2,538
+   transcripts / 121,745 commands (2026-09-25):
+
+   | Class | Share |
+   |---|---|
+   | Passes as written | 0.6% |
+   | Passes once its one statement is prefixed | 11.9% |
+   | Passes once each of several statements is prefixed | 71.8% |
+   | **Refused even fully wrapped** (needs restructuring) | **15.7%** |
+
+   The refused 15.7% is mostly command substitution (12,589), control flow
+   (4,238) and subshells (1,801). A replay measures commands agents wrote
+   *without* the gate, so it is the friction an agent would meet on first
+   contact, not after it adapts. It is also the floor for step 4's decision.
+3. **Opt-in, from clud.** Done: `CLUD_CMD_GATE_AUTO=1`. It is a child-env
+   layer (`shell::cmd_gate`, next to nounset) rather than a `LaunchPlan`
+   field, because `apply_child_env_policy` is the one builder both the
+   foreground runner and the daemon use; a detached session is gated exactly
+   like a foreground one with no new daemon wire field.
+4. **Default-on — not taken.** One command in six would be refused outright
+   even from an agent that wraps everything, and 72% would need several
+   prefixes. That is not an affordable default. Revisit only with a gate that
+   admits more shapes (for example, wrapped pipelines or `$(...)` whose body is
+   itself wrapped), re-measured with the same replay.
 
 Step 2 is not ceremony. The gate refuses compound commands, control flow, and
 command substitution outright; that is affordable only if the rate at which it

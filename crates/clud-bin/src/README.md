@@ -511,6 +511,13 @@ which test tier a change belongs in — lives in
   prefix check. Refuses anything it cannot decompose with certainty (command
   substitution, subshells, process substitution, control flow); the cost of
   that is one extra tool call, not a wedged session. See DD-056.
+  `classify` (re-exported as `block_bad_cmd::classify_for_gate`) grades a
+  command by how much restating it needs; `gate_replay.rs` and the
+  `clud-bench-gate-replay` bench binary use it to measure the gate's cost
+  over recorded transcripts (#1067 step 2).
+- `gate_replay.rs` - content-safe aggregation for that replay: extracts Bash
+  commands from Claude Code transcript lines and counts gate classes, never
+  command text.
 - `settings_tui.rs` - `clud settings`: small cross-platform TUI checkbox menu
   over global boolean settings in `~/.clud/settings.json` (`clud_settings.rs`
   owns persistence). Pure `Menu` state machine + crossterm raw-mode I/O shell,

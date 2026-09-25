@@ -14,6 +14,7 @@
 //! #753), which is a property of the shell's login environment rather than of
 //! which shell gets picked.
 
+pub mod cmd_gate;
 pub mod completion_guard;
 pub mod git_bash_resolver;
 pub mod nounset;

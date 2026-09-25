@@ -31,6 +31,13 @@ The two enforcement layers live elsewhere:
 ## What's here
 
 - `mod.rs` — module root.
+- `cmd_gate.rs` — #1067 step 3: with `CLUD_CMD_GATE_AUTO=1` in clud's own
+  environment, sets `CLUD_CMD_GATE=enforce` in the child env, but only when the
+  gate's wrapper (`tap`, or `CLUD_CMD_GATE_PREFIX`) resolves on the child's
+  `PATH` and the user has not set `CLUD_CMD_GATE` themselves. Applied by
+  `runner::apply_child_env_policy`, so foreground and daemon sessions agree.
+  `pub fn env_overrides(env)` / `env_overrides_with(env, resolves)` (test seam).
+  Default-on is deliberately not taken; see DD-056's rollout section.
 - `completion_guard.rs` — keeps Git-Bash completion functions out of the
   backend's **shell snapshot** (#753). Unrelated to shell *selection*: this is
   about the login environment the chosen shell starts in. Claude Code snapshots
