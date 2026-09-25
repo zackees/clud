@@ -20,6 +20,18 @@ carve-out was removed along with the `whisper-rs` dependency entirely —
 voice transcription is stubbed on every platform now; see
 `crates/clud-bin/src/voice/README.md`.)
 
+## Git Bash / mintty
+
+Git Bash's mintty terminal is not a Windows console: without `winpty` a
+native `clud.exe` gets pipe stdio, so `session::terminals_are_interactive()`
+is false and clud runs in subprocess mode (pipes cannot do raw mode or
+ConPTY). This is deliberate, not fixed by lying about the TTY (#1357).
+Instead `session::warn_if_mintty_without_console()` (called once from
+`main.rs` on the launch path) detects Windows + non-terminal stdin/stdout +
+a real `TERM` + non-empty `MSYSTEM` and prints one stderr line explaining the
+downgrade. Set `CLUD_NO_MINTTY_WARNING=1` to silence it. Workaround: run clud
+from Windows Terminal, or wrap it as `winpty clud ...`.
+
 ## Why so many?
 
 Each of these is individually small. Cumulatively they exist because Windows
