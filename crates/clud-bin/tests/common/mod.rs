@@ -167,6 +167,22 @@ pub fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     false
 }
 
+/// What a child reads when `sent` is written to its PTY input.
+///
+/// POSIX PTYs in raw mode pass bytes through unchanged. ConPTY parses its
+/// input into key events and turns a bare LF into the Enter key, which the
+/// child reads as CR; escape sequences survive byte-for-byte once the child
+/// is in VT input mode (#1310). Tests compare against this, not `sent`.
+pub fn through_pty_input(sent: &[u8]) -> Vec<u8> {
+    if cfg!(windows) {
+        sent.iter()
+            .map(|&byte| if byte == b'\n' { b'\r' } else { byte })
+            .collect()
+    } else {
+        sent.to_vec()
+    }
+}
+
 /// Wait until mock-agent's `--mock-ready-file` exists: its stdin mode is
 /// final and bytes sent from now on arrive intact (#1310). On Windows,
 /// ConPTY converts input to key records under the console mode current when

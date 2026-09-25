@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use running_process::pty::NativePtyProcess;
 
-use crate::common::{drain_reader, mock_agent_path, wait_for_mock_ready};
+use crate::common::{drain_reader, mock_agent_path, through_pty_input, wait_for_mock_ready};
 
 /// Counting hooks for pump integration tests. Records F3 presses,
 /// releases, ticks, and can opt into voice interception via `intercept`.
@@ -114,10 +114,11 @@ fn raw_pump_forwards_stdin_bytes_verbatim() {
     let _ = process.close_impl();
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    let expected = through_pty_input(payload);
     assert_eq!(
-        got, payload,
+        got, expected,
         "pump must forward stdin bytes verbatim; got {:?}, expected {:?}",
-        got, payload
+        got, expected
     );
 }
 
@@ -174,10 +175,11 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
     let _ = process.close_impl();
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    let expected = through_pty_input(payload);
     assert_eq!(
-        got, payload,
+        got, expected,
         "F3 interception must NOT eat bytes; child should still see {:?}, got {:?}",
-        payload, got
+        expected, got
     );
     assert_eq!(
         presses.load(std::sync::atomic::Ordering::SeqCst),
@@ -238,7 +240,8 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
     assert_eq!(
-        got, payload,
+        got,
+        through_pty_input(payload),
         "kitty release detection must NOT eat bytes; child should still see the full payload"
     );
     assert_eq!(
@@ -644,11 +647,22 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
             .any(|window| window == b"\x1b[D\x1b[B\x1b[C\x1b[A"),
         "complete navigation sequences must reach the child PTY; got {got:?}"
     );
-    assert!(
-        got.contains(&b'\n'),
-        "Shift+Enter translation must produce a literal \\n in the child's stdin; got {:?}",
-        got
-    );
+    // Shift+Enter is sent as a literal LF. ConPTY turns that into Enter, so
+    // on Windows the child cannot tell it from plain Enter (#1369).
+    if cfg!(windows) {
+        assert_eq!(
+            got.iter().filter(|&&byte| byte == b'\r').count(),
+            2,
+            "under ConPTY both Shift+Enter (LF) and Enter arrive as CR; got {:?}",
+            got
+        );
+    } else {
+        assert!(
+            got.contains(&b'\n'),
+            "Shift+Enter translation must produce a literal \\n in the child's stdin; got {:?}",
+            got
+        );
+    }
     assert!(
         got.contains(&b'\r'),
         "plain Enter translation must produce a \\r in the child's stdin; got {:?}",
