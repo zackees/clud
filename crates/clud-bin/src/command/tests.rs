@@ -813,13 +813,18 @@ fn test_codex_prompt_goes_through_exec_subcommand() {
     assert_eq!(p.launch_mode, LaunchMode::Subprocess);
 }
 
+/// An interactive launch is PTY from a console and subprocess without one
+/// (DD-086). `cargo test` may or may not have a terminal, so ask.
+fn console_launch_mode() -> LaunchMode {
+    if crate::session::terminals_are_interactive() {
+        LaunchMode::Pty
+    } else {
+        LaunchMode::Subprocess
+    }
+}
+
 #[test]
-fn test_codex_interactive_defaults_to_pty_without_tty() {
-    // Under `cargo test` there is no controlling terminal, so
-    // `parent_has_tty` is false and the interactive TUI gets a PTY.
-    // With a real TTY (normal user invocation) the answer is
-    // platform-split (#1181): PTY on Linux/macOS, subprocess on
-    // Windows — see `backend::test_codex_interactive_with_tty_*`.
+fn test_codex_interactive_follows_console_rule() {
     let p = plan(&["clud", "--codex"]);
     assert_eq!(
         p.command,
@@ -829,7 +834,7 @@ fn test_codex_interactive_defaults_to_pty_without_tty() {
         ]
         .concat()
     );
-    assert_eq!(p.launch_mode, LaunchMode::Pty);
+    assert_eq!(p.launch_mode, console_launch_mode());
 }
 
 #[test]
@@ -897,7 +902,7 @@ fn test_codex_continue_uses_resume_last() {
         ]
         .concat()
     );
-    assert_eq!(p.launch_mode, LaunchMode::Pty);
+    assert_eq!(p.launch_mode, console_launch_mode());
 }
 
 #[test]
@@ -968,8 +973,8 @@ fn test_codex_builtin_verbs_seed_interactive_sessions() {
         );
         assert_eq!(
             p.launch_mode,
-            LaunchMode::Pty,
-            "headless tests have no parent TTY, so an interactive Codex TUI needs a PTY; argv={argv:?}"
+            console_launch_mode(),
+            "an interactive Codex TUI follows the console rule (DD-086); argv={argv:?}"
         );
     }
 }
@@ -1282,7 +1287,7 @@ fn grind_uses_one_interactive_harness_session_without_external_loop_state() {
         "grind prompt must contain the URL; got: {prompt:?}"
     );
     assert!(!p.command.iter().any(|arg| arg == "-p"));
-    assert_eq!(p.launch_mode, LaunchMode::Pty);
+    assert_eq!(p.launch_mode, console_launch_mode());
     assert_eq!(p.iterations, 1);
     assert!(p.loop_markers.is_none());
     assert!(p.repeat_schedule.is_none());
@@ -1325,7 +1330,7 @@ fn grind_through_claude_harness_seeds_native_loop_interactively() {
     ]);
     let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
     assert!(!plan.command.iter().any(|arg| arg == "-p"));
-    assert_eq!(plan.launch_mode, LaunchMode::Pty);
+    assert_eq!(plan.launch_mode, console_launch_mode());
     assert_eq!(plan.iterations, 1);
     assert!(plan.loop_markers.is_none());
     assert!(plan.command.last().is_some_and(|prompt| {
@@ -1532,7 +1537,7 @@ fn grind_never_enables_external_loop_stream_json() {
         "grind",
         "https://github.com/zackees/clud/issues",
     ]);
-    assert_eq!(p.launch_mode, LaunchMode::Pty);
+    assert_eq!(p.launch_mode, console_launch_mode());
     assert!(!p.command.iter().any(|arg| arg == "stream-json"));
     assert!(!p.command.iter().any(|arg| arg == "--verbose"));
     assert!(!p.stream_json_progress);

@@ -64,7 +64,7 @@ setup.
 When changing `grind`, verify all of the following:
 
 - One backend harness session is launched for one `clud grind` invocation.
-- Launch mode is interactive PTY and the generated prompt begins `/loop look
+- Launch mode follows DD-086 (PTY from a console) and the generated prompt begins `/loop look
   at <resolved issues URL>`.
 - The argv uses the harness's ordinary interactive entrypoint.
 - The plan carries no loop markers, repeat schedule, external iteration count,
