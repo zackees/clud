@@ -1,7 +1,7 @@
-use super::merge_extra_rx;
 use super::runner_exit::normalize_exit_code;
 use super::runner_terminal;
 use super::*;
+use super::{lease_shared_rx, merge_extra_rx};
 
 pub(super) fn run_with_inherited_stdio(
     process: &subprocess::ManagedSubprocess,
@@ -128,18 +128,21 @@ pub fn run_plan_pty(
     // launches. The injector writes into `dnd_rx` which the pump drains
     // and forwards to the PTY master. Held for the full launch — the
     // refresh worker thread needs to keep displacing Claude Code's
-    // own IDropTarget across iterations.
+    // own IDropTarget across iterations. Issue #1360: the receiver is
+    // shared across iterations; each iteration leases it through
+    // `lease_shared_rx` instead of moving it, so drops reach every child.
     #[cfg(windows)]
-    let (_dnd_pty_guard, mut dnd_rx) = if dnd_enabled {
+    let (_dnd_pty_guard, dnd_rx) = if dnd_enabled {
         crate::startup::try_register_console_drop_target_pty()
     } else {
         (None, None)
     };
     #[cfg(not(windows))]
-    let (_dnd_pty_guard, mut dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) = {
+    let (_dnd_pty_guard, dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) = {
         let _ = dnd_enabled;
         (None, None)
     };
+    let dnd_shared = dnd_rx.map(|rx| std::sync::Arc::new(std::sync::Mutex::new(rx)));
 
     let statusline = toast_cfg
         .claude_statusline
@@ -346,9 +349,16 @@ pub fn run_plan_pty(
         let _console_guard = enable_console_vt_input();
         let raw_guard = session::enter_raw_mode_if_tty();
 
-        // The OLE drag-drop receiver is one-shot for the process, while the
-        // native keyboard receiver above is fresh on every iteration.
-        let dnd_for_iteration = if iteration == 0 { dnd_rx.take() } else { None };
+        // Issue #1360: the OLE drag-drop receiver lives for the whole
+        // process and is leased per iteration; the lease guard stops its
+        // forwarder at iteration end so the next lease is the only reader.
+        let (dnd_for_iteration, _dnd_lease) = match &dnd_shared {
+            Some(shared) => {
+                let (rx, lease) = lease_shared_rx(shared);
+                (Some(rx), Some(lease))
+            }
+            None => (None, None),
+        };
         let extra_rx = merge_extra_rx(dnd_for_iteration, console_input_rx);
         // #1181: only Codex gets the bare-LF -> CRLF output filter; see
         // `codex_lf.rs` for why it must stay off for every other backend.
