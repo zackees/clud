@@ -162,12 +162,15 @@ def test_auth_status_and_logout_run_through_the_binary(
 def test_dry_run_makes_zero_vault_calls(
     clud_binary: Path, mock_env: dict[str, str], tmp_path: Path, flag: str
 ) -> None:
-    """#936: dry-run never touches the vault. The test vault points at a
-    regular file, so any read fails as "vault unavailable". The live control
+    """#936: dry-run never touches the vault. Each provider's record in the
+    test vault is a directory, so any read fails as "vault unavailable" on
+    every OS (a file under a regular file reads as NotFound on Windows,
+    which would look like "not configured" instead). The live control
     launch proves the poison works; the dry run must not notice it."""
-    poison = tmp_path / "not-a-directory"
-    poison.write_text("", encoding="utf-8")
-    env = _env(mock_env, poison)
+    vault = _vault(tmp_path)
+    for record in VAULT_FILES.values():
+        (vault / record).mkdir()
+    env = _env(mock_env, vault)
 
     live = _run(clud_binary, flag, "-p", "hello", env=env)
     assert live.returncode == 2, live.stderr
