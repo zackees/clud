@@ -343,7 +343,7 @@ fn build_launch_plan_for_target_at(
         }
     }
 
-    if matches!(backend, Backend::Codex) {
+    if backend.settings_surface() == crate::backend::SettingsSurface::CodexConfigOverrides {
         for override_value in &args.codex_config_overrides {
             cmd.push("-c".to_string());
             cmd.push(override_value.clone());

@@ -231,6 +231,31 @@ impl std::fmt::Display for LaunchTargetError {
 
 impl std::error::Error for LaunchTargetError {}
 
+/// A harness's argument surface for launch-scoped configuration (#977).
+///
+/// clud compiles its settings into launch arguments and never writes a
+/// harness's config files (DD-049), so what a harness can receive is bounded
+/// by this surface. See `docs/architecture/hook-dispatch.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSurface {
+    /// `--settings <file-or-json>`: an additional source that merges with the
+    /// settings files; hook entries concatenate across levels.
+    ClaudeSettingsArg,
+    /// Repeated `-c key=value` overrides of `config.toml`. Codex hooks live
+    /// in a separate `hooks.json` that no flag can point at, so hooks are not
+    /// expressible; the installed PreToolUse line is codex's only coverage.
+    CodexConfigOverrides,
+    /// Only a named `--profile` switch; no known hook or settings argument.
+    ProfileOnly,
+}
+
+impl SettingsSurface {
+    /// Whether clud's declared hooks can be delivered as launch arguments.
+    pub fn accepts_hooks(self) -> bool {
+        matches!(self, SettingsSurface::ClaudeSettingsArg)
+    }
+}
+
 /// Supported backend agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Backend {
@@ -241,6 +266,16 @@ pub enum Backend {
 
 impl Backend {
     pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::DeepSeek];
+
+    /// How clud hands this harness launch-scoped configuration (#977).
+    /// Call sites ask this instead of matching on the harness.
+    pub fn settings_surface(&self) -> SettingsSurface {
+        match self {
+            Backend::Claude => SettingsSurface::ClaudeSettingsArg,
+            Backend::Codex => SettingsSurface::CodexConfigOverrides,
+            Backend::DeepSeek => SettingsSurface::ProfileOnly,
+        }
+    }
 
     /// The executable name to search for on PATH.
     pub fn executable_name(&self) -> &'static str {
@@ -896,6 +931,23 @@ mod tests {
             saved_harness_override_notice(cli_override, true, false),
             None
         );
+    }
+
+    /// #977: the registry is the one place that says which harness can take
+    /// hooks as launch arguments. Codex cannot (no flag names a hooks file).
+    #[test]
+    fn settings_surface_registry_records_hook_support() {
+        assert_eq!(
+            Backend::Claude.settings_surface(),
+            SettingsSurface::ClaudeSettingsArg
+        );
+        assert_eq!(
+            Backend::Codex.settings_surface(),
+            SettingsSurface::CodexConfigOverrides
+        );
+        assert!(Backend::Claude.settings_surface().accepts_hooks());
+        assert!(!Backend::Codex.settings_surface().accepts_hooks());
+        assert!(!Backend::DeepSeek.settings_surface().accepts_hooks());
     }
 
     #[test]

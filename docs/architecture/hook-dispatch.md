@@ -234,6 +234,11 @@ read-modify-write lost updates, two writers fighting over one file (the #847
 failure mode), per-repo gitignore assumptions, and stale state left behind by a
 killed session.
 
+Each harness's surface is recorded once, in `backend::SettingsSurface`
+(`Backend::settings_surface`): Claude `--settings`, Codex `-c` overrides that
+cannot carry hooks, DeepSeek `--profile` only. Call sites ask
+`accepts_hooks()` rather than matching on the harness.
+
 `--setting-sources` can also *subtract* a source, which would let clud absorb a
 repo's existing `.claude/settings.json` hooks and fix repos with no migration
 at all. Deliberately not done yet: excluding a source drops everything it

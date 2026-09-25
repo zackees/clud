@@ -1565,7 +1565,7 @@ fn hook_roots_env_value(plan: &LaunchPlan) -> Option<(String, String)> {
 /// flag pointing at an alternate one. Codex keeps the PreToolUse coverage its
 /// already-installed `clud-cmd-scan` line gives it.
 fn declared_hooks_settings(plan: &LaunchPlan) -> Result<Option<ClaudeSettings>, BridgeError> {
-    if plan.effective_harness() != Backend::Claude {
+    if !plan.effective_harness().settings_surface().accepts_hooks() {
         return Ok(None);
     }
     let Some(fragment) = declared_hook_fragment(plan) else {
@@ -1588,10 +1588,10 @@ fn declared_hook_fragment(plan: &LaunchPlan) -> Option<serde_json::Value> {
     let hooks = crate::clud_hooks::discover(&repo_root)?;
     // Phase 5: clud's own `CwdChanged` backstop line rides on frontend
     // support, probed once per launch against the resolved backend binary.
-    // Every consumer of the fragment is a Claude launch (the bridge wraps
-    // Claude; codex has no argument surface for hooks), so probe only there —
-    // a failed probe degrades silently to no line (DD-064).
-    let cwd_changed_supported = plan.effective_harness() == Backend::Claude
+    // Only a harness whose settings surface accepts hooks consumes the
+    // fragment (the bridge wraps Claude; see `SettingsSurface`), so probe only
+    // there — a failed probe degrades silently to no line (DD-064).
+    let cwd_changed_supported = plan.effective_harness().settings_surface().accepts_hooks()
         && plan
             .command
             .first()
