@@ -1,44 +1,80 @@
-//! Windows console-mode plumbing: enable `ENABLE_VIRTUAL_TERMINAL_INPUT` for
-//! the duration of a PTY session, and restore the prior mode on drop. No-op
-//! on POSIX.
+//! Windows console-mode plumbing: for the duration of a PTY session, enable
+//! `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin and
+//! `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on stdout, and restore both prior
+//! modes on drop. No-op on POSIX.
 
 use std::io;
 
-/// RAII guard that restores the original console input mode on drop.
+/// Windows console input mode flag for virtual terminal input.
+#[cfg(windows)]
+const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+/// Windows console output mode flag for virtual terminal processing.
+#[cfg(windows)]
+const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+#[cfg(windows)]
+extern "system" {
+    fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+    fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+}
+
+/// RAII guard that restores the original console input and output modes on
+/// drop.
 pub struct ConsoleVtGuard {
     #[cfg(windows)]
     original_mode: Option<u32>,
+    #[cfg(windows)]
+    original_output_mode: Option<u32>,
 }
 
 impl Drop for ConsoleVtGuard {
     fn drop(&mut self) {
         #[cfg(windows)]
-        if let Some(mode) = self.original_mode {
-            restore_console_mode(mode);
+        {
+            use std::os::windows::io::AsRawHandle;
+            if let Some(mode) = self.original_mode {
+                restore_console_mode(io::stdin().as_raw_handle() as isize, mode);
+            }
+            if let Some(mode) = self.original_output_mode {
+                restore_console_mode(io::stdout().as_raw_handle() as isize, mode);
+            }
         }
     }
 }
 
-/// Enable `ENABLE_VIRTUAL_TERMINAL_INPUT` on the Windows console so ANSI
-/// sequences (bracketed paste, etc.) pass through to the child process.
-/// Returns a guard that restores the original mode on drop.
+/// Enable `ENABLE_VIRTUAL_TERMINAL_INPUT` on the Windows console input handle
+/// so ANSI sequences (bracketed paste, etc.) pass through to the child
+/// process, and `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stdout console
+/// handle so ANSI sequences written to stdout are interpreted instead of
+/// printed literally. Each handle is handled independently: a non-terminal or
+/// failing handle does not skip the other.
+/// Returns a guard that restores both original modes on drop.
 /// On non-Windows platforms this is a no-op.
 pub fn enable_console_vt_input() -> ConsoleVtGuard {
     #[cfg(windows)]
     {
         use std::io::IsTerminal;
-        if !io::stdin().is_terminal() {
-            return ConsoleVtGuard {
-                original_mode: None,
-            };
-        }
-        match set_console_vt_input(true) {
-            Some(original) => ConsoleVtGuard {
-                original_mode: Some(original),
-            },
-            None => ConsoleVtGuard {
-                original_mode: None,
-            },
+        use std::os::windows::io::AsRawHandle;
+        let original_mode = if io::stdin().is_terminal() {
+            or_console_mode(
+                io::stdin().as_raw_handle() as isize,
+                ENABLE_VIRTUAL_TERMINAL_INPUT,
+            )
+        } else {
+            None
+        };
+        let original_output_mode = if io::stdout().is_terminal() {
+            or_console_mode(
+                io::stdout().as_raw_handle() as isize,
+                ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            )
+        } else {
+            None
+        };
+        ConsoleVtGuard {
+            original_mode,
+            original_output_mode,
         }
     }
     #[cfg(not(windows))]
@@ -47,31 +83,17 @@ pub fn enable_console_vt_input() -> ConsoleVtGuard {
     }
 }
 
+/// OR `bit` into the console mode of `handle`. Returns the original mode, or
+/// `None` if the handle is not a console or the mode could not be set.
 #[cfg(windows)]
-fn set_console_vt_input(enable: bool) -> Option<u32> {
-    use std::os::windows::io::AsRawHandle;
-
-    // Windows console mode flag for virtual terminal input processing.
-    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
-
-    extern "system" {
-        fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
-        fn SetConsoleMode(handle: isize, mode: u32) -> i32;
-    }
-
-    let handle = io::stdin().as_raw_handle() as isize;
+fn or_console_mode(handle: isize, bit: u32) -> Option<u32> {
     unsafe {
         let mut mode: u32 = 0;
         if GetConsoleMode(handle, &mut mode) == 0 {
             return None;
         }
         let original = mode;
-        if enable {
-            mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-        } else {
-            mode &= !ENABLE_VIRTUAL_TERMINAL_INPUT;
-        }
-        if SetConsoleMode(handle, mode) == 0 {
+        if SetConsoleMode(handle, mode | bit) == 0 {
             return None;
         }
         Some(original)
@@ -79,14 +101,7 @@ fn set_console_vt_input(enable: bool) -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn restore_console_mode(mode: u32) {
-    use std::os::windows::io::AsRawHandle;
-
-    extern "system" {
-        fn SetConsoleMode(handle: isize, mode: u32) -> i32;
-    }
-
-    let handle = io::stdin().as_raw_handle() as isize;
+fn restore_console_mode(handle: isize, mode: u32) {
     unsafe {
         SetConsoleMode(handle, mode);
     }
@@ -180,6 +195,93 @@ mod tests {
             after & ENABLE_VIRTUAL_TERMINAL_INPUT,
             0,
             "guard must restore the original (cleared) VT input state on drop"
+        );
+
+        // Restore the truly-original mode we saved at the top.
+        unsafe {
+            SetConsoleMode(handle, saved);
+        }
+    }
+
+    /// Windows (#1345): `enable_console_vt_input()` must also set the
+    /// `ENABLE_VIRTUAL_TERMINAL_PROCESSING` bit (0x0004) on the stdout
+    /// console handle, and restore the original mode on drop. Without it,
+    /// ANSI sequences clud writes to a console with the bit cleared are
+    /// printed literally.
+    ///
+    /// Skipped when stdout is not a real console (captured `cargo test`
+    /// output, CI boxes without an attached TTY).
+    #[cfg(windows)]
+    #[test]
+    fn enable_console_vt_input_sets_and_restores_output_vt_processing() {
+        use super::enable_console_vt_input;
+        use std::io::IsTerminal;
+        use std::os::windows::io::AsRawHandle;
+
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+        extern "system" {
+            fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+            fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+        }
+
+        if !std::io::stdout().is_terminal() {
+            eprintln!(
+                "enable_console_vt_input_sets_and_restores_output_vt_processing: SKIP \
+                 (stdout not a real console in this test runner)"
+            );
+            return;
+        }
+
+        let handle = std::io::stdout().as_raw_handle() as isize;
+        let saved: u32 = unsafe {
+            let mut mode: u32 = 0;
+            assert_ne!(GetConsoleMode(handle, &mut mode), 0, "GetConsoleMode");
+            mode
+        };
+        // Clear the VT-processing bit so we're starting from a known state.
+        unsafe {
+            assert_ne!(
+                SetConsoleMode(handle, saved & !ENABLE_VIRTUAL_TERMINAL_PROCESSING),
+                0,
+                "clear VT processing bit"
+            );
+        }
+
+        let before: u32 = unsafe {
+            let mut mode: u32 = 0;
+            assert_ne!(GetConsoleMode(handle, &mut mode), 0);
+            mode
+        };
+        assert_eq!(
+            before & ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            0,
+            "VT processing bit should be cleared at start of test"
+        );
+
+        {
+            let _guard = enable_console_vt_input();
+            let during: u32 = unsafe {
+                let mut mode: u32 = 0;
+                assert_ne!(GetConsoleMode(handle, &mut mode), 0);
+                mode
+            };
+            assert_ne!(
+                during & ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                0,
+                "enable_console_vt_input must set ENABLE_VIRTUAL_TERMINAL_PROCESSING on stdout"
+            );
+        }
+
+        let after: u32 = unsafe {
+            let mut mode: u32 = 0;
+            assert_ne!(GetConsoleMode(handle, &mut mode), 0);
+            mode
+        };
+        assert_eq!(
+            after & ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            0,
+            "guard must restore the original (cleared) VT processing state on drop"
         );
 
         // Restore the truly-original mode we saved at the top.
