@@ -158,7 +158,13 @@ The rationale is in
 - `pr_merge_watch` exits `0` green, `1` failed, `2` new review, `3` closed,
   `4` timeout, `5` approval required (fork `action_required`; report, no
   retry), `6` never reported (required check never ran; blocked), `7` stale
-  (older than 14 days; re-run once). It judges each check by the newest run of
+  (older than 14 days; re-run once), `8` no checks (no workflows, a
+  `[skip ci]` marker, or nothing registered within the grace period; merge
+  when `mergeStateStatus` is `CLEAN`), `9` conflict (back to the integrator),
+  `10` GitHub unreachable (never reported as closed), `11` queued too long
+  (opt-in `--max-queued`). The lander passes `--timeout 540`, below its
+  600 s tool cap, so the watch always exits on its own; a watch never cancels
+  runs on a head SHA it did not start on (#1418). It judges each check by the newest run of
   its workflow, so a superseded cancelled run is not a failure; the full rule
   lives in the watcher's docstring
   (`crates/clud-bin/assets/tools/github/pr_merge_watch.py`).

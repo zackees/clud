@@ -35,6 +35,25 @@ Exit codes:
      `pull_request_target` run on the base commit, ...)
   7  stale: GitHub marked a required check `stale` (14 days incomplete); it
      never resolves on its own, a re-run is needed
+  8  NO_CHECKS: no check will ever report (#1418): the base branch has no
+     workflows, the head commit carries a skip marker (`[skip ci]`, ...), or
+     the rollup stayed empty for the grace period (`--no-checks-grace`,
+     default 60 s). The final event names the reason and `mergeStateStatus`;
+     a `CLEAN` PR is mergeable as is
+  9  CONFLICT: `mergeable=CONFLICTING` / `mergeStateStatus=DIRTY`, or
+     `mergeable` stayed `UNKNOWN` for too many polls while checks were green
+ 10  GITHUB_UNREACHABLE: gh failed (auth, rate limit, network) for several
+     polls in a row, or no repository could be resolved; the final event
+     carries gh's stderr
+ 11  QUEUED: a run waited longer than `--max-queued` to start (off by default)
+ 130/143  killed by SIGINT/SIGTERM: a final `EXIT` event with reason `killed`,
+     and nothing is cancelled
+
+A watch only ever cancels runs on the head SHA it started on (#1418): when the
+head moves it logs `head_moved`, keeps judging the new head, and skips any
+cancellation. `--timeout` defaults to `$CLUD_PR_MERGE_WATCH_TIMEOUT` (else
+3600 s); a caller whose tool call is capped must pass a lower value, or the
+watch outlives it.
 
 Supersession rule (#1330). Check runs are judged on the PR's *current* head
 commit only, grouped by (workflow file, check name) -- never the display
@@ -67,9 +86,10 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -84,6 +104,23 @@ EXIT_TIMEOUT = 4
 EXIT_APPROVAL_REQUIRED = 5
 EXIT_NEVER_REPORTED = 6
 EXIT_STALE = 7
+EXIT_NO_CHECKS = 8
+EXIT_CONFLICT = 9
+EXIT_GITHUB_UNREACHABLE = 10
+EXIT_QUEUED = 11
+
+DEFAULT_TIMEOUT_SEC = 3600
+DEFAULT_NO_CHECKS_GRACE_SEC = 60
+# Every gh call is bounded (#1418): a stalled connection must not block the
+# loop past --timeout, which is only checked between polls.
+GH_CALL_TIMEOUT_SEC = 30.0
+MAX_CONSECUTIVE_API_FAILURES = 3
+MERGEABLE_UNKNOWN_MAX_POLLS = 6
+# An immediate no-checks reason still waits this long: `pull_request_target`
+# workflows and check apps can register seconds after a `[skip ci]` push.
+NO_CHECKS_SETTLE_SEC = 5
+SKIP_CI_MARKER = re.compile(r"\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]", re.I)
+QUEUED_STATUSES = {"queued", "waiting", "pending", "requested"}
 
 CANCEL_ON_CHOICES = {"fail", "review", "timeout", "closed", "always", "never"}
 CANCEL_ON_DEFAULTS = {"fail", "review", "timeout", "closed"}
@@ -262,12 +299,24 @@ class GhResult:
         return self.exit_code == 0
 
 
+LAST_GH_ERROR = ""
+
+
+def gh_error_note(text: str) -> None:
+    """Remember the latest gh failure, for the final unreachable report."""
+    global LAST_GH_ERROR
+    if text.strip():
+        LAST_GH_ERROR = text.strip()[-2000:]
+
+
 def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResult:
     """Run gh with the supplied args; return the captured outcome.
 
-    `timeout` bounds the call: a probe that would otherwise delay a
-    fail-fast exit is abandoned and reported as a failed call.
+    `timeout` bounds the call (default `GH_CALL_TIMEOUT_SEC`): a call that
+    would otherwise hang the loop is abandoned and reported as a failed call.
     """
+    if timeout is None:
+        timeout = GH_CALL_TIMEOUT_SEC
     try:
         # #1175: running-process merges stderr into stdout unless it is asked
         # for separately, and `capture_output=True` alone is not asking.
@@ -280,9 +329,13 @@ def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResul
         # running-process raises its own `TimeoutExpired` (a
         # `subprocess.TimeoutExpired`, not a `TimeoutError`); catching only
         # the builtin let a hung probe escape as a crash (#1175 review).
-        return GhResult(124, "", f"gh {' '.join(args)} timed out after {timeout}s")
+        message = f"gh {' '.join(args)} timed out after {timeout}s"
+        gh_error_note(message)
+        return GhResult(124, "", message)
     stdout = res.stdout or ""
     stderr = res.stderr or ""
+    if res.returncode != 0:
+        gh_error_note(stderr or f"gh {' '.join(args)} exited {res.returncode}")
     if check and res.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} failed: {stderr.strip()}")
     return GhResult(res.returncode, stdout, stderr)
@@ -309,13 +362,17 @@ class PRSnapshot:
     head_sha: str
     base_ref: str
     head_ref: str = ""
+    merge_state: str = "UNKNOWN"  # mergeStateStatus: CLEAN | DIRTY | BEHIND | BLOCKED | ...
 
     @classmethod
     def fetch(cls, pr: int, repo: str | None) -> PRSnapshot | None:
         args = ["pr", "view", str(pr)]
         if repo:
             args += ["--repo", repo]
-        args += ["--json", "number,state,mergeable,headRefOid,baseRefName,headRefName"]
+        args += [
+            "--json",
+            "number,state,mergeable,headRefOid,baseRefName,headRefName,mergeStateStatus",
+        ]
         data = gh_json(*args)
         if not isinstance(data, dict):
             return None
@@ -326,6 +383,7 @@ class PRSnapshot:
             head_sha=str(data.get("headRefOid", "")),
             base_ref=str(data.get("baseRefName", "main")),
             head_ref=str(data.get("headRefName") or ""),
+            merge_state=str(data.get("mergeStateStatus") or "UNKNOWN"),
         )
 
 
@@ -472,12 +530,17 @@ def judge_check_runs(
     statuses: list[dict] | None = None,
     head_branch: str | None = None,
     require_re: re.Pattern[str] | None = None,
+    runs_grace_elapsed: bool = False,
 ) -> Verdict:
     """Judge the head commit's checks. Pure: no network, no clock.
 
     `check_runs` are `repos/{r}/commits/{sha}/check-runs` items and
     `workflow_runs` are `actions/runs?head_sha=` items, all pages. See the
     module docstring for the supersession rule this implements.
+
+    `runs_grace_elapsed` says the head commit has had no workflow run for the
+    whole grace period: a missing required check then never reports (#1418)
+    instead of staying pending.
     """
 
     def is_required(name: str) -> bool:
@@ -680,7 +743,8 @@ def judge_check_runs(
     elif any(j.state == "pending" for j in req):
         state = "pending"
     elif missing:
-        state = "never_reported" if all_runs_done else "pending"
+        no_runs_ever = not head_runs and runs_grace_elapsed
+        state = "never_reported" if all_runs_done or no_runs_ever else "pending"
     elif not judgments:
         state = "pass" if all_runs_done else "pending"
     else:
@@ -1044,7 +1108,7 @@ def fetch_gate_snapshot(repo: str, pr: int, *, include_coderabbit: bool) -> Gate
 query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
-      number state mergeable headRefOid baseRefName headRefName
+      number state mergeable mergeStateStatus headRefOid baseRefName headRefName
       reviews(first:100){nodes{databaseId state author{login}} pageInfo{hasNextPage}}
       reviewThreads(first:100) @include(if:$includeCoderabbit){
         nodes{isResolved comments(first:20){
@@ -1196,6 +1260,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
             head_sha=str(pull.get("headRefOid", "")),
             base_ref=str(pull.get("baseRefName", "main")),
             head_ref=str(pull.get("headRefName") or ""),
+            merge_state=str(pull.get("mergeStateStatus") or "UNKNOWN"),
         ),
         checks=checks,
         human_review_ids=human_ids,
@@ -1326,6 +1391,9 @@ class CancelOptions:
     dry_run: bool
     ignore_permission_errors: bool
     no_retry: bool
+    # The head SHA the watch started on (#1418); runs on any other SHA are
+    # never cancelled, so an orphaned watch cannot kill a fix's fresh CI.
+    pinned_sha: str | None = None
 
 
 def cancel_pr_runs(
@@ -1519,6 +1587,17 @@ def _cancel_for_exit(
     scope: dict[str, int] | None = None,
 ) -> None:
     if on_label in opts.on or "always" in opts.on:
+        if opts.pinned_sha and head_sha != opts.pinned_sha:
+            print(
+                f"NOTE  head moved from {opts.pinned_sha[:7]} to {head_sha[:7]}; "
+                "not cancelling runs this watch did not start on",
+                file=sys.stderr,
+            )
+            if log:
+                log.emit(
+                    "cancel_skipped", reason="head_moved", pinned=opts.pinned_sha, head=head_sha
+                )
+            return
         if scope is None:
             attempts = cancel_pr_runs(pr, repo, head_sha, opts, log)
         else:
@@ -1527,11 +1606,89 @@ def _cancel_for_exit(
             log.emit("cancel", trigger=on_label, attempts=attempts, mode=opts.mode)
 
 
-def _finish_exit(code: int, reason: str, log: WatchLog | None = None) -> None:
+def _finish_exit(code: int, reason: str, log: WatchLog | None = None, **fields: object) -> None:
     if log:
-        log.emit("EXIT", code=code, reason=reason)
+        log.emit("EXIT", code=code, reason=reason, **fields)
         log.close()
     sys.exit(code)
+
+
+def _exit_unreachable(why: str, log: WatchLog | None) -> None:
+    detail = LAST_GH_ERROR or "(no gh stderr captured)"
+    print(f"GITHUB-UNREACHABLE  {why}: {detail}", file=sys.stderr)
+    _finish_exit(EXIT_GITHUB_UNREACHABLE, "github_unreachable", log, why=why, stderr=detail)
+
+
+class WatchKilled(Exception):
+    """SIGINT/SIGTERM arrived; `main` writes the final `EXIT` event."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"signal {signum}")
+        self.signum = signum
+        self.code = 128 + signum
+
+
+def install_kill_handlers() -> None:
+    """On SIGINT/SIGTERM unwind to `main`, which writes a final `EXIT` event
+    and cancels nothing: the caller that killed the watch did not ask for
+    cancellation (#1418)."""
+
+    def on_signal(signum: int, _frame: object) -> None:
+        raise WatchKilled(int(signum))
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, on_signal)
+
+
+def fetch_workflow_presence(repo: str, ref: str) -> bool | None:
+    """True/False when the base branch does/doesn't have workflow files;
+    None when GitHub could not be asked."""
+    res = gh("api", f"repos/{repo}/contents/.github/workflows?ref={ref}")
+    if not res.ok:
+        return False if "HTTP 404" in res.stderr else None
+    try:
+        entries = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    return any(
+        isinstance(e, dict) and str(e.get("name", "")).endswith((".yml", ".yaml"))
+        for e in entries
+    )
+
+
+def fetch_head_commit_message(repo: str, sha: str) -> str | None:
+    data = gh_json("api", f"repos/{repo}/commits/{sha}")
+    if not isinstance(data, dict):
+        return None
+    message = (data.get("commit") or {}).get("message")
+    return message if isinstance(message, str) else None
+
+
+def immediate_no_checks_reason(repo: str, snapshot: PRSnapshot) -> str | None:
+    """Why no check can ever report on this head, known without waiting."""
+    # A PR adding the repo's first workflow runs it from its own ref, so the
+    # repo has no workflows only when neither side does.
+    if (
+        fetch_workflow_presence(repo, snapshot.base_ref) is False
+        and fetch_workflow_presence(repo, snapshot.head_sha) is False
+    ):
+        return "no_workflows"
+    message = fetch_head_commit_message(repo, snapshot.head_sha)
+    if message and SKIP_CI_MARKER.search(message):
+        return "skip_ci_marker"
+    return None
+
+
+def fetch_queued_jobs(repo: str, run_id: int) -> list[dict]:
+    data = gh_json("api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    return [
+        {"name": str(j.get("name", "?")), "labels": list(j.get("labels") or [])}
+        for j in jobs or []
+        if isinstance(j, dict) and _lower(j.get("status")) in QUEUED_STATUSES
+    ]
 
 
 QUEUE_WARN_SEC = 600  # 10 min queued = surface a warning (#440)
@@ -1717,17 +1874,27 @@ def watch(
     require_pattern: str | None,
     opts: CancelOptions,
     log: WatchLog | None = None,
+    *,
+    no_checks_grace: int = DEFAULT_NO_CHECKS_GRACE_SEC,
+    max_queued: int | None = None,
 ) -> int:
     deadline = time.monotonic() + timeout
     snapshot: PRSnapshot | None = None
     required_names: set[str] | None = None
-    # Initial snapshot — bail fast if the PR isn't open.
-    snapshot = PRSnapshot.fetch(pr, repo)
-    if snapshot is None:
-        print(f"ERROR  could not fetch PR #{pr}", file=sys.stderr)
+    # Initial snapshot — bail fast if the PR isn't open. A failed fetch is
+    # GitHub being unreachable, never "closed" (#1418).
+    for attempt in range(1, MAX_CONSECUTIVE_API_FAILURES + 1):
+        snapshot = PRSnapshot.fetch(pr, repo)
+        if snapshot is not None:
+            break
+        print(f"ERROR  could not fetch PR #{pr} (attempt {attempt})", file=sys.stderr)
         if log:
             log.emit("api_degraded", source="pr_snapshot", reason="fetch_failed")
-        return EXIT_PR_CLOSED
+        if attempt < MAX_CONSECUTIVE_API_FAILURES:
+            time.sleep(interval)
+    if snapshot is None:
+        _exit_unreachable(f"could not fetch PR #{pr}", log)
+        return EXIT_GITHUB_UNREACHABLE
     if snapshot.state in {"MERGED", "CLOSED"}:
         print(f"PR-STATE  #{pr} state={snapshot.state}")
         if log:
@@ -1736,10 +1903,20 @@ def watch(
         label = "merged" if snapshot.state == "MERGED" else "closed"
         _exit_after_cancel(code, label, pr, repo, snapshot.head_sha, opts, log)
 
-    # Resolve required check names (best-effort).
+    # Resolve required check names (best-effort). Without a repository every
+    # poll would fail, so that is fatal up front (#1418).
     repo_for_protection = repo or _resolve_origin_repo()
-    if repo_for_protection:
-        required_names = fetch_required_check_names(repo_for_protection, snapshot.base_ref)
+    if not repo_for_protection:
+        _exit_unreachable("no repository: pass --repo or add an `origin` remote", log)
+        return EXIT_GITHUB_UNREACHABLE
+    required_names = fetch_required_check_names(repo_for_protection, snapshot.base_ref)
+    opts = replace(opts, pinned_sha=snapshot.head_sha)
+    seen_head = snapshot.head_sha
+    # Empty-rollup bookkeeping (#1418), reset whenever the head moves.
+    idle_since: float | None = None
+    no_checks_reasons: dict[str, str | None] = {}
+    api_failures = 0
+    unknown_polls = 0
 
     review_state = ReviewState()
     coderabbit_probe_complete = False
@@ -1757,22 +1934,38 @@ def watch(
         # One current GraphQL snapshot owns PR state, check rollup, human
         # reviews, and optional CodeRabbit fields. This prevents bot APIs from
         # becoming a serial post-green gate.
-        gate = (
-            fetch_gate_snapshot(
-                repo_for_protection,
-                pr,
-                include_coderabbit=not coderabbit_probe_complete or review_state.coderabbit_enabled,
-            )
-            if repo_for_protection
-            else None
+        gate = fetch_gate_snapshot(
+            repo_for_protection,
+            pr,
+            include_coderabbit=not coderabbit_probe_complete or review_state.coderabbit_enabled,
         )
         if gate is None:
+            api_failures += 1
             print("NOTE  gate snapshot unavailable; retrying", file=sys.stderr, flush=True)
             if log:
-                log.emit("api_degraded", source="gate_snapshot", reason="fetch_failed")
+                log.emit(
+                    "api_degraded",
+                    source="gate_snapshot",
+                    reason="fetch_failed",
+                    consecutive=api_failures,
+                )
+            if api_failures >= MAX_CONSECUTIVE_API_FAILURES:
+                _exit_unreachable(f"{api_failures} consecutive failed polls", log)
             _sleep_remaining_interval(poll_started, interval)
             continue
+        api_failures = 0
         snapshot = gate.pr
+        if snapshot.head_sha != seen_head:
+            print(
+                f"NOTE  head moved {seen_head[:7]} -> {snapshot.head_sha[:7]}",
+                file=sys.stderr,
+            )
+            if log:
+                log.emit("head_moved", old=seen_head, new=snapshot.head_sha)
+            seen_head = snapshot.head_sha
+            idle_since = None
+            unknown_polls = 0
+        merge_fields = {"mergeable": snapshot.mergeable, "merge_state_status": snapshot.merge_state}
         if snapshot.state != "OPEN":
             print(f"PR-STATE  #{pr} state={snapshot.state}")
             if log:
@@ -1786,7 +1979,25 @@ def watch(
         # fallback when that data is unavailable.
         verdict: Verdict | None = None
         checks = gate.checks
+        # Idle: nothing has registered on the head. Idle for the grace period
+        # means nothing will.
+        # Anything in the rollup (an external CI's status, a check app) means
+        # checks do report here, so only a fully empty head is idle.
+        idle = not gate.checks
         if gate.head_checks is not None:
+            idle = idle and not gate.head_checks.statuses and not any(
+                isinstance(r, dict) and r.get("head_sha") == snapshot.head_sha
+                for r in gate.head_checks.workflow_runs
+            )
+        if not idle:
+            idle_since = None
+        elif idle_since is None:
+            idle_since = poll_started
+        grace_elapsed = idle_since is not None and poll_started - idle_since >= no_checks_grace
+        if gate.head_checks is not None:
+            if max_queued is not None:
+                _exit_if_queued_too_long(gate.head_checks, snapshot, repo_for_protection,
+                                         max_queued, log)
             verdict = judge_check_runs(
                 gate.head_checks.check_runs,
                 gate.head_checks.workflow_runs,
@@ -1795,6 +2006,7 @@ def watch(
                 statuses=gate.head_checks.statuses,
                 head_branch=snapshot.head_ref or None,
                 require_re=require_re,
+                runs_grace_elapsed=grace_elapsed,
             )
             checks = [j.as_check_row() for j in verdict.judgments]
         pending = [c for c in checks if c.bucket == "pending"]
@@ -1804,11 +2016,26 @@ def watch(
             # A fresh push registers no checks for the first few seconds; an
             # empty rollup must read as "no data yet", never as green.
             if log:
-                log.emit("checks", checks=counts, note="rollup_empty")
+                log.emit("checks", checks=counts, note="rollup_empty", **merge_fields)
+            # ...unless nothing will ever register (#1418).
+            if snapshot.head_sha not in no_checks_reasons:
+                no_checks_reasons[snapshot.head_sha] = immediate_no_checks_reason(
+                    repo_for_protection, snapshot
+                )
+            if snapshot.mergeable == "CONFLICTING" or snapshot.merge_state == "DIRTY":
+                _exit_conflict(pr, snapshot, log, merge_fields)
+            immediate = no_checks_reasons[snapshot.head_sha]
+            idle_for = poll_started - idle_since if idle_since is not None else 0.0
+            if immediate and idle_for < NO_CHECKS_SETTLE_SEC:
+                time.sleep(NO_CHECKS_SETTLE_SEC - idle_for)
+                continue
+            reason = immediate or ("empty_after_grace" if grace_elapsed else None)
+            if reason:
+                _exit_no_checks(reason, snapshot, required_names, require_re, log)
             _sleep_remaining_interval(poll_started, interval)
             continue
         if log:
-            log.emit("checks", checks=counts)
+            log.emit("checks", checks=counts, **merge_fields)
             elapsed = round(max(0.0, time.monotonic() - log.started_monotonic), 2)
             print(
                 f"{elapsed:.2f} {counts['succeeded']} succeeded, "
@@ -1861,6 +2088,10 @@ def watch(
                     )
                 _finish_exit(EXIT_REQUIRED_FAIL, "fail", log)
 
+        # A conflict never resolves by waiting (#1418).
+        if snapshot.mergeable == "CONFLICTING" or snapshot.merge_state == "DIRTY":
+            _exit_conflict(pr, snapshot, log, merge_fields)
+
         if not coderabbit_probe_complete:
             probe = gate.coderabbit_probe or CodeRabbitProbe("degraded", 0)
             if (
@@ -1895,6 +2126,13 @@ def watch(
         # CI and review state came from the same GraphQL response, so green
         # does not initiate or wait for an additional CodeRabbit request.
         checks_green = verdict.state == "pass" if verdict is not None else not pending
+        unknown_polls = unknown_polls + 1 if checks_green and snapshot.mergeable == "UNKNOWN" else 0
+        if unknown_polls >= MERGEABLE_UNKNOWN_MAX_POLLS:
+            print(
+                f"CONFLICT  #{pr} checks green but mergeable stayed UNKNOWN for "
+                f"{unknown_polls} polls (mergeStateStatus={snapshot.merge_state})"
+            )
+            _finish_exit(EXIT_CONFLICT, "mergeable_unknown", log, **merge_fields)
         if checks_green and snapshot.mergeable == "MERGEABLE":
             for c in failing:
                 print(f"ADVISORY-FAIL  {c.name} (not in required set)")
@@ -1917,6 +2155,82 @@ def watch(
             print(f"NOTE  progress report failed: {exc}", file=sys.stderr)
 
         _sleep_remaining_interval(poll_started, interval)
+
+
+def _exit_conflict(
+    pr: int, snapshot: PRSnapshot, log: WatchLog | None, merge_fields: dict[str, str]
+) -> None:
+    print(
+        f"CONFLICT  #{pr} mergeable={snapshot.mergeable} "
+        f"mergeStateStatus={snapshot.merge_state}: rebase or merge the base branch"
+    )
+    _finish_exit(EXIT_CONFLICT, "conflict", log, **merge_fields)
+
+
+def _exit_no_checks(
+    reason: str,
+    snapshot: PRSnapshot,
+    required: set[str] | None,
+    require_re: re.Pattern[str] | None,
+    log: WatchLog | None,
+) -> None:
+    """Terminal empty rollup: a required check can then never report (exit
+    6); otherwise nothing gates the merge but `mergeStateStatus` (exit 8)."""
+    if required and require_re is None:
+        missing = sorted(required)
+        print(f"NEVER-REPORTED  {', '.join(missing)}: required, but no check runs ({reason})")
+        if log:
+            log.emit("never_reported", checks=missing, reason=reason)
+        _finish_exit(EXIT_NEVER_REPORTED, "never_reported", log)
+    print(
+        f"NO-CHECKS  #{snapshot.number} reason={reason} "
+        f"mergeStateStatus={snapshot.merge_state}"
+    )
+    if log:
+        log.emit(
+            "no_checks",
+            reason=reason,
+            merge_state_status=snapshot.merge_state,
+            mergeable=snapshot.mergeable,
+            head_sha=snapshot.head_sha,
+        )
+    _finish_exit(EXIT_NO_CHECKS, "no_checks", log, merge_state_status=snapshot.merge_state)
+
+
+def _exit_if_queued_too_long(
+    head: HeadChecks,
+    snapshot: PRSnapshot,
+    repo: str,
+    max_queued: int,
+    log: WatchLog | None,
+) -> None:
+    now = time.time()
+    stuck = [
+        run
+        for run in head.workflow_runs
+        if isinstance(run, dict)
+        and run.get("head_sha") == snapshot.head_sha
+        and _lower(run.get("status")) in QUEUED_STATUSES
+        and (created := _parse_iso(run.get("created_at"))) is not None
+        and now - created > max_queued
+    ]
+    if not stuck:
+        return
+    jobs: list[dict] = []
+    for run in stuck:
+        run_id = _as_int(run.get("id"))
+        if run_id is None:
+            continue
+        found = fetch_queued_jobs(repo, run_id)
+        if not found:
+            found = [{"name": str(run.get("name") or run_id), "labels": []}]
+        jobs += [{**job, "run_id": run_id} for job in found]
+    for job in jobs:
+        labels = ", ".join(job["labels"]) or "?"
+        print(f"QUEUED  {job['name']} (run {job['run_id']}) waiting for a runner: {labels}")
+    if log:
+        log.emit("queued_too_long", max_queued_sec=max_queued, jobs=jobs)
+    _finish_exit(EXIT_QUEUED, "queued", log)
 
 
 def _act_on_verdict(
@@ -2053,6 +2367,14 @@ def _extract_job_id_from_link(link: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="pr_merge_watch",
@@ -2061,7 +2383,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         epilog=(
             "exit codes: 0 green, 1 required check failed, 2 review activity, "
             "3 PR closed, 4 timeout, 5 approval required, 6 required check never "
-            "reported, 7 stale (re-run needed)\n\n"
+            "reported, 7 stale (re-run needed), 8 no checks will ever report, "
+            "9 merge conflict, 10 GitHub unreachable, 11 queued too long, "
+            "130/143 killed\n\n"
             "supersession rule (#1330): checks on the PR's current head commit are "
             "grouped by (workflow file, check name) and ordered by check-run id. A "
             "cancelled check is replaced by any newer check, even a queued one; a "
@@ -2083,8 +2407,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--timeout",
         type=int,
-        default=3600,
-        help="overall wait cap in seconds (default 3600 = 60 min)",
+        default=_env_int("CLUD_PR_MERGE_WATCH_TIMEOUT", DEFAULT_TIMEOUT_SEC),
+        help="overall wait cap in seconds (default $CLUD_PR_MERGE_WATCH_TIMEOUT, else "
+        "3600); keep it below any tool-call cap of the caller",
+    )
+    p.add_argument(
+        "--no-checks-grace",
+        type=int,
+        default=_env_int("CLUD_PR_MERGE_WATCH_NO_CHECKS_GRACE", DEFAULT_NO_CHECKS_GRACE_SEC),
+        help="seconds an empty rollup is waited for before exiting 8 NO_CHECKS "
+        "(default $CLUD_PR_MERGE_WATCH_NO_CHECKS_GRACE, else 60)",
+    )
+    p.add_argument(
+        "--max-queued",
+        type=int,
+        default=None,
+        help="exit 11 when a run has waited this many seconds for a runner (default: off)",
     )
     p.add_argument(
         "--require",
@@ -2176,7 +2514,23 @@ def main(argv: list[str] | None = None) -> int:
         log.emit("EXIT", code=EXIT_GREEN, reason="dry_run")
         log.close()
         return EXIT_GREEN
-    code = watch(ns.pr_number, ns.repo, ns.interval, ns.timeout, ns.require, opts, log)
+    install_kill_handlers()
+    try:
+        code = watch(
+            ns.pr_number,
+            ns.repo,
+            ns.interval,
+            ns.timeout,
+            ns.require,
+            opts,
+            log,
+            no_checks_grace=ns.no_checks_grace,
+            max_queued=ns.max_queued,
+        )
+    except WatchKilled as killed:
+        print(f"KILLED  {killed}", file=sys.stderr)
+        _finish_exit(killed.code, "killed", log, signal=killed.signum)
+        return killed.code
     if not log.closed:
         log.emit("EXIT", code=code, reason="return")
         log.close()
