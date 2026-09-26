@@ -1,4 +1,15 @@
 //! Post-expansion rm safety. Decisions never spawn; unit builds have no executor.
+//!
+//! Two ways through for a real `rm` run by a session's child process (a
+//! script, `make`, `cargo`):
+//!
+//! - **Inside the roots** (#1340): `CLUD_RM_ROOTS` is set and every operand
+//!   resolves inside it ([`crate::rm_tool::resolve`]). The shim deletes in
+//!   process on every platform, so scripts that clean up after themselves
+//!   work on a developer machine. Roots, `$HOME` and anything outside the
+//!   roots stay refused.
+//! - **CI in Docker**: a CI-named variable and a detected Docker container,
+//!   for CI jobs without roots.
 use std::path::{Path, PathBuf};
 
 use crate::deletion_policy::unsafe_delete_base_reason;
@@ -11,14 +22,18 @@ pub struct Approved {
     pub verbose: bool,
 }
 
+/// The options both gates understand, and the raw operands.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Parsed {
+    recursive: bool,
+    force: bool,
+    verbose: bool,
+    operands: Vec<String>,
+}
+
 /// Parse only options whose semantics we implement. Never forward raw options.
-pub fn decide(args: &[String], cwd: &Path, home: Option<&Path>) -> Result<Approved, String> {
-    let mut result = Approved {
-        operands: vec![],
-        recursive: false,
-        force: false,
-        verbose: false,
-    };
+fn parse(args: &[String]) -> Result<Parsed, String> {
+    let mut result = Parsed::default();
     let mut options = true;
     for arg in args {
         if options && arg == "--" {
@@ -45,12 +60,70 @@ pub fn decide(args: &[String], cwd: &Path, home: Option<&Path>) -> Result<Approv
             }
             continue;
         }
+        result.operands.push(arg.clone());
+    }
+    Ok(result)
+}
+
+pub fn decide(args: &[String], cwd: &Path, home: Option<&Path>) -> Result<Approved, String> {
+    let parsed = parse(args)?;
+    let mut result = Approved {
+        operands: vec![],
+        recursive: parsed.recursive,
+        force: parsed.force,
+        verbose: parsed.verbose,
+    };
+    for arg in &parsed.operands {
         result.operands.push(validate_operand(arg, cwd, home)?);
     }
     if result.operands.is_empty() {
         return Err("rm requires a provable operand".into());
     }
     Ok(result)
+}
+
+/// A child `rm` whose every operand lies inside the session's roots.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InRoots {
+    /// Operands that exist, each checked against the roots.
+    pub targets: Vec<crate::rm_tool::Target>,
+    /// Operands with nothing there (fine with `-f`, an error without).
+    pub missing: Vec<PathBuf>,
+    pub recursive: bool,
+    pub force: bool,
+    pub verbose: bool,
+}
+
+/// The in-roots gate: every operand must resolve inside `roots`, and none may
+/// be a filesystem root, `$HOME` or an ancestor of it, or a root itself.
+pub fn decide_in_roots(
+    args: &[String],
+    cwd: &Path,
+    home: Option<&Path>,
+    roots: &mut crate::rm_tool::Roots,
+) -> Result<InRoots, String> {
+    let parsed = parse(args)?;
+    let mut plan = InRoots {
+        targets: vec![],
+        missing: vec![],
+        recursive: parsed.recursive,
+        force: parsed.force,
+        verbose: parsed.verbose,
+    };
+    for arg in &parsed.operands {
+        if let Some(reason) = unsafe_delete_base_reason(arg) {
+            return Err(format!("unsafe rm operand {arg:?}: {reason}"));
+        }
+        match crate::rm_tool::resolve(arg, cwd, home, roots) {
+            Ok(crate::rm_tool::Resolved::Present(target)) => plan.targets.push(target),
+            Ok(crate::rm_tool::Resolved::Missing(path)) => plan.missing.push(path),
+            Err(reason) => return Err(format!("rm {arg}: {reason}")),
+        }
+    }
+    if parsed.operands.is_empty() {
+        return Err("rm requires a provable operand".into());
+    }
+    Ok(plan)
 }
 
 fn validate_operand(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
@@ -184,19 +257,60 @@ pub fn gate(dry_run: bool, ci: bool, docker: bool) -> Action {
     }
 }
 
+/// What the shim will do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// The CI-in-Docker gate: `/bin/rm` on Linux, or a dry run.
+    Gated(Approved, Action),
+    /// Inside the session's roots; `true` for a dry run.
+    InRoots(InRoots, bool),
+}
+
 /// Read real process facts, then decide. This library never executes rm.
-pub fn prepare(args: &[String]) -> Result<(Approved, Action), String> {
+pub fn prepare(args: &[String]) -> Result<Plan, String> {
     let dry = std::env::var("CLUD_RM_DRY_RUN").ok().as_deref() == Some("1");
     let ci = std::env::vars_os().any(|(key, _)| key.to_string_lossy().contains("CI"));
-    let action = gate(dry, ci, docker_detected());
-    if action == Action::Deny {
-        return Err("real rm requires both a set CI-named variable and detected Docker".into());
-    }
+    let docker = docker_detected();
     let cwd = std::env::current_dir().map_err(|e| format!("cannot resolve cwd: {e}"))?;
-    let home = std::env::var_os("HOME")
+    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var_os(home_key)
         .map(PathBuf::from)
         .ok_or("rm cannot establish the home root")?;
-    Ok((decide(args, &cwd, Some(&home))?, action))
+    if let Some(value) =
+        std::env::var_os(crate::rm_tool::ROOTS_ENV).filter(|value| !value.is_empty())
+    {
+        let mut roots = crate::rm_tool::Roots::resolve(Some(&value), &cwd);
+        match decide_in_roots(args, &cwd, Some(&home), &mut roots) {
+            Ok(plan) => return Ok(Plan::InRoots(plan, dry)),
+            // CI in Docker keeps its own gate for what the roots refuse.
+            Err(reason) if !(ci && docker) => return Err(reason),
+            Err(_) => {}
+        }
+    }
+    let action = gate(dry, ci, docker);
+    if action == Action::Deny {
+        return Err(format!(
+            "real rm runs only inside this session's roots (${}) or in CI under Docker",
+            crate::rm_tool::ROOTS_ENV
+        ));
+    }
+    Ok(Plan::Gated(decide(args, &cwd, Some(&home))?, action))
+}
+
+/// Report an in-roots dry run.
+pub fn report_in_roots_dry_run(plan: &InRoots) -> i32 {
+    let operands: Vec<&PathBuf> = plan.targets.iter().map(|t| &t.path).collect();
+    println!(
+        "{}",
+        serde_json::json!({
+            "decision": "allow",
+            "dry_run": true,
+            "in_roots": true,
+            "operands": operands,
+            "missing": plan.missing,
+        })
+    );
+    0
 }
 
 pub fn deny(reason: &str) -> i32 {
@@ -275,6 +389,48 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn in_roots_gate_allows_only_operands_inside_the_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let (root, home) = (base.join("repo"), base.join("home"));
+        std::fs::create_dir_all(root.join("build/x")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("keep"), b"k").unwrap();
+        let mut roots = crate::rm_tool::Roots::fixed(vec![root.clone()], true);
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let plan = decide_in_roots(
+            &args(&["-rf", "build", "gone"]),
+            &root,
+            Some(&home),
+            &mut roots,
+        )
+        .unwrap();
+        assert!(plan.recursive && plan.force);
+        assert_eq!(plan.targets.len(), 1);
+        assert_eq!(plan.targets[0].path, root.join("build"));
+        assert!(plan.targets[0].is_dir);
+        assert_eq!(plan.missing, vec![root.join("gone")]);
+        assert_eq!(report_in_roots_dry_run(&plan), 0);
+
+        let home_file = home.join("keep");
+        for refused in [
+            vec!["-rf", "/"],
+            vec!["-f", home_file.to_str().unwrap()],
+            vec!["-rf", root.to_str().unwrap()],
+            vec!["-rf", "build", "/etc/passwd"],
+            vec!["-rfz", "build"],
+            vec!["-rf"],
+        ] {
+            assert!(
+                decide_in_roots(&args(&refused), &root, Some(&home), &mut roots).is_err(),
+                "{refused:?}"
+            );
+        }
+        assert!(root.join("build/x").exists(), "decisions never delete");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn validates_every_operand_and_canonical_ancestors() {

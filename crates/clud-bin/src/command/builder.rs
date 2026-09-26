@@ -580,6 +580,9 @@ fn build_launch_plan_for_target_at(
         Some(Command::GrindFacts { .. }) => {
             unreachable!("grind-facts is handled directly in main")
         }
+        Some(Command::RmFile { .. } | Command::RmDir { .. }) => {
+            unreachable!("rm-file / rm-dir are handled directly in main")
+        }
         Some(Command::InstallAssets { .. }) => {
             unreachable!("install-assets is handled directly in main")
         }

@@ -29,11 +29,17 @@ pub const SHIMS_SUBDIR: &str = ".clud/state/shims";
 pub fn alias_names() -> Vec<&'static str> {
     #[cfg(windows)]
     {
-        vec!["python.exe", "python3.exe", "rm.exe"]
+        vec![
+            "python.exe",
+            "python3.exe",
+            "rm.exe",
+            "rm-file.exe",
+            "rm-dir.exe",
+        ]
     }
     #[cfg(not(windows))]
     {
-        vec!["python", "python3", "rm"]
+        vec!["python", "python3", "rm", "rm-file", "rm-dir"]
     }
 }
 
@@ -227,8 +233,20 @@ pub fn packaged_shim() -> std::io::Result<PathBuf> {
     }))
 }
 
-/// Session activation installs only rm, keeping unfinished Python relays off PATH.
-/// A separate directory also avoids activating previously extracted Python aliases.
+/// The deletion aliases session activation installs: the child `rm` shim
+/// and the agent-facing `rm-file` / `rm-dir` (#1340). All are byte copies of
+/// `clud-shim`, which dispatches on argv\[0\].
+pub fn rm_alias_names() -> [&'static str; 3] {
+    if cfg!(windows) {
+        ["rm.exe", "rm-file.exe", "rm-dir.exe"]
+    } else {
+        ["rm", "rm-file", "rm-dir"]
+    }
+}
+
+/// Session activation installs only the deletion aliases, keeping unfinished
+/// Python relays off PATH. A separate directory also avoids activating
+/// previously extracted Python aliases.
 pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
     let bytes = std::fs::read(source)?;
     if bytes.is_empty() {
@@ -236,18 +254,20 @@ pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
     }
     let dir = home.join(".clud/state/rm-shim");
     std::fs::create_dir_all(&dir)?;
-    let target = dir.join(if cfg!(windows) { "rm.exe" } else { "rm" });
-    // Replace the directory entry, never write through a replaced symlink.
-    // NamedTempFile persists atomically and supports concurrent installers.
-    if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink())
-        || std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice())
-    {
-        write_alias(&dir, &target, &bytes)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+    for name in rm_alias_names() {
+        let target = dir.join(name);
+        // Replace the directory entry, never write through a replaced symlink.
+        // NamedTempFile persists atomically and supports concurrent installers.
+        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink())
+            || std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice())
+        {
+            write_alias(&dir, &target, &bytes)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+        }
     }
     Ok(dir)
 }
@@ -277,15 +297,24 @@ mod tests {
     }
 
     #[test]
-    fn session_installs_only_rm_and_repairs_replacement() {
+    fn session_installs_only_the_deletion_aliases_and_repairs_replacement() {
         let home = TempDir::new().unwrap();
         let (_source_dir, source) = make_source(b"trusted");
         let dir = install_rm_at(home.path(), &source).unwrap();
-        let target = dir.join(if cfg!(windows) { "rm.exe" } else { "rm" });
-        fs::write(&target, b"replacement").unwrap();
-        install_rm_at(home.path(), &source).unwrap();
-        assert_eq!(fs::read(target).unwrap(), b"trusted");
-        assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
+        for name in rm_alias_names() {
+            let target = dir.join(name);
+            fs::write(&target, b"replacement").unwrap();
+            install_rm_at(home.path(), &source).unwrap();
+            assert_eq!(fs::read(&target).unwrap(), b"trusted", "{name}");
+        }
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let mut expected: Vec<String> = rm_alias_names().iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(names, expected, "no Python relay is activated");
     }
 
     #[test]

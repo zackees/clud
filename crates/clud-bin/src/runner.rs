@@ -151,6 +151,7 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
     keys.push(crate::shell::nounset::BASH_ENV_KEY);
     keys.push(crate::shell::nounset::PREV_KEY);
     keys.push(crate::shell::cmd_gate::GATE_KEY);
+    keys.push(crate::rm_tool::ROOTS_ENV);
     keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
     keys
 }
@@ -177,7 +178,10 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
 ///   empty. `push_or_replace` is what chains rather than duplicates: the
 ///   module has already stashed any inherited BASH_ENV under
 ///   CLUD_PREV_BASH_ENV, and the generated file sources it.
-/// - Finally, activates the `rm` shim session.
+/// - Issue #1340: `CLUD_RM_ROOTS`, where `rm-file` / `rm-dir` and the child
+///   `rm` shim may delete: the launch directory's git checkout and clud's
+///   session temp dir. See rm_tool::session_roots_value.
+/// - Finally, activates the `rm` shim session (`rm`, `rm-file`, `rm-dir`).
 ///
 /// This is now the ONE builder: [`child_env`] calls it with
 /// `std::env::vars()`, and `daemon::io_helpers::child_env_from` calls it
@@ -287,6 +291,21 @@ fn apply_child_env_policy_with_nounset_opt_out(
     // only when the wrapper resolves on this env's PATH. See shell::cmd_gate.
     for (key, value) in crate::shell::cmd_gate::env_overrides(&env) {
         push_or_replace(&mut env, &key, &value);
+    }
+
+    // Issue #1340: the session's deletion roots. The launch directory is the
+    // base's `PWD` (the client's shell cwd on the daemon path, where this
+    // process's own cwd is the daemon's), else this process's cwd. Always
+    // replaced, so a nested launch gets its own checkout's roots.
+    let launch_dir = env
+        .iter()
+        .find(|(key, _)| key == "PWD")
+        .map(|(_, value)| std::path::PathBuf::from(value))
+        .filter(|path| path.is_absolute() && path.is_dir())
+        .or_else(|| std::env::current_dir().ok());
+    match launch_dir.and_then(|dir| crate::rm_tool::session_roots_value(&dir)) {
+        Some(roots) => push_or_replace(&mut env, crate::rm_tool::ROOTS_ENV, &roots),
+        None => env.retain(|(key, _)| key != crate::rm_tool::ROOTS_ENV),
     }
 
     crate::shim_session::activate_rm(&mut env);
@@ -440,6 +459,37 @@ mod tests {
         let (second_rx, second_lease) = lease_shared_rx(&shared);
         assert_eq!(second_rx.recv_timeout(timeout).expect("chunk"), b"late");
         drop(second_lease);
+    }
+
+    #[test]
+    fn child_env_sets_the_rm_roots_from_the_launch_checkout() {
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = std::fs::canonicalize(repo.path()).unwrap();
+        std::fs::create_dir_all(repo_path.join(".git")).unwrap();
+        std::fs::create_dir_all(repo_path.join("src")).unwrap();
+        let pwd = repo_path.join("src").to_string_lossy().into_owned();
+        let env = apply_child_env_policy_with_nounset_opt_out(
+            vec![
+                ("PWD".to_string(), pwd),
+                (
+                    crate::rm_tool::ROOTS_ENV.to_string(),
+                    "/inherited".to_string(),
+                ),
+            ],
+            false,
+            false,
+        );
+        let values: Vec<&str> = env
+            .iter()
+            .filter(|(k, _)| k == crate::rm_tool::ROOTS_ENV)
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(values.len(), 1, "replaced, never duplicated");
+        let roots: Vec<std::path::PathBuf> = std::env::split_paths(values[0]).collect();
+        assert_eq!(
+            roots[0], repo_path,
+            "the checkout, not the subdir or the parent's value"
+        );
     }
 
     #[test]

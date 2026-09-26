@@ -98,6 +98,12 @@ fn run(mut args: args::Args) {
     if let Some(args::Command::GrindFacts { args }) = &args.command {
         std::process::exit(clud::grind_facts::run_cli(args));
     }
+    if let Some(args::Command::RmFile { args }) = &args.command {
+        std::process::exit(clud::rm_tool::run(clud::rm_tool::Kind::File, args));
+    }
+    if let Some(args::Command::RmDir { args }) = &args.command {
+        std::process::exit(clud::rm_tool::run(clud::rm_tool::Kind::Dir, args));
+    }
 
     if let Some(args::Command::InstallAssets { home }) = &args.command {
         std::process::exit(install_assets(home.as_deref()));

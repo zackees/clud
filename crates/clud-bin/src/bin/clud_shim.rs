@@ -53,6 +53,23 @@ pub const STDERR_NO_SESSION: &str = "clud python shim invoked outside a clud ses
 
 fn main() {
     let argv: Vec<_> = env::args_os().collect();
+    // `rm-file` / `rm-dir` (#1340): clud-controlled deletion for agents.
+    if let Some(kind) = argv
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_name())
+        .and_then(|name| clud::rm_tool::Kind::from_program_name(&name.to_string_lossy()))
+    {
+        let args: Option<Vec<String>> = argv
+            .into_iter()
+            .skip(1)
+            .map(|a| a.into_string().ok())
+            .collect();
+        let Some(args) = args else {
+            eprintln!("{}: non-UTF8 arguments are not supported", kind.command());
+            exit(2);
+        };
+        exit(clud::rm_tool::run(kind, &args));
+    }
     let is_rm = argv
         .first()
         .and_then(|a| std::path::Path::new(a).file_name())
@@ -244,9 +261,92 @@ fn exec_real(path: &str, args: &[String]) -> io::Result<i32> {
 
 fn run_rm(args: &[String]) -> i32 {
     match clud::rm_guard::prepare(args) {
-        Ok((approved, action)) => finish_rm(approved, action),
+        Ok(clud::rm_guard::Plan::Gated(approved, action)) => finish_rm(approved, action),
+        Ok(clud::rm_guard::Plan::InRoots(plan, dry_run)) => finish_in_roots(plan, dry_run),
         Err(reason) => clud::rm_guard::deny(&reason),
     }
+}
+
+fn finish_in_roots(plan: clud::rm_guard::InRoots, dry_run: bool) -> i32 {
+    #[cfg(not(test))]
+    if !dry_run {
+        return in_roots_execute(plan);
+    }
+    let _ = dry_run;
+    clud::rm_guard::report_in_roots_dry_run(&plan)
+}
+
+/// Delete in process, as `rm` would: `-r` for directories, `-f` to ignore
+/// missing operands, `-v` to report. Every operand already passed the
+/// in-roots gate. One audit record per call, with role `child`.
+#[cfg(not(test))]
+fn in_roots_execute(plan: clud::rm_guard::InRoots) -> i32 {
+    let mut failed = false;
+    let mut paths = Vec::new();
+    for missing in &plan.missing {
+        if !plan.force {
+            failed = true;
+            eprintln!(
+                "rm: cannot remove '{}': No such file or directory",
+                missing.display()
+            );
+        }
+        paths.push(serde_json::json!({"path": missing, "action": "missing"}));
+    }
+    for target in &plan.targets {
+        let result = if target.is_dir {
+            if plan.recursive {
+                clud::gc::delete_audit::record("rm-shim.child", &target.path, "rm -r in roots");
+                std::fs::remove_dir_all(&target.path)
+            } else {
+                Err(std::io::Error::other("Is a directory"))
+            }
+        } else {
+            // Audit before acting (#893), like every other deletion path.
+            clud::gc::delete_audit::record("rm-shim.child", &target.path, "rm in roots");
+            clud::rm_tool::remove_link_or_file(&target.path)
+        };
+        match result {
+            Ok(()) => {
+                if plan.verbose {
+                    println!("removed '{}'", target.path.display());
+                }
+                paths.push(serde_json::json!({"path": target.path, "action": "purged"}));
+            }
+            Err(error) => {
+                failed = true;
+                eprintln!("rm: cannot remove '{}': {error}", target.path.display());
+                paths.push(serde_json::json!({
+                    "path": target.path,
+                    "action": "failed",
+                    "reason": error.to_string(),
+                }));
+            }
+        }
+    }
+    let code = i32::from(failed);
+    if let Ok(state) = clud::daemon::default_state_dir() {
+        let record = serde_json::json!({
+            "ts_unix": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            "command": "rm",
+            "role": "child",
+            "session_id": std::env::var("CLUD_SESSION_ID")
+                .or_else(|_| std::env::var(clud::grind_facts::SESSION_ENV))
+                .ok(),
+            "cwd": std::env::current_dir().ok(),
+            "paths": paths,
+            "exit": code,
+        });
+        clud::rm_tool::append_audit(
+            &state.join("logs").join("rm"),
+            std::time::SystemTime::now(),
+            &record,
+        );
+    }
+    code
 }
 
 fn finish_rm(approved: clud::rm_guard::Approved, action: clud::rm_guard::Action) -> i32 {

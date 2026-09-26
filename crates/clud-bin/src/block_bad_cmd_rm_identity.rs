@@ -47,12 +47,29 @@ fn source_reason_with_tap(
         }
         return source_reason_with_tap(inner, trusted_tap, rg_configured);
     }
+    if contains_removal_in_command_substitution(command) {
+        return Err(
+            "rm identity: a command substitution runs rm, which could resolve to \
+                    something other than clud's shim; run the removal as its own command \
+                    with literal paths (rm-file / rm-dir)"
+                .into(),
+        );
+    }
+    // #1305: a backtick the scanner cannot prove inert only matters when the
+    // command could run a removal through it. Prose in an issue title or a
+    // grep pattern cannot change which rm runs.
     let has_backticks = command.as_bytes().contains(&96);
-    if contains_active_backtick_substitution(command)
-        || (has_backticks && !literal_backticks_are_data_only(command, rg_configured))
-        || contains_removal_in_command_substitution(command)
+    let opaque_backticks = contains_active_backtick_substitution(command)
+        || (has_backticks && !literal_backticks_are_data_only(command, rg_configured));
+    if opaque_backticks
+        && (contains_unquoted_removal_program(command)
+            || contains_unquoted_dynamic_shell_program(command))
     {
-        return Err(refuse());
+        return Err(
+            "rm identity: a backtick substitution appears in a command that runs rm \
+                    or a nested shell; use $(...) or run the removal as its own command"
+                .into(),
+        );
     }
     // Opaque shell structure matters only when it can execute a removal. A
     // command substitution used to obtain documentation, or a for loop that
@@ -70,7 +87,12 @@ fn source_reason_with_tap(
         Err(()) => return Err(refuse()),
     };
     for segment in statements {
-        let words = match shell_words::split(segment.trim()) {
+        // Every `$(...)` body was checked for a removal above; mask it so
+        // `n=$(basename $u)` is one assignment word, not `$u)` as a program
+        // (#1305). The mask keeps its `$`, so a substitution in program
+        // position is still refused below.
+        let masked = mask_command_substitutions(segment);
+        let words = match shell_words::split(masked.trim()) {
             Ok(words) => words,
             // `shell_words` intentionally does not model Bash's ANSI-C
             // `$'...'` arguments. The statement scanner above does, and can
@@ -390,7 +412,26 @@ fn contains_unquoted_dynamic_shell_program(command: &str) -> bool {
     let mut word = String::new();
     let mut at_program_start = true;
     let mut quoted_program = false;
+    // Depth inside an unquoted `${...}` parameter expansion, which belongs
+    // to the current word: its braces are not a brace group (#1305).
+    let mut expansion_depth = 0usize;
     for character in command.chars() {
+        if quote.is_none() && !escaped {
+            if expansion_depth > 0 {
+                word.push(character);
+                match character {
+                    '{' => expansion_depth += 1,
+                    '}' => expansion_depth -= 1,
+                    _ => {}
+                }
+                continue;
+            }
+            if character == '{' && word.ends_with('$') {
+                word.push(character);
+                expansion_depth = 1;
+                continue;
+            }
+        }
         if escaped {
             if quote.is_none() {
                 word.push(character);
@@ -461,7 +502,32 @@ fn opaque_program_word_changes_identity(
             | "command"
             | "xargs"
             | "busybox"
-    ) || program.contains(['$', '*', '?', '[', ']', '{', '}', '~'])
+    ) || program.contains(['$', '*', '?', '[', ']', '{', '}', '~', '`'])
+        || word.contains('`')
+}
+
+/// `segment` with each `$(...)` outside single quotes replaced by `$_`.
+fn mask_command_substitutions(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = String::with_capacity(segment.len());
+    let mut single = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\'' {
+            single = !single;
+        } else if !single && byte == b'$' && bytes.get(index + 1) == Some(&b'(') {
+            if let Some(end) = closing_paren(bytes, index + 1) {
+                out.push_str("$_");
+                index = end;
+                continue;
+            }
+        }
+        let width = segment[index..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&segment[index..index + width]);
+        index += width;
+    }
+    out
 }
 
 /// A command substitution executes its body even when it appears inside a
@@ -585,7 +651,8 @@ fn contains_unquoted_removal_program_at_depth(command: &str, depth: usize) -> bo
                 index = end;
                 continue;
             }
-            None if byte.is_ascii_whitespace() || b";|&(){}<>".contains(&byte) => {
+            // A backtick ends a word too, so `` #`rm x` `` still names rm.
+            None if byte.is_ascii_whitespace() || b";|&(){}<>`".contains(&byte) => {
                 if finish_word(&mut word) {
                     return true;
                 }
@@ -669,6 +736,9 @@ fn resolution_variable(name: &str) -> bool {
             | "LD_PRELOAD"
             | "LD_LIBRARY_PATH"
             | "PROMPT_COMMAND"
+            // #1340: where rm-file / rm-dir and the child shim may delete.
+            | "CLUD_RM_ROOTS"
+            | "CLUD_RM_ROLE"
     )
 }
 
@@ -808,11 +878,13 @@ mod tests {
             "gh issue comment 1298 --repo zackees/clud --body 'Findings include {tick}cache_health_fuse{tick} and {tick}quoted prose{tick}'"
         );
         assert!(source_reason(&issue_comment).is_ok(), "{issue_comment}");
+        // #1305: backticks the scanner cannot prove inert are refused only
+        // when the command could run rm; these run none.
         for command in [
             format!("gh issue comment 1298 --editor --attach image.png --body 'literal {tick}text{tick}'"),
             format!("gh issue comment 1298 --web --body 'literal {tick}text{tick}'"),
         ] {
-            assert!(source_reason(&command).is_err(), "{command}");
+            assert!(source_reason(&command).is_ok(), "{command}");
         }
 
         for command in [
@@ -823,17 +895,24 @@ mod tests {
             assert!(source_reason(&command).is_ok(), "{command}");
         }
 
+        // An active backtick substitution that runs rm stays refused.
         for command in [
-            format!("echo {tick}PATH=/tmp{tick}"),
             format!("printf x\\ #{tick}rm /tmp/victim{tick}"),
             format!("printf $(echo x)#{tick}rm /tmp/victim{tick}"),
             format!("printf x\r#{tick}rm /tmp/victim{tick}"),
-            format!("printf ok \\;# literal {tick}text{tick}"),
-            format!("printf ok # literal {tick}text{tick}"),
             format!("cat <<EOF\nprintf ok # {tick}rm /tmp/victim{tick}\nEOF"),
         ] {
             assert!(contains_active_backtick_substitution(&command), "{command}");
             assert!(source_reason(&command).is_err(), "{command}");
+        }
+        // #1305: one that runs no removal cannot change which rm runs.
+        for command in [
+            format!("echo {tick}PATH=/tmp{tick}"),
+            format!("printf ok \\;# literal {tick}text{tick}"),
+            format!("printf ok # literal {tick}text{tick}"),
+        ] {
+            assert!(contains_active_backtick_substitution(&command), "{command}");
+            assert!(source_reason(&command).is_ok(), "{command}");
         }
 
         let dollar = char::from(36);
@@ -841,13 +920,43 @@ mod tests {
             "unset CLUD_REVIEW_UNSET; printf '%s' {dollar}{{CLUD_REVIEW_UNSET:- #{tick}printf nested{tick}}}"
         );
         assert!(contains_active_backtick_substitution(&nested_expansion));
-        assert!(source_reason(&nested_expansion).is_err());
-
-        let nested_shell = format!("env bash -c 'printf ok {tick}printf nested{tick}'");
-        assert!(source_reason(&nested_shell).is_err(), "{nested_shell}");
+        assert!(source_reason(&nested_expansion).is_ok());
+        let nested_removal = nested_expansion.replace("printf nested", "rm -rf x");
+        assert!(source_reason(&nested_removal).is_err(), "{nested_removal}");
 
         let perl_program = format!("perl -e 'print {tick}printf nested{tick}'");
-        assert!(source_reason(&perl_program).is_err(), "{perl_program}");
+        assert!(source_reason(&perl_program).is_ok(), "{perl_program}");
+        // A nested shell could run rm from the hidden text: still refused.
+        let nested_shell = format!("env bash -c 'printf ok {tick}printf nested{tick}'");
+        assert!(source_reason(&nested_shell).is_err(), "{nested_shell}");
+    }
+
+    /// #1305's four refused commands, verbatim in shape: none runs rm.
+    #[test]
+    fn issue_1305_harmless_commands_are_allowed() {
+        let tick = char::from(96);
+        for command in [
+            format!(
+                "gh issue create --title \"feat(openrouter): \\{tick}clud --openrouter <KEY>\\{tick} saves the key\" --body-file x.md"
+            ),
+            "for u in $(gh issue list --json url -q '.[].url'); do n=${u##*/}; gh api repos/o/r/issues/$n; done".to_string(),
+            "u=$(gh issue create --title t --body b) && n=$(basename $u) && id=$(gh api repos/o/r/issues/$n --jq .id)".to_string(),
+            format!("grep -rn '\\\\{tick}' docs"),
+        ] {
+            assert_eq!(source_reason(&command), Ok(()), "{command}");
+        }
+        // Real bypasses stay refused.
+        for command in [
+            format!("if :; then PATH=/bin {tick}printf r{tick}{tick}printf m{tick} -rf x; fi"),
+            format!("if :; then /bin/{tick}printf rm{tick} -rf x; fi"),
+            "CLUD_RM_ROOTS=/ ./test".to_string(),
+            "export CLUD_RM_ROOTS=/".to_string(),
+            "PATH=/bin rm x".to_string(),
+            format!("{tick}which rm{tick} x"),
+            "$(printf rm) file".to_string(),
+        ] {
+            assert!(source_reason(&command).is_err(), "{command}");
+        }
     }
 
     #[test]

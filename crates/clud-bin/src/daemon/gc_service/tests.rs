@@ -806,6 +806,60 @@ fn trash_reaper_deletes_successful_entry_and_row() {
 }
 
 #[test]
+fn rm_tool_trash_is_kept_for_its_window_then_reaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::open_at(&dir.path().join("rm-trash.redb")).unwrap();
+    let entry = dir.path().join("20260101T000000Z-abcdef-build");
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join(crate::rm_tool::TRASH_MANIFEST), b"{}").unwrap();
+    registry
+        .insert_if_new(&InsertInput {
+            kind: "trash".to_string(),
+            path: entry.to_string_lossy().to_string(),
+            repo_root: None,
+            branch: None,
+            agent_id: Some("/repo/build".to_string()),
+            now_unix: 100,
+        })
+        .unwrap();
+    let now = std::time::SystemTime::now();
+
+    // Inside the keep window the entry is recoverable, so the tick spares it.
+    assert_eq!(
+        filesystem::reap_trash_entries_at(&registry, now).unwrap(),
+        (0, 0)
+    );
+    assert!(entry.exists());
+
+    let later = now + crate::rm_tool::TRASH_KEEP + std::time::Duration::from_secs(60);
+    assert_eq!(
+        filesystem::reap_trash_entries_at(&registry, later).unwrap(),
+        (1, 0)
+    );
+    assert!(!entry.exists());
+    assert!(registry.list(Some("trash")).unwrap().is_empty());
+}
+
+#[test]
+fn unregistered_rm_tool_trash_is_swept_only_once_expired() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = dir.path().join("20260101T000000Z-abcdef-notes.txt");
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join(crate::rm_tool::TRASH_MANIFEST), b"{}").unwrap();
+    let quarantine = dir.path().join("20260101T000000Z-123456");
+    std::fs::create_dir_all(&quarantine).unwrap();
+    let now = std::time::SystemTime::now();
+    assert_eq!(reap_unregistered_rm_trash(dir.path(), now), 0);
+    let later = now + crate::rm_tool::TRASH_KEEP + std::time::Duration::from_secs(60);
+    assert_eq!(reap_unregistered_rm_trash(dir.path(), later), 1);
+    assert!(!entry.exists());
+    assert!(
+        quarantine.exists(),
+        "`clud trash` quarantine is the registry's job"
+    );
+}
+
+#[test]
 fn trash_reaper_keeps_row_when_delete_fails() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("trash-reap-fail.redb");

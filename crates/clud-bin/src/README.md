@@ -784,10 +784,15 @@ for why the single-instantiation pattern matters.
 - Top-level project docs and CI matrix: [`../../../CLAUDE.md`](../../../CLAUDE.md).
 
 Session rm activation and hook identity checks: [rm protection](../../../docs/architecture/rm-protection.md).
+Agent deletion (`rm-file` / `rm-dir`, trash, roots, the hook redirect): [rm tools](../../../docs/architecture/rm-tools.md).
 
-- `rm_guard.rs` — argv decisions, canonical operands and execution-gate facts;
-  it contains no removal implementation. `bin/clud_shim.rs` owns the production
-  executor under `cfg(not(test))` and argv[0] rm dispatch.
+- `rm_tool.rs` — `rm-file` / `rm-dir` (#1340): flags, `Roots` from `CLUD_RM_ROOTS` or the checkout (plus its worktrees), `resolve`'s refusals, trash entries with `.clud-rm.json`, `--purge`, the per-call audit log, and `session_roots_value` for the child env; tests in `rm_tool_tests.rs`.
+- `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to rm-file / rm-dir, and `rm_tool_only`, the no-prompt allow.
+- `rm_guard.rs` — argv decisions, canonical operands and execution-gate facts,
+  including the in-roots gate (`decide_in_roots`, #1340); it contains no
+  removal implementation. `bin/clud_shim.rs` owns the production executors
+  (the CI-in-Docker `/bin/rm` and the in-roots in-process delete) under
+  `cfg(not(test))`, and the argv[0] dispatch for `rm`, `rm-file` and `rm-dir`.
 - `deletion_policy.rs` — normalized deletion-base semantics shared by source
   interpretation and the shim.
 - `block_bad_cmd_rm_identity.rs` — effective-PATH byte identity and source

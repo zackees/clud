@@ -15,7 +15,9 @@
 //!
 //! The router learns the path from `clud grind-facts path`, which reads
 //! [`SESSION_ENV`] (Claude Code exports it to every shell command), and its
-//! Finish step removes the file with `clud grind-facts clear`.
+//! Finish step removes the file with `clud grind-facts clear`. The planner
+//! records each worker task's checkout and files with `clud grind-facts task`
+//! (#1340), which the hook turns into that worker's deletion roots.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -136,10 +138,12 @@ pub fn lookup(session_id: Option<&str>) -> Lookup {
     }
 }
 
-const USAGE: &str = "usage: clud grind-facts <path|clear>
+const USAGE: &str = "usage: clud grind-facts <path|clear|task>
   path   print this session's run-facts file (~/.clud/tmp/grind/<session>.json)
          and mark an existing one as current, so a long run never goes stale
-  clear  remove this session's run-facts file";
+  clear  remove this session's run-facts file
+  task --checkout <dir> [--] <file>...
+         record one worker task's files (the grind planner runs this)";
 
 /// `clud grind-facts <path|clear>`. Returns the exit code.
 pub fn run_cli(args: &[String]) -> i32 {
@@ -162,6 +166,7 @@ fn run_cli_in(
 ) -> i32 {
     let action = match args {
         [action] if matches!(action.as_str(), "path" | "clear") => action.as_str(),
+        [action, ..] if action == "task" => "task",
         _ => {
             let _ = writeln!(err, "{USAGE}");
             return 2;
@@ -176,6 +181,30 @@ fn run_cli_in(
         return 2;
     };
     match action {
+        "task" => {
+            let (checkout, files) = match parse_task(&args[1..]) {
+                Ok(task) => task,
+                Err(error) => {
+                    let _ = writeln!(err, "clud grind-facts task: {error}\n{USAGE}");
+                    return 2;
+                }
+            };
+            match record_task(&path, &checkout, &files) {
+                Ok(count) => {
+                    let _ = writeln!(
+                        out,
+                        "recorded task {count}: {} file(s) in {}",
+                        files.len(),
+                        checkout.display()
+                    );
+                    0
+                }
+                Err(error) => {
+                    let _ = writeln!(err, "clud grind-facts task: {error}");
+                    1
+                }
+            }
+        }
         "path" => {
             if let Err(error) = std::fs::create_dir_all(dir) {
                 let _ = writeln!(err, "clud grind-facts: create {}: {error}", dir.display());
@@ -206,6 +235,85 @@ fn run_cli_in(
             }
         },
     }
+}
+
+/// `--checkout <dir> [--] <file>...`; the checkout must be absolute.
+fn parse_task(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
+    let mut checkout = None;
+    let mut files = Vec::new();
+    let mut flags = true;
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        if flags && arg == "--" {
+            flags = false;
+        } else if flags && arg == "--checkout" {
+            checkout = args.get(i).map(PathBuf::from);
+            i += 1;
+        } else if flags && arg.starts_with("--checkout=") {
+            checkout = Some(PathBuf::from(&arg["--checkout=".len()..]));
+        } else if flags && arg.starts_with('-') {
+            return Err(format!("unknown option {arg:?}"));
+        } else {
+            files.push(arg.clone());
+        }
+    }
+    let checkout = checkout.ok_or("--checkout <dir> is required")?;
+    if !checkout.is_absolute() {
+        return Err("--checkout must be an absolute path".into());
+    }
+    if files.is_empty() {
+        return Err("name the task's files".into());
+    }
+    Ok((checkout, files))
+}
+
+/// Append `{worktree, files}` to the facts' `tasks`, under a lock file so
+/// concurrent planners never lose each other's tasks. Returns the new count.
+fn record_task(path: &Path, checkout: &Path, files: &[String]) -> Result<usize, String> {
+    let dir = path.parent().ok_or("facts path has no directory")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let lock = path.with_extension("lock");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A lock left by a crashed writer is stale after the deadline.
+                if std::time::Instant::now() > deadline {
+                    let _ = std::fs::remove_file(&lock);
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(format!("lock {}: {error}", lock.display())),
+        }
+    }
+    let result = (|| {
+        let mut facts: Value = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("parse facts: {e}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(error) => return Err(format!("read facts: {error}")),
+        };
+        let object = facts.as_object_mut().ok_or("facts are not a JSON object")?;
+        let tasks = object
+            .entry("tasks")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let tasks = tasks.as_array_mut().ok_or("facts' tasks is not an array")?;
+        tasks.push(serde_json::json!({"worktree": checkout, "files": files}));
+        let count = tasks.len();
+        let text = serde_json::to_string_pretty(&facts).map_err(|e| e.to_string())?;
+        let temp = path.with_extension("json.tmp");
+        std::fs::write(&temp, text).map_err(|e| format!("write facts: {e}"))?;
+        std::fs::rename(&temp, path).map_err(|e| format!("replace facts: {e}"))?;
+        Ok(count)
+    })();
+    let _ = std::fs::remove_file(&lock);
+    result
 }
 
 /// Set an existing file's modification time to now; a missing file is fine.
@@ -274,6 +382,43 @@ mod tests {
         assert!(matches!(stale, Lookup::Stale(_)));
         assert!(stale.warning().unwrap().contains("ignored"));
         assert!(lookup_in(dir.path(), Some(A), now).warning().is_none());
+    }
+
+    #[test]
+    fn planners_record_tasks_without_losing_each_others() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("grind");
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, A, r#"{"mode":"parallel"}"#);
+        let checkout = root.path().join("repo-wt-1");
+        let checkout_arg = checkout.to_string_lossy().into_owned();
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let (dir, checkout_arg) = (&dir, &checkout_arg);
+                scope.spawn(move || {
+                    let file = format!("src/f{i}.rs");
+                    let (code, _, err) = cli(
+                        &["task", "--checkout", checkout_arg, "--", &file],
+                        Some(A),
+                        dir,
+                    );
+                    assert_eq!(code, 0, "{err}");
+                });
+            }
+        });
+        let facts = lookup_in(&dir, Some(A), SystemTime::now());
+        let facts = facts.facts().unwrap();
+        assert_eq!(facts["mode"], "parallel", "other facts are kept");
+        assert_eq!(facts["tasks"].as_array().unwrap().len(), 8);
+        assert_eq!(facts["tasks"][0]["worktree"], checkout_arg.as_str());
+        for bad in [
+            vec!["task", "src/a.rs"],
+            vec!["task", "--checkout", "relative", "src/a.rs"],
+            vec!["task", "--checkout", checkout_arg.as_str()],
+            vec!["task", "--bogus", "x"],
+        ] {
+            assert_eq!(cli(&bad, Some(A), &dir).0, 2, "{bad:?}");
+        }
     }
 
     #[test]

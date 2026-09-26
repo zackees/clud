@@ -590,6 +590,20 @@ pub enum Command {
     /// `/grind` router (#1336). The router's body runs this at invocation.
     #[command(hide = true)]
     GrindScripts,
+    /// Move files to the clud trash (`--purge` deletes), within this
+    /// session's roots (#1340). The same command as the `rm-file` alias.
+    #[command(name = "rm-file", disable_help_flag = true)]
+    RmFile {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Move directories to the clud trash (`--purge` deletes), within this
+    /// session's roots (#1340). The same command as the `rm-dir` alias.
+    #[command(name = "rm-dir", disable_help_flag = true)]
+    RmDir {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print or clear this session's `/grind` run-facts file (#1337). The
     /// router writes its run facts there; clud's hook reads them by the
     /// payload's session id.
@@ -1302,6 +1316,8 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "do-prompt",
     "grind-scripts",
     "grind-facts",
+    "rm-file",
+    "rm-dir",
     "install-assets",
     "loop",
     "up",
@@ -1596,7 +1612,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
     // subcommand missing from this list does not fail loudly: clud silently
     // swallows everything after `--` as backend passthrough, and the subcommand
     // sees an empty command vector.
-    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test"];
+    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test", "rm-file", "rm-dir"];
 
     // Which subcommand we are inside, once one has been seen. `None` means the
     // tokens still belong to clud's own top-level flags.
@@ -1796,6 +1812,24 @@ mod grind_scripts_parse_tests {
         let args = Args::parse_from_raw(raw);
         assert!(matches!(args.command, Some(Command::GrindScripts)));
         assert!(args.passthrough.is_empty());
+    }
+
+    #[test]
+    fn rm_file_and_rm_dir_dispatch_with_raw_arguments() {
+        let parse =
+            |list: &[&str]| Args::parse_from_raw(list.iter().map(|s| s.to_string()).collect());
+        let args = parse(&["clud", "rm-file", "--purge", "a", "--", "-b"]);
+        assert!(args.passthrough.is_empty());
+        match args.command {
+            Some(Command::RmFile { args }) => {
+                assert_eq!(args, vec!["--purge", "a", "--", "-b"]);
+            }
+            other => panic!("expected Command::RmFile, got {other:?}"),
+        }
+        match parse(&["clud", "rm-dir", "--help"]).command {
+            Some(Command::RmDir { args }) => assert_eq!(args, vec!["--help"]),
+            other => panic!("expected Command::RmDir, got {other:?}"),
+        }
     }
 
     #[test]

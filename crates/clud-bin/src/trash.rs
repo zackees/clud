@@ -270,7 +270,7 @@ fn create_unique_quarantine_dir(trash_root: &Path) -> Result<PathBuf, TrashError
     })
 }
 
-fn randomish_hex(now: std::time::Duration) -> String {
+pub(crate) fn randomish_hex(now: std::time::Duration) -> String {
     let counter = SUFFIX_COUNTER.fetch_add(1, Ordering::Relaxed) as u64;
     let mut x =
         now.as_nanos() as u64 ^ ((std::process::id() as u64) << 24) ^ counter.rotate_left(17);
@@ -281,7 +281,7 @@ fn randomish_hex(now: std::time::Duration) -> String {
     format!("{:06x}", x & 0x00ff_ffff)
 }
 
-fn timestamp_utcish(unix_secs: i64) -> String {
+pub(crate) fn timestamp_utcish(unix_secs: i64) -> String {
     // Format only. This string names quarantine directories that already
     // exist on disk, so it must stay byte-for-byte identical; the calendar
     // arithmetic lives in `crate::civil_time` (#1206).
@@ -344,7 +344,7 @@ fn remove_source_best_effort(source: &Path, metadata: &std::fs::Metadata) {
     };
 }
 
-fn is_cross_volume_error(err: &io::Error) -> bool {
+pub(crate) fn is_cross_volume_error(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::CrossesDevices || matches!(err.raw_os_error(), Some(17 | 18))
 }
 
