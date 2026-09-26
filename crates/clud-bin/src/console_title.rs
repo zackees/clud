@@ -20,8 +20,9 @@
 //!    — we can't intercept its OSC bytes.
 //!
 //! 2. [`OscTitleStripper`] is a stream-resumable byte filter used by the
-//!    PTY pump (`session.rs`) to drop OSC 0/2 sequences from the child's
-//!    output before they reach our terminal. PTY mode is opt-in
+//!    PTY pump (`session.rs`) and the daemon attach relay
+//!    (`daemon/attach.rs`, #1372) to drop OSC 0/2 sequences from the
+//!    child's output before they reach our terminal. PTY mode is opt-in
 //!    (`--pty`) and used by `clud loop` on POSIX. With the stripper in
 //!    place the title doesn't flicker — the keeper rarely fires.
 //!

@@ -269,7 +269,8 @@ drifted. This is the only defense in subprocess mode, where the child
 inherits stdio handles directly and clud cannot intercept OSC bytes.
 
 In PTY mode the pump runs every output chunk through `OscTitleStripper`
-before stdout. The stripper is a stream-resumable state machine
+before stdout; a daemon attach's relay does the same (#1372, see
+[daemon-ipc.md](daemon-ipc.md#attach-flow)). The stripper is a stream-resumable state machine
 (`console_title.rs:176`) with seven states (`Normal`, `AfterEsc`,
 `InOscNumber`, `SwallowOscBody`, `SwallowAfterEsc`, `PassthroughOscBody`,
 `PassthroughAfterEsc`). It drops OSC 0 (icon + title) and OSC 2 (title only)

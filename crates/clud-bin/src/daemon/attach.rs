@@ -22,6 +22,7 @@ use super::types::{
     WorkerClientMessage, WorkerServerMessage, BACKGROUND_PROMPT_TIMEOUT,
 };
 use super::wire_prost::{daemon_wire_format_from_env, decode_worker_server_line, DaemonWireFormat};
+use crate::console_title::OscTitleStripper;
 use crate::ctrl_c_track::CtrlEventKind;
 use crate::session::{
     InteractiveHooks, KeyboardEnhancementGuard, KeyboardEnhancementTracker, PtyInputSink,
@@ -366,6 +367,9 @@ pub(super) fn attach_to_session(
     let child_keyboard = keyboard
         .as_ref()
         .map(KeyboardEnhancementGuard::child_tracker);
+    // #1372: one stripper for the whole attach, so a title split across
+    // two `Output` messages is still dropped.
+    let mut osc_strip = OscTitleStripper::new();
     let exit_code = Arc::new(Mutex::new(None));
     let reader_exit = Arc::clone(&exit_code);
     let reader = thread::spawn(move || loop {
@@ -383,7 +387,12 @@ pub(super) fn attach_to_session(
                             base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
                         {
                             let mut stdout = io::stdout().lock();
-                            relay_worker_output(&mut stdout, &bytes, child_keyboard.as_deref());
+                            relay_worker_output(
+                                &mut stdout,
+                                &bytes,
+                                child_keyboard.as_deref(),
+                                &mut osc_strip,
+                            );
                         }
                     }
                     WorkerServerMessage::Exited { exit_code } => {
@@ -471,18 +480,21 @@ pub(super) fn attach_to_session(
     final_exit_code
 }
 
-/// Write one chunk of the session's output to the local terminal, feeding it
-/// first to the attach's keyboard-frame tracker (#1363), as the local pump's
-/// output writer does.
+/// Write one chunk of the session's output to the local terminal, as the
+/// local pump's output reader does: the raw bytes go first to the attach's
+/// keyboard-frame tracker (#1363), then the child's OSC 0/2 title writes are
+/// stripped (#1372) so they cannot overwrite clud's stamped console title.
+/// The worker keeps the raw bytes for its backlog, log and transcript.
 fn relay_worker_output(
     out: &mut dyn Write,
     bytes: &[u8],
     child_keyboard: Option<&KeyboardEnhancementTracker>,
+    osc_strip: &mut OscTitleStripper,
 ) {
     if let Some(tracker) = child_keyboard {
         tracker.observe(bytes);
     }
-    let _ = out.write_all(bytes);
+    let _ = out.write_all(&osc_strip.process(bytes));
     let _ = out.flush();
 }
 
@@ -793,8 +805,9 @@ mod tests {
         let mut keyboard = KeyboardEnhancementGuard::with_pushed(true);
         let tracker = keyboard.child_tracker();
         let mut terminal = Vec::new();
-        relay_worker_output(&mut terminal, b"tui\x1b[>", Some(&tracker));
-        relay_worker_output(&mut terminal, b"7u frame", Some(&tracker));
+        let mut osc_strip = OscTitleStripper::new();
+        relay_worker_output(&mut terminal, b"tui\x1b[>", Some(&tracker), &mut osc_strip);
+        relay_worker_output(&mut terminal, b"7u frame", Some(&tracker), &mut osc_strip);
 
         keyboard.unwind_to(&mut terminal);
 
@@ -811,7 +824,13 @@ mod tests {
         let mut keyboard = KeyboardEnhancementGuard::with_pushed(true);
         let tracker = keyboard.child_tracker();
         let mut terminal = Vec::new();
-        relay_worker_output(&mut terminal, b"\x1b[>1uhi\x1b[<u", Some(&tracker));
+        let mut osc_strip = OscTitleStripper::new();
+        relay_worker_output(
+            &mut terminal,
+            b"\x1b[>1uhi\x1b[<u",
+            Some(&tracker),
+            &mut osc_strip,
+        );
 
         keyboard.unwind_to(&mut terminal);
         keyboard.unwind_to(&mut terminal);
@@ -819,6 +838,42 @@ mod tests {
         assert_eq!(
             terminal, b"\x1b[>1uhi\x1b[<u\x1b[<1u",
             "unwind is idempotent"
+        );
+    }
+
+    /// #1372: the local PTY pump strips the child's OSC 0/2 title writes so
+    /// they cannot overwrite clud's stamped console title; the attach relay
+    /// must do the same, including a title split across two output chunks,
+    /// while other output and the keyboard-frame tracking pass through.
+    #[test]
+    fn attach_relay_strips_child_osc_titles_like_the_local_pump() {
+        let mut keyboard = KeyboardEnhancementGuard::with_pushed(true);
+        let tracker = keyboard.child_tracker();
+        let mut terminal = Vec::new();
+        let mut osc_strip = OscTitleStripper::new();
+        relay_worker_output(
+            &mut terminal,
+            b"a\x1b]0;bel-title\x07b\x1b[>1u\x1b]2;st-ti",
+            Some(&tracker),
+            &mut osc_strip,
+        );
+        relay_worker_output(
+            &mut terminal,
+            b"tle\x1b\\c\x1b]8;;u\x07",
+            Some(&tracker),
+            &mut osc_strip,
+        );
+
+        assert_eq!(
+            terminal, b"ab\x1b[>1uc\x1b]8;;u\x07",
+            "OSC 0 and a split OSC 2 are dropped; CSI and OSC 8 pass through"
+        );
+
+        terminal.clear();
+        keyboard.unwind_to(&mut terminal);
+        assert_eq!(
+            terminal, b"\x1b[<1u\x1b[<1u",
+            "the child's relayed frame was still tracked"
         );
     }
 
