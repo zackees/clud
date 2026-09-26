@@ -85,9 +85,9 @@ jobs:
           - runner: ubuntu-24.04-arm
             expected: linux aarch64
           - runner: macos-15-intel
-            expected: macos x86_64
+            expected: darwin x86_64
           - runner: macos-15
-            expected: macos aarch64
+            expected: darwin aarch64
           - runner: windows-2025
             expected: windows x86_64
           - runner: windows-11-arm
@@ -119,7 +119,11 @@ jobs:
           CLUD_TEST_VERSION: ''
         run: |
           set -euo pipefail
-          sha256sum clud-installer.exe
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum clud-installer.exe
+          else
+            shasum -a 256 clud-installer.exe
+          fi
           chmod +x clud-installer.exe
           ./clud-installer.exe --version
           ./clud-installer.exe --self-test-json
@@ -127,6 +131,7 @@ jobs:
           ./clud-installer.exe --self-test-tty
           ./clud-installer.exe --self-test-sha256
           actual=$(./clud-installer.exe --host-platform)
+          echo "Detected host platform: $actual (expected $EXPECTED_PLATFORM)"
           test "$actual" = "$EXPECTED_PLATFORM"
           version=$(./clud-installer.exe --latest-stable)
           echo "Testing latest stable clud $version on $actual (installer release ${RELEASE_TAG:-PR build})"
