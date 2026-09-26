@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -90,17 +89,6 @@ class TestDaemonCentralizedPersistence:
                 proc.wait(timeout=10)
             stop_daemon(clud_binary, state_dir, env)
 
-    @pytest.mark.xfail(
-        sys.platform == "win32",
-        reason=(
-            "Issue #38: `clud attach <id>` times out on Windows PTY "
-            "sessions — the attach subprocess runs to completion but Python's "
-            "communicate() never sees pipe EOF. Handle-inheritance guard in "
-            "PR #39 didn't clear it; deeper Windows ConPTY / CreateProcess "
-            "investigation needed."
-        ),
-        strict=True,
-    )
     def test_pty_session_persists_and_reattaches(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
@@ -138,11 +126,6 @@ class TestDaemonCentralizedPersistence:
                 proc.wait(timeout=10)
             stop_daemon(clud_binary, state_dir, env)
 
-    @pytest.mark.xfail(
-        sys.platform == "win32",
-        reason="Issue #38 — same Windows PTY attach pipe-EOF bug as above.",
-        strict=True,
-    )
     def test_pty_attach_replay_paints_current_frame(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:

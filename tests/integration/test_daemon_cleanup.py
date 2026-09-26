@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
@@ -64,16 +63,6 @@ class TestDaemonCentralizedCleanup:
         # every run.
         wait_for_pids_to_exit([*pids, metadata["worker_pid"]])
 
-    @pytest.mark.xfail(
-        sys.platform == "win32",
-        reason=(
-            "Issue #38: mock-agent helper-tree spawn under ConPTY on "
-            "Windows records fewer than 3 PIDs — same class of "
-            "handle-inheritance / process-spawn quirk as the PTY attach "
-            "pipe hang above."
-        ),
-        strict=True,
-    )
     def test_pty_tree_dies_when_daemon_dies(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
