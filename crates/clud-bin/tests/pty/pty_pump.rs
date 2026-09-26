@@ -260,12 +260,10 @@ fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
 /// Voice mode drains a background transcription worker through this hook;
 /// gating it behind stdin activity would leave transcripts stuck whenever
 /// the user stops typing. Here: an empty stdin source, a 400ms child.
-/// Threshold is intentionally loose — the 10ms `read_chunk_impl`
-/// timeout is a lower bound, but CI scheduler granularity (and an
-/// occasional stall waiting for the child to finish start-up I/O)
-/// can stretch each iteration to 60–100ms. We just need to prove
-/// the tick isn't gated on stdin, not measure loop cadence. Anything
-/// above zero would do; 3 gives headroom for truly slow runners.
+/// We only prove the tick isn't gated on stdin, not measure loop cadence,
+/// so a single tick passes. The pump ticks every 50ms (`PUMP_TICK`), and
+/// the child has already spent 100ms+ of its 400ms starting up; a slow
+/// macOS runner saw only 2 ticks, which failed the old `>= 3` bound.
 #[test]
 fn raw_pump_calls_on_tick_during_idle() {
     require_pty_or_skip!("raw_pump_calls_on_tick_during_idle");
@@ -307,8 +305,8 @@ fn raw_pump_calls_on_tick_during_idle() {
 
     let tick_count = ticks.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        tick_count >= 3,
-        "expected >=3 ticks during 400ms idle child, got {}",
+        tick_count >= 1,
+        "expected on_tick to fire while stdin was idle, got {}",
         tick_count
     );
 }
