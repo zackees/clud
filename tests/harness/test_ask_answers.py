@@ -1,20 +1,20 @@
 """AskUserQuestion answered by the harness on the real Claude Code (#1402).
 
 The model calls `AskUserQuestion` with one question (options ``red`` and
-``blue``); ``Harness.run(answers=...)`` registers ``answer_hook.py``, which
-allows the call with ``updatedInput.answers`` filled in. The test checks that
-the chosen answer reaches the model in the next request's tool result.
-
-If `claude -p` ever stops honouring ``updatedInput.answers`` for
-AskUserQuestion, the fallback is a ``--permission-prompt-tool`` stub that
-returns the answers instead (#1402).
+``blue``). ``Harness.run(answers=...)`` makes the call answerable in print
+mode: it names the stub MCP tool of ``answer_mcp.py`` as the
+``--permission-prompt-tool`` (without one, `claude -p` does not offer
+AskUserQuestion at all) and registers ``answer_hook.py``, which allows the
+call with ``updatedInput.answers`` filled in. The test checks that the tool
+was offered, that the chosen answer reaches the model in the next request's
+tool result, and that the question was logged with its time.
 """
 
 from __future__ import annotations
 
 import json
 
-from tests.harness.harness import Harness, questions_before
+from tests.harness.harness import Harness, questions_after, questions_before
 
 QUESTION = {
     "question": "Which colour?",
@@ -52,8 +52,14 @@ def _tool_results(request: dict) -> str:
 def test_ask_user_question_is_answered(harness: Harness) -> None:
     result = harness.run("pick a colour", SCRIPT, answers={"*": "blue"})
     assert result.returncode == 0, result.stdout[-2000:]
+    notes = [(r["role"], r["note"]) for r in result.requests if r.get("note")]
+    assert not notes, notes
     mains = [r for r in result.requests if r.get("role") == "main"]
+    assert "AskUserQuestion" in mains[0].get("tools", []), mains[0].get("tools")
     assert len(mains) >= 2, [r.get("role") for r in result.requests]
     followup = _tool_results(mains[1])
     assert "blue" in followup, followup[:2000]
     assert len(questions_before(result, "grind-planner")) == 1
+    assert questions_after(result, "grind-planner") == []
+    assert [(q["question"], q["answer"]) for q in result.questions] == [("Which colour?", "blue")]
+    assert result.questions[0]["t"] <= mains[1]["t_start"]
