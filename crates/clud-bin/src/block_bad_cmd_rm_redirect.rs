@@ -387,7 +387,7 @@ fn is_tool_word(word: &str) -> bool {
     if TOOLS.contains(&bare) {
         return true;
     }
-    let normalized = bare.replace('\\', "/");
+    let normalized = crate::path_norm::slash_separators(bare);
     TOOLS
         .iter()
         .any(|tool| normalized.ends_with(&format!("/.clud/state/rm-shim/{tool}")))
