@@ -522,8 +522,58 @@ impl Drop for RawTerminalGuard {
     }
 }
 
+/// True when both stdin and stdout are terminals.
+///
+/// Under Git Bash's mintty (without winpty) a native Windows exe gets pipe
+/// stdio, so this returns false even though a human is typing (#1357).
+/// That is correct — pipes cannot do raw mode or ConPTY — but the
+/// downgrade is announced by [`warn_if_mintty_without_console`].
 pub fn terminals_are_interactive() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+/// Pure decision behind [`mintty_without_console`]: Windows, both stdio
+/// handles are non-terminals, and the environment looks like an MSYS2 /
+/// Git Bash terminal (a real `TERM` plus a non-empty `MSYSTEM`).
+pub(crate) fn looks_like_mintty_without_console(
+    is_windows: bool,
+    stdin_tty: bool,
+    stdout_tty: bool,
+    term: Option<&str>,
+    msystem: Option<&str>,
+) -> bool {
+    let term_ok = matches!(term, Some(t) if !t.is_empty() && t != "dumb");
+    let msystem_ok = matches!(msystem, Some(m) if !m.is_empty());
+    is_windows && !stdin_tty && !stdout_tty && term_ok && msystem_ok
+}
+
+/// Whether clud appears to be running under mintty without a Windows console.
+pub fn mintty_without_console() -> bool {
+    let term = std::env::var("TERM").ok();
+    let msystem = std::env::var("MSYSTEM").ok();
+    looks_like_mintty_without_console(
+        cfg!(windows),
+        io::stdin().is_terminal(),
+        io::stdout().is_terminal(),
+        term.as_deref(),
+        msystem.as_deref(),
+    )
+}
+
+/// Print a one-time stderr warning when [`mintty_without_console`] holds,
+/// unless `CLUD_NO_MINTTY_WARNING` is set.
+pub fn warn_if_mintty_without_console() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("CLUD_NO_MINTTY_WARNING").is_some() || !mintty_without_console() {
+            return;
+        }
+        eprintln!(
+            "clud: Git Bash/mintty detected without a Windows console; clud cannot run an \
+             interactive session here and will use subprocess mode. Run clud from Windows \
+             Terminal, or use `winpty clud ...`. (Set CLUD_NO_MINTTY_WARNING=1 to silence.)"
+        );
+    });
 }
 
 /// Raw-byte pump replacing the crossterm event loop on the PTY path.

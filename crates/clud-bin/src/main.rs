@@ -429,6 +429,9 @@ fn run(mut args: args::Args) {
             }
         };
     let global_launch_preferences = launch_preferences.global;
+    // #1357: Git Bash mintty hands a native exe pipes, not a console, so
+    // the launch silently downgrades to subprocess mode. Say so once.
+    clud::session::warn_if_mintty_without_console();
     // #922: interactive `clud -c` / `--last` on the Claude harness picks a
     // session for this cwd and rewrites the args (provider, resume target,
     // recovery) before the launch target is resolved from them.
