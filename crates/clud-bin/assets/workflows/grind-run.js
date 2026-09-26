@@ -23,6 +23,15 @@ export const meta = {
 //   planOnly?: true, meta?: '<meta issue number>',
 //   base?: 'main',   // default base branch for goals in no plan stage; omitted = main
 //                    // a plan stage's `base` wins for its children (#1409)
+//   // Stages (#1409): the router starts grind-run once per stage. The bug-stage
+//   // call passes `plan` (prework posts it) and the bug children as `goals`
+//   // (none when the plan is all feature: that call only posts the plan). The
+//   // feature-stage call comes after the router cut the feature branch from the
+//   // updated main, and passes `plan`, the feature children, `feature`,
+//   // `feature_merge`, `problem_reporting` and:
+//   plan_url?: '<url>',   // the plan comment the bug-stage call posted; prework is skipped
+//   stuck_bugs?: ['103'], // bug children that did not merge in the bug-stage call;
+//                         // feature goals listing one in depends_on_bugs are blocked
 //   plan?: { schema: 'grind-plan/v1', run_id, meta, original, repo, main, mode,
 //            preflight, structure, stages, deferred_groups, feature_merge,
 //            problem_reporting, models, ci, scripts, rules, waiting_on_pr },
@@ -38,10 +47,14 @@ export const meta = {
 //   feature_merge?: 'auto' | 'decide_later' | 'comment_only',
 //                    // what happens to the feature PR once its goals settle;
 //                    // args.plan.feature_merge is also read; default decide_later
-//   // problem reporting (#1411) needs no new args
+//   problem_reporting?: 'issue' | 'comment',   // args.plan.problem_reporting is also read
 // }
-// problems (#1411): roles return them; the router files them per plan.problem_reporting
-if (!args || !args.repo || !Array.isArray(args.goals) || !args.goals.length) {
+// problems (#1411): roles return them; the router files them per problem_reporting.
+// With a plan the result is { goals, plan_url, problems, problem_reporting } (plus
+// `feature` in a feature stage); without one it is the goal summary array.
+// A plan-carrying call may have no goals: it only posts the plan.
+const POSTS_PLAN = !!(args && args.plan && !args.plan_url && !args.planOnly)
+if (!args || !args.repo || !Array.isArray(args.goals) || (!args.goals.length && !POSTS_PLAN)) {
   throw new Error('grind needs args {repo, mode, goals:[{id,title,brief}]}; start it with /grind')
 }
 if (!args.planOnly && args.mode !== 'parallel' && args.mode !== 'sequential') {
@@ -154,19 +167,25 @@ const CLASSIFY = {
 
 // Plan-only helpers (#1406): one classification line per child, and the
 // threshold that decides whether a meta issue is worth regrouping.
+// Child ids arrive as numbers (plan stages), strings or '#N' (goals, planner
+// output); every comparison between them goes through idKey.
+const idKey = (x) => String(x ?? '').trim().replace(/^#/, '')
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/g, '')
 const featureBranch = (meta, group) => `grind/meta-${meta}-${slug(group)}`
 const classificationLines = (c, meta) => (c.children || []).map(ch => {
-  const id = String(ch.id).replace(/^#/, '')
+  const id = idKey(ch.id)
   return ch.track === 'bug'
     ? `#${id} bug → ${MAIN}`
     : `#${id} feature → ${featureBranch(meta, ch.group || 'feature')}`
 })
-const thresholdVerdict = (c) => {
+// `ids`: every child of the meta issue; one the planner left out is unplaced.
+const thresholdVerdict = (c, ids = []) => {
   const children = c.children || []
   const groups = c.groups || []
   const names = new Set(groups.map(g => g.name))
+  const classified = new Set(children.map(ch => idKey(ch.id)))
   if (c.confident !== true) return { path: 'simple', reason: 'classification not confident' }
+  if (ids.some(id => !classified.has(idKey(id)))) return { path: 'simple', reason: 'a child could not be placed' }
   if (children.some(ch => ch.track === 'feature' && !(ch.group && names.has(ch.group)))) return { path: 'simple', reason: 'a child could not be placed' }
   if (children.length < 8) return { path: 'simple', reason: 'fewer than 8 children' }
   if (groups.filter(g => g.independent === true && (g.children || []).length >= 3).length < 2) return { path: 'simple', reason: 'fewer than 2 independent feature groups of 3+' }
@@ -233,19 +252,35 @@ if (args.planOnly) {
   const c = await agent(
     `Follow your built-in /grind-plan procedure in PLAN-ONLY mode (read-only: no Write/Edit, no worktree, no push, no branch).\n\nRepo: ${REPO} (default branch ${MAIN}). Meta issue: #${args.meta}.\nChildren of the meta issue:\n` +
     args.goals.map(g => `${g.id}: ${g.title}\n${g.brief}`).join('\n\n') +
-    `\n\nClassify every child as bug or feature, name the feature groups and whether they are independent, which feature children depend on which bugs, and the dependency order. Return it through StructuredOutput.`,
+    `\n\nClassify every child as bug or feature, name the feature groups and whether they are independent, which feature children depend on which bugs, and the dependency order. Classify every child listed above exactly once, using its id as given; set confident to false if any child cannot be placed. Return it through StructuredOutput.`,
     opts('planner', 'classify', 'Classify', CLASSIFY))
-  if (!c) return { planOnly: true, path: 'simple', reason: 'planner died', lines: [] }
-  const lines = classificationLines(c, args.meta)
+  // log() lines never reach the router (the Workflow result arrives as a
+  // notification carrying only the return value), so the classification
+  // lines and the keep message are returned too.
+  if (!c) {
+    const keep = `keeping #${args.meta} as is: planner died`
+    log(keep)
+    return { planOnly: true, path: 'simple', reason: 'planner died', message: keep, lines: [] }
+  }
+  const classified = new Set((c.children || []).map(ch => idKey(ch.id)))
+  const lines = [...classificationLines(c, args.meta),
+    ...args.goals.filter(g => !classified.has(idKey(g.id))).map(g => `#${idKey(g.id)} unclassified`)]
   lines.forEach(l => log(l))
-  const { path, reason } = thresholdVerdict(c)
-  if (path === 'simple') log(`keeping #${args.meta} as is: ${reason}`)
-  return { planOnly: true, path, reason, lines, classification: c }
+  const { path, reason } = thresholdVerdict(c, args.goals.map(g => g.id))
+  const nGroups = (c.groups || []).length
+  const message = path === 'simple'
+    ? `keeping #${args.meta} as is: ${reason} (${nGroups} feature group${nGroups === 1 ? '' : 's'}, ${args.goals.length} children)`
+    : `regroup #${args.meta}: ${nGroups} feature groups, ${args.goals.length} children`
+  log(message)
+  return { planOnly: true, path, reason, message, lines, classification: c }
 }
 
 // Prework (#1408): record the plan on the meta issue before any worker runs.
-let PLAN_URL = null
-if (args.plan) {
+// A feature-stage call (#1409) reuses the comment the bug-stage call posted.
+let PLAN_URL = args.plan_url || null
+if (PLAN_URL) {
+  log(`plan: ${PLAN_URL} (posted earlier; prework skipped)`)
+} else if (args.plan) {
   phase('Prework')
   const bodies = planBodies(args.plan)
   const pw = collect(await agent(
@@ -292,11 +327,11 @@ const STAGES = ALL_STAGES.filter(s => {
   return true
 })
 const keptIds = new Set()
-STAGES.forEach(s => (Array.isArray(s.children) ? s.children : []).forEach(c => keptIds.add(String(c))))
+STAGES.forEach(s => (Array.isArray(s.children) ? s.children : []).forEach(c => keptIds.add(idKey(c))))
 const DEFERRED_GOALS = []
 const deferredNote = {}
 removedStages.forEach(({ s, note }) => (Array.isArray(s.children) ? s.children : []).forEach(c => {
-  const id = String(c)
+  const id = idKey(c)
   if (!keptIds.has(id) && !(id in deferredNote)) deferredNote[id] = note
 }))
 // A deferred group's children never run this time, even when the router left
@@ -310,7 +345,7 @@ removedStages.forEach(({ s, note }) => (Array.isArray(s.children) ? s.children :
   })
 })
 args.goals = args.goals.filter(g => {
-  const note = deferredNote[String(g.id)]
+  const note = deferredNote[idKey(g.id)]
   if (note === undefined) return true
   DEFERRED_GOALS.push({ goal: g.id, id: g.id, merged: false, status: 'deferred', note, problems: [] })
   return false
@@ -318,7 +353,7 @@ args.goals = args.goals.filter(g => {
 const stageBase = {}
 const stageOf = {}
 STAGES.forEach(s => (Array.isArray(s.children) ? s.children : []).forEach(c => {
-  const id = String(c)
+  const id = idKey(c)
   if (s.base && !(id in stageBase)) stageBase[id] = s.base
   if (!(id in stageOf)) stageOf[id] = s
 }))
@@ -330,12 +365,15 @@ const FEATURE = (args.feature && args.feature.branch && !NO_FEATURE_LEFT) ? args
 const FEATURE_MERGE_ALIASES = { auto: 'auto', later: 'decide_later', decide_later: 'decide_later', comment: 'comment_only', comment_only: 'comment_only' }
 const FEATURE_MERGE = [args.feature_merge, args.plan && args.plan.feature_merge]
   .map(m => FEATURE_MERGE_ALIASES[m]).find(Boolean) || 'decide_later'
+// Where the router files problems (#1411): 'issue' (default) or 'comment'.
+const PROBLEM_REPORTING = [args.problem_reporting, args.plan && args.plan.problem_reporting]
+  .find(m => m === 'issue' || m === 'comment') || 'issue'
 const isFeatureGoal = (g) => {
   if (!FEATURE) return false
-  const s = stageOf[String(g.id)]
+  const s = stageOf[idKey(g.id)]
   return s ? !isBugStage(s) : !STAGES.length
 }
-const baseOf = (g) => g.base || stageBase[String(g.id)] || (isFeatureGoal(g) ? FEATURE.branch : null) || args.base || MAIN
+const baseOf = (g) => g.base || stageBase[idKey(g.id)] || (isFeatureGoal(g) ? FEATURE.branch : null) || args.base || MAIN
 const featureCheckout = (g) => (!PARALLEL && isFeatureGoal(g))
   ? `\nThis is a feature-stage goal: work in the feature worktree ${FEATURE.worktree} (never the user's checkout ${REPO}); that is the goal's checkout.`
   : ''
@@ -352,13 +390,21 @@ const featureIntegrateNote = (g) => !isFeatureGoal(g) ? '' :
   `keep its existing Closes lines${args.meta ? `, including \`Closes #${args.meta}\`` : ''}.`
 const featureLandNote = (g) => !isFeatureGoal(g) ? '' :
   `\n\nFeature-stage goal: merge this PR into the feature branch ${FEATURE.branch} with \`gh pr merge <n> --merge\`, never into ${MAIN}.`
-const STUCK_BUG_BLOCKS = !!(args.plan && args.plan.rules && args.plan.rules.stuck_bug === 'block_dependents_only')
+// Stuck-bug rule (#1409): `block_dependents_only` is the only rule the spec
+// defines, so it also applies when the plan omits rules.stuck_bug.
+const STUCK_RULE = args.plan && args.plan.rules && args.plan.rules.stuck_bug
+const STUCK_BUG_BLOCKS = !!args.plan && (!STUCK_RULE || STUCK_RULE === 'block_dependents_only')
+// Bugs that did not merge in an earlier, bug-stage call of this run.
+const STUCK_BUGS = new Set((Array.isArray(args.stuck_bugs) ? args.stuck_bugs : []).map(idKey))
 const bugDepsOf = (g) => {
-  const s = stageOf[String(g.id)]
+  const s = stageOf[idKey(g.id)]
   if (!s || isBugStage(s) || !s.depends_on_bugs || typeof s.depends_on_bugs !== 'object') return []
-  const entry = Object.entries(s.depends_on_bugs).find(([k]) => String(k) === String(g.id))
-  return entry && Array.isArray(entry[1]) ? entry[1].map(String) : []
+  const entry = Object.entries(s.depends_on_bugs).find(([k]) => idKey(k) === idKey(g.id))
+  return entry && Array.isArray(entry[1]) ? entry[1].map(idKey) : []
 }
+// The goal id (as the router spelled it) for a normalized id.
+const goalIdOf = {}
+args.goals.forEach(g => { goalIdOf[idKey(g.id)] = g.id })
 
 const ctx = (g) => `Repo: ${REPO} (default branch ${MAIN}). Mode: ${args.mode}. Local CI (act): ${CI ? `on, lane ${args.lane || '(pick from ci.yml)'}` : 'off'}.\nGoal ${g.id}: ${g.title}\n${g.brief}` +
   (PLAN_URL ? `\nPlan comment: ${PLAN_URL} (read it before you start; it is the recorded plan and never changes).` : '') +
@@ -429,7 +475,7 @@ args.goals.forEach((g, i) => {
   landed[g.id] = new Promise(r => { settle[g.id] = r })
 })
 const earlierDeps = (p, g) => {
-  const deps = (p.depends_on || []).map(String)
+  const deps = (p.depends_on || []).map(d => { const id = goalIdOf[idKey(d)]; return id === undefined ? String(d) : String(id) })
   const kept = deps.filter(d => d in order && order[d] < order[g.id])
   const dropped = deps.filter(d => !kept.includes(d))
   if (dropped.length) log(`goal ${g.id}: ignoring depends_on ${dropped.join(', ')} (unknown, itself, or not listed earlier)`)
@@ -516,11 +562,13 @@ let DIRTY_AFTER = null
 
 const attemptGoal = async (g, state) => {
   if (!PARALLEL && DIRTY_AFTER !== null) return { merged: false, blocked: true, note: `blocked: checkout not clean after parking goal ${DIRTY_AFTER}` }
-  // Stuck-bug rule: a failed bug blocks only the feature children that list it.
+  // Stuck-bug rule: a failed bug blocks only the feature children that list
+  // it, whether it ran in this call or in the earlier bug-stage call.
   if (STUCK_BUG_BLOCKS) {
     for (const bug of bugDepsOf(g)) {
-      if (!(bug in landed)) continue
-      if (!(await landed[bug])) return { merged: false, blocked: true, note: `blocked: bug #${bug} did not land` }
+      const dep = goalIdOf[bug]
+      const stuck = dep === undefined ? STUCK_BUGS.has(bug) : !(await landed[dep])
+      if (stuck) return { merged: false, blocked: true, note: `blocked: bug #${bug} did not land` }
     }
   }
   const planned = await plan(g)
@@ -592,21 +640,22 @@ phase('Plan')
 const featureStages = STAGES.filter(s => !isBugStage(s))
 if (STAGES.some(isBugStage) && featureStages.length) {
   // Bug stage first (plus any goal in no stage), then each feature stage in order.
+  // The router normally starts one call per stage, so one batch is empty.
   const featureIds = new Set()
   const batches = featureStages.map(s => {
-    const ids = new Set((Array.isArray(s.children) ? s.children : []).map(String))
-    const goals = args.goals.filter(g => ids.has(String(g.id)) && !featureIds.has(String(g.id)))
-    goals.forEach(g => featureIds.add(String(g.id)))
+    const ids = new Set((Array.isArray(s.children) ? s.children : []).map(idKey))
+    const goals = args.goals.filter(g => ids.has(idKey(g.id)) && !featureIds.has(idKey(g.id)))
+    goals.forEach(g => featureIds.add(idKey(g.id)))
     return { label: `stage feature ${s.group || s.name || s.branch || 'feature'}`, goals }
   })
-  batches.unshift({ label: 'stage bugs', goals: args.goals.filter(g => !featureIds.has(String(g.id))) })
+  batches.unshift({ label: 'stage bugs', goals: args.goals.filter(g => !featureIds.has(idKey(g.id))) })
   const byId = {}
-  for (const b of batches) {
+  for (const b of batches.filter(b => b.goals.length)) {
     log(`${b.label}: ${b.goals.length} goal(s)`)
     const rs = await runBatch(b.goals)
-    b.goals.forEach((g, i) => { byId[String(g.id)] = rs[i] })
+    b.goals.forEach((g, i) => { byId[idKey(g.id)] = rs[i] })
   }
-  results = args.goals.map(g => byId[String(g.id)])
+  results = args.goals.map(g => byId[idKey(g.id)])
 } else {
   results = await runBatch(args.goals)
 }
@@ -618,9 +667,11 @@ DEFERRED_GOALS.forEach(d => {
   summary.push(d)
 })
 if (PLAN_URL) log(`plan: ${PLAN_URL}`)
+if (allProblems().length) log(`problems go to: ${PROBLEM_REPORTING} (the router files them)`)
 if (!FEATURE) {
   logProblems()
-  return summary
+  // With a plan the router needs plan_url back for the feature-stage call.
+  return args.plan ? { goals: summary, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING } : summary
 }
 
 // Feature landing (#1410): once every feature-stage goal has settled.
@@ -645,4 +696,4 @@ if (!FEATURE.pr) {
 log(`feature ${feature.branch}: PR ${feature.pr || '(none)'}, policy ${feature.policy}, ${feature.merged ? 'merged' : 'not merged'}: ${feature.note}`)
 feature.problems = problemsOf('feature')
 logProblems()
-return { goals: summary, feature, problems: allProblems() }
+return { goals: summary, feature, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING }

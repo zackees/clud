@@ -4458,3 +4458,30 @@ parked: its work is on the pushed branch. Park branches are local and never
 deleted by Finish. If a park leaves the checkout dirty, every later goal in
 the run is blocked. The contract is owned by
 [architecture/grind.md](architecture/grind.md#review-gate-parking-and-dependents-1424).
+
+## DD-100: The /grind router starts grind-run once per stage
+
+**Status:** Accepted
+
+**Context:** #1409, spec #1392 §3. The feature branch must be cut from
+`<main>` after the bug stage has merged, so it contains those fixes. Only
+the router (the main session) may create the feature worktree, and a
+Workflow call is one tool call: the router cannot act between two stages of
+the same call. Cutting the branch before the call breaks that ordering.
+
+**Decision:** The router starts `grind-run` twice. The bug-stage call gets
+the plan and the bug children; its prework posts the plan and the result
+returns `plan_url`. After the router cuts the feature branch and opens the
+draft feature PR, the feature-stage call gets the feature children, the
+feature branch as `base`, `plan_url` (so prework is not repeated), `feature`,
+`feature_merge` and `stuck_bugs`, the bug children that did not merge.
+
+**Rationale:** Each call keeps the workflow deterministic and needs no role
+with the router's worktree rights. The stuck-bug rule stays in the workflow,
+not the router's prose, because `stuck_bugs` carries the only fact it needs
+across calls.
+
+**Consequences:** An all-feature plan still makes a bug-stage call with no
+goals, so the plan is recorded before any branch exists. `grind-run` still
+orders stages when one call is given goals from both. The contract is owned
+by [architecture/grind.md](architecture/grind.md#bug-stage-then-feature-stage).

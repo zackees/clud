@@ -3,9 +3,15 @@
 With `planOnly: true` the workflow runs one `grind-planner` over the meta
 issue's children, prints the bug/feature classification, and picks a path:
 `simple` (keep the meta issue as is) under the complexity threshold,
-`regroup` above it. Covers #1392 cases U2, T4, H1, H2, H3 and H5. The
-planning phase is marked by `<repo>/.clud/grind/run.json` with
-`{"phase": "plan"}`, which the clud hook reads to hold the planner read-only.
+`regroup` above it. Covers #1392 cases U2, T4 and H1-H5 (H7 is in
+`test_grind_tracks.py`). The planning phase is marked by
+`<repo>/.clud/grind/run.json` with `{"phase": "plan"}`, which the clud hook
+reads to hold the planner read-only; the prompt's PLAN-ONLY text is for the
+planner only.
+
+The Workflow result reaches the main session as a later task notification
+carrying the return value, never the `log()` lines, so the classification
+`lines` and the `keeping #T as is:` `message` are asserted from the return.
 
 Script note: a step's `expect` checks the tool results of the *previous*
 step, so an expectation about a command sits on the step after it.
@@ -56,10 +62,13 @@ def _seed(h: Harness, children: list[int]) -> dict[str, Any]:
     return h.read_gh_state()
 
 
-def _plan_phase(h: Harness) -> None:
+def _plan_phase(h: Harness, mode: str | None = None) -> None:
     run = Path(h.repo) / ".clud" / "grind" / "run.json"
     run.parent.mkdir(parents=True, exist_ok=True)
-    run.write_text(json.dumps({"phase": "plan"}), encoding="utf-8")
+    facts: dict[str, Any] = {"phase": "plan"}
+    if mode is not None:
+        facts["mode"] = mode
+    run.write_text(json.dumps(facts), encoding="utf-8")
 
 
 def _script(
@@ -117,6 +126,12 @@ def _told(result: RunResult) -> str:
     return json.dumps(seen, ensure_ascii=False) + result.stdout
 
 
+def _no_notes(result: RunResult) -> None:
+    """No scripted step failed its expectation or asked for a missing tool."""
+    notes = [(r["role"], r["note"]) for r in result.requests if r.get("note")]
+    assert not notes, notes
+
+
 def _path(result: RunResult) -> str | None:
     match = re.search(r'path\\*"\s*:\s*\\*"(simple|regroup)', _told(result))
     return match.group(1) if match else None
@@ -131,33 +146,55 @@ def _run(h: Harness, children: list[int], plan: dict[str, Any]) -> tuple[RunResu
 
 
 def test_plan_only_planner_is_read_only(harness: Harness) -> None:
+    """U2: no worktree, push or file write gets through in plan-only mode.
+
+    Write/Edit are not offered to `grind-planner` at all (its `tools:` list),
+    so the planner cannot even attempt them; a scripted Write step would only
+    be answered with text by the mock and end the planner. The hook's
+    plan-only mode covers the shell: `git worktree add`, which parallel mode
+    would otherwise allow, and push.
+    """
     repo = str(harness.repo)
-    denied = {"is_error": True}
-    write = {"file_path": f"{repo}/x.txt", "content": "x\n"}
     plan = _classify({101: ("bug", None)}, {})
     worktree = f"{repo}-wt-1"
+    add = f"git -C {repo} worktree add {worktree} -b grind/x origin/main"
+    push = f"git -C {repo} push origin main"
     steps = [
-        _bash(f"git -C {repo} worktree add {worktree} -b grind/x origin/main"),
-        _after(denied, _bash(f"git -C {repo} push origin main")),
-        _after(denied, {"tool_use": {"name": "Write", "input": write}}),
-        _after(denied, _structured(plan)),
+        _bash(add),
+        _after({"is_error": True, "content_contains": "plan-only"}, _bash(push)),
+        _after({"is_error": True, "content_contains": "git push"}, _structured(plan)),
     ]
     _seed(harness, [101])
-    _plan_phase(harness)
+    # Parallel mode: only plan-only mode refuses the worktree.
+    _plan_phase(harness, mode="parallel")
     result = harness.run("start grind", _script(harness, [101], steps), timeout=300)
     assert result.returncode == 0, result.stdout[-3000:]
-    tried = [
-        h
+    tools = set(result.first_request("planner")["tools"])
+    assert "Write" not in tools, tools
+    assert "Edit" not in tools, tools
+    bash = [
+        h["tool_input"]["command"]
         for h in result.hooks
         if h.get("agent_type") == "grind-planner"
         and h.get("event") == "PreToolUse"
-        and h.get("tool_name") in ("Bash", "Write")
+        and h.get("tool_name") == "Bash"
     ]
-    assert [h["tool_name"] for h in tried] == ["Bash", "Bash", "Write"], tried
+    assert bash == [add, push], bash
+    assert not [
+        h
+        for h in result.hooks
+        if h.get("agent_type") == "grind-planner" and h.get("tool_name") in ("Write", "Edit")
+    ]
+    _no_notes(result)
+    assert _path(result) == "simple", _told(result)[-3000:]
     assert not Path(worktree).exists()
-    assert not (harness.repo / "x.txt").exists()
+    assert "grind/x" not in harness.git("branch", "--list", "grind/x")
+    heads = harness.git(
+        "for-each-ref", "--format=%(refname:short)", "refs/heads", cwd=harness.origin
+    )
+    assert heads.split() == ["main"], heads
     planner = json.dumps([r["messages"] for r in result.requests if r["role"] == "planner"])
-    assert planner.count('"is_error": true') >= 3, planner[-3000:]
+    assert planner.count('"is_error": true') >= 2, planner[-3000:]
 
 
 def test_classification_is_printed_without_asking(harness: Harness) -> None:
@@ -213,8 +250,43 @@ def test_below_threshold_keeps_the_meta_issue(harness: Harness, spec: tuple) -> 
     assert harness.read_gh_state() == before
 
 
-def test_above_threshold_chooses_regroup(harness: Harness) -> None:
-    tracks, groups = _groups(("a", 4), ("b", 4))
-    result, _ = _run(harness, list(tracks), _classify(tracks, groups))
+REGROUP = {
+    "H4-two-groups-of-3-and-2-bugs": (("a", 3), ("b", 3), ("bug", 2)),
+    "two-groups-of-4": (("a", 4), ("b", 4)),
+}
+
+
+@pytest.mark.parametrize("spec", list(REGROUP.values()), ids=list(REGROUP))
+def test_above_threshold_chooses_regroup(harness: Harness, spec: tuple) -> None:
+    tracks, groups = _groups(*spec)
+    result, before = _run(harness, list(tracks), _classify(tracks, groups))
     assert _path(result) == "regroup", _told(result)[-3000:]
     assert f"keeping #{META} as is" not in _told(result)
+    # The plan-only pass only reports; the regroup itself waits for the answer.
+    assert harness.read_gh_state() == before
+
+
+@pytest.mark.parametrize(
+    "unsure", [{"confident": False}, {"independent": False}], ids=["not-confident", "dependent"]
+)
+def test_unsure_classification_keeps_the_meta_issue(harness: Harness, unsure: dict) -> None:
+    """H5's other faces: an unconfident plan, or groups that are not independent."""
+    tracks, groups = _groups(("a", 4), ("b", 4))
+    result, before = _run(harness, list(tracks), _classify(tracks, groups, **unsure))
+    assert _path(result) == "simple", _told(result)[-3000:]
+    assert f"keeping #{META} as is:" in _told(result)
+    assert harness.read_gh_state() == before
+
+
+def test_a_child_the_planner_left_out_is_unplaced(harness: Harness) -> None:
+    """Every child is printed even if the planner omits it, and it keeps the
+    meta issue as is, though the rest would clear the threshold."""
+    tracks, groups = _groups(("a", 4), ("b", 4))
+    plan = _classify(tracks, groups)
+    children = [*tracks, 109]
+    result, before = _run(harness, children, plan)
+    told = _told(result)
+    assert _path(result) == "simple", told[-3000:]
+    assert "#109 unclassified" in told, told[-3000:]
+    assert "could not be placed" in told
+    assert harness.read_gh_state() == before

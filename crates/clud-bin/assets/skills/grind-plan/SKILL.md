@@ -15,9 +15,11 @@ later, one goal at a time.
 
 1. **Read the goal.** If the brief is an issue, `gh issue view <n>
    --comments`. Read the code it names and the repo's per-directory READMEs.
-2. **Checkout and branch.** Branch `grind/<id>-<slug>`.
-   - Parallel mode: `git -C <repo> fetch origin <main>`, then
-     `git -C <repo> worktree add <repo>-wt-<id> -b <branch> origin/<main>`
+2. **Checkout and branch.** Branch `grind/<id>-<slug>`. `<base>` is the
+   prompt's "Base branch": `<main>` for a bug-stage goal, the feature branch
+   for a feature-stage goal.
+   - Parallel mode: `git -C <repo> fetch origin <base>`, then
+     `git -C <repo> worktree add <repo>-wt-<id> -b <branch> origin/<base>`
      (reuse it if it exists). The checkout is that worktree.
    - Sequential mode: the checkout is the repository itself. Do not create a
      worktree or switch branches; the integrator creates the branch.
@@ -32,7 +34,7 @@ later, one goal at a time.
 4. **Dependencies.** `depends_on` lists other goals in this run that must
    land first (shared files, an API this goal consumes). Only goals listed
    before this one count; the workflow ignores any other. An empty list
-   means the goal is isolated and rebases straight onto `origin/<main>`.
+   means the goal is isolated and rebases straight onto `origin/<base>`.
    Keep chains short; a dependent goal waits for its dependency to merge.
 5. **Verify.** The exact lint, build and test commands the integrator runs,
    newest-first focused test before the broad gates, taken from the repo's
@@ -52,12 +54,14 @@ When the prompt says PLAN-ONLY, skip steps 2-5 and only classify:
   the default branch) or a **feature** (one part of a single cohesive
   change).
 - Name the feature groups and say whether each is independent of the others.
-- List which feature children depend on which bugs, and give a dependency
-  order for all children.
+- List which feature children depend on which bugs (`depends_on_bugs`), and
+  give a dependency order for all children.
+- Return every child exactly once, with its id as the prompt gives it.
 - Set `confident` to false if any child cannot be placed or the split is a
   guess.
 
-Never write files, create worktrees or branches, or push. Return that shape
+Never write files, create worktrees or branches, or push; clud's hook refuses
+them while `run.json` has `"phase": "plan"`. Return the classification
 through StructuredOutput.
 
-Return the plan through StructuredOutput.
+Otherwise, return the plan through StructuredOutput.

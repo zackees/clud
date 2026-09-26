@@ -81,13 +81,14 @@ clud's command hook then denies the planner Write/Edit, `git worktree add`
 and `git push`. Start the Workflow named `grind-run` with args
 `{repo, main, meta, goals, planOnly: true}` and relay its output.
 
-The classification is automatic: print one line per child, `#N bug → main`
-or `#N feature → grind/meta-<T>-<group>`, and never ask about it.
+The classification is automatic: print the returned `lines`, one per child,
+`#N bug → main` or `#N feature → grind/meta-<T>-<group>`, and never ask
+about it.
 
-The workflow also returns `path`:
+The workflow also returns `path` and a one-line `message`:
 
 - `simple` (the default) keeps the meta issue exactly as written: no new
-  issues, no moved parents, no rewritten bodies. Print
+  issues, no moved parents, no rewritten bodies. Print the `message`,
   `keeping #T as is: <reason>`; there is no regroup question.
 - `regroup` happens only when all of these hold: at least 2 independent
   feature groups of 3+ children each, 8+ children in total, and a confident
@@ -296,13 +297,28 @@ agent gets that comment's URL. Nobody edits the plan comment.
 ## 4. Run
 
 - Cron: read `../grind-cron/SKILL.md` and follow it with the goal source and the answers.
-- Parallel or sequential: start the Workflow named `grind-run` with args
-  `{repo, main, mode, goals, ci, scripts, plan, meta, models: {planner,
-  worker, reviewer, integrator}}`, where `plan` is the 3b object. Omit a
-  model the user left at the session default, and omit `scripts` when none
-  were chosen.
+- Parallel or sequential: start the Workflow named `grind-run` once per
+  stage, because the feature branch is cut only after the bug stage ends.
+  1. **Bug stage** (always, even when it has no children): args
+     `{repo, main, mode, goals, ci, scripts, plan, meta, base: <main>,
+     problem_reporting, models: {planner, worker, reviewer, integrator}}`,
+     where `plan` is the 3b object and `goals` are the bug-stage children
+     only (`[]` for an all-feature plan: the call then only posts the plan).
+     Its first agent, prework, posts the plan; the result's `plan_url` is
+     that comment.
+  2. **Feature stage** (only when the plan kept a feature stage): do 4b,
+     then start `grind-run` again with the same args, except `goals` are
+     the feature stage's children, `base` is the feature branch, plus
+     `plan_url` (from step 1, so prework is not repeated), `feature`,
+     `feature_merge`, and `stuck_bugs`: the bug children step 1 reported
+     as not merged. The workflow blocks each feature child that lists one
+     of them in `depends_on_bugs`, and runs the rest.
+
+  Omit a model the user left at the session default, and omit `scripts`
+  when none were chosen.
 - If the workflow returns `stopped: 'prework'`, report that the plan could
-  not be posted and that no work was done, then go to Finish.
+  not be posted and that no work was done, then go to Finish; no feature
+  branch is created.
 
 **Status comment (router only).** When the workflow starts (or just
 before), post one `<!-- grind:v1 status run=<run-id> -->` comment on the
@@ -315,8 +331,9 @@ agents at once, and exactly one integrator.
 
 ## 4b. Feature stage (feature-branch mode)
 
-Only when the plan has feature children, at the start of the feature stage
-(after the bug stage ends):
+Only when the plan has feature children, at the start of the feature stage:
+after the bug-stage `grind-run` call returns (section 4, step 1), so the
+branch contains every bug fix that merged:
 
 1. `git fetch origin <main>`.
 2. Create exactly ONE worktree:
@@ -333,7 +350,9 @@ Only when the plan has feature children, at the start of the feature stage
    `grind:on-feature` as the goal lands.
 5. Record `{"feature": {"branch": "…", "worktree": "…", "pr": "…"},
    "feature_merge": "…"}` in `run.json`, and pass `feature` and
-   `feature_merge` to `grind-run`.
+   `feature_merge` to the feature-stage `grind-run` call (section 4,
+   step 2). Until this step `run.json` has no `feature`: the bug stage runs
+   under the plain caps, where the lander merges each bug PR into `<main>`.
 
 The router creates no other worktree and never touches the user's checkout
 after preflight. If `origin/<main>` moves during the stage, merge it into the
@@ -341,15 +360,18 @@ feature branch (`git merge origin/<main>`); never rebase the feature branch.
 
 ## 5. Finish (always, as the very last step)
 
-After the workflow returns, whether or not every goal merged:
+After the last workflow call returns (both stage calls, when there are
+two), whether or not every goal merged:
 
 1. **Report** each goal's PR and whether it merged, and list anything left
-   open with its reason. For a feature stage, by `feature_merge`:
+   open with its reason, including each feature child blocked by a stuck
+   bug (`blocked: bug #N did not land`) next to that bug. For a feature
+   stage, by `feature_merge`:
    - `later`: report the open draft feature PR.
    - `comment`: post one result comment on the meta issue (branch, goals
      landed, feature PR) and keep the PR draft.
    - `auto`: report the feature PR as merged, or as "waiting for review".
-2. **File problems (router only).** Gather every `problems` item from the
+2. **File problems (router only).** Gather every `problems` item from each
    workflow result (each goal entry's `problems`, `feature.problems`, and the
    top-level `problems`), and dedupe by kind + summary + related_issue. Then,
    by the plan's `problem_reporting`:

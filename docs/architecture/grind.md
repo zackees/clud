@@ -142,8 +142,11 @@ The complexity threshold is
 `grind-run.js::thresholdVerdict`: it picks `path: regroup` only for a confident
 classification with every child placed, 8+ children, and at least 2
 independent feature groups of 3+; otherwise it logs
-`keeping #T as is: <reason>` and the meta issue is left untouched. The
-router then rewrites `run.json` without `phase` for the real run.
+`keeping #T as is: <reason>` and the meta issue is left untouched. A child
+the planner leaves out is printed `#N unclassified` and counts as unplaced.
+The router then rewrites `run.json` without `phase` for the real run. The
+`phase` marker in `run.json` is the hook's only plan-only signal; the
+`PLAN-ONLY` prompt text is for the planner, and the hook never reads it.
 
 ### Meta of metas and no overlap
 
@@ -271,21 +274,33 @@ Issue [#1409](https://github.com/zackees/clud/issues/1409). The stage fields
 are defined by the plan; see
 [Prework and the plan comment](#prework-and-the-plan-comment).
 
-- **Order.** `grind-run` runs every bug-stage goal against `origin/<main>`
-  first. Only then does it run each feature stage, against that stage's
-  `stage.base`. A goal named in no stage runs with the bug stage. With no
-  bug stage, or no feature stage left after the no-overlap and deferral
-  filters, the goals run as one batch.
-- **One workflow call.** Both stages run inside one `grind-run` call, and
-  the main session cannot act between them. So the router sets up the
-  feature branch and its draft PR before it starts the workflow (see
-  [Feature-branch mode](#feature-branch-mode)).
-- **Base override.** For a run without a plan, `args.base` replaces the
-  default base (`origin/<main>`).
-- **Stuck bug.** The rule is `block_dependents_only`. When a bug does not
-  merge, only the feature children that list it in `depends_on_bugs` are
-  blocked, reported as `blocked: bug #N did not land`. Every other goal
-  proceeds.
+- **One call per stage.** The feature branch must be cut from `<main>`
+  *after* the bug stage has merged, and only the router may create it, so
+  the router starts `grind-run` twice. The bug-stage call gets `plan`, the
+  bug children and `base: <main>`; prework posts the plan there, and the
+  result carries `plan_url`. An all-feature plan still makes this call, with
+  no goals, so the plan is recorded before any branch exists. The router
+  then sets up the feature branch and starts the feature-stage call with the
+  feature children, `base: <feature branch>`, `plan_url` (prework is
+  skipped), `feature`, `feature_merge`, `problem_reporting` and
+  `stuck_bugs`.
+- **Order.** Given goals from both stages in one call, `grind-run` still
+  runs every bug-stage goal first and each feature stage after it, against
+  that stage's `stage.base`.
+- **Base.** A goal's base is its plan stage's `base`; `args.base` (default
+  `<main>`) covers goals in no stage.
+- **Ids.** Plan stages hold numbers, goals and planner output strings or
+  `#N`; the workflow compares them after stripping `#` (`idKey`).
+- **Stuck bug.** The rule is `block_dependents_only` (also when the plan
+  omits `rules.stuck_bug`). When a bug does not merge, in this call or as
+  listed in `stuck_bugs`, only the feature children that list it in
+  `depends_on_bugs` are blocked, reported as `blocked: bug #N did not land`.
+  Every other goal proceeds.
+- **Caps.** While the bug stage runs, `run.json` has no `feature`, so the
+  lander merges bug PRs into `<main>` under the plain caps.
+
+Why two calls:
+[DD-100](../DESIGN_DECISIONS.md#dd-100-the-grind-router-starts-grind-run-once-per-stage).
 
 ### Feature-branch mode
 
@@ -294,18 +309,19 @@ Issue [#1410](https://github.com/zackees/clud/issues/1410); spec
 feature-stage children of a meta issue; issue safety is in
 [#1393](https://github.com/zackees/clud/issues/1393).
 
-- **Setup.** Before it starts `grind-run`, the router creates
-  `grind/meta-<M>-<run-id>` from `origin/<main>` in the worktree
+- **Setup.** After the bug-stage call returns and before the feature-stage
+  call, the router creates `grind/meta-<M>-<run-id>` from the updated
+  `origin/<main>` in the worktree
   `.clud/grind/worktrees/feature` and pushes it. `<M>` is the feature meta:
   the meta issue, or the chosen group's sub-meta in a meta of metas. It
   opens the **draft feature PR** into `<main>` (body `Closes #<M>`, plus
   `Closes #<original>` for a converted issue) and passes
   `feature: {branch, worktree, pr}` and `feature_merge` to the workflow and
   `run.json`. The user's checkout is not touched after preflight.
-- **Bug fixes reach the branch by merge.** The branch is cut before the bug
-  stage runs, so the first feature-stage integrator merges the updated
-  `origin/<main>` into it (see *Merge commit, main merged in* below). That
-  is how the feature stage builds on the bugs that landed.
+- **Bug fixes reach the branch.** The branch is cut after the bug stage
+  has merged, so it already contains those fixes. Anything that lands on
+  `<main>` later is merged into it by the next feature-stage integrator (see
+  *Merge commit, main merged in* below), never rebased.
 - **Goals.** Each goal PR's base is the feature branch, so it still gets CI
   and a review trail. The integrator rebases the goal onto the feature
   branch, writes `Refs #N`, and appends `Closes #N` to the feature PR's body,
