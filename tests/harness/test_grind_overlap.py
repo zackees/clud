@@ -293,7 +293,8 @@ def _feature_stage_ran(h: Harness, result: RunResult, features: list[str]) -> No
     for f in features:
         assert f"planner:{f}" in ran, (f, ran)
         assert _branch(f) in merged, (f, merged)
-    assert "waiting on feature PR" not in _told(result)
+    # The workflow source also contains the phrase; match only a rendered note.
+    assert not re.search(r"waiting on feature PR #\d", _told(result))
 
 
 # ---- tests ---------------------------------------------------------------------
@@ -392,6 +393,12 @@ def test_o3_feature_pr_merged_in_run_unblocks_the_next_plan(harness: Harness) ->
     }
     goals = ["101", "102", "103", "104"]
     roles = [*_roles(harness, goals), _feature_lander()]
+    # The router records the feature in run.json before the feature-stage
+    # call (/grind 4b step 5); the hook reads the feature PR from there.
+    run = Path(harness.repo) / ".clud" / "grind" / "run.json"
+    run.parent.mkdir(parents=True, exist_ok=True)
+    facts = {"mode": "sequential", "meta": META, "feature": feature, "feature_merge": "auto"}
+    run.write_text(json.dumps(facts), encoding="utf-8")
     first = _run(harness, _script(harness, roles, goals, plan, feature))
     _feature_stage_ran(harness, first, FEATURES)
     assert FEATURE in _merged(harness), _merged(harness)
@@ -413,4 +420,4 @@ def test_o4_feature_pr_under_another_meta_does_not_block(harness: Harness) -> No
     goals = ["101", "102", "103", "104"]
     result = _run(harness, _script(harness, _roles(harness, goals), goals, plan))
     _feature_stage_ran(harness, result, FEATURES)
-    assert "no overlap" not in _told(result)
+    assert not re.search(r"no overlap: waiting on feature PR #\d", _told(result))

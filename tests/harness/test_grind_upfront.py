@@ -477,7 +477,7 @@ def test_u3_u8_dirty_feature_plan_offers_carry_and_abort_creates_nothing(
         *_route_and_plan(h, meta, children),
         _after(_saw("README.md"), _ask(_dirty_q(carry=True), MODE_Q, MODELS_Q)),
         # Abort: remove the plan-phase run.json and create nothing else.
-        _after(_saw("Abort"), _bash(f"rm -f {_run_json(h)}")),
+        _after(_saw("Abort"), _bash(f"clud trash {_run_json(h)}")),
         _after(OK, {"text": "Aborted; nothing was created."}),
     ]
     roles = [_classifier(h, _classify([101], {"verbose": [102]}))]

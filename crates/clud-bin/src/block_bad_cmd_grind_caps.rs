@@ -559,6 +559,24 @@ fn policy_name(policy: FeatureMerge) -> &'static str {
 /// The PR a `gh pr merge|ready` argument list targets: the first non-flag
 /// argument, as a number. Value-taking flags skip their value.
 fn pr_target(args: &[String]) -> Option<String> {
+    pr_positional(args).and_then(|word| number_word(word))
+}
+
+/// Whether a `gh pr merge` target names the feature PR: by number, or by its
+/// head branch (the feature branch `run.json` records). `None` when no target
+/// is given, so the caller fails closed.
+fn merge_targets_feature(args: &[String], run: &RunFacts, feature_pr: &str) -> Option<bool> {
+    let word = pr_positional(args)?;
+    if let Some(number) = number_word(word) {
+        return Some(number == feature_pr);
+    }
+    let branch = word.trim().trim_matches(&['\'', '"'][..]);
+    let feature_branch = run.feature.as_ref().map(|f| f.branch.as_str());
+    Some(feature_branch == Some(branch))
+}
+
+/// The first positional argument after `gh pr <sub>`.
+fn pr_positional(args: &[String]) -> Option<&String> {
     const VALUE_FLAGS: &[&str] = &[
         "-R",
         "--repo",
@@ -581,7 +599,7 @@ fn pr_target(args: &[String]) -> Option<String> {
             }
             continue;
         }
-        return number_word(word);
+        return Some(word);
     }
     None
 }
@@ -631,7 +649,7 @@ fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String
     }
     let feature_pr = run.feature_pr()?;
     let args = &words[3..];
-    let Some(target) = pr_target(args) else {
+    let Some(is_feature) = merge_targets_feature(args, run, feature_pr) else {
         return Some(format!(
             "{role} must name the PR to `gh pr merge` in feature-branch mode"
         ));
@@ -639,7 +657,7 @@ fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String
     let has = |names: &[&str]| args.iter().any(|w| names.contains(&w.as_str()));
     // Goal PRs head `grind/*` branches too: none is deleted while the
     // feature PR is open.
-    if target != feature_pr {
+    if !is_feature {
         return has(&["--delete-branch", "-d"]).then(|| {
             format!("{role} may not delete grind/* branches while the feature PR is open")
         });
@@ -1808,6 +1826,46 @@ mod tests {
         assert!(allowed(LANDER, "gh pr merge 9 -m", &auto));
         // Goal PRs are not the feature PR: their method is the lander's call.
         assert!(allowed(LANDER, "gh pr merge 5 --admin --squash", &auto));
+    }
+
+    #[test]
+    fn merge_target_may_be_a_branch_name() {
+        let auto = feature_run(FeatureMerge::Auto);
+        // A goal PR named by its head branch is not the feature PR.
+        assert!(allowed(
+            LANDER,
+            "gh pr merge grind/goal-101 --admin --squash",
+            &auto
+        ));
+        assert!(!allowed(
+            LANDER,
+            "gh pr merge grind/goal-101 --merge -d",
+            &auto
+        ));
+        // The feature branch names the feature PR, with all its rules.
+        assert!(allowed(
+            LANDER,
+            "gh pr merge grind/meta-100-r1 --merge",
+            &auto
+        ));
+        assert!(!allowed(
+            LANDER,
+            "gh pr merge grind/meta-100-r1 --admin --merge",
+            &auto
+        ));
+        assert!(!allowed(
+            LANDER,
+            "gh pr merge 'grind/meta-100-r1' --squash",
+            &auto
+        ));
+        let later = feature_run(FeatureMerge::DecideLater);
+        assert!(!allowed(
+            LANDER,
+            "gh pr merge grind/meta-100-r1 --merge",
+            &later
+        ));
+        // No target at all still fails closed.
+        assert!(!allowed(LANDER, "gh pr merge --merge", &auto));
     }
 
     #[test]

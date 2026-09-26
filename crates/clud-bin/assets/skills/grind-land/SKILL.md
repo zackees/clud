@@ -13,7 +13,8 @@ disable-model-invocation: true
 The integrator already proved RED -> GREEN locally; you confirm it on the
 server and merge.
 
-1. Watch: `"$CLUD_EXE" tool run github/pr_merge_watch.py <n> --timeout 540`.
+1. Watch: `clud tool run github/pr_merge_watch.py <n> --timeout 540` (a plain
+   `clud`: clud's hook refuses a `"$CLUD_EXE"` program word).
    Run it bare; its exit code is the result (do not pipe it through `tail`).
    Keep `--timeout` below your 600 s tool-call cap so the watch exits `4`
    itself instead of being orphaned in the background.

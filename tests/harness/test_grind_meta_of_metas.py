@@ -11,7 +11,7 @@ scripted main session runs the exact `gh` commands the skill names:
 - move each feature child with
   `gh api -X POST repos/o/r/issues/<sub>/sub_issues -F sub_issue_id=<id> -F replace_parent=true`.
 
-`fake_gh` takes `--body` rather than `--body-file`, so bodies go inline.
+Bodies go inline with `--body`, which keeps the scripted commands short.
 Every change is written to `run.json`'s `undo` before its command runs, and
 the plan fields to `.clud/grind/plan.json`. The tests then check the fake
 GitHub state against hard-coded expectations, plus the undo record against

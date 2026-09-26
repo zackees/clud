@@ -656,13 +656,26 @@ const attemptGoal = async (g, state) => {
   state.p = p
   const worked = await work(p, g)
   state.results = worked.results
-  return integrateAndLand(await review(worked, g), g)
+  const reviewed = await review(worked, g)
+  state.review = reviewed.review
+  return integrateAndLand(reviewed, g)
+}
+
+// Did anything write to the checkout? A rejected or blocked goal whose
+// workers touched no file and whose reviewer applied no fix left nothing to
+// park; any other failure may have (the integrator writes too).
+const wroteSomething = (state, result) => {
+  if (!result.rejected && !result.blocked) return true
+  const touched = (state.results || []).some(r => r && Array.isArray(r.files_touched) && r.files_touched.length)
+  const fixed = !!(state.review && Array.isArray(state.review.fixes_applied) && state.review.fixes_applied.length)
+  return touched || fixed
 }
 
 // Sequential mode: a goal that wrote files and ends unmerged with nothing
 // pushed has its changes parked before the next goal starts (#1424).
 const parkIfNeeded = async (g, state, result) => {
   if (PARALLEL || !state.p || result.merged || result.pushed) return result
+  if (!wroteSomething(state, result)) return result
   const why = result.rejected ? 'its review was rejected' : result.blocked ? 'it was blocked' : 'it failed before its work was pushed'
   let pk = null
   try {

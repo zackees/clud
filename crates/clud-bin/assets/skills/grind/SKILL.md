@@ -147,7 +147,8 @@ action right after the round, before prework:
   so the user's checkout is clean; section 4b applies it in the feature
   worktree.
 - **Abort**: stop. Create nothing on GitHub or in git, remove the
-  plan-phase `.clud/grind/run.json`, and write no other file.
+  plan-phase `.clud/grind/run.json` with `clud trash <path>` (clud's rm shim
+  refuses a plain `rm`), and write no other file.
 
 A clean tree records `preflight.action: "none"`.
 
@@ -456,7 +457,7 @@ two), whether or not every goal merged:
    it holds a rejected or failed goal's only copy; report it. A merged
    goal PR's commits stay reachable at `refs/pull/<n>/head`, but an
    unpushed worktree has no such copy, so push first. Only then remove
-   `.clud/grind/run.json` and `.clud/grind/plan.json` (last, because the
+   `.clud/grind/run.json` and `.clud/grind/plan.json` with `clud trash` (last, because the
    hook reads `run.json` to guard `grind/*` branches during the cleanup).
    Then `git status --porcelain`
    prints nothing: no untracked files, no uncommitted changes, and no stash

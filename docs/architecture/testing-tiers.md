@@ -105,13 +105,17 @@ pins how Claude Code treats it:
   dependency order, fix rounds and their cap, the worker shell caps, a dead
   planner, per-role procedures and tool lists, the internal-only agents, and
   the router's Docker and `ci.yml` text.
-- `tests/harness/test_ask_answers.py`: the `answer_hook.py` answerer that
-  fills in `AskUserQuestion` under `-p` (#1402).
+- `tests/harness/test_ask_answers.py`: the `AskUserQuestion` answerer
+  (#1402). Print mode offers the tool only with a permission prompt tool, so
+  `h.run(..., answers={...})` adds `answer_mcp.py` as one and registers
+  `answer_hook.py`, which returns the answers as `updatedInput`. Runs
+  without `answers` are never offered the tool.
 - The `/grind` redesign suites (#1392), one per section of
   [grind.md](grind.md#tests), which maps each to what it covers:
   `test_grind_routing.py`, `test_grind_plan_only.py`,
   `test_grind_meta_of_metas.py`, `test_grind_overlap.py`,
   `test_grind_upfront.py`, `test_grind_prework.py`, `test_grind_stages.py`,
   `test_grind_feature.py`, `test_grind_problems.py`,
-  `test_grind_reconcile.py`, `test_grind_scripts.py` and the end-to-end
+  `test_grind_reconcile.py`, `test_grind_scripts.py`,
+  `test_grind_tracks.py`, `test_grind_review_gate.py` and the end-to-end
   scenarios in `test_grind_e2e.py`.

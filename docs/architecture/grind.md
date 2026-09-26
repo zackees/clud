@@ -340,27 +340,39 @@ feature-stage children of a meta issue; issue safety is in
   *Merge commit, main merged in* below), never rebased.
 - **Goals.** Each goal PR's base is the feature branch, so it still gets CI
   and a review trail. The integrator rebases the goal onto the feature
-  branch, writes `Refs #N`, and appends `Closes #N` to the feature PR's body,
-  keeping `Closes #<M>`. The lander merges the goal PR into the feature
-  branch with `--merge`. Parallel goal worktrees branch from the feature
-  branch; sequential goals run inside the feature worktree.
+  branch, writes `Refs #N`, and never edits the feature PR. The lander
+  merges the goal PR into the feature branch with `--admin --merge` (never
+  `--delete-branch`), and only then adds `Closes #N` to the feature PR's
+  body (keeping `Closes #<M>` and every other line), so a goal that never
+  lands is never closed by the feature merge. Parallel goal worktrees branch
+  from the feature branch; sequential goals run inside the feature worktree.
 - **Merge policy** (`feature_merge`, asked up front):
   - `auto`: once CI is green the lander marks the PR ready and runs
     `gh pr merge --merge`, never `--admin`, so branch protection and required
     reviews still apply.
-  - `later`: the router reports the PR and leaves it open, still a draft,
-    for the user; the hook refuses the lander `gh pr ready` and the merge.
+  - `later`: at Finish, when every feature goal landed, the router marks
+    the PR ready (`gh pr ready`) and leaves it open for the user; if a goal
+    did not land it stays a draft. Nobody merges it: the hook refuses the
+    lander `gh pr ready` and the merge, and the router the merge.
   - `comment`: the router posts the result on the meta issue and keeps the
     PR a draft.
 - **Merge commit, main merged in.** The feature PR lands as a merge commit.
   If `<main>` moves during the run, `<main>` is merged into the feature
   branch, never rebased, so goal SHAs already merged there stay unchanged.
 - **Caps.** `block_bad_cmd_grind_caps.rs` refuses `gh pr merge --admin` on
-  the feature PR, lets the lander merge the feature PR into `<main>` only
-  under `feature_merge: auto`, and refuses deleting a `grind/*` branch while
-  its feature PR is open. The router's single worktree (the feature one) is
-  enforced by the `/grind` skill text, not the hook, since the router is the
-  main session.
+  the feature PR, requires its merge to name `--merge`, lets the lander
+  merge it into `<main>` only under `feature_merge: auto`, and refuses
+  deleting a `grind/*` branch (including `gh api -X DELETE …/git/refs/heads/grind/*`)
+  while its feature PR is open. In feature mode the lander may also
+  `gh label create`/add `grind:on-feature`, comment on an issue (the landing
+  marker), edit only the feature PR's body, and `gh run rerun`.
+- **Router caps.** The main session has no agent type, so while `run.json`
+  records a `feature`, the hook applies router caps to any caller that is
+  not a grind role: exactly one `git worktree add` (the feature worktree),
+  no issue close (`gh issue close` or `gh api … -f state=closed`), no merge
+  of the feature PR, and no deletion of a `grind/*` branch. A `run.json`
+  left behind by a crashed run keeps these on; the denial says to remove it.
+  Finish removes `run.json` last, so cleanup stays guarded.
 
 The rationale is in
 [DD-095](../DESIGN_DECISIONS.md#dd-095-the-grind-feature-lands-as-a-merge-commit-and-main-is-merged-into-the-feature-branch-rather-than-rebased).
@@ -390,7 +402,14 @@ Issue [#1393](https://github.com/zackees/clud/issues/1393).
   | closed unmerged | any | reopen if closed; remove label; comment citing `refs/pull/<N>/head` |
   | open, or merged elsewhere | closed by hand, by an unmerged PR, by a PR into a non-default base, or by a commit not on `<main>` | reopen with a comment naming the closer |
   | open, or merged elsewhere | closed by a PR merged into `<main>` or a commit on `<main>` | none |
-  | open and stale (14 days idle, conflicting, or branch gone) | any | report stale; comment on the meta issue |
+  | open and stale (14 days idle, conflicting, or branch gone) | any | report stale; comment on the meta issue once per staleness window (a hidden `<!-- grind:reconcile … -->` tag suppresses repeats) |
+  | open, not stale | any | report it (draft, ready, or waiting for review) |
+
+  It also reopens an unlabelled sub-issue of a feature meta that was closed
+  by hand mid-run, and closes the top meta issue of a meta of metas once
+  every child is closed (follow-ups never count). Actions are applied in
+  order and a pass stops at the first failure; the label is removed last,
+  so a failed close never strands an open issue without it.
 
 - **Reachable commits.** A commit closer counts as landed only when
   `compare/<main>...<oid>` reports `behind` or `identical`, i.e. the commit is
@@ -561,7 +580,7 @@ it covers:
   overlap.
 - `test_grind_upfront.py` — preflight and the single question round.
 - `test_grind_prework.py` — the plan comment.
-- `test_grind_stages.py`, `test_grind_feature.py` — stages and
+- `test_grind_stages.py`, `test_grind_tracks.py`, `test_grind_feature.py` — stages and
   feature-branch mode.
 - `test_grind_problems.py` — problem reporting.
 - `test_grind_reconcile.py` — reconcile.
