@@ -3,13 +3,13 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "*",
         "hooks": [
           {
-            "command": "'/home/niteris/dev/clud/.claude/worktrees/agent-a0b94894b57c7b81a/target/debug/clud-cmd-scan'",
-            "type": "command"
+            "type": "command",
+            "command": "clud-cmd-scan"
           }
-        ],
-        "matcher": "*"
+        ]
       }
     ]
   }

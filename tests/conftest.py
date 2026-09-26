@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from ci import tracked_files
 from ci.env import scrub_clud_session_env
 
 # A clud session exports state such as CLUD_SKIP_RM_IDENTITY (auto-on in
@@ -16,6 +17,27 @@ from ci.env import scrub_clud_session_env
 # under test, they flip the behavior those tests assert (#1423). Tests set
 # only the CLUD_* variables they need; everything else starts clean.
 scrub_clud_session_env(os.environ)
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def checkout_tracked_files_unchanged():
+    """Fail the run if any test wrote a tracked file in the checkout (#1426).
+
+    Compares before vs after, so a checkout that was already dirty passes.
+    Skipped when the tests do not run from a git checkout.
+    """
+    before = tracked_files.snapshot(_REPO_ROOT)
+    yield
+    if before is None:
+        return
+    after = tracked_files.snapshot(_REPO_ROOT)
+    if after is None:
+        return
+    changed = tracked_files.changed_paths(before, after)
+    if changed:
+        pytest.fail(tracked_files.describe(changed, during="the pytest run"), pytrace=False)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
