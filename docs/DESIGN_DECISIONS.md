@@ -4421,3 +4421,44 @@ linked without that coupling.
 `Refs` backlink. A failed filing is listed in the router's final report
 rather than stopping the run. The contract is owned by
 [architecture/grind.md](architecture/grind.md#problem-reporting).
+
+## DD-099: /grind's preflight never touches its own files, and "carry" becomes the feature branch's first commit
+
+**Status:** Accepted
+
+**Context:** #1407, spec #1392 §2. The router writes `.clud/grind/run.json`
+before preflight (the plan-only pass needs it), and the feature worktree
+lives under `.clud/grind/worktrees/`. In a repo that does not ignore
+`.clud/`, a plain `git status --porcelain` reports the run's own files as
+user changes, and `git stash push -u` would stash `run.json` away, taking
+the hook's role caps with it. The spec's "carry into the grind worktree"
+option also left open what happens to changes that are carried.
+
+**Decision:** Every preflight command (`git status --porcelain -uall`, the
+stash, the WIP commit) takes the pathspec `. ':(exclude).clud/grind'`.
+"Carry" stashes the changes as `grind-<run-id>-carry`, and the feature setup
+pops that stash in the feature worktree and commits it as the feature
+branch's first commit.
+
+**Rationale:**
+- A pathspec needs no write to `.gitignore` or `.git/info/exclude`, so Abort
+  still leaves the repo exactly as it was.
+- `-uall` lists untracked files one by one, so the exclusion applies to each
+  file rather than to a collapsed `?? .clud/` directory entry.
+- Uncommitted changes in the feature worktree would be invisible to
+  parallel goal worktrees (branched from the pushed feature branch) and would
+  leak into whichever goal commit ran first in sequential mode. A commit
+  makes them part of the feature that every goal builds on, and the feature
+  PR shows them to the user.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Add `.clud/grind/` to `.git/info/exclude` | A lasting side effect of a run the user may abort. |
+| Carry the changes uncommitted | Goals would not see them, or would commit them by accident. |
+
+**Consequences:** Carried changes reach `origin` on the feature branch, so
+"carry" is only offered when the plan has a feature stage. Finish has nothing
+to restore for a carry. The contract is owned by
+[architecture/grind.md](architecture/grind.md#preflight-and-the-single-question-round).

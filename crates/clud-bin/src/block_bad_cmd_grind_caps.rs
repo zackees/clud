@@ -1005,10 +1005,14 @@ mod tests {
             ..run(true, false)
         };
         for facts in [run(false, false), plan.clone()] {
-            for role in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER] {
-                let reason = tool_reason(role, "AskUserQuestion", &facts)
-                    .unwrap_or_else(|| panic!("{role} allowed AskUserQuestion"));
-                assert!(reason.contains("up front"), "{role}: {reason}");
+            for role in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK] {
+                for tool in ["AskUserQuestion", "askuserquestion"] {
+                    let reason = tool_reason(role, tool, &facts)
+                        .unwrap_or_else(|| panic!("{role} allowed {tool}"));
+                    // U11 (#1407): the denial names the up-front rule.
+                    assert!(reason.contains("up front"), "{role}: {reason}");
+                    assert!(reason.contains("before prework"), "{role}: {reason}");
+                }
             }
             assert!(tool_reason(WORKER, "Read", &facts).is_none());
             assert!(tool_reason(PLANNER, "Write", &facts).is_some());

@@ -28,8 +28,9 @@ deterministic part to the bundled `grind-run` workflow.
                                                                                           └─ cron ─ /grind-cron ─ /loop: sequential run, one issue per tick
 ```
 
-From the moment prework (or the workflow) starts, nobody asks: no agent and
-not the main session calls AskUserQuestion, and clud's hook denies it for
+From the moment prework starts (the run's `grind-run` workflow, after the
+question round), nobody asks: no agent and not the main session calls
+AskUserQuestion, and clud's hook denies it for
 every `grind-*` subagent. Anything unexpected follows a rule recorded in
 advance in `run.json` (section 3).
 
@@ -63,10 +64,10 @@ and its default branch (`main` or `master`).
 Intake always resolves the input to a meta issue: it creates or attaches one
 for a prompt or issue list, or converts a multi-part issue after asking. That
 conversion question (or, with no argument, the pick of which open issues to
-take) is intake's only question and comes before section 2.
+take) is intake's only question and comes before section 1b.
 Intake may instead end the run with a refusal ("run `/do N`"), "Nothing to
-do", or a `gh` error; then skip sections 2-4 entirely, write no
-`.clud/grind/run.json`, and create nothing.
+do", or a `gh` error; then stop there: skip every later section (Finish
+included), write no `.clud/grind/run.json`, and create nothing.
 
 ## 1b. Plan before asking (classification)
 
@@ -79,7 +80,9 @@ repository root as:
 
 clud's command hook then denies the planner Write/Edit, `git worktree add`
 and `git push`. Start the Workflow named `grind-run` with args
-`{repo, main, meta, goals, planOnly: true}` and relay its output.
+`{repo, main, meta, goals, planOnly: true}` and relay its output. The
+Workflow tool returns at once and its result arrives later as a task
+notification: end your turn and do nothing else until it arrives.
 
 The classification is automatic: print one line per child, `#N bug → main`
 or `#N feature → grind/meta-<T>-<group>`, and never ask about it.
@@ -109,37 +112,64 @@ overwrites `run.json` without `phase`, lifting the plan-only caps.
 
 ## 1c. Repo-state preflight
 
-Read-only, from the repository root:
+Pick the run id now (4 lowercase hex characters); every later
+`<run-id>` is this one. Then, read-only, from the repository root:
 
-- `git status --porcelain`
+- `git status --porcelain -uall -- . ':(exclude).clud/grind'` (`-uall`
+  lists untracked files one by one, so the exclusion applies to each)
 - `git rev-parse --abbrev-ref HEAD` (record it as the starting branch)
-- `git fetch origin` and note whether the checkout is behind `origin/<main>`.
+- `git stash list`
+- `git fetch origin`, then
+  `git rev-list --left-right --count origin/<main>...HEAD` (behind, ahead).
+
+`.clud/grind/` holds the run's own files (`run.json`, `plan.json`, the
+feature worktree), never the user's changes: every preflight command here
+excludes it with that pathspec, so it is never reported, stashed or
+committed.
 
 Repo state is asked about here and nowhere else. If the tree is dirty, the
 question round includes the dirty-repo question (section 2). Apply the chosen
 action right after the round, before prework:
 
-- **Stash**: `git stash push -u -m grind-<run-id>`.
-- **WIP branch**: commit everything to a local `wip/grind-<run-id>` branch
-  (never pushed), then switch back to the starting branch.
-- **Carry into the grind worktree**: the changes travel into the feature
-  stage's worktree. Offered only when the plan has a feature stage.
-- **Abort**: stop. Create nothing on GitHub or in git, write no `run.json`,
-  and remove the plan-phase `run.json`.
+- **Stash**: `git stash push -u -m grind-<run-id> -- . ':(exclude).clud/grind'`.
+- **WIP branch**: `git switch -c wip/grind-<run-id>`, `git add -A -- .
+  ':(exclude).clud/grind'`, `git commit -m "grind: WIP before run <run-id>"`,
+  then `git switch <starting branch>`. Never push it.
+- **Carry into the grind worktree**: offered only when the plan has a
+  feature stage. Stash now, as
+  `git stash push -u -m grind-<run-id>-carry -- . ':(exclude).clud/grind'`,
+  so the user's checkout is clean; section 4b applies it in the feature
+  worktree.
+- **Abort**: stop. Create nothing on GitHub or in git, remove the
+  plan-phase `.clud/grind/run.json`, and write no other file.
+
+A clean tree records `preflight.action: "none"`.
 
 ## 2. One question round
 
-At most 2 AskUserQuestion calls in total, and nothing is asked twice. Split
-the items below across the two calls; skip an item whose condition does not
-hold.
+At most 2 AskUserQuestion calls in total, and nothing is asked twice.
+AskUserQuestion takes at most 4 questions per call and 2-4 options per
+question (the user can always type another answer), so the round is fixed:
+
+- **Call 1, the repo and the plan:** Dirty repo, Regroup, Mode, Models.
+- **Call 2, the run's policies:** Local CI, Scripts, Feature merge policy,
+  Problem reporting.
+
+Skip an item whose condition does not hold. Problem reporting is always
+asked, so a run that goes ahead makes exactly 2 calls; answering Abort in
+call 1 stops before call 2. This is the only round: no question is asked
+after it, by the main session or anyone else.
 
 - **Dirty repo** (only if 1c found changes): show the file list; options
-  Stash, WIP branch, Carry into the grind worktree (feature stage only),
-  Abort.
-- **Regroup** (only when 1b returned `regroup`): confirm the regroup plan
-  and pick exactly ONE feature group for this run (single-select). Every
+  Stash it, Commit to a WIP branch, Carry into the grind worktree (only when
+  the plan has a feature stage), Abort.
+- **Regroup** (only when 1b returned `regroup`): ONE single-select question
+  that both confirms the regroup plan and picks exactly ONE feature group for
+  this run: `Regroup; run <group> first` per group in dependency order (the
+  first labelled "(Recommended)", at most 3), plus `Keep as is`. Every
   other group goes into the plan's `deferred_groups` as
-  `{group, sub_meta, children}` with no branch assigned.
+  `{group, sub_meta, children}` with no branch assigned. `Keep as is` takes
+  the `simple` path.
 - **Mode.** (i) *Parallel*: each goal gets a git worktree; workers only read
   and write files; one integrator at a time rebases, lints, builds and tests.
   Uses GitHub's server-side concurrency. (ii) *Sequential*: one goal at a
@@ -147,12 +177,14 @@ hold.
   clones; best for C++/Rust or other heavy repos where a cold worktree build
   is expensive. (iii) *Cron*: one issue per `/loop` tick, each tick a
   sequential run.
-- **Planner model**, **Worker model**, **Reviewer model**: offer the session's
-  current model first, labelled "(Recommended)", then the other tiers the
-  harness accepts. The session model is whatever this session is running on
-  (for `clud --deepseek` or another provider, the model that route resolved);
+- **Models**, one question for the planner, worker, reviewer and integrator
+  (the lander shares the integrator's, prework the planner's): first "the
+  session's model for every role", labelled "(Recommended)", then up to 3
+  mixes of the other tiers the harness accepts (for example a stronger tier
+  for planner and reviewer only). A typed answer may name a model per role.
+  The session model is whatever this session is running on (for
+  `clud --deepseek` or another provider, the model that route resolved);
   never assume a fixed model name.
-- **Integrator model** (the lander shares it), same options.
 - **Local CI**, asked only when both hold:
   - `docker info` succeeds. Otherwise print
     "Docker/github actions disabled due to no docker running" and set CI off.
@@ -167,7 +199,8 @@ hold.
   test together, each alone when both exist, and up to four test modes (for
   example `./test --integration`) discovered by *reading*, never executing,
   the delegation files the report lists; their help text and comments give
-  each option's description. Always include a "Neither" option.
+  each option's description. Always include a "Neither" option, and keep the
+  total at 4 options (the most likely ones); the user can type any other.
 - **Feature merge policy** (asked once, only when the plan has feature
   children): `auto` merges the feature PR once it is green, respecting
   branch protection; `decide later` leaves the draft feature PR open for the
@@ -235,8 +268,9 @@ Write `.clud/grind/run.json` at the repository root:
 `scripts` holds the chosen commands; omit a key the user did not pick, and
 set `scripts` to `null` (or omit it) when they chose "Neither" or none were
 found. `preflight.action` is `stash`, `wip` (with `"wip":
-"wip/grind-<run-id>"` instead of `stash`), `carry` or `none`; `branch` is the
-starting branch. `feature_merge` is `auto`, `later` or `comment`, omitted or
+"wip/grind-<run-id>"` instead of `stash`), `carry` (with `"stash":
+"grind-<run-id>-carry"`) or `none` (clean tree); `branch` is the
+starting branch. `preflight` is what Finish restores, and nothing else. `feature_merge` is `auto`, `later` or `comment`, omitted or
 `null` when the run is bugs-only. Section 4b adds
 `"feature": {"branch", "worktree", "pr"}` when the feature stage starts. `problem_reporting` is `issue` or `comment`.
 `tracks` maps each child to its 1b track. `meta` is the meta issue number
@@ -282,7 +316,8 @@ agent gets that comment's URL. Nobody edits the plan comment.
   `{repo, main, mode, goals, ci, scripts, plan, meta, models: {planner,
   worker, reviewer, integrator}}`, where `plan` is the 3b object. Omit a
   model the user left at the session default, and omit `scripts` when none
-  were chosen.
+  were chosen. As in 1b, its result arrives as a task notification; Finish
+  starts only after it arrives, and nothing is asked while waiting.
 - If the workflow returns `stopped: 'prework'`, report that the plan could
   not be posted and that no work was done, then go to Finish.
 
@@ -304,7 +339,11 @@ Only when the plan has feature children, at the start of the feature stage
 2. Create exactly ONE worktree:
    `git worktree add <repo>/.clud/grind/worktrees/feature -b grind/meta-<M>-<run-id> origin/<main>`,
    where `<M>` is the meta issue.
-3. Push the branch: `git -C <worktree> push -u origin grind/meta-<M>-<run-id>`.
+3. With `preflight.action: carry`, apply the carried stash in that
+   worktree (`git -C <worktree> stash pop <stash@{n} of grind-<run-id>-carry>`)
+   and commit it as the branch's first commit,
+   `grind: carry uncommitted changes from <starting branch>`. Then push the
+   branch: `git -C <worktree> push -u origin grind/meta-<M>-<run-id>`.
 4. Before the first goal lands, open a DRAFT feature PR:
    `gh pr create --draft --base <main> --head grind/meta-<M>-<run-id>`. The
    body starts with `Closes #<meta>` (plus `Closes #<original>` when intake
@@ -363,12 +402,18 @@ After the workflow returns, whether or not every goal merged:
    goal PR's commits stay reachable at `refs/pull/<n>/head`, but an
    unpushed worktree has no such copy, so push first. Then `git status --porcelain`
    prints nothing: no untracked files, no uncommitted changes, and no stash
-   the run created.
+   the run created other than the preflight stash step 4 pops.
 4. **Restore only what `preflight` recorded.** `git fetch origin`, then
    `git switch <preflight.branch>`; run `git pull --ff-only origin <main>`
-   only when that branch is `<main>`. For `stash`, `git stash pop` the
-   stash named `grind-<run-id>`. For `wip`, leave `wip/grind-<run-id>` local
-   and stay on the starting branch.
+   only when that branch is `<main>`. Then, by `preflight.action`:
+   - `stash`: `git stash pop stash@{n}`, where `stash@{n}` is the entry
+     named `grind-<run-id>` in `git stash list` (never a bare pop). If it
+     conflicts, leave the stash in place and report it.
+   - `wip`: leave `wip/grind-<run-id>` local, never pushed, and stay on
+     the starting branch; report the branch name.
+   - `carry`: nothing to restore; the changes are the feature branch's
+     first commit. Report that.
+   - `none`: nothing beyond the switch.
 5. **Report what you could not clean or restore**, and why. Never delete
    work the run did not create to get a clean status, and never ask about
    repo state here; report it instead.
