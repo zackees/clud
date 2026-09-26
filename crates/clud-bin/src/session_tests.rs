@@ -17,15 +17,43 @@ fn mintty_without_console_detected_on_windows_with_term_and_msystem() {
 fn mintty_without_console_rejects_non_mintty_environments() {
     let xterm = Some("xterm");
     let mingw = Some("MINGW64");
-    assert!(!looks_like_mintty_without_console(false, false, false, xterm, mingw));
-    assert!(!looks_like_mintty_without_console(true, true, false, xterm, mingw));
-    assert!(!looks_like_mintty_without_console(true, false, true, xterm, mingw));
-    assert!(!looks_like_mintty_without_console(true, false, false, None, mingw));
-    assert!(!looks_like_mintty_without_console(true, false, false, Some("dumb"), mingw));
-    assert!(!looks_like_mintty_without_console(true, false, false, Some(""), mingw));
-    assert!(!looks_like_mintty_without_console(true, false, false, xterm, Some("")));
+    assert!(!looks_like_mintty_without_console(
+        false, false, false, xterm, mingw
+    ));
+    assert!(!looks_like_mintty_without_console(
+        true, true, false, xterm, mingw
+    ));
+    assert!(!looks_like_mintty_without_console(
+        true, false, true, xterm, mingw
+    ));
+    assert!(!looks_like_mintty_without_console(
+        true, false, false, None, mingw
+    ));
+    assert!(!looks_like_mintty_without_console(
+        true,
+        false,
+        false,
+        Some("dumb"),
+        mingw
+    ));
+    assert!(!looks_like_mintty_without_console(
+        true,
+        false,
+        false,
+        Some(""),
+        mingw
+    ));
+    assert!(!looks_like_mintty_without_console(
+        true,
+        false,
+        false,
+        xterm,
+        Some("")
+    ));
     // A plain `clud -p | cat` pipeline on Windows has no MSYSTEM.
-    assert!(!looks_like_mintty_without_console(true, false, false, xterm, None));
+    assert!(!looks_like_mintty_without_console(
+        true, false, false, xterm, None
+    ));
 }
 
 // F3Observer — byte-level observer for voice-mode F3 press detection.
