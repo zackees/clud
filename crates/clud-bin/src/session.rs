@@ -413,6 +413,15 @@ fn observe_keyboard_enhancement_byte(state: &mut KeyboardEnhancementTrackerState
     }
 }
 
+/// Turns off every xterm mouse-reporting mode a child may have enabled.
+///
+/// clud never enables mouse tracking itself (see `toast::mouse`), so the
+/// terminal's pre-session state is "off". A child that exits (or is killed)
+/// without sending its own disable leaves the terminal reporting motion, and
+/// the shell then echoes `35;21;8M…` on every mouse move.
+const MOUSE_TRACKING_RESET: &[u8] =
+    b"\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l";
+
 fn keyboard_enhancement_pop_bytes(count: usize) -> Vec<u8> {
     // crossterm's PopKeyboardEnhancementFlags emits this one-frame pop. Do
     // not use `CSI = ... u`: that would overwrite the caller's state instead
@@ -502,6 +511,8 @@ impl Drop for RawTerminalGuard {
     fn drop(&mut self) {
         // This is intentionally in Drop so unwind cannot strand a child frame.
         self.restore_child_keyboard_enhancements();
+        let _ = io::stdout().write_all(MOUSE_TRACKING_RESET);
+        let _ = io::stdout().flush();
         let _ = if self.enhancement_flags_pushed {
             execute!(io::stdout(), PopKeyboardEnhancementFlags)
         } else {
