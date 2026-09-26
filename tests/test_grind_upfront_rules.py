@@ -48,7 +48,8 @@ def test_question_round_fits_two_ask_user_question_calls() -> None:
     assert "at most 4 questions per call" in round_
     call1 = re.search(r"\*\*Call 1[^*]*:\*\* (.*?)\.\n", round_)
     call2 = re.search(r"\*\*Call 2[^*]*:\*\* (.*?)\.\n", round_, re.DOTALL)
-    assert call1 and call2, round_
+    assert call1, round_
+    assert call2, round_
     items = [i.strip() for i in call1.group(1).split(",")]
     items += [" ".join(i.split()) for i in call2.group(1).split(",")]
     # U12: every item, at most 4 per call.

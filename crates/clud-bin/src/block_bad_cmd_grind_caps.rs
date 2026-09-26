@@ -320,7 +320,10 @@ fn is_script_retry_loop(statements: &[Vec<String>]) -> bool {
             .first()
             .is_some_and(|w| matches!(w.as_str(), "for" | "while" | "until"))
     });
-    looped && statements.iter().any(|words| runs_repo_script(words.as_slice()))
+    looped
+        && statements
+            .iter()
+            .any(|words| runs_repo_script(words.as_slice()))
 }
 
 /// The denial reason for a non-shell tool call from `role`, or `None` to
@@ -653,9 +656,8 @@ fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String
             policy_name(run.feature_merge)
         ));
     }
-    (!has(&["--merge", "-m"])).then(|| {
-        "the feature PR lands as a merge commit: pass --merge explicitly".to_string()
-    })
+    (!has(&["--merge", "-m"]))
+        .then(|| "the feature PR lands as a merge commit: pass --merge explicitly".to_string())
 }
 
 /// Feature mode only: after a goal PR merges into the feature branch, the
@@ -664,11 +666,7 @@ fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String
 /// marker comment, and adds the goal's `Closes #N` line to the feature PR's
 /// body. `None` when `words` is none of those commands (the lander's other
 /// rules then apply); `Some(None)` allows, `Some(Some(reason))` denies.
-fn lander_records_landing(
-    role: &str,
-    words: &[String],
-    run: &RunFacts,
-) -> Option<Option<String>> {
+fn lander_records_landing(role: &str, words: &[String], run: &RunFacts) -> Option<Option<String>> {
     let feature = run.feature.as_ref()?;
     if program_name(&words[0]) != "gh" {
         return None;
@@ -678,10 +676,14 @@ fn lander_records_landing(
     fn is_label(w: &str) -> bool {
         w == ON_FEATURE_LABEL
     }
-    let verdict = match sub.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["label", "create", name, ..] => (!is_label(name)).then(|| {
-            format!("{role} may create only the `{ON_FEATURE_LABEL}` label")
-        }),
+    let verdict = match sub
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["label", "create", name, ..] => (!is_label(name))
+            .then(|| format!("{role} may create only the `{ON_FEATURE_LABEL}` label")),
         ["issue", "edit", _, rest @ ..] => {
             let mut ok = !rest.is_empty();
             let mut i = 0;
@@ -802,9 +804,17 @@ fn worktree_add_path(args: &[String]) -> Option<String> {
 /// A cheap prefilter for [`router_reason`], so an ordinary session's shell
 /// calls never read `run.json`.
 pub(super) fn may_concern_router(command: &str) -> bool {
-    ["worktree", "close", "state=closed", "merge", "delete", "branch", ":grind/"]
-        .iter()
-        .any(|needle| command.contains(needle))
+    [
+        "worktree",
+        "close",
+        "state=closed",
+        "merge",
+        "delete",
+        "branch",
+        ":grind/",
+    ]
+    .iter()
+    .any(|needle| command.contains(needle))
 }
 
 /// The issue number a `gh issue comment` argument list targets (`#` stripped,

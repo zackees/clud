@@ -486,7 +486,8 @@ def test_u3_u8_dirty_feature_plan_offers_carry_and_abort_creates_nothing(
     # U3: the dirty-repo question lists the files and offers all four actions,
     # carry included, because the plan has a feature stage.
     dirty = _question(result, "Dirty repo")
-    assert "README.md" in dirty["question"] and "notes.txt" in dirty["question"], dirty
+    assert "README.md" in dirty["question"], dirty
+    assert "notes.txt" in dirty["question"], dirty
     assert _labels(dirty) == DIRTY_OPTS
     assert len(_asks(result)) == 1
 

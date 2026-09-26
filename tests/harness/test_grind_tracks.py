@@ -444,7 +444,8 @@ def test_t3_t6_mixed_bugs_land_before_the_feature_branch_is_cut(harness: Harness
     for f in features:
         pr = prs[_branch(f)]
         assert (pr["base"], pr["state"]) == (FEATURE, "MERGED"), pr
-        assert f"Refs #{f}" in pr["body"] and "Closes" not in pr["body"], pr
+        assert f"Refs #{f}" in pr["body"], pr
+        assert "Closes" not in pr["body"], pr
         assert issues[f]["state"] == "open", issues[f]
         prompt = _prompt(result, f"integrator:{f}")
         assert f"Base: origin/{FEATURE}" in prompt, prompt[-3000:]

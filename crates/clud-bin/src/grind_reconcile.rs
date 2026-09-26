@@ -471,7 +471,10 @@ pub fn feature_from_pr_json(v: &Value, now_secs: i64, branch_exists: bool) -> Fe
 /// grind start and cron tick ("a waiting feature PR is never silent").
 pub fn describe_open_feature(v: &Value) -> String {
     let draft = v.get("isDraft").and_then(Value::as_bool).unwrap_or(false);
-    let review = v.get("reviewDecision").and_then(Value::as_str).unwrap_or("");
+    let review = v
+        .get("reviewDecision")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let conflicting = v.get("mergeable").and_then(Value::as_str) == Some("CONFLICTING");
     let mut parts = vec![if draft { "draft" } else { "ready" }];
     match review {
@@ -820,7 +823,10 @@ fn reconcile_issue(
             .or_default()
             .insert(number);
         // A child closed by hand before its goal landed carries no label yet.
-        for child in subs.iter().filter(|s| !s.open && !labelled.contains(&s.number)) {
+        for child in subs
+            .iter()
+            .filter(|s| !s.open && !labelled.contains(&s.number))
+        {
             let closer = fetch_closer(cwd, child.number, default_branch)?;
             let acts = decide_unlabelled_child(
                 child,
@@ -880,7 +886,11 @@ fn reconcile_top_metas(cwd: &Path, pass: &mut Pass, default_branch: &str) -> Res
     for top in tops {
         let mut children = Vec::new();
         for s in fetch_sub_issues(cwd, top)? {
-            let landed = !s.open && closer_landed(&fetch_closer(cwd, s.number, default_branch)?, default_branch);
+            let landed = !s.open
+                && closer_landed(
+                    &fetch_closer(cwd, s.number, default_branch)?,
+                    default_branch,
+                );
             children.push(ChildClose {
                 number: s.number,
                 open: s.open,
@@ -1006,10 +1016,12 @@ mod tests {
 
     fn reopens(acts: &[Action]) -> bool {
         matches!(acts.first(), Some(Action::Reopen { .. }))
-            && acts.iter().any(|a| matches!(
-                a,
-                Action::Comment { body } if body.contains(&reconcile_tag("reopen", 812))
-            ))
+            && acts.iter().any(|a| {
+                matches!(
+                    a,
+                    Action::Comment { body } if body.contains(&reconcile_tag("reopen", 812))
+                )
+            })
     }
 
     /// The state after applying `acts` to `f` (what GitHub would show next pass).
@@ -1106,7 +1118,10 @@ mod tests {
             merged: true,
             base_ref: "master".into(),
         };
-        assert!(reopens(&decide(&facts(false, closer.clone(), healthy()), "main")));
+        assert!(reopens(&decide(
+            &facts(false, closer.clone(), healthy()),
+            "main"
+        )));
         assert_eq!(
             decide(&facts(false, closer, healthy()), "master"),
             vec![Action::RemoveLabel]
@@ -1191,7 +1206,10 @@ mod tests {
 
         // A child is reported, never commented.
         let acts = decide(&facts(true, Closer::None, stale.clone()), "main");
-        assert!(matches!(acts.as_slice(), [Action::ReportStale { .. }]), "{acts:?}");
+        assert!(
+            matches!(acts.as_slice(), [Action::ReportStale { .. }]),
+            "{acts:?}"
+        );
 
         // The meta issue gets one comment per staleness window.
         let mut meta = facts(true, Closer::None, stale);
@@ -1203,7 +1221,10 @@ mod tests {
         )));
         meta.stale_noted_at = Some(NOW - 86_400);
         let acts = decide(&meta, "main");
-        assert!(matches!(acts.as_slice(), [Action::ReportStale { .. }]), "{acts:?}");
+        assert!(
+            matches!(acts.as_slice(), [Action::ReportStale { .. }]),
+            "{acts:?}"
+        );
         meta.stale_noted_at = Some(NOW - STALE_AFTER_SECS - 1);
         assert!(decide(&meta, "main")
             .iter()
@@ -1247,7 +1268,10 @@ mod tests {
         );
         assert!(parents_from_graphql(&json!({"data":{}}), &[5]).is_empty());
         let q = parent_query(&[5, 7]);
-        assert!(q.contains("i5:issue(number:5){parent{number state}}"), "{q}");
+        assert!(
+            q.contains("i5:issue(number:5){parent{number state}}"),
+            "{q}"
+        );
         assert!(!q.contains("closer") && !q.contains("ClosedEvent"), "{q}");
     }
 
@@ -1381,8 +1405,10 @@ mod tests {
     // S6: two runs on the same meta issue carry distinct branches and run ids.
     #[test]
     fn two_runs_on_one_meta_have_distinct_markers() {
-        let r1 = "<!-- grind:v1 feature-pr=#101 branch=grind/meta-100-1f3a goal-pr=#102 run=1f3a -->";
-        let r2 = "<!-- grind:v1 feature-pr=#201 branch=grind/meta-100-9c0d goal-pr=#202 run=9c0d -->";
+        let r1 =
+            "<!-- grind:v1 feature-pr=#101 branch=grind/meta-100-1f3a goal-pr=#102 run=1f3a -->";
+        let r2 =
+            "<!-- grind:v1 feature-pr=#201 branch=grind/meta-100-9c0d goal-pr=#202 run=9c0d -->";
         let (a, b) = (parse_marker(r1).unwrap(), parse_marker(r2).unwrap());
         assert_ne!(a.branch, b.branch);
         assert_ne!(a.run, b.run);
