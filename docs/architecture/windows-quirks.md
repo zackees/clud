@@ -134,23 +134,36 @@ the codebase stays portable.
   stdin is not a real TTY (piped `cargo test`, CI without a console) —
   it remembers `original_mode: None` so the drop impl skips the restore.
 
-- **Output side (#1345)**: The same `ConsoleVtGuard` returned by
-  `console_setup::enable_console_vt_input()` also ORs
-  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` (0x0004) into the stdout console
-  handle when stdout is a terminal, and restores the original output mode
-  on drop. Without it, ANSI output forwarded by the PTY pump (colors,
-  cursor moves, the toast compositor, kitty keyboard flags) prints
-  literally on plain conhost windows instead of being interpreted.
+- **Output side (#1345, #1374)**: Without
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` (0x0004), every escape sequence clud
+  writes prints literally on a plain conhost window. That covers colored
+  `[clud]` notices, selector frames, the graphics header, and child output
+  relayed by the PTY pump or the daemon attach. `fn main` calls
+  `console_setup::enable_console_vt_output()` before it parses arguments. That
+  call ORs the bit into the stdout and stderr console modes, skips a stream
+  that is not a console, and never restores it
+  ([DD-105](../DESIGN_DECISIONS.md#dd-105-vt-output-processing-is-enabled-once-at-startup-and-never-restored)).
+  `selector::run` re-asserts it through the same call. The session's
+  `ConsoleVtGuard` also ORs the bit into stdout and restores the prior mode
+  on drop.
+  Do not call crossterm's `supports_ansi` for this. Its enable is latched by a
+  `Once` and never undone. The selector used to call it, so a launch that
+  showed a picker rendered escapes and an ordinary repeat launch did not.
+  That hid the missing startup enable (#1374). A guard test in
+  `console_setup.rs` fails if `fn main` drops the call or a selector module
+  calls crossterm's enable again.
 
-- **File**: `crates/clud-bin/src/console_setup.rs:24` (`ConsoleVtGuard`);
-  construction at `:54` (`enable_console_vt_input`); the actual
-  `Get/SetConsoleMode` calls at `:89` (`or_console_mode`) and `:104`
-  (`restore_console_mode`).
+- **File**: `crates/clud-bin/src/console_setup.rs:85`
+  (`enable_console_vt_output`) over the testable `enable_vt_processing` at
+  `:92`; `ConsoleVtGuard` at `:110`, constructed at `:140`
+  (`enable_console_vt_input`); the guard's `Get/SetConsoleMode` calls at
+  `:175` (`or_console_mode`) and `:190` (`restore_console_mode`).
 
 - **POSIX behavior**: No-op. The `ConsoleVtGuard` struct has no
   `original_mode` / `original_output_mode` fields off Windows (see the
-  `#[cfg(windows)]` fields at `:25`); the `Drop` impl is empty on POSIX; the
-  `enable_console_vt_input` constructor at `:80` returns the empty-struct form. POSIX terminals are
+  `#[cfg(windows)]` fields at `:111`); the `Drop` impl is empty on POSIX; the
+  `enable_console_vt_input` constructor at `:168` returns the empty-struct form,
+  and `enable_console_vt_output` sees no console stream. POSIX terminals are
   already in canonical VT mode and need no opt-in.
 
 ### (d) Native terminal input via running-process (issues #141 / #575)

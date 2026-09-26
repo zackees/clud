@@ -4633,3 +4633,45 @@ only move agents to the next workaround. A script's `find -delete` reaches no
 shim, which is an accepted gap. The rm-variable rewrite (#963) now serves only
 shell tools the redirect does not cover (PowerShell-labelled tools). The
 contract is owned by [architecture/rm-tools.md](architecture/rm-tools.md).
+
+## DD-105: VT output processing is enabled once at startup and never restored
+
+**Status:** Accepted
+
+**Context:** #1374, meta #1441. #1345 made the PTY session guard enable
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` on stdout for the session and restore it
+on drop. clud writes escape sequences outside that window too: colored
+`[clud]` notices on stderr, the graphics header before the guard and its
+restore after it, and relayed daemon output that starts before the attach
+loop's guard. Those sequences rendered only when an inline selector had run
+first, because `selector::run` called crossterm's `supports_ansi`. That call
+enables VT processing once per process, behind a `Once`, and never undoes
+it. So first-run and reconfiguration launches worked, and an ordinary
+already-configured launch printed literal escapes.
+
+**Decision:** `main` calls `console_setup::enable_console_vt_output()` before
+it parses arguments. That call ORs VT processing into the stdout and stderr
+console modes. Nothing restores them at exit. `selector::run` calls the same
+function, not crossterm's `supports_ansi`. The PTY session guard keeps its
+own scoped enable and restore.
+
+**Rationale:**
+
+- **One enable that no launch path can miss.** Scoping the enable to each
+  path means finding every write that precedes or follows it, on every path,
+  now and in future. One call in `main` covers them all.
+- **No restore at exit.** clud writes escape sequences until it exits, and
+  most exits go through `process::exit`, where no destructor runs. A restore
+  would have to be the process's last write, and there is no such point.
+  Leaving the bit set is also what crossterm already did on every launch
+  that showed a selector.
+- **Idempotent, not `Once`.** A `Once`-latched enable cannot recover when a
+  child that shares the console clears the bit. The function checks the mode
+  on each call, so the selector can re-assert it for the price of one
+  `GetConsoleMode` call.
+
+**Consequences:** After clud exits, the shell's console keeps VT processing
+enabled, as it already did after any launch that showed a picker. A guard
+test fails if `fn main` stops making the call, or if a selector module calls
+crossterm's `supports_ansi` again. The contract is owned by
+[architecture/windows-quirks.md](architecture/windows-quirks.md#c-enable_virtual_terminal_input-raii).

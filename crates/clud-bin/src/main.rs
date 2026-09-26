@@ -11,6 +11,11 @@ use clud::{
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
+    // #1374: before anything can write an escape sequence (clap's help, a
+    // colored notice, a selector, a PTY session), so every launch path gets
+    // VT output processing on a Windows console, not only those that happen
+    // to show a selector first.
+    console_setup::enable_console_vt_output();
     run(parse_args());
 }
 
