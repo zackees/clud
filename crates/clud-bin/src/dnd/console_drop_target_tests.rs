@@ -3,7 +3,7 @@ use crate::dnd::dropfiles::DROPFILES_HEADER_SIZE;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 
-fn make_dropfiles_wide(paths: &[&str]) -> Vec<u8> {
+pub(super) fn make_dropfiles_wide(paths: &[&str]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&(DROPFILES_HEADER_SIZE as u32).to_le_bytes());
     out.extend_from_slice(&0i32.to_le_bytes()); // pt.x
@@ -79,6 +79,72 @@ fn dispatch_normalizes_paths_before_injection() {
 
     let got = captured.lock().unwrap().clone();
     assert_eq!(got, vec![r"C:\Users\me\Документы\file.txt"]);
+}
+
+#[test]
+fn dispatch_reports_whether_the_injector_fired() {
+    let injector: DropInjector = Box::new(|_| {});
+    assert!(dispatch_dropfiles_to_injector(
+        &make_dropfiles_wide(&[r"C:\a.txt"]),
+        &injector
+    ));
+    assert!(!dispatch_dropfiles_to_injector(&[], &injector));
+    assert!(!dispatch_dropfiles_to_injector(
+        &[0u8; DROPFILES_HEADER_SIZE - 1],
+        &injector
+    ));
+}
+
+// ─── drag_effect: the DROPEFFECT the IDropTarget reports ───────────
+
+/// oleidl.h `DROPEFFECT_MOVE` / `DROPEFFECT_LINK`.
+const MOVE: u32 = 2;
+const LINK: u32 = 4;
+const ANY: u32 = DROPEFFECT_COPY_BITS | MOVE | LINK;
+
+#[test]
+fn drag_effect_is_copy_for_files_from_a_source_that_allows_copy() {
+    assert_eq!(drag_effect(ANY, true), DROPEFFECT_COPY_BITS);
+    assert_eq!(
+        drag_effect(DROPEFFECT_COPY_BITS, true),
+        DROPEFFECT_COPY_BITS
+    );
+    assert_eq!(
+        drag_effect(DROPEFFECT_COPY_BITS | LINK, true),
+        DROPEFFECT_COPY_BITS
+    );
+}
+
+#[test]
+fn drag_effect_is_none_without_files() {
+    assert_eq!(drag_effect(ANY, false), DROPEFFECT_NONE_BITS);
+    assert_eq!(
+        drag_effect(DROPEFFECT_COPY_BITS, false),
+        DROPEFFECT_NONE_BITS
+    );
+}
+
+#[test]
+fn drag_effect_never_claims_an_effect_the_source_forbids() {
+    // clud only reads the paths, so it never claims MOVE (Explorer would
+    // delete the file) and returns NONE when COPY is not allowed.
+    for allowed in [DROPEFFECT_NONE_BITS, MOVE, LINK, MOVE | LINK] {
+        assert_eq!(
+            drag_effect(allowed, true),
+            DROPEFFECT_NONE_BITS,
+            "{allowed:#x}"
+        );
+    }
+    for allowed in 0..=0xFF_u32 {
+        for files in [false, true] {
+            let effect = drag_effect(allowed, files);
+            assert!(
+                effect == DROPEFFECT_NONE_BITS || effect == DROPEFFECT_COPY_BITS,
+                "{effect:#x}"
+            );
+            assert_eq!(effect & !allowed, 0, "allowed {allowed:#x} -> {effect:#x}");
+        }
+    }
 }
 
 #[test]
