@@ -2,9 +2,7 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crossterm::event::{
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
+use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 use running_process::pty::NativePtyProcess;
 use running_process::pty::PtySize;
@@ -315,8 +313,22 @@ pub trait InteractiveHooks {
 /// Only useful when stdin is an actual TTY; see `enter_raw_mode_if_tty`.
 #[derive(Debug)]
 pub struct RawTerminalGuard {
-    enhancement_flags_pushed: bool,
-    child_keyboard_enhancements: Arc<KeyboardEnhancementTracker>,
+    keyboard: KeyboardEnhancementGuard,
+}
+
+/// Owns clud's own kitty keyboard-enhancement stack frame for one terminal
+/// session, plus the tracker for frames the child pushes over it.
+///
+/// Every path that relays a child's output to the user's terminal holds one:
+/// the local PTY pump through [`RawTerminalGuard`], and the daemon attach
+/// (`daemon::attach::attach_to_session`) directly, because its raw-mode guard
+/// ends before its output relay does (#1363). Unwinding lives in `Drop`, so
+/// a normal exit, an interrupt, an early return and a panic all leave the
+/// terminal's pre-session keyboard state as they found it (#1221).
+#[derive(Debug)]
+pub struct KeyboardEnhancementGuard {
+    pushed: bool,
+    child: Arc<KeyboardEnhancementTracker>,
 }
 
 /// Tracks the keyboard-enhancement stack frames a child writes to the outer
@@ -473,51 +485,95 @@ pub fn enter_raw_mode_if_tty() -> Option<RawTerminalGuard> {
 const KEYBOARD_ENHANCEMENT_FLAGS: KeyboardEnhancementFlags =
     KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
 
-impl RawTerminalGuard {
-    pub fn enter() -> io::Result<Self> {
-        crossterm::terminal::enable_raw_mode()?;
-
-        let mut stdout = io::stdout();
-        let enhancement_flags_pushed = execute!(
-            stdout,
+impl KeyboardEnhancementGuard {
+    /// Push `KEYBOARD_ENHANCEMENT_FLAGS` onto the real terminal. A console
+    /// without VT support rejects the push; the guard then owns no frame and
+    /// pops none, but still unwinds frames a child pushes.
+    pub fn push() -> Self {
+        let pushed = execute!(
+            io::stdout(),
             PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT_FLAGS)
         )
         .is_ok();
+        Self::with_pushed(pushed)
+    }
 
+    pub(crate) fn with_pushed(pushed: bool) -> Self {
+        Self {
+            pushed,
+            child: Arc::new(KeyboardEnhancementTracker::default()),
+        }
+    }
+
+    /// Share the child-output tracker with whatever writes the child's
+    /// output to the terminal. Feed it the bytes before they are written.
+    pub fn child_tracker(&self) -> Arc<KeyboardEnhancementTracker> {
+        Arc::clone(&self.child)
+    }
+
+    /// Pop the frames the child left pushed, keeping clud's own frame.
+    /// Call it only once the child's output relay has stopped, so every
+    /// frame that reached the terminal has been observed.
+    pub fn restore_child_frames(&self) {
+        let mut stdout = io::stdout();
+        self.restore_child_frames_to(&mut stdout);
+        let _ = stdout.flush();
+    }
+
+    fn restore_child_frames_to(&self, out: &mut dyn Write) {
+        let count = self.child.take_unbalanced_pushes();
+        if count != 0 {
+            let _ = out.write_all(&keyboard_enhancement_pop_bytes(count));
+        }
+    }
+
+    /// Pop the child's frames, then clud's own, in LIFO order. Idempotent:
+    /// a second call writes nothing.
+    pub(crate) fn unwind_to(&mut self, out: &mut dyn Write) {
+        self.restore_child_frames_to(out);
+        if std::mem::take(&mut self.pushed) {
+            let _ = out.write_all(&keyboard_enhancement_pop_bytes(1));
+        }
+    }
+}
+
+impl Drop for KeyboardEnhancementGuard {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout();
+        self.unwind_to(&mut stdout);
+        let _ = stdout.flush();
+    }
+}
+
+impl RawTerminalGuard {
+    pub fn enter() -> io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
         Ok(Self {
-            enhancement_flags_pushed,
-            child_keyboard_enhancements: Arc::new(KeyboardEnhancementTracker::default()),
+            keyboard: KeyboardEnhancementGuard::push(),
         })
     }
 
     /// Share the child-output tracker with the PTY reader for this session.
     pub fn child_keyboard_enhancement_tracker(&self) -> Arc<KeyboardEnhancementTracker> {
-        Arc::clone(&self.child_keyboard_enhancements)
+        self.keyboard.child_tracker()
     }
 
     /// Unwind child-owned frames before this guard pops clud's own frame.
     /// The pump joins its output reader before this is called, so every child
     /// control sequence that reached the terminal has been observed.
     pub fn restore_child_keyboard_enhancements(&self) {
-        let count = self.child_keyboard_enhancements.take_unbalanced_pushes();
-        if count != 0 {
-            let _ = io::stdout().write_all(&keyboard_enhancement_pop_bytes(count));
-            let _ = io::stdout().flush();
-        }
+        self.keyboard.restore_child_frames();
     }
 }
 
 impl Drop for RawTerminalGuard {
     fn drop(&mut self) {
         // This is intentionally in Drop so unwind cannot strand a child frame.
-        self.restore_child_keyboard_enhancements();
-        let _ = io::stdout().write_all(MOUSE_TRACKING_RESET);
-        let _ = io::stdout().flush();
-        let _ = if self.enhancement_flags_pushed {
-            execute!(io::stdout(), PopKeyboardEnhancementFlags)
-        } else {
-            Ok(())
-        };
+        self.keyboard.restore_child_frames();
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(MOUSE_TRACKING_RESET);
+        self.keyboard.unwind_to(&mut stdout);
+        let _ = stdout.flush();
         let _ = crossterm::terminal::disable_raw_mode();
     }
 }

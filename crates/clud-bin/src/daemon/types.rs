@@ -767,6 +767,9 @@ pub(super) enum BackgroundPromptDecision {
     EndSession,
 }
 
+/// Raw mode only. The interactive attach's kitty keyboard frame is a separate
+/// `session::KeyboardEnhancementGuard` in `attach_to_session`, because it must
+/// outlive this guard until the output relay stops (#1363).
 pub(super) struct RawTerminalGuard;
 
 impl RawTerminalGuard {

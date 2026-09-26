@@ -94,7 +94,10 @@ arms the per-session guards in this order before allocating the PTY:
    joined, `RawTerminalGuard` pops any remaining child-owned frames and then
    drops clud's own frame. This preserves keyboard-protocol frames that were
    present before clud started; it must not be replaced with a terminal-wide
-   protocol reset (issue #1221).
+   protocol reset (issue #1221). The frame and its child tracker live in
+   `session::KeyboardEnhancementGuard`, which `RawTerminalGuard` wraps and
+   the daemon attach holds on its own (#1363, see
+   [daemon-ipc.md](daemon-ipc.md#attach-flow)).
 
 ## The pump loop (`run_raw_pty_pump`)
 

@@ -694,6 +694,17 @@ fn keyboard_enhancement_tracker_handles_fragmentation_balanced_pops_and_key_even
 }
 
 #[test]
+fn keyboard_guard_without_its_own_frame_still_unwinds_child_frames() {
+    // A console that rejected clud's push owns no frame to pop, but a child
+    // that pushed one over it must still be unwound (#1363).
+    let mut guard = KeyboardEnhancementGuard::with_pushed(false);
+    guard.child_tracker().observe(b"\x1b[>3u");
+    let mut terminal = Vec::new();
+    guard.unwind_to(&mut terminal);
+    assert_eq!(terminal, b"\x1b[<1u");
+}
+
+#[test]
 fn pushed_flags_exclude_disambiguate_escape_codes() {
     // The whole of issue #1101 is downstream of this one bit. A future
     // edit that re-adds it takes Ctrl+C away from every kitty-protocol
