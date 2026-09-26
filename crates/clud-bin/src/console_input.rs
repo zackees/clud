@@ -126,7 +126,17 @@ where
     }
 
     if event.virtual_key_code == VK_V && event.ctrl {
-        if let Some(bytes) = handle_clipboard() {
+        // Honor wRepeatCount like the Shift+Enter branch: one clipboard
+        // expansion per repeat (issue #1361).
+        let mut pasted: Option<Vec<u8>> = None;
+        for _ in 0..usize::from(event.repeat_count.max(1)) {
+            if let Some(bytes) = handle_clipboard() {
+                pasted
+                    .get_or_insert_with(Vec::new)
+                    .extend_from_slice(&bytes);
+            }
+        }
+        if let Some(bytes) = pasted {
             return bytes;
         }
     }
@@ -191,6 +201,40 @@ mod tests {
     fn ctrl_v_falls_through_to_upstream_control_byte() {
         let upstream = event(&[0x16], VK_V, false, true, false);
         assert_eq!(adapt_event_with_clipboard(upstream, || None), vec![0x16]);
+    }
+
+    #[test]
+    fn ctrl_v_honors_repeat_count() {
+        let mut upstream = event(b"\x16", VK_V, false, true, false);
+        upstream.repeat_count = 3;
+        let mut calls = 0usize;
+        let bytes = adapt_event_with_clipboard(upstream, || {
+            calls += 1;
+            Some(format!("[img{calls}]").into_bytes())
+        });
+        assert_eq!(calls, 3);
+        assert_eq!(bytes, b"[img1][img2][img3]");
+    }
+
+    #[test]
+    fn ctrl_v_repeat_zero_treated_as_one() {
+        let mut upstream = event(b"\x16", VK_V, false, true, false);
+        upstream.repeat_count = 0;
+        let mut calls = 0usize;
+        let bytes = adapt_event_with_clipboard(upstream, || {
+            calls += 1;
+            Some(format!("[img{calls}]").into_bytes())
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(bytes, b"[img1]");
+    }
+
+    #[test]
+    fn ctrl_v_without_clipboard_image_falls_back_to_event_data() {
+        let mut upstream = event(b"\x16", VK_V, false, true, false);
+        upstream.repeat_count = 3;
+        let expected = upstream.data.clone();
+        assert_eq!(adapt_event_with_clipboard(upstream, || None), expected);
     }
 
     #[test]
