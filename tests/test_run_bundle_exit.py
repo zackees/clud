@@ -195,5 +195,7 @@ def test_abrupt_pytest_exit_leaves_the_active_test_in_progress_log(
         for line in pytest_progress_path("unit").read_text(encoding="utf-8").splitlines()
     ]
     assert [entry["event"] for entry in entries] == ["start"]
-    assert entries[0]["nodeid"].endswith("test_abrupt_exit.py::test_abrupt_exit")
+    # pytest may omit the external temp file's path from a Windows node ID;
+    # the test function remains the stable active-test identifier.
+    assert entries[0]["nodeid"].endswith("::test_abrupt_exit")
     assert "short test summary info" not in pytest_log_path("unit").read_text(encoding="utf-8")
