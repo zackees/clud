@@ -3523,6 +3523,44 @@ mod tests {
         assert!(line.contains("reason=\"reason\""));
     }
 
+    /// #1407 U11: the hook payload path denies `AskUserQuestion` to every
+    /// `grind-*` subagent, in either payload spelling, and leaves the main
+    /// session (no `agent_type`) and other subagents alone: the router's
+    /// one question round happens there, before prework.
+    #[test]
+    fn grind_caps_deny_ask_user_question_only_for_grind_subagents() {
+        let dir = tempdir().unwrap();
+        let payload = |extra: &str| {
+            let raw = format!(
+                r#"{{"tool_name":"AskUserQuestion","tool_input":{{"questions":[]}}{extra}}}"#
+            );
+            parse_payload(&raw, dir.path()).expect("payload parses")
+        };
+        for role in [
+            "grind-planner",
+            "grind-worker",
+            "grind-reviewer",
+            "grind-integrator",
+            "grind-lander",
+            "grind-prework",
+        ] {
+            for extra in [
+                format!(r#","agent_type":"{role}""#),
+                format!(r#","agentType":"{role}""#),
+            ] {
+                let reason = grind_caps_reason(&payload(extra.as_str()))
+                    .unwrap_or_else(|| panic!("{role} may ask ({extra})"));
+                assert!(reason.contains("/grind role caps"), "{reason}");
+                assert!(reason.contains("up front"), "{reason}");
+            }
+        }
+        assert_eq!(grind_caps_reason(&payload("")), None);
+        assert_eq!(
+            grind_caps_reason(&payload(r#","agent_type":"general-purpose""#)),
+            None
+        );
+    }
+
     fn denies(command: &str) -> bool {
         evaluate_command(command, None, false, &[]).reason.is_some()
     }

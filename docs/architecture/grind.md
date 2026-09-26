@@ -113,9 +113,10 @@ Every run works on a meta issue:
 - **One issue.** The bundled `github/is_meta_issue.py` tool alone decides
   meta-ness. A meta issue's open children are the goals. A multi-part
   non-meta issue gets intake's one question, *Convert #N into a meta
-  issue?*: convert splits it into children under a new meta (the original
-  stays open); declining, or a single-change issue, refuses with
-  ``run `/do N` `` and creates nothing.
+  issue?* (*Convert to a meta issue* / *Abort*): convert creates the
+  children first, then a meta issue that `Tracks #N`, and comments on the
+  original (which stays open); *Abort*, or a single-change issue, refuses
+  with ``run `/do N` (or `clud do N`) instead`` and creates nothing.
 - **Issue list.** A new meta issue tracks the given issues as sub-issues.
 - **Prompt.** Split into deliverables, one child issue each, under a new meta.
 - **Nothing.** Pick from the open issues, then route as a list.
@@ -186,12 +187,15 @@ Issue [#1407](https://github.com/zackees/clud/issues/1407); spec
 [#1392](https://github.com/zackees/clud/issues/1392) §0 and §2.
 
 - **Order.** Routing → planning pass → preflight → **one** question round
-  (at most 2 `AskUserQuestion` calls) → prework → run. Nothing is asked
+  (at most 2 `AskUserQuestion` calls of at most 4 questions each: repo and
+  plan first, run policies second) → prework → run. Nothing is asked
   after prework starts.
 - **Dirty repo.** Preflight inspects the checkout. The options are: stash
   as `grind-<run-id>`; commit to a local-only branch `wip/grind-<run-id>`;
-  carry the changes (offered only when a feature stage exists); or abort,
-  which creates nothing.
+  carry the changes into the feature worktree as the feature branch's first
+  commit (offered only when a feature stage exists); or abort, which
+  creates nothing. The run's own `.clud/grind/` files are excluded from the
+  check, the stash and the WIP commit.
 - **Recording.** The answers go into `run.json` as `preflight` (what was
   stashed or branched), `feature_merge`, `problem_reporting` and `tracks`.
   Finish restores only what `preflight` recorded.
@@ -201,7 +205,9 @@ Issue [#1407](https://github.com/zackees/clud/issues/1407); spec
   `tests/harness/test_grind_upfront.py`.
 
 The rationale is in
-[DD-097](../DESIGN_DECISIONS.md#dd-097-the-grind-run-plans-before-it-asks-one-up-front-question-round-none-after-prework).
+[DD-097](../DESIGN_DECISIONS.md#dd-097-the-grind-run-plans-before-it-asks-one-up-front-question-round-none-after-prework);
+the preflight exclusion and carry are in
+[DD-101](../DESIGN_DECISIONS.md#dd-101-grinds-preflight-never-touches-its-own-files-and-carry-becomes-the-feature-branchs-first-commit).
 
 ### Problem reporting
 

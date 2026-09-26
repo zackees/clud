@@ -8,7 +8,7 @@ arrives does the router cut `grind/meta-100-1f3a` from the updated
 `origin/main` and open the draft feature PR; then the feature-stage call gets
 the feature children, `base`, `plan_url`, `feature`, `feature_merge` and
 `stuck_bugs`. See `docs/architecture/grind.md`, "Bug stage, then feature
-stage", and DD-099.
+stage", and DD-100.
 
 Harness facts these scripts rely on:
 
