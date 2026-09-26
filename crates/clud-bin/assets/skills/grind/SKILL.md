@@ -95,13 +95,18 @@ The workflow also returns `path`:
   shown in the question round.
 
 **No overlap.** Before the question round, run
-`gh pr list --state open --search 'head:grind/meta-<T>-' --json number,headRefName,isDraft`
-(`T` is the top meta issue). If any open feature PR exists under the same
-top meta `T`, the plan becomes bugs-only: drop every feature stage, set
-`rules.no_overlap: "bugs_only"` and `"waiting_on_pr": <n>` in the plan, skip
-the regroup and feature-merge questions, and report
-`feature PR #<n> for #T is still open; this run is bugs-only`. A feature PR
-under a different top meta never blocks; the scope is per top meta. Once
+`gh pr list --state open --base <main> --search 'head:grind/meta-' --json number,headRefName,isDraft`
+(`T` is the top meta issue). A PR is a feature PR *under `T`* when its head
+is `grind/meta-<X>-…` and `X` is `T` or one of `T`'s sub-issues
+(`gh api repos/<o>/<r>/issues/<T>/sub_issues`): in a meta of metas the
+feature branch carries its sub-meta's number (section 2b). If any exists,
+the plan becomes bugs-only: move every feature group into `deferred_groups`
+(no feature stage, no branch), set `rules.no_overlap: "bugs_only"` and
+`"waiting_on_pr": <n>` in the plan, skip the regroup, feature-pick and
+feature-merge questions, and report
+`feature PR #<n> for #T is still open; this run is bugs-only`. `grind-run`
+reports the feature children as `deferred` and never works them. A feature
+PR under a different top meta never blocks; the scope is per top meta. Once
 that PR is merged (or closed), the next run may pick a feature again.
 
 Keep the per-child tracks (`bug` or `feature`) for section 3. Section 3 then
@@ -136,10 +141,14 @@ hold.
 - **Dirty repo** (only if 1c found changes): show the file list; options
   Stash, WIP branch, Carry into the grind worktree (feature stage only),
   Abort.
-- **Regroup** (only when 1b returned `regroup`): confirm the regroup plan
-  and pick exactly ONE feature group for this run (single-select). Every
-  other group goes into the plan's `deferred_groups` as
-  `{group, sub_meta, children}` with no branch assigned.
+- **Regroup** (only when 1b returned `regroup`): show the regroup plan
+  (`bugs: #b1 #b2 · F1 "<name>": #c1 #c2 · F2 "<name>": #c3 #c4`) and ask
+  which ONE feature group this run does (single-select). List the groups in
+  the planner's dependency order (a group sits where its first child sits in
+  `order`), the first labelled "(Recommended)" as the default, plus
+  "Keep as is (simple schedule)", which declines the regroup: the simple
+  path runs and no issue is touched. Every other group goes into the plan's
+  `deferred_groups` as `{group, sub_meta, children}` with no branch assigned.
 - **Mode.** (i) *Parallel*: each goal gets a git worktree; workers only read
   and write files; one integrator at a time rebases, lints, builds and tests.
   Uses GitHub's server-side concurrency. (ii) *Sequential*: one goal at a
@@ -185,9 +194,12 @@ question round and before prework:
 - One sub-meta issue per feature group; bug children stay direct children of
   the top meta `T`. With exactly one feature group, create no sub-meta: `T`
   itself is the feature meta.
-- Classify the existing sub-meta issues under `T` by the marker
-  `<!-- grind:v1 -->` (label `grind:meta`). Grind-made (marked) sub-metas are
-  kept as they are, and their children are never re-parented.
+- The existing sub-metas are the sub-issues of `T` that have sub-issues of
+  their own. One is grind-made when its body carries the marker
+  `<!-- grind:v1 -->` or it has the label `grind:meta`; a user-made one that
+  an earlier run rewrote carries the marker, so it counts as grind-made too.
+  Grind-made sub-metas are kept as groups as they are: no rewrite, and their
+  children are never re-parented.
 - Reuse user-made (unmarked) sub-metas first, in place: rewrite each with
   `gh issue edit <n> --title ... --body-file <f>`, where the new body starts
   with `<!-- grind:v1 -->` and ends with
@@ -195,16 +207,19 @@ question round and before prework:
   Only groups beyond the reused count get new issues: `gh issue create` with
   the marker body and label `grind:meta`, then
   `gh api -X POST repos/<o>/<r>/issues/<T>/sub_issues -F sub_issue_id=<id>`.
+  `sub_issue_id` is always the issue's REST `id`
+  (`gh api repos/<o>/<r>/issues/<n> --jq .id`), never its number.
 - A leftover user-made sub-meta (more sub-metas than groups) is rewritten to
   say `no children after regrouping`, its old body kept in the same
   `<details>` block.
 - Move each feature child with
   `gh api -X POST repos/<o>/<r>/issues/<sub>/sub_issues -F sub_issue_id=<child id> -F replace_parent=true`.
-- **Nesting guard.** Before moving anything, check that every move keeps the
-  depth at or below 8 levels and each parent at or below 100 sub-issues. If
-  any move would break either limit, stop cleanly before prework: create or
-  move nothing further, report `regroup failed: <reason>`, and fall back to
-  `simple`.
+- **Nesting guard.** Before creating or moving anything, check that every
+  move keeps the depth at or below 8 levels and each parent at or below 100
+  sub-issues. If any move would break either limit, or a sub-issue call
+  still fails with GitHub's 422, stop cleanly before prework: create or move
+  nothing further, report `regroup failed: <reason>` with the changes
+  already made (from `undo`), and fall back to `simple`.
 - **Undo record.** Append every change to `run.json` under `"undo": [...]`,
   one entry per change, recorded before its command runs:
   `{"op": "create", "issue": n}`,
@@ -214,7 +229,10 @@ question round and before prework:
 Then set the plan's `structure: "meta_of_metas"`, the chosen feature stage's
 `sub_meta` to its sub-meta number (`null` when `T` is the feature meta), and
 `deferred_groups` for the other groups. `meta` in `run.json` stays the top
-meta `T`.
+meta `T`, and section 3 keeps the `undo` array when it rewrites `run.json`.
+In section 4b, `<M>` in the branch name and `<meta>` in the `Closes` line
+are then the chosen group's sub-meta (`T` when `sub_meta` is `null`), which
+is how 1b's no-overlap check finds that PR on later runs.
 
 ## 3. Record the run
 
@@ -269,8 +287,8 @@ answers, keeping the real preflight details locally:
  "rules": {"stuck_bug": "block_dependents_only", "no_overlap": "bugs_only"}}
 ```
 
-Only one feature stage appears in `stages` per run; other feature groups
-wait in `deferred_groups`. Write it to `.clud/grind/plan.json` at the repository root. The workflow's
+Only one feature stage appears in `stages` per run (on the simple path it
+holds every feature child); other feature groups wait in `deferred_groups`. Write it to `.clud/grind/plan.json` at the repository root. The workflow's
 first agent, `grind-prework`, posts the public copy (preflight reduced to
 `"handled"`) under `<!-- grind:v1 plan run=<run-id> -->`, and every later
 agent gets that comment's URL. Nobody edits the plan comment.

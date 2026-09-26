@@ -292,6 +292,16 @@ removedStages.forEach(({ s, note }) => (Array.isArray(s.children) ? s.children :
   const id = String(c)
   if (!keptIds.has(id) && !(id in deferredNote)) deferredNote[id] = note
 }))
+// A deferred group's children never run this time, even when the router left
+// its stage out of `stages` (a bugs-only plan moves every group here).
+;(args.plan && Array.isArray(args.plan.deferred_groups) ? args.plan.deferred_groups : []).forEach(d => {
+  if (!d || !Array.isArray(d.children)) return
+  const note = BUGS_ONLY ? `no overlap: waiting on feature PR #${WAITING_PR}` : `deferred group ${stageName(d)}`
+  d.children.forEach(c => {
+    const id = String(c)
+    if (!keptIds.has(id) && !(id in deferredNote)) deferredNote[id] = note
+  })
+})
 args.goals = args.goals.filter(g => {
   const note = deferredNote[String(g.id)]
   if (note === undefined) return true
@@ -307,7 +317,7 @@ STAGES.forEach(s => (Array.isArray(s.children) ? s.children : []).forEach(c => {
 }))
 // Feature-branch mode (#1410): feature-stage goals land on args.feature.branch.
 // No feature stage survived the #1412 filter: nothing lands on the feature branch.
-const NO_FEATURE_LEFT = removedStages.length > 0 && !keptFeature
+const NO_FEATURE_LEFT = BUGS_ONLY || (removedStages.length > 0 && !keptFeature)
 const FEATURE = (args.feature && args.feature.branch && !NO_FEATURE_LEFT) ? args.feature : null
 // The router stores 'auto' | 'later' | 'comment'; the long spellings are accepted too.
 const FEATURE_MERGE_ALIASES = { auto: 'auto', later: 'decide_later', decide_later: 'decide_later', comment: 'comment_only', comment_only: 'comment_only' }
