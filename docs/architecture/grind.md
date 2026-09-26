@@ -40,8 +40,8 @@ capped agent types:
 
 | Asset | Source | Installed to |
 |---|---|---|
-| Skills `grind`, `grind-intake`, `grind-plan`, `grind-work`, `grind-review`, `grind-integrate`, `grind-land`, `grind-cron` | `crates/clud-bin/assets/skills/` (`skills.rs::BUNDLED_SKILLS`) | `~/.claude/skills/`, `~/.codex/skills/` |
-| Agents `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
+| Skills `grind`, `grind-intake`, `grind-prework`, `grind-plan`, `grind-work`, `grind-review`, `grind-integrate`, `grind-land`, `grind-cron` | `crates/clud-bin/assets/skills/` (`skills.rs::BUNDLED_SKILLS`) | `~/.claude/skills/`, `~/.codex/skills/` |
+| Agents `grind-prework`, `grind-planner`, `grind-worker`, `grind-reviewer`, `grind-integrator`, `grind-lander` | `crates/clud-bin/assets/agents/` (`claude_files.rs`) | `~/.claude/agents/` |
 | Workflow `grind-run` | `crates/clud-bin/assets/workflows/grind-run.js` (`claude_files.rs`) | `~/.claude/workflows/` |
 
 Each workflow agent runs as its `grind-<role>` type and is told to invoke
@@ -88,6 +88,250 @@ everything first:
 
 The router records `{mode, ci}` in `.clud/grind/run.json` at the repository
 root for the hook below, and removes it when the run ends.
+
+### Input routing
+
+Issue [#1404](https://github.com/zackees/clud/issues/1404); the steps live
+in [`grind-intake/SKILL.md`](../../crates/clud-bin/assets/skills/grind-intake/SKILL.md).
+Every run works on a meta issue:
+
+- **One issue.** The bundled `github/is_meta_issue.py` tool alone decides
+  meta-ness. A meta issue's open children are the goals. A multi-part
+  non-meta issue gets intake's one question, *Convert #N into a meta
+  issue?*: convert splits it into children under a new meta (the original
+  stays open); declining, or a single-change issue, refuses with
+  ``run `/do N` `` and creates nothing.
+- **Issue list.** A new meta issue tracks the given issues as sub-issues.
+- **Prompt.** Split into deliverables, one child issue each, under a new meta.
+- **Nothing.** Pick from the open issues, then route as a list.
+
+**Tracks.** After the plan-only pass each child carries a track, `bug`
+(lands on `<main>` in the bug stage) or `feature` (lands on the feature
+branch), recorded in `run.json` `tracks`; see
+[Bug stage, then feature stage](#bug-stage-then-feature-stage).
+
+### Plan-only classification pass
+
+Issue [#1406](https://github.com/zackees/clud/issues/1406). Before asking
+anything about a meta issue, the router writes `{"phase": "plan"}` to
+`run.json` and starts `grind-run` with `planOnly: true, meta`. One
+`grind-planner` classifies every child as a bug (`#N bug → main`) or a
+feature (`#N feature → grind/meta-<T>-<group>`), names feature groups and
+their independence, and returns without starting any other role. The hook
+refuses the planner `git worktree add` and file writes in this phase.
+The complexity threshold is
+`grind-run.js::thresholdVerdict`: it picks `path: regroup` only for a confident
+classification with every child placed, 8+ children, and at least 2
+independent feature groups of 3+; otherwise it logs
+`keeping #T as is: <reason>` and the meta issue is left untouched. The
+router then rewrites `run.json` without `phase` for the real run.
+
+### Meta of metas and no overlap
+
+Issue [#1412](https://github.com/zackees/clud/issues/1412). The commands
+live in the router skill, section 2b
+([`grind/SKILL.md`](../../crates/clud-bin/assets/skills/grind/SKILL.md));
+this is the contract.
+
+- **Regroup only after confirmation.** `path: regroup` is a proposal until
+  the user confirms it in the question round.
+- **Shape.** One sub-meta per feature group; bugs stay directly under the
+  top meta. A single feature group gets no sub-meta.
+- **User-made sub-metas** are reused in place: the old body is kept in
+  `<details>Previous content</details>`, surplus groups get new sub-metas,
+  and leftovers are rewritten as `no children after regrouping`.
+- **Grind-made sub-metas** (marker `<!-- grind:v1 -->`, label `grind:meta`)
+  are kept and their children are not touched.
+- **Moves** use `replace_parent`. The 8-level depth / 100-children guard
+  fails the run before prework, not midway.
+- **Undo.** Every change is recorded in `run.json` `undo`.
+- **One feature group per run.** The rest go to `deferred_groups`.
+- **No overlap.** An open feature PR under the same top meta makes the run
+  bugs-only (`waiting_on_pr`, rule `rules.no_overlap`). A feature PR under a
+  different top meta does not block.
+- `grind-run.js` enforces the deferral and the no-overlap rule, not just the
+  router.
+
+### Preflight and the single question round
+
+Issue [#1407](https://github.com/zackees/clud/issues/1407); spec
+[#1392](https://github.com/zackees/clud/issues/1392) §0 and §2.
+
+- **Order.** Routing → planning pass → preflight → **one** question round
+  (at most 2 `AskUserQuestion` calls) → prework → run. Nothing is asked
+  after prework starts.
+- **Dirty repo.** Preflight inspects the checkout. The options are: stash
+  as `grind-<run-id>`; commit to a local-only branch `wip/grind-<run-id>`;
+  carry the changes (offered only when a feature stage exists); or abort,
+  which creates nothing.
+- **Recording.** The answers go into `run.json` as `preflight` (what was
+  stashed or branched), `feature_merge`, `problem_reporting` and `tracks`.
+  Finish restores only what `preflight` recorded.
+- **Enforcement.** `block_bad_cmd_grind_caps::tool_reason` denies
+  `AskUserQuestion` to every `grind-*` subagent. The main-session router is
+  bound by its skill text instead, pinned by
+  `tests/harness/test_grind_upfront.py`.
+
+The rationale is in
+[DD-097](../DESIGN_DECISIONS.md#dd-097-the-grind-run-plans-before-it-asks-one-up-front-question-round-none-after-prework).
+
+### Problem reporting
+
+Issue [#1411](https://github.com/zackees/clud/issues/1411). The
+`problem_reporting` answer is recorded as described in
+[Preflight and the single question round](#preflight-and-the-single-question-round).
+
+- **Returned, not filed.** Every role may return
+  `problems: [{kind, summary, evidence, related_issue}]` alongside its
+  result. Roles never file anything themselves.
+- **Collected once.** `grind-run` collects the problems from every role and
+  dedupes them by `kind` + `summary` + `related_issue`.
+- **Only the router files.** It follows `problem_reporting`:
+  - `issue`: one issue per problem, body carrying `Refs #<meta>`, label
+    `grind:followup`, and the marker
+    `<!-- grind:followup meta=<T> stage=<stage> feature-pr=<N> -->`. It is
+    never attached as a sub-issue of the meta.
+  - `comment`: one comment per problem on its `related_issue`, or on the
+    meta issue when there is none.
+- **Never blocking.** Follow-ups do not hold up closing the meta issue and
+  are not counted by the no-overlap check.
+- **Later pickup.** Intake and cron treat a `grind:followup` issue from the
+  bug stage as eligible at once; one from a feature stage becomes eligible
+  only after that stage's feature PR has merged. The label is removed when
+  the issue is picked up.
+- **Filing failures.** A failed filing does not stop the run; the router
+  lists each unfiled problem inline in its final report.
+
+The rationale is in
+[DD-098](../DESIGN_DECISIONS.md#dd-098-grind-follow-up-issues-are-never-sub-issues-of-the-meta).
+
+### Prework and the plan comment
+
+Issue [#1408](https://github.com/zackees/clud/issues/1408); spec
+[#1392](https://github.com/zackees/clud/issues/1392) §0.
+
+- **Role.** `grind-prework` is the first agent of the real run, after the
+  question round and before any planner or worker. It does not plan; it
+  records the plan the router assembled.
+- **Local copy.** The router writes the full `grind-plan/v1` object to
+  `.clud/grind/plan.json` and passes it to `grind-run` as `args.plan`, with
+  the meta issue as `args.meta` (the top meta issue in a meta of metas).
+  `run.json` also carries `meta`, so the hook knows which issue prework may
+  comment on. Finish deletes `plan.json`.
+- **Public comment.** Prework posts the plan once on the meta issue, in a
+  fenced `json` block under `<!-- grind:v1 plan run=<run-id> -->`. The
+  comment is public on public repos, so local-only fields are dropped:
+  `preflight` becomes `"handled"`, and the starting branch, stash name, WIP
+  branch and local paths never appear. The local details stay in
+  `plan.json`.
+- **Never edited.** Nobody edits the plan comment, so no decision can change
+  mid-run. Every later agent is told its URL and reads it before starting.
+- **Size.** GitHub caps a comment at 65,536 characters. Per-child entries stay
+  one line; above about 60,000 characters the plan is split into numbered
+  comments marked `part=k/N`, linked from the first.
+- **Failure stops the run.** If prework cannot post, the workflow returns
+  `stopped: 'prework'` before any other agent starts; the router reports
+  that the plan was not posted and no work was done.
+- **Status comment.** Results live in a separate comment,
+  `<!-- grind:v1 status run=<run-id> -->`, one line per child. The router,
+  not prework, posts it when the run starts and edits it
+  (`gh api -X PATCH repos/<o>/<r>/issues/comments/<id>`) as results arrive
+  and at Finish.
+- **Caps.** Read-only git and `gh`, plus `gh issue comment` on the
+  `run.json` meta issue only. No Write/Edit, builds or worktrees.
+
+### Bug stage, then feature stage
+
+Issue [#1409](https://github.com/zackees/clud/issues/1409). The stage fields
+are defined by the plan; see
+[Prework and the plan comment](#prework-and-the-plan-comment).
+
+- **Order.** `grind-run` runs every bug-stage goal against `origin/<main>`
+  first. Only then does it run each feature stage, against that stage's
+  `stage.base`.
+- **Base override.** For a run without a plan, `args.base` replaces the
+  default base (`origin/<main>`).
+- **Stuck bug.** The rule is `block_dependents_only`. When a bug does not
+  merge, only the feature children that list it in `depends_on_bugs` are
+  blocked, reported as `blocked: bug #N did not land`. Every other goal
+  proceeds.
+
+### Feature-branch mode
+
+Issue [#1410](https://github.com/zackees/clud/issues/1410); spec
+[#1392](https://github.com/zackees/clud/issues/1392) §6. Used for
+feature-stage children of a meta issue; issue safety is in
+[#1393](https://github.com/zackees/clud/issues/1393).
+
+- **Setup.** When the bug stage ends, the router creates
+  `grind/meta-<M>-<run-id>` from the updated `origin/<main>` in the worktree
+  `.clud/grind/worktrees/feature` and pushes it. Before the first goal lands
+  it opens the **draft feature PR** into `<main>`. `run.json` records
+  `feature: {branch, worktree}` and `feature_merge`. The user's checkout is
+  not touched after preflight.
+- **Goals.** Each goal PR's base is the feature branch, so it still gets CI
+  and a review trail. The integrator rebases the goal onto the feature branch
+  and writes `Refs #N`; the feature PR collects `Closes #N` for each child
+  that lands, plus `Closes #<meta>`. Parallel goal worktrees branch from the
+  feature branch; sequential goals run inside the feature worktree.
+- **Merge policy** (`feature_merge`, asked up front):
+  - `auto`: once CI is green the lander marks the PR ready and runs
+    `gh pr merge --merge`, never `--admin`, so branch protection and required
+    reviews still apply.
+  - `later`: the router reports the PR and leaves it open for the user.
+  - `comment`: the router posts the result on the meta issue and keeps the
+    PR a draft.
+- **Merge commit, main merged in.** The feature PR lands as a merge commit.
+  If `<main>` moves during the run, `<main>` is merged into the feature
+  branch, never rebased, so goal SHAs already merged there stay unchanged.
+- **Caps.** `block_bad_cmd_grind_caps.rs` refuses `gh pr merge --admin` on
+  the feature PR, lets the lander merge the feature PR into `<main>` only
+  under `feature_merge: auto`, and refuses deleting a `grind/*` branch while
+  its feature PR is open. The router's single worktree (the feature one) is
+  enforced by the `/grind` skill text, not the hook, since the router is the
+  main session.
+
+The rationale is in
+[DD-095](../DESIGN_DECISIONS.md#dd-095-the-grind-feature-lands-as-a-merge-commit-and-main-is-merged-into-the-feature-branch-rather-than-rebased).
+
+### Never losing issues in feature mode
+
+Issue [#1393](https://github.com/zackees/clud/issues/1393).
+
+- **Single closer.** Goal PRs into the feature branch say `Refs #N`, never a
+  closing keyword. Only the feature PR carries `Closes #N` for each landed
+  child plus `Closes #<meta>`, so GitHub closes an issue exactly when its fix
+  merges into `<main>`. No role runs `gh issue close` on a feature child.
+- **Label and marker.** When a goal merges into the feature branch the lander
+  adds the `grind:on-feature` label and posts one marker comment:
+  `<!-- grind:v1 feature-pr=#<N> branch=<feature> goal-pr=#<G> run=<run-id> -->`.
+  The label makes pending issues queryable; the last marker names the feature
+  PR. Intake and triage skip labelled issues.
+- **Reconcile.** `clud grind reconcile` (`grind_reconcile.rs`) runs at the
+  start of every `/grind` run and every `/grind-cron` tick. For each labelled
+  issue it reads the marker, the feature PR, and (for a closed issue) the
+  GraphQL `ClosedEvent.closer`:
+
+  | Feature PR | Issue | Action |
+  |---|---|---|
+  | merged into `<main>` | open | close citing the feature PR; remove label |
+  | merged into `<main>` | closed | remove label |
+  | closed unmerged | any | reopen if closed; remove label; comment citing `refs/pull/<N>/head` |
+  | open, or merged elsewhere | closed by hand, by an unmerged PR, by a PR into a non-default base, or by a commit not on `<main>` | reopen with a comment naming the closer |
+  | open, or merged elsewhere | closed by a PR merged into `<main>` or a commit on `<main>` | none |
+  | open and stale (14 days idle, conflicting, or branch gone) | any | report stale; comment on the meta issue |
+
+- **Reachable commits.** A commit closer counts as landed only when
+  `compare/<main>...<oid>` reports `behind` or `identical`, i.e. the commit is
+  reachable from `<main>`.
+- **Branches.** `grind/*` branches are not deleted while their feature PR is
+  open (see the caps above and the `/clud-git` playbook), so an unmerged
+  feature's commits stay reachable.
+
+Reconcile is idempotent: a healthy open issue yields no action. It is covered
+by unit tests in `grind_reconcile.rs` and by
+`tests/harness/test_grind_reconcile.py`. The rationale is in
+[DD-096](../DESIGN_DECISIONS.md#dd-096-the-feature-pr-is-the-single-closer-of-grind-issues-and-clud-grind-reconcile-reopens-early-closes).
 
 ### Repository lint/test scripts
 
@@ -173,7 +417,8 @@ The rationale is in
 
 | Role | Tools (`tools:` frontmatter) | Shell (hook) |
 |---|---|---|
-| `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only |
+| `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only, never in the plan-only phase (the hook also refuses it Write/Edit) |
+| `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the `run.json` meta issue only; no edits, worktrees or builds |
 | `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh` only |
 | `grind-reviewer` | same as worker | same as worker |
 | `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, and `act` when CI is off |
@@ -201,6 +446,28 @@ the suite checks the ordering, concurrency, fix-round and cap behavior above.
 The router's questions are model behavior, which a scripted model can't
 exercise, so the suite starts `grind-run` directly and pins the router text
 separately.
+
+The per-feature suites in `tests/harness/`, each named for the section above
+it covers:
+
+- `test_grind_routing.py` — input routing and the `/do` refusal.
+- `test_grind_plan_only.py` — the plan-only pass and threshold.
+- `test_grind_meta_of_metas.py`, `test_grind_overlap.py` — regroup and no
+  overlap.
+- `test_grind_upfront.py` — preflight and the single question round.
+- `test_grind_prework.py` — the plan comment.
+- `test_grind_stages.py`, `test_grind_feature.py` — stages and
+  feature-branch mode.
+- `test_grind_problems.py` — problem reporting.
+- `test_grind_reconcile.py` — reconcile.
+- `test_grind_e2e.py` — the three user scenarios of
+  [#1392](https://github.com/zackees/clud/issues/1392) end to end.
+
+GitHub itself is faked (`tests/harness/fake_gh.py`), so one step stays
+manual: a smoke run against a scratch GitHub repository, checking that the
+closing-keyword rule closes children only when the feature PR merges into
+`<main>`, that `replace_parent` moves children during a regroup, and that
+a large feature PR's body stays within GitHub's closing-keyword count.
 
 ## Boundary with `clud loop`
 

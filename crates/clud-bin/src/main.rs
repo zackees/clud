@@ -774,6 +774,17 @@ fn run(mut args: args::Args) {
     // verbatim.
     if let Some(args::Command::Grind { url }) = args.command.clone() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // `clud grind reconcile` (#1393) runs the feature-branch reconcile
+        // pass instead of launching a session.
+        if args::is_reconcile(url.as_deref()) {
+            match clud::grind_reconcile::run(&cwd) {
+                Ok(code) => std::process::exit(code),
+                Err(error) => {
+                    eprintln!("[clud] error: {error}");
+                    std::process::exit(2);
+                }
+            }
+        }
         match grind::resolve_grind_target(&cwd, url.as_deref()) {
             Ok(issues_url) => {
                 let color = std::io::IsTerminal::is_terminal(&io::stderr());

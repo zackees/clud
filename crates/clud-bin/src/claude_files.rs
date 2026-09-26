@@ -65,6 +65,11 @@ pub const BUNDLED_CLAUDE_FILES: &[BundledClaudeFile] = &[
         procedure: Some("grind-plan"),
     },
     BundledClaudeFile {
+        rel_path: "agents/grind-prework.md",
+        body: include_str!("../assets/agents/grind-prework.md"),
+        procedure: Some("grind-prework"),
+    },
+    BundledClaudeFile {
         rel_path: "agents/grind-worker.md",
         body: include_str!("../assets/agents/grind-worker.md"),
         procedure: Some("grind-work"),
@@ -187,7 +192,14 @@ mod tests {
     #[test]
     fn bundled_includes_the_grind_roles_and_workflow() {
         let paths: Vec<_> = BUNDLED_CLAUDE_FILES.iter().map(|f| f.rel_path).collect();
-        for role in ["planner", "worker", "reviewer", "integrator", "lander"] {
+        for role in [
+            "planner",
+            "prework",
+            "worker",
+            "reviewer",
+            "integrator",
+            "lander",
+        ] {
             let path = format!("agents/grind-{role}.md");
             assert!(paths.contains(&path.as_str()), "missing {path}");
         }
@@ -226,7 +238,14 @@ mod tests {
                 .unwrap()
                 .body
         };
-        for role in ["planner", "worker", "reviewer", "integrator", "lander"] {
+        for role in [
+            "planner",
+            "prework",
+            "worker",
+            "reviewer",
+            "integrator",
+            "lander",
+        ] {
             assert!(
                 body(role).contains("\ntools: "),
                 "grind-{role} needs tools:"
@@ -242,6 +261,7 @@ mod tests {
         assert_eq!(tools("reviewer"), tools("worker"));
         assert!(!body("lander").contains("Edit"));
         assert!(!body("planner").contains("Edit"));
+        assert_eq!(tools("prework"), "tools: Bash, Read, Grep, Glob");
     }
 
     #[test]

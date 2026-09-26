@@ -4278,3 +4278,146 @@ replaces because it fails fast. `gh pr merge --auto` is allowed.
 of the matrix unless someone also runs `pr_merge_watch.py`; the merge simply
 never happens. That is an acceptable cost for keeping GitHub's native
 auto-merge available.
+
+## DD-095: The /grind feature lands as a merge commit, and main is merged into the feature branch rather than rebased
+
+**Status:** Accepted
+
+**Context:** #1410, spec #1392 §6. In feature-branch mode each goal PR merges
+into `grind/meta-<M>-<run-id>`, and only one feature PR reaches `<main>`.
+There are three ways that PR could land, and two ways to bring in a `<main>`
+that moved during the run.
+
+**Decision:** The feature PR always lands as a merge commit (`--no-ff`,
+`gh pr merge --merge`), whoever merges it. When `<main>` moves, grind merges
+`<main>` into the feature branch and never rebases it.
+
+**Rationale:**
+- The goal commits that land are the ones that were tested, SHA for SHA, so
+  nothing needs re-testing.
+- History keeps one commit per goal.
+- `git revert -m1 <merge>` undoes the whole feature in one step.
+- A rebase replays N goal commits onto the moved `<main>`, so the code that
+  lands is not the code that was tested. On a long refactor it also forces
+  conflict resolution one commit at a time, and undoing the feature means
+  reverting N commits. A squash is easy to revert but loses per-goal history.
+
+**Consequences:** `<main>` gets one merge commit per feature and the feature
+branch may carry merge commits from `<main>`. The hook refuses `--admin` on
+the feature PR, and the lander merges it only under `feature_merge: auto`.
+The contract is owned by
+[architecture/grind.md](architecture/grind.md#feature-branch-mode).
+
+## DD-096: The feature PR is the single closer of /grind issues, and `clud grind reconcile` reopens early closes
+
+**Status:** Accepted
+
+**Context:** #1393. In feature-branch mode a child's fix merges into
+`grind/meta-<M>-<run-id>`, not `<main>`. GitHub closes an issue from a
+closing keyword only when the PR merges into the default branch, but people
+and tools still close issues early: by hand mid-run, from a PR merged into a
+non-default base, or from a commit that never reaches `<main>`. If the
+feature PR is then closed unmerged, those issues read as done while their fix
+exists only at `refs/pull/<N>/head`. Nothing on GitHub records which feature
+PR an issue is waiting on.
+
+**Decision:**
+- **One closer.** Goal PRs say `Refs #N`; only the feature PR carries
+  `Closes #N` (and `Closes #<meta>`), so GitHub closes each issue exactly when
+  its fix reaches `<main>`. No grind role closes an issue by hand.
+- **Label plus marker.** The lander labels every issue whose goal merged into
+  the feature branch `grind:on-feature` and posts
+  `<!-- grind:v1 feature-pr=#N branch=... goal-pr=#G run=... -->`. The label
+  makes the set queryable; the marker says which PR it waits on.
+- **Reconcile.** `clud grind reconcile` (run by the `/grind` router and each
+  `/grind-cron` tick) walks every labelled issue. An issue closed by anything
+  other than a merge into `<main>` (or a commit reachable from `<main>`) is
+  reopened while its feature PR is unlanded. A feature PR closed unmerged
+  reopens and unlabels its issues and cites `refs/pull/N/head`. A feature PR
+  merged into `<main>` closes any stragglers and removes the label.
+
+**Rationale:** GitHub's own closing semantics already mean "the fix is on the
+default branch"; making the feature PR the only closer reuses them instead of
+simulating them. Reconcile is idempotent and reads only GitHub state, so it
+can run on every tick and repair damage done outside grind.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Projects v2 status field | Needs a project per repo and extra token scopes; a label and a comment work with the default `gh` login and are visible on the issue itself. |
+| Milestones | One milestone per issue, often already used for releases; it cannot name the PR an issue waits on. |
+| Rulesets / branch protection | They gate merges, not issue state; nothing stops a hand close. |
+| Close on goal merge, reopen on failure | Issues read as fixed while the fix is off `<main>`, the exact state #1393 forbids. |
+
+**Consequences:** An issue can be closed early, but only until the next
+reconcile. The label is removed only when the feature PR has merged or been
+closed, so an open label always means "fix pending on a feature branch".
+Intake skips `grind:on-feature` issues. The contract is owned by
+[architecture/grind.md](architecture/grind.md#never-losing-issues-in-feature-mode).
+
+## DD-097: The /grind run plans before it asks: one up-front question round, none after prework
+
+**Status:** Accepted
+
+**Context:** #1407, spec #1392 §0 and §2. A workflow cannot ask questions
+while it runs, and `/grind` runs unattended for hours. Earlier drafts asked
+questions as they came up: repo state at the start, feature grouping after
+planning, the merge policy when the feature PR opened. Each one stalled a run
+the user had walked away from, and a question about grouping cannot be asked
+well before the children have been classified.
+
+**Decision:** The router routes the input, runs a plan-only classification
+pass (no edits, worktrees or pushes), inspects repo state, and only then asks
+**one** question round of at most two `AskUserQuestion` calls. Every answer
+(dirty-repo action, regroup, mode, models, CI, scripts, feature merge policy,
+problem reporting) is recorded in `run.json` and the plan before prework
+starts. From prework on nobody asks: the hook denies `AskUserQuestion` to
+every `grind-*` subagent, and anything unexpected follows a rule recorded in
+advance (`stuck_bug`, `no_overlap`, `problem_reporting`).
+
+**Rationale:**
+- Planning first means the questions are about a concrete plan, so the user
+  answers once with the facts in front of them.
+- One round bounds interruption: after it the user can leave.
+- Recorded rules make every mid-run decision reproducible from the plan
+  comment, which nobody edits.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Ask as questions arise | Stalls an unattended run at an unknown time. |
+| Ask before planning | Grouping and merge-policy questions would be guesses. |
+| No questions, fixed defaults | Dirty-repo handling and merge policy are the user's call. |
+
+**Consequences:** The plan-only pass costs one planner agent before any
+question. Intake's conversion (or pick) question stays separate and precedes
+the round, because it decides what the meta issue is. The contract is owned by
+[architecture/grind.md](architecture/grind.md#preflight-and-the-single-question-round).
+
+## DD-098: /grind follow-up issues are never sub-issues of the meta
+
+**Status:** Accepted
+
+**Context:** #1411, spec #1392. Roles find problems outside their goal's
+scope. Filed as sub-issues of the meta issue, they would widen the run's
+scope while it runs: the meta could not close until they were fixed, and the
+no-overlap check and reconcile would count them.
+
+**Decision:** Roles return problems; only the router files them. Under
+`problem_reporting: issue` each becomes an issue labelled `grind:followup`,
+with `Refs #<meta>` and a `<!-- grind:followup ... -->` marker naming its
+stage and feature PR, and it is never attached as a sub-issue of the meta.
+Intake and cron pick a follow-up up later: at once for the bug stage, and
+after the feature PR merges for a feature stage.
+
+**Rationale:** The meta's sub-issue list stays exactly the run's scope, so
+closing the meta, the no-overlap check and reconcile act on precisely the
+issues the run planned. The label and marker keep follow-ups queryable and
+linked without that coupling.
+
+**Consequences:** A follow-up is visible from the meta only through its
+`Refs` backlink. A failed filing is listed in the router's final report
+rather than stopping the run. The contract is owned by
+[architecture/grind.md](architecture/grind.md#problem-reporting).

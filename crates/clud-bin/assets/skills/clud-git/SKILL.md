@@ -41,7 +41,7 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 4. **`git worktree remove --force`.** Pass `--force` only after the audit shows no useful holders. If it still fails with "Access is denied" / "device or resource busy", fall through to step 5.
 5. **`"$CLUD_EXE" trash` quarantine fallback.** `"$CLUD_EXE" trash .claude/worktrees/<name>` moves the path to `~/.clud/trash/<timestamp>/` for the daemon's GC sweeper to reap when handles release. This is the documented fallback — see [[clud-windows-trash]] for the file-lock case.
 6. **`git worktree prune`** + verify `git worktree list` no longer mentions the path.
-7. **Delete the local branch** if it was created for the worktree: `git branch -D <branch>` for already-merged work; `git branch -d` for non-merged (which will refuse and force you to confirm).
+7. **Delete the local branch** if it was created for the worktree: `git branch -D <branch>` for already-merged work; `git branch -d` for non-merged (which will refuse and force you to confirm). Never delete a `grind/*` branch (local or remote) that has an open PR (`gh pr list --head <branch> --state open`): it is a `/grind` feature branch holding landed goals until its feature PR merges. Push a worktree's branch before removing the worktree; a merged PR's commits stay reachable at `refs/pull/<n>/head`, unpushed commits do not.
 
 ## Process-audit playbook (standalone)
 

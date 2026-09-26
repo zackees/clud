@@ -27,3 +27,30 @@ def test_bare_intake_skips_grind_labelled_issues() -> None:
     text = _read("grind-intake")
     assert "grind:on-feature" in text
     assert "grind:followup" in text
+
+
+def test_intake_never_says_grind_closes_issues() -> None:
+    assert "closed by `/grind`" not in _read("grind-intake")
+
+
+def test_integrate_goal_prs_use_refs() -> None:
+    assert "Refs #" in _read("grind-integrate")
+
+
+def test_land_labels_and_marks_feature_issues() -> None:
+    text = _read("grind-land")
+    assert "grind:on-feature" in text
+    assert "<!-- grind:v1 feature-pr=" in text
+
+
+def test_router_and_cron_run_reconcile() -> None:
+    assert "clud grind reconcile" in _read("grind")
+    assert "clud grind reconcile" in _read("grind-cron")
+
+
+def test_triage_knows_the_on_feature_label() -> None:
+    assert "grind:on-feature" in _read("clud-issue-triage")
+
+
+def test_git_playbook_protects_grind_branches() -> None:
+    assert "grind/*" in _read("clud-git")

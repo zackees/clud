@@ -42,4 +42,22 @@ later, one goal at a time.
    every push: do not invent lint or test commands; verify is just the
    focused test.
 
+## Plan-only mode
+
+When the prompt says PLAN-ONLY, skip steps 2-5 and only classify:
+
+- Read each child (`gh issue view <n> --comments`) and the code it names.
+- Classify each child as a **bug** (a self-contained fix to existing
+  behaviour, independent of the other children, landing as its own PR into
+  the default branch) or a **feature** (one part of a single cohesive
+  change).
+- Name the feature groups and say whether each is independent of the others.
+- List which feature children depend on which bugs, and give a dependency
+  order for all children.
+- Set `confident` to false if any child cannot be placed or the split is a
+  guess.
+
+Never write files, create worktrees or branches, or push. Return that shape
+through StructuredOutput.
+
 Return the plan through StructuredOutput.
