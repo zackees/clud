@@ -397,6 +397,11 @@ mod tests {
         std::fs::create_dir_all(root.join("build/x")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("keep"), b"k").unwrap();
+        // An existing file outside the roots on every platform: `/etc/passwd`
+        // is `C:\etc\passwd` on Windows, which does not exist, so it would
+        // resolve as missing instead of outside.
+        let outside = base.join("outside.txt");
+        std::fs::write(&outside, b"o").unwrap();
         let mut roots = crate::rm_tool::Roots::fixed(vec![root.clone()], true);
         let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
@@ -419,7 +424,7 @@ mod tests {
             vec!["-rf", "/"],
             vec!["-f", home_file.to_str().unwrap()],
             vec!["-rf", root.to_str().unwrap()],
-            vec!["-rf", "build", "/etc/passwd"],
+            vec!["-rf", "build", outside.to_str().unwrap()],
             vec!["-rfz", "build"],
             vec!["-rf"],
         ] {
@@ -429,6 +434,7 @@ mod tests {
             );
         }
         assert!(root.join("build/x").exists(), "decisions never delete");
+        assert!(outside.exists());
     }
 
     #[cfg(target_os = "linux")]
