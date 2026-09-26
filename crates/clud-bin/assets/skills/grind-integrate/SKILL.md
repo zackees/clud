@@ -24,9 +24,10 @@ You hold the run's build lock, so nothing else builds while you do.
    (`grind/meta-<M>-<run-id>`) in the feature stage. A dependent goal's
    dependency has already merged, so `origin/<base>` contains it. In the
    feature stage, first check whether `origin/<main>` moved past the feature
-   branch; if so, merge (never rebase) `origin/<main>` into the feature
-   branch in its worktree and push it, then rebase the goal onto the
-   updated feature branch.
+   branch; if so, in the feature worktree fast-forward to the feature
+   branch's origin (`git merge --ff-only origin/<feature>`), merge (never
+   rebase) `origin/<main>` into it with `git merge --no-ff`, and push it with
+   a plain push, then rebase the goal onto the updated feature branch.
 3. **RED -> GREEN.** Run the goal's focused regression test and show it
    fails without the fix (check out the test alone on the base, or cite the
    reproduction), then passes with it.
@@ -52,9 +53,9 @@ You hold the run's build lock, so nothing else builds while you do.
    on merges into the default branch and a premature close would lose the
    issue. Either keyword names the goal's own issue, never the parent of a
    meta issue. So feature-stage goal PRs (base = the feature branch) use
-   `Refs #N`, and you add a `Closes #N` line for the goal to the feature
-   PR's body (`gh pr edit <feature-pr> --body-file ...`) so the issue closes
-   when the feature PR merges into `<main>`.
+   `Refs #N`. Do not edit the feature PR: the lander adds the goal's
+   `Closes #N` line to it only after the goal PR merges into the feature
+   branch, so a goal that never lands is never closed by the feature merge.
    Return `pushed=true` and the PR URL. The lander watches CI; do not wait
    for it here.
 

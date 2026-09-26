@@ -3417,12 +3417,17 @@ mod block_bad_cmd_cwd_changed;
 #[path = "block_bad_cmd_grind_caps.rs"]
 mod block_bad_cmd_grind_caps;
 
-/// The `/grind` role-cap denial for this call, if its agent is a capped role.
+/// The `/grind` role-cap denial for this call, if its agent is a capped role,
+/// or the feature-branch-mode router caps for any other caller while
+/// `run.json` records a feature.
 fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
-    let role = payload.agent_type.as_deref()?;
-    if !block_bad_cmd_grind_caps::is_grind_role(role) {
-        return None;
-    }
+    let Some(role) = payload
+        .agent_type
+        .as_deref()
+        .filter(|role| block_bad_cmd_grind_caps::is_grind_role(role))
+    else {
+        return grind_router_reason(payload);
+    };
     let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
     if let Some(reason) = block_bad_cmd_grind_caps::tool_reason(role, &payload.tool_name, &run) {
         return Some(format!("Blocked by the /grind role caps: {reason}."));
@@ -3432,6 +3437,19 @@ fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     }
     block_bad_cmd_grind_caps::shell_reason(role, &payload.command, &run)
         .map(|reason| format!("Blocked by the /grind role caps: {reason}."))
+}
+
+/// The main-session `/grind` router carries no `grind-*` agent type, so its
+/// feature-mode caps (#1410, #1393) key on `run.json` recording a feature.
+fn grind_router_reason(payload: &HookPayloadView) -> Option<String> {
+    if !block_bad_cmd_gate::gates_tool(&payload.tool_name)
+        || !block_bad_cmd_grind_caps::may_concern_router(&payload.command)
+    {
+        return None;
+    }
+    let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
+    block_bad_cmd_grind_caps::router_reason(&payload.command, &run)
+        .map(|reason| format!("Blocked by the /grind feature-mode caps: {reason}."))
 }
 
 /// The lexical repo-root walk, for callers outside this module.

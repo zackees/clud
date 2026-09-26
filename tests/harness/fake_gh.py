@@ -609,6 +609,13 @@ def _pr(path: Path, state: dict, argv: list[str]) -> int:
                     "headRefName": pr.get("head"),
                     "baseRefName": pr.get("base", default_branch),
                     "isDraft": bool(pr.get("draft", False)),
+                    "reviewDecision": (
+                        "APPROVED"
+                        if pr.get("approved")
+                        else "REVIEW_REQUIRED"
+                        if pr.get("reviews_required")
+                        else ""
+                    ),
                     "body": pr.get("body", ""),
                     "title": pr.get("title", ""),
                 }
