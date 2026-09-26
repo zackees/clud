@@ -313,7 +313,9 @@ pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option
         ));
     }
     if !matches!(role, PLANNER | PREWORK)
-        || !WRITE_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(tool_name))
+        || !WRITE_TOOLS
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(tool_name))
     {
         return None;
     }
@@ -358,9 +360,9 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
                 return match sub.as_slice() {
                     _ if is_git_read(&sub) => None,
                     [a, b, ..] if a == "worktree" && b == "list" => None,
-                    [a, b, ..] if a == "worktree" && b == "add" && run.plan_only => Some(
-                        format!("{role} is in plan-only mode: no worktrees"),
-                    ),
+                    [a, b, ..] if a == "worktree" && b == "add" && run.plan_only => {
+                        Some(format!("{role} is in plan-only mode: no worktrees"))
+                    }
                     [a, b, ..] if a == "worktree" && b == "add" && run.parallel => None,
                     [a, b, ..] if a == "worktree" && b == "add" => {
                         Some(format!("{role} may create worktrees only in parallel mode"))
@@ -379,9 +381,7 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
                 && words.get(2).is_some_and(|w| w == "comment")
             {
                 return match comment_target(&words[3..]) {
-                    Err(flag) => Some(format!(
-                        "{role} may not pass `{flag}` to gh issue comment"
-                    )),
+                    Err(flag) => Some(format!("{role} may not pass `{flag}` to gh issue comment")),
                     Ok(target) if target.is_some() && target == run.meta => None,
                     Ok(_) => Some(format!(
                         "{role} may comment only on the meta issue{}",
@@ -638,9 +638,7 @@ fn comment_target(args: &[String]) -> Result<Option<String>, String> {
         if target.is_some() {
             return Ok(None);
         }
-        let bare = word
-            .trim_matches(&['\'', '"'][..])
-            .trim_end_matches('/');
+        let bare = word.trim_matches(&['\'', '"'][..]).trim_end_matches('/');
         let tail = bare.rsplit('/').next().unwrap_or(bare);
         let num = tail.strip_prefix('#').unwrap_or(tail);
         if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
@@ -746,31 +744,30 @@ fn closes_issue(words: &[String]) -> bool {
     }
     let is_issue_path = |t: &str| {
         let t = t.trim_end_matches('/');
-        t.split('/')
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|p| p[0] == "issues" && !p[1].is_empty() && p[1].chars().all(|c| c.is_ascii_digit()))
+        t.split('/').collect::<Vec<_>>().windows(2).any(|p| {
+            p[0] == "issues" && !p[1].is_empty() && p[1].chars().all(|c| c.is_ascii_digit())
+        })
     };
     let field_closes = |flag: &str, value: Option<&&str>| {
         const FIELD_FLAGS: &[&str] = &["-f", "-F", "--field", "--raw-field"];
         let is_closed = |v: &str| v.trim_matches(&['\'', '"'][..]) == "state=closed";
         if FIELD_FLAGS.contains(&flag) {
-            return value.is_some_and(|v| is_closed(*v));
+            return value.is_some_and(|v| is_closed(v));
         }
         ["--field=", "--raw-field=", "-f", "-F"]
             .iter()
             .any(|p| flag.strip_prefix(p).is_some_and(is_closed))
     };
     tokens.iter().enumerate().any(|(i, t)| {
-        if !is_gh(*t) || tokens.get(i + 1) != Some(&"api") {
+        if !is_gh(t) || tokens.get(i + 1) != Some(&"api") {
             return false;
         }
         let rest = &tokens[i + 2..];
-        rest.iter().any(|t| is_issue_path(*t))
+        rest.iter().any(|t| is_issue_path(t))
             && rest
                 .iter()
                 .enumerate()
-                .any(|(j, t)| field_closes(*t, rest.get(j + 1)))
+                .any(|(j, t)| field_closes(t, rest.get(j + 1)))
     })
 }
 
@@ -959,9 +956,13 @@ mod tests {
     #[test]
     fn run_facts_parse_plan_phase() {
         let plan = |v: serde_json::Value| RunFacts::from_json(&v).plan_only;
-        assert!(plan(serde_json::json!({"mode": "parallel", "phase": "plan"})));
+        assert!(plan(
+            serde_json::json!({"mode": "parallel", "phase": "plan"})
+        ));
         assert!(!plan(serde_json::json!({"mode": "parallel"})));
-        assert!(!plan(serde_json::json!({"mode": "parallel", "phase": "run"})));
+        assert!(!plan(
+            serde_json::json!({"mode": "parallel", "phase": "run"})
+        ));
     }
 
     #[test]
@@ -986,7 +987,10 @@ mod tests {
             ..run(true, false)
         };
         for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "write"] {
-            assert!(tool_reason(PLANNER, tool, &run(true, false)).is_some(), "{tool}");
+            assert!(
+                tool_reason(PLANNER, tool, &run(true, false)).is_some(),
+                "{tool}"
+            );
             let reason = tool_reason(PLANNER, tool, &plan).unwrap();
             assert!(reason.contains("plan-only"), "{reason}");
         }
@@ -1281,8 +1285,14 @@ mod tests {
     #[test]
     fn run_facts_parse_meta() {
         let meta = |v: serde_json::Value| RunFacts::from_json(&v).meta;
-        assert_eq!(meta(serde_json::json!({"meta": 100})).as_deref(), Some("100"));
-        assert_eq!(meta(serde_json::json!({"meta": "#100"})).as_deref(), Some("100"));
+        assert_eq!(
+            meta(serde_json::json!({"meta": 100})).as_deref(),
+            Some("100")
+        );
+        assert_eq!(
+            meta(serde_json::json!({"meta": "#100"})).as_deref(),
+            Some("100")
+        );
         assert_eq!(meta(serde_json::json!({"meta": ""})), None);
         assert_eq!(meta(serde_json::json!({"mode": "sequential"})), None);
     }
@@ -1363,7 +1373,11 @@ mod tests {
             assert!(reason.contains(policy_name(policy)), "{reason}");
         }
         for policy in POLICIES {
-            assert!(allowed(LANDER, "gh pr merge 5 --merge", &feature_run(policy)));
+            assert!(allowed(
+                LANDER,
+                "gh pr merge 5 --merge",
+                &feature_run(policy)
+            ));
             assert!(allowed(
                 LANDER,
                 "gh pr merge 5 --admin --squash",
@@ -1387,8 +1401,16 @@ mod tests {
 
     #[test]
     fn lander_readies_feature_pr_only_under_auto() {
-        assert!(allowed(LANDER, "gh pr ready 9", &feature_run(FeatureMerge::Auto)));
-        assert!(!allowed(LANDER, "gh pr ready 5", &feature_run(FeatureMerge::Auto)));
+        assert!(allowed(
+            LANDER,
+            "gh pr ready 9",
+            &feature_run(FeatureMerge::Auto)
+        ));
+        assert!(!allowed(
+            LANDER,
+            "gh pr ready 5",
+            &feature_run(FeatureMerge::Auto)
+        ));
         for policy in [FeatureMerge::DecideLater, FeatureMerge::CommentOnly] {
             assert!(!allowed(LANDER, "gh pr ready 9", &feature_run(policy)));
         }

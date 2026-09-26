@@ -32,6 +32,7 @@ step, so an expectation about a command sits on the step after it.
 
 from __future__ import annotations
 
+import itertools
 import json
 import shlex
 from pathlib import Path
@@ -352,15 +353,17 @@ def test_e2e_1_bugs_only_each_lands_on_main_and_the_meta_is_not_hand_closed(
     _questions_then_none(result, 1)
     _all_goal_roles_ran(result, S1_BUGS)
     first = _first(result)
-    for a, b in zip(S1_BUGS, S1_BUGS[1:]):
+    for a, b in itertools.pairwise(S1_BUGS):
         assert first[f"lander:{a}"] < first[f"planner:{b}"], (a, b, first)
 
     # Every bug PR goes straight into main with Closes, and its merge closed it.
     issues = _issues(h)
     for g in S1_BUGS:
         pr = _pr(h, prs[g])
-        assert pr["head"] == f"grind/{g}" and pr["base"] == "main", pr
-        assert f"Closes #{g}" in pr["body"] and pr["state"] == "MERGED", pr
+        assert pr["head"] == f"grind/{g}", pr
+        assert pr["base"] == "main", pr
+        assert f"Closes #{g}" in pr["body"], pr
+        assert pr["state"] == "MERGED", pr
         assert issues[g]["state"] == "closed", (g, issues[g])
         assert issues[g]["closed_by"] == {"kind": "pr", "pr": prs[g]}, (g, issues[g])
 
@@ -676,7 +679,8 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
     # Bug stage: PRs into main, each closing its own issue.
     for g in S2_BUGS:
         pr = _pr(h, bug_prs[g])
-        assert pr["base"] == "main" and f"Closes #{g}" in pr["body"], pr
+        assert pr["base"] == "main", pr
+        assert f"Closes #{g}" in pr["body"], pr
         assert pr["state"] == "MERGED", pr
         assert issues[g]["closed_by"] == {"kind": "pr", "pr": bug_prs[g]}, (g, issues[g])
         assert "Base: origin/main" in _prompt(result, f"integrator:{g}")
@@ -684,19 +688,25 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
     # Feature stage: goal PRs into the feature branch with Refs, never Closes.
     for g in S2_FEATURES:
         pr = _pr(h, feature_prs[g])
-        assert pr["base"] == S2_FEATURE and pr["state"] == "MERGED", pr
-        assert f"Refs #{g}" in pr["body"] and "Closes" not in pr["body"], pr
+        assert pr["base"] == S2_FEATURE, pr
+        assert pr["state"] == "MERGED", pr
+        assert f"Refs #{g}" in pr["body"], pr
+        assert "Closes" not in pr["body"], pr
         assert f"Base: origin/{S2_FEATURE}" in _prompt(result, f"integrator:{g}")
 
     # The feature PR: readied, merge-committed without --admin, and the only
     # closer of the meta issue and every feature part.
     feature = _pr(h, S2_FEATURE_PR)
-    assert feature["base"] == "main" and feature["state"] == "MERGED", feature
-    assert feature["draft"] is False and feature["merge_method"] == "merge", feature
+    assert feature["base"] == "main", feature
+    assert feature["state"] == "MERGED", feature
+    assert feature["draft"] is False, feature
+    assert feature["merge_method"] == "merge", feature
     assert feature["admin"] is False, feature
     ready = _calls(h, "pr", "ready", str(S2_FEATURE_PR))
     merge = _calls(h, "pr", "merge", str(S2_FEATURE_PR))
-    assert ready and merge and calls.index(ready[0]) < calls.index(merge[0]), calls
+    assert ready, calls
+    assert merge, calls
+    assert calls.index(ready[0]) < calls.index(merge[0]), calls
     assert all("--admin" not in c and "--squash" not in c for c in merge), merge
     for n in (S2_META, *S2_FEATURES):
         assert f"Closes #{n}" in feature["body"], feature["body"]
@@ -888,7 +898,8 @@ def test_e2e_3_regrouped_epic_decide_later_runs_only_bugs_and_leaves_features_op
     # Only bugs ran: each landed on main and closed its own issue.
     for g in S3_BUGS:
         pr = _pr(h, prs[g])
-        assert pr["base"] == "main" and f"Closes #{g}" in pr["body"], pr
+        assert pr["base"] == "main", pr
+        assert f"Closes #{g}" in pr["body"], pr
         assert pr["state"] == "MERGED", pr
         assert issues[g]["closed_by"] == {"kind": "pr", "pr": prs[g]}, (g, issues[g])
         assert issues[g]["parent"] == int(S3_TOP)
@@ -906,7 +917,8 @@ def test_e2e_3_regrouped_epic_decide_later_runs_only_bugs_and_leaves_features_op
     assert not [b for b in _origin_heads(h) if b.startswith("grind/meta-")], _origin_heads(h)
     assert not [p for p in after["prs"] if p.get("draft")], after["prs"]
     told = _told(result)
-    assert "deferred group docs" in told and "deferred group cli" in told, told[-3000:]
+    assert "deferred group docs" in told, told[-3000:]
+    assert "deferred group cli" in told, told[-3000:]
 
     # The top meta issue carries the plan and is left for reconcile.
     assert issues[S3_TOP]["state"] == "open"

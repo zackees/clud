@@ -353,8 +353,10 @@ def test_f1_setup_opens_the_draft_feature_pr_before_any_goal_merges(harness: Har
     result = _run(harness, _goals(harness, "sequential"), router=True)
     _no_notes(result)
     pr = _pr(harness, PR)
-    assert pr["head"] == FEATURE and pr["base"] == "main", pr
-    assert pr["draft"] is True and pr["state"] == "OPEN", pr
+    assert pr["head"] == FEATURE, pr
+    assert pr["base"] == "main", pr
+    assert pr["draft"] is True, pr
+    assert pr["state"] == "OPEN", pr
     assert f"Closes #{META}" in pr["body"]
     assert _origin(harness, FEATURE) == main_sha
     assert str(_wt(harness)) in harness.git("worktree", "list")
@@ -372,7 +374,8 @@ def test_f2_goal_prs_target_the_feature_branch_and_main_is_unchanged(harness: Ha
     for g in GOALS:
         pr = _goal_pr(harness, g)
         assert pr["base"] == FEATURE, pr
-        assert f"Refs #{g}" in pr["body"] and "Closes" not in pr["body"], pr
+        assert f"Refs #{g}" in pr["body"], pr
+        assert "Closes" not in pr["body"], pr
         text = _prompt(result, f"integrator:{g}")
         assert f"Base: origin/{FEATURE}" in text, text[-3000:]
         assert "Base: origin/main" not in text
@@ -401,13 +404,17 @@ def test_f4_auto_readies_then_merge_commits_and_closes_issues(harness: Harness) 
     _no_notes(result)
     ready = _calls(harness, "pr", "ready", PR)
     merge = _calls(harness, "pr", "merge", PR)
-    assert ready and merge, harness.read_gh_state()["calls"]
+    assert ready, harness.read_gh_state()["calls"]
+    assert merge, harness.read_gh_state()["calls"]
     calls = harness.read_gh_state()["calls"]
     assert calls.index(ready[0]) < calls.index(merge[0])
-    assert "--merge" in merge[0] and "--admin" not in merge[0], merge
+    assert "--merge" in merge[0], merge
+    assert "--admin" not in merge[0], merge
     pr = _pr(harness, PR)
-    assert pr["state"] == "MERGED" and pr["merge_method"] == "merge", pr
-    assert pr["admin"] is False and pr["base"] == "main", pr
+    assert pr["state"] == "MERGED", pr
+    assert pr["merge_method"] == "merge", pr
+    assert pr["admin"] is False, pr
+    assert pr["base"] == "main", pr
     issues = harness.read_gh_state()["issues"]
     for n in (META, *GOALS):
         assert issues[n]["state"] == "closed", (n, issues[n])
@@ -434,7 +441,8 @@ def test_f5_required_review_leaves_the_pr_open_waiting_for_review(harness: Harne
     pr = _pr(harness, PR)
     assert pr["state"] == "OPEN", pr
     merges = _calls(harness, "pr", "merge", PR)
-    assert merges and all("--admin" not in c for c in merges), merges
+    assert merges, merges
+    assert all("--admin" not in c for c in merges), merges
     assert not _attempted(result, "grind-lander", "--admin")
     assert "waiting for review" in _told(result), _told(result)[-3000:]
     issues = harness.read_gh_state()["issues"]
@@ -455,7 +463,8 @@ def test_f6_hook_denies_admin_merge_of_the_feature_pr(harness: Harness) -> None:
     _no_notes(result)
     assert _attempted(result, "grind-lander", admin)
     merges = _calls(harness, "pr", "merge", PR)
-    assert merges and all("--admin" not in c for c in merges), merges
+    assert merges, merges
+    assert all("--admin" not in c for c in merges), merges
     assert _pr(harness, PR)["admin"] is False
 
 
@@ -473,7 +482,8 @@ def test_f7_decide_later_leaves_the_pr_open_and_denies_merging_it(harness: Harne
     assert not _calls(harness, "pr", "merge", PR)
     assert not _calls(harness, "pr", "ready", PR)
     pr = _pr(harness, PR)
-    assert pr["state"] == "OPEN" and pr["draft"] is True, pr
+    assert pr["state"] == "OPEN", pr
+    assert pr["draft"] is True, pr
     assert "lander:feature" not in _first(result)
     assert harness.read_gh_state()["issues"][META]["state"] == "open"
 
@@ -488,7 +498,8 @@ def test_f8_comment_only_keeps_the_draft_and_posts_one_result_comment(harness: H
     result = _run(harness, _goals(harness, "sequential"), merge="comment_only", post=post)
     _no_notes(result)
     pr = _pr(harness, PR)
-    assert pr["state"] == "OPEN" and pr["draft"] is True, pr
+    assert pr["state"] == "OPEN", pr
+    assert pr["draft"] is True, pr
     assert not _calls(harness, "pr", "ready", PR)
     assert not _calls(harness, "pr", "merge", PR)
     comments = harness.read_gh_state()["issues"][META]["comments"]

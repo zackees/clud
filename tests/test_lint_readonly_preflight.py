@@ -23,8 +23,9 @@ def _read_only(path: Path) -> None:
 
 
 READONLY_UNENFORCED = pytest.mark.skipif(
-    os.name == "nt",
-    reason="chmod read-only is not enforced for the owner on Windows",
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="chmod read-only is not enforced for the owner on Windows, or for root "
+    "(e.g. CI under act)",
 )
 
 

@@ -372,7 +372,8 @@ def test_prework_shell_is_capped_to_commenting_on_the_meta_issue(harness: Harnes
     assert result.returncode == 0, result.stdout[-3000:]
     # P7: no Edit/Write at all, and the hook's decisions show in the results.
     tools = set(result.first_request("prework")["tools"])
-    assert "Edit" not in tools and "Write" not in tools, tools
+    assert "Edit" not in tools, tools
+    assert "Write" not in tools, tools
     _no_notes(result)
     bash = [
         h["tool_input"]["command"]

@@ -486,6 +486,9 @@ def test_empty_rollup_on_a_fresh_push_is_not_green(
         lambda *args: watcher.PRSnapshot(527, "OPEN", "UNKNOWN", "abc123", "main"),
     )
     monkeypatch.setattr(watcher, "fetch_required_check_names", lambda *args: None)
+    # Hermetic: the empty first poll asks GitHub whether workflows exist. That
+    # passed only on runners with a real `gh`, and failed to spawn elsewhere.
+    monkeypatch.setattr(watcher, "immediate_no_checks_reason", lambda *args: None)
     monkeypatch.setattr(watcher, "_sleep_remaining_interval", lambda *args: None)
     monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
     polls = 0

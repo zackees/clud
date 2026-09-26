@@ -277,7 +277,7 @@ def test_x1_issue_policy_files_one_followup_that_is_not_a_sub_issue(harness: Har
     _no_notes(result)
     followups = _followups(harness)
     assert len(followups) == 1, followups
-    (number, issue), = followups.items()
+    ((number, issue),) = followups.items()
     assert f"Refs #{META}" in issue["body"], issue["body"]
     assert FLAKY["summary"] in issue["title"]
     state = harness.read_gh_state()["issues"]
@@ -422,12 +422,15 @@ def _intake(pr_state: str, pick: str) -> list[dict[str, Any]]:
 def test_x7_intake_gates_followups_on_their_feature_pr(harness: Harness) -> None:
     skill = harness.config / "skills" / "grind-intake" / "SKILL.md"
     text = skill.read_text(encoding="utf-8")
-    assert LABEL in text and "stage=bugs" in text and "feature-pr=" in text, text[-2000:]
+    assert LABEL in text, text[-2000:]
+    assert "stage=bugs" in text, text[-2000:]
+    assert "feature-pr=" in text, text[-2000:]
 
     # Feature PR still open: only the bug-stage follow-up (#202) is eligible.
     _followup_world(harness, "OPEN")
     first = harness.run(
-        "/grind", {"default_text": "OK", "roles": [{"name": "main", "steps": _intake("OPEN", "202")}]}
+        "/grind",
+        {"default_text": "OK", "roles": [{"name": "main", "steps": _intake("OPEN", "202")}]},
     )
     assert first.returncode == 0, first.stdout[-3000:]
     _no_notes(first)
@@ -458,8 +461,7 @@ def test_x8_failed_filing_is_reported_inline(harness: Harness) -> None:
     harness.write_gh_state(state)
     _run_facts(harness, "issue")
     report = (
-        "GRIND_DONE. Problems not filed: "
-        f"{FLAKY['kind']}: {FLAKY['summary']} ({FLAKY['evidence']})"
+        f"GRIND_DONE. Problems not filed: {FLAKY['kind']}: {FLAKY['summary']} ({FLAKY['evidence']})"
     )
     router = [
         _after(_saw(FLAKY), _bash(_file_issue(FLAKY))),
