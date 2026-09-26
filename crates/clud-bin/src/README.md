@@ -241,8 +241,13 @@ Console and terminal:
 
 - `console_input.rs` - Windows adapter over
   `running_process::pty::terminal_input::TerminalInputCore` (issues #141 /
-  #575): forwards upstream's complete virtual-key translations atomically
+  #575): runs its own `ReadConsoleInputW` loop so surrogate pairs are joined
+  first (#1351), forwards upstream's complete virtual-key translations atomically
   while retaining clud's Shift+Enter-as-ESC-CR (ConPTY rewrites LF, #1369) and Ctrl+V image policies.
+- `console_surrogates.rs` - platform-neutral `SurrogatePairer`: joins the two
+  UTF-16 surrogate key records of an emoji into UTF-8, across read batches,
+  with U+FFFD for an unpaired half (#1351). See
+  [windows-quirks.md](../../../docs/architecture/windows-quirks.md#d-native-terminal-input-via-running-process-issues-141--575--1351).
 - `console_setup.rs` - `enable_console_vt_output`, which `main` calls first
   to enable `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stdout and stderr
   consoles for the process's life (#1374, DD-105), and the RAII guard that

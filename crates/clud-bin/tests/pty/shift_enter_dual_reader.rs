@@ -3,7 +3,8 @@
 //! The test injects real `KEY_EVENT_RECORD`s into the process console with
 //! `WriteConsoleInputW`, then observes the bytes emitted by clud's
 //! `TerminalInputCore` adapter. It covers the navigation-key failure from
-//! issue #575 and the Shift+Enter compatibility behavior from issue #141.
+//! issue #575, the Shift+Enter compatibility behavior from issue #141, and
+//! surrogate-pair (emoji) assembly from issue #1351.
 
 #![cfg(windows)]
 
@@ -21,6 +22,8 @@ use windows::Win32::System::Console::{
 use windows_core::BOOL;
 
 const VK_RETURN: u16 = 0x0D;
+/// Virtual-key code the console reports for synthesized Unicode text.
+const VK_PACKET: u16 = 0xE7;
 const SHIFT_PRESSED: u32 = 0x0010;
 const TRACE_ENV: &str = "RUNNING_PROCESS_NATIVE_TERMINAL_INPUT_TRACE_PATH";
 
@@ -56,15 +59,22 @@ fn key_record(key_down: bool, virtual_key: u16, unicode: u16, control: u32) -> I
     }
 }
 
-fn inject_key(virtual_key: u16, unicode: u16, control: u32) {
+fn inject_records(records: &[INPUT_RECORD]) {
     let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.expect("GetStdHandle");
-    let records = [
+    let mut written = 0;
+    unsafe { WriteConsoleInputW(handle, records, &mut written) }.expect("WriteConsoleInputW");
+    assert_eq!(
+        written as usize,
+        records.len(),
+        "WriteConsoleInputW must write every record"
+    );
+}
+
+fn inject_key(virtual_key: u16, unicode: u16, control: u32) {
+    inject_records(&[
         key_record(true, virtual_key, unicode, control),
         key_record(false, virtual_key, unicode, control),
-    ];
-    let mut written = 0;
-    unsafe { WriteConsoleInputW(handle, &records, &mut written) }.expect("WriteConsoleInputW");
-    assert_eq!(written, 2, "WriteConsoleInputW must write down/up records");
+    ]);
 }
 
 fn upstream_key_record(virtual_key: u16, unicode: u16, control: u32) -> WinapiKeyEventRecord {
@@ -151,6 +161,24 @@ fn native_reader_translates_navigation_and_preserves_shift_enter() {
             rx.recv_timeout(Duration::from_secs(2))
                 .expect("plain Enter event"),
             b"\r"
+        );
+
+        // #1351: an emoji arrives as one down/up record pair per UTF-16
+        // surrogate, the way the emoji picker and keystroke paste send it.
+        let emoji: Vec<INPUT_RECORD> = "\u{1F600}"
+            .encode_utf16()
+            .flat_map(|unit| {
+                [
+                    key_record(true, VK_PACKET, unit, 0),
+                    key_record(false, VK_PACKET, unit, 0),
+                ]
+            })
+            .collect();
+        inject_records(&emoji);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("emoji event"),
+            "\u{1F600}".as_bytes()
         );
 
         drop(input);

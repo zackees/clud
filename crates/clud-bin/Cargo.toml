@@ -152,9 +152,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
-# #575: construct native KEY_EVENT_RECORD values in the consumer regression
-# test and pass them through running-process's authoritative translator.
-winapi = { version = "0.3", features = ["wincon", "winuser"] }
 
 [build-dependencies]
 prost-build = "0.14"
@@ -225,6 +222,23 @@ windows = { version = "0.61", features = [
 # re-exports them as `windows::core::*` but having the direct dep is
 # the documented pattern for `#[implement]` users.
 windows-core = "0.61"
+# #1351: `console_input` runs its own `ReadConsoleInputW` loop (to pair UTF-16
+# surrogates) and hands each KEY_EVENT_RECORD to running-process's translator,
+# whose signature takes winapi's type. running-process already depends on
+# winapi 0.3 with every feature listed here, so this adds nothing to the build.
+# The #575 consumer regression test also builds these records.
+winapi = { version = "0.3", features = [
+    "consoleapi",
+    "handleapi",
+    "minwindef",
+    "processenv",
+    "synchapi",
+    "winbase",
+    "wincon",
+    "winerror",
+    "winnt",
+    "winuser",
+] }
 
 [[bin]]
 name = "clud"
