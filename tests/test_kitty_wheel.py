@@ -48,7 +48,7 @@ def _bundle(tmp_path):
             pe[0x40:0x44] = b"PE\0\0"
             struct.pack_into("<H", pe, 0x44, 0x8664)
             if name == "wezterm-gui.exe":
-                pe.extend(b"--return-initial-exit-code\0")
+                pe.extend(b"--wait-exit\0")
             file.write_bytes(pe)
         else:
             file.write_bytes(name.encode())
@@ -186,9 +186,9 @@ def test_kitty_bundle_rejects_gui_without_exit_code_flag(tmp_path) -> None:
     (bundle / "wezterm-gui.exe").write_bytes(
         (bundle / "wezterm-gui.exe")
         .read_bytes()
-        .replace(b"--return-initial-exit-code", b"--obsolete-gui-option-----")
+        .replace(b"--wait-exit", b"--no-such-x")
     )
-    with pytest.raises(RuntimeError, match="return-initial-exit-code"):
+    with pytest.raises(RuntimeError, match="wait-exit"):
         add_kitty_bundle(wheel, bundle, config, "x86_64-pc-windows-msvc", _paste_helper(tmp_path))
 
 
@@ -200,9 +200,9 @@ def test_kitty_wheel_check_rejects_gui_without_exit_code_flag(tmp_path) -> None:
     with pytest.warns(UserWarning, match="Duplicate name"):
         with zipfile.ZipFile(wheel, "a") as archive:
             archive.writestr(member, (bundle / "wezterm-gui.exe").read_bytes().replace(
-                b"--return-initial-exit-code", b"--obsolete-gui-option-----"
+                b"--wait-exit", b"--no-such-x"
             ))
-    assert any("return-initial-exit-code" in error for error in check_kitty_wheel(wheel))
+    assert any("wait-exit" in error for error in check_kitty_wheel(wheel))
 
 
 def test_kitty_wheel_check_rejects_incomplete_bundle(tmp_path) -> None:

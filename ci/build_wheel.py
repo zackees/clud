@@ -576,7 +576,7 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
             timeout=10,
             env=env,
         )
-        if help_result.returncode != 0 or "--return-initial-exit-code" not in (
+        if help_result.returncode != 0 or "--wait-exit" not in (
             help_result.stdout + help_result.stderr
         ):
             print(

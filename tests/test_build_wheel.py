@@ -10,9 +10,9 @@ from ci.kitty_wheel import KITTY_BUNDLE_FILES, KITTY_SOURCE_REVISION, add_kitty_
 @pytest.mark.parametrize(
     ("help_returncode", "help_output", "expected"),
     [
-        (0, "--return-initial-exit-code", 0),
+        (0, "--wait-exit", 0),
         (0, "Usage: wezterm-gui start", 1),
-        (1, "--return-initial-exit-code", 1),
+        (1, "--wait-exit", 1),
     ],
 )
 def test_native_windows_installed_console_help_smoke(
@@ -72,7 +72,7 @@ def test_windows_soldr_wheel_packages_prebuilt_executables(monkeypatch, tmp_path
             pe[0x40:0x44] = b"PE\0\0"
             struct.pack_into("<H", pe, 0x44, 0x8664)
             if name == "wezterm-gui.exe":
-                pe.extend(b"return-initial-exit-code\0")
+                pe.extend(b"wait-exit\0")
             file.write_bytes(pe)
         else:
             file.write_bytes(name.encode())
@@ -443,7 +443,7 @@ def test_local_windows_build_rejects_bundle_before_maturin(
                 data[0x40:0x44] = b"PE\0\0"
                 struct.pack_into("<H", data, 0x44, 0x8664)
                 if name == "wezterm-gui.exe":
-                    data.extend(b"return-initial-exit-code")
+                    data.extend(b"wait-exit")
                 file.write_bytes(data)
             else:
                 file.write_text(name)
@@ -533,7 +533,7 @@ def test_verify_windows_wheel_scripts_uses_target_not_host(monkeypatch, tmp_path
             pe[0x40:0x44] = b"PE\0\0"
             struct.pack_into("<H", pe, 0x44, 0x8664)
             if name == "wezterm-gui.exe":
-                pe.extend(b"return-initial-exit-code\0")
+                pe.extend(b"wait-exit\0")
             file.write_bytes(pe)
         else:
             file.write_bytes(name.encode())
