@@ -20,7 +20,7 @@ mod session_output;
 use session_output::run_output_writer;
 use session_output::{redraw_graphics_header_for_resize, run_output_writer_composited, OutputMsg};
 #[path = "session_stdin.rs"]
-mod session_stdin;
+pub(crate) mod session_stdin;
 use session_stdin::{
     normalize_interactive_console_stdin_chunk, should_normalize_interactive_console_stdin,
     should_spawn_byte_stream_stdin_reader, stdin_chunk_requests_interrupt,

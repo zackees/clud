@@ -36,13 +36,13 @@ const RUNNING_PROCESS_BROKER_ENV: &str = "CLUD_RUNNING_PROCESS_BROKER";
 ///
 /// The centralized path is **opt-in**. Defaulting it on for interactive
 /// launches (the PR #151 experiment) exposed a latent bug: the attach
-/// pump (`run_remote_interactive`) reads stdin through `crossterm::event`,
+/// pump (`run_remote_interactive`) read stdin through `crossterm::event`,
 /// which drops DSR / DA / OSC replies the child TUI writes on startup
 /// (same lossy-demultiplexer issue #46 already fixed for the local-PTY
 /// runner). With nothing answering claude's `\x1b[6n` query, the TUI
-/// hangs and the user sees a blank screen. Until the attach pump is
-/// rewritten to forward raw stdin bytes (like `run_raw_pty_pump` does),
-/// the safe default is to leave plain `clud` on the direct runner.
+/// hung and the user saw a blank screen. The attach pump now forwards
+/// raw stdin bytes (#1355, `attach_input.rs`); the default was not
+/// revisited with that fix, so plain `clud` stays on the direct runner.
 ///
 /// Override matrix:
 ///

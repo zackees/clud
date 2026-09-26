@@ -83,7 +83,7 @@ and why it matters.
 - `attach.rs` — interactive client-side attach loop: handshake, raw-terminal keyboard forwarding, Ctrl-C → background-prompt flow, exit-code propagation.
 - `commands.rs` — implementations of `clud kill`, `clud list`, `clud logs` (including pm2-style tail/follow with rotation handling).
 - `sessions.rs` — snapshot discovery + filtering: `resolve_session_id` (exact/name/prefix), `most_recent_session[_any]`, `list_background_sessions`, `list_attachable_sessions`. Also `reconcile_session_records` (#549): retires crash-leftover records (worker **and** root dead, no clean exit, past a 10 min grace) by renaming `<id>.json` → `<id>.json.tombstone` (invisible to every `.json`-filtered lister) and deletes tombstones older than 7 days. Never terminates a process.
-- `keys.rs` — `crossterm` `KeyEvent` → terminal byte sequence translator used by interactive attach.
+- `attach_input.rs` — raw input for the interactive attach (#1355): the byte source (Windows `console_input`, POSIX polled stdin) and `RemoteInputFilter`, which forwards every byte except Ctrl+C, so terminal replies such as the answer to ConPTY's `ESC[6n` reach the worker. Contract: [daemon-ipc.md attach flow](../../../../docs/architecture/daemon-ipc.md#attach-flow).
 - `io_helpers.rs` — JSON read/write over TCP + atomic file writes, session-id generator, terminal-size probe, `--backlog-size` / `CLUD_BACKLOG_BYTES` parsing, and the shared child-environment policy merge.
 - `login_env.rs` — #933's refreshable login baseline: bounded POSIX login-shell capture, Windows machine/user registry materialization, admission snapshots, and the five-minute daemon refresh backstop. Full contract: [daemon environment](../../../../docs/architecture/daemon-environment.md).
 - `wire_prost/` - prost v1 foundation for the daemon wire: generated `clud.v1` types, CLUD/CLJS payload protocol discriminators, encode/decode helpers, JSON-compatibility tests, the default prost daemon RPC path, and the `CLUD_DAEMON_WIRE=json` legacy fallback.
@@ -180,8 +180,7 @@ Dead rows are omitted by default. Passing `--since <duration>` sets `include_dea
 - `fn run_kill / run_list / run_logs` — `commands.rs:15`, `commands.rs:90`, `commands.rs:167`
 - `fn resolve_session_id(&Path, &str)` — `sessions.rs:20`
 - `struct WorkerShared` (+ `attach_client`, `push_output`, `broadcast_exit`, `evict_dead_client`, log rotation) — `worker_shared.rs:95`
-- `fn translate_key_event(KeyEvent) -> KeyAction` — `keys.rs:5`
-  Ctrl+Alt with a non-letter char is treated as AltGr and forwarded literally (#1352).
+- `struct RemoteInputFilter` (`process`, `flush_pending`) — `attach_input.rs:46`
 - `fn resolve_backlog_bytes(Option<&str>) -> Option<usize>` — `io_helpers.rs:77`
 - `fn signal_process_tree(u32, Signal)` — `process_utils.rs:67`;
   `fn signal_process_tree_as(&ProcessIdentity, Signal)` — `process_utils.rs:57`
