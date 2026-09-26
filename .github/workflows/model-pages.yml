@@ -32,7 +32,7 @@ jobs:
           python-version: '3.11'
       - name: Publisher unit tests
         run: |
-          python -m pip install pytest
+          python -m pip install pytest running-process
           python -m pytest -q tests/test_model_manifest.py
       - name: Stage complete Pages artifact
         id: stage
