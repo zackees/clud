@@ -27,4 +27,3 @@ def test_release_assets_extract_one_clud_per_target(tmp_path) -> None:
     assert len(paths) == 6
     assert all(path.read_bytes() for path in paths)
     assert sum(path.suffix == ".exe" for path in paths) == 2
-
