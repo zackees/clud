@@ -682,3 +682,30 @@ fn copy_returns_none_when_get_data_fails() {
     assert!(unsafe { copy_cf_hdrop_bytes(&src.data) }.is_none());
     assert_eq!(src.get_data_calls.load(Ordering::SeqCst), 1);
 }
+
+// ─── Drop → subprocess-mode console injection (#1370) ─────────────────
+
+#[test]
+fn a_real_drop_types_the_paths_into_the_console_input_buffer() {
+    use crate::dnd::injectors::console_input_injector;
+    use crate::dnd::injectors::win_tests::{
+        conin, conin_resolver, console_lock, drain, flush, typed_text,
+    };
+
+    let _guard = console_lock();
+    let h = conin();
+    flush(h);
+
+    let target = new_drop_target(console_input_injector(conin_resolver));
+    let src = file_source(&[r"C:\test\a.txt", r"C:\Users\me\Документы\b c.txt"]);
+    drag_enter(&target, Some(&src.data), ANY_EFFECT);
+    assert_eq!(
+        drop_on(&target, Some(&src.data), ANY_EFFECT),
+        DROPEFFECT_COPY
+    );
+
+    assert_eq!(
+        typed_text(&drain(h)),
+        "C:\\test\\a.txt\nC:\\Users\\me\\Документы\\b c.txt "
+    );
+}

@@ -150,11 +150,53 @@ pub fn pty_master_injector(master: Arc<Mutex<Box<dyn Write + Send>>>) -> DropInj
     })
 }
 
+/// How many whole `INPUT_RECORD`s a buffer of `len` bytes holds.
+/// A length that is not a multiple of [`INPUT_RECORD_SIZE`] is an
+/// error: a partial record cannot be sent.
+///
+/// Pure function — testable on every host.
+pub fn input_record_count(len: usize) -> std::io::Result<usize> {
+    // `is_multiple_of` is stable since 1.87; clud's MSRV is 1.85.
+    #[allow(clippy::manual_is_multiple_of)]
+    if len % INPUT_RECORD_SIZE != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("records buffer length {len} is not a multiple of {INPUT_RECORD_SIZE}"),
+        ));
+    }
+    Ok(len / INPUT_RECORD_SIZE)
+}
+
+/// `WriteConsoleInputW` may accept fewer records than it was given and
+/// still succeed. A short write drops the tail of the path (and its
+/// trailing space) without a word, so it is an error, not a success.
+///
+/// Pure function — testable on every host.
+pub fn check_all_records_written(expected: usize, written: usize) -> std::io::Result<()> {
+    if written <= expected {
+        return Ok(()); // RED(#1370): deliberately broken, reverted next commit
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WriteZero,
+        format!("WriteConsoleInputW wrote {written} of {expected} records"),
+    ))
+}
+
 /// Build a subprocess-mode injector that writes the joined paths into
 /// the *console input buffer* via `WriteConsoleInputW`. The backend's
 /// `ReadFile`/`ReadConsole` then sees them as if typed.
 #[cfg(windows)]
 pub fn subprocess_console_injector() -> DropInjector {
+    console_input_injector(std_input_handle)
+}
+
+/// A subprocess-mode injector writing to whatever console input handle
+/// `resolve` returns at drop time. [`subprocess_console_injector`] passes
+/// the process's standard input; tests pass a `CONIN$` handle.
+#[cfg(windows)]
+pub fn console_input_injector(
+    resolve: fn() -> std::io::Result<windows::Win32::Foundation::HANDLE>,
+) -> DropInjector {
     Box::new(move |paths: &[String]| {
         if paths.is_empty() {
             return;
@@ -163,8 +205,20 @@ pub fn subprocess_console_injector() -> DropInjector {
         let records = build_input_records(&payload);
         // Best-effort — like the PTY path, we can't surface failures
         // from inside the OLE callback.
-        let _ = write_to_console_input(&records);
+        if let Ok(handle) = resolve() {
+            // RED(#1370): deliberately drop the trailing space's records.
+            let cut = records.len().saturating_sub(2 * INPUT_RECORD_SIZE);
+            let _ = write_records_to_handle(handle, &records[..cut]);
+        }
     })
+}
+
+#[cfg(windows)]
+fn std_input_handle() -> std::io::Result<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+    // SAFETY: no preconditions.
+    unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+        .map_err(|e| std::io::Error::other(format!("GetStdHandle(STD_INPUT_HANDLE) failed: {e}")))
 }
 
 /// Windows-only: write a pre-built `INPUT_RECORD` byte buffer to the
@@ -174,49 +228,99 @@ pub fn subprocess_console_injector() -> DropInjector {
 /// records are an error.
 #[cfg(windows)]
 pub fn write_to_console_input(records_bytes: &[u8]) -> std::io::Result<()> {
-    use windows::Win32::System::Console::{
-        GetStdHandle, WriteConsoleInputW, INPUT_RECORD, STD_INPUT_HANDLE,
-    };
-
     if records_bytes.is_empty() {
         return Ok(());
     }
-    // `is_multiple_of` is stable since 1.87; clud's MSRV is 1.85.
-    // Suppress the lint instead of bumping MSRV for one suggestion.
-    #[allow(clippy::manual_is_multiple_of)]
-    if records_bytes.len() % INPUT_RECORD_SIZE != 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "records buffer length {} is not a multiple of {}",
-                records_bytes.len(),
-                INPUT_RECORD_SIZE
-            ),
-        ));
-    }
-
-    // SAFETY: INPUT_RECORD is repr(C) and our byte layout matches its
-    // wire format exactly (verified by build_input_records tests).
-    // Reinterpret the slice for the FFI call.
-    let count = records_bytes.len() / INPUT_RECORD_SIZE;
-    let records: &[INPUT_RECORD] =
-        unsafe { std::slice::from_raw_parts(records_bytes.as_ptr() as *const INPUT_RECORD, count) };
-
-    let stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.map_err(|e| {
-        std::io::Error::other(format!("GetStdHandle(STD_INPUT_HANDLE) failed: {e}"))
-    })?;
-
-    let mut written: u32 = 0;
-    unsafe {
-        WriteConsoleInputW(stdin, records, &mut written)
-            .map_err(|e| std::io::Error::other(format!("WriteConsoleInputW failed: {e}")))?;
-    }
-    Ok(())
+    input_record_count(records_bytes.len())?;
+    write_records_to_handle(std_input_handle()?, records_bytes)
 }
+
+/// Decode the wire bytes from [`build_input_records`] into real
+/// `INPUT_RECORD`s, field by field.
+///
+/// The bytes are never reinterpreted in place: `INPUT_RECORD` needs
+/// 4-byte alignment and a `&[u8]` guarantees 1, so casting the pointer
+/// would be undefined behavior for any buffer that does not happen to
+/// start on a 4-byte boundary (#1370).
+#[cfg(windows)]
+pub fn decode_input_records(
+    records_bytes: &[u8],
+) -> std::io::Result<Vec<windows::Win32::System::Console::INPUT_RECORD>> {
+    use windows::Win32::System::Console::{
+        INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
+    };
+    input_record_count(records_bytes.len())?;
+    let u16_at = |r: &[u8], at: usize| u16::from_le_bytes([r[at], r[at + 1]]);
+    let u32_at = |r: &[u8], at: usize| u32::from_le_bytes([r[at], r[at + 1], r[at + 2], r[at + 3]]);
+    Ok(records_bytes
+        .chunks_exact(INPUT_RECORD_SIZE)
+        .map(|r| INPUT_RECORD {
+            EventType: u16_at(r, 0),
+            Event: INPUT_RECORD_0 {
+                KeyEvent: KEY_EVENT_RECORD {
+                    bKeyDown: (u32_at(r, 4) != 0).into(),
+                    wRepeatCount: u16_at(r, 8),
+                    wVirtualKeyCode: u16_at(r, 10),
+                    wVirtualScanCode: u16_at(r, 12),
+                    uChar: KEY_EVENT_RECORD_0 {
+                        UnicodeChar: u16_at(r, 14),
+                    },
+                    dwControlKeyState: u32_at(r, 16),
+                },
+            },
+        })
+        .collect())
+}
+
+/// Windows-only: write `records_bytes` to the console input `handle`,
+/// failing on a short write.
+#[cfg(windows)]
+pub fn write_records_to_handle(
+    handle: windows::Win32::Foundation::HANDLE,
+    records_bytes: &[u8],
+) -> std::io::Result<()> {
+    use windows::Win32::System::Console::WriteConsoleInputW;
+
+    let records = decode_input_records(records_bytes)?;
+    if records.is_empty() {
+        return Ok(());
+    }
+    let mut written: u32 = 0;
+    // SAFETY: `records` is a live, properly aligned slice and `written`
+    // outlives the call.
+    unsafe { WriteConsoleInputW(handle, &records, &mut written) }
+        .map_err(|e| std::io::Error::other(format!("WriteConsoleInputW failed: {e}")))?;
+    check_all_records_written(records.len(), written as usize)
+}
+
+/// Windows tests against a real console input buffer (#1370).
+#[cfg(all(test, windows))]
+#[path = "injectors_win_tests.rs"]
+pub(crate) mod win_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_record_count_accepts_whole_records_only() {
+        assert_eq!(input_record_count(0).unwrap(), 0);
+        assert_eq!(input_record_count(3 * INPUT_RECORD_SIZE).unwrap(), 3);
+        for bad in [1, INPUT_RECORD_SIZE - 1, INPUT_RECORD_SIZE + 1] {
+            let err = input_record_count(bad).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "len {bad}");
+        }
+    }
+
+    #[test]
+    fn a_short_console_write_is_an_error() {
+        assert!(check_all_records_written(4, 4).is_ok());
+        assert!(check_all_records_written(0, 0).is_ok());
+        let err = check_all_records_written(4, 3).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+        assert!(err.to_string().contains("3 of 4"), "{err}");
+        assert!(check_all_records_written(4, 0).is_err());
+    }
 
     #[test]
     fn build_input_records_for_simple_ascii() {
