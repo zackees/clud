@@ -167,20 +167,27 @@ def _fake_harnesses_on_path(bin_dir: Path) -> None:
         fake.chmod(0o755)
 
 
-def _run(*args: str, input_data: str | None = None) -> process.CompletedProcess[str]:
+def _run(
+    *args: str,
+    input_data: str | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> process.CompletedProcess[str]:
     with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         home = Path(temp_dir) / "home"
         state_dir = Path(temp_dir) / "state"
         home.mkdir()
+        env = _isolated_clud_env(source, home, state_dir)
+        if env_overrides:
+            env.update(env_overrides)
         return process.run(
             [str(launch), *args],
             capture_output=True,
             text=True,
             timeout=10,
             input=input_data,
-            env=_isolated_clud_env(source, home, state_dir),
+            env=env,
         )
 
 
@@ -262,6 +269,34 @@ def test_help() -> None:
     assert "--prompt" in result.stdout
     assert "--safe" in result.stdout
     assert "loop" in result.stdout
+    assert "--kitty-term" in result.stdout
+
+
+def test_kitty_term_rejects_clud_subcommands() -> None:
+    result = _run("--kitty-term", "auth", "status")
+    assert result.returncode == 2
+    assert "--kitty-term only applies to a backend launch" in result.stderr
+
+
+def test_kitty_term_reports_unavailable_host_or_companion(tmp_path: Path) -> None:
+    missing_binary = tmp_path / "missing-wezterm-gui.exe"
+    assert not missing_binary.exists()
+    result = _run(
+        "--kitty-term",
+        "--codex",
+        "-p",
+        "hello",
+        env_overrides={"CLUD_KITTY_TERM_BINARY": str(missing_binary)},
+    )
+    assert result.returncode == 1
+    if sys.platform != "win32":
+        assert "supported on Windows only" in result.stderr
+    else:
+        assert (
+            "does not support Windows ARM64" in result.stderr
+            or "currently requires x86_64 Windows" in result.stderr
+            or f"WezTerm GUI is missing at {missing_binary}" in result.stderr
+        )
 
 
 def test_version() -> None:

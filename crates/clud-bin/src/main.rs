@@ -1,11 +1,12 @@
 use clud::{
     args, auth, backend, backend_bootstrap, claude_files, clud_settings, codex_auth, command,
     config, console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover,
-    gc, graphics, grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard,
-    launch_log, launch_setup, log_event, loop_artifacts, loop_spec, openrouter_catalog, optimize,
-    orphan_reaper, provider_auth, runner, runtime_cache, settings_tui, skills, soldr_activate,
-    stage_trace, startup, symbols, test_runtime, toast, tool_cli, tool_install, tools, trampoline,
-    trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm, workspace_trust, worktrees,
+    gc, graphics, grind, harness_picker, hook_health, job_orphan_reaper, kitty_term,
+    large_file_guard, launch_log, launch_setup, log_event, loop_artifacts, loop_spec,
+    openrouter_catalog, optimize, orphan_reaper, provider_auth, runner, runtime_cache,
+    settings_tui, skills, soldr_activate, stage_trace, startup, symbols, test_runtime, toast,
+    tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm,
+    webterm, workspace_trust, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -45,7 +46,7 @@ fn run(mut args: args::Args) {
     // without `--model` still launches with a main model inside its own
     // boundary (#1257).
     args.normalize_model_allowlist();
-    if let Some(exit_code) = webterm::handle(&args) {
+    if let Some(exit_code) = kitty_term::handle(&args) {
         std::process::exit(exit_code);
     }
     if let Some(exit_code) = webterm::handle(&args) {
@@ -1065,9 +1066,15 @@ fn run(mut args: args::Args) {
         if args.verbose {
             verbose_log::log("[clud] uv-run hook guard: scanning agent hooks");
         }
-        uv_run_hook_guard::run(&root);
+        uv_run_hook_guard::run(&root, args.verbose);
+        if args.verbose {
+            verbose_log::log("[clud] uv-run hook guard: complete");
+        }
     }
 
+    if args.verbose {
+        verbose_log::log("[clud] backend: resolving executable");
+    }
     let backend = launch_target.effective_harness;
     let backend_path = {
         let mut bootstrap_host = backend_bootstrap::ProductionBackendBootstrapHost;
@@ -1091,6 +1098,9 @@ fn run(mut args: args::Args) {
             }
         }
     };
+    if args.verbose {
+        verbose_log::log("[clud] backend: executable resolved");
+    }
     if !args.dry_run {
         let discovery_version = if launch_target.routing_mode == backend::RoutingMode::Unified {
             Some(backend_bootstrap::require_unified_claude_version(

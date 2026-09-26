@@ -35,7 +35,7 @@ re-explaining.
 | [architecture/test-runtime-memory.md](architecture/test-runtime-memory.md) | ~220 | **Design proposal (#405, not yet implemented):** `.clud/`-local test-runtime histogram — append-only JSONL over redb/SQLite and why, raw `(duration, cpu_load)` with query-time normalization, count-based compaction, and the run-all-vs-targeted recommendation policy |
 | [architecture/toasts.md](architecture/toasts.md) | ~200 | In-terminal toasts (#1189): toast model and hub, tier selection (kitty graphics, alternate-screen text cells, status line/title fallback), the PTY writer-thread compositor and its safe-injection rules, Claude `statusLine` chaining, click-to-dismiss |
 | [architecture/web-terminal.md](architecture/web-terminal.md) | ~30 | Desktop web-terminal preference, companion launch/recursion guard, tab PTYs, and wheel packaging |
-| [architecture/kitty-windows-parity.md](architecture/kitty-windows-parity.md) | ~40 | #1282 Windows Kitty-style parity matrix, current companion gaps, native GUI repro and implementation decision gates |
+| [architecture/kitty-windows-parity.md](architecture/kitty-windows-parity.md) | ~75 | #1282 Windows Kitty-style parity matrix, native WezTerm candidate, packaging and GUI verification gates |
 
 ## Quick Reference
 

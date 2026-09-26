@@ -244,6 +244,10 @@ winapi = { version = "0.3", features = [
 name = "clud"
 path = "src/main.rs"
 
+[[bin]]
+name = "clud-kittyterm-paste"
+path = "src/bin/clud_kittyterm_paste.rs"
+
 # Issue #464: opt-in process-sampler microbench. Behind a feature so it is
 # not compiled by `cargo clippy --all-targets`, which `bash lint` runs on all
 # six CI platforms -- a measurement harness should not tax every lint lane.

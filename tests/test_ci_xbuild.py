@@ -166,6 +166,47 @@ def test_release_wheel_stripping_receives_the_explicit_cross_target(monkeypatch,
     assert stripped == [(wheel, target)]
 
 
+def test_windows_wheel_resolves_cargo_target_dir_for_binaries_and_companion(
+    monkeypatch, tmp_path
+) -> None:
+    target = "x86_64-pc-windows-msvc"
+    wheel = tmp_path / "clud.whl"
+    seen: dict[str, Path] = {}
+    monkeypatch.setattr(xbuild, "ROOT", tmp_path)
+    monkeypatch.setattr(xbuild, "build_env", lambda *_args: {"CARGO_TARGET_DIR": "build-output"})
+    monkeypatch.setattr(xbuild, "run", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(xbuild, "_project_version", lambda: "2.0.0")
+    monkeypatch.setattr(xbuild, "collect_debuginfo", lambda *_args: None)
+
+    def fake_build(**kwargs):
+        seen["target_dir"] = kwargs["target_dir"]
+        return wheel
+
+    monkeypatch.setattr(build_wheel, "build_windows_wheel_from_binaries", fake_build)
+    monkeypatch.setattr(build_wheel, "verify_wheel_scripts", lambda _wheel: 0)
+    from ci import webterm_wheel
+
+    monkeypatch.setattr(
+        webterm_wheel,
+        "add_companion",
+        lambda _wheel, companion, _target: seen.update(companion=companion),
+    )
+
+    args = argparse.Namespace(target=target, strategy="soldr", profile="dev")
+    assert xbuild.cmd_wheel(args) == 0
+    assert seen["target_dir"] == tmp_path / "build-output"
+    assert seen["companion"] == tmp_path / "build-output" / target / "debug" / "clud-webterm.exe"
+
+
+def test_cargo_target_dir_preserves_absolute_and_default_paths(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(xbuild, "ROOT", tmp_path / "source")
+    default = tmp_path / "source" / "clud-webterm" / "target"
+    assert xbuild.cargo_target_dir({}, default) == default
+    assert xbuild.cargo_target_dir({"CARGO_TARGET_DIR": str(tmp_path / "output")}, default) == (
+        tmp_path / "output"
+    )
+
+
 def test_gnu_linux_test_verb_stays_on_prepared_cargo() -> None:
     """Non-linking verbs ride the plain cargo front door on the env `soldr
     prepare` exported -- same as Apple/MSVC under the soldr strategy."""

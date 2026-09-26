@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Literal
 
 from ci import process
+from ci.kitty_wheel import (
+    KITTY_BUNDLE_FILES,
+    KITTY_PASTE_HELPER,
+    KITTY_TARGET,
+    add_kitty_bundle,
+    check_kitty_wheel,
+    read_kitty_paste_helper,
+    resolve_kitty_bundle,
+)
 from ci.webterm_wheel import add_companion, companion_name, desktop_target
 from ci.wheel_repair import repair_windows_gnu_wheel
 
@@ -245,6 +254,32 @@ def build_local_webterm_companion(
     return companion
 
 
+def build_local_kitty_paste_helper(*, mode: BuildMode, env: dict[str, str]) -> Path:
+    """Build the extra Windows binary that maturin does not promise to emit."""
+    command = [
+        "soldr",
+        "build",
+        "--manifest-path",
+        str(ROOT / "crates" / "clud-bin" / "Cargo.toml"),
+        "--bin",
+        "clud-kittyterm-paste",
+        "--target",
+        KITTY_TARGET,
+    ]
+    if mode == "release":
+        command.append("--release")
+    result = process.run(command, cwd=ROOT, check=False, env=env)
+    if result.returncode != 0:
+        raise RuntimeError("failed to build clud-kittyterm-paste")
+    target_root = Path(env.get("CARGO_TARGET_DIR", ROOT / "target"))
+    if not target_root.is_absolute():
+        target_root = ROOT / target_root
+    profile = "release" if mode == "release" else "debug"
+    helper = target_root / KITTY_TARGET / profile / KITTY_PASTE_HELPER
+    read_kitty_paste_helper(helper)
+    return helper
+
+
 def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[str]:
     from ci.env import maturin_argv
 
@@ -289,10 +324,15 @@ def build_windows_wheel_from_binaries(
     the SDK preparation that soldr already owns. The binaries in this wheel
     have therefore been built exclusively by the preceding soldr invocation.
     """
+    # Resolve before writing a wheel, so an absent fork artifact cannot leave
+    # behind a plausible but incomplete distributable in dist/.
+    kitty_bundle = resolve_kitty_bundle() if target == KITTY_TARGET else None
     platform_tag = {"x86_64": "win_amd64", "aarch64": "win_arm64"}[target.split("-", 1)[0]]
     distribution = f"clud-{version}"
     wheel = dist_dir / f"{distribution}-py3-none-{platform_tag}.whl"
     binaries = target_dir / target / profile
+    if kitty_bundle is not None:
+        read_kitty_paste_helper(binaries / KITTY_PASTE_HELPER)
     scripts = []
     for name in REQUIRED_SCRIPTS:
         binary = binaries / f"{name}.exe"
@@ -329,6 +369,14 @@ def build_windows_wheel_from_binaries(
         for name, data in members:
             archive.writestr(name, data)
         archive.writestr(f"{distribution}.dist-info/RECORD", "\n".join(records) + "\n")
+    if kitty_bundle is not None:
+        add_kitty_bundle(
+            wheel,
+            kitty_bundle,
+            ROOT / "crates" / "clud-bin" / "assets" / "kitty" / "clud-kittyterm.lua",
+            target,
+            binaries / KITTY_PASTE_HELPER,
+        )
     return wheel
 
 
@@ -404,6 +452,19 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
             flush=True,
         )
         return 1
+    if platform.system() == "Windows" and platform.machine().lower() in {"amd64", "x86_64"}:
+        kitty_dir = _installed_script("clud").parent.parent / "clud-kittyterm"
+        kitty_missing = [
+            name for name in (*KITTY_BUNDLE_FILES, "clud-kittyterm.lua", KITTY_PASTE_HELPER)
+            if not (kitty_dir / name).is_file()
+        ]
+        if kitty_missing:
+            print(
+                "installed wheel is missing Kitty GUI files: " + ", ".join(kitty_missing),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
 
     # Hook smoke tests need the same trusted rm PATH contract as a session.
     # Never invoke this alias: the only payloads below are inert hook JSON.
@@ -484,6 +545,49 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
             )
             return 1
 
+    if platform.system() == "Windows" and platform.machine().lower() in {"amd64", "x86_64"}:
+        wezterm = _installed_script("clud").parent.parent / "clud-kittyterm" / "wezterm.exe"
+        version = process.run(
+            [str(wezterm), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+            env=env,
+        )
+        if version.returncode != 0 or "wezterm" not in (
+            version.stdout + version.stderr
+        ).lower():
+            print(
+                "installed Kitty GUI headless smoke failed: "
+                f"rc={version.returncode} stdout={version.stdout!r} stderr={version.stderr!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+
+        # wezterm-gui.exe is a Windows GUI-subsystem executable, so its help
+        # text is not reliably attached to the CI runner's console.
+        help_result = process.run(
+            [str(wezterm), "start", "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+            env=env,
+        )
+        if help_result.returncode != 0 or "--return-initial-exit-code" not in (
+            help_result.stdout + help_result.stderr
+        ):
+            print(
+                "installed Kitty GUI start help smoke failed: "
+                f"rc={help_result.returncode} stdout={help_result.stdout!r} "
+                f"stderr={help_result.stderr!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+
     return 0
 
 
@@ -512,6 +616,25 @@ def verify_wheel_scripts(wheel: Path) -> int:
         if ".data/scripts/clud-" in member
         and Path(member).name.removesuffix(".exe") not in required
     ]
+    if platform_tag == "win_amd64":
+        prefix = next(
+            (name.removesuffix(".dist-info/WHEEL") + ".data/data/clud-kittyterm/"
+             for name in members if name.endswith(".dist-info/WHEEL")),
+            None,
+        )
+        kitty_required = (*KITTY_BUNDLE_FILES, "clud-kittyterm.lua", KITTY_PASTE_HELPER)
+        if prefix is None or any(prefix + name not in members for name in kitty_required):
+            print(f"built wheel {wheel.name} is missing Kitty GUI bundle files", file=sys.stderr)
+            return 1
+        errors = check_kitty_wheel(wheel)
+        if errors:
+            print("\n".join(errors), file=sys.stderr)
+            return 1
+    elif platform_tag == "win_arm64":
+        errors = check_kitty_wheel(wheel)
+        if errors:
+            print("\n".join(errors), file=sys.stderr)
+            return 1
     if unexpected:
         print(
             f"built wheel {wheel.name} contains non-production scripts: " + ", ".join(unexpected),
@@ -526,6 +649,12 @@ def run_build(mode: BuildMode) -> int:
     from ci.env import build_env
 
     env = build_env()
+    target = local_webterm_target()
+    # Fail before maturin creates a plausible but incomplete Windows wheel.
+    kitty_bundle = resolve_kitty_bundle() if target == KITTY_TARGET else None
+    paste_helper = (
+        build_local_kitty_paste_helper(mode=mode, env=env) if kitty_bundle is not None else None
+    )
     DIST.mkdir(parents=True, exist_ok=True)
     before = wheel_snapshot()
     cmd = build_command(mode, env=env)
@@ -537,7 +666,6 @@ def run_build(mode: BuildMode) -> int:
     if not changed_wheels:
         print("build completed but produced no wheel", file=sys.stderr, flush=True)
         return 1
-    target = local_webterm_target()
     companion = (
         build_local_webterm_companion(mode=mode, target=target, env=env)
         if target is not None
@@ -551,6 +679,14 @@ def run_build(mode: BuildMode) -> int:
         repair_windows_gnu_wheel(wheel)
         if companion is not None and target is not None:
             add_companion(wheel, companion, target)
+        if kitty_bundle is not None:
+            add_kitty_bundle(
+                wheel,
+                kitty_bundle,
+                ROOT / "crates" / "clud-bin" / "assets" / "kitty" / "clud-kittyterm.lua",
+                target,
+                paste_helper,
+            )
         verify = verify_wheel_scripts(wheel)
         if verify != 0:
             return verify

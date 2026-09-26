@@ -43,6 +43,8 @@ fn main() {
     let mut helper_role: Option<String> = None;
     let mut tree_log: Option<PathBuf> = None;
     let mut report_file: Option<PathBuf> = None;
+    let mut started_file: Option<PathBuf> = None;
+    let mut wait_for_file: Option<PathBuf> = None;
     let mut write_done_at: Option<PathBuf> = None;
     let mut write_done_body = String::from("mock-done");
     let mut write_blocked_at: Option<PathBuf> = None;
@@ -54,6 +56,7 @@ fn main() {
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
     let mut ansi_script: Option<PathBuf> = None;
+    let mut ansi_after_wait: Option<PathBuf> = None;
     let mut tool_shell_probe_to: Option<PathBuf> = None;
     let mut bash_nounset_probe_to: Option<PathBuf> = None;
     let mut codex_bridge_probe_to: Option<PathBuf> = None;
@@ -158,6 +161,20 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-started-file" {
+            if let Some(path) = args.get(i + 1) {
+                started_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-wait-for-file" {
+            if let Some(path) = args.get(i + 1) {
+                wait_for_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
         if arg == "--mock-stdin-raw-to" {
             if let Some(path) = args.get(i + 1) {
                 stdin_raw_to = Some(PathBuf::from(path));
@@ -189,6 +206,13 @@ fn main() {
         if arg == "--mock-ansi-script" {
             if let Some(path) = args.get(i + 1) {
                 ansi_script = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-ansi-after-wait" {
+            if let Some(path) = args.get(i + 1) {
+                ansi_after_wait = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -263,6 +287,9 @@ fn main() {
     // the floor, so existing tests stay silent) and exit before the JSON
     // report machinery runs.
     if args.get(1).map(String::as_str) == Some("--version") {
+        if let Ok(path) = std::env::var("CLUD_KITTY_SMOKE_VERSION_MARKER") {
+            let _ = std::fs::write(path, "mock-agent --version");
+        }
         let version = std::env::var("MOCK_CLAUDE_VERSION")
             .unwrap_or_else(|_| "9.9.9 (mock-agent)".to_string());
         println!("{version}");
@@ -318,6 +345,21 @@ fn main() {
     if let Some(path) = tool_shell_probe_to.as_ref() {
         run_tool_shell_probe(&args[0], path);
         return;
+    }
+
+    if let Some(path) = started_file.as_ref() {
+        let ready = serde_json::json!({
+            "pid": std::process::id(),
+            "env": {
+                "CLUD_KITTY_TERM": std::env::var("CLUD_KITTY_TERM").ok(),
+                "WEZTERM_PANE": std::env::var("WEZTERM_PANE").ok(),
+                "WEZTERM_UNIX_SOCKET": std::env::var("WEZTERM_UNIX_SOCKET").ok(),
+            },
+        });
+        if let Err(error) = write_atomic_ready_file(path, &ready) {
+            eprintln!("mock-agent could not write readiness report: {error}");
+            std::process::exit(87);
+        }
     }
 
     // Track which iteration we're on by reading/bumping a counter file whose
@@ -412,6 +454,7 @@ fn main() {
     let enable_gateway_model_discovery =
         std::env::var("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY").ok();
     let max_context_tokens = std::env::var("CLAUDE_CODE_MAX_CONTEXT_TOKENS").ok();
+    let wezterm_unix_socket = std::env::var("WEZTERM_UNIX_SOCKET").ok();
     let bridge_probe = codex_bridge_probe_to.as_deref().map(run_codex_bridge_probe);
     let cache_identity_probe = codex_cache_identity_probe_to
         .as_deref()
@@ -426,6 +469,30 @@ fn main() {
         .ok()
         .map(|path| path.to_string_lossy().to_string());
 
+    if let Some(path) = wait_for_file.as_ref() {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !path.is_file() {
+            if Instant::now() >= deadline {
+                eprintln!("mock-agent timed out waiting for {}", path.display());
+                std::process::exit(88);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    if let Some(path) = ansi_after_wait.as_ref() {
+        let bytes = std::fs::read(path).unwrap_or_else(|error| {
+            eprintln!("mock-agent could not read post-release ANSI script: {error}");
+            std::process::exit(89);
+        });
+        io::stdout().write_all(&bytes).unwrap_or_else(|error| {
+            eprintln!("mock-agent could not emit post-release ANSI script: {error}");
+            std::process::exit(89);
+        });
+        io::stdout().flush().unwrap_or_else(|error| {
+            eprintln!("mock-agent could not flush post-release ANSI script: {error}");
+            std::process::exit(89);
+        });
+    }
     if sleep_ms > 0 {
         std::thread::sleep(Duration::from_millis(sleep_ms));
     }
@@ -450,6 +517,7 @@ fn main() {
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": disable_nonessential_traffic,
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": enable_gateway_model_discovery,
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS": max_context_tokens,
+            "WEZTERM_UNIX_SOCKET": wezterm_unix_socket,
         },
         "codex_bridge_probe": bridge_probe,
         "codex_cache_identity_probe": cache_identity_probe,
@@ -507,6 +575,16 @@ fn trace(stage: &str) {
         use std::io::Write as _;
         let _ = writeln!(file, "{millis} {stage}");
     }
+}
+
+fn write_atomic_ready_file(path: &Path, ready: &serde_json::Value) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("ready-{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec(ready).map_err(io::Error::other)?;
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, path)
 }
 
 fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {
@@ -946,7 +1024,11 @@ fn read_stdin_timed(timeout_ms: u64, ready_file: Option<&Path>) -> Option<Vec<u8
     // that moment, so bytes sent before this point lose their escape
     // sequences. A test sends only after this file exists.
     if let Some(path) = ready_file {
-        let _ = std::fs::write(path, b"ready");
+        let ready = serde_json::json!({ "pid": std::process::id(), "stdin_raw_ready": true });
+        if let Err(error) = write_atomic_ready_file(path, &ready) {
+            eprintln!("mock-agent could not write stdin readiness report: {error}");
+            std::process::exit(87);
+        }
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
