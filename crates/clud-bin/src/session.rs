@@ -568,10 +568,10 @@ pub fn warn_if_mintty_without_console() {
         if std::env::var_os("CLUD_NO_MINTTY_WARNING").is_some() || !mintty_without_console() {
             return;
         }
-        eprint!(
+        eprintln!(
             "clud: Git Bash/mintty detected without a Windows console; clud cannot run an \
              interactive session here and will use subprocess mode. Run clud from Windows \
-             Terminal, or use `winpty clud ...`. (Set CLUD_NO_MINTTY_WARNING=1 to silence.)\n"
+             Terminal, or use `winpty clud ...`. (Set CLUD_NO_MINTTY_WARNING=1 to silence.)"
         );
     });
 }
