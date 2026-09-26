@@ -83,6 +83,37 @@ function Stop-SmokeProcess {
     }
 }
 
+# Diagnostics only: a wedged mux can block `wezterm cli` forever, which once
+# hung this step until the job timeout instead of reporting GUI_UNAVAILABLE.
+function Get-GuiCliText {
+    param([string[]]$CliArgs, [string]$Socket, [int]$TimeoutMs = 5000)
+    $cliStart = [Diagnostics.ProcessStartInfo]::new($wezterm)
+    $cliStart.UseShellExecute = $false
+    $cliStart.RedirectStandardOutput = $true
+    $cliStart.RedirectStandardError = $true
+    $cliStart.Environment['WEZTERM_UNIX_SOCKET'] = $Socket
+    [void]$cliStart.ArgumentList.Add('cli')
+    foreach ($arg in $CliArgs) { [void]$cliStart.ArgumentList.Add([string]$arg) }
+    try {
+        $cli = [Diagnostics.Process]::Start($cliStart)
+    } catch {
+        return "<wezterm cli $($CliArgs -join ' ') failed to start: $_>"
+    }
+    try {
+        $stdout = $cli.StandardOutput.ReadToEndAsync()
+        $stderr = $cli.StandardError.ReadToEndAsync()
+        if (-not $cli.WaitForExit($TimeoutMs)) {
+            try { $cli.Kill($true) } catch { }
+            return "<wezterm cli $($CliArgs -join ' ') timed out after $TimeoutMs ms>"
+        }
+        [void]$stdout.Wait(2000)
+        [void]$stderr.Wait(2000)
+        return ("$($stdout.Result)$($stderr.Result)").Trim()
+    } finally {
+        try { $cli.Dispose() } catch { }
+    }
+}
+
 $process = $null
 $outerProcess = $null
 $controlProcess = $null
@@ -300,17 +331,15 @@ foreach ($arg in @('--kitty-term', '--claude', '--subprocess', '--verbose', '-p'
     }
     if (-not $process.HasExited) {
         # Name what is still alive so a hang is diagnosable from one CI run.
-        $env:WEZTERM_UNIX_SOCKET = $serverSocket
-        $livePanes = (& $wezterm cli list --format json 2>&1 | Out-String).Trim()
+        $livePanes = Get-GuiCliText @('list', '--format', 'json') $serverSocket
         try {
             foreach ($live in @($livePanes | ConvertFrom-Json)) {
-                $liveText = (& $wezterm cli get-text --pane-id "$($live.pane_id)" 2>&1 | Out-String).Trim()
+                $liveText = Get-GuiCliText @('get-text', '--pane-id', "$($live.pane_id)") $serverSocket
                 Write-Host "Live pane $($live.pane_id) '$($live.title)' text:`n$liveText"
             }
         } catch {
             Write-Host "Could not read live pane text: $_"
         }
-        Remove-Item Env:WEZTERM_UNIX_SOCKET -ErrorAction SilentlyContinue
         $seedReported = Test-Path -LiteralPath $marker -PathType Leaf
         throw "GUI_UNAVAILABLE: seed GUI stayed open after reused pane completed; seed report written=$seedReported; live panes=$livePanes"
     }
