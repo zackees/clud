@@ -31,11 +31,15 @@
 //!   intercepts drops before conhost can refuse them. See issue #66.
 //! - [`console_drop_target`] — Windows-only `IDropTarget` registration
 //!   plus the platform-agnostic dispatch glue. See issues #65, #66, #79.
+//! - `drop_host` — pure decision of which terminal host window the
+//!   `IDropTarget` also covers (Windows Terminal yes, VS Code no). See #1358.
 //! - [`injectors`] — per-launch-mode byte injectors that the
 //!   `IDropTarget` callback hands the dropped paths to (subprocess via
 //!   `WriteConsoleInputW`, PTY via the master writer).
 
 pub mod console_drop_target;
+#[cfg(any(windows, test))]
+mod drop_host;
 pub mod dropfiles;
 pub mod injectors;
 

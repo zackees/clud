@@ -11,7 +11,9 @@
 //! usually `GetConsoleWindow()`. Under Windows Terminal, `GetConsoleWindow()`
 //! is a `PseudoConsoleWindow`; Explorer hovers over the visible
 //! `WindowsTerminal.exe` top-level window instead, so we register both
-//! when possible.
+//! when possible. VS Code and WezTerm accept drops on their terminal
+//! themselves, so they keep the console window only; the rule lives in
+//! `dnd::drop_host` (#1358).
 //!
 //! Issue #79 adds a wrinkle: Claude Code (the backend) registers its
 //! own `IDropTarget` after launch and overrides ours. Solution:
@@ -418,7 +420,7 @@ pub fn dispatch_dropfiles_to_injector(buf: &[u8], injector: &DropInjector) {
 #[cfg(windows)]
 mod win {
     use super::*;
-    use std::collections::HashMap;
+    use crate::dnd::drop_host::{resolve_drop_host, DropHost, ProcessEntry};
     use std::sync::Mutex;
 
     use windows::core::ComObject;
@@ -790,18 +792,16 @@ mod win {
         })
     }
 
-    #[derive(Clone)]
-    struct ProcessEntry {
-        pid: u32,
-        parent_pid: u32,
-        exe: String,
-    }
-
     fn drop_target_hwnds() -> Vec<HWND> {
         let mut hwnds = Vec::new();
 
-        if std::env::var_os("WT_SESSION").is_some() {
-            for hwnd in windows_terminal_hwnds_for_current_process() {
+        let env = |name: &str| std::env::var(name).ok();
+        // SAFETY: pure FFI, no preconditions.
+        let current_pid = unsafe { GetCurrentProcessId() };
+        if let DropHost::WindowsTerminal { pid } =
+            resolve_drop_host(&env, current_pid, process_entries)
+        {
+            for hwnd in visible_top_level_windows_for_pid(pid) {
                 push_unique_hwnd(&mut hwnds, hwnd);
             }
         }
@@ -820,47 +820,6 @@ mod win {
             return;
         }
         hwnds.push(hwnd);
-    }
-
-    fn windows_terminal_hwnds_for_current_process() -> Vec<HWND> {
-        let entries = process_entries();
-        let current_pid = unsafe { GetCurrentProcessId() };
-        let Some(wt_pid) = find_named_ancestor(
-            current_pid,
-            &entries,
-            &["WindowsTerminal.exe", "WindowsTerminalPreview.exe"],
-        ) else {
-            return Vec::new();
-        };
-        visible_top_level_windows_for_pid(wt_pid)
-    }
-
-    fn find_named_ancestor(
-        current_pid: u32,
-        entries: &[ProcessEntry],
-        target_names: &[&str],
-    ) -> Option<u32> {
-        let by_pid: HashMap<u32, &ProcessEntry> =
-            entries.iter().map(|entry| (entry.pid, entry)).collect();
-        let mut pid = current_pid;
-        let mut hops = 0usize;
-        while let Some(entry) = by_pid.get(&pid) {
-            if target_names
-                .iter()
-                .any(|name| entry.exe.eq_ignore_ascii_case(name))
-            {
-                return Some(entry.pid);
-            }
-            if entry.parent_pid == 0 || entry.parent_pid == pid {
-                break;
-            }
-            pid = entry.parent_pid;
-            hops += 1;
-            if hops > 64 {
-                break;
-            }
-        }
-        None
     }
 
     fn process_entries() -> Vec<ProcessEntry> {
@@ -935,61 +894,27 @@ mod win {
     mod win_tests {
         use super::*;
 
+        /// The one test that runs the real Toolhelp snapshot the host
+        /// decision consumes; the decision itself is covered on every
+        /// host in `drop_host_tests.rs`.
         #[test]
-        fn find_named_ancestor_finds_windows_terminal_parent() {
-            let entries = vec![
-                ProcessEntry {
-                    pid: 1,
-                    parent_pid: 0,
-                    exe: "explorer.exe".to_string(),
-                },
-                ProcessEntry {
-                    pid: 2,
-                    parent_pid: 1,
-                    exe: "WindowsTerminal.exe".to_string(),
-                },
-                ProcessEntry {
-                    pid: 3,
-                    parent_pid: 2,
-                    exe: "cmd.exe".to_string(),
-                },
-                ProcessEntry {
-                    pid: 4,
-                    parent_pid: 3,
-                    exe: "clud.exe".to_string(),
-                },
-            ];
-
-            assert_eq!(
-                find_named_ancestor(4, &entries, &["WindowsTerminal.exe"]),
-                Some(2)
+        fn real_process_snapshot_contains_this_process() {
+            // SAFETY: pure FFI, no preconditions.
+            let current_pid = unsafe { GetCurrentProcessId() };
+            let entries = process_entries();
+            let me = entries
+                .iter()
+                .find(|entry| entry.pid == current_pid)
+                .expect("the Toolhelp snapshot must list the test process itself");
+            assert!(
+                me.exe.to_ascii_lowercase().ends_with(".exe"),
+                "unexpected exe name for the test process: {:?}",
+                me.exe
             );
-        }
 
-        #[test]
-        fn find_named_ancestor_returns_none_without_terminal_parent() {
-            let entries = vec![
-                ProcessEntry {
-                    pid: 1,
-                    parent_pid: 0,
-                    exe: "explorer.exe".to_string(),
-                },
-                ProcessEntry {
-                    pid: 2,
-                    parent_pid: 1,
-                    exe: "cmd.exe".to_string(),
-                },
-                ProcessEntry {
-                    pid: 3,
-                    parent_pid: 2,
-                    exe: "clud.exe".to_string(),
-                },
-            ];
-
-            assert_eq!(
-                find_named_ancestor(3, &entries, &["WindowsTerminal.exe"]),
-                None
-            );
+            // Without WT_SESSION or TERM_PROGRAM the snapshot is not needed.
+            let host = resolve_drop_host(&|_: &str| None, current_pid, process_entries);
+            assert_eq!(host, DropHost::ConsoleWindowOnly);
         }
     }
 }
