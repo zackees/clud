@@ -182,7 +182,14 @@ def test_abrupt_pytest_exit_leaves_the_active_test_in_progress_log(
         encoding="utf-8",
     )
 
-    assert run_pytest("not integration", {}, ["-v", str(victim)], suite="unit") == 1
+    # This child exercises only our explicit plugin. Autoloading unrelated
+    # plugins can fail during Windows runner teardown before the test starts.
+    assert run_pytest(
+        "not integration",
+        {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        ["-v", str(victim)],
+        suite="unit",
+    ) == 1
     entries = [
         json.loads(line)
         for line in pytest_progress_path("unit").read_text(encoding="utf-8").splitlines()
