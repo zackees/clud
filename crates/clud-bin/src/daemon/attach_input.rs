@@ -7,7 +7,10 @@
 //! for that reply hung at startup. Input now reaches the worker byte for
 //! byte, the way the local PTY pump forwards stdin
 //! (`session::forward_user_input`), and Ctrl+C, F3 and bracketed paste are
-//! detected in the byte stream with the local pump's own helpers.
+//! detected in the byte stream with the local pump's own helpers. Ctrl+V
+//! with an image on the clipboard pastes the image's saved path (#1373),
+//! expanded by the same code as the local pump: `console_input` on Windows,
+//! `paste_image::expand_ctrl_v_bytes` for a byte-stream source.
 //!
 //! The byte source mirrors `runner_execution.rs`: on Windows the
 //! `console_input` reader (so Shift+Enter and Backspace match the local
@@ -46,26 +49,53 @@ impl FilteredInput {
 pub(super) struct RemoteInputFilter {
     paste: BracketedPasteNormalizer,
     f3: F3Observer,
+    /// Expand a raw Ctrl+V (0x16) to the clipboard image's saved path
+    /// (#1373). Set from [`RawInput::expands_ctrl_v`]: only a byte-stream
+    /// source needs it, since the Windows `console_input` reader already
+    /// expands Ctrl+V itself and must not read the clipboard twice.
+    expand_ctrl_v: bool,
 }
 
 impl RemoteInputFilter {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(expand_ctrl_v: bool) -> Self {
         Self {
             paste: BracketedPasteNormalizer::new(),
             f3: F3Observer::new(),
+            expand_ctrl_v,
         }
     }
 
     /// Filter one raw input chunk. Everything that is not Ctrl+C is
     /// forwarded, including terminal replies no key parser recognizes.
     pub(super) fn process(&mut self, chunk: &[u8]) -> FilteredInput {
+        self.process_with_clipboard(chunk, || {
+            crate::paste_image::handle_clipboard().ok().flatten()
+        })
+    }
+
+    /// [`Self::process`] with the clipboard read injected, so tests never
+    /// touch the real clipboard.
+    fn process_with_clipboard<F>(&mut self, chunk: &[u8], clipboard: F) -> FilteredInput
+    where
+        F: FnMut() -> Option<Vec<u8>>,
+    {
+        // Ctrl+C is checked on the raw chunk, before any clipboard read,
+        // exactly as the local pump's stdin branch orders it.
         if stdin_chunk_requests_interrupt(chunk) {
             return FilteredInput {
                 interrupt: true,
                 ..FilteredInput::default()
             };
         }
-        let mut chunk = chunk.to_vec();
+        // #1373: the local pump's stdin branch substitution. Only the legacy
+        // 0x16 byte counts, as there: clud never pushes kitty's
+        // `DISAMBIGUATE_ESCAPE_CODES`, so a CSI u Ctrl+V only arrives when
+        // the child pushed that flag itself, and then the child owns it.
+        let mut chunk = if self.expand_ctrl_v {
+            crate::paste_image::expand_ctrl_v_bytes(chunk, clipboard).into_owned()
+        } else {
+            chunk.to_vec()
+        };
         // Windows-only Backspace fix-up the local pump applies (#1350).
         normalize_interactive_console_stdin_chunk(&mut chunk);
         FilteredInput {
@@ -104,7 +134,7 @@ pub(super) struct RawInput {
     /// Dropping the handle stops the native reader and restores the
     /// console mode it changed.
     #[cfg(windows)]
-    _console: Option<crate::console_input::ConsoleInputHandle>,
+    console: Option<crate::console_input::ConsoleInputHandle>,
     #[cfg(unix)]
     fd: std::os::fd::RawFd,
 }
@@ -116,12 +146,9 @@ impl RawInput {
         #[cfg(windows)]
         {
             match crate::console_input::spawn_console_input_reader() {
-                Ok(mut handle) => {
-                    if let Some(rx) = handle.take_receiver() {
-                        return Self {
-                            rx,
-                            _console: Some(handle),
-                        };
+                Ok(handle) => {
+                    if let Some(input) = Self::from_console(handle) {
+                        return input;
                     }
                 }
                 Err(err) => {
@@ -142,7 +169,7 @@ impl RawInput {
                     }
                 }
             });
-            Self { rx, _console: None }
+            Self { rx, console: None }
         }
         #[cfg(unix)]
         {
@@ -154,6 +181,31 @@ impl RawInput {
     #[cfg(unix)]
     fn from_fd(fd: std::os::fd::RawFd) -> Self {
         Self { fd }
+    }
+
+    #[cfg(windows)]
+    fn from_console(mut handle: crate::console_input::ConsoleInputHandle) -> Option<Self> {
+        let rx = handle.take_receiver()?;
+        Some(Self {
+            rx,
+            console: Some(handle),
+        })
+    }
+
+    /// True when this source delivers Ctrl+V as a raw 0x16 byte that the
+    /// attach must expand itself (#1373), as the local pump does for its
+    /// stdin byte stream. The Windows `console_input` reader already
+    /// expands Ctrl+V (`console_input::adapt_event`), like the local
+    /// pump's side channel.
+    pub(super) fn expands_ctrl_v(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.console.is_none()
+        }
+        #[cfg(unix)]
+        {
+            true
+        }
     }
 
     /// Wait up to `timeout` for the next chunk.
@@ -218,7 +270,7 @@ mod tests {
     /// worker unchanged, or a ConPTY child waiting for it never starts.
     #[test]
     fn cursor_position_reply_is_forwarded_verbatim() {
-        let mut filter = RemoteInputFilter::new();
+        let mut filter = RemoteInputFilter::new(false);
         let out = filter.process(b"\x1b[12;40R");
         assert_eq!(out.bytes, b"\x1b[12;40R".to_vec());
         assert!(!out.interrupt);
@@ -235,14 +287,14 @@ mod tests {
             b"\x1b[?0u",
             b"\x1b]11;rgb:0000/0000/0000\x1b\\",
         ] {
-            let mut filter = RemoteInputFilter::new();
+            let mut filter = RemoteInputFilter::new(false);
             assert_eq!(filter.process(reply).bytes, reply.to_vec(), "{reply:?}");
         }
     }
 
     #[test]
     fn keys_and_enter_are_forwarded_and_lone_enter_submits() {
-        let mut filter = RemoteInputFilter::new();
+        let mut filter = RemoteInputFilter::new(false);
         let typed = filter.process(b"hi\x1b[A");
         assert_eq!(typed.bytes, b"hi\x1b[A".to_vec());
         assert!(!typed.submit());
@@ -252,7 +304,7 @@ mod tests {
     #[test]
     fn ctrl_c_requests_interrupt_without_forwarding() {
         for chunk in [b"\x03".as_slice(), b"abc\x03", b"\x1b[99;5u"] {
-            let mut filter = RemoteInputFilter::new();
+            let mut filter = RemoteInputFilter::new(false);
             let out = filter.process(chunk);
             assert!(out.interrupt, "{chunk:?}");
             assert!(out.bytes.is_empty(), "{chunk:?}");
@@ -261,7 +313,7 @@ mod tests {
 
     #[test]
     fn f3_is_counted_and_forwarded_like_the_local_pump() {
-        let mut filter = RemoteInputFilter::new();
+        let mut filter = RemoteInputFilter::new(false);
         let out = filter.process(b"\x1bOR");
         assert_eq!(out.f3.presses, 1);
         assert_eq!(out.bytes, b"\x1bOR".to_vec());
@@ -269,18 +321,161 @@ mod tests {
 
     #[test]
     fn bracketed_paste_keeps_its_markers() {
-        let mut filter = RemoteInputFilter::new();
+        let mut filter = RemoteInputFilter::new(false);
         let out = filter.process(b"\x1b[200~hello world\x1b[201~");
         assert_eq!(out.bytes, b"\x1b[200~hello world\x1b[201~".to_vec());
     }
 
     #[test]
     fn lone_esc_is_released_by_flush() {
-        let mut filter = RemoteInputFilter::new();
+        let mut filter = RemoteInputFilter::new(false);
         assert!(filter.process(b"\x1b").bytes.is_empty());
         assert!(filter.has_pending());
         assert_eq!(filter.flush_pending(), b"\x1b".to_vec());
         assert!(!filter.has_pending());
+    }
+
+    const IMAGE_PATH: &[u8] = b"/tmp/clud-clipboard/paste-1.png\n";
+
+    /// #1373: a byte-stream source (POSIX stdin) delivers Ctrl+V as a raw
+    /// 0x16, and the attach expands it to the clipboard image's saved path
+    /// exactly like the local pump's stdin branch.
+    #[test]
+    fn ctrl_v_byte_expands_to_the_clipboard_image_path() {
+        let mut filter = RemoteInputFilter::new(true);
+        let out = filter.process_with_clipboard(b"a\x16b", || Some(IMAGE_PATH.to_vec()));
+        assert_eq!(out.bytes, [b"a".as_slice(), IMAGE_PATH, b"b"].concat());
+        assert!(!out.interrupt);
+    }
+
+    #[test]
+    fn ctrl_v_without_a_clipboard_image_forwards_the_byte() {
+        let mut filter = RemoteInputFilter::new(true);
+        let out = filter.process_with_clipboard(b"\x16", || None);
+        assert_eq!(out.bytes, vec![0x16]);
+    }
+
+    /// The Windows `console_input` reader already expanded Ctrl+V, so a
+    /// 0x16 it forwards means "no image": the filter must not read the
+    /// clipboard a second time.
+    #[test]
+    fn a_source_that_expands_ctrl_v_itself_is_not_expanded_again() {
+        let mut filter = RemoteInputFilter::new(false);
+        let mut reads = 0;
+        let out = filter.process_with_clipboard(b"\x16", || {
+            reads += 1;
+            Some(IMAGE_PATH.to_vec())
+        });
+        assert_eq!(out.bytes, vec![0x16]);
+        assert_eq!(reads, 0);
+    }
+
+    /// Ctrl+C wins over a Ctrl+V in the same chunk, before any clipboard
+    /// read, as in the local pump.
+    #[test]
+    fn interrupt_is_checked_before_the_clipboard_is_read() {
+        let mut filter = RemoteInputFilter::new(true);
+        let mut reads = 0;
+        let out = filter.process_with_clipboard(b"\x16\x03", || {
+            reads += 1;
+            Some(IMAGE_PATH.to_vec())
+        });
+        assert!(out.interrupt);
+        assert!(out.bytes.is_empty());
+        assert_eq!(reads, 0);
+    }
+
+    /// With the kitty keyboard frame the attach pushes (#1363) a terminal
+    /// may also report key releases. Only the legacy 0x16 byte pastes, as
+    /// in the local pump: CSI u spellings of Ctrl+V (press, repeat,
+    /// release) reach the child verbatim and never read the clipboard, so a
+    /// release cannot paste the image a second time.
+    #[test]
+    fn kitty_ctrl_v_sequences_are_forwarded_without_reading_the_clipboard() {
+        for chunk in [
+            b"\x1b[118;5u".as_slice(),
+            b"\x1b[118;5:1u",
+            b"\x1b[118;5:2u",
+            b"\x1b[118;5:3u",
+        ] {
+            let mut filter = RemoteInputFilter::new(true);
+            let mut reads = 0;
+            let out = filter.process_with_clipboard(chunk, || {
+                reads += 1;
+                Some(IMAGE_PATH.to_vec())
+            });
+            assert_eq!(out.bytes, chunk.to_vec(), "{chunk:?}");
+            assert_eq!(reads, 0, "{chunk:?}");
+        }
+    }
+
+    /// A legacy Ctrl+V press followed by its kitty release event pastes the
+    /// image exactly once and forwards the release unchanged.
+    #[test]
+    fn ctrl_v_press_then_release_pastes_once() {
+        let mut filter = RemoteInputFilter::new(true);
+        let mut reads = 0;
+        let mut clipboard = || {
+            reads += 1;
+            Some(IMAGE_PATH.to_vec())
+        };
+        let press = filter.process_with_clipboard(b"\x16", &mut clipboard);
+        let release = filter.process_with_clipboard(b"\x1b[118;5:3u", &mut clipboard);
+        assert_eq!(press.bytes, IMAGE_PATH.to_vec());
+        assert_eq!(release.bytes, b"\x1b[118;5:3u".to_vec());
+        assert_eq!(reads, 1);
+    }
+
+    /// POSIX stdin is a byte stream, so the attach expands Ctrl+V itself.
+    #[cfg(unix)]
+    #[test]
+    fn stdin_source_needs_ctrl_v_expansion() {
+        assert!(RawInput::from_fd(0).expands_ctrl_v());
+    }
+
+    /// #1373 on Windows: the attach reads the `console_input` reader, which
+    /// expands Ctrl+V itself, so the attach's filter must not. A Ctrl+V
+    /// event injected into the reader arrives as the reader's own output
+    /// (the image path, or 0x16 when the clipboard holds no image) and the
+    /// filter forwards it without a second clipboard read.
+    #[cfg(windows)]
+    #[test]
+    fn console_source_expands_ctrl_v_upstream_and_the_filter_passes_it_through() {
+        use running_process::pty::terminal_input::{TerminalInputCore, TerminalInputEventRecord};
+        use std::sync::Arc;
+
+        let core = Arc::new(TerminalInputCore::new());
+        {
+            let mut state = core.state.lock().expect("terminal input state");
+            state.events.push_back(TerminalInputEventRecord {
+                data: vec![0x16],
+                submit: false,
+                shift: false,
+                ctrl: true,
+                alt: false,
+                virtual_key_code: 0x56,
+                repeat_count: 1,
+            });
+            state.closed = false;
+        }
+        core.condvar.notify_all();
+        let handle = crate::console_input::spawn_terminal_input_adapter(Arc::clone(&core))
+            .expect("spawn terminal input adapter");
+        let mut input = RawInput::from_console(handle).expect("console receiver");
+        assert!(!input.expands_ctrl_v());
+
+        let InputPoll::Chunk(chunk) = input.poll(Duration::from_secs(5)) else {
+            panic!("the injected Ctrl+V event never reached the attach");
+        };
+        let mut filter = RemoteInputFilter::new(input.expands_ctrl_v());
+        let mut reads = 0;
+        let out = filter.process_with_clipboard(&chunk, || {
+            reads += 1;
+            Some(IMAGE_PATH.to_vec())
+        });
+        assert_eq!(out.bytes, chunk);
+        assert_eq!(reads, 0);
+        assert!(chunk == [0x16] || chunk.ends_with(b".png\n"), "{chunk:?}");
     }
 
     #[cfg(unix)]

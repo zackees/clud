@@ -561,7 +561,7 @@ fn run_remote_interactive(
             return LocalAttachResult::Completed(1);
         }
     };
-    let mut filter = RemoteInputFilter::new();
+    let mut filter = RemoteInputFilter::new(input.expands_ctrl_v());
     // VoiceMode + PtyInputSink: same `InteractiveHooks` plumbing the
     // local-PTY pump uses, just with input bytes routed through the
     // daemon-worker TCP socket instead of `NativePtyProcess::write_impl`.
