@@ -4,6 +4,139 @@ use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Matches the 50 MiB upper bound checked by the WezTerm paste action.
+const MAX_KITTY_PASTE_BYTES: usize = 50 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+pub struct KittyPastePayload {
+    pub kind: &'static str,
+    pub value: String,
+    pub bytes: usize,
+}
+
+/// Take one clipboard snapshot for the native WezTerm paste helper. Images
+/// have priority over text when the clipboard advertises both formats.
+pub fn kitty_clipboard_payload() -> io::Result<KittyPastePayload> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|err| io::Error::other(format!("open clipboard: {err}")))?;
+    if let Ok(image) = clipboard.get_image() {
+        let dir = kitty_pictures_dir()?;
+        return kitty_image_payload_in(&dir, image.width, image.height, image.bytes.as_ref());
+    }
+    let text = clipboard
+        .get_text()
+        .map_err(|err| io::Error::other(format!("read clipboard text or image: {err}")))?;
+    kitty_text_payload(text)
+}
+
+fn kitty_text_payload(text: String) -> io::Result<KittyPastePayload> {
+    let bytes = text.len();
+    if bytes == 0 || bytes > MAX_KITTY_PASTE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "clipboard text is empty or exceeds 50 MiB",
+        ));
+    }
+    Ok(KittyPastePayload {
+        kind: "text",
+        value: text,
+        bytes,
+    })
+}
+
+fn kitty_pictures_dir() -> io::Result<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = dirs::picture_dir() {
+        candidates.push(path.join("clud-kitty-pastes"));
+    }
+    if let Some(path) = dirs::home_dir() {
+        let fallback = path.join("Pictures").join("clud-kitty-pastes");
+        if !candidates.contains(&fallback) {
+            candidates.push(fallback);
+        }
+    }
+    for path in candidates {
+        if std::fs::create_dir_all(&path).is_ok() && path.is_dir() {
+            return Ok(path);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "no writable user Pictures directory for Kitty clipboard image",
+    ))
+}
+
+fn kitty_image_payload_in(
+    dir: &Path,
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> io::Result<KittyPastePayload> {
+    let byte_count = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "clipboard dimensions overflow")
+        })?;
+    if byte_count != rgba.len() || byte_count > MAX_KITTY_PASTE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "clipboard image byte count is invalid or exceeds 50 MiB",
+        ));
+    }
+    let width = u32::try_from(width)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "clipboard image too wide"))?;
+    let height = u32::try_from(height)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "clipboard image too tall"))?;
+    let image = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "clipboard image byte count is invalid",
+        )
+    })?;
+
+    // The temporary file is private until complete. `persist_noclobber` then
+    // publishes the PNG at a random create-new path without overwriting one.
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(temporary.as_file_mut(), image::ImageFormat::Png)
+        .map_err(|err| io::Error::other(format!("encode clipboard png: {err}")))?;
+    temporary.as_file_mut().sync_all()?;
+    let bytes = usize::try_from(temporary.as_file().metadata()?.len())
+        .map_err(|_| io::Error::other("clipboard PNG size overflow"))?;
+    if bytes == 0 || bytes > MAX_KITTY_PASTE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "clipboard PNG is empty or exceeds 50 MiB",
+        ));
+    }
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|err| io::Error::other(format!("name clipboard PNG: {err}")))?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = dir.join(format!("paste-{suffix}.png"));
+    let value = path
+        .to_str()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "clipboard PNG path is not UTF-8",
+            )
+        })?
+        .to_string();
+    temporary
+        .persist_noclobber(&path)
+        .map_err(|err| io::Error::other(format!("publish clipboard PNG: {err}")))?;
+    Ok(KittyPastePayload {
+        kind: "image",
+        value,
+        bytes,
+    })
+}
+
 pub fn handle_clipboard() -> io::Result<Option<Vec<u8>>> {
     let mut clipboard = arboard::Clipboard::new()
         .map_err(|err| io::Error::other(format!("open clipboard: {err}")))?;
@@ -102,5 +235,39 @@ mod tests {
     fn write_clipboard_png_rejects_bad_rgba_len() {
         let err = write_clipboard_png(2, 2, &[0, 0, 0]).expect_err("bad len");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn kitty_text_payload_counts_utf8_bytes_and_rejects_empty_or_oversized_text() {
+        let payload = kitty_text_payload("hello 🦀".to_string()).unwrap();
+        assert_eq!(payload.kind, "text");
+        assert_eq!(payload.value, "hello 🦀");
+        assert_eq!(payload.bytes, "hello 🦀".len());
+        assert!(kitty_text_payload(String::new()).is_err());
+        assert!(kitty_text_payload("x".repeat(MAX_KITTY_PASTE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn kitty_image_payload_writes_distinct_complete_png_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let rgba = [255, 0, 0, 255];
+        let first = kitty_image_payload_in(dir.path(), 1, 1, &rgba).unwrap();
+        let second = kitty_image_payload_in(dir.path(), 1, 1, &rgba).unwrap();
+        assert_eq!(first.kind, "image");
+        assert_ne!(first.value, second.value);
+        assert_eq!(
+            first.bytes as u64,
+            std::fs::metadata(&first.value).unwrap().len()
+        );
+        assert!(image::open(&first.value).is_ok());
+        assert!(image::open(&second.value).is_ok());
+    }
+
+    #[test]
+    fn kitty_image_payload_rejects_bad_dimensions_without_leaving_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = kitty_image_payload_in(dir.path(), usize::MAX, 2, &[]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

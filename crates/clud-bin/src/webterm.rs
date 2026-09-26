@@ -33,7 +33,7 @@ pub fn handle(args: &Args) -> Option<i32> {
         );
     }
 
-    if std::env::var_os(ENV_WEBTERM).is_some() {
+    if std::env::var_os(ENV_WEBTERM).is_some() || std::env::var_os("CLUD_KITTY_TERM").is_some() {
         return None;
     }
 

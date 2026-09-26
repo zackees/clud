@@ -109,6 +109,7 @@ pub mod subprocess;
 #[cfg(test)]
 pub(crate) mod test_env;
 
+pub mod kitty_term;
 pub mod symbols;
 pub mod test_runtime;
 pub mod toast;

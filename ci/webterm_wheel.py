@@ -28,30 +28,34 @@ def add_companion(wheel: Path, companion: Path, target: str) -> None:
         raise RuntimeError(f"web terminal binary is missing: {companion}")
     with zipfile.ZipFile(wheel) as source:
         entries = [
-            (info.filename, source.read(info.filename), info.external_attr)
+            (info, source.read(info.filename))
             for info in source.infolist()
             if not info.filename.endswith(".dist-info/RECORD")
             and not info.filename.endswith(f".data/scripts/{companion_name(target)}")
         ]
     dist_info = next(
-        (name.split("/", 1)[0] for name, _, _ in entries if name.endswith(".dist-info/WHEEL")),
+        (
+            info.filename.split("/", 1)[0]
+            for info, _ in entries
+            if info.filename.endswith(".dist-info/WHEEL")
+        ),
         None,
     )
     if dist_info is None:
         raise RuntimeError(f"wheel has no dist-info/WHEEL entry: {wheel}")
     script = f"{dist_info.removesuffix('.dist-info')}.data/scripts/{companion_name(target)}"
-    external_attr = (0o755 << 16) if "windows" not in target else 0
-    entries.append((script, companion.read_bytes(), external_attr))
-    records = [_record_line(name, data) for name, data, _ in entries]
+    companion_info = zipfile.ZipInfo(script)
+    companion_info.compress_type = zipfile.ZIP_DEFLATED
+    companion_info.external_attr = (0o755 << 16) if "windows" not in target else 0
+    entries.append((companion_info, companion.read_bytes()))
+    records = [_record_line(info.filename, data) for info, data in entries]
     record = f"{dist_info}/RECORD"
     records.append(f"{record},,")
     with tempfile.NamedTemporaryFile(dir=wheel.parent, suffix=".whl", delete=False) as handle:
         temporary = Path(handle.name)
     try:
         with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as output:
-            for name, data, external_attr in entries:
-                info = zipfile.ZipInfo(name)
-                info.external_attr = external_attr
+            for info, data in entries:
                 output.writestr(info, data)
             output.writestr(record, "\n".join(records) + "\n")
         temporary.replace(wheel)

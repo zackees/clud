@@ -19,7 +19,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+use running_process::{
+    CommandSpec, NativeProcess, ProcessConfig, ProcessError, StderrMode, StdinMode,
+};
 
 use crate::tool_install::tools_root;
 
@@ -35,7 +37,7 @@ const TOOL_REL_PATH: &str = "hooks/uv_run_hook_guard.py";
 /// Run the guard against `project_root`. Silent on every failure mode
 /// (tool not installed, uv missing, subprocess error) so the guard
 /// never breaks a launch.
-pub fn run(project_root: &Path) {
+pub fn run(project_root: &Path, verbose: bool) {
     let Some(tool_path) = installed_tool_path() else {
         return;
     };
@@ -58,14 +60,65 @@ pub fn run(project_root: &Path) {
         capture: false,
         stderr_mode: StderrMode::Stdout,
         creationflags: None,
-        create_process_group: false,
+        create_process_group: true,
         stdin_mode: StdinMode::Inherit,
         nice: None,
     });
-    if process.start().is_err() {
-        return;
+    let _ = run_guard_process(&process, DEADLINE, verbose);
+}
+
+fn run_guard_process(process: &NativeProcess, deadline: Duration, verbose: bool) -> bool {
+    if let Err(error) = process.start() {
+        if verbose {
+            crate::verbose_log::log(format_args!(
+                "[clud] uv-run hook guard: start failed: {error}"
+            ));
+        }
+        return false;
     }
-    let _ = process.wait(Some(DEADLINE));
+    if verbose {
+        crate::verbose_log::log("[clud] uv-run hook guard: started");
+    }
+    match process.wait(Some(deadline)) {
+        Ok(code) => {
+            if verbose {
+                crate::verbose_log::log(format_args!("[clud] uv-run hook guard: exited {code}"));
+            }
+            false
+        }
+        Err(error) => {
+            if verbose {
+                crate::verbose_log::log(format_args!(
+                    "[clud] uv-run hook guard: wait failed: {error}"
+                ));
+            }
+            if matches!(error, ProcessError::Timeout) {
+                // A timed-out uv run may retain inherited stdio or a child
+                // Python process. Reap it before the backend launch continues.
+                match process.kill() {
+                    Ok(()) => {
+                        if verbose {
+                            crate::verbose_log::log(
+                                "[clud] uv-run hook guard: timed-out child killed",
+                            );
+                        }
+                        true
+                    }
+                    Err(kill_error) => {
+                        if verbose {
+                            crate::verbose_log::log(format_args!(
+                                "[clud] uv-run hook guard: timeout cleanup failed: {kill_error}"
+                            ));
+                        }
+                        let _ = process.close();
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        }
+    }
 }
 
 fn installed_tool_path() -> Option<PathBuf> {
@@ -75,6 +128,46 @@ fn installed_tool_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn guard_sleeper_child() {
+        if std::env::var_os("CLUD_TEST_GUARD_SLEEP_CHILD").is_some() {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn timeout_kills_and_reaps_guard_child() {
+        let executable = std::env::current_exe().expect("locate test executable");
+        let process = NativeProcess::new(ProcessConfig {
+            command: CommandSpec::Argv(vec![
+                executable.to_string_lossy().into_owned(),
+                "--exact".to_string(),
+                "uv_run_hook_guard::tests::guard_sleeper_child".to_string(),
+            ]),
+            cwd: None,
+            env: Some(vec![(
+                "CLUD_TEST_GUARD_SLEEP_CHILD".to_string(),
+                "1".to_string(),
+            )]),
+            capture: false,
+            stderr_mode: StderrMode::Stdout,
+            creationflags: None,
+            create_process_group: true,
+            stdin_mode: StdinMode::Inherit,
+            nice: None,
+        });
+        let started = Instant::now();
+        assert!(run_guard_process(
+            &process,
+            Duration::from_millis(200),
+            false
+        ));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(process.poll().expect("poll timed-out child").is_some());
+        assert!(process.wait(Some(Duration::from_millis(200))).is_ok());
+    }
 
     /// Guard rel_path is the same string both this wrapper and the
     /// BUNDLED_TOOLS registry rely on. Drift would mean the wrapper

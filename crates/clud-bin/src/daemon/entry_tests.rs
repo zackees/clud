@@ -218,6 +218,7 @@ fn backend_prompt_classification_drives_centralized_session_kind() {
 fn transcript_forces_centralized_daemon() {
     let args = Args {
         web_term: false,
+        kitty_term: false,
         set_web_term: None,
         provider: None,
         unified: false,

@@ -29,3 +29,32 @@ def test_add_companion_updates_record_and_replaces_old_binary(tmp_path) -> None:
     digest = base64.urlsafe_b64encode(hashlib.sha256(b"new-webterm").digest()).rstrip(b"=").decode()
     assert f"{script},sha256={digest},11" in record
     assert wheel_has_companion(wheel, "x86_64-pc-windows-msvc")
+
+
+def test_add_companion_keeps_large_members_compressed_and_record_valid(tmp_path) -> None:
+    wheel = tmp_path / "clud-2.7.1-py3-none-win_amd64.whl"
+    companion = tmp_path / "clud-webterm.exe"
+    companion.write_bytes(b"MZ" + b"w" * 1_000_000)
+    runtime = "clud-2.7.1.data/data/clud-kittyterm/wezterm-gui.exe"
+    runtime_data = b"MZ" + b"r" * 2_000_000
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        info = zipfile.ZipInfo(runtime)
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o755 << 16
+        archive.writestr(info, runtime_data)
+        archive.writestr("clud-2.7.1.dist-info/WHEEL", "Wheel-Version: 1.0\n")
+        archive.writestr("clud-2.7.1.dist-info/RECORD", "stale")
+
+    add_companion(wheel, companion, "x86_64-pc-windows-msvc")
+
+    with zipfile.ZipFile(wheel) as archive:
+        script = "clud-2.7.1.data/scripts/clud-webterm.exe"
+        assert archive.getinfo(runtime).compress_type == zipfile.ZIP_DEFLATED
+        assert archive.getinfo(runtime).external_attr == 0o755 << 16
+        assert archive.getinfo(script).compress_type == zipfile.ZIP_DEFLATED
+        assert archive.read(runtime) == runtime_data
+        record = archive.read("clud-2.7.1.dist-info/RECORD").decode()
+        for name, data in ((runtime, runtime_data), (script, companion.read_bytes())):
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            assert f"{name},sha256={digest},{len(data)}" in record
+    assert wheel.stat().st_size < 50_000

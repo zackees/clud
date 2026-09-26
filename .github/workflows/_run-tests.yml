@@ -70,6 +70,25 @@ jobs:
       - name: Install pinned Claude Code
         if: inputs.suite == 'harness'
         run: npm install -g @anthropic-ai/claude-code@2.1.282
+
+      # Run the focused GUI check before the broad integration suite, which can
+      # hang independently. setup-exec has unpacked the wheel into bundle/dist.
+      - name: Smoke installed Kitty GUI headlessly
+        if: ${{ inputs.target == 'x86_64-pc-windows-msvc' && inputs.suite == 'integration' }}
+        shell: pwsh
+        run: |
+          $wheels = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'bundle/dist') -Filter '*.whl' -File)
+          if ($wheels.Count -ne 1) { throw "Expected one bundled wheel, found $($wheels.Count)" }
+          $wheel = $wheels[0]
+          uv pip install --python (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts/python.exe') --reinstall --no-deps $wheel.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Wheel install failed with exit $LASTEXITCODE" }
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'bundle/manifest.json') | ConvertFrom-Json
+          $mockAgent = Join-Path $env:GITHUB_WORKSPACE "bundle/target/$($manifest.profile_dir)/mock-agent.exe"
+          pwsh -NoProfile -File ci/kitty_windows_smoke.ps1 `
+            -ScriptsDir (Join-Path $env:GITHUB_WORKSPACE '.venv/Scripts') `
+            -MockAgentPath $mockAgent
+          if ($LASTEXITCODE -ne 0) { throw "Kitty GUI smoke failed with exit $LASTEXITCODE" }
+
       - name: Run ${{ inputs.suite }} suite
         shell: bash
         run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'

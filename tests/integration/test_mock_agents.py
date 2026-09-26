@@ -700,7 +700,10 @@ class TestCodexBridgeForeground:
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            "WEZTERM_UNIX_SOCKET",
         }
+        # The mock always reports this key; outside a Kitty pane it is unset.
+        assert report["env"]["WEZTERM_UNIX_SOCKET"] is None
         assert report["env"]["ANTHROPIC_BASE_URL_PRESENT"] is True
         assert report["env"]["ANTHROPIC_AUTH_TOKEN_PRESENT"] is True
         assert report["env"]["ANTHROPIC_API_KEY_PRESENT"] is False

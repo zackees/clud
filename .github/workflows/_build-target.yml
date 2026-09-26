@@ -136,6 +136,18 @@ jobs:
         if: ${{ inputs.bundle && inputs.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' }}
         run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
+      # This ZIP is the pinned portable build of zackees/wezterm at
+      # 0be809bc0d2d82143efa5684ad3e0d76d879ce9e. The fetcher checks both
+      # the archive digest and its SOURCE_REVISION before exposing the bundle.
+      - name: Fetch Kitty Windows x64 bundle
+        if: ${{ inputs.target == 'x86_64-pc-windows-msvc' && (inputs.bundle || inputs.wheel-artifact != '') }}
+        run: |
+          "$VENV_PY" -m ci.fetch_kitty_bundle \
+            --url https://github.com/zackees/wezterm/releases/download/kitty-windows-compat-0be809bc/WezTerm-windows-portable.zip \
+            --sha256 933c3a0ed459b9b19dcb79b47e94d8583866271fa8fb7a0c2121aab1bcc82b5a \
+            --dest "$RUNNER_TEMP/clud-kittyterm-bundle"
+          echo "CLUD_KITTYTERM_BUNDLE_DIR=$RUNNER_TEMP/clud-kittyterm-bundle" >> "$GITHUB_ENV"
+
       - name: Build wheel
         if: ${{ inputs.bundle || inputs.wheel-artifact != '' }}
         run: >
