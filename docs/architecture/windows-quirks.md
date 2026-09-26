@@ -544,9 +544,11 @@ the codebase stays portable.
     its subtree is spared (`!new`).
   - `RUNNING_PROCESS_IS_DAEMON` is the positive detach contract for services
     and helpers. The daemon PID and its whole subtree are spared. Ordinary
-    unmarked Docker helpers hosted below `conhost.exe` are also protected by
+    unmarked Docker helpers hosted below `conhost.exe` or sidecar
+    `OpenConsole.exe` are also protected by
     the unconditional console-host boundary.
-  - `conhost.exe` is never an automatic kill target. The runtime takes a fresh
+  - `conhost.exe` and sidecar `OpenConsole.exe` are never automatic kill targets.
+    The runtime takes a fresh
     process snapshot immediately before each kill and prunes every console-host
     subtree, even if its Job NEW_PROCESS event raced metadata publication.
   - A Job `NEW_PROCESS` PID whose Toolhelp metadata is not published yet stays

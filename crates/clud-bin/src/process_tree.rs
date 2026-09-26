@@ -52,8 +52,7 @@ fn automatic_target_allowed(
     observed: ProcessIdentity,
     image_name: &str,
 ) -> bool {
-    automatic_identity_matches(recorded, observed)
-        && !is_console_host_image(image_name)
+    automatic_identity_matches(recorded, observed) && !is_console_host_image(image_name)
 }
 
 /// Console host images for both the inbox ConPTY (`conhost.exe`) and the
