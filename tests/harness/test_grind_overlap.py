@@ -90,7 +90,7 @@ def _seed(h: Harness, prs: list[dict[str, Any]]) -> None:
     world["prs"] = prs
     h.write_gh_state(world)
     h.git("push", "-q", "origin", f"main:{FEATURE}")
-    run = Path(h.repo) / ".clud" / "grind" / "run.json"
+    run = h.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
     run.write_text(json.dumps({"mode": "sequential", "meta": META}), encoding="utf-8")
 
@@ -393,9 +393,9 @@ def test_o3_feature_pr_merged_in_run_unblocks_the_next_plan(harness: Harness) ->
     }
     goals = ["101", "102", "103", "104"]
     roles = [*_roles(harness, goals), _feature_lander()]
-    # The router records the feature in run.json before the feature-stage
+    # The router records the feature in the run facts before the feature-stage
     # call (/grind 4b step 5); the hook reads the feature PR from there.
-    run = Path(harness.repo) / ".clud" / "grind" / "run.json"
+    run = harness.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
     facts = {"mode": "sequential", "meta": META, "feature": feature, "feature_merge": "auto"}
     run.write_text(json.dumps(facts), encoding="utf-8")
@@ -408,6 +408,9 @@ def test_o3_feature_pr_merged_in_run_unblocks_the_next_plan(harness: Harness) ->
     second_plan = _plan([BUG2], [FEATURE2], waiting=waiting)
     assert "waiting_on_pr" not in second_plan
     goals2 = [BUG2, FEATURE2]
+    # The next `/grind` is a new session; its router records the same facts.
+    harness.new_session()
+    harness.write_run_facts(facts)
     second = _run(harness, _script(harness, _roles(harness, goals2), goals2, second_plan))
     _feature_stage_ran(harness, second, [FEATURE2])
 

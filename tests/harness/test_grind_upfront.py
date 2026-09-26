@@ -3,10 +3,10 @@
 The main session plays the `/grind` router: the routing tool, the plan-only
 `grind-run` pass, the read-only preflight, the question round (at most two
 `AskUserQuestion` calls of at most four questions each), the preflight
-action, `run.json`, the real run (prework first) and Finish. Every role is
+action, the run facts, the real run (prework first) and Finish. Every role is
 scripted, so these tests pin the *contract*: which role ran in what order,
 what was asked and when, what the hook allowed, and the resulting git,
-`run.json` and fake GitHub state. U2 (plan-only caps) lives in
+the run facts and fake GitHub state. U2 (plan-only caps) lives in
 `test_grind_plan_only.py`.
 
 Script notes:
@@ -151,7 +151,9 @@ def _grind_dir(h: Harness) -> Path:
 
 
 def _run_json(h: Harness) -> Path:
-    return _grind_dir(h) / "run.json"
+    path = h.run_facts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _dirty(h: Harness) -> None:
@@ -236,7 +238,7 @@ def _dying_planners() -> dict[str, Any]:
 
 
 def _route_and_plan(h: Harness, meta: str, children: list[int]) -> list[dict[str, Any]]:
-    """Routing tool, the plan-phase run.json, the plan-only pass, then preflight."""
+    """Routing tool, the plan-phase run facts, the plan-only pass, then preflight."""
     repo = h.repo
     plan_only = {
         "repo": str(repo),
@@ -453,7 +455,7 @@ def test_u1_u13_u14_order_is_route_plan_preflight_ask_prework_work(harness: Harn
     headers = [q["header"] for q in _questions(result)]
     assert headers == ["Mode", "Models", "Problems"], headers
 
-    # U14: run.json records every answer.
+    # U14: the run facts record every answer.
     recorded = json.loads(_run_json(h).read_text(encoding="utf-8"))
     assert recorded["mode"] == "sequential"
     assert recorded["preflight"] == {"action": "none", "branch": "main"}
@@ -476,8 +478,8 @@ def test_u3_u8_dirty_feature_plan_offers_carry_and_abort_creates_nothing(
     main = [
         *_route_and_plan(h, meta, children),
         _after(_saw("README.md"), _ask(_dirty_q(carry=True), MODE_Q, MODELS_Q)),
-        # Abort: remove the plan-phase run.json and create nothing else.
-        _after(_saw("Abort"), _bash(f"clud trash {_run_json(h)}")),
+        # Abort: remove the plan-phase run facts and create nothing else.
+        _after(_saw("Abort"), _bash("clud grind-facts clear")),
         _after(OK, {"text": "Aborted; nothing was created."}),
     ]
     roles = [_classifier(h, _classify([101], {"verbose": [102]}))]
@@ -491,7 +493,7 @@ def test_u3_u8_dirty_feature_plan_offers_carry_and_abort_creates_nothing(
     assert _labels(dirty) == DIRTY_OPTS
     assert len(_asks(result)) == 1
 
-    # U8: nothing on GitHub, nothing in git, no run.json, no later role.
+    # U8: nothing on GitHub, nothing in git, no run facts, no later role.
     assert h.read_gh_state()["issues"] == before_issues
     writes = [
         c
@@ -575,7 +577,7 @@ def test_u4_u5_u13_stash_lives_through_the_run_and_finish_restores_it(
     assert "my local edit" in readme
     assert (Path(repo) / "notes.txt").read_text(encoding="utf-8") == "scratch\n"
 
-    # U14: the preflight answer is what run.json recorded.
+    # U14: the preflight answer is what the run facts recorded.
     recorded = json.loads(_run_json(h).read_text(encoding="utf-8"))
     assert recorded["preflight"] == {"action": "stash", "branch": "main", "stash": stash}
     assert recorded["problem_reporting"] == "issue"

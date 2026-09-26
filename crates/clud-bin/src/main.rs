@@ -95,6 +95,9 @@ fn run(mut args: args::Args) {
     if let Some(args::Command::GrindScripts) = &args.command {
         std::process::exit(command::grind_scripts::run());
     }
+    if let Some(args::Command::GrindFacts { args }) = &args.command {
+        std::process::exit(clud::grind_facts::run_cli(args));
+    }
 
     if let Some(args::Command::InstallAssets { home }) = &args.command {
         std::process::exit(install_assets(home.as_deref()));

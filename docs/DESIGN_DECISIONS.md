@@ -4554,3 +4554,34 @@ no argument-length limit on any platform.
 **Consequences:** Plan readers must parse the JSON rather than grep it for
 raw characters. The contract is owned by
 [architecture/grind.md](architecture/grind.md#prework-and-the-plan-comment).
+
+## DD-103: /grind run facts are keyed by session id and live under `~/.clud/tmp/grind/`
+
+**Status:** Accepted
+
+**Context:** #1337. The router kept its run facts in one fixed file,
+`<repo>/.clud/grind/run.json`, and the command hook found it by walking up
+from the tool call's cwd. Two `/grind` runs in one repo overwrote each
+other's `mode` and `ci`, one run's Finish deleted the facts the other was
+still using, and a crashed run's file was silently inherited by the next.
+
+**Decision:** Each run's facts live in `~/.clud/tmp/grind/<session_id>.json`.
+The router gets the path from `clud grind-facts path` (Claude Code exports
+`CLAUDE_CODE_SESSION_ID` to every shell command) and removes only its own
+file with `clud grind-facts clear`. The hook reads the file named by the
+`session_id` in each PreToolUse payload; a missing, unreadable or
+older-than-72-hours file gives the strictest caps (sequential, no CI) and a
+hook-log line saying why.
+
+**Rationale:** The harness showed that a workflow agent's PreToolUse
+payload carries its parent session's id, so the id identifies the run
+exactly, with no walk and no guessing, where a numbered slot (`run-NN.json`)
+would still need a way to tell the hook which slot an agent belongs to.
+Outside the working tree, the file cannot be staged or stashed by accident,
+and the existing session-temp sweep removes what a crashed run leaves.
+
+**Consequences:** The real-harness tests launch Claude Code with
+`--session-id` so they can write facts up front, and a test that runs twice
+starts a new session for its second run. Run facts are no longer visible in
+the checkout; `clud grind-facts path` names the file. The contract is owned
+by [architecture/grind.md](architecture/grind.md#router-questions).

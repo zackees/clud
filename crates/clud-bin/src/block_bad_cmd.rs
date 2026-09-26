@@ -129,6 +129,10 @@ pub struct HookPayloadView {
     /// The subagent's type (`agent_type`), when the harness names it. The
     /// `/grind` role caps key on it; see `block_bad_cmd_grind_caps`.
     pub agent_type: Option<String>,
+    /// The session the call belongs to. A workflow agent reports its parent
+    /// session's id, which is how the `/grind` caps find the run's facts
+    /// (#1337, `grind_facts`).
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1245,6 +1249,12 @@ pub fn parse_payload_value(value: &Value, process_cwd: &Path) -> Option<HookPayl
             .or_else(|| object.get("agentType"))
             .and_then(Value::as_str)
             .filter(|kind| !kind.is_empty())
+            .map(str::to_string),
+        session_id: object
+            .get("session_id")
+            .or_else(|| object.get("sessionId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
             .map(str::to_string),
     })
 }
@@ -3419,7 +3429,7 @@ mod block_bad_cmd_grind_caps;
 
 /// The `/grind` role-cap denial for this call, if its agent is a capped role,
 /// or the feature-branch-mode router caps for any other caller while
-/// `run.json` records a feature.
+/// the session's run facts record a feature.
 fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     let Some(role) = payload
         .agent_type
@@ -3428,7 +3438,11 @@ fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     else {
         return grind_router_reason(payload);
     };
-    let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
+    let (run, warning) =
+        block_bad_cmd_grind_caps::RunFacts::for_session(payload.session_id.as_deref());
+    if let Some(warning) = warning {
+        append_log(&format!("{role}: {warning}"));
+    }
     if let Some(reason) = block_bad_cmd_grind_caps::tool_reason(role, &payload.tool_name, &run) {
         return Some(format!("Blocked by the /grind role caps: {reason}."));
     }
@@ -3440,14 +3454,14 @@ fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
 }
 
 /// The main-session `/grind` router carries no `grind-*` agent type, so its
-/// feature-mode caps (#1410, #1393) key on `run.json` recording a feature.
+/// feature-mode caps (#1410, #1393) key on the session's run facts recording a feature.
 fn grind_router_reason(payload: &HookPayloadView) -> Option<String> {
     if !block_bad_cmd_gate::gates_tool(&payload.tool_name)
         || !block_bad_cmd_grind_caps::may_concern_router(&payload.command)
     {
         return None;
     }
-    let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
+    let (run, _) = block_bad_cmd_grind_caps::RunFacts::for_session(payload.session_id.as_deref());
     block_bad_cmd_grind_caps::router_reason(&payload.command, &run)
         .map(|reason| format!("Blocked by the /grind feature-mode caps: {reason}."))
 }
@@ -3929,6 +3943,7 @@ mod tests {
             tool_input: None,
             agent_id: None,
             agent_type: None,
+            session_id: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, r#"C:\py\clud-block-bad-cmd.exe"#);
         assert_eq!(event["event"], "bad_cmd_denied");
@@ -3970,6 +3985,7 @@ mod tests {
             tool_input: None,
             agent_id: None,
             agent_type: None,
+            session_id: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, "");
         assert_eq!(event["match_mode"], "regex");

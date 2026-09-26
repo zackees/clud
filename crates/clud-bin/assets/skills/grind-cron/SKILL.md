@@ -25,8 +25,12 @@ Issue one `/loop` whose body is:
 > never a rebase) only when the loop ends.
 
 `<source>` is what `/grind-intake` resolved: the meta issue's children, the
-issue list, or the repo's issues page. Keep `.clud/grind/run.json` in place
-for the whole loop, with `mode` set to `sequential`. Every tick runs
+issue list, or the repo's issues page. Keep the run facts (the file
+`clud grind-facts path` prints) in place for the whole loop, with `mode` set
+to `sequential`: every tick runs in this session, so it reads the same file.
+Start every tick with `clud grind-facts path`: asking for the path marks the
+facts as current, so a loop that outlives the 72-hour staleness cutoff keeps
+its caps. Clear them only when the loop ends. Every tick runs
 `clud grind reconcile` before picking a goal, so an issue whose goal PR
 landed on a feature branch is labelled `grind:on-feature` and never lost.
 

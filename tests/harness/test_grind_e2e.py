@@ -197,7 +197,7 @@ def _origin_heads(h: Harness) -> list[str]:
 
 
 def _run_path(h: Harness) -> Path:
-    return Path(h.repo) / ".clud" / "grind" / "run.json"
+    return h.run_facts_path()
 
 
 def _write_run(h: Harness, facts: dict[str, Any]) -> None:
@@ -551,7 +551,7 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
     h = harness
     h.write_gh_state(mixed())
     before = {n: dict(i) for n, i in h.read_gh_state()["issues"].items()}
-    # The feature worktree lives inside the repo; keep it (and run.json) out of
+    # The feature worktree lives inside the repo; keep it out of
     # the stash, as a real repo's ignore rules would.
     exclude = Path(h.repo) / ".git" / "info" / "exclude"
     exclude.write_text(exclude.read_text(encoding="utf-8") + ".clud/\n", encoding="utf-8")
@@ -1109,6 +1109,8 @@ def test_e2e_3_regrouped_epic_decide_later_one_feature_then_bugs_only(
         "plan": plan2,
         "goals": _goals([S3_BUG2]),
     }
+    # A second `/grind` is a second Claude Code session, with its own facts.
+    h.new_session()
     main_steps2 = _chain(
         [
             # Reconcile first; nothing is labelled, so it has nothing to repair.

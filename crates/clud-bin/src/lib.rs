@@ -55,6 +55,7 @@ pub mod gate_replay;
 pub mod gc;
 pub mod graphics;
 pub mod grind;
+pub mod grind_facts;
 pub mod grind_reconcile;
 pub mod harness_picker;
 pub mod hook_health;

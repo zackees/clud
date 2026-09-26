@@ -57,7 +57,7 @@ changes no code, so the RED -> GREEN rule applies later, in
      stop.
 
    The refusal, verbatim with `N` filled in, creates nothing (no issues,
-   comments, labels, `run.json`, worktrees or branches):
+   comments, labels, run facts, worktrees or branches):
 
    > `clud grind` works on meta issues. #N is a single change; run `/do N`
    > (or `clud do N`) instead.

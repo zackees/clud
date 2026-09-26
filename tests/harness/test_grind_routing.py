@@ -114,9 +114,8 @@ def _local_state(h: Harness) -> tuple[str, str, str, str]:
 
 
 def _no_run_files(h: Harness) -> None:
-    grind = Path(h.repo) / ".clud" / "grind"
-    assert not (grind / "run.json").exists()
-    assert not (grind / "plan.json").exists()
+    assert not h.run_facts_path().exists()
+    assert not (Path(h.repo) / ".clud" / "grind" / "plan.json").exists()
 
 
 def _gh_calls(h: Harness) -> list[list[str]]:

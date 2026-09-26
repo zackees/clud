@@ -75,8 +75,9 @@ def test_finish_keeps_grind_branches_and_pushes_worktrees() -> None:
     finish = text[text.index("## 5. Finish") :]
     assert "push every worktree before" in finish
     assert "Never delete a `grind/*` branch while its feature PR is" in finish
-    # run.json goes last: the hook reads it to guard grind/* branches.
-    assert finish.index("Remove every") < finish.index("remove\n   `.clud/grind/run.json`")
+    # The run facts go last: the hook reads them to guard grind/* branches.
+    clear = finish.index("last the run facts with\n   `clud grind-facts clear`")
+    assert finish.index("Remove every") < clear
 
 
 def test_feature_goals_never_merge_main_by_rebase() -> None:

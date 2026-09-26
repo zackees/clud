@@ -4,7 +4,7 @@
 //! names one of the bundled `grind-*` roles, the role's shell allowlist (or,
 //! for the integrator, denylist) decides the call. Every other caller —
 //! the primary session, other subagents — is untouched, except that while
-//! `run.json` records a feature branch the router caps ([`router_reason`])
+//! the run facts record a feature branch the router caps ([`router_reason`])
 //! apply to it: the main-session router carries no agent type to key on.
 //!
 //! The agent definitions' `tools:` frontmatter is the hard limit on *which
@@ -13,16 +13,19 @@
 //! is the second layer for the one tool frontmatter cannot narrow. See
 //! [`docs/architecture/grind.md`](../../../docs/architecture/grind.md).
 //!
-//! Run-scoped facts come from `.clud/grind/run.json`, written by the `/grind`
-//! router at the main checkout's root before the workflow starts, and found
-//! from a linked worktree through its `.git` file: `mode`
+//! Run-scoped facts come from the run-facts file the `/grind` router writes
+//! before the workflow starts, `~/.clud/tmp/grind/<session_id>.json`
+//! ([`crate::grind_facts`], #1337). The hook reads the file for the payload's
+//! `session_id`, which a workflow agent shares with its parent session, so
+//! concurrent runs never see each other's facts. The facts are `mode`
 //! (`parallel` permits the planner's `git worktree add`) and `ci` (permits the
 //! integrator's `act`), plus the optional `scripts: {lint, test}` the router
 //! detected. Workers and reviewers may never run the repo's lint/test
 //! scripts; the integrator runs them before every push. During the read-only
 //! planning pass the router also writes `"phase": "plan"`, which puts the
 //! planner in plan-only mode (no worktrees, no file writes); the router
-//! removes it before the real run.
+//! removes it before the real run. With no facts for the session, the
+//! defaults (sequential, no CI) are the strictest caps.
 
 use std::path::Path;
 
@@ -113,13 +116,13 @@ pub(super) struct RunFacts {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct FeatureFacts {
     pub branch: String,
-    /// The draft feature PR number (`#` or URL stripped). While `run.json`
+    /// The draft feature PR number (`#` or URL stripped). While the run facts
     /// records the feature, its PR is treated as open.
     pub pr: Option<String>,
     pub worktree: Option<String>,
 }
 
-/// `feature_merge` in `run.json`: whether the lander may merge the feature PR.
+/// `feature_merge` in the run facts: whether the lander may merge the feature PR.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum FeatureMerge {
     /// The lander readies and merges the feature PR (merge commit only).
@@ -150,7 +153,7 @@ fn number_word(word: &str) -> Option<String> {
     (!num.is_empty() && num.chars().all(|c| c.is_ascii_digit())).then(|| num.to_string())
 }
 
-/// The repo scripts recorded in `run.json`'s optional `scripts` object.
+/// The repo scripts recorded in the run facts' optional `scripts` object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct RunScripts {
     pub lint: Option<String>,
@@ -211,46 +214,20 @@ impl RunFacts {
         self.feature.as_ref()?.pr.as_deref()
     }
 
-    /// Search upward from `cwd` for `.clud/grind/run.json`. A linked worktree
-    /// (a sibling directory in parallel mode) is resolved to its main checkout
-    /// through the `gitdir:` line of its `.git` file.
-    pub(super) fn discover(cwd: &Path) -> Self {
-        for dir in cwd.ancestors() {
-            let mut roots = vec![dir.to_path_buf()];
-            if let Some(main) = main_checkout_of(dir) {
-                roots.push(main);
-            }
-            for root in roots {
-                let path = root.join(".clud").join("grind").join("run.json");
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    return serde_json::from_str(&text)
-                        .map(|value| Self::from_json(&value))
-                        .unwrap_or_default();
-                }
-            }
-        }
-        Self::default()
+    /// The facts of the run that `session_id` belongs to (#1337), read from
+    /// `~/.clud/tmp/grind/<session_id>.json`. With none (no id, no file, a
+    /// stale or unreadable one) the defaults apply, which are the strictest
+    /// caps, and the second value says why for the hook log.
+    pub(super) fn for_session(session_id: Option<&str>) -> (Self, Option<String>) {
+        Self::from_lookup(&crate::grind_facts::lookup(session_id))
     }
-}
 
-/// The main checkout of a linked worktree rooted at `dir`, read lexically from
-/// `dir/.git` (`gitdir: <main>/.git/worktrees/<name>`).
-fn main_checkout_of(dir: &Path) -> Option<std::path::PathBuf> {
-    let text = std::fs::read_to_string(dir.join(".git")).ok()?;
-    main_checkout_from_gitdir(text.trim().strip_prefix("gitdir:")?.trim())
-}
-
-fn main_checkout_from_gitdir(gitdir: &str) -> Option<std::path::PathBuf> {
-    let gitdir = Path::new(gitdir);
-    let worktrees = gitdir.parent()?;
-    if worktrees.file_name()? != "worktrees" {
-        return None;
+    pub(super) fn from_lookup(lookup: &crate::grind_facts::Lookup) -> (Self, Option<String>) {
+        (
+            lookup.facts().map(Self::from_json).unwrap_or_default(),
+            lookup.warning(),
+        )
     }
-    let dot_git = worktrees.parent()?;
-    if dot_git.file_name()? != ".git" {
-        return None;
-    }
-    dot_git.parent().map(Path::to_path_buf)
 }
 
 /// Set to `1` to let an `Agent` call start a `grind-*` agent type directly,
@@ -563,7 +540,7 @@ fn pr_target(args: &[String]) -> Option<String> {
 }
 
 /// Whether a `gh pr merge` target names the feature PR: by number, or by its
-/// head branch (the feature branch `run.json` records). `None` when no target
+/// head branch (the feature branch the run facts record). `None` when no target
 /// is given, so the caller fails closed.
 fn merge_targets_feature(args: &[String], run: &RunFacts, feature_pr: &str) -> Option<bool> {
     let word = pr_positional(args)?;
@@ -605,7 +582,7 @@ fn pr_positional(args: &[String]) -> Option<&String> {
 }
 
 /// Feature-branch-mode rules for every grind role: no `grind/*` branch is
-/// deleted while `run.json` records a feature (its PR counts as open), and
+/// deleted while the run facts record a feature (its PR counts as open), and
 /// the feature PR merges only as a merge commit, never with `--admin`, and
 /// only under `feature_merge=auto`.
 fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String> {
@@ -765,14 +742,14 @@ const ON_FEATURE_LABEL: &str = "grind:on-feature";
 
 /// Feature-branch-mode caps for callers that are not `grind-*` roles: the
 /// main-session `/grind` router, which the hook cannot tell apart from any
-/// other session, so they apply only while `run.json` records a feature
+/// other session, so they apply only while the run facts record a feature
 /// (#1392 §6, #1393 §1). The router keeps exactly one worktree (the feature
 /// worktree), never closes an issue (the feature PR and `clud grind
 /// reconcile` do), never merges the feature PR (the lander does, under
 /// `auto`), and never deletes a `grind/*` branch while the feature PR is open.
 pub(super) fn router_reason(command: &str, run: &RunFacts) -> Option<String> {
     let feature = run.feature.as_ref()?;
-    let stale = "; if no /grind run is active, remove the stale .clud/grind/run.json";
+    let stale = "; if no /grind run is active, run `clud grind-facts clear`";
     let statements = statement_words(command).ok()?;
     statements.iter().find_map(|words| {
         if closes_issue(words) {
@@ -830,7 +807,7 @@ fn worktree_add_path(args: &[String]) -> Option<String> {
 }
 
 /// A cheap prefilter for [`router_reason`], so an ordinary session's shell
-/// calls never read `run.json`.
+/// calls never read the run facts file.
 pub(super) fn may_concern_router(command: &str) -> bool {
     [
         "worktree",
@@ -1372,7 +1349,7 @@ mod tests {
         assert!(!allowed(LANDER, "git commit -am fix", &facts));
     }
 
-    /// #1409: during the bug stage `run.json` has no `feature` yet (the router
+    /// #1409: during the bug stage the run facts have no `feature` yet (the router
     /// adds it when the feature stage starts), so the lander merges each bug
     /// PR into `<main>`, whatever the feature merge policy will be.
     #[test]
@@ -1517,36 +1494,40 @@ mod tests {
     }
 
     #[test]
-    fn linked_worktrees_resolve_to_their_main_checkout() {
-        assert_eq!(
-            main_checkout_from_gitdir("/home/u/repo/.git/worktrees/wt-5"),
-            Some(std::path::PathBuf::from("/home/u/repo"))
-        );
-        assert_eq!(main_checkout_from_gitdir("/home/u/repo/.git"), None);
-    }
-
-    #[test]
-    fn run_facts_are_found_from_a_linked_worktree() {
+    fn each_session_resolves_its_own_runs_facts() {
+        use crate::grind_facts::{facts_path_in, lookup_in, Lookup};
         let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("repo");
-        let wt = dir.path().join("repo-wt-5");
-        std::fs::create_dir_all(main.join(".clud/grind")).unwrap();
-        std::fs::create_dir_all(main.join(".git/worktrees/repo-wt-5")).unwrap();
-        std::fs::create_dir_all(wt.join("src")).unwrap();
+        let (a, b) = ("aaaaaaaa-0000", "bbbbbbbb-0000");
         std::fs::write(
-            main.join(".clud/grind/run.json"),
+            facts_path_in(dir.path(), a).unwrap(),
             r#"{"mode":"parallel","ci":true}"#,
         )
         .unwrap();
         std::fs::write(
-            wt.join(".git"),
-            format!(
-                "gitdir: {}\n",
-                main.join(".git/worktrees/repo-wt-5").display()
-            ),
+            facts_path_in(dir.path(), b).unwrap(),
+            r#"{"mode":"sequential","ci":false}"#,
         )
         .unwrap();
-        assert_eq!(RunFacts::discover(&wt.join("src")), run(true, true));
+        let now = std::time::SystemTime::now();
+        let facts = |id: &str| RunFacts::from_lookup(&lookup_in(dir.path(), Some(id), now));
+        assert_eq!(facts(a), (run(true, true), None));
+        assert_eq!(facts(b), (run(false, false), None));
+        // The planner of run A may add worktrees; run B's may not.
+        assert!(allowed(PLANNER, "git worktree add ../wt -b x", &facts(a).0));
+        assert!(!allowed(
+            PLANNER,
+            "git worktree add ../wt -b x",
+            &facts(b).0
+        ));
+        // Run B finishing leaves run A's caps untouched.
+        std::fs::remove_file(facts_path_in(dir.path(), b).unwrap()).unwrap();
+        assert_eq!(facts(a).0, run(true, true));
+        let (strict, warning) = facts(b);
+        assert_eq!(strict, RunFacts::default());
+        assert!(warning.unwrap().contains("strictest"));
+        let (strict, warning) = RunFacts::from_lookup(&Lookup::NoSession);
+        assert_eq!(strict, RunFacts::default());
+        assert!(warning.is_some());
     }
 
     #[test]

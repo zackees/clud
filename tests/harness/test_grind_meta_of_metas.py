@@ -12,7 +12,7 @@ scripted main session runs the exact `gh` commands the skill names:
   `gh api -X POST repos/o/r/issues/<sub>/sub_issues -F sub_issue_id=<id> -F replace_parent=true`.
 
 Bodies go inline with `--body`, which keeps the scripted commands short.
-Every change is written to `run.json`'s `undo` before its command runs, and
+Every change is written to the run facts' `undo` before its command runs, and
 the plan fields to `.clud/grind/plan.json`. The tests then check the fake
 GitHub state against hard-coded expectations, plus the undo record against
 the before/after states. A second regroup over a regrouped world changes
@@ -104,7 +104,7 @@ def _told(result: RunResult) -> str:
 
 
 def _run_path(h: Harness) -> Path:
-    return Path(h.repo) / ".clud" / "grind" / "run.json"
+    return h.run_facts_path()
 
 
 def _plan_path(h: Harness) -> Path:
@@ -461,6 +461,8 @@ def test_m5_sub_metas_rewritten_by_an_earlier_run_are_kept(harness: Harness) -> 
     # Claude Code's Write refuses to overwrite a file this session never read.
     _run_path(harness).unlink()
     _plan_path(harness).unlink()
+    # The next `/grind` is a new session, with its own run facts (#1337).
+    harness.new_session()
     before, after, undo, plan = _regroup_run(harness, {**first, "calls": []}, groups, [10])
     assert undo == []
     assert not _calls(after, "issue")
