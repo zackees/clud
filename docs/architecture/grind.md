@@ -253,7 +253,12 @@ Issue [#1408](https://github.com/zackees/clud/issues/1408); spec
   `run.json` also carries `meta`, so the hook knows which issue prework may
   comment on. Finish deletes `plan.json`.
 - **Public comment.** Prework posts the plan once on the meta issue, in a
-  fenced `json` block under `<!-- grind:v1 plan run=<run-id> -->`. The
+  `~~~json` fenced block under `<!-- grind:v1 plan run=<run-id> -->`, piping
+  the body as one single-quoted word:
+  `printf '%s' '<body>' | gh issue comment <meta> --body-file -`. clud's
+  command hook reads a backtick, `$(`, `<(` or `>(` as a substitution even
+  inside quotes, so the workflow keeps backticks, single quotes, `$`, `<`
+  and `>` out of the JSON (`\u` escapes). The
   comment is public on public repos, so local-only fields are dropped:
   `preflight` becomes `"handled"`, and the starting branch, stash name, WIP
   branch and local paths never appear. The local details stay in
@@ -262,7 +267,8 @@ Issue [#1408](https://github.com/zackees/clud/issues/1408); spec
   mid-run. Every later agent is told its URL and reads it before starting.
 - **Size.** GitHub caps a comment at 65,536 characters. Per-child entries stay
   one line; above about 60,000 characters the plan is split into numbered
-  comments marked `part=k/N`, linked from the first.
+  comments marked `part=k/N`, linked from the first. A part that would
+  still reach the limit stops the run before prework posts anything.
 - **Failure stops the run.** If prework cannot post, the workflow returns
   `stopped: 'prework'` before any other agent starts; the router reports
   that the plan was not posted and no work was done.
@@ -272,7 +278,11 @@ Issue [#1408](https://github.com/zackees/clud/issues/1408); spec
   (`gh api -X PATCH repos/<o>/<r>/issues/comments/<id>`) as results arrive
   and at Finish.
 - **Caps.** Read-only git and `gh`, plus `gh issue comment` on the
-  `run.json` meta issue only. No Write/Edit, builds or worktrees.
+  `run.json` meta issue only, fed by `printf '%s' '<body>'`. No Write/Edit,
+  builds or worktrees.
+
+Why the body is shell-inert and piped from `printf`:
+[DD-102](../DESIGN_DECISIONS.md#dd-102-the-grind-plan-comment-body-is-shell-inert-and-piped-from-printf).
 
 ### Bug stage, then feature stage
 
@@ -512,7 +522,7 @@ The rationale is in
 | Role | Tools (`tools:` frontmatter) | Shell (hook) |
 |---|---|---|
 | `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only, never in the plan-only phase (the hook also refuses it Write/Edit) |
-| `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the `run.json` meta issue only; no edits, worktrees or builds |
+| `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the `run.json` meta issue only, fed by `printf '%s' '<body>'`; no edits, worktrees or builds |
 | `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh` only |
 | `grind-reviewer` | same as worker | same as worker |
 | `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, `act` when CI is off, and a shell loop around lint/test |

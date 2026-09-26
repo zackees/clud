@@ -1,4 +1,4 @@
-"""`/grind` problem reporting on the real Claude Code (#1411, cases X1-X4, X6-X8 of #1392).
+"""`/grind` problem reporting on the real Claude Code (#1411, cases X1-X8 of #1392).
 
 Every grind role may return `problems: [{kind, summary, evidence,
 related_issue}]`. The `grind-run` workflow collects them once per run
@@ -13,8 +13,12 @@ The main session is scripted, so the router's filing commands are fixed in
 the script. What these tests guard is the contract around them: the
 workflow hands the router each problem exactly once, the hook lets the router
 (and only the router) file, the fake GitHub ends up in the right shape, and
-a follow-up never blocks the meta issue. X5 (a subagent's `gh issue create`
-is denied) lives with the hook-cap tests.
+a follow-up never blocks the meta issue.
+
+The Workflow tool runs in the background: its call returns at once and the
+workflow's result reaches the main session later as a `<task-notification>`
+user turn. The router's filing steps answer that turn (a second main role,
+picked only once the notification is in the conversation).
 
 Script note: a step's `expect` checks the tool results of the *previous*
 step, so an expectation about a command sits on the step after it.
@@ -28,6 +32,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from tests import process
 from tests.harness.harness import Harness, RunResult
 from tests.harness.worlds import _issue, _world
 
@@ -42,6 +47,8 @@ META = "100"
 GOAL = "101"
 LABEL = "grind:followup"
 OK = {"is_error": False}
+DENIED = {"is_error": True, "content_contains": "/grind role caps"}
+NOTIFIED = "</task-notification>"
 FLAKY = {
     "kind": "flaky-test",
     "summary": "test_cache_eviction flakes under load",
@@ -100,8 +107,13 @@ def _goal_roles(
     worker_problems: list[dict[str, Any]] | None = None,
     integrator_problems: list[dict[str, Any]] | None = None,
     fix_round_problems: list[dict[str, Any]] | None = None,
+    worker_tries_create: bool = False,
 ) -> list[dict[str, Any]]:
-    """Goal #101's roles. With `fix_round_problems`, one fix round runs."""
+    """Goal #101's roles. With `fix_round_problems`, one fix round runs.
+
+    With `worker_tries_create`, the worker first tries to file its problem
+    itself (`gh issue create`), which the hook denies.
+    """
     goal = GOAL
     branch = f"grind/{goal}"
     repo = str(h.repo)
@@ -113,7 +125,8 @@ def _goal_roles(
         "verify": "true",
         "tasks": [{"id": "t1", "files": [f"{goal}.txt"], "instructions": f"write {goal}.txt"}],
     }
-    write = {"file_path": f"{repo}/{goal}.txt", "content": f"{goal}\n"}
+    written = {"file_path": f"{repo}/{goal}.txt", "content": f"{goal}\n"}
+    write = {"tool_use": {"name": "Write", "input": written}}
     push = (
         f"git -C {repo} switch -q main && git -C {repo} switch -q -c {branch} && "
         f"git -C {repo} add {goal}.txt && git -C {repo} commit -q -m {goal} && "
@@ -124,6 +137,10 @@ def _goal_roles(
     work: dict[str, Any] = {"files_touched": [f"{goal}.txt"], "summary": "wrote"}
     if worker_problems:
         work["problems"] = worker_problems
+    worker_steps = [write, _after(OK, _structured(work))]
+    if worker_tries_create:
+        create = _bash(f"gh issue create --title 'flaky-test: self-filed' --label {LABEL} --body x")
+        worker_steps = [create, _after(DENIED, write), _after(OK, _structured(work))]
     integ: dict[str, Any] = {"pushed": True, "pr_url": url, "summary": "p"}
     if integrator_problems:
         integ["problems"] = integrator_problems
@@ -145,15 +162,7 @@ def _goal_roles(
         roles.append(_role("lander:0", "lander", [at, "Fix rounds used: 0 of"], merge))
     return [
         _role("planner", "planner", at, [_structured(plan)]),
-        _role(
-            "worker",
-            "worker",
-            at,
-            [
-                {"tool_use": {"name": "Write", "input": write}},
-                _after(OK, _structured(work)),
-            ],
-        ),
+        _role("worker", "worker", at, worker_steps),
         _role("reviewer", "reviewer", at, [_structured({"approved": True, "summary": "ok"})]),
         *roles,
         _role(
@@ -168,7 +177,12 @@ def _goal_roles(
 def _script(
     h: Harness, roles: list[dict[str, Any]], router: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Main runs the workflow, then `router` (its filing steps) on its result."""
+    """Main starts the workflow; once notified of its result, runs `router`.
+
+    The second main role is chosen only after the `<task-notification>` is
+    in the conversation; its steps are padded to the two assistant turns the
+    first one took (the Workflow call and its text).
+    """
     args = {
         "repo": str(h.repo),
         "main": "main",
@@ -176,14 +190,13 @@ def _script(
         "meta": META,
         "goals": [{"id": GOAL, "title": f"child {GOAL}", "brief": f"do {GOAL}"}],
     }
-    main = {
-        "name": "main",
-        "steps": [
-            {"tool_use": {"name": "Workflow", "input": {"name": "grind-run", "args": args}}},
-            *router,
-        ],
-    }
-    return {"default_text": "OK", "roles": [*roles, main]}
+    start = [
+        {"tool_use": {"name": "Workflow", "input": {"name": "grind-run", "args": args}}},
+        {"text": "GRIND_STARTED"},
+    ]
+    pad = [{"text": "unused"}] * len(start)
+    finish = {"name": "main", "match_prompt": NOTIFIED, "steps": [*pad, *router]}
+    return {"default_text": "OK", "roles": [*roles, finish, {"name": "main", "steps": start}]}
 
 
 # ---- router filing steps -------------------------------------------------------
@@ -208,11 +221,6 @@ def _file_issue(p: dict[str, Any]) -> str:
 def _file_comment(target: str, p: dict[str, Any]) -> str:
     body = shlex.quote(f"grind problem ({p['kind']}): {p['summary']}. {p['evidence']}")
     return f"gh issue comment {target} --body {body}"
-
-
-def _saw(p: dict[str, Any]) -> dict[str, Any]:
-    """The workflow result handed to the router carries this problem."""
-    return {"is_error": False, "content_contains": p["summary"]}
 
 
 # ---- helpers -------------------------------------------------------------------
@@ -241,6 +249,15 @@ def _router_saw(result: RunResult) -> str:
     return _text(mains[-1].get("messages"))
 
 
+def _notified(result: RunResult, *problems: dict[str, Any]) -> str:
+    """The router saw the workflow's result, and it names every problem."""
+    seen = _router_saw(result)
+    assert NOTIFIED in seen, seen[-3000:]
+    for p in problems:
+        assert p["summary"] in seen, (p["summary"], seen[-3000:])
+    return seen
+
+
 def _followups(h: Harness) -> dict[str, dict[str, Any]]:
     issues = h.read_gh_state()["issues"]
     return {n: i for n, i in issues.items() if LABEL in i.get("labels", [])}
@@ -262,19 +279,21 @@ def _run(h: Harness, script: dict[str, Any]) -> RunResult:
     return result
 
 
+def _issue_creates(h: Harness) -> list[list[str]]:
+    return [c for c in h.read_gh_state()["calls"] if c[:2] == ["issue", "create"]]
+
+
 # ---- tests ---------------------------------------------------------------------
 
 
 def test_x1_issue_policy_files_one_followup_that_is_not_a_sub_issue(harness: Harness) -> None:
     _seed(harness)
     _run_facts(harness, "issue")
-    router = [
-        _after(_saw(FLAKY), _bash(_file_issue(FLAKY))),
-        _after(OK, {"text": "GRIND_DONE"}),
-    ]
+    router = [_bash(_file_issue(FLAKY)), _after(OK, {"text": "GRIND_DONE"})]
     roles = _goal_roles(harness, worker_problems=[FLAKY])
     result = _run(harness, _script(harness, roles, router))
     _no_notes(result)
+    _notified(result, FLAKY)
     followups = _followups(harness)
     assert len(followups) == 1, followups
     ((number, issue),) = followups.items()
@@ -286,21 +305,18 @@ def test_x1_issue_policy_files_one_followup_that_is_not_a_sub_issue(harness: Har
     worker = _bash_by(result, "grind-worker")
     assert not [c for c in worker if "gh issue create" in c], worker
     # The router, not a subagent, made the only issue-create call.
-    creates = [c for c in harness.read_gh_state()["calls"] if c[:2] == ["issue", "create"]]
-    assert len(creates) == 1, creates
+    assert len(_issue_creates(harness)) == 1, _issue_creates(harness)
 
 
 def test_x2_comment_policy_comments_on_the_related_child(harness: Harness) -> None:
     _seed(harness)
     _run_facts(harness, "comment")
     problem = {**FLAKY, "related_issue": GOAL}
-    router = [
-        _after(_saw(problem), _bash(_file_comment(GOAL, problem))),
-        _after(OK, {"text": "GRIND_DONE"}),
-    ]
+    router = [_bash(_file_comment(GOAL, problem)), _after(OK, {"text": "GRIND_DONE"})]
     roles = _goal_roles(harness, worker_problems=[problem])
     result = _run(harness, _script(harness, roles, router))
     _no_notes(result)
+    _notified(result, problem)
     issues = harness.read_gh_state()["issues"]
     child = [c for c in issues[GOAL].get("comments", []) if FLAKY["summary"] in c["body"]]
     assert len(child) == 1, issues[GOAL].get("comments")
@@ -312,13 +328,11 @@ def test_x2_comment_policy_comments_on_the_related_child(harness: Harness) -> No
 def test_x3_comment_policy_without_related_issue_comments_on_meta(harness: Harness) -> None:
     _seed(harness)
     _run_facts(harness, "comment")
-    router = [
-        _after(_saw(FLAKY), _bash(_file_comment(META, FLAKY))),
-        _after(OK, {"text": "GRIND_DONE"}),
-    ]
+    router = [_bash(_file_comment(META, FLAKY)), _after(OK, {"text": "GRIND_DONE"})]
     roles = _goal_roles(harness, worker_problems=[FLAKY])
     result = _run(harness, _script(harness, roles, router))
     _no_notes(result)
+    _notified(result, FLAKY)
     issues = harness.read_gh_state()["issues"]
     meta = [c for c in issues[META].get("comments", []) if FLAKY["summary"] in c["body"]]
     assert len(meta) == 1, issues[META].get("comments")
@@ -332,7 +346,7 @@ def test_x4_duplicate_problems_across_roles_and_fix_rounds_are_filed_once(
     _seed(harness)
     _run_facts(harness, "issue")
     router = [
-        _after(_saw(FLAKY), _bash(_file_issue(FLAKY))),
+        _bash(_file_issue(FLAKY)),
         _after(OK, _bash(_file_issue(DOCS))),
         _after(OK, {"text": "GRIND_DONE"}),
     ]
@@ -346,23 +360,40 @@ def test_x4_duplicate_problems_across_roles_and_fix_rounds_are_filed_once(
     _no_notes(result)
     ran = {r["role"] for r in result.requests}
     assert {"integrator:fix", "lander:1"} <= ran, ran
-    # The workflow hands the router each problem once, however often it was reported.
-    seen = _router_saw(result)
+    # The workflow hands the router each problem once, however often it was
+    # reported. The router's own commands quote the summary too, but never
+    # as a `summary` field (plain or JSON-escaped).
+    seen = _notified(result, FLAKY, DOCS)
     for p in (FLAKY, DOCS):
-        entries = re.findall(r'"summary"\s*:\s*"' + re.escape(p["summary"]) + '"', seen)
+        field = r'summary\\?"?\s*:\s*\\?"?' + re.escape(p["summary"])
+        entries = re.findall(field, seen)
         assert len(entries) == 1, (p["summary"], seen[-3000:])
     followups = _followups(harness)
     titles = sorted(i["title"] for i in followups.values())
     assert titles == sorted(f"{p['kind']}: {p['summary']}" for p in (DOCS, FLAKY)), titles
 
 
+def test_x5_subagent_issue_create_is_denied(harness: Harness) -> None:
+    # A worker that tries to file its own problem is refused by the hook; it
+    # returns the problem instead and the router files it.
+    _seed(harness)
+    _run_facts(harness, "issue")
+    router = [_bash(_file_issue(FLAKY)), _after(OK, {"text": "GRIND_DONE"})]
+    roles = _goal_roles(harness, worker_problems=[FLAKY], worker_tries_create=True)
+    result = _run(harness, _script(harness, roles, router))
+    _no_notes(result)
+    worker = _bash_by(result, "grind-worker")
+    assert [c for c in worker if "gh issue create" in c], worker
+    creates = _issue_creates(harness)
+    assert len(creates) == 1, creates
+    assert "self-filed" not in json.dumps(creates)
+    assert len(_followups(harness)) == 1
+
+
 def test_x6_open_followup_does_not_block_the_meta_close(harness: Harness) -> None:
     _seed(harness)
     _run_facts(harness, "issue")
-    router = [
-        _after(_saw(FLAKY), _bash(_file_issue(FLAKY))),
-        _after(OK, {"text": "GRIND_DONE"}),
-    ]
+    router = [_bash(_file_issue(FLAKY)), _after(OK, {"text": "GRIND_DONE"})]
     roles = _goal_roles(harness, worker_problems=[FLAKY])
     result = _run(harness, _script(harness, roles, router))
     _no_notes(result)
@@ -370,13 +401,58 @@ def test_x6_open_followup_does_not_block_the_meta_close(harness: Harness) -> Non
     followups = _followups(harness)
     assert len(followups) == 1, followups
     assert all(i["state"] == "open" for i in followups.values())
-    # Reconcile closes the meta once every sub-issue is legitimately closed;
-    # the open follow-up is not among them, so it cannot hold the meta open.
+    # The meta issue's close depends on its sub-issues only; the open
+    # follow-up is not among them, so it cannot hold the meta open.
     subs = issues[META]["sub_issues"]
     assert [s["number"] for s in subs] == [int(GOAL)], subs
     assert all(s["state"] == "closed" for s in subs), subs
     assert issues[GOAL]["closed_by"]["kind"] == "pr", issues[GOAL]
     assert not set(followups) & {str(s["number"]) for s in subs}
+
+
+def test_x6_reconcile_closes_the_meta_despite_an_open_followup(harness: Harness) -> None:
+    # The feature PR merged into main but left the meta open: `clud grind
+    # reconcile` closes it, and the open follow-up neither stops that nor is
+    # touched by it.
+    feature_pr, branch, run_id = 150, f"grind/meta-{META}-1f3a", "1f3a"
+    marker = f"<!-- grind:v1 feature-pr=#{feature_pr} branch={branch} run={run_id} -->"
+    meta = _issue("meta: auth rework", "Tracked as sub-issues.", labels=["grind:on-feature"])
+    followup = _issue(
+        "flaky-test: feature-stage follow-up",
+        f"x Refs #{META} <!-- grind:followup meta={META} stage=feature "
+        f"feature-pr={feature_pr} -->",
+        labels=[LABEL],
+    )
+    state = _world({int(META): meta, 201: followup})
+    state["issues"][META]["comments"].append({"id": 2000, "body": marker})
+    state["prs"] = [
+        {
+            "number": feature_pr,
+            "head": branch,
+            "state": "MERGED",
+            "title": f"grind: meta {META}",
+            "base": "main",
+            "body": f"Refs #{META}",
+        }
+    ]
+    harness.write_gh_state(state)
+    ran = process.run(
+        [str(harness.clud), "grind", "reconcile"],
+        cwd=str(harness.repo),
+        capture_output=True,
+        text=True,
+        env=harness.env(),
+        timeout=120,
+    )
+    out = (ran.stdout or "") + (ran.stderr or "")
+    assert ran.returncode == 0, out[-3000:]
+    issues = harness.read_gh_state()["issues"]
+    assert issues[META]["state"] == "closed", (issues[META], out[-3000:])
+    assert "grind:on-feature" not in issues[META]["labels"], issues[META]
+    assert issues["201"]["state"] == "open", issues["201"]
+    assert issues["201"]["labels"] == [LABEL], issues["201"]
+    assert issues["201"]["comments"] == [], issues["201"]
+    assert issues[META]["sub_issues"] == []
 
 
 def _followup_world(h: Harness, pr_state: str) -> None:
@@ -420,11 +496,12 @@ def _intake(pr_state: str, pick: str) -> list[dict[str, Any]]:
 
 
 def test_x7_intake_gates_followups_on_their_feature_pr(harness: Harness) -> None:
-    skill = harness.config / "skills" / "grind-intake" / "SKILL.md"
-    text = skill.read_text(encoding="utf-8")
-    assert LABEL in text, text[-2000:]
-    assert "stage=bugs" in text, text[-2000:]
-    assert "feature-pr=" in text, text[-2000:]
+    for name in ("grind-intake", "grind-cron", "clud-issue-triage"):
+        text = (harness.config / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+        assert LABEL in text, (name, text[-2000:])
+        assert "stage=bugs" in text, (name, text[-2000:])
+        assert "feature-pr=" in text, (name, text[-2000:])
+        assert "MERGED" in text, (name, text[-2000:])
 
     # Feature PR still open: only the bug-stage follow-up (#202) is eligible.
     _followup_world(harness, "OPEN")
@@ -463,13 +540,11 @@ def test_x8_failed_filing_is_reported_inline(harness: Harness) -> None:
     report = (
         f"GRIND_DONE. Problems not filed: {FLAKY['kind']}: {FLAKY['summary']} ({FLAKY['evidence']})"
     )
-    router = [
-        _after(_saw(FLAKY), _bash(_file_issue(FLAKY))),
-        _after({"is_error": True}, {"text": report}),
-    ]
+    router = [_bash(_file_issue(FLAKY)), _after({"is_error": True}, {"text": report})]
     roles = _goal_roles(harness, worker_problems=[FLAKY])
     result = _run(harness, _script(harness, roles, router))
     _no_notes(result)
+    _notified(result, FLAKY)
     assert not _followups(harness)
     # The goal still landed: the failed filing did not stop the run.
     prs = harness.read_gh_state()["prs"]

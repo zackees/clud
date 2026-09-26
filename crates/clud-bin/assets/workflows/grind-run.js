@@ -162,6 +162,7 @@ const CLASSIFY = {
       name: { type: 'string' }, independent: { type: 'boolean' }, children: { type: 'array', items: { type: 'string' } } } } },
     order: { type: 'array', items: { type: 'string' }, description: 'dependency order of child ids' },
     confident: { type: 'boolean' },
+    problems: PROBLEMS,
   },
 }
 
@@ -194,7 +195,7 @@ const thresholdVerdict = (c, ids = []) => {
 
 // Prework helpers (#1408): the plan comment is public, so local-only state
 // (preflight, absolute paths) never leaves the machine.
-const LOCAL_ONLY = ['repo_path', 'checkout', 'stash', 'wip', 'start_branch']
+const LOCAL_ONLY = ['repo_path', 'checkout', 'worktree', 'stash', 'wip', 'start_branch']
 const stripLocal = (v) => Array.isArray(v)
   ? v.map(stripLocal)
   : (v && typeof v === 'object')
@@ -206,41 +207,87 @@ const publicPlan = (p) => {
   return pub
 }
 const PLAN_LIMIT = 65536
+// Pretty JSON, except that an array element holding no nested array/object
+// (a child id, a one-line child entry) stays on one line (#1408).
+const planJson = (v, pad = '') => {
+  const inner = pad + ' '
+  const nests = (x) => !!x && typeof x === 'object' && Object.values(x).some(y => y && typeof y === 'object')
+  if (Array.isArray(v)) {
+    if (!v.length) return '[]'
+    return '[\n' + v.map(x => inner + (nests(x) ? planJson(x, inner) : JSON.stringify(x === undefined ? null : x))).join(',\n') + '\n' + pad + ']'
+  }
+  if (v && typeof v === 'object') {
+    const e = Object.entries(v).filter(([, x]) => x !== undefined && typeof x !== 'function')
+    if (!e.length) return '{}'
+    return '{\n' + e.map(([k, x]) => inner + JSON.stringify(k) + ': ' + planJson(x, inner)).join(',\n') + '\n' + pad + '}'
+  }
+  return JSON.stringify(v === undefined ? null : v)
+}
+// The prework agent posts a body as one single-quoted shell word, and clud's
+// command hook reads a backtick, `$(`, `<(` or `>(` as a substitution even
+// inside quotes. So a body holds no backtick, single quote, `$`, `<` or `>`
+// outside its marker: the fence is `~~~json`, and those characters inside
+// JSON strings become \u escapes (JSON.parse restores them).
+const inert = (json) => json.replace(/[`'$<>]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
+// The comment bodies for a plan: one when it fits in `limit` characters,
+// else part 1 (every field, stages without their per-child entries) plus
+// parts 2..N carrying each stage's children and their depends_on_bugs
+// entries. The caller refuses to post if any body still reaches PLAN_LIMIT.
 const planBodies = (p, limit = 60000) => {
   const cap = Math.min(limit, PLAN_LIMIT - 1)
   const pub = publicPlan(p)
   const id = pub.run_id
-  const fence = (o) => '\n```json\n' + JSON.stringify(o, null, 1) + '\n```'
-  const single = `<!-- grind:v1 plan run=${id} -->` + fence(pub)
-  if (single.length < cap) return [single]
+  const fence = (s) => '\n~~~json\n' + inert(s) + '\n~~~'
+  const single = `<!-- grind:v1 plan run=${id} -->` + fence(planJson(pub))
+  if (single.length <= cap) return [single]
   const stages = Array.isArray(pub.stages) ? pub.stages : []
-  // Part 1: every field, with each stage's children emptied.
-  const head = { ...pub, stages: stages.map(s => (s && Array.isArray(s.children)) ? { ...s, children: [] } : s) }
+  const isStage = (s) => !!s && typeof s === 'object' && !Array.isArray(s)
+  const kids = (s) => isStage(s) && Array.isArray(s.children) ? s.children : []
+  const deps = (s) => isStage(s) && s.depends_on_bugs && typeof s.depends_on_bugs === 'object' ? s.depends_on_bugs : {}
+  const cid = (c) => String(c && typeof c === 'object' ? c.id : c)
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+  // Part 1: every field; each stage keeps only depends_on_bugs entries that
+  // name no child of it (per-child entries travel with the child).
+  const head = { ...pub, stages: stages.map(s => {
+    if (!isStage(s) || !Array.isArray(s.children)) return s
+    const ids = new Set(s.children.map(cid))
+    const rest = Object.fromEntries(Object.entries(deps(s)).filter(([k]) => !ids.has(String(k))))
+    return { ...s, children: [], ...(has(s, 'depends_on_bugs') ? { depends_on_bugs: rest } : {}) }
+  }) }
   const items = []
-  stages.forEach((s, i) => (s && Array.isArray(s.children) ? s.children : []).forEach(c => items.push({ i, c })))
-  // Room for a worst-case marker (part=9999/9999) and fence.
+  stages.forEach((s, i) => kids(s).forEach(c => items.push({ i, c, d: has(deps(s), cid(c)) ? deps(s)[cid(c)] : undefined })))
+  const body = (list) => {
+    const out = []
+    list.forEach(({ i, c, d }) => {
+      let e = out.find(b => b.index === i)
+      if (!e) out.push(e = { index: i, stage: stages[i].stage, group: stages[i].group, children: [] })
+      e.children.push(c)
+      if (d !== undefined) (e.depends_on_bugs = e.depends_on_bugs || {})[cid(c)] = d
+    })
+    return planJson({ stages: out })
+  }
+  // Room for a worst-case marker (part=9999/9999) and the fence. Sizes are
+  // counted per item (an over-estimate of its lines), not re-serialized.
   const room = cap - `<!-- grind:v1 plan run=${id} part=9999/9999 -->`.length - 16
+  const stageCost = (i) => inert(planJson({ index: i, stage: stages[i].stage, group: stages[i].group, children: [], depends_on_bugs: {} }, '  ')).length + 32
+  const itemCost = ({ c, d }) => inert(JSON.stringify(c)).length + 12 + (d === undefined ? 0 : inert(planJson(d, '    ')).length + inert(JSON.stringify(cid(c))).length + 14)
   const chunks = []
   let cur = []
-  const body = (list) => {
-    const byStage = []
-    list.forEach(({ i, c }) => {
-      let e = byStage.find(b => b.stage === i)
-      if (!e) byStage.push(e = { stage: i, name: stages[i] && stages[i].name, children: [] })
-      e.children.push(c)
-    })
-    return JSON.stringify({ stages: byStage }, null, 1)
-  }
+  let size = 32
+  let seen = new Set()
   for (const it of items) {
-    if (cur.length && body([...cur, it]).length > room) { chunks.push(cur); cur = [] }
+    const cost = () => itemCost(it) + (seen.has(it.i) ? 0 : stageCost(it.i))
+    if (cur.length && size + cost() > room) { chunks.push(cur); cur = []; size = 32; seen = new Set() }
+    size += cost()
+    seen.add(it.i)
     cur.push(it)
   }
   if (cur.length) chunks.push(cur)
   const n = chunks.length + 1
   const mark = (k) => `<!-- grind:v1 plan run=${id} part=${k}/${n} -->`
   return [
-    mark(1) + fence(head) + `\nContinued in parts 2..${n} (posted below).`,
-    ...chunks.map((ch, k) => mark(k + 2) + '\n```json\n' + body(ch) + '\n```'),
+    mark(1) + fence(planJson(head)) + `\nThe plan continues in parts 2..${n} (part=k/${n}), posted right after this comment.`,
+    ...chunks.map((ch, k) => mark(k + 2) + fence(body(ch))),
   ]
 }
 const PREWORK = { type: 'object', required: ['posted'], properties: {
@@ -257,10 +304,11 @@ if (args.planOnly) {
   // log() lines never reach the router (the Workflow result arrives as a
   // notification carrying only the return value), so the classification
   // lines and the keep message are returned too.
+  collect(c, 'planner', 'classify')
   if (!c) {
     const keep = `keeping #${args.meta} as is: planner died`
     log(keep)
-    return { planOnly: true, path: 'simple', reason: 'planner died', message: keep, lines: [] }
+    return { planOnly: true, path: 'simple', reason: 'planner died', message: keep, lines: [], problems: allProblems() }
   }
   const classified = new Set((c.children || []).map(ch => idKey(ch.id)))
   const lines = [...classificationLines(c, args.meta),
@@ -272,7 +320,7 @@ if (args.planOnly) {
     ? `keeping #${args.meta} as is: ${reason} (${nGroups} feature group${nGroups === 1 ? '' : 's'}, ${args.goals.length} children)`
     : `regroup #${args.meta}: ${nGroups} feature groups, ${args.goals.length} children`
   log(message)
-  return { planOnly: true, path, reason, message, lines, classification: c }
+  return { planOnly: true, path, reason, message, lines, classification: c, problems: allProblems() }
 }
 
 // Prework (#1408): record the plan on the meta issue before any worker runs.
@@ -283,6 +331,12 @@ if (PLAN_URL) {
 } else if (args.plan) {
   phase('Prework')
   const bodies = planBodies(args.plan)
+  const oversized = bodies.findIndex(b => b.length >= PLAN_LIMIT)
+  if (oversized >= 0) {
+    const note = `plan comment part ${oversized + 1} is ${bodies[oversized].length} characters (GitHub's limit is ${PLAN_LIMIT})`
+    log(`plan comment not posted: ${note}; stopping before any worker`)
+    return { stopped: 'prework', note, problems: allProblems() }
+  }
   const pw = collect(await agent(
     `Follow your built-in /grind-prework procedure.\n\nRepo: ${REPO} (default branch ${MAIN}). Meta issue: #${args.plan.meta}.\n` +
     `Post these ${bodies.length} comment bod${bodies.length === 1 ? 'y' : 'ies'} verbatim, in order:\n\n` +
@@ -690,6 +744,10 @@ if (PLAN_URL) log(`plan: ${PLAN_URL}`)
 if (allProblems().length) log(`problems go to: ${PROBLEM_REPORTING} (the router files them)`)
 if (!FEATURE) {
   logProblems()
+  // Problems no goal owns (prework's) ride on one extra entry, so the router files them too.
+  const goalIds = new Set(summary.map(s => String(s.goal)))
+  const orphans = allProblems().filter(p => !goalIds.has(String(p.goal)))
+  if (orphans.length) summary.push({ goal: 'run', status: 'problems', note: 'problems reported outside any goal', problems: orphans })
   // With a plan the router needs plan_url back for the feature-stage call.
   return args.plan ? { goals: summary, plan_url: PLAN_URL, problems: allProblems(), problem_reporting: PROBLEM_REPORTING } : summary
 }
@@ -701,7 +759,9 @@ if (!FEATURE.pr) {
 } else if (FEATURE_MERGE === 'auto') {
   phase('Land')
   const l = collect(await agent(
-    `Follow your built-in /grind-land procedure for the FEATURE PR.\n\nRepo: ${REPO} (default branch ${MAIN}).\nFeature PR: ${FEATURE.pr}\nFeature branch: ${FEATURE.branch}\n\n` +
+    `Follow your built-in /grind-land procedure for the FEATURE PR.\n\nRepo: ${REPO} (default branch ${MAIN}).` +
+    (PLAN_URL ? `\nPlan comment: ${PLAN_URL} (read it before you start; it is the recorded plan and never changes).` : '') +
+    `\nFeature PR: ${FEATURE.pr}\nFeature branch: ${FEATURE.branch}\n\n` +
     `1. gh pr ready ${FEATURE.pr}\n2. Wait for CI with github/pr_merge_watch.\n` +
     `3. gh pr merge ${FEATURE.pr} --merge (no --admin, no --squash, no --delete-branch).\n` +
     `If a review is required and missing, return status 'gave_up' with summary 'waiting for review'; do not retry.`,

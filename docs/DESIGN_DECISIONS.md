@@ -4526,3 +4526,31 @@ branch's first commit.
 "carry" is only offered when the plan has a feature stage. Finish has nothing
 to restore for a carry. The contract is owned by
 [architecture/grind.md](architecture/grind.md#preflight-and-the-single-question-round).
+
+## DD-102: The /grind plan comment body is shell-inert and piped from `printf`
+
+**Status:** Accepted
+
+**Context:** #1408. `grind-prework` may not write files, so it must pass the
+plan body to `gh issue comment` through its shell. clud's command hook
+checks every shell call: its removal checks read a backtick, `$(`, `<(` or
+`>(` as a substitution even inside single quotes, and its rm-identity check
+parses each line of a heredoc body as a command. A plan in a backtick fence
+passed with `--body '...'`, or any JSON body in a heredoc, is refused. A
+60,000-character `--body` argument also overflows the Windows command-line
+limit.
+
+**Decision:** The workflow builds bodies that are inert in a single-quoted
+shell word: a `~~~json` fence, and backticks, single quotes, `$`, `<` and
+`>` inside the JSON written as `\u` escapes. Prework posts each body with
+`printf '%s' '<body>' | gh issue comment <meta> --body-file -`, and its caps
+allow exactly that `printf` form.
+
+**Rationale:** Escaping in the workflow keeps the fix in one place and
+leaves the hook's fail-closed parsing untouched. The JSON still parses to
+the same plan, and a tilde fence renders like a backtick fence. Stdin has
+no argument-length limit on any platform.
+
+**Consequences:** Plan readers must parse the JSON rather than grep it for
+raw characters. The contract is owned by
+[architecture/grind.md](architecture/grind.md#prework-and-the-plan-comment).

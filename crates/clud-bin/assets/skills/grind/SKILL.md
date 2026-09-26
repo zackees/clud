@@ -359,7 +359,10 @@ agent gets that comment's URL. Nobody edits the plan comment.
 before), post one `<!-- grind:v1 status run=<run-id> -->` comment on the
 meta issue with one line per child. Edit it with
 `gh api -X PATCH repos/<o>/<r>/issues/comments/<id> -f body=...` as results
-arrive and once more at Finish.
+arrive and once more at Finish. clud's command hook reads a backtick as a
+substitution even inside quotes, so write any body that has one to a file
+and pass it with `--body-file <f>` (for the PATCH, `--input <f>` holding
+`{"body": ...}`).
 
 Concurrency is fixed by the workflow: at most 4 planner/worker/reviewer
 agents at once, and exactly one integrator.
@@ -420,8 +423,10 @@ two), whether or not every goal merged:
      Once it merged, run `clud grind reconcile` again so every issue it
      closed loses the `grind:on-feature` label.
 2. **File problems (router only).** Gather every `problems` item from each
-   workflow result (each goal entry's `problems`, `feature.problems`, and the
-   top-level `problems`), and dedupe by kind + summary + related_issue. Then,
+   workflow result (each goal entry's `problems`, including the
+   `goal: 'run'` entry for problems no goal owns, `feature.problems`, the
+   top-level `problems`, and the plan-only pass's `problems` from 1b), and
+   dedupe by kind + summary + related_issue. Then,
    by the plan's `problem_reporting`:
    - `issue`: create the label first if missing
      (`gh label create grind:followup --force`). For each problem, search for

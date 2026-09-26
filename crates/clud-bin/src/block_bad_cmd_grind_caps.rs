@@ -402,6 +402,16 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
             if inspect_ok(&program, words) || is_gh_read(words) {
                 return None;
             }
+            // `printf '%s' '<body>' | gh issue comment <meta> --body-file -`:
+            // the one producer /grind-prework pipes a plan body from. Exactly
+            // a `%s` format and one argument, so no `-v`, and no redirection.
+            if program == "printf"
+                && !words[0].contains(['/', '\\'])
+                && words.len() == 3
+                && words[1] == "%s"
+            {
+                return None;
+            }
             if program == "gh"
                 && words.get(1).is_some_and(|w| w == "issue")
                 && words.get(2).is_some_and(|w| w == "comment")
@@ -820,12 +830,25 @@ pub(super) fn may_concern_router(command: &str) -> bool {
 /// The issue number a `gh issue comment` argument list targets (`#` stripped,
 /// or the trailing number of an issue URL), or `Err(flag)` for any flag other
 /// than `-R/--repo`, `-b/--body` and `-F/--body-file` (so `--edit-last`,
-/// `--delete-last`, `--editor` and `--web` are refused).
+/// `--delete-last`, `--editor` and `--web` are refused). Input redirections
+/// (`--body-file - <<'EOF'`, `< body.md`) and fd duplications (`2>&1`) are
+/// shell plumbing, not arguments; any other output redirection is refused.
 fn comment_target(args: &[String]) -> Result<Option<String>, String> {
     let mut target = None;
     let mut i = 0;
     while let Some(word) = args.get(i) {
         i += 1;
+        match redirection(word) {
+            Some(Redirection::Input { operand_follows }) => {
+                if operand_follows {
+                    i += 1;
+                }
+                continue;
+            }
+            Some(Redirection::FdDup) => continue,
+            Some(Redirection::Output) => return Err(word.clone()),
+            None => {}
+        }
         if word.starts_with('-') {
             let name = word.split('=').next().unwrap_or(word);
             if !matches!(
@@ -851,6 +874,37 @@ fn comment_target(args: &[String]) -> Result<Option<String>, String> {
         target = Some(num.to_string());
     }
     Ok(target)
+}
+
+/// A shell redirection word, as the tokenizer leaves it (quotes stripped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Redirection {
+    /// `<file`, `<<EOF`, `<<-EOF`, `<<<text`; `operand_follows` when the word
+    /// is the bare operator (`<`, `<<`, `<<<`) and its operand is the next word.
+    Input { operand_follows: bool },
+    /// `2>&1`, `>&2`: duplicates a descriptor, writes no file.
+    FdDup,
+    /// Any other `>`: writes a file.
+    Output,
+}
+
+fn redirection(word: &str) -> Option<Redirection> {
+    let op = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    if let Some(rest) = op.strip_prefix('<') {
+        let operand = rest.trim_start_matches('<').trim_start_matches('-');
+        return Some(Redirection::Input {
+            operand_follows: operand.is_empty(),
+        });
+    }
+    let rest = op.strip_prefix('>')?;
+    let dup = rest
+        .strip_prefix('&')
+        .is_some_and(|fd| !fd.is_empty() && fd.chars().all(|c| c.is_ascii_digit() || c == '-'));
+    Some(if dup {
+        Redirection::FdDup
+    } else {
+        Redirection::Output
+    })
 }
 
 fn program_name(word: &str) -> String {
@@ -1535,6 +1589,44 @@ mod tests {
             ..run(true, false)
         };
         assert!(!allowed(PREWORK, "git worktree add ../x", &parallel));
+    }
+
+    /// The /grind-prework skill pipes the plan body from `printf '%s'` into
+    /// `gh issue comment <meta> --body-file -`. Stdin redirections (a `<`
+    /// file, a heredoc) are plumbing, not a second comment target; output
+    /// redirection still writes a file, and `printf` is allowed only as that
+    /// bare `%s` producer.
+    #[test]
+    fn prework_posts_the_plan_through_stdin() {
+        let facts = RunFacts {
+            meta: Some("100".to_string()),
+            ..run(false, false)
+        };
+        let body = "'<!-- grind:v1 plan run=r1 -->\n~~~json\n{\n \"meta\": 100\n}\n~~~'";
+        let piped = format!("printf '%s' {body} | gh issue comment 100 --repo o/r --body-file -");
+        let elsewhere = format!("printf '%s' {body} | gh issue comment 101 --body-file -");
+        for command in [
+            piped.as_str(),
+            "gh issue comment 100 --body-file - << 'EOF'\nbody\nEOF",
+            "gh issue comment 100 -F - < plan-part-1.md",
+            "gh issue comment 100 --body x 2>&1",
+        ] {
+            assert!(allowed(PREWORK, command, &facts), "{command}");
+        }
+        for command in [
+            elsewhere.as_str(),
+            "gh issue comment 101 --body-file - <<'EOF'\nbody\nEOF",
+            "gh issue comment 100 --body x > out.txt",
+            "gh issue comment 100 --body x >> out.txt",
+            "printf '%s' x > plan.md",
+            "printf -v PATH '%s' /tmp",
+            "printf '%s' a b",
+            "./printf '%s' x",
+        ] {
+            assert!(!allowed(PREWORK, command, &facts), "{command}");
+        }
+        // Only prework may run printf at all.
+        assert!(!allowed(WORKER, "printf '%s' x", &facts));
     }
 
     #[test]
