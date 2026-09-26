@@ -142,6 +142,14 @@ destination = "/var/run/docker.sock"
 scope = "machine"
 destination = "/root/.cache/act"
 
+# act's built-in Actions cache server (`--cache-server-path` in
+# ci/act_ci.sh). Every `actions/cache`, setup-uv and setup-soldr cache the jobs
+# save lands here, so the next run restores the venv, the Rust toolchain and
+# soldr's zccache build cache instead of starting cold.
+[stack.clud_act.volumes.act-server-cache]
+scope = "machine"
+destination = "/root/.cache/actcache"
+
 [task.act-ci-list]
 stack = "clud_act"
 cmd = "sh /workspace/ci/act_ci.sh --list"

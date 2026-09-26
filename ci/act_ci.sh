@@ -13,7 +13,24 @@ WORK="/tmp/$RUN/src"
 CHECKOUT="/tmp/$RUN/checkout"
 IMAGE="${ACT_IMAGE:-catthehacker/ubuntu:act-24.04}"
 REPO="${ACT_REPO:-zackees/clud}"
-trap 'rm -rf "/tmp/$RUN"' EXIT
+# Both live in machine-scoped bosn volumes (bosn.toml `clud_act`), so they
+# outlive this container: action checkouts, and the Actions cache server that
+# backs actions/cache, setup-uv and setup-soldr's caches.
+ACTION_CACHE=/root/.cache/act
+SERVER_CACHE=/root/.cache/actcache
+
+# Job containers are siblings on the host engine, outside bosn's registry.
+# `--rm` removes them on a normal exit; after a crash or interrupt, this trap
+# removes the containers labelled with this run and the per-job volumes act
+# named after it (the workflow names carry $RUN, see below).
+cleanup() {
+    ids="$(docker ps -aq --filter "label=clud.act-run=$RUN" 2>/dev/null || true)"
+    [ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1 || true
+    vols="$(docker volume ls -q --filter "name=-$RUN-" 2>/dev/null || true)"
+    [ -z "$vols" ] || docker volume rm -f $vols >/dev/null 2>&1 || true
+    rm -rf "/tmp/$RUN"
+}
+trap cleanup EXIT
 
 mkdir -p "$WORK" "$CHECKOUT"
 # --no-same-owner: the copy is owned by root, not the host uid, so git doesn't
@@ -80,10 +97,27 @@ runs:
       shell: bash
 EOF
 
+# setup-soldr authenticates its release lookups with SOLDR_GITHUB_TOKEN, which
+# ci.yml fills from secrets.GITHUB_TOKEN. `bosn run` forwards no host
+# environment and a token is never written to a file, so runs are anonymous
+# unless GITHUB_TOKEN is already set inside this container.
+set --
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    set -- -s GITHUB_TOKEN
+fi
+
+# --cache-server-path: act's default is ~/.cache/actcache, but pinning it to
+# the volume makes the reuse explicit. Without a persistent path every run
+# restored nothing: a cold venv, and 0 zccache hits in the Rust build.
+# --pull=false: reuse the local runner image (a missing one is still pulled).
 act pull_request -W .github/workflows/ci.yml -j "$JOB" \
     -e "/tmp/$RUN/event.json" \
     --local-repository "actions/checkout@v4=$CHECKOUT" \
     -P "ubuntu-24.04=$IMAGE" \
+    --pull=false \
     --rm \
+    --container-options "--label clud.act-run=$RUN" \
     --artifact-server-path "/tmp/$RUN/artifacts" \
-    --action-cache-path /root/.cache/act
+    --action-cache-path "$ACTION_CACHE" \
+    --cache-server-path "$SERVER_CACHE" \
+    "$@"

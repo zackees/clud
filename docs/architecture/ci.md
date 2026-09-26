@@ -88,6 +88,30 @@ directly:
   names alone, so two concurrent runs on one host would remove each other's
   containers. The script gives every workflow a per-run name.
 
+Caches persist across runs in two machine-scoped Bosn volumes:
+- `act-cache` (`/root/.cache/act`) holds the action checkouts.
+- `act-server-cache` (`/root/.cache/actcache`) backs act's Actions cache
+  server (`--cache-server-path`), so what `actions/cache`, setup-uv and
+  setup-soldr save is restored by the next run. That includes the venv, the
+  solo Rust toolchain and soldr's zccache build cache. Before that volume
+  existed, the server lived in the container and every run started cold.
+
+The runner image is reused (`--pull=false`). Job containers carry a
+`clud.act-run=<run>` label, and the script's exit trap removes them, along
+with the per-run job volumes, after a crash or interrupt.
+
+setup-soldr's saves follow its `save-cache` policy. The `v0` pin used here
+saves on every event. Starting with setup-soldr#527, `save-cache: auto`
+skips durable saves on `pull_request` events, which is how `act_ci.sh`
+drives `ci.yml`. When `v0` moves past it, local act runs will restore but
+no longer refresh the soldr caches. Give `save-cache` an act-only value then;
+this `v0` pin has no such input.
+
+The `clud_act` stack and `ci/act_ci.sh` exist only because bosn has no act
+support of its own. [zackees/bosn#302](https://github.com/zackees/bosn/issues/302)
+tracks making act and its caches a first-class bosn capability, so a task is
+a single `cmd`. Once that lands, delete them.
+
 `act --dryrun` is useful for planning/validation but does not run action code.
 Its Docker runner is not a native macOS or Windows runner, and this workflow's
 reusable jobs, artifacts, and runner environment can differ from GitHub's.
