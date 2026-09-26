@@ -226,9 +226,9 @@ the codebase stays portable.
   environment it exists for. `GetConsoleCP` answers "is a console attached"
   directly: 65001 with one, 0 / `ERROR_INVALID_HANDLE` after `FreeConsole`.
 
-  For PTY-mode launches (`--pty` / POSIX `clud loop`) the `OscTitleStripper`
-  stream filter in the same file eats OSC 0/2 sequences from the child's
-  output before they reach the terminal, so the keeper rarely fires.
+  For PTY-mode launches (`--pty` / POSIX `clud loop`) and `clud attach` the
+  `OscTitleStripper` stream filter in the same file eats OSC 0/2 sequences
+  from the child's output before they reach the terminal, so the keeper rarely fires.
   Numeric OSC bodies other than `0`/`2` (8 hyperlinks, 10/11 color queries,
   52 clipboard, 133 prompt marks, etc.) pass through verbatim — stripping
   them would break TUIs that rely on the response.
