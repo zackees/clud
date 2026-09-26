@@ -203,6 +203,34 @@ Do not auto-install tools, prune Docker resources, or consume remote CI merely
 to avoid a reproducible local failure. See the bundled `clud-bosn` and
 `clud-preloop` skills for their respective prerequisites and limits.
 
+### Manual Windows probes (ignored tests)
+
+<!-- manual-windows-probes -->
+
+Three Windows-only test files are `#[ignore]`d, with a "Run manually" note in
+their module docs, because they
+pin CPU cores for wall-clock seconds or time host-wide enumeration. They are the
+only tests that exercise the real Win32 sampling APIs (`Toolhelp32Snapshot`,
+`GetThreadTimes`, `GetProcessIoCounters`, `NtQueryInformationProcess`,
+`NtQuerySystemInformation`, sysinfo's `ProcessesToUpdate`) behind the wedge
+watchdog, the reaper's Job-Object diagnostics and process tier refresh. No CI
+lane passes `--ignored`, so nothing runs them automatically
+([#1368](https://github.com/zackees/clud/issues/1368)).
+
+Run them on a real Windows box before cutting a release, and whenever you touch
+wedge watchdog, reaper diagnostics or process tier refresh code, or bump the
+`windows` / `sysinfo` crates. Each `tests/<dir>/main.rs` is its own test
+target, so the target is the directory name:
+
+```bash
+soldr cargo test -p clud --test reaper wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
+soldr cargo test -p clud --test diagnostics win32_hooking_probe -- --ignored --nocapture --test-threads=1
+soldr cargo test -p clud --test diagnostics tier_refresh_probe -- --ignored --nocapture --test-threads=1
+```
+
+Any new test file that is `#[ignore]`d and says "run manually" must be added to
+this list; `tests/test_manual_windows_probes.py` enforces it.
+
 ## The problem
 
 Every push fans out to **12 heavy workflows** (6 platforms x {unit-test,

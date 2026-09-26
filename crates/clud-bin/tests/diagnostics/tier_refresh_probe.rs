@@ -21,11 +21,13 @@
 //! result is **platform-specific**: sysinfo's Linux backend reads `/proc/<pid>`
 //! and may well make `Some` genuinely targeted there. Anyone extending the
 //! tier model to another platform should re-run this before trusting the
-//! Windows conclusion.
+//! Windows conclusion. Run manually:
 //!
 //! ```text
-//! soldr cargo test -p clud --test tier_refresh_probe -- --ignored --nocapture
+//! soldr cargo test -p clud --test diagnostics tier_refresh_probe -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! Listed in docs/architecture/ci.md "Manual Windows probes"; keep that checklist in sync.
 //!
 //! `#[ignore]`d — a timing probe, not a gate.
 
