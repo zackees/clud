@@ -590,6 +590,14 @@ pub enum Command {
     /// `/grind` router (#1336). The router's body runs this at invocation.
     #[command(hide = true)]
     GrindScripts,
+    /// Print or clear this session's `/grind` run-facts file (#1337). The
+    /// router writes its run facts there; clud's hook reads them by the
+    /// payload's session id.
+    #[command(hide = true)]
+    GrindFacts {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     #[command(hide = true)]
     InstallAssets {
         #[arg(long = "home", value_name = "DIR")]
@@ -1293,6 +1301,7 @@ pub enum GcSubcommand {
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "do-prompt",
     "grind-scripts",
+    "grind-facts",
     "install-assets",
     "loop",
     "up",
@@ -1787,6 +1796,20 @@ mod grind_scripts_parse_tests {
         let args = Args::parse_from_raw(raw);
         assert!(matches!(args.command, Some(Command::GrindScripts)));
         assert!(args.passthrough.is_empty());
+    }
+
+    #[test]
+    fn grind_facts_dispatches_with_its_action() {
+        let raw: Vec<String> = ["clud", "grind-facts", "path"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let args = Args::parse_from_raw(raw);
+        assert!(args.passthrough.is_empty());
+        match args.command {
+            Some(Command::GrindFacts { args }) => assert_eq!(args, vec!["path".to_string()]),
+            other => panic!("expected Command::GrindFacts, got {other:?}"),
+        }
     }
 
     #[test]

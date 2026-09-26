@@ -5,7 +5,7 @@ triggers:
   - When the user runs /grind or clud grind
   - When clud do or /goal has several independent deliverables to implement
   - When the user asks to burn down a meta issue, an issue list, or the issues page
-allowed-tools: Bash(clud grind-scripts:*)
+allowed-tools: Bash(clud grind-scripts:*), Bash(clud grind-facts:*)
 ---
 <!-- managed-by: clud -->
 
@@ -32,7 +32,7 @@ From the moment prework starts (the run's `grind-run` workflow, after the
 question round), nobody asks: no agent and not the main session calls
 AskUserQuestion, and clud's hook denies it for
 every `grind-*` subagent. Anything unexpected follows a rule recorded in
-advance in `run.json` (section 3).
+advance in the run facts (section 3).
 
 Every code change keeps a RED -> GREEN focused regression: the integrator
 first shows the failure or reproduction, then makes it pass before the
@@ -52,7 +52,7 @@ from the repository root and report what it prints: each issue it reopened,
 closed or unlabelled, every open feature PR with its state (draft, ready,
 waiting for review) and the issues waiting on it, and each stale feature PR.
 It reads only GitHub (the `grind:on-feature` label and `grind:v1` markers),
-never `run.json`. A failure is reported, not fatal. Optionally, mention once that a GitHub Action could run the same
+never the run facts. A failure is reported, not fatal. Optionally, mention once that a GitHub Action could run the same
 reconcile on a schedule; setting one up is out of scope for this run.
 
 ## 1. Intake
@@ -67,12 +67,18 @@ conversion question (or, with no argument, the pick of which open issues to
 take) is intake's only question and comes before section 1b.
 Intake may instead end the run with a refusal ("run `/do N`"), "Nothing to
 do", or a `gh` error; then stop there: skip every later section (Finish
-included), write no `.clud/grind/run.json`, and create nothing.
+included), write no run facts, and create nothing.
 
 ## 1b. Plan before asking (classification)
 
-After intake resolves the meta issue `T`, write `.clud/grind/run.json` at the
-repository root as:
+**The run facts.** clud's command hook reads this run's facts from one file
+per session, outside the repository: run `clud grind-facts path` once and
+use the absolute path it prints (`~/.clud/tmp/grind/<session>.json`) as
+`<facts>` everywhere below. Write and rewrite it with the Write tool; never
+put run facts in the working tree. Another `/grind` run, in this repo or any
+other, has its own file, so runs never share or clobber facts.
+
+After intake resolves the meta issue `T`, write `<facts>` as:
 
 ```json
 {"phase": "plan"}
@@ -114,7 +120,7 @@ PR under a different top meta never blocks; the scope is per top meta. Once
 that PR is merged (or closed), the next run may pick a feature again.
 
 Keep the per-child tracks (`bug` or `feature`) for section 3. Section 3 then
-overwrites `run.json` without `phase`, lifting the plan-only caps.
+overwrites `<facts>` without `phase`, lifting the plan-only caps.
 
 ## 1c. Repo-state preflight
 
@@ -128,7 +134,7 @@ Pick the run id now (4 lowercase hex characters); every later
 - `git fetch origin`, then
   `git rev-list --left-right --count origin/<main>...HEAD` (behind, ahead).
 
-`.clud/grind/` holds the run's own files (`run.json`, `plan.json`, the
+`.clud/grind/` holds the run's own files (`plan.json` and the
 feature worktree), never the user's changes: every preflight command here
 excludes it with that pathspec, so it is never reported, stashed or
 committed.
@@ -147,8 +153,8 @@ action right after the round, before prework:
   so the user's checkout is clean; section 4b applies it in the feature
   worktree.
 - **Abort**: stop. Create nothing on GitHub or in git, remove the
-  plan-phase `.clud/grind/run.json` with `clud trash <path>` (clud's rm shim
-  refuses a plain `rm`), and write no other file.
+  plan-phase run facts with `clud grind-facts clear`, and write no other
+  file.
 
 A clean tree records `preflight.action: "none"`.
 
@@ -216,7 +222,7 @@ after it, by the main session or anyone else.
   branch protection; `decide later` leaves the draft feature PR open for the
   user; `comment only` keeps the PR draft and posts one result comment on
   the meta issue. Never `--admin`. Record the answer as `feature_merge`
-  (`auto`, `later` or `comment`) in `run.json` and the plan.
+  (`auto`, `later` or `comment`) in `<facts>` and the plan.
 - **Problem reporting** (always): a new issue per problem (Recommended), or
   one comment per problem on the relevant issue.
 
@@ -254,7 +260,7 @@ question round and before prework:
   still fails with GitHub's 422, stop cleanly before prework: create or move
   nothing further, report `regroup failed: <reason>` with the changes
   already made (from `undo`), and fall back to `simple`.
-- **Undo record.** Append every change to `run.json` under `"undo": [...]`,
+- **Undo record.** Append every change to `<facts>` under `"undo": [...]`,
   one entry per change, recorded before its command runs:
   `{"op": "create", "issue": n}`,
   `{"op": "reparent", "issue": child, "from": old_parent, "to": new_parent}`,
@@ -262,15 +268,15 @@ question round and before prework:
 
 Then set the plan's `structure: "meta_of_metas"`, the chosen feature stage's
 `sub_meta` to its sub-meta number (`null` when `T` is the feature meta), and
-`deferred_groups` for the other groups. `meta` in `run.json` stays the top
-meta `T`, and section 3 keeps the `undo` array when it rewrites `run.json`.
+`deferred_groups` for the other groups. `meta` in `<facts>` stays the top
+meta `T`, and section 3 keeps the `undo` array when it rewrites `<facts>`.
 In section 4b, `<M>` in the branch name and `<meta>` in the `Closes` line
 are then the chosen group's sub-meta (`T` when `sub_meta` is `null`), which
 is how 1b's no-overlap check finds that PR on later runs.
 
 ## 3. Record the run
 
-Write `.clud/grind/run.json` at the repository root:
+Write `<facts>` (the path `clud grind-facts path` printed):
 
 ```json
 {"mode": "parallel", "ci": false, "scripts": {"lint": "./lint", "test": "./test --integration"},
@@ -297,7 +303,8 @@ starting branch. `preflight` is what Finish restores, and nothing else. `feature
 
 clud's command hook reads it to apply the per-role caps (the planner may add
 worktrees only in parallel mode; the integrator may run `act` only when CI is
-on; `grind-prework` may comment only on `meta`). Delete it when the run ends.
+on; `grind-prework` may comment only on `meta`). Remove it with
+`clud grind-facts clear` when the run ends (Finish, step 3).
 
 ## 3b. Assemble the plan
 
@@ -392,16 +399,16 @@ branch contains every bug fix that merged:
    `Closes #N` line, updates the table and labels the issue
    `grind:on-feature` as the goal lands.
 5. Record `{"feature": {"branch": "…", "worktree": "…", "pr": "…"},
-   "feature_merge": "…"}` in `run.json`, and pass `feature` and
+   "feature_merge": "…"}` in `<facts>`, and pass `feature` and
    `feature_merge` to the feature-stage `grind-run` call (section 4,
-   step 2). Until this step `run.json` has no `feature`: the bug stage runs
+   step 2). Until this step `<facts>` has no `feature`: the bug stage runs
    under the plain caps, where the lander merges each bug PR into `<main>`.
 
 The router creates no other worktree and never touches the user's checkout
 after preflight. When `origin/<main>` moves during the feature stage, the
 integrator merges it into the feature branch before the next feature goal
 (`git merge --no-ff origin/<main>` in the feature worktree); nobody rebases
-the feature branch. While `run.json` records the feature,
+the feature branch. While `<facts>` records the feature,
 clud's hook refuses the router a second `git worktree add`, any
 `gh issue close` (or `gh api … -f state=closed`), merging the feature PR,
 and deleting a `grind/*` branch.
@@ -457,8 +464,10 @@ two), whether or not every goal merged:
    it holds a rejected or failed goal's only copy; report it. A merged
    goal PR's commits stay reachable at `refs/pull/<n>/head`, but an
    unpushed worktree has no such copy, so push first. Only then remove
-   `.clud/grind/run.json` and `.clud/grind/plan.json` with `clud trash` (last, because the
-   hook reads `run.json` to guard `grind/*` branches during the cleanup).
+   `.clud/grind/plan.json` with `clud trash`, and last the run facts with
+   `clud grind-facts clear` (last, because the hook reads them to guard
+   `grind/*` branches during the cleanup). It removes only this session's
+   file; another run's facts are never touched.
    Then `git status --porcelain`
    prints nothing: no untracked files, no uncommitted changes, and no stash
    the run created other than the preflight stash step 4 pops.

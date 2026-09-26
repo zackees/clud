@@ -20,7 +20,6 @@ step, so an expectation about a command sits on the step after it.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from tests.harness.harness import Harness, RunResult
@@ -85,7 +84,7 @@ def _seed(h: Harness) -> None:
 
 
 def _run_facts(h: Harness) -> None:
-    run = Path(h.repo) / ".clud" / "grind" / "run.json"
+    run = h.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
     run.write_text(json.dumps({"mode": "sequential", "meta": META}), encoding="utf-8")
 

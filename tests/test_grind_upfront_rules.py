@@ -89,7 +89,7 @@ def test_preflight_never_touches_the_runs_own_files() -> None:
     assert f"git stash push -u -m grind-<run-id>-carry -- . {exclude}" in preflight
     assert "git add -A -- .\n  ':(exclude).clud/grind'" in preflight
     assert "Never push it." in preflight
-    assert "remove the\n  plan-phase `.clud/grind/run.json`" in preflight
+    assert "remove the\n  plan-phase run facts with `clud grind-facts clear`" in preflight
 
 
 def test_run_json_records_every_up_front_answer() -> None:

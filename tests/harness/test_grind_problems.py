@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import re
 import shlex
-from pathlib import Path
 from typing import Any
 
 from tests import process
@@ -92,7 +91,7 @@ def _seed(h: Harness, extra: dict[int, dict[str, Any]] | None = None) -> None:
 
 
 def _run_facts(h: Harness, reporting: str) -> None:
-    run = Path(h.repo) / ".clud" / "grind" / "run.json"
+    run = h.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
     facts = {"mode": "sequential", "meta": META, "problem_reporting": reporting}
     run.write_text(json.dumps(facts), encoding="utf-8")
@@ -519,6 +518,7 @@ def test_x7_intake_gates_followups_on_their_feature_pr(harness: Harness) -> None
     state = harness.read_gh_state()
     state["prs"][0]["state"] = "MERGED"
     harness.write_gh_state(state)
+    harness.new_session()
     second = harness.run(
         "/grind",
         {"default_text": "OK", "roles": [{"name": "main", "steps": _intake("MERGED", "201")}]},

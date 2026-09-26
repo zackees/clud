@@ -36,6 +36,7 @@ import os
 import shutil
 import sys
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -155,6 +156,12 @@ class Harness:
                     f"{binary} is missing; build it first (`bash build` or soldr cargo build)"
                 )
         self.hide_clud = False
+        # Each `run` is one Claude Code session, launched with `--session-id`
+        # so a test knows the id up front: the `/grind` run facts live at
+        # `~/.clud/tmp/grind/<session_id>.json` (#1337). Claude Code refuses
+        # to reuse an id, so a second run needs `new_session()` first.
+        self.session_id = str(uuid.uuid4())
+        self._session_used = False
         self.gh_state = root / "gh-state.json"
         self.write_gh_state({"repo": "o/r", "issues": {}, "prs": []})
         self._install_bin()
@@ -214,6 +221,25 @@ class Harness:
         )
         if result.returncode != 0:
             raise RuntimeError(f"clud install-assets failed: {result.stdout}{result.stderr}")
+
+    # ---- /grind run facts ------------------------------------------------------
+
+    def new_session(self) -> str:
+        """Start a fresh session id for the next `run`; returns it."""
+        self.session_id = str(uuid.uuid4())
+        self._session_used = False
+        return self.session_id
+
+    def run_facts_path(self) -> Path:
+        """The `/grind` run-facts file of the current session (#1337)."""
+        return self.home / ".clud" / "tmp" / "grind" / f"{self.session_id}.json"
+
+    def write_run_facts(self, facts: dict[str, Any]) -> Path:
+        """Record run facts the way the router does, for the current session."""
+        path = self.run_facts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(facts, indent=1), encoding="utf-8")
+        return path
 
     # ---- environment -----------------------------------------------------------
 
@@ -383,6 +409,11 @@ class Harness:
         timeout: float = 120,
         answers: dict[str, Any] | None = None,
     ) -> RunResult:
+        if self._session_used:
+            raise RuntimeError(
+                f"session {self.session_id} already ran; call new_session() before another run"
+            )
+        self._session_used = True
         (self.logs / "hooks.jsonl").write_text("", encoding="utf-8")
         (self.logs / "questions.jsonl").write_text("", encoding="utf-8")
         with self.backend(script) as base_url:
@@ -396,6 +427,8 @@ class Harness:
                 "claude-sonnet-5",
                 "--settings",
                 str(self.settings(cmd_scan=cmd_scan, answers=answers)),
+                "--session-id",
+                self.session_id,
             ]
             if answers is not None:
                 argv += self.answer_args()

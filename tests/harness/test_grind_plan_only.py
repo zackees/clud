@@ -4,9 +4,9 @@ With `planOnly: true` the workflow runs one `grind-planner` over the meta
 issue's children, prints the bug/feature classification, and picks a path:
 `simple` (keep the meta issue as is) under the complexity threshold,
 `regroup` above it. Covers #1392 cases U2, T4 and H1-H5 (H7 is in
-`test_grind_tracks.py`). The planning phase is marked by
-`<repo>/.clud/grind/run.json` with `{"phase": "plan"}`, which the clud hook
-reads to hold the planner read-only; the prompt's PLAN-ONLY text is for the
+`test_grind_tracks.py`). The planning phase is marked by the session's run
+facts (`~/.clud/tmp/grind/<session>.json`) holding `{"phase": "plan"}`, which
+the clud hook reads to hold the planner read-only; the prompt's PLAN-ONLY text is for the
 planner only.
 
 The Workflow result reaches the main session as a later task notification
@@ -63,7 +63,7 @@ def _seed(h: Harness, children: list[int]) -> dict[str, Any]:
 
 
 def _plan_phase(h: Harness, mode: str | None = None) -> None:
-    run = Path(h.repo) / ".clud" / "grind" / "run.json"
+    run = h.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
     facts: dict[str, Any] = {"phase": "plan"}
     if mode is not None:

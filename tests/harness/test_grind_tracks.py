@@ -86,9 +86,9 @@ def _seed(h: Harness, children: list[str]) -> dict[str, Any]:
     for n in children:
         issues[int(n)] = _issue(f"child {n}", f"do {n}", parent=int(META))
     h.write_gh_state(_world(issues))
-    run = h.repo / ".clud" / "grind" / "run.json"
+    run = h.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
-    # The bug stage runs without `feature` in run.json (plain lander caps).
+    # The bug stage runs without `feature` in the run facts (plain lander caps).
     facts = {"mode": "sequential", "meta": META, "problem_reporting": "issue"}
     run.write_text(json.dumps(facts), encoding="utf-8")
     exclude = h.repo / ".git" / "info" / "exclude"

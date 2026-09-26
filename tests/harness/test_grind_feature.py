@@ -10,11 +10,11 @@ Once the goals settle, `feature_merge` decides: `auto` readies the feature PR
 and merges it with `--merge` (never `--admin`), `decide_later` has the router
 mark it ready and leave it open, `comment_only` keeps the draft and the router
 posts one result comment on the meta issue. `main` moving is merged into the
-feature branch, never rebased. While `run.json` records the feature, the hook
+feature branch, never rebased. While the run facts records the feature, the hook
 also caps the main-session router: no issue close (S3), no feature PR merge,
 no `grind/*` branch deletion.
 
-The hook caps read the feature from `.clud/grind/run.json` (`feature: {branch,
+The hook caps read the feature from the session's run facts (`feature: {branch,
 worktree, pr}` and `feature_merge`). A denied call still shows in the hook
 log (the recorder runs first) but never reaches `fake_gh`, so a deny is
 asserted as "attempted by <agent_type>" plus "absent from gh calls/refs".
@@ -128,7 +128,7 @@ def _seed(
 
 
 def _run_facts(h: Harness, *, mode: str, merge: str) -> None:
-    run = Path(h.repo) / ".clud" / "grind" / "run.json"
+    run = h.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
     facts = {
         "mode": mode,

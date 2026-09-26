@@ -101,8 +101,23 @@ These are part of the single up-front round described in
 [Preflight and the single question round](#preflight-and-the-single-question-round).
 The router records the answers (`mode`, `ci`, `scripts`, `preflight`,
 `feature_merge`, `problem_reporting`, `tracks`, `meta`, and later `feature`)
-in `.clud/grind/run.json` at the repository root for the hook below, and
-removes it when the run ends.
+in its **run facts** for the hook below, and removes them when the run ends.
+
+**Run facts (#1337).** One JSON file per Claude Code session,
+`~/.clud/tmp/grind/<session_id>.json`, never in the working tree. The
+router gets the path from `clud grind-facts path` (it reads
+`CLAUDE_CODE_SESSION_ID`, which Claude Code exports to shell commands) and
+removes the file with `clud grind-facts clear`. The hook reads the file for
+the `session_id` in each PreToolUse payload; a workflow agent's payload
+carries its parent session's id (`tests/harness/test_grind_facts.py`), so
+every agent resolves its own run. Two runs, in one repo or two, never share
+or clobber facts, and one run finishing cannot change another's caps. A
+session with no file, or with a file older than 72 hours (a crashed run the
+session-temp sweep has not removed yet; `clud grind-facts path` refreshes a
+live one, and `/grind-cron` asks for it every tick), gets the strictest caps
+(sequential, no CI), and the hook log says why
+(`crates/clud-bin/src/grind_facts.rs`,
+[DD-103](../DESIGN_DECISIONS.md#dd-103-grind-run-facts-are-keyed-by-session-id-and-live-under-cludtmpgrind)).
 
 ### Input routing
 
@@ -123,18 +138,18 @@ Every run works on a meta issue:
 - **Stops that create nothing.** A meta issue whose children are all closed
   (`Nothing to do`), a `gh` failure reported by the tool (never read as "not
   meta"), and a conversion that fails partway (the partial state is listed)
-  all end the run before any question, `run.json` or worktree.
+  all end the run before any question, the run facts or worktree.
 
 **Tracks.** After the plan-only pass each child carries a track, `bug`
 (lands on `<main>` in the bug stage) or `feature` (lands on the feature
-branch), recorded in `run.json` `tracks`; see
+branch), recorded in the run facts' `tracks`; see
 [Bug stage, then feature stage](#bug-stage-then-feature-stage).
 
 ### Plan-only classification pass
 
 Issue [#1406](https://github.com/zackees/clud/issues/1406). Before asking
 anything about a meta issue, the router writes `{"phase": "plan"}` to
-`run.json` and starts `grind-run` with `planOnly: true, meta`. One
+the run facts and starts `grind-run` with `planOnly: true, meta`. One
 `grind-planner` classifies every child as a bug (`#N bug → main`) or a
 feature (`#N feature → grind/meta-<T>-<group>`), names feature groups and
 their independence, and returns without starting any other role. The hook
@@ -145,8 +160,8 @@ classification with every child placed, 8+ children, and at least 2
 independent feature groups of 3+; otherwise it logs
 `keeping #T as is: <reason>` and the meta issue is left untouched. A child
 the planner leaves out is printed `#N unclassified` and counts as unplaced.
-The router then rewrites `run.json` without `phase` for the real run. The
-`phase` marker in `run.json` is the hook's only plan-only signal; the
+The router then rewrites the run facts without `phase` for the real run. The
+`phase` marker in the run facts is the hook's only plan-only signal; the
 `PLAN-ONLY` prompt text is for the planner, and the hook never reads it.
 
 ### Meta of metas and no overlap
@@ -167,7 +182,7 @@ this is the contract.
   are kept and their children are not touched.
 - **Moves** use `replace_parent`. The 8-level depth / 100-children guard
   fails the run before prework, not midway.
-- **Undo.** Every change is recorded in `run.json` `undo`.
+- **Undo.** Every change is recorded in the run facts' `undo`.
 - **One feature group per run.** The rest go to `deferred_groups`.
 - **No overlap.** An open feature PR under the same top meta makes the run
   bugs-only (`waiting_on_pr`, rule `rules.no_overlap`). "Under" means a PR
@@ -196,7 +211,7 @@ Issue [#1407](https://github.com/zackees/clud/issues/1407); spec
   commit (offered only when a feature stage exists); or abort, which
   creates nothing. The run's own `.clud/grind/` files are excluded from the
   check, the stash and the WIP commit.
-- **Recording.** The answers go into `run.json` as `preflight` (what was
+- **Recording.** The answers go into the run facts as `preflight` (what was
   stashed or branched), `feature_merge`, `problem_reporting` and `tracks`.
   Finish restores only what `preflight` recorded.
 - **Enforcement.** `block_bad_cmd_grind_caps::tool_reason` denies
@@ -250,7 +265,7 @@ Issue [#1408](https://github.com/zackees/clud/issues/1408); spec
 - **Local copy.** The router writes the full `grind-plan/v1` object to
   `.clud/grind/plan.json` and passes it to `grind-run` as `args.plan`, with
   the meta issue as `args.meta` (the top meta issue in a meta of metas).
-  `run.json` also carries `meta`, so the hook knows which issue prework may
+  The run facts also carry `meta`, so the hook knows which issue prework may
   comment on. Finish deletes `plan.json`.
 - **Public comment.** Prework posts the plan once on the meta issue, in a
   `~~~json` fenced block under `<!-- grind:v1 plan run=<run-id> -->`, piping
@@ -278,7 +293,7 @@ Issue [#1408](https://github.com/zackees/clud/issues/1408); spec
   (`gh api -X PATCH repos/<o>/<r>/issues/comments/<id>`) as results arrive
   and at Finish.
 - **Caps.** Read-only git and `gh`, plus `gh issue comment` on the
-  `run.json` meta issue only, fed by `printf '%s' '<body>'`. No Write/Edit,
+  run facts' meta issue only, fed by `printf '%s' '<body>'`. No Write/Edit,
   builds or worktrees.
 
 Why the body is shell-inert and piped from `printf`:
@@ -312,7 +327,7 @@ are defined by the plan; see
   listed in `stuck_bugs`, only the feature children that list it in
   `depends_on_bugs` are blocked, reported as `blocked: bug #N did not land`.
   Every other goal proceeds.
-- **Caps.** While the bug stage runs, `run.json` has no `feature`, so the
+- **Caps.** While the bug stage runs, the run facts have no `feature`, so the
   lander merges bug PRs into `<main>` under the plain caps.
 
 Why two calls:
@@ -333,7 +348,7 @@ feature-stage children of a meta issue; issue safety is in
   opens the **draft feature PR** into `<main>` (body `Closes #<M>`, plus
   `Closes #<original>` for a converted issue) and passes
   `feature: {branch, worktree, pr}` and `feature_merge` to the workflow and
-  `run.json`. The user's checkout is not touched after preflight.
+  the run facts. The user's checkout is not touched after preflight.
 - **Bug fixes reach the branch.** The branch is cut after the bug stage
   has merged, so it already contains those fixes. Anything that lands on
   `<main>` later is merged into it by the next feature-stage integrator (see
@@ -366,13 +381,15 @@ feature-stage children of a meta issue; issue safety is in
   while its feature PR is open. In feature mode the lander may also
   `gh label create`/add `grind:on-feature`, comment on an issue (the landing
   marker), edit only the feature PR's body, and `gh run rerun`.
-- **Router caps.** The main session has no agent type, so while `run.json`
-  records a `feature`, the hook applies router caps to any caller that is
+- **Router caps.** The main session has no agent type, so while the session's run
+  facts record a `feature`, the hook applies router caps to any caller that is
   not a grind role: exactly one `git worktree add` (the feature worktree),
   no issue close (`gh issue close` or `gh api … -f state=closed`), no merge
-  of the feature PR, and no deletion of a `grind/*` branch. A `run.json`
-  left behind by a crashed run keeps these on; the denial says to remove it.
-  Finish removes `run.json` last, so cleanup stays guarded.
+  of the feature PR, and no deletion of a `grind/*` branch. These key on the
+  caller's own session, so another session's run never caps it; a crashed
+  run's facts keep them on for that session until `clud grind-facts clear`
+  (the denial says so) or the 72-hour staleness cutoff.
+  Finish removes the run facts last, so cleanup stays guarded.
 
 The rationale is in
 [DD-095](../DESIGN_DECISIONS.md#dd-095-the-grind-feature-lands-as-a-merge-commit-and-main-is-merged-into-the-feature-branch-rather-than-rebased).
@@ -447,7 +464,7 @@ Issue [#1336](https://github.com/zackees/clud/issues/1336).
   test, lint and test with each mode found, lint only, test only, or neither
   (use the planner's verify commands). If nothing was detected, there's no
   question.
-- **Recording.** The answer goes into `.clud/grind/run.json` as `scripts`,
+- **Recording.** The answer goes into the run facts as `scripts`,
   for example `{"lint": "bash ./lint", "test": "bash ./test --integration"}`,
   and reaches the workflow as `args.scripts`. `{}` means neither.
 - **Integrator.** Before **every** push, fix rounds included, it runs the
@@ -541,7 +558,7 @@ The rationale is in
 | Role | Tools (`tools:` frontmatter) | Shell (hook) |
 |---|---|---|
 | `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only, never in the plan-only phase (the hook also refuses it Write/Edit) |
-| `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the `run.json` meta issue only, fed by `printf '%s' '<body>'`; no edits, worktrees or builds |
+| `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the run facts' meta issue only, fed by `printf '%s' '<body>'`; no edits, worktrees or builds |
 | `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh` only |
 | `grind-reviewer` | same as worker | same as worker |
 | `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, `act` when CI is off, and a shell loop around lint/test |
@@ -587,6 +604,9 @@ it covers:
 - `test_grind_review_gate.py` — the review gate, parking, dependents of a
   rejected goal, and the integrator's retry rules.
 - `test_grind_scripts.py` — the repository lint/test scripts.
+- `test_grind_facts.py` — run facts: a workflow agent's payload carries the
+  parent session id, `clud grind-facts path` names the file the hook reads,
+  and each session is capped by its own run's facts.
 - `test_grind_e2e.py` — the three user scenarios posted on
   [#1392](https://github.com/zackees/clud/issues/1392), end to end, each
   from routing to Finish:

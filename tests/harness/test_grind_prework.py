@@ -9,8 +9,8 @@ The scripted model cannot copy text out of its prompt, so two things are
 checked separately: the bodies the *workflow* built (read from the prework
 agent's first request) and the comment the prework agent actually posted
 (read from the fake GitHub). The run facts the hook reads (`mode`, `meta`,
-`feature_merge`, `problem_reporting`) live in `<repo>/.clud/grind/run.json`,
-written here as the router would.
+`feature_merge`, `problem_reporting`) live in the session's run facts
+(`~/.clud/tmp/grind/<session>.json`), written here as the router would.
 
 Posting shape: the scripted prework posts the way `/grind-prework` says to,
 `printf '%s' '<body>' | gh issue comment <meta> --body-file -`, and the body
@@ -90,8 +90,8 @@ def _seed(h: Harness, children: list[int]) -> dict[str, Any]:
 
 
 def _run_facts(h: Harness, meta: str) -> dict[str, Any]:
-    """`run.json` as the router writes it in section 3; returns it."""
-    run = Path(h.repo) / ".clud" / "grind" / "run.json"
+    """the run facts as the router writes it in section 3; returns it."""
+    run = h.run_facts_path()
     run.parent.mkdir(parents=True, exist_ok=True)
     facts = {
         "mode": "sequential",
@@ -370,7 +370,7 @@ def test_plan_comment_is_posted_once_with_the_public_plan(harness: Harness) -> N
     built = _json_block(bodies[0])
     assert built["schema"] == "grind-plan/v1"
     # P2: the recorded plan is the plan the router passed, and it agrees
-    # with the answers recorded in run.json.
+    # with the answers recorded in the run facts.
     assert built["stages"] == _public(plan)["stages"]
     assert built["stages"][1]["depends_on_bugs"] == {"102": [101]}
     for key in ("feature_merge", "problem_reporting", "rules", "mode"):
@@ -563,7 +563,7 @@ def test_failed_plan_comment_stops_before_any_worker(harness: Harness) -> None:
 
 def test_meta_of_metas_gets_the_plan_on_the_top_issue(harness: Harness) -> None:
     # P9: in a meta-of-metas world the plan lands on the top meta issue (#1);
-    # run.json names the top issue, so the sub-meta (#3) is off limits.
+    # The run facts name the top issue, so the sub-meta (#3) is off limits.
     harness.write_gh_state(with_user_sub_meta())
     top = "1"
     _run_facts(harness, top)

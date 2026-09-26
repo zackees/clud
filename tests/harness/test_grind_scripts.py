@@ -3,7 +3,7 @@
 The `/grind` router carries a `` !`clud grind-scripts` `` line, so the model's
 first request holds the detected scripts, their run commands and the files to
 read for modes (L1-L4). The router records the one answer in
-`.clud/grind/run.json` and passes it to `grind-run` as `args.scripts`; the
+the session's run facts and passes it to `grind-run` as `args.scripts`; the
 workflow puts the commands, in order, into every integrator prompt (L5, L11,
 L12), and the integrator runs them before each push (L6, L8-L10). Workers
 still cannot run them (L7).
@@ -113,11 +113,9 @@ def make_scripts(
 
 def _record_run_json(h: Harness, scripts: dict[str, str]) -> None:
     """What the router writes once the user answers (not committed)."""
-    path = h.repo / ".clud" / "grind" / "run.json"
+    path = h.run_facts_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"verify": scripts}, indent=1), encoding="utf-8")
-    exclude = h.repo / ".git" / "info" / "exclude"
-    exclude.write_text(exclude.read_text(encoding="utf-8") + ".clud/\n", encoding="utf-8")
 
 
 def _ran(h: Harness) -> list[dict[str, Any]]:

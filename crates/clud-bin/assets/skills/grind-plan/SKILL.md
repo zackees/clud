@@ -61,7 +61,7 @@ When the prompt says PLAN-ONLY, skip steps 2-5 and only classify:
   guess.
 
 Never write files, create worktrees or branches, or push; clud's hook refuses
-them while `run.json` has `"phase": "plan"`. Return the classification
+them while the run facts have `"phase": "plan"`. Return the classification
 through StructuredOutput.
 
 Otherwise, return the plan through StructuredOutput.

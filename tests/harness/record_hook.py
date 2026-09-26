@@ -22,6 +22,7 @@ def main() -> int:
         "tool_name": event.get("tool_name"),
         "agent_type": event.get("agent_type"),
         "agent_id": event.get("agent_id"),
+        "session_id": event.get("session_id"),
         "tool_input": event.get("tool_input"),
         "prompt": event.get("prompt"),
     }
