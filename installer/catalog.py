@@ -83,7 +83,50 @@ def executable_member(wheel_bytes: bytes, executable: str) -> str:
         return members[0]
 
 
-def catalog_from_releases(releases: list[dict], fetch_bytes) -> dict:
+def _verified_catalog_assets(
+    catalog: dict | None,
+) -> dict[tuple[str, str], tuple[tuple[str, str], dict]]:
+    if (
+        not isinstance(catalog, dict)
+        or catalog.get("kind") != "Catalog"
+        or catalog.get("schema_version") != 1
+        or catalog.get("tool") != "clud"
+        or catalog.get("online_url") != ONLINE_URL
+    ):
+        return {}
+    verified = {}
+    entries = catalog.get("releases")
+    if not isinstance(entries, list):
+        return {}
+    for release in entries:
+        if not isinstance(release, dict) or not isinstance(release.get("version"), str):
+            continue
+        platforms = release.get("platforms")
+        if not isinstance(platforms, list):
+            continue
+        for item in platforms:
+            if not isinstance(item, dict):
+                continue
+            platform = item.get("platform")
+            asset = item.get("asset")
+            if (
+                isinstance(platform, dict)
+                and isinstance(platform.get("os"), str)
+                and isinstance(platform.get("arch"), str)
+                and isinstance(asset, dict)
+                and isinstance(asset.get("filename"), str)
+            ):
+                verified[(release["version"], asset["filename"])] = (
+                    (platform["os"], platform["arch"]),
+                    asset,
+                )
+    return verified
+
+
+def catalog_from_releases(
+    releases: list[dict], fetch_bytes, verified_catalog: dict | None = None
+) -> dict:
+    cached_assets = _verified_catalog_assets(verified_catalog)
     entries = []
     for release in releases:
         version = release["tag_name"].removeprefix("v")
@@ -106,25 +149,50 @@ def catalog_from_releases(releases: list[dict], fetch_bytes) -> dict:
                     raise ValueError(f"duplicate direct target in {version}: {target}")
                 continue
             seen.add((os_name, arch))
-            data = fetch_bytes(asset["browser_download_url"])
-            digest = hashlib.sha256(data).hexdigest()
-            if asset.get("digest") != f"sha256:{digest}" or asset["size"] != len(data):
-                raise ValueError(f"published wheel digest/size mismatch: {asset['name']}")
-            if direct:
-                if not is_executable(data, executable):
-                    raise ValueError(f"published asset is not clud: {asset['name']}")
+            filename = asset["name"]
+            url = asset["browser_download_url"]
+            api_digest = asset.get("digest")
+            size = asset.get("size")
+            cached = cached_assets.get((version, filename))
+            cached_platform, cached_asset = cached if cached else (None, None)
+            media_type = "application/octet-stream" if direct else "application/zip"
+            reused = (
+                cached_platform == (os_name, arch)
+                and cached_asset.get("filename") == filename
+                and cached_asset.get("media_type") == media_type
+                and cached_asset.get("size_bytes") == size
+                and isinstance(cached_asset.get("sha256"), str)
+                and len(cached_asset["sha256"]) == 64
+                and all(c in "0123456789abcdef" for c in cached_asset["sha256"])
+                and api_digest == f"sha256:{cached_asset.get('sha256')}"
+                and cached_asset.get("urls") == [url]
+                and cached_asset.get("provides") == ["clud"]
+                and isinstance(size, int)
+                and isinstance(api_digest, str)
+            )
+            if reused:
+                digest = cached_asset["sha256"]
+                print(f"reused verified release asset: {filename} ({size} bytes)", flush=True)
             else:
-                executable_member(data, executable)
-            print(f"verified release asset: {asset['name']} ({len(data)} bytes)", flush=True)
+                data = fetch_bytes(url)
+                digest = hashlib.sha256(data).hexdigest()
+                if api_digest != f"sha256:{digest}" or size != len(data):
+                    raise ValueError(f"published wheel digest/size mismatch: {filename}")
+                if direct:
+                    if not is_executable(data, executable):
+                        raise ValueError(f"published asset is not clud: {filename}")
+                else:
+                    executable_member(data, executable)
+                print(f"verified release asset: {filename} ({len(data)} bytes)", flush=True)
             platforms.append(
                 {
                     "platform": {"os": os_name, "arch": arch},
                     "asset": {
-                        "filename": asset["name"],
-                        "media_type": "application/octet-stream" if direct else "application/zip",
-                        "size_bytes": len(data),
+                        "filename": filename,
+                        "media_type": media_type,
+                        "size_bytes": size,
                         "sha256": digest,
-                        "urls": [asset["browser_download_url"]],
+                        "urls": [url],
                         "provides": ["clud"],
                     },
                 }
@@ -175,8 +243,13 @@ def published_releases(fetch_bytes=fetch) -> list[dict]:
         page += 1
 
 
-def write_catalog(destination: Path, releases: list[dict], fetch_bytes=fetch) -> dict:
-    catalog = catalog_from_releases(releases, fetch_bytes)
+def write_catalog(
+    destination: Path,
+    releases: list[dict],
+    fetch_bytes=fetch,
+    verified_catalog: dict | None = None,
+) -> dict:
+    catalog = catalog_from_releases(releases, fetch_bytes, verified_catalog)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
     return catalog

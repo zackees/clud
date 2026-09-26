@@ -53,8 +53,18 @@ def render_page(catalog: dict, *, installer_available: bool) -> str:
 """
 
 
-def build_site(destination: Path, releases: list[dict], fetch_bytes) -> dict:
-    catalog = write_catalog(destination / "install" / "manifest.json", releases, fetch_bytes)
+def build_site(
+    destination: Path,
+    releases: list[dict],
+    fetch_bytes,
+    previous_catalog: dict | None = None,
+) -> dict:
+    catalog = write_catalog(
+        destination / "install" / "manifest.json",
+        releases,
+        fetch_bytes,
+        verified_catalog=previous_catalog,
+    )
     latest = catalog["channels"]["latest-stable"]
     installer_available = any(
         item["tag_name"].removeprefix("v") == latest
@@ -76,7 +86,7 @@ def build_site(destination: Path, releases: list[dict], fetch_bytes) -> dict:
 def main() -> None:
     import argparse
 
-    from installer.catalog import fetch, published_releases
+    from installer.catalog import ONLINE_URL, fetch, published_releases
 
     parser = argparse.ArgumentParser()
     parser.add_argument("destination", type=Path)
@@ -91,7 +101,13 @@ def main() -> None:
         releases = [
             next(item for item in releases if not item.get("draft") and not item.get("prerelease"))
         ]
-    catalog = build_site(args.destination, releases, fetch)
+    previous_catalog = None
+    try:
+        previous_catalog = json.loads(fetch(ONLINE_URL))
+        print("Found the previous published catalog; unchanged assets will reuse its verification.")
+    except (OSError, ValueError):
+        print("No previous published catalog is available; verifying release assets from scratch.")
+    catalog = build_site(args.destination, releases, fetch, previous_catalog)
     print(
         json.dumps(
             {

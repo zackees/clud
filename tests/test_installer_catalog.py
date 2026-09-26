@@ -59,6 +59,38 @@ def test_reject_changed_published_bytes() -> None:
         )
 
 
+def test_cached_catalog_reuses_only_unchanged_verified_release_assets() -> None:
+    old_wheel = wheel("clud.exe", b"MZprevious")
+    new_wheel = wheel("clud.exe", b"MZnew-release")
+    old_release = release("2.9.0", "https://example.com/29", old_wheel)
+    cached = catalog_from_releases([old_release], lambda _: old_wheel)
+    new_release = release("2.10.0", "https://example.com/210", new_wheel)
+
+    catalog = catalog_from_releases(
+        [old_release, new_release],
+        lambda url: new_wheel if url.endswith("210") else pytest.fail("unchanged asset fetched"),
+        verified_catalog=cached,
+    )
+
+    assert catalog["channels"]["latest-stable"] == "2.10.0"
+    assert [item["version"] for item in catalog["releases"]] == ["2.10.0", "2.9.0"]
+
+
+def test_cached_catalog_refetches_release_asset_when_digest_changes() -> None:
+    old_wheel = wheel("clud.exe", b"MZprevious")
+    changed_wheel = wheel("clud.exe", b"MZchanged")
+    old_release = release("2.9.0", "https://example.com/29", old_wheel)
+    changed_release = release("2.9.0", "https://example.com/29", changed_wheel)
+    cached = catalog_from_releases([old_release], lambda _: old_wheel)
+
+    catalog = catalog_from_releases(
+        [changed_release], lambda _: changed_wheel, verified_catalog=cached
+    )
+
+    asset = catalog["releases"][0]["platforms"][0]["asset"]
+    assert asset["sha256"] != cached["releases"][0]["platforms"][0]["asset"]["sha256"]
+
+
 def test_reject_wheel_without_real_clud() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         executable_member(wheel("other.exe", b"MZpayload"), "clud.exe")
