@@ -10,7 +10,7 @@ re-explaining.
 |---|---|---|
 | [architecture/loop-subsystem.md](architecture/loop-subsystem.md) | ~250 | `clud loop`: task resolution, plan synthesis, iteration run, DONE/BLOCKED marker contract, artifact rollover, repeat scheduling |
 | [architecture/testing-tiers.md](architecture/testing-tiers.md) | ~110 | The three test tiers; tier 3 runs the real Claude Code on `mock-agent serve` (scripted model), with the `tests/harness/` fixture and its pitfalls |
-| [architecture/grind.md](architecture/grind.md) | ~130 | `clud grind` and the `/grind` skill DAG: modes, capped `grind-*` agent roles, one-at-a-time integration |
+| [architecture/grind.md](architecture/grind.md) | ~550 | `clud grind` and the `/grind` skill DAG: meta-issue routing, the plan-only pass and regroup threshold, meta of metas, preflight and the single question round, prework's plan comment, bug and feature stages, feature-branch mode, problem reporting, reconcile, capped `grind-*` agent roles, one-at-a-time integration |
 | [architecture/daemon-ipc.md](architecture/daemon-ipc.md) | ~250 | Always-on clud daemon hosting session ops + GC: TCP JSON IPC, daemon/worker re-entry model, snapshot persistence, attach broker |
 | [architecture/daemon-environment.md](architecture/daemon-environment.md) | ~100 | Daemon session environment: login-baseline materialization, client overlay, refresh, worker snapshot compatibility |
 | [architecture/api-session-storage.md](architecture/api-session-storage.md) | ~160 | Durable API logical sessions above provider turns: immutable CWD, bounded events/idempotency, atomic persistence, restart recovery |
