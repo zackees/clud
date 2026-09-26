@@ -135,7 +135,7 @@ pub fn delegation_targets(contents: &str) -> Vec<String> {
 
 fn normalize_path(raw: &str) -> Option<String> {
     let t = raw.trim_end_matches([',', '&', '|']);
-    let t = t.replace('\\', "/");
+    let t = crate::path_norm::slash_separators(t);
     let t = t.strip_prefix("./").unwrap_or(&t).to_string();
     if t.is_empty()
         || t.starts_with('/')

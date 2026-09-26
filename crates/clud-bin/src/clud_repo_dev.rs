@@ -58,10 +58,17 @@ mod tests {
         assert!(is_clud_repo(tmp.path()));
     }
 
+    /// Searches up from the working directory, not from the compile-time
+    /// `CARGO_MANIFEST_DIR`: CI builds on Linux and runs the Windows bundle
+    /// from a checkout at a different path.
     #[test]
     fn this_checkout_is_detected() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        assert!(is_clud_repo(&root));
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            cwd.ancestors().any(is_clud_repo),
+            "no clud checkout above {}",
+            cwd.display()
+        );
     }
 
     #[test]
