@@ -184,8 +184,19 @@ fn refuses_roots_home_outside_and_git_metadata() {
     // A missing path resolves as missing, not as an error.
     assert!(matches!(
         resolve("nope/deeper", &w.root, Some(&w.home), &mut roots),
-        Ok(Resolved::Missing(_))
+        Ok(Resolved::Missing(path)) if path == w.root.join("nope/deeper")
     ));
+    // ...but only inside the roots, even when its parent is missing too
+    // (Windows turns `/etc/passwd` into `C:\etc\passwd`, whose parent is absent).
+    let outside = w.home.join("no-such-dir").join("file");
+    assert!(resolve(
+        outside.to_str().unwrap(),
+        &w.root,
+        Some(&w.home),
+        &mut roots
+    )
+    .unwrap_err()
+    .contains("outside the allowed roots"));
 }
 
 #[cfg(unix)]
