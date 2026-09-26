@@ -303,6 +303,26 @@ the codebase stays portable.
   thread when dropped — COM lifecycle has to stay on the thread that
   initialized it.
 
+  Which host window gets the extra registration is decided by the pure
+  `dnd::drop_host::resolve_drop_host`, from the environment and the
+  process ancestor chain (#1358):
+  - **Windows Terminal** (`WT_SESSION` set and `WindowsTerminal.exe` the
+    nearest recognised host ancestor): register on its visible top-level
+    windows as well.
+  - **VS Code, its forks and WezTerm** (`TERM_PROGRAM=vscode`/`WezTerm`,
+    `WEZTERM_PANE`, or a `Code.exe` / `Code - Insiders.exe` /
+    `wezterm-gui.exe` ancestor nearer than any Windows Terminal):
+    `GetConsoleWindow()` only. These hosts accept Explorer drops on the
+    terminal themselves and type the shell-escaped path into the PTY, and
+    their top-level window also holds the editor and every other panel,
+    so an `IDropTarget` there (re-taken every 3 s) would capture drops
+    meant for the whole IDE. The nearest-host check matters because
+    `WT_SESSION` is inherited: a VS Code started from a Windows Terminal
+    tab passes it to its own terminals, and the old `WT_SESSION`-only
+    gate then registered on the outer Windows Terminal window.
+  - **Anything else** (legacy conhost, unknown hosts):
+    `GetConsoleWindow()` only; no process snapshot is taken.
+
 - **File**: `crates/clud-bin/src/dnd/console_drop_target.rs:384`
   (`register_console_drop_target`, Windows); `:392` (POSIX stub);
   `ConsoleDropTargetGuard` at `:333`; platform-agnostic dispatch at `:407`

@@ -9,6 +9,7 @@ The Windows COM lifecycle (`OleInitialize` worker thread, `RegisterDragDrop` dis
 - `mod.rs` — public `normalize_dropped_path` / `looks_like_dropped_path` string transforms plus `pub mod` re-exports of the submodules.
 - `dropfiles.rs` — pure `&[u8]` parser for the Win32 `CF_HDROP` / `DROPFILES` wire format (wide + narrow encodings); panic-free on malformed input.
 - `console_drop_target.rs` — Windows-only `IDropTarget` COM object, `OleInitialize`/`RegisterDragDrop` worker thread with delay-then-refresh strategy (issue #79, displaces Claude Code's own registration), RAII guard, and the platform-agnostic dispatch glue.
+- `drop_host.rs` — pure host decision (Windows or test builds only): whether the `IDropTarget` also covers the Windows Terminal window, or stays on `GetConsoleWindow()` for VS Code, WezTerm and conhost (#1358). Inputs are an injected env reader and process snapshot; tests in `drop_host_tests.rs` run on every host.
 - `injectors.rs` — `DropInjector` factories for the two launch modes plus `build_input_records` (synthesizes Win32 `INPUT_RECORD` bytes for `WriteConsoleInputW`) and `join_paths_for_injection` (newline-join + trailing space contract).
 
 ## Key items
@@ -22,6 +23,7 @@ The Windows COM lifecycle (`OleInitialize` worker thread, `RegisterDragDrop` dis
 - `struct RefreshConfig` with `default_displacement()` (2s/3s) and `immediate_no_refresh()` — `console_drop_target.rs:143`
 - `struct ConsoleDropTargetGuard` (RAII; signals worker, revokes, `OleUninitialize`) — `console_drop_target.rs:333`
 - `register_console_drop_target(injector, config)` — `console_drop_target.rs:384` (Windows) / `:392` (non-Windows stub)
+- `resolve_drop_host(env, current_pid, processes) -> DropHost` — `drop_host.rs:59`
 - `dispatch_dropfiles_to_injector(buf, injector)` — `console_drop_target.rs:407`
 - `build_input_records(s: &str) -> Vec<u8>` — `injectors.rs:71`
 - `join_paths_for_injection(paths: &[String]) -> String` — `injectors.rs:126`
