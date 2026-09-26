@@ -156,7 +156,16 @@ released on the next idle poll.
   `.claude/settings.local.json` / `settings.json`, then
   `~/.claude/settings.json`), base64url-encodes its command, and
   `clud statusline` runs it first with Claude's session JSON on stdin
-  (`sh -c`; Git Bash or `cmd` on Windows), then appends the toast.
+  (`sh -c`; Git Bash on Windows), then appends the toast.
+- **Windows runs the chain only under Git Bash (#1371).** The command is
+  authored for Git Bash, which is where Claude Code runs it, so clud looks for
+  Git Bash wherever Git for Windows puts it: `CLAUDE_CODE_GIT_BASH_PATH`, then
+  `<Git>\bin\bash.exe` beside the `git.exe` on PATH (the installer puts only
+  `Git\cmd` on PATH), then `%ProgramFiles%\Git\bin\bash.exe`, then any `bash`
+  on PATH. With none found it never falls back to `cmd.exe`, whose quoting and
+  `$VAR` rules would silently mis-run the command and leave an empty footer.
+  Instead the user's line is replaced by a one-line notice naming the missing
+  Git Bash and `CLAUDE_CODE_GIT_BASH_PATH`.
 - The setting rides the same single launch-scoped `--settings` source hooks
   use: merged into that file, or into the user's own `--settings` document,
   which then replaces the argument.

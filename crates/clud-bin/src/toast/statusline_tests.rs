@@ -635,9 +635,9 @@ fn the_chain_runs_through_the_platform_shell_with_claudes_stdin() {
     );
 }
 
-fn argv_of(spec: CommandSpec) -> Vec<String> {
+fn argv_of(spec: Option<CommandSpec>) -> Vec<String> {
     match spec {
-        CommandSpec::Argv(argv) => argv,
+        Some(CommandSpec::Argv(argv)) => argv,
         _ => panic!("expected CommandSpec::Argv"),
     }
 }
@@ -661,7 +661,7 @@ fn windows_chain_spec_uses_valid_git_bash_env_path() {
 }
 
 #[test]
-fn windows_chain_spec_ignores_missing_env_path_and_uses_which() {
+fn windows_chain_spec_ignores_missing_env_path_and_locates_bash() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("no-such-bash.exe");
     let spec = windows_chain_spec("echo hi", Some(missing.into_os_string()), || {
@@ -681,12 +681,59 @@ fn windows_chain_spec_ignores_directory_env_path() {
     assert_eq!(argv_of(spec), vec!["/x/bash", "-c", "echo hi"]);
 }
 
+/// #1371: a `statusLine.command` is authored for Git Bash, so without one it
+/// must not be handed to `cmd.exe`, whose quoting and `$VAR` rules differ.
 #[test]
-fn windows_chain_spec_falls_back_to_shell_when_no_bash() {
-    match windows_chain_spec("echo hi", None, || None) {
-        CommandSpec::Shell(cmd) => assert_eq!(cmd, "echo hi"),
-        _ => panic!("expected CommandSpec::Shell"),
-    }
+fn windows_chain_spec_never_hands_a_bash_command_to_cmd() {
+    let spec = windows_chain_spec("echo \"$CLAUDE_MODEL\" | cut -d/ -f2", None, || None);
+    assert!(
+        spec.is_none(),
+        "a bash-authored status line must not fall back to cmd.exe"
+    );
+}
+
+/// #1371: without Git Bash the footer says why the user's line is missing
+/// instead of rendering nothing, and no process is started.
+#[test]
+fn a_missing_git_bash_renders_a_visible_notice_not_an_empty_line() {
+    let mut out = Vec::new();
+    render_chain(&mut out, None, b"{}");
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text, format!("{NO_GIT_BASH_NOTICE}\n"));
+    assert!(text.contains("Git Bash not found"), "{text:?}");
+    assert!(text.contains("CLAUDE_CODE_GIT_BASH_PATH"), "{text:?}");
+}
+
+/// Git for Windows puts only `Git\cmd` on PATH by default, so `bash` is
+/// usually not on PATH even when Git Bash is installed; it is found beside
+/// `git.exe` instead, then under `%ProgramFiles%`.
+#[test]
+fn git_bash_is_found_beside_git_and_in_program_files() {
+    let git = Path::new("C:/Tools/Git/cmd/git.exe");
+    let program_files = Path::new("C:/Program Files");
+    assert_eq!(
+        git_bash_candidates(Some(git), Some(program_files)),
+        vec![
+            Path::new("C:/Tools/Git").join("bin").join("bash.exe"),
+            program_files.join("Git").join("bin").join("bash.exe"),
+        ]
+    );
+    assert_eq!(
+        git_bash_candidates(Some(Path::new("C:/Git/bin/git.exe")), None),
+        vec![Path::new("C:/Git").join("bin").join("bash.exe")]
+    );
+    assert!(git_bash_candidates(None, None).is_empty());
+}
+
+/// Runs on the Windows CI lane, whose runner (like any machine that runs
+/// Claude Code on Windows) has Git for Windows installed.
+#[cfg(windows)]
+#[test]
+fn chain_spec_finds_the_installed_git_bash_on_windows() {
+    let bash = locate_git_bash().expect("Git Bash is installed on the Windows runner");
+    assert!(bash.is_file(), "{}", bash.display());
+    let argv = argv_of(chain_spec("echo hi"));
+    assert_eq!(&argv[1..], ["-c", "echo hi"]);
 }
 
 #[cfg(not(windows))]
