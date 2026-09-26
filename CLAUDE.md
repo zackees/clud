@@ -9,7 +9,7 @@ Guidance for Claude Code when working in this repository.
 ### Essential Commands
 
 - **Build**: `bash build` — dev wheel (Rust binary + Python package)
-- **Lint**: `bash lint` — `cargo fmt`, `cargo clippy`, `ruff` (**MANDATORY** after any code edit)
+- **Lint**: `bash lint` — `cargo fmt`, `cargo clippy`, `ruff` (**MANDATORY** after any code edit). `bash lint --windows` also runs clippy for `x86_64-pc-windows-msvc` through soldr — run it before pushing Windows-only code ([ci.md](docs/architecture/ci.md#local-validation-before-remote-ci))
 - **Test**: `bash test` — Rust unit tests + Python unit tests
 - **Test (full)**: `bash test --integration` — adds integration tests with mock agents
 

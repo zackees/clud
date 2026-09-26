@@ -94,6 +94,21 @@ def explain_readonly_failure(argv: list[str]) -> None:
     )
 
 
+#: The Windows triple `--windows` type-checks locally (#1441). soldr prepares
+#: the MSVC sysroot, so a Linux or macOS host can run the same clippy the
+#: Windows build job runs, before a push spends a `ci-windows` run on it.
+WINDOWS_TARGET = "x86_64-pc-windows-msvc"
+
+
+def clippy_subcommands(windows: bool) -> list[list[str]]:
+    """The cargo clippy invocations to run: the host, plus Windows on request."""
+    host = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+    if not windows:
+        return [host]
+    target = ["clippy", "--workspace", "--all-targets", "--target", WINDOWS_TARGET]
+    return [host, [*target, "--", "-D", "warnings"]]
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the lint suite.
 
@@ -106,9 +121,12 @@ def main(argv: list[str] | None = None) -> int:
     checks whose result cannot vary by platform.
 
     `bash lint` (local, no flags) still runs everything, unchanged.
+    `--windows` also runs clippy for `x86_64-pc-windows-msvc` through soldr,
+    catching Windows-only `cfg` code before a `ci-windows` run does.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     static_only = "--static-only" in argv
+    windows = "--windows" in argv
 
     from ci.env import activate
 
@@ -152,11 +170,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if static_only:
         return 0
-    clippy = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
-    clippy_argv = _cargo(clippy)
-    if run(clippy_argv) != 0:
-        explain_readonly_failure(clippy_argv)
-        return 1
+    for clippy in clippy_subcommands(windows):
+        clippy_argv = _cargo(clippy)
+        if run(clippy_argv) != 0:
+            explain_readonly_failure(clippy_argv)
+            return 1
     return 0
 
 
