@@ -11,32 +11,51 @@ PATH. Everything a test world needs from GitHub lives in ``$FAKE_GH_STATE``:
      "calls": []}
 
 Every invocation is appended to ``calls``. ``"fail": true`` makes every call
-exit 1, to exercise "gh is broken" paths.
+exit 1, to exercise "gh is broken" paths. Calls are serialized with a lock
+file next to the state, so parallel agents never lose each other's writes.
 
 Optional additions (#1402); every key is defaulted, so the shape above still
 works unchanged:
 
 - top level ``default_branch`` (default ``"main"``), ``next_id`` (comment id
-  counter), and ``faults``: ``{"<key>": {"code": 1, "stderr": "...",
-  "times": N}}``. The key is the first two argv words (``"issue close"``), or
-  ``"api <METHOD>"`` / ``"api graphql"`` for ``api``. A fault is consumed per
-  matching call (after the call is recorded, before dispatch); without
-  ``times`` it fires forever.
+  counter), ``requires_review`` (every merge into ``default_branch`` needs an
+  approval or ``--admin``), ``fail_on`` (a list of fault keys that always
+  fail) and ``faults``: ``{"<key>": {"code": 1, "stderr": "...", "times": N,
+  "after": M}}``. The key is the first two argv words (``"issue close"``), or
+  ``"api <METHOD>"`` / ``"api graphql"`` for ``api``; a longer key narrows it
+  by prefix of the rest of the command (``"issue comment 5"``,
+  ``"api POST repos/o/r/issues/1/sub_issues"``). The most specific matching
+  key wins. A fault lets its first ``after`` matching calls through, then
+  fires ``times`` times (forever without ``times``). Faults fire after the
+  call is recorded and before dispatch, so a failed call changes nothing.
 - per issue: ``labels`` (list of str), ``comments`` (``[{"id", "body"}]``),
-  ``closed_by`` (``{"kind": "pr"|"user"|"command", "pr": int|None}``) and
-  ``parent`` (int or None).
+  ``closed_by`` (``{"kind": "pr"|"user"|"command"|"commit", "pr": int|None,
+  "oid": str}``) and ``parent`` (int or None).
 - per PR: ``base``, ``draft``, ``body``, ``merge_method``, ``admin``,
-  ``reviews_required`` and ``approved``.
+  ``requires_review`` (alias ``reviews_required``) and ``approved``.
 
 Supported commands: ``issue view|create|comment|edit|close|reopen|list``,
 ``pr list|create|edit|ready|merge|view|checks``, ``repo view`` (name and
-``defaultBranchRef``) and ``api`` (sub-issue GET,
-POST, DELETE with GitHub's one-parent / 100-children / 8-levels rules; issue
-comment GET/PATCH; a ``graphql`` ClosedEvent closer stub). ``api`` takes
-``-X/--method``, ``-f/-F field=value`` and ``--input file``; with no method it
-is POST when fields are given, else GET. Bodies over 65536 characters are
-rejected. Merging a PR into ``default_branch`` closes the issues its title or
-body references with a closing keyword; merges into other bases close nothing.
+``defaultBranchRef``), ``auth status``, ``label create`` (a no-op) and
+``api``: issue GET/PATCH, issue comments GET/POST, comment GET/PATCH/DELETE,
+sub-issue GET, POST (``replace_parent``) and DELETE with GitHub's one-parent /
+100-children / 8-levels rules, ``.../parent`` GET, and a ``graphql``
+ClosedEvent closer stub. ``api`` takes ``-X/--method``, ``-f/-F field=value``
+and ``--input file``; with no method it is POST when fields are given, else
+GET. ``{owner}``/``{repo}`` placeholders are filled from ``repo``. REST issue
+objects carry ``id == number``, so ``sub_issue_id=<number>`` works.
+
+``--body-file <f>`` (``-`` for stdin) works wherever ``--body`` does, and
+``-q/--jq`` supports paths (``.a.b``, ``.[]``, ``.[0]``), ``|`` and
+``length``. Issue list/search take ``--label``, ``--state``, ``--limit`` and
+``--search`` (words, ``in:title``/``in:body``, ``[-]label:``, ``is:`` /
+``state:``, and ``head:``/``base:`` for PRs). Bodies over 65536 characters are
+rejected. Merging a PR into ``default_branch`` closes the open issues its body
+names with a closing keyword (``Closes/Fixes/Resolves #N``) and records the PR
+as their closer; merges into other bases close nothing. A PR without a
+target (``gh pr view --json body``) or a ``--head`` resolves to
+``$FAKE_GH_HEAD`` or the current git branch. PR numbers start at 101 and are
+numbered apart from issues.
 """
 
 from __future__ import annotations
@@ -44,13 +63,46 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 
 BODY_LIMIT = 65536
 SUB_ISSUE_LIMIT = 100
 DEPTH_LIMIT = 8
-_CLOSING = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)", re.IGNORECASE)
+_CLOSING = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:([\w.-]+/[\w.-]+))?#(\d+)",
+    re.IGNORECASE,
+)
+_API_VALUE_FLAGS = {
+    "-X",
+    "--method",
+    "-f",
+    "--raw-field",
+    "-F",
+    "--field",
+    "--input",
+    "-H",
+    "--header",
+    "-q",
+    "--jq",
+    "-t",
+    "--template",
+    "--hostname",
+    "--cache",
+    "-p",
+    "--preview",
+}
 
 
 def _load() -> tuple[Path, dict]:
@@ -60,6 +112,30 @@ def _load() -> tuple[Path, dict]:
 
 def _save(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+
+
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on ``<state>.lock`` for one whole call."""
+    with open(path.with_name(path.name + ".lock"), "a+b") as fh:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    continue
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            else:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _flag(argv: list[str], name: str) -> str | None:
@@ -82,6 +158,21 @@ def _flags(argv: list[str], *names: str) -> list[str]:
     return out
 
 
+def _body(argv: list[str], text_flags: tuple[str, ...], file_flags: tuple[str, ...]) -> str | None:
+    """The body from ``--body``-style flags, else from a ``--body-file`` (``-`` = stdin)."""
+    for name in text_flags:
+        value = _flag(argv, name)
+        if value is not None:
+            return value
+    for name in file_flags:
+        source = _flag(argv, name)
+        if source is not None:
+            if source == "-":
+                return sys.stdin.read()
+            return Path(source).read_text(encoding="utf-8")
+    return None
+
+
 def _split_labels(values: list[str]) -> list[str]:
     return [p.strip() for v in values for p in v.split(",") if p.strip()]
 
@@ -98,6 +189,14 @@ def _issue_url(state: dict, number) -> str:
     return f"https://github.com/{_repo(state)}/issues/{number}"
 
 
+def _pr_url(state: dict, number) -> str:
+    return f"https://github.com/{_repo(state)}/pull/{number}"
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def _too_long(body: str | None) -> bool:
     if body is not None and len(body) > BODY_LIMIT:
         print(
@@ -106,6 +205,146 @@ def _too_long(body: str | None) -> bool:
         )
         return True
     return False
+
+
+def _jq(expr: str, data: Any) -> list[Any]:
+    """A tiny jq: ``.a.b``, ``.[]``, ``.[N]``, ``.["k"]``, ``|`` and ``length``."""
+    step = re.compile(r'\.([A-Za-z_][\w-]*)|\.?\[(-?\d*)\]|\.?\["([^"]+)"\]')
+    values = [data]
+    for segment in expr.split("|"):
+        seg = segment.strip()
+        if seg in ("", "."):
+            continue
+        if seg == "length":
+            values = [len(v) if v is not None else 0 for v in values]
+            continue
+        pos = 0
+        while pos < len(seg):
+            m = step.match(seg, pos)
+            if m is None:
+                raise ValueError(expr)
+            name, index, quoted = m.groups()
+            key = name if name is not None else quoted
+            nxt: list[Any] = []
+            for v in values:
+                if key is not None:
+                    nxt.append(v.get(key) if isinstance(v, dict) else None)
+                elif index == "":
+                    if isinstance(v, dict):
+                        nxt.extend(v.values())
+                    elif isinstance(v, list):
+                        nxt.extend(v)
+                else:
+                    i = int(index)
+                    ok = isinstance(v, list) and -len(v) <= i < len(v)
+                    nxt.append(v[i] if ok else None)
+            values = nxt
+            pos = m.end()
+    return values
+
+
+def _emit(argv: list[str], data: Any) -> int:
+    """Print ``data`` as JSON, or through ``-q/--jq`` as gh does."""
+    expr = _flag(argv, "--jq") or _flag(argv, "-q")
+    if expr is None:
+        print(json.dumps(data))
+        return 0
+    try:
+        values = _jq(expr, data)
+    except ValueError:
+        print(f"fake gh: unsupported --jq expression {expr!r}", file=sys.stderr)
+        return 1
+    for v in values:
+        print(v if isinstance(v, str) else json.dumps(v))
+    return 0
+
+
+def _current_branch() -> str | None:
+    """``$FAKE_GH_HEAD``, else the branch checked out in the cwd's git repo."""
+    env = os.environ.get("FAKE_GH_HEAD")
+    if env:
+        return env
+    here = Path.cwd()
+    for d in (here, *here.parents):
+        dot_git = d / ".git"
+        if dot_git.is_dir():
+            head = dot_git / "HEAD"
+        elif dot_git.is_file():
+            text = dot_git.read_text(encoding="utf-8").strip()
+            if not text.startswith("gitdir:"):
+                return None
+            gitdir = Path(text.split(":", 1)[1].strip())
+            head = (gitdir if gitdir.is_absolute() else d / gitdir) / "HEAD"
+        else:
+            continue
+        try:
+            ref = head.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        prefix = "ref: refs/heads/"
+        return ref[len(prefix) :] if ref.startswith(prefix) else None
+    return None
+
+
+def _search_terms(query: str | None) -> dict[str, Any]:
+    """Split a GitHub search string into filters the fake understands."""
+    out: dict[str, Any] = {
+        "words": [],
+        "no_words": [],
+        "in": set(),
+        "labels": [],
+        "no_labels": [],
+        "state": None,
+        "head": None,
+        "base": None,
+    }
+    if not query:
+        return out
+    try:
+        tokens = shlex.split(query)
+    except ValueError:
+        tokens = query.split()
+    for token in tokens:
+        key, sep, value = token.partition(":")
+        low = key.lower()
+        if not sep or not value:
+            if token.startswith("-") and len(token) > 1:
+                out["no_words"].append(token[1:].lower())
+            else:
+                out["words"].append(token.lower())
+        elif low == "in":
+            out["in"].update(v.strip().lower() for v in value.split(","))
+        elif low == "label":
+            out["labels"].append(value)
+        elif low == "-label":
+            out["no_labels"].append(value)
+        elif low in ("is", "state") and value.lower() in ("open", "closed", "merged"):
+            out["state"] = value.lower()
+        elif low == "head":
+            out["head"] = value
+        elif low == "base":
+            out["base"] = value
+        # Other qualifiers (author:, sort:, is:issue, ...) are ignored.
+    return out
+
+
+def _matches_search(terms: dict[str, Any], title: str, body: str, labels: list[str]) -> bool:
+    if any(lbl not in labels for lbl in terms["labels"]):
+        return False
+    if any(lbl in labels for lbl in terms["no_labels"]):
+        return False
+    scope = terms["in"] or {"title", "body"}
+    haystack = " ".join(
+        text for name, text in (("title", title), ("body", body)) if name in scope
+    ).lower()
+    if any(word in haystack for word in terms["no_words"]):
+        return False
+    return all(word in haystack for word in terms["words"])
+
+
+def _limit(argv: list[str]) -> int | None:
+    raw = _flag(argv, "--limit") or _flag(argv, "-L")
+    return int(raw) if raw and raw.isdigit() else None
 
 
 def _issue_json(state: dict, number: str) -> dict | None:
@@ -125,17 +364,54 @@ def _issue_json(state: dict, number: str) -> dict | None:
     }
 
 
+def _sub_state(state: dict, sub: dict) -> str:
+    """A sub-issue's state: the live issue's when it exists, else the stored one."""
+    issue = state.get("issues", {}).get(str(sub["number"]))
+    return (issue or sub).get("state", "open")
+
+
+def _rest_issue(state: dict, number: str) -> dict:
+    """``GET repos/o/r/issues/N`` in REST shape (``id`` is the number)."""
+    issue = state["issues"][number]
+    subs = issue.get("sub_issues", [])
+    done = sum(1 for s in subs if _sub_state(state, s) == "closed")
+    return {
+        "id": int(number),
+        "number": int(number),
+        "title": issue.get("title", ""),
+        "body": issue.get("body", ""),
+        "state": issue.get("state", "open").lower(),
+        "state_reason": issue.get("state_reason"),
+        "labels": [{"name": n} for n in issue.get("labels", [])],
+        "html_url": _issue_url(state, number),
+        "sub_issues_summary": {
+            "total": len(subs),
+            "completed": done,
+            "percent_completed": (100 * done // len(subs)) if subs else 0,
+        },
+    }
+
+
+def _rest_comment(state: dict, number: str, comment: dict) -> dict:
+    return {
+        "id": comment["id"],
+        "body": comment.get("body", ""),
+        "html_url": f"{_issue_url(state, number)}#issuecomment-{comment['id']}",
+        "issue_url": f"https://api.github.com/repos/{_repo(state)}/issues/{number}",
+    }
+
+
 def _next_comment_id(state: dict) -> int:
     cid = int(state.get("next_id", 1000))
     state["next_id"] = cid + 1
     return cid
 
 
-def _find_comment(state: dict, cid: int) -> dict | None:
-    for issue in state.get("issues", {}).values():
+def _find_comment(state: dict, cid: int) -> tuple[str, dict] | None:
+    for number, issue in state.get("issues", {}).items():
         for c in issue.get("comments", []):
             if c.get("id") == cid:
-                return c
+                return number, c
     return None
 
 
@@ -156,10 +432,43 @@ def _close(state: dict, number: str, closed_by: dict) -> None:
 
 def _fault_key(argv: list[str]) -> str:
     if argv[:1] == ["api"]:
-        if len(argv) > 1 and argv[1] == "graphql":
+        if _api_endpoint(argv) == "graphql":
             return "api graphql"
         return "api " + _api_method(argv)
     return " ".join(argv[:2])
+
+
+def _fault_detail(argv: list[str]) -> str:
+    """The rest of the command after the fault key, for narrower keys."""
+    if argv[:1] == ["api"]:
+        endpoint = _api_endpoint(argv)
+        return "" if endpoint == "graphql" else endpoint.strip("/")
+    return " ".join(argv[2:])
+
+
+def _fault(state: dict, argv: list[str]) -> dict | None:
+    """The fault to fire for this call, consuming ``after``/``times``; else None."""
+    base = _fault_key(argv)
+    full = f"{base} {_fault_detail(argv)}".strip()
+
+    def hit(key: str) -> bool:
+        return full == key or full.startswith(key + " ") or key == base
+
+    if any(hit(k) for k in state.get("fail_on", [])):
+        return {"code": 1, "stderr": f"fake gh: injected failure ({base})"}
+    for key in sorted(state.get("faults", {}), key=len, reverse=True):
+        if not hit(key):
+            continue
+        fault = state["faults"][key]
+        if int(fault.get("after", 0)) > 0:
+            fault["after"] = int(fault["after"]) - 1
+            return None
+        if fault.get("times", 1) == 0:
+            return None
+        if "times" in fault:
+            fault["times"] = int(fault["times"]) - 1
+        return fault
+    return None
 
 
 def _api_method(argv: list[str]) -> str:
@@ -169,6 +478,22 @@ def _api_method(argv: list[str]) -> str:
     if _flags(argv, "-f", "-F", "--field", "--raw-field") or _flag(argv, "--input"):
         return "POST"
     return "GET"
+
+
+def _api_endpoint(argv: list[str]) -> str:
+    """The first positional argument after ``api``, skipping flag values."""
+    skip = False
+    for arg in argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if arg in _API_VALUE_FLAGS:
+            skip = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return ""
 
 
 def _api_fields(argv: list[str]) -> dict:
@@ -188,6 +513,8 @@ def _api_fields(argv: list[str]) -> dict:
             fields[key] = int(value)
         elif value == "null":
             fields[key] = None
+        elif value.startswith("@"):
+            fields[key] = Path(value[1:]).read_text(encoding="utf-8")
         else:
             fields[key] = value
     return fields
@@ -214,8 +541,26 @@ def _height(state: dict, number: str, seen: set | None = None) -> int:
     return 1 + max((_height(state, str(s["number"]), seen) for s in subs), default=0)
 
 
+def _is_ancestor(state: dict, ancestor: str, number: str) -> bool:
+    """True when ``ancestor`` is ``number`` or above it in the parent chain."""
+    seen: set[str] = set()
+    current: str | None = number
+    while current is not None and current not in seen:
+        if current == ancestor:
+            return True
+        seen.add(current)
+        parent = state["issues"].get(current, {}).get("parent")
+        current = str(parent) if parent is not None else None
+    return False
+
+
 def _unprocessable(message: str) -> int:
     print(f"gh: {message} (HTTP 422)", file=sys.stderr)
+    return 1
+
+
+def _not_found() -> int:
+    print("gh: Not Found (HTTP 404)", file=sys.stderr)
     return 1
 
 
@@ -228,62 +573,61 @@ def _detach(state: dict, child: str) -> None:
     issue["parent"] = None
 
 
-def _api(path: Path, state: dict, argv: list[str]) -> int:
+def _graphql(state: dict, argv: list[str]) -> int:
     issues = state.setdefault("issues", {})
-    if argv[1] == "graphql":
-        fields = _api_fields(argv)
-        query = str(fields.get("query", ""))
-        if "ClosedEvent" in query or "closer" in query:
-            number = fields.get("number") or fields.get("issue")
-            if number is None:
-                m = re.search(r"issue\s*\(\s*number\s*:\s*(\d+)", query)
-                number = m.group(1) if m else None
-            issue = issues.get(str(number)) if number is not None else None
-            if issue is None:
-                print(json.dumps({"data": {"repository": {"issue": None}}}))
-                return 0
-            nodes = []
-            if issue.get("state", "open") == "closed":
-                by = issue.get("closed_by") or {}
-                if by.get("kind") == "pr" and by.get("pr") is not None:
-                    closer_pr = next(
-                        (p for p in state.get("prs", []) if p["number"] == by["pr"]), {}
-                    )
-                    nodes.append(
-                        {
-                            "closer": {
-                                "__typename": "PullRequest",
-                                "number": by["pr"],
-                                "merged": closer_pr.get("state") == "MERGED",
-                                "baseRefName": closer_pr.get(
-                                    "base", state.get("default_branch", "main")
-                                ),
-                            }
-                        }
-                    )
-                else:
-                    nodes.append({"closer": None})
-            print(
-                json.dumps(
-                    {"data": {"repository": {"issue": {"timelineItems": {"nodes": nodes}}}}}
-                )
-            )
-            return 0
+    fields = _api_fields(argv)
+    query = str(fields.get("query", ""))
+    if "ClosedEvent" not in query and "closer" not in query:
         print(json.dumps({"data": {}}))
         return 0
+    number = fields.get("number") or fields.get("issue")
+    if number is None:
+        m = re.search(r"issue\s*\(\s*number\s*:\s*(\d+)", query)
+        number = m.group(1) if m else None
+    issue = issues.get(str(number)) if number is not None else None
+    if issue is None:
+        return _emit(argv, {"data": {"repository": {"issue": None}}})
+    nodes = []
+    if issue.get("state", "open") == "closed":
+        by = issue.get("closed_by") or {}
+        if by.get("kind") == "pr" and by.get("pr") is not None:
+            closer_pr = next((p for p in state.get("prs", []) if p["number"] == by["pr"]), {})
+            closer = {
+                "__typename": "PullRequest",
+                "number": by["pr"],
+                "merged": closer_pr.get("state") == "MERGED",
+                "baseRefName": closer_pr.get("base", state.get("default_branch", "main")),
+            }
+            nodes.append({"closer": closer})
+        elif by.get("kind") == "commit" and by.get("oid"):
+            nodes.append({"closer": {"__typename": "Commit", "oid": by["oid"]}})
+        else:
+            nodes.append({"closer": None})
+    return _emit(argv, {"data": {"repository": {"issue": {"timelineItems": {"nodes": nodes}}}}})
+
+
+def _api(path: Path, state: dict, argv: list[str]) -> int:
+    issues = state.setdefault("issues", {})
+    if _api_endpoint(argv) == "graphql":
+        return _graphql(state, argv)
 
     method = _api_method(argv)
-    endpoint = next(
-        (a for a in argv[1:] if not a.startswith("-") and "/" in a and "=" not in a), argv[1]
-    )
+    owner, _, name = _repo(state).partition("/")
+    endpoint = _api_endpoint(argv).replace("{owner}", owner).replace("{repo}", name)
     parts = endpoint.split("?", 1)[0].strip("/").split("/")
+    is_issues = len(parts) >= 5 and parts[0] == "repos" and parts[3] == "issues"
 
     # repos/o/r/issues/comments/{id}
-    if len(parts) == 6 and parts[0] == "repos" and parts[3] == "issues" and parts[4] == "comments":
-        comment = _find_comment(state, int(parts[5])) if parts[5].isdigit() else None
-        if comment is None:
-            print("gh: Not Found (HTTP 404)", file=sys.stderr)
-            return 1
+    if is_issues and len(parts) == 6 and parts[4] == "comments":
+        found = _find_comment(state, int(parts[5])) if parts[5].isdigit() else None
+        if found is None:
+            return _not_found()
+        number, comment = found
+        if method == "DELETE":
+            issue = issues[number]
+            issue["comments"] = [c for c in issue["comments"] if c is not comment]
+            _save(path, state)
+            return 0
         if method == "PATCH":
             body = _api_fields(argv).get("body")
             if _too_long(body):
@@ -291,48 +635,88 @@ def _api(path: Path, state: dict, argv: list[str]) -> int:
             if body is not None:
                 comment["body"] = body
             _save(path, state)
-        print(json.dumps({"id": comment["id"], "body": comment.get("body", "")}))
-        return 0
+        return _emit(argv, _rest_comment(state, number, comment))
 
-    # repos/o/r/issues/N/sub_issues and .../sub_issue
-    if (
-        len(parts) == 6
-        and parts[0] == "repos"
-        and parts[3] == "issues"
-        and parts[5] in ("sub_issues", "sub_issue")
-    ):
+    # repos/o/r/issues/N
+    if is_issues and len(parts) == 5:
         issue = issues.get(parts[4])
         if issue is None:
-            print("gh: Not Found (HTTP 404)", file=sys.stderr)
-            return 1
+            return _not_found()
+        if method == "PATCH":
+            fields = _api_fields(argv)
+            if _too_long(fields.get("body")):
+                return 1
+            for key in ("title", "body"):
+                if fields.get(key) is not None:
+                    issue[key] = fields[key]
+            if isinstance(fields.get("labels"), list):
+                issue["labels"] = [str(x) for x in fields["labels"]]
+            if fields.get("state") == "closed" and issue.get("state", "open") != "closed":
+                _close(state, parts[4], {"kind": "user", "pr": None})
+            elif fields.get("state") == "open":
+                _set_issue_state(state, parts[4], "open")
+                issue["closed_by"] = None
+            _save(path, state)
+        return _emit(argv, _rest_issue(state, parts[4]))
+
+    # repos/o/r/issues/N/comments
+    if is_issues and len(parts) == 6 and parts[5] == "comments":
+        issue = issues.get(parts[4])
+        if issue is None:
+            return _not_found()
+        if method == "POST":
+            body = _api_fields(argv).get("body")
+            if _too_long(body):
+                return 1
+            comment = {"id": _next_comment_id(state), "body": body or ""}
+            issue.setdefault("comments", []).append(comment)
+            _save(path, state)
+            return _emit(argv, _rest_comment(state, parts[4], comment))
+        return _emit(
+            argv, [_rest_comment(state, parts[4], c) for c in issue.get("comments", [])]
+        )
+
+    # repos/o/r/issues/N/parent
+    if is_issues and len(parts) == 6 and parts[5] == "parent":
+        issue = issues.get(parts[4])
+        parent = issue.get("parent") if issue is not None else None
+        if parent is None or str(parent) not in issues:
+            return _not_found()
+        return _emit(argv, _rest_issue(state, str(parent)))
+
+    # repos/o/r/issues/N/sub_issues and .../sub_issue
+    if is_issues and len(parts) == 6 and parts[5] in ("sub_issues", "sub_issue"):
+        issue = issues.get(parts[4])
+        if issue is None:
+            return _not_found()
         if method == "GET":
-            print(
-                json.dumps(
-                    [
-                        {"number": s["number"], "state": s.get("state", "open")}
-                        for s in issue.get("sub_issues", [])
-                    ]
-                )
-            )
-            return 0
+            rows = []
+            for s in issue.get("sub_issues", []):
+                row = {"id": s["number"], "number": s["number"], "state": _sub_state(state, s)}
+                if str(s["number"]) in issues:
+                    row["title"] = issues[str(s["number"])].get("title", "")
+                row["html_url"] = _issue_url(state, s["number"])
+                rows.append(row)
+            return _emit(argv, rows)
         fields = _api_fields(argv)
         child = str(fields.get("sub_issue_id", ""))
         if child not in issues:
-            print("gh: Not Found (HTTP 404)", file=sys.stderr)
-            return 1
+            return _not_found()
         if method == "DELETE":
             if str(issues[child].get("parent")) != parts[4]:
-                print("gh: Not Found (HTTP 404)", file=sys.stderr)
-                return 1
+                return _not_found()
             _detach(state, child)
             _save(path, state)
-            print(json.dumps({"number": int(parts[4])}))
-            return 0
+            return _emit(argv, _rest_issue(state, parts[4]))
         if method == "POST":
             replace = fields.get("replace_parent") in (True, "true")
-            if child == parts[4]:
-                return _unprocessable("an issue cannot be its own sub-issue")
+            if _is_ancestor(state, child, parts[4]):
+                return _unprocessable("Validation Failed: an issue cannot be its own sub-issue")
             current = issues[child].get("parent")
+            if current is not None and str(current) == parts[4]:
+                if replace:
+                    return _emit(argv, _rest_issue(state, parts[4]))
+                return _unprocessable("Validation Failed: duplicate sub-issue")
             if current is not None and not replace:
                 return _unprocessable("Validation Failed: sub-issue may only have one parent")
             if len(issue.get("sub_issues", [])) >= SUB_ISSUE_LIMIT:
@@ -350,8 +734,7 @@ def _api(path: Path, state: dict, argv: list[str]) -> int:
             )
             issues[child]["parent"] = int(parts[4])
             _save(path, state)
-            print(json.dumps({"number": int(parts[4])}))
-            return 0
+            return _emit(argv, _rest_issue(state, parts[4]))
 
     print(json.dumps({}))
     return 0
@@ -362,15 +745,15 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
     sub = argv[1] if len(argv) > 1 else ""
 
     if sub == "create":
-        body = _flag(argv, "--body") or ""
+        body = _body(argv, ("--body", "-b"), ("--body-file", "-F")) or ""
         if _too_long(body):
             return 1
         taken = [int(k) for k in issues if k.isdigit()] + [
             p["number"] for p in state.get("prs", [])
         ]
-        number = str(max([*taken, 0]) + 1)
+        number = str(max(taken, default=0) + 1)
         issues[number] = {
-            "title": _flag(argv, "--title") or "",
+            "title": _flag(argv, "--title") or _flag(argv, "-t") or "",
             "body": body,
             "state": "open",
             "labels": _split_labels(_flags(argv, "--label", "-l")),
@@ -385,25 +768,30 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
 
     if sub == "list":
         labels = _split_labels(_flags(argv, "--label", "-l"))
-        wanted = (_flag(argv, "--state") or _flag(argv, "-s") or "open").lower()
+        terms = _search_terms(_flag(argv, "--search") or _flag(argv, "-S"))
+        wanted = (_flag(argv, "--state") or _flag(argv, "-s") or terms["state"] or "open").lower()
         out = []
         for key in sorted(issues, key=lambda k: int(k) if k.isdigit() else 0):
             issue = issues[key]
+            have = issue.get("labels", [])
             if wanted != "all" and issue.get("state", "open").lower() != wanted:
                 continue
-            if any(lbl not in issue.get("labels", []) for lbl in labels):
+            if any(lbl not in have for lbl in labels):
+                continue
+            if not _matches_search(terms, issue.get("title", ""), issue.get("body", ""), have):
                 continue
             out.append(
                 {
                     "number": int(key),
                     "title": issue.get("title", ""),
+                    "body": issue.get("body", ""),
                     "state": issue.get("state", "open").upper(),
-                    "labels": [{"name": n} for n in issue.get("labels", [])],
+                    "labels": [{"name": n} for n in have],
                     "url": _issue_url(state, key),
                 }
             )
-        print(json.dumps(out))
-        return 0
+        limit = _limit(argv)
+        return _emit(argv, out[:limit] if limit is not None else out)
 
     if len(argv) < 3:
         print(f"gh: issue {sub} needs an issue number", file=sys.stderr)
@@ -416,14 +804,16 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
 
     if sub == "view":
         data = _issue_json(state, number)
-        if "--json" in " ".join(argv):
-            print(json.dumps(data))
-        else:
-            print(f"title:\t{data['title']}\nstate:\t{data['state']}\n--\n{data['body']}")
+        if "--json" in argv or any(a.startswith("--json=") for a in argv):
+            return _emit(argv, data)
+        print(f"title:\t{data['title']}\nstate:\t{data['state']}\n--\n{data['body']}")
+        if "--comments" in argv or "-c" in argv:
+            for c in data["comments"]:
+                print(f"--\n{c['body']}")
         return 0
 
     if sub == "comment":
-        body = _flag(argv, "--body") or _flag(argv, "-b") or ""
+        body = _body(argv, ("--body", "-b"), ("--body-file", "-F")) or ""
         if _too_long(body):
             return 1
         cid = _next_comment_id(state)
@@ -433,12 +823,12 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
         return 0
 
     if sub == "edit":
-        body = _flag(argv, "--body")
+        body = _body(argv, ("--body", "-b"), ("--body-file", "-F"))
         if _too_long(body):
             return 1
         if body is not None:
             issue["body"] = body
-        title = _flag(argv, "--title")
+        title = _flag(argv, "--title") or _flag(argv, "-t")
         if title is not None:
             issue["title"] = title
         labels = issue.setdefault("labels", [])
@@ -452,6 +842,9 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
         return 0
 
     if sub == "close":
+        if issue.get("state", "open") == "closed":
+            print(f"! Issue #{number} is already closed", file=sys.stderr)
+            return 0
         comment = _flag(argv, "--comment") or _flag(argv, "-c")
         if _too_long(comment):
             return 1
@@ -460,13 +853,19 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
                 {"id": _next_comment_id(state), "body": comment}
             )
         _close(state, number, {"kind": "command", "pr": None})
+        reason = _flag(argv, "--reason") or _flag(argv, "-r")
+        issue["state_reason"] = "not_planned" if reason == "not planned" else "completed"
         _save(path, state)
         print(f"Closed issue #{number}")
         return 0
 
     if sub == "reopen":
+        if issue.get("state", "open") != "closed":
+            print(f"! Issue #{number} is already open", file=sys.stderr)
+            return 0
         _set_issue_state(state, number, "open")
         issue["closed_by"] = None
+        issue["state_reason"] = "reopened"
         _save(path, state)
         print(f"Reopened issue #{number}")
         return 0
@@ -475,17 +874,55 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
 
 
 def _find_pr(state: dict, target: str) -> dict | None:
-    tail = _number(target)
-    number = int(tail) if tail.isdigit() else None
-    return next(
-        (
-            p
-            for p in state.get("prs", [])
-            if (number is not None and p["number"] == number)
-            or (number is None and p.get("head") == target)
-        ),
-        None,
-    )
+    """A PR by number, ``#N``, URL or head branch; no target means the current branch."""
+    prs = state.get("prs", [])
+    text = target.strip()
+    m = re.search(r"/pull/(\d+)", text)
+    if m:
+        number: int | None = int(m.group(1))
+    elif text.lstrip("#").isdigit():
+        number = int(text.lstrip("#"))
+    else:
+        number = None
+    if number is not None:
+        return next((p for p in prs if p["number"] == number), None)
+    head = text or _current_branch()
+    if not head:
+        return None
+    matches = [p for p in prs if p.get("head") == head]
+    live = [p for p in matches if p.get("state", "OPEN") == "OPEN"]
+    return (live or matches or [None])[-1]
+
+
+def _review_decision(state: dict, pr: dict) -> str:
+    if pr.get("approved"):
+        return "APPROVED"
+    if _needs_review(state, pr):
+        return "REVIEW_REQUIRED"
+    return ""
+
+
+def _needs_review(state: dict, pr: dict) -> bool:
+    if pr.get("requires_review") or pr.get("reviews_required"):
+        return True
+    default_branch = state.get("default_branch", "main")
+    return bool(state.get("requires_review")) and pr.get("base", default_branch) == default_branch
+
+
+def _pr_json(state: dict, pr: dict) -> dict:
+    default_branch = state.get("default_branch", "main")
+    return {
+        "number": pr["number"],
+        "state": pr.get("state", "OPEN"),
+        "headRefName": pr.get("head"),
+        "baseRefName": pr.get("base", default_branch),
+        "isDraft": bool(pr.get("draft", False)),
+        "body": pr.get("body", ""),
+        "title": pr.get("title", ""),
+        "url": _pr_url(state, pr["number"]),
+        "mergedAt": pr.get("merged_at"),
+        "reviewDecision": _review_decision(state, pr),
+    }
 
 
 def _pr(path: Path, state: dict, argv: list[str]) -> int:
@@ -493,104 +930,134 @@ def _pr(path: Path, state: dict, argv: list[str]) -> int:
     default_branch = state.get("default_branch", "main")
 
     if sub == "list":
-        head = _flag(argv, "--head")
-        wanted = (_flag(argv, "--state") or "open").lower()
+        head = _flag(argv, "--head") or _flag(argv, "-H")
+        base = _flag(argv, "--base") or _flag(argv, "-B")
+        terms = _search_terms(_flag(argv, "--search") or _flag(argv, "-S"))
+        wanted = (_flag(argv, "--state") or _flag(argv, "-s") or terms["state"] or "open").lower()
         prs = [
             p
             for p in state.get("prs", [])
             if (head is None or p.get("head") == head)
+            and (base is None or p.get("base", default_branch) == base)
             and (wanted == "all" or p.get("state", "OPEN").lower() == wanted)
+            and (terms["head"] is None or str(p.get("head", "")).startswith(terms["head"]))
+            and (terms["base"] is None or p.get("base", default_branch) == terms["base"])
+            and _matches_search(terms, p.get("title", ""), p.get("body", ""), [])
         ]
-        print(
-            json.dumps(
-                [
-                    {
-                        "number": p["number"],
-                        "headRefName": p.get("head"),
-                        "state": p.get("state", "OPEN"),
-                        "title": p.get("title", ""),
-                        "url": f"https://github.com/{_repo(state)}/pull/{p['number']}",
-                    }
-                    for p in prs
-                ]
-            )
-        )
-        return 0
+        limit = _limit(argv)
+        rows = [_pr_json(state, p) for p in prs]
+        return _emit(argv, rows[:limit] if limit is not None else rows)
 
     if sub == "create":
-        body = _flag(argv, "--body") or _flag(argv, "-b") or ""
+        body = _body(argv, ("--body", "-b"), ("--body-file", "-F")) or ""
         if _too_long(body):
             return 1
         prs = state.setdefault("prs", [])
-        number = max([p["number"] for p in prs] + [100]) + 1
-        head = _flag(argv, "--head") or os.environ.get("FAKE_GH_HEAD", "HEAD")
+        head = _flag(argv, "--head") or _flag(argv, "-H") or _current_branch() or "HEAD"
+        base = _flag(argv, "--base") or _flag(argv, "-B") or default_branch
+        dup = next(
+            (
+                p
+                for p in prs
+                if p.get("head") == head
+                and p.get("base", default_branch) == base
+                and p.get("state", "OPEN") == "OPEN"
+            ),
+            None,
+        )
+        if dup is not None:
+            print(
+                f'a pull request for branch "{head}" into branch "{base}" already exists:\n'
+                f"{_pr_url(state, dup['number'])}",
+                file=sys.stderr,
+            )
+            return 1
+        number = max((p["number"] for p in prs), default=100) + 1
         prs.append(
             {
                 "number": number,
                 "head": head,
                 "state": "OPEN",
-                "title": _flag(argv, "--title") or "",
-                "base": _flag(argv, "--base") or _flag(argv, "-B") or default_branch,
+                "title": _flag(argv, "--title") or _flag(argv, "-t") or "",
+                "base": base,
                 "draft": "--draft" in argv or "-d" in argv,
                 "body": body,
             }
         )
         _save(path, state)
-        print(f"https://github.com/{_repo(state)}/pull/{number}")
+        print(_pr_url(state, number))
         return 0
 
     target = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else ""
     pr = _find_pr(state, target)
     if pr is None:
-        print(f"gh: pull request {target} not found", file=sys.stderr)
+        print(f"gh: no pull requests found for {target or 'the current branch'}", file=sys.stderr)
         return 1
     number = pr["number"]
 
     if sub == "edit":
-        body = _flag(argv, "--body")
+        body = _body(argv, ("--body", "-b"), ("--body-file", "-F"))
         if _too_long(body):
             return 1
         if body is not None:
             pr["body"] = body
-        title = _flag(argv, "--title")
+        title = _flag(argv, "--title") or _flag(argv, "-t")
         if title is not None:
             pr["title"] = title
-        base = _flag(argv, "--base")
+        base = _flag(argv, "--base") or _flag(argv, "-B")
         if base is not None:
             pr["base"] = base
         _save(path, state)
-        print(f"https://github.com/{_repo(state)}/pull/{number}")
+        print(_pr_url(state, number))
         return 0
 
     if sub == "ready":
-        pr["draft"] = False
+        pr["draft"] = "--undo" in argv
         _save(path, state)
-        print(f"Pull request #{number} is marked as ready for review")
+        if pr["draft"]:
+            print(f"Pull request #{number} is converted to draft")
+        else:
+            print(f"Pull request #{number} is marked as ready for review")
         return 0
 
     if sub == "merge":
         admin = "--admin" in argv
+        if pr.get("state", "OPEN") == "MERGED":
+            print(f"gh: pull request #{number} was already merged", file=sys.stderr)
+            return 1
+        if pr.get("state", "OPEN") == "CLOSED":
+            print(f"gh: pull request #{number} is closed and cannot be merged", file=sys.stderr)
+            return 1
+        method = next(
+            (m for m in ("merge", "squash", "rebase") if f"--{m}" in argv or f"-{m[0]}" in argv),
+            None,
+        )
+        if method is None:
+            print(
+                "gh: --merge, --rebase, or --squash required when not running interactively",
+                file=sys.stderr,
+            )
+            return 1
         if pr.get("draft"):
             print(f"gh: pull request #{number} is still a draft", file=sys.stderr)
             return 1
-        if pr.get("reviews_required") and not pr.get("approved") and not admin:
+        if _needs_review(state, pr) and not pr.get("approved") and not admin:
             print(
                 f"gh: pull request #{number} is not mergeable: "
                 "the base branch policy prohibits the merge (review required)",
                 file=sys.stderr,
             )
             return 1
-        method = next(
-            (m for m in ("merge", "squash", "rebase") if f"--{m}" in argv or f"-{m[0]}" in argv),
-            None,
-        )
         pr["merge_method"] = method
         pr["admin"] = admin
         pr["state"] = "MERGED"
+        pr["merged_at"] = _now()
         if pr.get("base", default_branch) == default_branch:
-            text = f"{pr.get('title', '')}\n{pr.get('body', '')}"
-            for ref in _CLOSING.findall(text):
-                if ref in state.get("issues", {}):
+            for repo, ref in _CLOSING.findall(pr.get("body") or ""):
+                if repo and repo.lower() != _repo(state).lower():
+                    continue
+                issue = state.get("issues", {}).get(ref)
+                if issue is not None and issue.get("state", "open") != "closed":
                     _close(state, ref, {"kind": "pr", "pr": number})
         _save(path, state)
         print(f"Merged pull request #{number}")
@@ -601,39 +1068,24 @@ def _pr(path: Path, state: dict, argv: list[str]) -> int:
         return 0
 
     if sub == "view":
-        print(
-            json.dumps(
-                {
-                    "number": number,
-                    "state": pr["state"],
-                    "headRefName": pr.get("head"),
-                    "baseRefName": pr.get("base", default_branch),
-                    "isDraft": bool(pr.get("draft", False)),
-                    "body": pr.get("body", ""),
-                    "title": pr.get("title", ""),
-                }
-            )
-        )
-        return 0
+        return _emit(argv, _pr_json(state, pr))
 
     return 0
 
 
-def main(argv: list[str]) -> int:
-    path, state = _load()
+def _dispatch(path: Path, state: dict, argv: list[str]) -> int:
     state.setdefault("calls", []).append(argv)
     _save(path, state)
     if state.get("fail"):
         print("fake gh: simulated failure (not signed in)", file=sys.stderr)
         return 1
 
-    fault = state.get("faults", {}).get(_fault_key(argv))
-    if fault is not None and fault.get("times", 1) != 0:
-        if "times" in fault:
-            fault["times"] = int(fault["times"]) - 1
+    fault = _fault(state, argv) if argv else None
+    if fault is not None:
         _save(path, state)
         print(fault.get("stderr", "fake gh: injected fault"), file=sys.stderr)
         return int(fault.get("code", 1))
+    _save(path, state)
 
     if argv[:1] == ["api"] and len(argv) > 1:
         return _api(path, state, argv)
@@ -642,16 +1094,24 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["pr"]:
         return _pr(path, state, argv)
     if argv[:2] == ["repo", "view"]:
-        print(
-            json.dumps(
-                {
-                    "nameWithOwner": _repo(state),
-                    "defaultBranchRef": {"name": state.get("default_branch", "main")},
-                }
-            )
+        return _emit(
+            argv,
+            {
+                "nameWithOwner": _repo(state),
+                "defaultBranchRef": {"name": state.get("default_branch", "main")},
+            },
         )
+    if argv[:2] == ["auth", "status"]:
+        print("github.com: logged in to github.com as fake-gh")
         return 0
     return 0
+
+
+def main(argv: list[str]) -> int:
+    path = Path(os.environ["FAKE_GH_STATE"])
+    with _locked(path):
+        _, state = _load()
+        return _dispatch(path, state, argv)
 
 
 if __name__ == "__main__":
