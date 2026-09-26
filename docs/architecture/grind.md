@@ -147,8 +147,10 @@ this is the contract.
 - **Undo.** Every change is recorded in `run.json` `undo`.
 - **One feature group per run.** The rest go to `deferred_groups`.
 - **No overlap.** An open feature PR under the same top meta makes the run
-  bugs-only (`waiting_on_pr`, rule `rules.no_overlap`). A feature PR under a
-  different top meta does not block.
+  bugs-only (`waiting_on_pr`, rule `rules.no_overlap`). "Under" means a PR
+  into `<main>` whose `grind/meta-<X>-…` head names the top meta or one of
+  its sub-metas, since a group's feature branch carries its sub-meta's
+  number. A feature PR under a different top meta does not block.
 - `grind-run.js` enforces the deferral and the no-overlap rule, not just the
   router.
 

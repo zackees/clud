@@ -15,8 +15,11 @@ scripted main session runs the exact `gh` commands the skill names:
 Every change is written to `run.json`'s `undo` before its command runs, and
 the plan fields to `.clud/grind/plan.json`. The tests then check the fake
 GitHub state against hard-coded expectations, plus the undo record against
-the before/after states. M6 runs `grind-run` itself: one feature stage runs,
-the deferred group's goals come back with status `deferred`.
+the before/after states. A second regroup over a regrouped world changes
+nothing (M5, later run). M9 has GitHub refuse a move (8 levels, 100
+sub-issues) and the router stop before prework. M6 runs `grind-run` itself:
+one feature stage runs, the deferred group's goals come back with status
+`deferred`.
 
 Script note: a step's `expect` checks the tool results of the *previous*
 step, so an expectation about a command sits on the step after it.
@@ -182,7 +185,8 @@ def _regroup(
     user = [n for n in subs if not _marked(_iss(state, n))]
     grind = [n for n in subs if _marked(_iss(state, n))]
     protected = {c for g in grind for c in _subs(state, g)}
-    next_id = max(int(k) for k in issues) + 1
+    # fake_gh numbers a new issue after every issue *and* PR number.
+    next_id = max([int(k) for k in issues] + [int(p["number"]) for p in state.get("prs", [])]) + 1
     cmds: list[str] = []
     undo: list[dict[str, Any]] = []
     where: dict[str, int] = {}
@@ -448,6 +452,26 @@ def test_m5_grind_made_sub_meta_and_its_children_are_untouched(harness: Harness)
     assert _parent(after, 2) == TOP
 
 
+def test_m5_sub_metas_rewritten_by_an_earlier_run_are_kept(harness: Harness) -> None:
+    """Scenario 3, run 2: the user's sub-metas rewritten in run 1 now carry
+    the marker, so the next run keeps them and changes nothing."""
+    groups = [("docs", [4, 5, 6]), ("cli", [7, 8, 9])]
+    _, first, _, _ = _regroup_run(harness, _two_user_metas(), groups, [10])
+    assert _iss(first, 2)["body"].startswith(V1)
+    # Claude Code's Write refuses to overwrite a file this session never read.
+    _run_path(harness).unlink()
+    _plan_path(harness).unlink()
+    before, after, undo, plan = _regroup_run(harness, {**first, "calls": []}, groups, [10])
+    assert undo == []
+    assert not _calls(after, "issue")
+    assert not _calls(after, "api")
+    assert after["issues"] == before["issues"]
+    assert plan["stages"][1]["sub_meta"] == 2
+    assert plan["deferred_groups"] == [
+        {"group": "cli", "sub_meta": 3, "children": ["7", "8", "9"]}
+    ]
+
+
 def test_m7_one_feature_group_creates_no_sub_meta(harness: Harness) -> None:
     state = _backlog_with_bugs()
     groups = [("docs", [2, 3, 4, 5, 6, 7, 8, 9])]
@@ -503,17 +527,35 @@ def test_m8_undo_records_every_create_reparent_and_rewrite(harness: Harness) -> 
 # ---- M9: nesting guard ---------------------------------------------------------
 
 
-def test_m9_too_deep_regroup_fails_before_prework(harness: Harness) -> None:
-    harness.write_gh_state(_too_deep())
-    move = _attach(8, 9, replace=True)
-    undo = [{"op": "reparent", "issue": 9, "from": TOP, "to": 8}]
+def _too_full() -> dict[str, Any]:
+    """A user sub-meta #2 already holding 100 sub-issues (#3-#102), plus a
+    loose feature child #103 and a bug #104 under #1."""
+    issues = {
+        1: _issue("meta: top", "Top-level meta."),
+        2: _issue("meta: big group", "The user's big group.", parent=1),
+    }
+    for n in range(3, 103):
+        issues[n] = _issue(f"docs {n}", "do", parent=2)
+    issues[103] = _issue("docs extra", "do", parent=1)
+    issues[104] = _issue("bug", "fix", parent=1)
+    return _world(issues)
+
+
+def _guarded_move_fails(
+    harness: Harness, world: dict[str, Any], parent: int, child: int, reason: str
+) -> None:
+    """Move `child` under `parent`; GitHub refuses with `reason`, and the
+    router reports it and stops before prework."""
+    harness.write_gh_state(world)
+    move = _attach(parent, child, replace=True)
+    undo = [{"op": "reparent", "issue": child, "from": TOP, "to": parent}]
     run = {"mode": "sequential", "meta": str(TOP), "undo": undo, "waiting_on_pr": None}
     steps = [
         _write(_run_path(harness), json.dumps(run, indent=1)),
         _after(OK, _bash(move)),
         _after(
-            {"is_error": True, "content_contains": "8 levels"},
-            {"text": "regroup failed: nesting too deep; keeping #1 as is. GRIND_DONE"},
+            {"is_error": True, "content_contains": reason},
+            {"text": f"regroup failed: {reason}; keeping #1 as is. GRIND_DONE"},
         ),
     ]
     script = {"default_text": "OK", "roles": [{"name": "main", "steps": steps}]}
@@ -523,20 +565,34 @@ def test_m9_too_deep_regroup_fails_before_prework(harness: Harness) -> None:
     after = harness.read_gh_state()
     posts = [c for c in _calls(after, "api") if "replace_parent=true" in c]
     assert len(posts) == 1, after["calls"]
-    assert _parent(after, 9) == TOP
-    assert _subs(after, 8) == set()
+    assert _parent(after, child) == TOP
+    assert child not in _subs(after, parent)
+    assert _subs(after, parent) == _subs(world, parent)
+    assert "regroup failed" in _told(result)
     assert "prework" not in {r["role"] for r in result.requests}
     assert not any(h.get("agent_type") == "grind-prework" for h in result.hooks)
     comments = _iss(after, TOP).get("comments", [])
     assert not [c for c in comments if PLAN_MARKER in c.get("body", "")], comments
 
 
+def test_m9_too_deep_regroup_fails_before_prework(harness: Harness) -> None:
+    _guarded_move_fails(harness, _too_deep(), 8, 9, "8 levels")
+
+
+def test_m9_full_parent_regroup_fails_before_prework(harness: Harness) -> None:
+    _guarded_move_fails(harness, _too_full(), 2, 103, "100 sub-issues")
+
+
 # ---- M6: feature pick, one feature per run -------------------------------------
 
 
 def _goal_roles(h: Harness, goal: str) -> list[dict[str, Any]]:
-    """One goal's planner, worker, reviewer, integrator and lander."""
-    branch = f"grind/{goal}"
+    """One goal's planner, worker, reviewer, integrator and lander.
+
+    The branch is `grind/goal-<id>`, not `grind/<id>`: fake_gh reads a
+    target whose last path segment is a number as a PR number.
+    """
+    branch = f"grind/goal-{goal}"
     repo = str(h.repo)
     at = f"Goal {goal}:"
     plan = {
@@ -627,7 +683,10 @@ def test_m6_only_the_picked_feature_group_is_worked(harness: Harness) -> None:
         "rules": {},
     }
     url = f"https://github.com/o/r/issues/{TOP}#issuecomment-1000"
-    body = f"{PLAN_MARKER}{RUN_ID} -->\n```json\n{json.dumps({'schema': 'grind-plan/v1'})}\n```"
+    # Marker only: clud's rm-vars hook reads the backticks of a ```json fence
+    # inside a single-quoted --body as a command substitution and blocks the
+    # whole command. This test is about the feature pick, not the plan body.
+    body = f"{PLAN_MARKER}{RUN_ID} -->"
     prework = _role(
         "prework",
         "prework",
@@ -659,7 +718,9 @@ def test_m6_only_the_picked_feature_group_is_worked(harness: Harness) -> None:
     _no_notes(result)
     # Only the chosen group's goals were worked.
     heads = {p["head"] for p in harness.read_gh_state()["prs"]}
-    assert heads == {"grind/2", "grind/3"}, heads
+    assert heads == {"grind/goal-2", "grind/goal-3"}, heads
+    # No group got a feature branch: this plan runs no feature setup.
+    assert "grind/meta-" not in harness.git("ls-remote", "--heads", "origin")
     for g in ("4", "5"):
         seen = [
             r["role"]

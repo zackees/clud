@@ -63,3 +63,30 @@ def test_workflow_enforces_deferral_and_overlap() -> None:
     assert "deferred_groups" in text
     assert "waiting_on_pr" in text
     assert "no overlap" in text
+
+
+def test_router_feature_pick_defaults_to_dependency_order() -> None:
+    text = _read("grind")
+    assert "dependency order" in text
+    assert '"(Recommended)"' in text
+    assert "Keep as is (simple schedule)" in text
+
+
+def test_router_no_overlap_covers_sub_meta_feature_prs() -> None:
+    """A meta of metas names each feature branch after its sub-meta, so the
+    check must look at `T`'s sub-issues, and only at PRs into `<main>`."""
+    text = _read("grind")
+    assert "--base <main> --search 'head:grind/meta-'" in text
+    assert "one of `T`'s sub-issues" in text
+    assert "move every feature group into `deferred_groups`" in text
+
+
+def test_router_attaches_sub_issues_by_rest_id() -> None:
+    text = _read("grind")
+    assert "gh api repos/<o>/<r>/issues/<n> --jq .id" in text
+
+
+def test_workflow_defers_children_of_groups_outside_stages() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "args.plan.deferred_groups : []).forEach" in text
+    assert "const NO_FEATURE_LEFT = BUGS_ONLY ||" in text
