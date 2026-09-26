@@ -45,6 +45,12 @@ const CHAIN_DEADLINE: Duration = Duration::from_secs(5);
 /// itself.
 const MARKER: &str = " statusline --session-pid ";
 
+/// Printed in place of the user's status line when Windows has no Git Bash
+/// to run it (#1371). The command is authored for Git Bash, as Claude Code
+/// runs it there; `cmd.exe` would mis-run it, so clud says why it is missing
+/// instead of silently dropping it.
+const NO_GIT_BASH_NOTICE: &str = "\x1b[38;5;214mclud \u{b7} statusLine skipped: Git Bash not found; set CLAUDE_CODE_GIT_BASH_PATH to Git's bin\\bash.exe\x1b[0m";
+
 pub fn state_path(state_dir: &Path, session_pid: u32) -> PathBuf {
     state_dir.join("toasts").join(format!("{session_pid}.json"))
 }
@@ -483,13 +489,7 @@ pub fn run(args: &RunArgs) -> i32 {
 /// Everything `run` prints, separated from stdio for tests.
 pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64) {
     if let Some(chain) = args.chain_b64.as_deref().and_then(decode_chain) {
-        if let Some(user) = run_chain(&chain, stdin) {
-            let trimmed = trim_trailing_newlines(&user);
-            if !trimmed.is_empty() {
-                out.extend_from_slice(trimmed);
-                out.push(b'\n');
-            }
-        }
+        render_chain(out, chain_spec(&chain), stdin);
     }
     let path = state_path(&args.state_dir, args.session_pid);
     let state = read_state(&path);
@@ -527,6 +527,23 @@ pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64)
     }
 }
 
+/// The user's line, or [`NO_GIT_BASH_NOTICE`] when there is no shell that can
+/// run it (`spec` is `None`).
+fn render_chain(out: &mut Vec<u8>, spec: Option<CommandSpec>, stdin: &[u8]) {
+    let Some(spec) = spec else {
+        out.extend_from_slice(NO_GIT_BASH_NOTICE.as_bytes());
+        out.push(b'\n');
+        return;
+    };
+    if let Some(user) = run_chain_spec(spec, stdin) {
+        let trimmed = trim_trailing_newlines(&user);
+        if !trimmed.is_empty() {
+            out.extend_from_slice(trimmed);
+            out.push(b'\n');
+        }
+    }
+}
+
 fn claude_status_model(stdin: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(stdin).ok()?;
     value
@@ -547,10 +564,15 @@ fn trim_trailing_newlines(bytes: &[u8]) -> &[u8] {
 
 /// Run the user's status-line command with Claude's session JSON on stdin and
 /// return its stdout. Stderr is captured separately and dropped, as Claude
-/// Code itself ignores a status line's stderr.
+/// Code itself ignores a status line's stderr. `None` when it could not run,
+/// including on Windows without Git Bash.
 pub fn run_chain(command: &str, stdin: &[u8]) -> Option<Vec<u8>> {
+    run_chain_spec(chain_spec(command)?, stdin)
+}
+
+fn run_chain_spec(command: CommandSpec, stdin: &[u8]) -> Option<Vec<u8>> {
     let config = ProcessConfig {
-        command: chain_spec(command),
+        command,
         cwd: None,
         env: None,
         capture: true,
@@ -589,45 +611,75 @@ pub fn run_chain(command: &str, stdin: &[u8]) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// POSIX runs the command with `sh -c`, as Claude Code does. Windows prefers
-/// Git Bash (Claude Code's own shell there) and falls back to `cmd`.
-fn chain_spec(command: &str) -> CommandSpec {
+/// POSIX runs the command with `sh -c`, as Claude Code does. Windows runs it
+/// with Git Bash, Claude Code's own shell there, and `None` means none was
+/// found: the command is never handed to `cmd.exe` instead (#1371).
+fn chain_spec(command: &str) -> Option<CommandSpec> {
     #[cfg(windows)]
     {
         windows_chain_spec(
             command,
             std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH"),
-            || which::which("bash").ok(),
+            locate_git_bash,
         )
     }
     #[cfg(not(windows))]
     {
-        CommandSpec::Argv(vec!["sh".into(), "-c".into(), command.into()])
+        Some(CommandSpec::Argv(vec![
+            "sh".into(),
+            "-c".into(),
+            command.into(),
+        ]))
     }
 }
 
 /// Windows shell resolution for [`chain_spec`], kept pure and compiled on
 /// every platform so Linux CI covers it: a `CLAUDE_CODE_GIT_BASH_PATH` that
-/// names an existing file wins, then `bash` on PATH, then `cmd` via
-/// [`CommandSpec::Shell`].
+/// names an existing file wins, then whatever `locate_bash` finds. With no
+/// bash at all it returns `None` rather than falling back to `cmd.exe`: the
+/// command is POSIX shell, and `cmd` would silently mis-run it.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn windows_chain_spec(
     command: &str,
     git_bash_env: Option<std::ffi::OsString>,
-    which_bash: impl FnOnce() -> Option<PathBuf>,
-) -> CommandSpec {
+    locate_bash: impl FnOnce() -> Option<PathBuf>,
+) -> Option<CommandSpec> {
     let bash = git_bash_env
         .map(PathBuf::from)
         .filter(|p| p.is_file())
-        .or_else(which_bash);
-    match bash {
-        Some(bash) => CommandSpec::Argv(vec![
-            bash.to_string_lossy().into_owned(),
-            "-c".into(),
-            command.into(),
-        ]),
-        None => CommandSpec::Shell(command.into()),
-    }
+        .or_else(locate_bash)?;
+    Some(CommandSpec::Argv(vec![
+        bash.to_string_lossy().into_owned(),
+        "-c".into(),
+        command.into(),
+    ]))
+}
+
+/// Where Git for Windows keeps `bash.exe`, most specific first: beside the
+/// `git.exe` found on PATH (the installer's default PATH entry is `Git\cmd`,
+/// which holds `git.exe` but not `bash.exe`), then the default install under
+/// `%ProgramFiles%`. Both resolve to `<Git>\bin\bash.exe`, the path
+/// `CLAUDE_CODE_GIT_BASH_PATH` names.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn git_bash_candidates(git_exe: Option<&Path>, program_files: Option<&Path>) -> Vec<PathBuf> {
+    let beside_git = git_exe
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|root| root.join("bin").join("bash.exe"));
+    let installed = program_files.map(|dir| dir.join("Git").join("bin").join("bash.exe"));
+    beside_git.into_iter().chain(installed).collect()
+}
+
+/// Git Bash when `CLAUDE_CODE_GIT_BASH_PATH` is unset: the Git for Windows
+/// install, then any `bash` on PATH.
+#[cfg(windows)]
+fn locate_git_bash() -> Option<PathBuf> {
+    let git = which::which("git").ok();
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    git_bash_candidates(git.as_deref(), program_files.as_deref())
+        .into_iter()
+        .find(|path| path.is_file())
+        .or_else(|| which::which("bash").ok())
 }
 
 #[cfg(test)]
