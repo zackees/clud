@@ -166,7 +166,7 @@ the codebase stays portable.
   and `enable_console_vt_output` sees no console stream. POSIX terminals are
   already in canonical VT mode and need no opt-in.
 
-### (d) Native terminal input via running-process (issues #141 / #575)
+### (d) Native terminal input via running-process (issues #141 / #575 / #1351)
 
 - **Symptoms**:
   - Conhost strips modifier state from the byte stream, so a byte reader
@@ -175,23 +175,39 @@ the codebase stays portable.
     Unicode characters. Navigation key records have `UnicodeChar == 0`, so
     arrows and Home/End/Insert/Delete/Page keys were dropped or surfaced as
     malformed CSI suffixes in Codex (#575).
+  - Emoji and other characters above U+FFFF arrive as two key records, one per
+    UTF-16 surrogate. running-process 4.9 translates each record alone,
+    rejects both halves as invalid `char`s, and drops the character: the emoji
+    picker, IME commits, and keystroke paste lost them silently (#1351).
 
-- **Solution**: `running_process::pty::terminal_input::TerminalInputCore` is
-  the authoritative Windows console reader. It owns console-mode
-  save/restore, `ReadConsoleInputW`, generic virtual-key translation,
-  modifiers, repeat counts, and
-  `RUNNING_PROCESS_NATIVE_TERMINAL_INPUT_TRACE_PATH`. Clud forwards each
-  `TerminalInputEventRecord::data` value as one PTY channel chunk, preserving
-  complete sequences such as `ESC [ D`. Its adapter changes only two
-  product-specific policies:
-  - Shift+Enter's upstream CSI-u representation becomes literal `\n`, keeping
-    clud's established multi-line prompt behavior.
+- **Solution**: `running_process::pty::terminal_input::TerminalInputCore`
+  holds the event queue and owns console-mode selection, generic virtual-key
+  translation (`translate_console_key_event`), modifiers, repeat counts, and
+  `RUNNING_PROCESS_NATIVE_TERMINAL_INPUT_TRACE_PATH`. Clud runs the
+  `ReadConsoleInputW` loop itself (`start_native_reader`, a copy of
+  `TerminalInputCore::start_impl` and its worker) so every batch first passes
+  through `console_surrogates::SurrogatePairer`: it joins the two halves into
+  UTF-8 (across batch boundaries too), ignores key-up records, honors
+  `wRepeatCount`, and turns an unpaired half into U+FFFD. Every other record
+  goes to the upstream translator unchanged. The upstream fix is
+  zackees/running-process#1215; once clud depends on a release with it, the
+  loop can go back to `start_impl`. The Windows unit test
+  `upstream_translator_alone_drops_both_surrogate_halves` fails when that
+  happens. Clud forwards each `TerminalInputEventRecord::data` value as one
+  PTY channel chunk, preserving complete sequences such as `ESC [ D`. Its
+  adapter changes only two product-specific policies:
+  - Shift+Enter's upstream CSI-u representation becomes ESC CR (the Alt+Enter
+    newline Claude Code and Codex accept), because ConPTY rewrites a bare LF
+    into CR (#1369).
   - Ctrl+V may become a saved clipboard-image path; otherwise the upstream
     control byte passes through.
 
 - **File**: `crates/clud-bin/src/console_input.rs`
-  (`spawn_console_input_reader`, `adapt_event_with_clipboard`); construction
-  and lifetime ownership in `crates/clud-bin/src/runner.rs`.
+  (`spawn_console_input_reader`, `start_native_reader`,
+  `translate_key_records`, `adapt_event_with_clipboard`) and the
+  platform-neutral `crates/clud-bin/src/console_surrogates.rs`; construction
+  and lifetime ownership in `crates/clud-bin/src/runner_execution.rs` (local
+  PTY) and `crates/clud-bin/src/daemon/attach_input.rs` (daemon attach).
 
 - **POSIX behavior**: Different mechanism. POSIX terminals deliver
   Shift+Enter as the same `\r` as plain Enter at the kernel layer —
@@ -571,12 +587,16 @@ unit-test runs cover only the dispatch logic, not the OS calls themselves.
 
 - On the Windows matrix, `console_input` unit tests construct upstream
   `TerminalInputEventRecord`s and pin clud's Shift+Enter/Ctrl+V policy plus
-  atomic event forwarding. The Windows integration test
+  atomic event forwarding, and pass emoji `KEY_EVENT_RECORD`s through
+  `translate_key_records` and the real upstream translator (#1351). The
+  surrogate-pairing rules themselves live in `console_surrogates.rs` and are
+  unit-tested on every OS. The Windows integration test
   `shift_enter_dual_reader.rs` passes native `KEY_EVENT_RECORD`s through
   running-process's real translator and verifies arrow/Home/End/Insert/Delete/
   Page sequences plus trace bytes even on a headless runner. When stdin is an
-  attached console, the same test additionally injects records with
-  `WriteConsoleInputW` and observes the production `TerminalInputCore` reader.
+  attached console, the same test additionally injects records (including an
+  emoji's two surrogate records) with `WriteConsoleInputW` and observes the
+  production reader.
 
 - Cross-platform, `console_title::OscTitleStripper` is a pure byte filter and is
   fully unit-tested cross-platform — including split-across-chunks,
