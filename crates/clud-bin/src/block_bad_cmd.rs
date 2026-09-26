@@ -502,6 +502,22 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
+    // #1340: an agent deletes through `rm-file` / `rm-dir`. Its own `rm`,
+    // `rmdir`, `unlink`, `find -delete` and `find -exec rm` are refused with
+    // the exact replacement, ahead of every check that would otherwise try
+    // to prove the removal safe. A script's `rm` is the child shim's job.
+    let posix_shell = event == PRE_TOOL_USE_EVENT
+        && block_bad_cmd_gate::gates_tool(&payload.tool_name)
+        && shell_dialect_for_tool(&payload.tool_name) == ShellDialect::Posix;
+    if posix_shell {
+        if let Some(reason) = block_bad_cmd_rm_redirect::redirect_reason(&payload.command) {
+            append_log(&format!("RM-REDIRECT: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud rm-file] {reason}");
+            return 2;
+        }
+    }
+
     // Inside clud's own repo the launcher sets this (see `clud_repo_dev`):
     // rebuilding clud-shim would otherwise wedge every shell call.
     let skip_rm_identity = crate::clud_repo_dev::skip_rm_identity_enabled();
@@ -674,6 +690,22 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // that isn't up yet must never block the tool call itself.
     for capture in &evaluation.git_path_captures {
         report_git_path_capture_to_daemon(capture, repo_root.as_deref());
+    }
+
+    // #1340: a command that only runs `rm-file` / `rm-dir` needs no
+    // permission prompt; the tools enforce the session's roots themselves.
+    if posix_shell
+        && evaluation.rewritten_command.is_none()
+        && block_bad_cmd_rm_redirect::rm_tool_only(&payload.command)
+    {
+        append_log("allowed: rm-file/rm-dir only");
+        println!(
+            "{}",
+            allow_json(
+                "rm-file / rm-dir: trash by default, limited to this session's roots (clud #1340)"
+            )
+        );
+        return 0;
     }
 
     append_log("allowed");
@@ -1283,6 +1315,17 @@ pub fn deny_json(reason: &str) -> Value {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    })
+}
+
+/// Allow the call without Claude Code's permission prompt, saying why.
+pub fn allow_json(reason: &str) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
             "permissionDecisionReason": reason,
         }
     })
@@ -3408,6 +3451,8 @@ mod block_bad_cmd_rm_identity;
 #[path = "block_bad_cmd_rm_vars.rs"]
 mod block_bad_cmd_rm_vars;
 use block_bad_cmd_rm_vars::*;
+#[path = "block_bad_cmd_rm_redirect.rs"]
+mod block_bad_cmd_rm_redirect;
 
 #[path = "block_bad_cmd_cd.rs"]
 mod block_bad_cmd_cd;
@@ -3448,6 +3493,12 @@ fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     }
     if !block_bad_cmd_gate::gates_tool(&payload.tool_name) {
         return None;
+    }
+    // #1340: `rm-file` / `rm-dir` operands against the role's own roots.
+    match block_bad_cmd_grind_caps::rm_tool_verdict(role, &payload.command, &run, &payload.cwd) {
+        Some(None) => return None,
+        Some(Some(reason)) => return Some(format!("Blocked by the /grind role caps: {reason}.")),
+        None => {}
     }
     block_bad_cmd_grind_caps::shell_reason(role, &payload.command, &run)
         .map(|reason| format!("Blocked by the /grind role caps: {reason}."))

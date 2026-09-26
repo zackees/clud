@@ -138,3 +138,4 @@ pub mod worktrees;
 
 pub mod deletion_policy;
 pub mod rm_guard;
+pub mod rm_tool;

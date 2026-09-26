@@ -124,8 +124,7 @@ def test_the_gate_denies_even_a_harmless_unwrapped_command(tmp_path: Path) -> No
     result = _hook(tmp_path, repo, "rm -rf ./scratch")
 
     assert result.returncode == 2, (
-        f"unwrapped is unwrapped, however safe: rc={result.returncode} "
-        f"stderr={result.stderr}"
+        f"unwrapped is unwrapped, however safe: rc={result.returncode} stderr={result.stderr}"
     )
 
 
@@ -142,11 +141,14 @@ def test_the_wrapped_removal_the_hook_allows_is_denied_at_tap(tmp_path: Path) ->
     repo = tmp_path / "repo"
     repo.mkdir()
 
+    # Since #1340 the hook no longer passes an agent's own `rm` at all: it
+    # redirects it to `rm-dir`, which enforces the session's roots itself.
+    # `tap` is still the guard for what it wraps, checked below directly.
     hook = _hook(tmp_path, repo, "tap rm -rf /etc/passwd")
-    assert hook.returncode == 0, (
-        f"the hook has no grounds to refuse a literal path: "
-        f"rc={hook.returncode} stderr={hook.stderr}"
+    assert hook.returncode == 2, (
+        f"the hook redirects an agent's rm: rc={hook.returncode} stderr={hook.stderr}"
     )
+    assert "rm-dir /etc/passwd" in hook.stderr, hook.stderr
 
     tap = _require("tap")
     env = os.environ.copy()
@@ -206,17 +208,20 @@ def test_the_wrapped_unset_variable_is_also_caught_by_the_hook(tmp_path: Path) -
     unrelated reasons.
 
     Pinned so that if the interpreter is ever relaxed, this says so instead of
-    the coverage quietly moving to `tap` alone."""
+    the coverage quietly moving to `tap` alone.
+
+    Since #1340 the hook refuses it earlier still: an agent's own `rm`, wrapped
+    or not, is redirected to `rm-dir`, which refuses anything outside the
+    session's roots at run time."""
     repo = tmp_path / "repo"
     repo.mkdir()
 
     result = _hook(tmp_path, repo, f"tap {UNSET_VARIABLE_REMOVAL}")
 
     assert result.returncode == 2, (
-        f"rm_vars is expected to refuse an unprovable $VAR/ even when wrapped: "
-        f"rc={result.returncode} stderr={result.stderr}"
+        f"an agent's rm is refused even when wrapped: rc={result.returncode} stderr={result.stderr}"
     )
-    assert "could not be proven" in result.stderr, result.stderr
+    assert "rm-dir" in result.stderr, result.stderr
 
 
 def test_the_gate_is_off_unless_the_session_enables_it(tmp_path: Path) -> None:
@@ -253,8 +258,7 @@ def test_the_gate_is_off_unless_the_session_enables_it(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, (
-        f"an ungated session must not be gated: rc={result.returncode} "
-        f"stderr={result.stderr}"
+        f"an ungated session must not be gated: rc={result.returncode} stderr={result.stderr}"
     )
 
 

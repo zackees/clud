@@ -5,13 +5,19 @@ session's effective PATH, and the argv[0] `rm` shim checks actual operands after
 shell expansion. The source interpreter remains responsible for provenance,
 redirection, indirect deletion and malformed payloads.
 
+Since #1340, an agent's own `rm` never reaches these layers: the hook
+redirects it to `rm-file` / `rm-dir`, and the child shim allows a script's
+`rm` inside the session's roots. Both are described in
+[rm-tools.md](rm-tools.md); this page covers what they share with the shim.
+
 ## Session installation and identity
 
 Foreground `runner::child_env` and daemon `io_helpers::child_env_from` activate
 the shim after assembling the child environment, including the client's PATH.
 `shim_install::packaged_shim` locates `clud-shim` beside the running executable;
 no environment variable chooses the trusted source. `install_rm_at` installs
-only `rm` (`rm.exe` on Windows) in `~/.clud/state/rm-shim/`. This separate
+only the deletion aliases, `rm`, `rm-file` and `rm-dir` (`.exe` on Windows),
+in `~/.clud/state/rm-shim/`. This separate
 directory avoids activating the unfinished Python relays in the older alias
 installer. Every activation compares actual bytes and repairs replacements.
 PATH prepending moves a later entry to the front and removes duplicates.
@@ -23,7 +29,10 @@ unreadable, empty or replaced binaries deny with exit 2 and JSON. Relative or
 empty PATH entries deny because their meaning depends on shell cwd. The packaged `tap` wrapper is transparent only after its own bytes match the
 packaged sibling; its argv forwarding preserves the environment. Commands
 that visibly bypass or change resolution also deny; command text is never
-executed to investigate resolution.
+executed to investigate resolution. A backtick or `$(…)` the scanner cannot
+prove inert denies only when the command also runs rm or a nested shell
+(#1305): prose in an issue title or a grep pattern cannot change which rm
+runs.
 
 This is the owner's PATH identity contract. It does not authenticate shell-local
 hash tables, preexisting functions or aliases, nor prevent a hostile same-user
@@ -46,12 +55,21 @@ under `#[cfg(not(test))]`; unit-test execution can only report dry-run verdicts,
 including when injected gate facts would otherwise authorize execution. No unit
 test callback can invoke a removal implementation.
 
-Real execution requires both a set environment-variable name containing uppercase
-`CI` (its value is irrelevant) and Docker evidence from the running filesystem.
-There is no enabling Docker override. Approved requests delegate normalized,
-validated arguments to absolute `/bin/rm` through running-process, with
-`--preserve-root=all` and `--one-file-system`; no PATH lookup or shell is used.
-Ordinary removal outside CI + Docker is intentionally denied.
+Real execution has two ways through:
+
+- **Inside the session's roots** (#1340): `CLUD_RM_ROOTS` is set and every
+  operand passes `rm_guard::decide_in_roots`, which applies
+  `rm_tool::resolve`'s checks (roots, `$HOME`, root-itself, symlinked
+  parents, mounts). The shim deletes in process on every platform and audits
+  the call with role `child`. See [rm-tools.md](rm-tools.md#scripts-the-child-rm-shim).
+- **CI in Docker**: a set environment-variable name containing uppercase `CI`
+  (its value is irrelevant) and Docker evidence from the running filesystem.
+  There is no enabling Docker override. Approved requests delegate
+  normalized, validated arguments to absolute `/bin/rm` through
+  running-process, with `--preserve-root=all` and `--one-file-system`; no PATH
+  lookup or shell is used.
+
+Removal that fits neither is denied.
 
 ## Trusted Codex standalone updates
 

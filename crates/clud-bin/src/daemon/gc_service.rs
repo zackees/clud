@@ -31,8 +31,8 @@ use super::watch_service as gc_watch_service;
 
 use extern_repo::{extern_repo_purge_verdict, extern_repo_stale_after, PurgeDecision};
 use filesystem::{
-    collect_live_lock_paths, reap_trash_entries, remove_entry_and_delete_row,
-    remove_entry_filesystem,
+    collect_live_lock_paths, reap_trash_entries, reap_unregistered_rm_trash,
+    remove_entry_and_delete_row, remove_entry_filesystem,
 };
 use list_state::{derive_state, EntryState, SpareReasons};
 
@@ -673,6 +673,12 @@ where
         }
         Err(message) => {
             eprintln!("[clud] gc tick: trash error: {message}");
+        }
+    }
+    if let Ok(trash_root) = crate::daemon::default_trash_dir() {
+        let removed = reap_unregistered_rm_trash(&trash_root, std::time::SystemTime::now());
+        if removed > 0 {
+            eprintln!("[clud] gc tick: unregistered rm trash removed {removed}");
         }
     }
 

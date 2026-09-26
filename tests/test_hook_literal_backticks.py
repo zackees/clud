@@ -37,11 +37,8 @@ def test_pretool_hook_allows_literal_backticks_in_shell_arguments(tmp_path: Path
             "Phase 0 — Gather the diff' /home/niteris/.claude /home/niteris/dev/fastled/.claude"
         ),
         f"gh issue comment 1298 --body 'literal {tick}code{tick}'",
-    ]
-    denied_commands = [
-        f"printf x\\ #{tick}rm /tmp/victim{tick}",
-        f"printf $(echo x)#{tick}rm /tmp/victim{tick}",
-        f"printf x\r#{tick}rm /tmp/victim{tick}",
+        # #1305: a backtick the scanner cannot prove inert is refused only
+        # when the command runs rm; none of these does.
         "unset CLUD_REVIEW_UNSET; printf '%s' "
         + dollar
         + "{CLUD_REVIEW_UNSET:- #"
@@ -49,11 +46,17 @@ def test_pretool_hook_allows_literal_backticks_in_shell_arguments(tmp_path: Path
         + "printf nested"
         + tick
         + "}",
-        f"env bash -c 'printf ok {tick}printf nested{tick}'",
         f"perl -e 'print {tick}printf nested{tick}'",
-        f"cat <<EOF\nprintf ok # {tick}rm /tmp/victim{tick}\nEOF",
         f"gh issue comment 1298 --editor --attach image.png --body 'literal {tick}text{tick}'",
         f"gh issue comment 1298 --web --body 'literal {tick}text{tick}'",
+    ]
+    denied_commands = [
+        # A nested shell can run rm from the text the backticks hide.
+        f"env bash -c 'printf ok {tick}printf nested{tick}'",
+        f"printf x\\ #{tick}rm /tmp/victim{tick}",
+        f"printf $(echo x)#{tick}rm /tmp/victim{tick}",
+        f"printf x\r#{tick}rm /tmp/victim{tick}",
+        f"cat <<EOF\nprintf ok # {tick}rm /tmp/victim{tick}\nEOF",
     ]
     env = os.environ.copy()
     env["PATH"] = str(tmp_path)
@@ -81,16 +84,19 @@ def test_pretool_hook_allows_literal_backticks_in_shell_arguments(tmp_path: Path
     config.write_text("--pre=printf nested\n", encoding="utf-8")
     configured_env = env.copy()
     configured_env["RIPGREP_CONFIG_PATH"] = str(config)
+    # #1305: a ripgrep config's `--pre` can make the backticks' text reach a
+    # program, but no rm appears anywhere, and any rm a preprocessor runs
+    # still resolves to clud's shim, so none of these is refused any more.
     configured_commands = [
-        (allowed_commands[0], False),
+        (allowed_commands[0], True),
         (allowed_commands[0].replace("rg -l", "rg --no-config -l", 1), True),
         (
             allowed_commands[0].replace(
                 " /home/niteris/.claude", " -- --no-config /home/niteris/.claude", 1
             ),
-            False,
+            True,
         ),
-        (allowed_commands[0].replace("rg -l", "rg -g --no-config -l", 1), False),
+        (allowed_commands[0].replace("rg -l", "rg -g --no-config -l", 1), True),
     ]
     for command, should_allow in configured_commands:
         payload = json.dumps(

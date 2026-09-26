@@ -73,13 +73,27 @@ pub(super) fn remove_entry_and_delete_row(
     registry.delete(entry.id).map_err(|e| e.to_string())
 }
 
+/// Remove registered trash rows. A `clud trash` quarantine entry goes as
+/// soon as it can be deleted; an `rm-file` / `rm-dir` entry (it carries
+/// [`crate::rm_tool::TRASH_MANIFEST`]) is kept for
+/// [`crate::rm_tool::TRASH_KEEP`] so it can be restored (#1340).
 pub(super) fn reap_trash_entries(registry: &Registry) -> Result<(usize, usize), String> {
+    reap_trash_entries_at(registry, std::time::SystemTime::now())
+}
+
+pub(super) fn reap_trash_entries_at(
+    registry: &Registry,
+    now: std::time::SystemTime,
+) -> Result<(usize, usize), String> {
     let entries = registry
         .list(Some("trash"))
         .map_err(|err| err.to_string())?;
     let mut removed = 0usize;
     let mut failed = 0usize;
     for entry in entries {
+        if crate::rm_tool::keep_trash_entry(Path::new(&entry.path), now) {
+            continue;
+        }
         // Audit before acting (#893).
         crate::gc::delete_audit::record("gc.trash-reap", Path::new(&entry.path), "trash");
         match std::fs::remove_dir_all(&entry.path) {
@@ -94,4 +108,20 @@ pub(super) fn reap_trash_entries(registry: &Registry) -> Result<(usize, usize), 
         }
     }
     Ok((removed, failed))
+}
+
+/// Remove expired `rm-file` / `rm-dir` trash entries under `trash_root` that
+/// never reached the registry (the call found no daemon to register with).
+/// Registered ones are removed by [`reap_trash_entries`] first.
+pub(super) fn reap_unregistered_rm_trash(trash_root: &Path, now: std::time::SystemTime) -> usize {
+    let mut removed = 0usize;
+    for dir in crate::rm_tool::expired_trash_entries(trash_root, now) {
+        // Audit before acting (#893).
+        crate::gc::delete_audit::record("gc.rm-trash-reap", &dir, "rm-trash expired");
+        if std::fs::remove_dir_all(&dir).is_ok() {
+            eprintln!("[gc] trash: reaped {}", dir.display());
+            removed += 1;
+        }
+    }
+    removed
 }

@@ -31,6 +31,11 @@ later, one goal at a time.
    Never plan a task that only runs commands ("verify build and tests",
    "run clippy"): workers and reviewers cannot run anything, so it can only
    end "Not done". Every task writes at least one file; checks go in step 5.
+   Record each task before returning, one call per task:
+   `clud grind-facts task --checkout <checkout> -- <file>...`, with the
+   checkout's absolute path and the task's repo-relative files. clud's hook
+   then lets that task's worker and reviewer delete (`rm-file` / `rm-dir`)
+   only under those files' directories.
 4. **Dependencies.** `depends_on` lists other goals in this run that must
    land first (shared files, an API this goal consumes). Only goals listed
    before this one count; the workflow ignores any other. An empty list

@@ -4585,3 +4585,51 @@ and the existing session-temp sweep removes what a crashed run leaves.
 starts a new session for its second run. Run facts are no longer visible in
 the checkout; `clud grind-facts path` names the file. The contract is owned
 by [architecture/grind.md](architecture/grind.md#router-questions).
+
+## DD-104: Agents delete through rm-file / rm-dir, which trash by default, and agent-typed rm is redirected
+
+**Status:** Accepted
+
+**Context:** #1340, meta #1436. Three layers intercepted deletion after the
+#1064 incident (`rm -rf "$SP"/` with `$SP` unset): the child `rm` shim, which
+refused every real `rm` without a CI variable and Docker; the rm identity
+check, which failed closed on shell syntax it could not parse; and Claude
+Code's own `rm` prompt, which can stall an unattended run. Across 2,710
+`rm`/`rmdir`/`unlink` Bash calls they refused 62, including harmless ones. A
+blocked agent then used `os.remove`, `shutil.rmtree` or `find -delete`, which
+pass no check at all.
+
+**Decision:** Agents delete through `rm-file` / `rm-dir`, argv[0] aliases of
+`clud-shim` installed next to the session's `rm` shim. They move paths to
+`~/.clud/trash` by default (`--purge` deletes), only inside the session's
+roots (`CLUD_RM_ROOTS`: the launch checkout, its worktrees and
+`~/.clud/tmp`), and write one audit record per call. The PreToolUse hook
+refuses an agent's own `rm`, `rmdir`, `unlink`, `find -delete` and
+`find -exec rm` with the exact replacement, and allows a command made only of
+the tools, so Claude Code never prompts for it. A script's `rm` is allowed by
+the child shim inside the roots. The `/grind` caps narrow the roots per role.
+
+**Rationale:**
+
+- **Trash by default.** The failure being prevented, deleting the wrong
+  thing, is recoverable only if the delete is. A rename into the trash costs
+  no more than a delete on the same filesystem, and 72 hours matches every
+  other temp policy here. `--purge` stays one flag away, because scripts and
+  large build trees sometimes need a real delete.
+- **Redirect rather than check.** Proving an arbitrary `rm` command line safe
+  from its text is the job the identity and rm-variable checks did, and every
+  false positive they produced blocked real work. A command whose semantics
+  clud owns needs no proof: roots are checked after expansion, by the tool,
+  on every path. The redirect names the replacement instead of applying it
+  through `updatedInput`, so the agent learns the command and stops typing
+  `rm`.
+- **Roots over allowlists.** Where a session may delete is a property of the
+  session, so clud sets it once in the environment. The hook can only narrow
+  it per role (grind subagents share one session), never widen it.
+
+**Consequences:** `git clean -f` and inline `python -c` / `node -e`
+deletions stay allowed; they are sometimes needed, and redirecting them would
+only move agents to the next workaround. A script's `find -delete` reaches no
+shim, which is an accepted gap. The rm-variable rewrite (#963) now serves only
+shell tools the redirect does not cover (PowerShell-labelled tools). The
+contract is owned by [architecture/rm-tools.md](architecture/rm-tools.md).

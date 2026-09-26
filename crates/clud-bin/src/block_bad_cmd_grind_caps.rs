@@ -106,6 +106,16 @@ pub(super) struct RunFacts {
     pub feature: Option<FeatureFacts>,
     /// What happens to the feature PR once every goal PR has landed.
     pub feature_merge: FeatureMerge,
+    /// Worker tasks the planner recorded (`clud grind-facts task`): the
+    /// deletion roots of a worker or reviewer in that checkout (#1340).
+    pub tasks: Vec<TaskFacts>,
+}
+
+/// One recorded worker task: its checkout and the files it owns.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct TaskFacts {
+    pub worktree: std::path::PathBuf,
+    pub files: Vec<String>,
 }
 
 /// The feature branch a feature-branch-mode run lands its goal PRs into.
@@ -206,7 +216,48 @@ impl RunFacts {
                 Some("comment_only" | "comment") => FeatureMerge::CommentOnly,
                 _ => FeatureMerge::DecideLater,
             },
+            tasks: value
+                .get("tasks")
+                .and_then(Value::as_array)
+                .map(|tasks| {
+                    tasks
+                        .iter()
+                        .filter_map(|task| {
+                            let worktree = task.get("worktree")?.as_str()?;
+                            let files = task
+                                .get("files")?
+                                .as_array()?
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect();
+                            Some(TaskFacts {
+                                worktree: worktree.into(),
+                                files,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
+    }
+
+    /// The directories of the files recorded for tasks in `checkout`, or
+    /// `None` when the planner recorded none there.
+    fn task_dirs(&self, checkout: &Path) -> Option<Vec<std::path::PathBuf>> {
+        let dirs: Vec<std::path::PathBuf> = self
+            .tasks
+            .iter()
+            .filter(|task| normalize(&task.worktree) == checkout)
+            .flat_map(|task| {
+                task.files.iter().filter_map(|file| {
+                    normalize(&task.worktree.join(file))
+                        .parent()
+                        .map(Path::to_path_buf)
+                })
+            })
+            .collect();
+        (!dirs.is_empty()).then_some(dirs)
     }
 
     /// The feature PR number, when a feature run records one.
@@ -352,6 +403,13 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
     match role {
         PLANNER => {
             if inspect_ok(&program, words) || is_gh_read(words) {
+                return None;
+            }
+            // Recording a task's files (#1340) writes only the run facts.
+            if is_clud(&words[0])
+                && words.get(1).is_some_and(|w| w == "grind-facts")
+                && words.get(2).is_some_and(|w| w == "task")
+            {
                 return None;
             }
             if program == "git" {
@@ -518,11 +576,159 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
              lint/test before every push"
         )),
         WORKER | REVIEWER => Some(format!(
-            "{role} may only run read-only `gh` (issue/pr/run view|list, search); it cannot build, \
-             lint or test"
+            "{role} may only run read-only `gh` (issue/pr/run view|list, search) and `rm-file` / \
+             `rm-dir` on literal paths in its task's directories; it cannot build, lint or test"
         )),
         _ => deny(&program),
     }
+}
+
+/// A deletion statement a grind role may type (#1340).
+enum RmStatement {
+    /// `rm-file` / `rm-dir` (or `clud rm-file`): its path operands.
+    Direct(Vec<String>),
+    /// `find <paths> … -exec rm-file|rm-dir …`: find's starting paths.
+    Find(Vec<String>),
+}
+
+fn rm_statement(words: &[String]) -> Option<RmStatement> {
+    const TOOLS: &[&str] = &["rm-file", "rm-dir"];
+    let program = program_name(&words[0]);
+    let operands = |args: &[String]| {
+        let mut out = Vec::new();
+        let mut flags = true;
+        for arg in args {
+            if flags && arg == "--" {
+                flags = false;
+            } else if !(flags && arg.starts_with('-')) {
+                out.push(arg.clone());
+            }
+        }
+        out
+    };
+    if TOOLS.contains(&program.as_str()) {
+        return Some(RmStatement::Direct(operands(&words[1..])));
+    }
+    if is_clud(&words[0]) && words.get(1).is_some_and(|w| TOOLS.contains(&w.as_str())) {
+        return Some(RmStatement::Direct(operands(&words[2..])));
+    }
+    if program == "find"
+        && words.windows(2).any(|w| {
+            matches!(w[0].as_str(), "-exec" | "-execdir")
+                && TOOLS.contains(&program_name(&w[1]).as_str())
+        })
+    {
+        let starts = words[1..]
+            .iter()
+            .take_while(|w| !w.starts_with(['-', '(', '!']))
+            .cloned()
+            .collect();
+        return Some(RmStatement::Find(starts));
+    }
+    None
+}
+
+/// Lexically resolve `.` and `..`, without touching the filesystem.
+fn normalize(path: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The per-role deletion roots for `rm-file` / `rm-dir` (#1340), checked
+/// before the tools run (which enforce the session's roots themselves):
+///
+/// - a worker or reviewer may delete only under the directories of the
+///   files the planner recorded for its checkout (its whole checkout when
+///   none were recorded), with literal paths and no `find -exec`;
+/// - the integrator may delete only inside its checkout.
+///
+/// `None` when the command runs neither tool (the role's other rules
+/// decide), `Some(None)` to allow a worker's or reviewer's pure deletion,
+/// `Some(Some(reason))` to deny. The integrator's other statements still go
+/// through its denylist.
+pub(super) fn rm_tool_verdict(
+    role: &str,
+    command: &str,
+    run: &RunFacts,
+    cwd: &Path,
+) -> Option<Option<String>> {
+    if !matches!(role, WORKER | REVIEWER | INTEGRATOR) {
+        return None;
+    }
+    let statements = statement_words(command).ok()?;
+    let parsed: Vec<Option<RmStatement>> = statements.iter().map(|w| rm_statement(w)).collect();
+    if parsed.iter().all(Option::is_none) {
+        return None;
+    }
+    let cwd = normalize(cwd);
+    let checkout = super::nearest_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let allowed = match role {
+        INTEGRATOR => vec![checkout.clone()],
+        _ => run
+            .task_dirs(&checkout)
+            .unwrap_or_else(|| vec![checkout.clone()]),
+    };
+    let shown = allowed
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    for statement in &parsed {
+        let (operands, is_find) = match statement {
+            None if role == INTEGRATOR => continue,
+            // A worker's deletion is allowed only on its own.
+            None => return None,
+            Some(RmStatement::Find(_)) if role != INTEGRATOR => {
+                return Some(Some(format!(
+                    "{role} may not run `find -exec` deletions; name each path to rm-file / rm-dir"
+                )))
+            }
+            Some(RmStatement::Find(starts)) => (starts, true),
+            Some(RmStatement::Direct(operands)) => (operands, false),
+        };
+        if operands.is_empty() {
+            return Some(Some(format!("{role} must name the paths to delete")));
+        }
+        for operand in operands {
+            // Brace expansion and backslash escapes make bash expand a path
+            // other than the one written (`{x,/elsewhere}`, `\.\.`), so they
+            // count as dynamic for every role. A glob only matches inside the
+            // directory before it, so the integrator may use one.
+            let dynamic = operand.contains(['$', '`', '~', '{', '}', '\\']);
+            let globbed = operand.contains(['*', '?', '[']);
+            if dynamic || (globbed && role != INTEGRATOR) {
+                return Some(Some(format!(
+                    "{role} may pass only literal paths to rm-file / rm-dir, not {operand:?}"
+                )));
+            }
+            // A glob is checked by the directory it expands in.
+            let literal: std::path::PathBuf = Path::new(operand)
+                .components()
+                .take_while(|c| !c.as_os_str().to_string_lossy().contains(['*', '?', '[']))
+                .collect();
+            let path = normalize(&cwd.join(literal));
+            // A path must lie strictly inside an allowed directory; a glob or
+            // a `find` start may name the directory it searches.
+            let ok = allowed
+                .iter()
+                .any(|dir| path.starts_with(dir) && (path != *dir || globbed || is_find));
+            if !ok {
+                return Some(Some(format!(
+                    "{role} may delete only under {shown}; {operand:?} is outside"
+                )));
+            }
+        }
+    }
+    (role != INTEGRATOR).then_some(None)
 }
 
 fn policy_name(policy: FeatureMerge) -> &'static str {
@@ -1152,6 +1358,89 @@ mod tests {
             assert!(!allowed(role, "./test", &facts));
             assert!(!allowed(role, "./lint", &facts));
         }
+    }
+
+    #[test]
+    fn deletion_roots_follow_the_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("repo-wt-1");
+        std::fs::create_dir_all(wt.join(".git")).unwrap();
+        std::fs::create_dir_all(wt.join("src/cache")).unwrap();
+        let facts = RunFacts::from_json(&serde_json::json!({
+            "mode": "parallel",
+            "tasks": [{"worktree": wt, "files": ["src/cache/mod.rs"]}],
+        }));
+        assert_eq!(facts.tasks.len(), 1);
+        let verdict = |role: &str, command: &str| rm_tool_verdict(role, command, &facts, &wt);
+
+        // A worker deletes only under its task's directories, literally.
+        assert_eq!(verdict(WORKER, "rm-file src/cache/old.rs"), Some(None));
+        assert_eq!(
+            verdict(REVIEWER, "rm-dir --purge src/cache/tmp"),
+            Some(None)
+        );
+        for command in [
+            "rm-file src/main.rs",
+            "rm-dir src",
+            "rm-file ../other/x",
+            "rm-file src/cache/../../README.md",
+            "rm-file \"$X\"",
+            "rm-file src/cache/*.rs",
+            "rm-file src/cache/{x,../../other}",
+            "rm-file src/cache/\\.\\./\\.\\./README.md",
+            "find src -exec rm-file {} +",
+            "rm-file",
+        ] {
+            assert!(
+                matches!(verdict(WORKER, command), Some(Some(_))),
+                "{command}"
+            );
+        }
+        // Mixed with anything else, a worker's usual rules decide.
+        assert_eq!(verdict(WORKER, "rm-file src/cache/a && ls"), None);
+        assert_eq!(verdict(WORKER, "ls"), None);
+
+        // With no recorded tasks for this checkout, its whole checkout.
+        let untracked = RunFacts::default();
+        assert_eq!(
+            rm_tool_verdict(WORKER, "rm-file docs/x.md", &untracked, &wt),
+            Some(None)
+        );
+        assert!(matches!(
+            rm_tool_verdict(WORKER, &format!("rm-dir {}", wt.display()), &untracked, &wt),
+            Some(Some(_))
+        ));
+
+        // The integrator: anywhere inside its checkout, globs and find too.
+        for command in [
+            "rm-dir target/debug/incremental",
+            "rm-file build/*.o",
+            "find . -name '*.tmp' -exec rm-file {} +",
+            "cargo build && rm-file out.log",
+        ] {
+            assert_eq!(verdict(INTEGRATOR, command), None, "{command}");
+        }
+        for command in [
+            "rm-dir ../repo",
+            "rm-file /etc/hosts",
+            "find / -exec rm-dir {} +",
+            "rm-dir {x,/abs/sibling-wt/dir}",
+        ] {
+            assert!(
+                matches!(verdict(INTEGRATOR, command), Some(Some(_))),
+                "{command}"
+            );
+        }
+        // Other roles are untouched here; their allowlists refuse the tools.
+        assert_eq!(verdict(LANDER, "rm-file src/cache/a"), None);
+        assert!(!allowed(LANDER, "rm-file src/cache/a", &facts));
+        // The planner records tasks, and nothing else through clud.
+        assert!(allowed(
+            PLANNER,
+            "clud grind-facts task --checkout /r -- src/a.rs",
+            &facts
+        ));
+        assert!(!allowed(PLANNER, "clud grind-facts clear", &facts));
     }
 
     #[test]
