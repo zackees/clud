@@ -5,14 +5,14 @@ summary -- "the process died rather than a test failing" -- and the log said
 only `Process completed with exit code 1`. A reader cannot tell a crash from a
 hang from an ordinary failure, so every occurrence costs a fresh diagnosis.
 
-An exit code carries more than that if it is read. Two records back it up, both
-under the `logs/*` that `_run-tests.yml` uploads: the teed stdout log, which
-survives a cancelled job (#1168), and pytest's own junit XML, which names the
-failing test when the tee is truncated (#1178).
+An exit code carries more than that if it is read. Three records under the
+uploaded `logs/*` back it up: the teed stdout log (#1168), pytest's JUnit XML,
+and a flushed test-boundary journal that survives an abrupt pytest exit (#1178).
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +22,7 @@ from ci.run_bundle import (
     describe_pytest_exit,
     pytest_junit_path,
     pytest_log_path,
+    pytest_progress_path,
     run_pytest,
     run_streamed,
 )
@@ -30,7 +31,7 @@ from ci.run_bundle import (
 def test_pytest_own_codes_are_named() -> None:
     """0-5 are pytest's; say which is which rather than echoing the number."""
     assert "all tests passed" in describe_pytest_exit(0)
-    assert "printed a summary" in describe_pytest_exit(1)
+    assert "abrupt exit" in describe_pytest_exit(1)
     assert "interrupted" in describe_pytest_exit(2)
     assert "internal error" in describe_pytest_exit(3)
     assert "usage error" in describe_pytest_exit(4)
@@ -134,17 +135,11 @@ def test_pytest_junit_path_is_under_the_uploaded_logs_dir() -> None:
     assert pytest_junit_path("unit").name == "pytest-unit.xml"
 
 
-def test_run_pytest_asks_pytest_for_its_own_junit_report(monkeypatch) -> None:
-    """#1178: the Windows integration lane's teed stdout log stops at 27% and
-    never names the failing test; the root cause of that truncation is
-    unknown and stays open. A pytest-written junit XML is a workaround --
-    `junit_logging=all` puts the captured stdout/stderr of the failing test
-    into the XML, so a truncated tee still leaves a machine-readable record
-    naming it.
+def test_run_pytest_records_junit_and_progress(monkeypatch) -> None:
+    """Ordinary failures get JUnit; abrupt exits leave the progress journal.
 
-    The new flags must precede the caller's `extra` args so a caller's
-    `pytest_args` can still override them -- pytest takes the last
-    `--junitxml` / `-o` it sees on the command line."""
+    The flags precede caller extras so a caller can override the JUnit options.
+    """
     captured: list[tuple[list[str], dict[str, str], Path]] = []
 
     def fake(argv: list[str], env: dict[str, str], log_path: Path) -> int:
@@ -159,15 +154,39 @@ def test_run_pytest_asks_pytest_for_its_own_junit_report(monkeypatch) -> None:
 
     junit_flag = f"--junitxml={pytest_junit_path('integration')}"
     assert junit_flag in argv
+    assert argv[argv.index("-p") + 1] == "ci.pytest_progress"
     assert argv[argv.index("-o") + 1] == "junit_logging=all"
 
     assert argv.index(junit_flag) < argv.index("-v")
     assert argv.index("-o") < argv.index("-v")
 
-    # The junit report is *additional* to the tee, not a replacement: the XML
-    # only exists at pytest's sessionfinish, so a cancelled job (#1168) still
-    # depends on the teed log. The marker selection and the child env must be
-    # untouched too.
     assert argv[:5] == [sys.executable, "-m", "pytest", "-m", "integration"]
     assert log_path == pytest_log_path("integration")
-    assert passed_env == env
+    assert passed_env == {
+        **env,
+        "CLUD_PYTEST_PROGRESS_LOG": str(pytest_progress_path("integration")),
+    }
+
+
+def test_abrupt_pytest_exit_leaves_the_active_test_in_progress_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An os._exit during a test leaves no pytest summary or JUnit sessionfinish.
+
+    The uploaded progress record must still identify the test that was active.
+    """
+    monkeypatch.setattr(run_bundle, "LOG_DIR", tmp_path / "logs")
+    victim = tmp_path / "test_abrupt_exit.py"
+    victim.write_text(
+        "import os\n\ndef test_abrupt_exit():\n    os._exit(1)\n",
+        encoding="utf-8",
+    )
+
+    assert run_pytest("not integration", {}, ["-v", str(victim)], suite="unit") == 1
+    entries = [
+        json.loads(line)
+        for line in pytest_progress_path("unit").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["event"] for entry in entries] == ["start"]
+    assert entries[0]["nodeid"].endswith("test_abrupt_exit.py::test_abrupt_exit")
+    assert "short test summary info" not in pytest_log_path("unit").read_text(encoding="utf-8")
