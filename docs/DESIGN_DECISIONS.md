@@ -4421,3 +4421,136 @@ linked without that coupling.
 `Refs` backlink. A failed filing is listed in the router's final report
 rather than stopping the run. The contract is owned by
 [architecture/grind.md](architecture/grind.md#problem-reporting).
+
+## DD-099: A /grind review never rejects for unrun checks, and a failed sequential goal is parked
+
+**Status:** Accepted
+
+**Context:** #1424. The reviewer cannot build, lint or test, yet its skill
+said to reject when the goal "cannot be made correct without running
+something". A reviewer rejected goal #1402 because "nothing has been run
+yet", and the goal was dropped. In sequential mode that goal's uncommitted
+files stayed in the shared checkout: the next goals' lint picked them up,
+integrators stashed around them, and a dependent was planned on top of them.
+
+**Decision:** The reviewer approves on reading and lists the checks it
+wants under `must_verify`, which `grind-run.js` appends to the goal's verify
+commands. A rejection whose summary only says nothing has been run is
+overridden by a narrow pattern (`NOT_RUN`), and the integrator is told so.
+A sequential goal that wrote files and ends unmerged with nothing pushed is
+parked by one more integrator call: its paths go to a local
+`wip/grind-<goal>` branch and the checkout returns to a detached
+`origin/<base>`. A goal whose dependency settled unmerged is blocked right
+after planning.
+
+**Rationale:** The workflow has no shell, and the integrator is the only
+role allowed to change git state, so parking is an integrator prompt under
+the build lock rather than a new role. A park branch rather than a stash
+keeps the work visible and away from the shared stash stack, and switching
+to a detached `origin/<base>` instead of `git reset --hard` cannot destroy
+the user's carried changes. The override accepts a small risk that a real
+rejection mentioning unrun checks is integrated; the integrator still runs
+every check and is told to refuse a real defect, so a wrong change fails
+verification rather than landing silently.
+
+**Consequences:** A goal that pushed a PR which then did not merge is not
+parked: its work is on the pushed branch. Park branches are local and never
+deleted by Finish. If a park leaves the checkout dirty, every later goal in
+the run is blocked. The contract is owned by
+[architecture/grind.md](architecture/grind.md#review-gate-parking-and-dependents-1424).
+
+## DD-100: The /grind router starts grind-run once per stage
+
+**Status:** Accepted
+
+**Context:** #1409, spec #1392 §3. The feature branch must be cut from
+`<main>` after the bug stage has merged, so it contains those fixes. Only
+the router (the main session) may create the feature worktree, and a
+Workflow call is one tool call: the router cannot act between two stages of
+the same call. Cutting the branch before the call breaks that ordering.
+
+**Decision:** The router starts `grind-run` twice. The bug-stage call gets
+the plan and the bug children; its prework posts the plan and the result
+returns `plan_url`. After the router cuts the feature branch and opens the
+draft feature PR, the feature-stage call gets the feature children, the
+feature branch as `base`, `plan_url` (so prework is not repeated), `feature`,
+`feature_merge` and `stuck_bugs`, the bug children that did not merge.
+
+**Rationale:** Each call keeps the workflow deterministic and needs no role
+with the router's worktree rights. The stuck-bug rule stays in the workflow,
+not the router's prose, because `stuck_bugs` carries the only fact it needs
+across calls.
+
+**Consequences:** An all-feature plan still makes a bug-stage call with no
+goals, so the plan is recorded before any branch exists. `grind-run` still
+orders stages when one call is given goals from both. The contract is owned
+by [architecture/grind.md](architecture/grind.md#bug-stage-then-feature-stage).
+
+## DD-101: /grind's preflight never touches its own files, and "carry" becomes the feature branch's first commit
+
+**Status:** Accepted
+
+**Context:** #1407, spec #1392 §2. The router writes `.clud/grind/run.json`
+before preflight (the plan-only pass needs it), and the feature worktree
+lives under `.clud/grind/worktrees/`. In a repo that does not ignore
+`.clud/`, a plain `git status --porcelain` reports the run's own files as
+user changes, and `git stash push -u` would stash `run.json` away, taking
+the hook's role caps with it. The spec's "carry into the grind worktree"
+option also left open what happens to changes that are carried.
+
+**Decision:** Every preflight command (`git status --porcelain -uall`, the
+stash, the WIP commit) takes the pathspec `. ':(exclude).clud/grind'`.
+"Carry" stashes the changes as `grind-<run-id>-carry`, and the feature setup
+pops that stash in the feature worktree and commits it as the feature
+branch's first commit.
+
+**Rationale:**
+- A pathspec needs no write to `.gitignore` or `.git/info/exclude`, so Abort
+  still leaves the repo exactly as it was.
+- `-uall` lists untracked files one by one, so the exclusion applies to each
+  file rather than to a collapsed `?? .clud/` directory entry.
+- Uncommitted changes in the feature worktree would be invisible to
+  parallel goal worktrees (branched from the pushed feature branch) and would
+  leak into whichever goal commit ran first in sequential mode. A commit
+  makes them part of the feature that every goal builds on, and the feature
+  PR shows them to the user.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Add `.clud/grind/` to `.git/info/exclude` | A lasting side effect of a run the user may abort. |
+| Carry the changes uncommitted | Goals would not see them, or would commit them by accident. |
+
+**Consequences:** Carried changes reach `origin` on the feature branch, so
+"carry" is only offered when the plan has a feature stage. Finish has nothing
+to restore for a carry. The contract is owned by
+[architecture/grind.md](architecture/grind.md#preflight-and-the-single-question-round).
+
+## DD-102: The /grind plan comment body is shell-inert and piped from `printf`
+
+**Status:** Accepted
+
+**Context:** #1408. `grind-prework` may not write files, so it must pass the
+plan body to `gh issue comment` through its shell. clud's command hook
+checks every shell call: its removal checks read a backtick, `$(`, `<(` or
+`>(` as a substitution even inside single quotes, and its rm-identity check
+parses each line of a heredoc body as a command. A plan in a backtick fence
+passed with `--body '...'`, or any JSON body in a heredoc, is refused. A
+60,000-character `--body` argument also overflows the Windows command-line
+limit.
+
+**Decision:** The workflow builds bodies that are inert in a single-quoted
+shell word: a `~~~json` fence, and backticks, single quotes, `$`, `<` and
+`>` inside the JSON written as `\u` escapes. Prework posts each body with
+`printf '%s' '<body>' | gh issue comment <meta> --body-file -`, and its caps
+allow exactly that `printf` form.
+
+**Rationale:** Escaping in the workflow keeps the fix in one place and
+leaves the hook's fail-closed parsing untouched. The JSON still parses to
+the same plan, and a tilde fence renders like a backtick fence. Stdin has
+no argument-length limit on any platform.
+
+**Consequences:** Plan readers must parse the JSON rather than grep it for
+raw characters. The contract is owned by
+[architecture/grind.md](architecture/grind.md#prework-and-the-plan-comment).

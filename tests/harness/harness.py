@@ -10,7 +10,15 @@ installed Claude Code against ``mock-agent serve``:
 * **bin** — first on PATH: a fake ``gh`` (``fake_gh.py``) and an ``rm`` that is
   a copy of the built ``clud-shim`` (``clud-cmd-scan``'s rm-identity check
   requires the first ``rm`` on PATH to be byte-identical to it).
-* **logs** — the backend's request log and the hook recorder's log.
+* **logs** — the backend's request log, the hook recorder's log and, with
+  ``run(answers=...)``, the answered-questions log.
+
+AskUserQuestion: `claude -p` only offers the tool when a permission prompt
+tool is configured, so ``run(answers={...})`` adds ``--mcp-config`` +
+``--permission-prompt-tool`` for the stub server ``answer_mcp.py`` and
+registers the PreToolUse hook ``answer_hook.py``, which answers each call via
+``updatedInput.answers``. A test that scripts AskUserQuestion must pass
+``answers`` (``{"*": label}`` for a default); see :meth:`Harness.answer_args`.
 
 PATH never contains clud's own shim directories (``~/.clud/state/shims``,
 ``~/.clud/state/rm-shim``): clud's ``python`` shim refuses to run outside a
@@ -40,6 +48,10 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 EXE = ".exe" if os.name == "nt" else ""
 ENABLED = os.environ.get("CLUD_REAL_CLAUDE_TESTS") == "1"
+# The AskUserQuestion answerer's MCP server and its permission-prompt tool
+# (``answer_mcp.py``; the names must match its SERVER and TOOL).
+ANSWER_SERVER = "clud_harness"
+ANSWER_TOOL = f"mcp__{ANSWER_SERVER}__answer"
 
 
 def _built(name: str, env_var: str) -> Path:
@@ -63,6 +75,9 @@ class RunResult:
     requests: list[dict[str, Any]]
     hooks: list[dict[str, Any]]
     events: list[dict[str, Any]] = field(default_factory=list)
+    # One record per AskUserQuestion question the harness answered:
+    # ``{"t": ms, "agent_type", "question", "header", "answer"}``.
+    questions: list[dict[str, Any]] = field(default_factory=list)
 
     def first_request(self, role: str = "main") -> dict[str, Any]:
         for request in self.requests:
@@ -76,26 +91,45 @@ class RunResult:
         """Everything the model saw from the user in the role's first request."""
         return json.dumps(self.first_request(role).get("messages"))
 
-    def questions_before(self, role: str) -> list[dict[str, Any]]:
+    def questions_before(self, role: str = "grind-prework") -> list[dict[str, Any]]:
         """See :func:`questions_before`."""
         return questions_before(self, role)
 
+    def questions_after(self, role: str = "grind-prework") -> list[dict[str, Any]]:
+        """See :func:`questions_after`."""
+        return questions_after(self, role)
 
-def questions_before(result: RunResult, role: str) -> list[dict[str, Any]]:
+
+def _split_at_role(
+    result: RunResult, role: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """AskUserQuestion hook records before / from `role`'s first hook event."""
+    before: list[dict[str, Any]] = []
+    after: list[dict[str, Any]] = []
+    seen = False
+    for record in result.hooks:
+        seen = seen or record.get("agent_type") == role
+        if record.get("tool_name") == "AskUserQuestion":
+            (after if seen else before).append(record)
+    return before, after
+
+
+def questions_before(result: RunResult, role: str = "grind-prework") -> list[dict[str, Any]]:
     """The `AskUserQuestion` hook records made before `role` first acted.
 
-    Walks ``result.hooks`` in order and stops at the first record whose
-    ``agent_type`` is `role`; if `role` never appears, every AskUserQuestion
-    record is returned. Lets a test assert how many questions were asked
-    before, say, the ``grind-planner`` started.
+    ``hooks.jsonl`` is appended in call order, so this walks it and stops at
+    the first record whose ``agent_type`` is `role` (for the up-front rule,
+    ``grind-prework``); if `role` never appears, every AskUserQuestion record
+    is returned. Pair it with :func:`questions_after` to assert the whole
+    question round happened before prework and none came after (#1392 U10).
     """
-    found: list[dict[str, Any]] = []
-    for record in result.hooks:
-        if record.get("agent_type") == role:
-            break
-        if record.get("tool_name") == "AskUserQuestion":
-            found.append(record)
-    return found
+    return _split_at_role(result, role)[0]
+
+
+def questions_after(result: RunResult, role: str = "grind-prework") -> list[dict[str, Any]]:
+    """The `AskUserQuestion` hook records from `role`'s first event on, made
+    by any agent including the main session; empty if `role` never ran."""
+    return _split_at_role(result, role)[1]
 
 
 class Harness:
@@ -231,13 +265,14 @@ class Harness:
         env.update(extra or {})
         return env
 
-    def settings(self, *, cmd_scan: bool = True, answers: dict[str, str] | None = None) -> Path:
+    def settings(self, *, cmd_scan: bool = True, answers: dict[str, Any] | None = None) -> Path:
         """A `--settings` file: the recorder, then clud's real command guard.
 
         Project `.claude/settings.json` hooks do not fire under an isolated
         CLAUDE_CONFIG_DIR, so hooks are passed this way (#1323, pitfall 2).
         With `answers`, an `AskUserQuestion` hook (``answer_hook.py``) picks
-        each question's option from that table (#1402).
+        each question's option from that table and logs it with its time to
+        ``logs/questions.jsonl`` (#1402); see :meth:`answer_args`.
         """
         record = f'"{sys.executable}" "{HERE / "record_hook.py"}" "{self.logs / "hooks.jsonl"}"'
         pre = [{"type": "command", "command": record}]
@@ -249,7 +284,10 @@ class Harness:
         if answers is not None:
             answers_path = self.root / "answers.json"
             answers_path.write_text(json.dumps(answers, indent=1), encoding="utf-8")
-            answer = f'"{sys.executable}" "{HERE / "answer_hook.py"}" "{answers_path}"'
+            answer = (
+                f'"{sys.executable}" "{HERE / "answer_hook.py"}" '
+                f'"{answers_path}" "{self.logs / "questions.jsonl"}"'
+            )
             pre_entries.append(
                 {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": answer}]}
             )
@@ -263,6 +301,37 @@ class Harness:
         path = self.root / "settings.json"
         path.write_text(json.dumps(settings, indent=1), encoding="utf-8")
         return path
+
+    def answer_args(self) -> list[str]:
+        """Claude Code flags that make `AskUserQuestion` answerable in `-p`.
+
+        Print mode drops AskUserQuestion from the model's tool list unless a
+        permission prompt tool is configured (Claude Code 2.1.x: the tool's
+        ``isEnabled`` is false in a non-interactive session without one), so
+        the answer hook alone never fires. This registers ``answer_mcp.py`` as
+        an MCP server and names its tool with ``--permission-prompt-tool``;
+        the hook then answers through ``updatedInput``, and the MCP tool
+        answers from the same table if Claude Code routes the call to it.
+        Call :meth:`settings` with the answers first (it writes the table).
+        """
+        answers_path = self.root / "answers.json"
+        config = {
+            "mcpServers": {
+                ANSWER_SERVER: {
+                    "type": "stdio",
+                    "command": sys.executable,
+                    "args": [
+                        str(HERE / "answer_mcp.py"),
+                        str(answers_path),
+                        str(self.logs / "questions.jsonl"),
+                    ],
+                }
+            }
+        }
+        path = self.root / "answer-mcp.json"
+        path.write_text(json.dumps(config, indent=1), encoding="utf-8")
+        # `--mcp-config` is variadic: keep an option right after its value.
+        return ["--mcp-config", str(path), "--permission-prompt-tool", ANSWER_TOOL]
 
     # ---- running ---------------------------------------------------------------
 
@@ -312,9 +381,10 @@ class Harness:
         extra_args: list[str] | None = None,
         extra_env: dict[str, str] | None = None,
         timeout: float = 120,
-        answers: dict[str, str] | None = None,
+        answers: dict[str, Any] | None = None,
     ) -> RunResult:
         (self.logs / "hooks.jsonl").write_text("", encoding="utf-8")
+        (self.logs / "questions.jsonl").write_text("", encoding="utf-8")
         with self.backend(script) as base_url:
             argv = [
                 self.claude,
@@ -327,6 +397,8 @@ class Harness:
                 "--settings",
                 str(self.settings(cmd_scan=cmd_scan, answers=answers)),
             ]
+            if answers is not None:
+                argv += self.answer_args()
             if skip_permissions:
                 argv.append("--dangerously-skip-permissions")
             argv += list(extra_args or [])
@@ -341,6 +413,7 @@ class Harness:
             stdout=result.stdout or "",
             requests=_jsonl(self.logs / "requests.jsonl"),
             hooks=_jsonl(self.logs / "hooks.jsonl"),
+            questions=_jsonl(self.logs / "questions.jsonl"),
             events=[
                 e for e in (_json_or_none(line) for line in (result.stdout or "").splitlines()) if e
             ],

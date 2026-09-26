@@ -19,8 +19,10 @@ Issue one `/loop` whose body is:
 > remain, end the loop. Otherwise start the Workflow named `grind-run` with
 > `mode: "sequential"`, that one goal, and these recorded answers: <models,
 > ci>. When it returns, do `/grind`'s Finish step: no files left behind, and
-> the checkout rebased onto `origin/<main>`; confirm
-> `git status` is clean.
+> no rebase; confirm `git status` is clean. Ask the user nothing: every
+> answer was recorded up front. Restore `preflight` (Finish step 4: back
+> on the starting branch, `git pull --ff-only` only when that is `<main>`,
+> never a rebase) only when the loop ends.
 
 `<source>` is what `/grind-intake` resolved: the meta issue's children, the
 issue list, or the repo's issues page. Keep `.clud/grind/run.json` in place

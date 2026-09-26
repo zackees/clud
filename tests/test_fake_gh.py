@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 
 import pytest
 
@@ -56,7 +58,7 @@ def test_legacy_state_shape_still_works(world, capsys):
     assert (data["number"], data["title"], data["state"]) == (7, "Meta", "OPEN")
     code, out, _ = _run(capsys, "api", "repos/o/r/issues/7/sub_issues")
     assert code == 0
-    assert json.loads(out) == [{"number": 8, "state": "closed"}]
+    assert [(s["number"], s["state"]) for s in json.loads(out)] == [(8, "closed")]
     code, out, _ = _run(capsys, "pr", "list", "--head", "feat/x", "--state", "all")
     assert json.loads(out)[0]["number"] == 1
     assert len(_state(world)["calls"]) == 3
@@ -293,3 +295,309 @@ def test_body_limit_65536(world, capsys):
     assert code == 1
     assert "65536" in err
     assert _run(capsys, "issue", "comment", "1", "--body", "x" * 65536)[0] == 0
+
+
+def _one(state: dict | None = None) -> dict:
+    return {"issues": {"1": {"title": "t", "body": "b", "state": "open"}}, **(state or {})}
+
+
+def test_rest_issue_get_patch_and_comments(world, capsys):
+    world(_one())
+    code, out, _ = _run(capsys, "api", "repos/{owner}/{repo}/issues/1")
+    assert code == 0
+    data = json.loads(out)
+    assert (data["id"], data["number"], data["body"], data["state"]) == (1, 1, "b", "open")
+    code, out, _ = _run(capsys, "api", "repos/o/r/issues/1/comments", "-f", "body=hello")
+    assert code == 0
+    cid = json.loads(out)["id"]
+    _, out, _ = _run(capsys, "api", "repos/o/r/issues/1/comments")
+    assert [c["body"] for c in json.loads(out)] == ["hello"]
+    assert _run(capsys, "api", "-X", "DELETE", f"repos/o/r/issues/comments/{cid}")[0] == 0
+    assert _state(world)["issues"]["1"]["comments"] == []
+    _run(capsys, "api", "-X", "PATCH", "repos/o/r/issues/1", "-f", "state=closed")
+    issue = _state(world)["issues"]["1"]
+    assert issue["state"] == "closed"
+    assert issue["closed_by"]["kind"] == "user"
+    assert _run(capsys, "api", "repos/o/r/issues/9")[0] == 1
+
+
+def test_api_endpoint_after_input_flag(world, capsys, tmp_path):
+    world(_one())
+    _, out, _ = _run(capsys, "issue", "comment", "1", "--body", "old")
+    cid = out.strip().rsplit("-", 1)[1]
+    body = tmp_path / "sub" / "body.json"
+    body.parent.mkdir()
+    body.write_text(json.dumps({"body": "new"}))
+    args = ("api", "--input", str(body), "-X", "PATCH", f"repos/o/r/issues/comments/{cid}")
+    assert _run(capsys, *args)[0] == 0
+    assert _state(world)["issues"]["1"]["comments"][0]["body"] == "new"
+
+
+def test_jq_paths(world, capsys):
+    world(_one({"prs": [{"number": 150, "head": "h", "state": "OPEN", "title": "t"}]}))
+    _, out, _ = _run(capsys, "pr", "view", "150", "--json", "state", "-q", ".state")
+    assert out.strip() == "OPEN"
+    _, out, _ = _run(capsys, "issue", "list", "--json", "number", "--jq", ".[].number")
+    assert out.split() == ["1"]
+    _, out, _ = _run(capsys, "issue", "list", "--jq", "length")
+    assert out.strip() == "1"
+    _, out, _ = _run(capsys, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+    assert out.strip() == "o/r"
+    code, _, err = _run(capsys, "issue", "list", "--jq", "map(.number)")
+    assert code == 1
+    assert "unsupported" in err
+
+
+def test_body_file_and_stdin(world, capsys, tmp_path, monkeypatch):
+    world(_one({"prs": [{"number": 101, "head": "f", "state": "OPEN", "title": "t"}]}))
+    body = tmp_path / "body.md"
+    body.write_text("from a file")
+    _, out, _ = _run(capsys, "issue", "create", "--title", "x", "--body-file", str(body))
+    # Issue numbers skip past PR numbers, as GitHub's shared numbering does.
+    number = out.strip().rsplit("/", 1)[1]
+    assert number == "102"
+    assert _state(world)["issues"][number]["body"] == "from a file"
+    _run(capsys, "issue", "edit", number, "--body-file", str(body))
+    _run(capsys, "pr", "edit", "101", "--body-file", str(body))
+    assert _state(world)["prs"][0]["body"] == "from a file"
+    monkeypatch.setattr(sys, "stdin", io.StringIO("from stdin"))
+    _run(capsys, "issue", "comment", "1", "--repo", "o/r", "--body-file", "-")
+    assert _state(world)["issues"]["1"]["comments"][0]["body"] == "from stdin"
+
+
+def test_issue_list_search(world, capsys):
+    world(
+        {
+            "issues": {
+                "1": {"title": "flaky cache test", "body": "x", "state": "open", "labels": ["f"]},
+                "2": {"title": "other", "body": "cache", "state": "closed", "labels": ["f"]},
+                "3": {"title": "cache again", "body": "", "state": "open", "labels": ["g"]},
+            }
+        }
+    )
+
+    def numbers(*extra: str) -> list[int]:
+        _, out, _ = _run(capsys, "issue", "list", "--json", "number", *extra)
+        return [i["number"] for i in json.loads(out)]
+
+    assert numbers("--state", "all", "--label", "f", "--search", "cache in:title") == [1]
+    assert numbers("--state", "all", "--search", "cache") == [1, 2, 3]
+    assert numbers("--search", "-label:g") == [1]
+    assert numbers("--search", "is:closed cache") == [2]
+    assert numbers("--state", "all", "--limit", "2") == [1, 2]
+
+
+def test_pr_found_by_head_even_when_it_ends_in_a_number(world, capsys):
+    world(
+        {
+            "issues": {},
+            "prs": [
+                {"number": 101, "head": "grind/meta-1", "state": "OPEN", "title": "f"},
+                {"number": 102, "head": "grind/103", "state": "OPEN", "title": "g"},
+            ],
+        }
+    )
+    assert _run(capsys, "pr", "merge", "grind/103", "--merge")[0] == 0
+    assert _state(world)["prs"][1]["state"] == "MERGED"
+    _, out, _ = _run(capsys, "pr", "view", "https://github.com/o/r/pull/101", "--json", "number")
+    assert json.loads(out)["number"] == 101
+    _, out, _ = _run(capsys, "pr", "view", "#101", "--json", "number")
+    assert json.loads(out)["number"] == 101
+
+
+def test_pr_current_branch_from_git_head(world, capsys, tmp_path, monkeypatch):
+    world({"issues": {}, "prs": [{"number": 101, "head": "feat/y", "state": "OPEN", "body": "b"}]})
+    monkeypatch.delenv("FAKE_GH_HEAD", raising=False)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/feat/y\n")
+    monkeypatch.chdir(repo)
+    _, out, _ = _run(capsys, "pr", "view", "--json", "body")
+    assert json.loads(out)["body"] == "b"
+    # A linked worktree's `.git` is a file naming its gitdir.
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    (gitdir / "HEAD").write_text("ref: refs/heads/feat/z\n")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {gitdir}\n")
+    monkeypatch.chdir(wt)
+    _run(capsys, "pr", "create", "--title", "z", "--body", "")
+    assert _state(world)["prs"][-1]["head"] == "feat/z"
+
+
+def test_pr_list_filters_and_fields(world, capsys):
+    world(
+        {
+            "issues": {},
+            "prs": [
+                {"number": 101, "head": "grind/meta-5-a", "state": "OPEN", "base": "main"},
+                {"number": 102, "head": "grind/7", "state": "OPEN", "base": "grind/meta-5-a"},
+                {"number": 103, "head": "x", "state": "MERGED", "base": "main", "draft": False},
+            ],
+        }
+    )
+
+    def numbers(*extra: str) -> list[int]:
+        _, out, _ = _run(capsys, "pr", "list", "--json", "number", *extra)
+        return [p["number"] for p in json.loads(out)]
+
+    assert numbers("--search", "head:grind/meta-5-") == [101]
+    assert numbers("--base", "grind/meta-5-a") == [102]
+    assert numbers("--state", "all", "--base", "main") == [101, 103]
+    _, out, _ = _run(capsys, "pr", "list", "--head", "grind/7", "--json", "isDraft,baseRefName")
+    row = json.loads(out)[0]
+    assert (row["isDraft"], row["baseRefName"]) == (False, "grind/meta-5-a")
+
+
+def test_pr_create_refuses_a_duplicate_and_merge_needs_a_method(world, capsys):
+    world()
+    assert _run(capsys, "pr", "create", "--head", "f", "--title", "t")[0] == 0
+    code, _, err = _run(capsys, "pr", "create", "--head", "f", "--title", "t")
+    assert code == 1
+    assert "already exists" in err
+    code, _, err = _run(capsys, "pr", "merge", "101")
+    assert code == 1
+    assert "--squash" in err
+    assert _run(capsys, "pr", "merge", "101", "--squash")[0] == 0
+    assert _state(world)["prs"][0]["merged_at"]
+    code, _, err = _run(capsys, "pr", "merge", "101", "--squash")
+    assert code == 1
+    assert "already merged" in err
+    assert _run(capsys, "pr", "ready", "101", "--undo")[0] == 0
+
+
+def test_repo_level_required_review(world, capsys):
+    world(
+        {
+            "issues": {},
+            "requires_review": True,
+            "prs": [
+                {"number": 1, "head": "a", "state": "OPEN", "base": "main"},
+                {"number": 2, "head": "b", "state": "OPEN", "base": "feature"},
+                {"number": 3, "head": "c", "state": "OPEN", "base": "main", "approved": True},
+            ],
+        }
+    )
+    code, _, err = _run(capsys, "pr", "merge", "1", "--merge")
+    assert code == 1
+    assert "review required" in err
+    _, out, _ = _run(capsys, "pr", "view", "1", "--json", "reviewDecision")
+    assert json.loads(out)["reviewDecision"] == "REVIEW_REQUIRED"
+    assert _run(capsys, "pr", "merge", "2", "--merge")[0] == 0
+    assert _run(capsys, "pr", "merge", "3", "--merge")[0] == 0
+    assert _run(capsys, "pr", "merge", "1", "--merge", "--admin")[0] == 0
+
+
+def test_closing_rule_reads_the_body_and_keeps_an_earlier_closer(world, capsys):
+    world(
+        {
+            "issues": {
+                "5": {"title": "t", "body": "", "state": "open"},
+                "6": {"title": "t", "body": "", "state": "open"},
+                "7": {"title": "t", "body": "", "state": "open"},
+            },
+            "prs": [],
+        }
+    )
+    _run(capsys, "issue", "close", "7")
+    body = "Resolves #5\nFixes: o/r#7\nCloses other/repo#6"
+    _run(capsys, "pr", "create", "--head", "f", "--title", "Closes #6", "--body", body)
+    _run(capsys, "pr", "merge", "101", "--merge")
+    issues = _state(world)["issues"]
+    assert issues["5"]["closed_by"] == {"kind": "pr", "pr": 101}
+    # The title and another repo's reference close nothing.
+    assert issues["6"]["state"] == "open"
+    # An issue closed earlier keeps its closer.
+    assert issues["7"]["closed_by"]["kind"] == "command"
+
+
+def test_graphql_commit_closer(world, capsys):
+    world(
+        {
+            "issues": {
+                "4": {
+                    "title": "t",
+                    "body": "",
+                    "state": "closed",
+                    "closed_by": {"kind": "commit", "pr": None, "oid": "abc"},
+                }
+            }
+        }
+    )
+    query = "query { repository { issue(number: 4) { timelineItems { nodes { closer } } } } }"
+    _, out, _ = _run(capsys, "api", "graphql", "-f", f"query={query}")
+    nodes = json.loads(out)["data"]["repository"]["issue"]["timelineItems"]["nodes"]
+    assert nodes == [{"closer": {"__typename": "Commit", "oid": "abc"}}]
+
+
+def test_close_and_reopen_are_idempotent(world, capsys):
+    world(_one())
+    _run(capsys, "issue", "close", "1")
+    code, _, err = _run(capsys, "issue", "close", "1", "--comment", "again")
+    assert code == 0
+    assert "already closed" in err
+    assert _state(world)["issues"]["1"].get("comments", []) == []
+    _run(capsys, "issue", "reopen", "1")
+    code, _, err = _run(capsys, "issue", "reopen", "1")
+    assert code == 0
+    assert "already open" in err
+
+
+def test_sub_issue_cycle_duplicate_parent_get_and_live_state(world, capsys):
+    world({"issues": _issues(3)})
+    assert _add(capsys, 1, 2)[0] == 0
+    assert _add(capsys, 2, 3)[0] == 0
+    code, _, err = _add(capsys, 3, 1)
+    assert code == 1
+    assert "422" in err
+    code, _, err = _add(capsys, 1, 2)
+    assert code == 1
+    assert "duplicate" in err
+    assert _add(capsys, 1, 2, "-F", "replace_parent=true")[0] == 0
+    _, out, _ = _run(capsys, "api", "repos/o/r/issues/3/parent")
+    assert json.loads(out)["number"] == 2
+    assert _run(capsys, "api", "repos/o/r/issues/1/parent")[0] == 1
+    _run(capsys, "issue", "close", "2")
+    _, out, _ = _run(capsys, "api", "repos/o/r/issues/1/sub_issues")
+    assert [(s["number"], s["state"]) for s in json.loads(out)] == [(2, "closed")]
+    _, out, _ = _run(capsys, "api", "repos/o/r/issues/1")
+    assert json.loads(out)["sub_issues_summary"]["completed"] == 1
+
+
+def test_fault_after_narrow_key_and_fail_on(world, capsys):
+    world(
+        _one(
+            {
+                "faults": {
+                    "issue create": {"code": 1, "stderr": "502", "after": 1, "times": 1},
+                    "issue comment 1": {"code": 3, "stderr": "boom"},
+                },
+                "fail_on": ["api POST repos/o/r/issues/1/sub_issues"],
+            }
+        )
+    )
+    assert _run(capsys, "issue", "create", "--title", "a")[0] == 0
+    assert _run(capsys, "issue", "create", "--title", "b")[0] == 1
+    assert _run(capsys, "issue", "create", "--title", "c")[0] == 0
+    assert _run(capsys, "issue", "comment", "1", "--body", "x")[0] == 3
+    assert _run(capsys, "issue", "comment", "2", "--body", "x")[0] == 0
+    assert _add(capsys, 1, 2)[0] == 1
+    assert sorted(_state(world)["issues"]) == ["1", "2", "3"]
+
+
+def test_body_file_from_stdin_and_path(world, capsys, monkeypatch, tmp_path):
+    # /grind-prework pipes the plan into `--body-file -` (#1408);
+    # the router may file a follow-up with `--body-file <f>` (#1411).
+    world({"issues": {"1": {"title": "t", "body": "", "state": "open"}}})
+    plan = "<!-- grind:v1 plan run=r -->\n~~~json\n{}\n~~~\n"
+    monkeypatch.setattr("sys.stdin", io.StringIO(plan))
+    assert _run(capsys, "issue", "comment", "1", "--body-file", "-")[0] == 0
+    body = tmp_path / "followup.md"
+    body.write_text("evidence\nRefs #1\n", encoding="utf-8")
+    code, out, _ = _run(capsys, "issue", "create", "--title", "x", "-F", str(body))
+    assert code == 0
+    state = _state(world)
+    assert state["issues"]["1"]["comments"][0]["body"] == plan
+    number = out.strip().rsplit("/", 1)[-1]
+    assert state["issues"][number]["body"] == "evidence\nRefs #1\n"

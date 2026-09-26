@@ -22,7 +22,7 @@ Prints JSON on stdout:
   {"meta": bool, "sub_issues": [{"number": int, "state": str}],
    "task_list_refs": [int | "owner/repo#N", ...]}
 
-Invoked via `"$CLUD_EXE" tool run github/is_meta_issue.py …`.
+Run through clud's `tool run` subcommand, as `/grind-intake` shows.
 
 Exit codes:
   0  answered (meta true or false)

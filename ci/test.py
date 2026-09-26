@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from ci import process
+from ci import process, tracked_files
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -148,6 +148,19 @@ def _prepare_pytest_binaries(
     return pytest_env
 
 
+def _tracked_files_changed(before: tracked_files.Snapshot | None, *, during: str) -> bool:
+    """Report tracked checkout files a suite modified (#1426); False if none."""
+    if before is None:
+        return False
+    after = tracked_files.snapshot(ROOT)
+    if after is None:
+        return False
+    changed = tracked_files.changed_paths(before, after)
+    if changed:
+        print(tracked_files.describe(changed, during=during), file=sys.stderr)
+    return bool(changed)
+
+
 def _marked_test_env(env: dict[str, str]) -> dict[str, str]:
     """Mark spawned clud binaries so their forensic logs stay test-only."""
     marked = env.copy()
@@ -193,7 +206,13 @@ def main(argv: list[str] | None = None) -> int:
         cargo_test = _cargo(["test", "--workspace"], env=rust_test_env)
         if sys.platform == "win32":
             cargo_test += ["--", "--test-threads=1"]
+        # #1426: a Rust test once rewrote the checkout's committed hook
+        # configs. Taken after `--no-run` so a Cargo.lock refresh by the
+        # build is not blamed on the tests.
+        tracked_before = tracked_files.snapshot(ROOT)
         if run(cargo_test, env=rust_test_env) != 0:
+            return 1
+        if _tracked_files_changed(tracked_before, during="the Rust test suite"):
             return 1
 
         # Python unit tests (skip integration by default)

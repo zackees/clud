@@ -16,28 +16,52 @@ through, and the final fake GitHub and git state.
    stashed up front. Bugs land on `main` first; the feature goals land on the
    feature branch; the draft feature PR is readied and merge-committed, and
    it alone closes #6 and the feature parts. `main` moving is merged in.
-3. **A big messy epic, decided later** (`regroupable()` plus two user-made
-   sub-metas and four bugs): the regroup rewrites the user's sub-metas in
-   place, the user answers "Decide later" to the feature pick, so only the
-   bug stage runs; both feature groups come back `deferred` and stay open.
+3. **A big messy epic, regrouped, the feature left to decide later**
+   (`regroupable()` plus two user-made sub-metas and four bugs): the regroup
+   rewrites the user's sub-metas in place as F1 (docs, #10) and F2 (cli,
+   #11); the user picks F1 and the merge policy "Decide later". Run 1 lands
+   the bugs on `main` and F1's goals on `grind/meta-10-<run>`; F1's feature
+   PR stays an open draft and F2 is deferred. Run 2, with F1's PR still
+   open, is bugs-only and its plan names the waiting PR. The user then
+   merges F1's PR, which closes #10 and its children but never the top
+   meta #1.
 
-Scenario 2 differs from #1392's prose in one scripted detail: the feature
-branch and draft PR exist before the workflow starts (the router sets them up
-from its own pre-steps), because the workflow is one tool call and the main
-session cannot act between its stages.
+Scenarios 2 and 3 differ from #1392's prose in one scripted detail: the
+feature branch and draft PR exist before the workflow starts (the router sets
+them up from its own pre-steps), because the workflow is one tool call and
+the main session cannot act between its stages. The first feature-stage
+integrator merges the updated `main` in instead.
 
-Script note: a step's `expect` checks the tool results of the *previous*
-step, so an expectation about a command sits on the step after it.
+Not covered here, and why:
+
+- Scenario 1's and 3's "reconcile closes the top meta" step: `clud grind
+  reconcile` has no top-meta close yet, so the tests only assert that no
+  grind role or router command closes it.
+- Scenario 3's `grind:on-feature` labels, markers and the run-2 reconcile
+  that reopens a hand-closed F1 child: the lander's caps refuse
+  `gh issue edit`/`gh issue comment`, so no role can label today;
+  `test_grind_reconcile.py` covers reconcile on a labelled world.
+- Scenario 3's run 3 (F2): it repeats run 1's machinery for the other group.
+
+Script notes: a step's `expect` checks the tool results of the *previous*
+step, so an expectation about a command sits on the step after it. The
+`Workflow` tool returns "launched in background" at once, and the workflow's
+own result arrives later as a task notification (a user turn, not a tool
+result). So the main session ends its turn right after the launch
+(`_workflow_steps`), and its Finish steps run on the notification turn;
+the tests check the workflow's outcome in the fake GitHub and git state.
 """
 
 from __future__ import annotations
 
 import itertools
 import json
+import re
 import shlex
 from pathlib import Path
 from typing import Any
 
+from tests import process
 from tests.harness.harness import Harness, RunResult
 from tests.harness.test_grind_meta_of_metas import PREVIOUS, V1, _regroup
 from tests.harness.worlds import _issue, meta_with_sub_issues, mixed, regroupable
@@ -102,8 +126,17 @@ def _ask(*questions: tuple[str, str, list[str]]) -> dict[str, Any]:
     return {"tool_use": {"name": "AskUserQuestion", "input": {"questions": qs}}}
 
 
-def _workflow(args: dict[str, Any]) -> dict[str, Any]:
-    return {"tool_use": {"name": "Workflow", "input": {"name": "grind-run", "args": args}}}
+def _workflow_steps(args: dict[str, Any]) -> list[dict[str, Any]]:
+    """Launch `grind-run`, then end the turn until its completion notification.
+
+    The step after these two runs on the notification turn. Its `expect` can
+    only see tool results, and the notification is plain user text, so it
+    carries no `content_contains` check.
+    """
+    return [
+        {"tool_use": {"name": "Workflow", "input": {"name": "grind-run", "args": args}}},
+        {"text": "grind-run is running in the background; waiting for it to finish"},
+    ]
 
 
 # ---- helpers -------------------------------------------------------------------
@@ -326,6 +359,7 @@ def test_e2e_1_bugs_only_each_lands_on_main_and_the_meta_is_not_hand_closed(
     followup = (
         f"gh issue create --repo o/r --title {title} --label {FOLLOWUP} --body {body}"
     )
+    launch, wait = _workflow_steps(args)
     main_steps = _chain(
         [
             # Routing: native sub-issues, so no conversion question.
@@ -335,8 +369,10 @@ def test_e2e_1_bugs_only_each_lands_on_main_and_the_meta_is_not_hand_closed(
                 ("Run mode?", "Mode", ["Sequential", "Parallel"]),
                 ("Where do problems go?", "Problems", ["New issue per problem", "Comment"]),
             ),
-            _after(_saw("New issue per problem"), _workflow(args)),
-            _after(_saw(S1_PROBLEM["summary"]), _bash(followup)),
+            _after(_saw("New issue per problem"), launch),
+            wait,
+            # Finish, on the workflow's notification turn: file the problem.
+            _bash(followup),
             {"text": "GRIND_DONE: 4 bugs merged, 1 follow-up filed"},
         ]
     )
@@ -416,12 +452,23 @@ def _wt(h: Harness) -> Path:
     return Path(h.repo) / ".clud" / "grind" / "worktrees" / "feature"
 
 
-def _s2_closes(goal: str) -> str:
-    done = S2_FEATURES[: S2_FEATURES.index(goal) + 1]
-    return " ".join(f"Closes #{n}" for n in [S2_META, *done])
+def _closes(meta: str, goals: list[str], goal: str) -> str:
+    """The feature PR body once `goal` (and every goal before it) has landed."""
+    done = goals[: goals.index(goal) + 1]
+    return " ".join(f"Closes #{n}" for n in [meta, *done])
 
 
-def _feature_roles(h: Harness, goal: str, pr: int, *, merge_main: bool) -> list[dict[str, Any]]:
+def _feature_roles(
+    h: Harness,
+    goal: str,
+    pr: int,
+    *,
+    feature: str,
+    feature_pr: int,
+    closes: str,
+    merge_main: bool = False,
+    problems: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """One feature goal, worked in the feature worktree, PR into the feature branch."""
     branch = f"grind/{goal}"
     at = f"Goal {goal}:"
@@ -435,23 +482,23 @@ def _feature_roles(h: Harness, goal: str, pr: int, *, merge_main: bool) -> list[
     }
     write = {"file_path": f"{checkout}/{goal}.txt", "content": f"{goal}\n"}
     work: dict[str, Any] = {"files_touched": [f"{goal}.txt"], "summary": "built"}
-    if goal == S2_PROBLEM["related_issue"]:
-        work["problems"] = [S2_PROBLEM]
+    if problems:
+        work["problems"] = problems
     git = f"git -C {checkout}"
     steps = [f"{git} fetch -q origin"]
     if merge_main:
         steps += [
-            f"{git} merge -q --no-ff origin/main -m 'merge main into {S2_FEATURE}'",
-            f"{git} push -q origin HEAD:{S2_FEATURE}",
+            f"{git} merge -q --no-ff origin/main -m 'merge main into {feature}'",
+            f"{git} push -q origin HEAD:{feature}",
         ]
     steps += [
-        f"{git} switch -q -c {branch} origin/{S2_FEATURE}",
+        f"{git} switch -q -c {branch} origin/{feature}",
         f"{git} add {goal}.txt",
         f"{git} commit -q -m 'feat: #{goal}'",
         f"{git} push -q -u origin {branch}",
-        f"gh pr create --title 'feat #{goal}' --head {branch} --base {S2_FEATURE} "
+        f"gh pr create --title 'feat #{goal}' --head {branch} --base {feature} "
         f"--body 'Refs #{goal}'",
-        f"gh pr edit {S2_FEATURE_PR} --body '{_s2_closes(goal)}'",
+        f"gh pr edit {feature_pr} --body '{closes}'",
     ]
     url = f"https://github.com/o/r/pull/{pr}"
     return [
@@ -627,8 +674,9 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
                 _saw("Stash it"), _bash(f"git -C {repo} stash push -q -u -m {S2_STASH}")
             ),
             _bash(draft),
-            _workflow(args),
-            _after(_saw(S2_PROBLEM["summary"]), _bash(comment)),
+            *_workflow_steps(args),
+            # Finish, on the workflow's notification turn: the problem comment.
+            _bash(comment),
             # Finish: back to the starting branch, stash restored.
             _bash(f"git -C {repo} switch -q main && git -C {repo} stash pop -q"),
             {"text": "GRIND_DONE: 2 bugs merged, feature PR merged"},
@@ -638,7 +686,16 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
     for g in S2_BUGS:
         roles += _bug_roles(h, g, bug_prs[g])
     for g in S2_FEATURES:
-        roles += _feature_roles(h, g, feature_prs[g], merge_main=g == S2_FEATURES[0])
+        roles += _feature_roles(
+            h,
+            g,
+            feature_prs[g],
+            feature=S2_FEATURE,
+            feature_pr=S2_FEATURE_PR,
+            closes=_closes(S2_META, S2_FEATURES, g),
+            merge_main=g == S2_FEATURES[0],
+            problems=[S2_PROBLEM] if g == S2_PROBLEM["related_issue"] else None,
+        )
     script = {"default_text": "OK", "roles": [*roles, {"name": "main", "steps": main_steps}]}
     answers = {
         "Your checkout has uncommitted changes. What should grind do?": "Stash it",
@@ -741,11 +798,28 @@ def test_e2e_2_prompt_feature_auto_merge_bugs_first_then_one_feature_merge_commi
 
 S3_TOP = "1"
 S3_RUN = "e3d4"
+S3_RUN2 = "e3d5"
 S3_BUGS = ["12", "13", "14", "15"]
+S3_BUG2 = "16"
 S3_DOCS = ["2", "3", "4", "5"]
 S3_CLI = ["6", "7", "8", "9"]
-S3_REPORT = "GRIND_DONE: 4 bugs merged; features docs (#10) and cli (#11) left for you to decide"
+S3_F1 = "10"
+S3_F2 = "11"
+S3_FEATURE = f"grind/meta-{S3_F1}-{S3_RUN}"
+S3_FEATURE_PR = 101
 S3_GROUPS = [("docs", [int(n) for n in S3_DOCS]), ("cli", [int(n) for n in S3_CLI])]
+S3_REGROUP_Q = (
+    "Regroup #1 into a meta of metas? bugs: #12 #13 #14 #15 "
+    "· F1 docs: #2 #3 #4 #5 · F2 cli: #6 #7 #8 #9"
+)
+S3_PICK_Q = "Which feature does this run do?"
+S3_MERGE_Q = "What happens to the feature PR when every feature goal has landed?"
+S3_PROBLEMS_Q = "Where do problems go?"
+S3_REPORT = (
+    f"GRIND_DONE: 4 bugs merged; F1 docs landed on {S3_FEATURE}, feature PR "
+    f"#{S3_FEATURE_PR} left open for you; F2 cli deferred"
+)
+S3_REPORT2 = f"GRIND_DONE: 1 bug merged; feature PR #{S3_FEATURE_PR} for #1 is still open"
 
 
 def _move(state: dict[str, Any], child: int, parent: int) -> None:
@@ -764,10 +838,10 @@ def _messy_epic() -> dict[str, Any]:
     sub-metas #10 (holding #2, #3) and #11 (holding #6, #7), and bugs #12-#15."""
     state = regroupable()
     issues = state["issues"]
-    issues["10"] = _issue("meta: my docs notes", "Docs things I noticed.", parent=1)
-    issues["11"] = _issue("meta: my cli notes", "CLI things I noticed.", parent=1)
-    for n in (10, 11):
-        issues[S3_TOP]["sub_issues"].append({"number": n, "state": "open"})
+    issues[S3_F1] = _issue("meta: my docs notes", "Docs things I noticed.", parent=1)
+    issues[S3_F2] = _issue("meta: my cli notes", "CLI things I noticed.", parent=1)
+    for n in (S3_F1, S3_F2):
+        issues[S3_TOP]["sub_issues"].append({"number": int(n), "state": "open"})
     for child, parent in ((2, 10), (3, 10), (6, 11), (7, 11)):
         _move(state, child, parent)
     for n in S3_BUGS:
@@ -776,114 +850,175 @@ def _messy_epic() -> dict[str, Any]:
     return state
 
 
-def _s3_feature_stage(name: str, sub: int, kids: list[str]) -> dict[str, Any]:
-    branch = f"grind/meta-{sub}-{S3_RUN}"
+def _s3_plan(run_id: str, stages: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
     return {
-        "stage": "feature",
-        "group": name,
-        "sub_meta": sub,
-        "branch": branch,
-        "base": branch,
-        "children": kids,
-    }
-
-
-def test_e2e_3_regrouped_epic_decide_later_runs_only_bugs_and_leaves_features_open(
-    harness: Harness,
-) -> None:
-    h = harness
-    h.write_gh_state(_messy_epic())
-    before = h.read_gh_state()
-    cmds, undo, where = _regroup(before, S3_GROUPS)
-    # The user's two sub-metas are reused in place; nothing new is created.
-    assert where == {"docs": 10, "cli": 11}, where
-    prs = {g: 101 + i for i, g in enumerate(S3_BUGS)}
-    plan = {
         "schema": "grind-plan/v1",
-        "run_id": S3_RUN,
+        "run_id": run_id,
         "meta": int(S3_TOP),
         "repo": "o/r",
         "main": "main",
         "mode": "sequential",
         "preflight": {"action": "none", "branch": "main"},
         "structure": "meta_of_metas",
-        "stages": [
-            {"stage": "bugs", "base": "main", "children": S3_BUGS},
-            _s3_feature_stage("docs", 10, S3_DOCS),
-            _s3_feature_stage("cli", 11, S3_CLI),
-        ],
-        # "Decide later" on the feature pick: no feature runs this time.
-        "deferred_groups": [
-            {"group": "docs", "sub_meta": 10, "children": S3_DOCS},
-            {"group": "cli", "sub_meta": 11, "children": S3_CLI},
-        ],
-        "feature_merge": "later",
+        "stages": stages,
         "problem_reporting": "issue",
         "models": {},
         "ci": False,
         "scripts": {},
         "rules": {"stuck_bug": "block_dependents_only", "no_overlap": "bugs_only"},
+        **extra,
     }
+
+
+def _saw_goal(result: RunResult, goal: str) -> list[str]:
+    """The scripted roles (other than main) whose conversation named `goal`."""
+    return [
+        r["role"]
+        for r in result.requests
+        if r["role"] != "main" and f"Goal {goal}:" in _text(r.get("messages"))
+    ]
+
+
+def _user_merges(h: Harness, pr: int) -> None:
+    """The user readies and merges `pr` on GitHub (through `fake_gh`)."""
+    for sub in (["pr", "ready", str(pr)], ["pr", "merge", str(pr), "--merge"]):
+        done = process.run(
+            [str(h.bin / "gh"), *sub], capture_output=True, text=True, env=h.env(), timeout=60
+        )
+        assert done.returncode == 0, (sub, done.stdout, done.stderr)
+
+
+def test_e2e_3_regrouped_epic_decide_later_one_feature_then_bugs_only(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.write_gh_state(_messy_epic())
+    before = h.read_gh_state()
+    cmds, undo, where = _regroup(before, S3_GROUPS)
+    # The user's two sub-metas are reused in place as F1 and F2; nothing new.
+    assert where == {"docs": int(S3_F1), "cli": int(S3_F2)}, where
+    # The router's feature setup for F1 (see the module docstring): the
+    # branch is named for the group's sub-meta, in the feature worktree, which
+    # a real repo's ignore rules keep out of the checkout's status.
+    exclude = Path(h.repo) / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text(encoding="utf-8") + ".clud/\n", encoding="utf-8")
+    h.git("branch", S3_FEATURE, "main")
+    h.git("push", "-q", "-u", "origin", S3_FEATURE)
+    h.git("worktree", "add", "-q", str(_wt(h)), S3_FEATURE)
+    feature = {
+        "branch": S3_FEATURE,
+        "worktree": str(_wt(h)),
+        "pr": f"https://github.com/o/r/pull/{S3_FEATURE_PR}",
+    }
+    bug_prs = {g: 102 + i for i, g in enumerate(S3_BUGS)}
+    docs_prs = {g: 106 + i for i, g in enumerate(S3_DOCS)}
+    plan = _s3_plan(
+        S3_RUN,
+        [
+            {"stage": "bugs", "base": "main", "children": S3_BUGS},
+            {
+                "stage": "feature",
+                "group": "docs",
+                "sub_meta": int(S3_F1),
+                "branch": S3_FEATURE,
+                "base": S3_FEATURE,
+                "children": S3_DOCS,
+                "depends_on_bugs": {},
+            },
+        ],
+        # One feature stage per run; F2 waits, with no branch.
+        deferred_groups=[{"group": "cli", "sub_meta": int(S3_F2), "children": S3_CLI}],
+        feature_merge="later",
+    )
     run = {
         "mode": "sequential",
         "meta": S3_TOP,
         "undo": undo,
         "problem_reporting": "issue",
+        "feature_merge": "later",
+        "feature": feature,
+        "tracks": {**{g: "bug" for g in S3_BUGS}, **{g: "feature" for g in S3_DOCS + S3_CLI}},
         "waiting_on_pr": None,
     }
+    # The deferred group's children stay out of this run's goals.
     args = {
         "repo": str(h.repo),
         "main": "main",
         "mode": "sequential",
         "meta": S3_TOP,
         "plan": plan,
-        "goals": _goals([*S3_BUGS, *S3_DOCS, *S3_CLI]),
+        "goals": _goals([*S3_BUGS, *S3_DOCS]),
+        "feature": feature,
+        "feature_merge": "later",
     }
-    regroup_q = "Regroup #1 into a meta of metas? bugs: #12 #13 #14 #15 · F1 docs · F2 cli"
-    pick_q = "Which feature does this run do?"
+    draft = (
+        f"gh pr create --draft --title 'grind: docs' --head {S3_FEATURE} "
+        f"--base main --body 'Closes #{S3_F1}'"
+    )
     main_steps = _chain(
         [
+            # Routing: native sub-issues, so no conversion question.
             _bash(f"gh api repos/o/r/issues/{S3_TOP}/sub_issues"),
+            # The one question round: regroup, feature pick, merge policy, problems.
             _ask(
-                (regroup_q, "Regroup", ["Regroup", "Keep as is (simple schedule)"]),
-                (pick_q, "Feature", ["docs (Recommended)", "cli", "Decide later"]),
+                (S3_REGROUP_Q, "Regroup", ["Regroup", "Keep as is (simple schedule)"]),
+                (S3_PICK_Q, "Feature", ["docs (Recommended)", "cli"]),
+                (
+                    S3_MERGE_Q,
+                    "Merge",
+                    ["Auto-merge when done (Recommended)", "Decide later", "Comment only"],
+                ),
+                (S3_PROBLEMS_Q, "Problems", ["New issue per problem", "Comment"]),
             ),
             _after(_saw("Decide later"), _write(_run_path(h), json.dumps(run, indent=1))),
             *[_bash(c) for c in cmds],
-            _workflow(args),
-            _after(_saw("deferred group docs"), {"text": S3_REPORT}),
+            _bash(draft),
+            *_workflow_steps(args),
+            {"text": S3_REPORT},
         ]
     )
     roles: list[dict[str, Any]] = [_prework(S3_TOP, S3_RUN)]
     for g in S3_BUGS:
-        roles += _bug_roles(h, g, prs[g])
+        roles += _bug_roles(h, g, bug_prs[g])
+    for g in S3_DOCS:
+        roles += _feature_roles(
+            h,
+            g,
+            docs_prs[g],
+            feature=S3_FEATURE,
+            feature_pr=S3_FEATURE_PR,
+            closes=_closes(S3_F1, S3_DOCS, g),
+        )
     script = {"default_text": "OK", "roles": [*roles, {"name": "main", "steps": main_steps}]}
-    result = h.run(
-        "start grind",
-        script,
-        timeout=900,
-        answers={regroup_q: "Regroup", pick_q: "Decide later"},
-    )
+    answers = {
+        S3_REGROUP_Q: "Regroup",
+        S3_PICK_Q: "docs (Recommended)",
+        S3_MERGE_Q: "Decide later",
+        S3_PROBLEMS_Q: "New issue per problem",
+    }
+    result = h.run("start grind", script, timeout=1200, answers=answers)
     assert result.returncode == 0, result.stdout[-3000:]
     _no_notes(result)
 
-    # Order: the regroup and the feature pick were asked once, before prework.
+    # Order: one question round before prework, then the bugs, then F1.
     _questions_then_none(result, 1)
-    _all_goal_roles_ran(result, S3_BUGS)
+    _all_goal_roles_ran(result, [*S3_BUGS, *S3_DOCS])
+    first = _first(result)
+    last_bug = max(first[f"lander:{b}"] for b in S3_BUGS)
+    assert all(last_bug < first[f"planner:{d}"] for d in S3_DOCS), first
     after = h.read_gh_state()
     issues = after["issues"]
 
     # Regrouped in place: the user's sub-metas became F1/F2, old text kept.
     assert not _calls(h, "issue", "create"), after["calls"]
-    for n, name in ((10, "docs"), (11, "cli")):
-        issue = issues[str(n)]
+    for n, name in ((S3_F1, "docs"), (S3_F2, "cli")):
+        issue = issues[n]
         assert issue["title"] == f"grind: {name}", issue
         assert issue["body"].startswith(V1), issue
-        old = before["issues"][str(n)]["body"]
+        old = before["issues"][n]["body"]
         assert f"{PREVIOUS}\n\n{old}\n\n</details>" in issue["body"], issue
-        assert issue["state"] == "open", issue
-    assert {s["number"] for s in issues["10"]["sub_issues"]} == {2, 3, 4, 5}
-    assert {s["number"] for s in issues["11"]["sub_issues"]} == {6, 7, 8, 9}
+    assert {s["number"] for s in issues[S3_F1]["sub_issues"]} == {2, 3, 4, 5}
+    assert {s["number"] for s in issues[S3_F2]["sub_issues"]} == {6, 7, 8, 9}
     assert {s["number"] for s in issues[S3_TOP]["sub_issues"]} == {10, 11, 12, 13, 14, 15}
     saved = json.loads(_run_path(h).read_text(encoding="utf-8"))["undo"]
     assert {(u["op"], u["issue"]) for u in saved} >= {
@@ -895,33 +1030,148 @@ def test_e2e_3_regrouped_epic_decide_later_runs_only_bugs_and_leaves_features_op
         ("reparent", 9),
     }, saved
 
-    # Only bugs ran: each landed on main and closed its own issue.
+    # Bugs: each landed on main, closed by its own PR, still under the top meta.
     for g in S3_BUGS:
-        pr = _pr(h, prs[g])
+        pr = _pr(h, bug_prs[g])
         assert pr["base"] == "main", pr
         assert f"Closes #{g}" in pr["body"], pr
         assert pr["state"] == "MERGED", pr
-        assert issues[g]["closed_by"] == {"kind": "pr", "pr": prs[g]}, (g, issues[g])
+        assert issues[g]["closed_by"] == {"kind": "pr", "pr": bug_prs[g]}, (g, issues[g])
         assert issues[g]["parent"] == int(S3_TOP)
-    assert {p["number"] for p in after["prs"]} == set(prs.values()), after["prs"]
 
-    # Both features were deferred: no agent saw them, no branch, no PR, still open.
-    for g in [*S3_DOCS, *S3_CLI]:
-        seen = [
-            r["role"]
-            for r in result.requests
-            if r["role"] != "main" and f"Goal {g}:" in _text(r.get("messages"))
-        ]
-        assert not seen, (g, seen)
+    # F1: goal PRs merged into F1's branch with Refs, so their issues stay open.
+    for g in S3_DOCS:
+        pr = _pr(h, docs_prs[g])
+        assert pr["base"] == S3_FEATURE, pr
+        assert pr["state"] == "MERGED", pr
+        assert f"Refs #{g}" in pr["body"], pr
+        assert "Closes" not in pr["body"], pr
         assert issues[g]["state"] == "open", (g, issues[g])
-    assert not [b for b in _origin_heads(h) if b.startswith("grind/meta-")], _origin_heads(h)
-    assert not [p for p in after["prs"] if p.get("draft")], after["prs"]
-    told = _told(result)
-    assert "deferred group docs" in told, told[-3000:]
-    assert "deferred group cli" in told, told[-3000:]
+        assert f"Base: origin/{S3_FEATURE}" in _prompt(result, f"integrator:{g}")
 
-    # The top meta issue carries the plan and is left for reconcile.
+    # "Decide later": F1's feature PR is left open as a draft, never readied or
+    # merged by grind. It closes F1's sub-meta and children, never the top meta.
+    fpr = _pr(h, S3_FEATURE_PR)
+    assert fpr["base"] == "main", fpr
+    assert fpr["state"] == "OPEN", fpr
+    assert fpr["draft"] is True, fpr
+    for n in (S3_F1, *S3_DOCS):
+        assert re.search(rf"Closes #{n}(?!\d)", fpr["body"]), fpr["body"]
+    assert not re.search(rf"Closes #{S3_TOP}(?!\d)", fpr["body"]), fpr["body"]
+    assert not _calls(h, "pr", "ready"), after["calls"]
+    assert not _calls(h, "pr", "merge", str(S3_FEATURE_PR)), after["calls"]
+    assert issues[S3_F1]["state"] == "open", issues[S3_F1]
+
+    # F2 was deferred: no agent saw its goals, no branch, no PR, still open.
+    for g in S3_CLI:
+        assert not _saw_goal(result, g), (g, _saw_goal(result, g))
+        assert issues[g]["state"] == "open", (g, issues[g])
+    assert [b for b in _origin_heads(h) if b.startswith("grind/meta-")] == [S3_FEATURE]
+    assert {p["number"] for p in after["prs"]} == {
+        S3_FEATURE_PR,
+        *bug_prs.values(),
+        *docs_prs.values(),
+    }, after["prs"]
+
+    # The top meta issue carries the plan and is left open; nothing closed it.
     assert issues[S3_TOP]["state"] == "open"
     assert not _calls(h, "issue", "close"), after["calls"]
     plans = [c for c in issues[S3_TOP]["comments"] if PLAN_MARKER in c["body"]]
     assert len(plans) == 1, issues[S3_TOP]["comments"]
+
+    # ---- run 2, the next day: a new bug, F1's PR still open -> bugs only. ----
+    state = h.read_gh_state()
+    state["issues"][S3_BUG2] = _issue(f"bug {S3_BUG2}", f"fix {S3_BUG2}", parent=int(S3_TOP))
+    state["issues"][S3_TOP]["sub_issues"].append({"number": int(S3_BUG2), "state": "open"})
+    h.write_gh_state(state)
+    edits_before = len(_calls(h, "issue", "edit"))
+    sub_metas_before = {n: dict(state["issues"][n]) for n in (S3_F1, S3_F2)}
+    bug2_pr = 110
+    plan2 = _s3_plan(
+        S3_RUN2,
+        [{"stage": "bugs", "base": "main", "children": [S3_BUG2]}],
+        deferred_groups=[{"group": "cli", "sub_meta": int(S3_F2), "children": S3_CLI}],
+        waiting_on_pr=S3_FEATURE_PR,
+    )
+    run2 = {
+        "mode": "sequential",
+        "meta": S3_TOP,
+        "undo": [],
+        "problem_reporting": "issue",
+        "tracks": {S3_BUG2: "bug"},
+        "waiting_on_pr": S3_FEATURE_PR,
+    }
+    args2 = {
+        "repo": str(h.repo),
+        "main": "main",
+        "mode": "sequential",
+        "meta": S3_TOP,
+        "plan": plan2,
+        "goals": _goals([S3_BUG2]),
+    }
+    main_steps2 = _chain(
+        [
+            # Reconcile first; nothing is labelled, so it has nothing to repair.
+            _bash("clud grind reconcile"),
+            # No overlap: an open feature PR under #1 makes this run bugs-only.
+            _bash("gh pr list --state open --json number,headRefName,isDraft"),
+            # Grind-made sub-metas are kept, so there is no regroup question and,
+            # with no feature stage, no merge-policy question.
+            _after(
+                _saw(S3_FEATURE),
+                _ask((S3_PROBLEMS_Q, "Problems", ["New issue per problem", "Comment"])),
+            ),
+            _after(
+                _saw("New issue per problem"), _write(_run_path(h), json.dumps(run2, indent=1))
+            ),
+            *_workflow_steps(args2),
+            {"text": S3_REPORT2},
+        ]
+    )
+    roles2: list[dict[str, Any]] = [_prework(S3_TOP, S3_RUN2), *_bug_roles(h, S3_BUG2, bug2_pr)]
+    script2 = {"default_text": "OK", "roles": [*roles2, {"name": "main", "steps": main_steps2}]}
+    result2 = h.run(
+        "start grind",
+        script2,
+        timeout=900,
+        answers={S3_PROBLEMS_Q: "New issue per problem"},
+    )
+    assert result2.returncode == 0, result2.stdout[-3000:]
+    _no_notes(result2)
+    _questions_then_none(result2, 1)
+    _all_goal_roles_ran(result2, [S3_BUG2])
+
+    after2 = h.read_gh_state()
+    issues2 = after2["issues"]
+    # The plan records the rule and names the waiting PR.
+    pre2 = _prompt(result2, "prework")
+    assert f'"waiting_on_pr": {S3_FEATURE_PR}' in pre2, pre2[-3000:]
+    assert '"no_overlap": "bugs_only"' in pre2, pre2[-3000:]
+    # Only the new bug ran, straight into main.
+    pr2 = _pr(h, bug2_pr)
+    assert (pr2["base"], pr2["state"]) == ("main", "MERGED"), pr2
+    assert issues2[S3_BUG2]["closed_by"] == {"kind": "pr", "pr": bug2_pr}, issues2[S3_BUG2]
+    for g in [*S3_DOCS, *S3_CLI]:
+        assert not _saw_goal(result2, g), (g, _saw_goal(result2, g))
+    assert {p["number"] for p in after2["prs"]} == {p["number"] for p in after["prs"]} | {bug2_pr}
+    assert [b for b in _origin_heads(h) if b.startswith("grind/meta-")] == [S3_FEATURE]
+    # F1's PR is untouched, and grind's own sub-metas were not regrouped again.
+    assert _pr(h, S3_FEATURE_PR) == fpr
+    assert len(_calls(h, "issue", "edit")) == edits_before, after2["calls"]
+    for n in (S3_F1, S3_F2):
+        assert issues2[n]["title"] == sub_metas_before[n]["title"], issues2[n]
+        assert issues2[n]["body"] == sub_metas_before[n]["body"], issues2[n]
+        assert issues2[n]["sub_issues"] == sub_metas_before[n]["sub_issues"], issues2[n]
+    plans2 = [c for c in issues2[S3_TOP]["comments"] if PLAN_MARKER in c["body"]]
+    assert len(plans2) == 2, issues2[S3_TOP]["comments"]
+
+    # ---- the user merges F1's PR: GitHub closes F1 and its children. ----
+    _user_merges(h, S3_FEATURE_PR)
+    final = _issues(h)
+    for n in (S3_F1, *S3_DOCS):
+        assert final[n]["state"] == "closed", (n, final[n])
+        assert final[n]["closed_by"] == {"kind": "pr", "pr": S3_FEATURE_PR}, (n, final[n])
+    # The top meta and F2 stay open: no feature PR names the top meta.
+    for n in (S3_TOP, S3_F2, *S3_CLI):
+        assert final[n]["state"] == "open", (n, final[n])
+    assert not _calls(h, "issue", "close"), h.read_gh_state()["calls"]

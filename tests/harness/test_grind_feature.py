@@ -3,11 +3,16 @@
 The router's feature setup gives a run a feature branch
 (`grind/meta-100-1f3a`), its worktree at `<repo>/.clud/grind/worktrees/feature`
 and a draft feature PR (#101, base `main`, `Closes #100`). Goal PRs target the
-feature branch with `Refs #N`; the feature PR collects the `Closes` lines.
+feature branch with `Refs #N`; once a goal PR merged, its lander labels the
+issue (and the meta) `grind:on-feature`, posts the `grind:v1` marker and adds
+the goal's `Closes` line to the feature PR (#1393 §2, S5).
 Once the goals settle, `feature_merge` decides: `auto` readies the feature PR
-and merges it with `--merge` (never `--admin`), `decide_later` leaves it open,
-`comment_only` keeps the draft and the router posts one result comment on the
-meta issue. `main` moving is merged into the feature branch, never rebased.
+and merges it with `--merge` (never `--admin`), `decide_later` has the router
+mark it ready and leave it open, `comment_only` keeps the draft and the router
+posts one result comment on the meta issue. `main` moving is merged into the
+feature branch, never rebased. While `run.json` records the feature, the hook
+also caps the main-session router: no issue close (S3), no feature PR merge,
+no `grind/*` branch deletion.
 
 The hook caps read the feature from `.clud/grind/run.json` (`feature: {branch,
 worktree, pr}` and `feature_merge`). A denied call still shows in the hook
@@ -142,6 +147,28 @@ def _closes(goal: str) -> str:
     return " ".join(f"Closes #{n}" for n in [META, *done])
 
 
+LABEL = "grind:on-feature"
+
+
+def _marker(goal: str | None) -> str:
+    goal_pr = f" goal-pr=#{goal}" if goal else ""
+    return f"<!-- grind:v1 feature-pr=#{PR} branch={FEATURE}{goal_pr} run={RUN_ID} -->"
+
+
+def _record(goal: str) -> str:
+    """What the lander runs once a goal PR merged into the feature branch (#1393 §2)."""
+    commands = [
+        f"gh label create {LABEL} --force",
+        f"gh issue edit {goal} --add-label {LABEL}",
+        f"gh issue edit {META} --add-label {LABEL}",
+        f"gh issue comment {goal} --body 'Landed on {FEATURE} via #{goal}. {_marker(goal)}'",
+    ]
+    if goal == GOALS[0]:
+        commands.append(f"gh issue comment {META} --body '{_marker(None)}'")
+    commands.append(f"gh pr edit {PR} --body '{_closes(goal)}'")
+    return " && ".join(commands)
+
+
 def _goal_roles(
     h: Harness,
     goal: str,
@@ -185,11 +212,11 @@ def _goal_roles(
         f"{git} commit -q -m {goal}",
         f"{git} push -q -u origin {branch}",
         f"gh pr create --title {goal} --head {branch} --base {FEATURE} --body 'Refs #{goal}'",
-        f"gh pr edit {PR} --body '{_closes(goal)}'",
     ]
     url = f"https://github.com/o/r/pull/{branch}"
     land = lander or [
         _bash(f"gh pr merge {branch} --merge"),
+        _after(OK, _bash(_record(goal))),
         _after(OK, _structured({"status": "merged", "summary": "green"})),
     ]
     return [
@@ -394,8 +421,53 @@ def test_f3_feature_pr_body_collects_closes_lines(harness: Harness) -> None:
     body = _pr(harness, PR)["body"]
     for n in (META, *GOALS):
         assert f"Closes #{n}" in body, body
-    assert f"Closes #{GOALS[0]}" in _prompt(result, f"integrator:{GOALS[0]}")
+    # The lander adds a goal's Closes line once the goal landed; the
+    # integrator never touches the feature PR (a goal that never lands must
+    # not be closed by the feature merge).
+    for g in GOALS:
+        land = _prompt(result, f"lander:{g}")
+        assert f"Closes #{g}" in land, land[-3000:]
+        assert _marker("<n>") in land, land[-3000:]
+        assert "Do not edit the feature PR" in _prompt(result, f"integrator:{g}")
+    assert _attempted(result, "grind-lander", f"gh pr edit {PR}")
+    assert not _attempted(result, "grind-integrator", "gh pr edit")
     assert _calls(harness, "pr", "edit", PR), harness.read_gh_state()["calls"]
+
+
+def test_s5_landed_goals_get_the_label_and_marker(harness: Harness) -> None:
+    result = _run(harness, _goals(harness, "sequential"))
+    _no_notes(result)
+    issues = harness.read_gh_state()["issues"]
+    for g in GOALS:
+        assert LABEL in issues[g]["labels"], issues[g]
+        assert any(_marker(g) in c["body"] for c in issues[g]["comments"]), issues[g]
+    assert LABEL in issues[META]["labels"], issues[META]
+    metas = [c for c in issues[META]["comments"] if f"feature-pr=#{PR}" in c["body"]]
+    assert len(metas) == 1, issues[META]["comments"]
+    # Landing on the feature branch closes nothing.
+    assert all(issues[n]["state"] == "open" for n in (META, *GOALS)), issues
+
+
+def test_s3_router_cannot_close_an_issue_in_feature_mode(harness: Harness) -> None:
+    _seed(harness)
+    _run_facts(harness, mode="sequential", merge="auto")
+    close = f"gh issue close {GOALS[0]}"
+    steps = [
+        _bash(close),
+        _after(_denied("never closes issues"), {"text": "GRIND_DONE"}),
+    ]
+    script = {"default_text": "OK", "roles": [{"name": "main", "steps": steps}]}
+    result = harness.run("start grind", script, timeout=300)
+    assert result.returncode == 0, result.stdout[-3000:]
+    _no_notes(result)
+    assert any(
+        r.get("tool_name") == "Bash"
+        and not r.get("agent_type")
+        and close in str((r.get("tool_input") or {}).get("command", ""))
+        for r in result.hooks
+    )
+    assert not _calls(harness, "issue", "close")
+    assert harness.read_gh_state()["issues"][GOALS[0]]["state"] == "open"
 
 
 def test_f4_auto_readies_then_merge_commits_and_closes_issues(harness: Harness) -> None:
@@ -468,22 +540,41 @@ def test_f6_hook_denies_admin_merge_of_the_feature_pr(harness: Harness) -> None:
     assert _pr(harness, PR)["admin"] is False
 
 
-def test_f7_decide_later_leaves_the_pr_open_and_denies_merging_it(harness: Harness) -> None:
+def _main_attempted(result: RunResult, needle: str) -> bool:
+    """Whether the main-session router tried a Bash command containing `needle`."""
+    return any(
+        not r.get("agent_type")
+        and r.get("tool_name") == "Bash"
+        and needle in str((r.get("tool_input") or {}).get("command", ""))
+        for r in result.hooks
+    )
+
+
+def test_f7_decide_later_readies_the_pr_and_denies_merging_it(harness: Harness) -> None:
     denied = f"gh pr merge {PR} --merge"
     lander = [
         _bash(denied),
         _after(_denied("decide later"), _bash("gh pr merge grind/102 --merge")),
+        _after(OK, _bash(_record("102"))),
         _after(OK, _structured({"status": "merged", "summary": "green"})),
     ]
     roles = _goals(harness, "sequential", landers={"102": lander})
-    result = _run(harness, roles, merge="decide_later")
+    # Finish under `later`: every goal landed, so the router marks the PR
+    # ready; merging it is the user's call, and the hook refuses the router.
+    post = [
+        _after(OK, _bash(f"gh pr ready {PR}")),
+        _after(OK, _bash(denied)),
+    ]
+    result = _run(harness, roles, merge="decide_later", post=post)
     _no_notes(result)
     assert _attempted(result, "grind-lander", denied)
+    assert _main_attempted(result, denied)
     assert not _calls(harness, "pr", "merge", PR)
-    assert not _calls(harness, "pr", "ready", PR)
+    assert _calls(harness, "pr", "ready", PR)
+    assert not _attempted(result, "grind-lander", f"gh pr ready {PR}")
     pr = _pr(harness, PR)
     assert pr["state"] == "OPEN", pr
-    assert pr["draft"] is True, pr
+    assert pr["draft"] is False, pr
     assert "lander:feature" not in _first(result)
     assert harness.read_gh_state()["issues"][META]["state"] == "open"
 
@@ -502,9 +593,10 @@ def test_f8_comment_only_keeps_the_draft_and_posts_one_result_comment(harness: H
     assert pr["draft"] is True, pr
     assert not _calls(harness, "pr", "ready", PR)
     assert not _calls(harness, "pr", "merge", PR)
+    # The meta issue also carries the lander's grind:v1 marker comment.
     comments = harness.read_gh_state()["issues"][META]["comments"]
-    assert len(comments) == 1, comments
-    assert "grind result" in comments[0]["body"]
+    results = [c for c in comments if "grind result" in c["body"]]
+    assert len(results) == 1, comments
     assert "lander:feature" not in _first(result)
 
 
@@ -529,7 +621,16 @@ def test_f9_moving_main_is_merged_in_never_rebased(harness: Harness) -> None:
 
 def test_f10_parallel_goal_worktrees_are_based_on_the_feature_branch(harness: Harness) -> None:
     feature = harness.git("rev-parse", "main")
-    result = _run(harness, _goals(harness, "parallel"), mode="parallel")
+    # Plain merges only: fake_gh's state file has no lock, so two landers'
+    # bookkeeping calls at once could lose an update (F3/S5 cover it).
+    plain = {
+        g: [
+            _bash(f"gh pr merge grind/{g} --merge"),
+            _after(OK, _structured({"status": "merged", "summary": "green"})),
+        ]
+        for g in GOALS
+    }
+    result = _run(harness, _goals(harness, "parallel", landers=plain), mode="parallel")
     _no_notes(result)
     for g in GOALS:
         text = _prompt(result, f"planner:{g}")
@@ -546,9 +647,14 @@ def test_f11_sequential_goals_run_in_the_feature_worktree(harness: Harness) -> N
     for g in GOALS:
         assert f"work in the feature worktree {wt}" in _prompt(result, f"planner:{g}")
         assert f"Checkout: {wt}" in _prompt(result, f"worker:{g}")
-        assert (Path(wt) / f"{g}.txt").is_file()
         assert not (Path(harness.repo) / f"{g}.txt").exists()
         assert _origin_has(harness, f"grind/{g}")
+        # Each goal was committed in the feature worktree on its own branch.
+        # fake_gh's merge moves no git refs, so goal 103 branches from an
+        # origin/<feature> without 102.txt and the worktree ends on grind/103.
+        assert harness.git("show", f"grind/{g}:{g}.txt", cwd=harness.origin) == g
+    assert harness.git("branch", "--show-current", cwd=Path(wt)) == f"grind/{GOALS[-1]}"
+    assert (Path(wt) / f"{GOALS[-1]}.txt").is_file()
     assert harness.git("branch", "--show-current") == "main"
 
 
@@ -563,9 +669,14 @@ def test_f12_no_grind_branch_deletion_while_the_feature_pr_is_open(harness: Harn
         ),
     ]
     roles = _goals(harness, "sequential", landers={"102": lander})
-    result = _run(harness, roles)
+    # Finish: the router may not delete grind/* branches either while the
+    # feature PR is open.
+    router_delete = f"git -C {harness.repo} push origin --delete grind/103 {FEATURE}"
+    post = [_after(OK, _bash(router_delete))]
+    result = _run(harness, roles, post=post)
     _no_notes(result)
     assert _attempted(result, "grind-lander", delete)
-    assert _origin_has(harness, "grind/102")
-    assert _origin_has(harness, FEATURE)
+    assert _main_attempted(result, router_delete)
+    for branch in ("grind/102", "grind/103", FEATURE):
+        assert _origin_has(harness, branch), branch
     assert _pr(harness, PR)["state"] == "OPEN"

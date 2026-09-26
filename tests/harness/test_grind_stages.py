@@ -9,6 +9,10 @@ block_dependents_only`) blocks only the feature goals that list it in
 `depends_on_bugs`; the rest still run. Without `plan` the old single-stage
 order, based on `origin/main`, is kept.
 
+These tests hand one `grind-run` call the goals of both stages, the
+fallback form. The router's one-call-per-stage flow (T1-T3, T5 across
+calls, T6, H7) is in `test_grind_tracks.py`.
+
 Script note: a step's `expect` checks the tool results of the *previous*
 step, so an expectation about a command sits on the step after it.
 """
@@ -41,6 +45,12 @@ PLAN_URL = f"https://github.com/o/r/issues/{META}#issuecomment-1000"
 OK = {"is_error": False}
 
 
+def _branch(goal: str) -> str:
+    """A goal branch whose last path part is not a number: fake_gh reads a
+    numeric tail (`grind/103`) as PR #103, not as the head branch."""
+    return f"grind/goal-{goal}"
+
+
 def _structured(value: dict[str, Any]) -> dict[str, Any]:
     return {"tool_use": {"name": "StructuredOutput", "input": value}}
 
@@ -69,7 +79,8 @@ def _seed(h: Harness) -> None:
     for n in (101, 102, 103, 104):
         issues[n] = _issue(f"child {n}", f"do {n}", parent=int(META))
     h.write_gh_state(_world(issues))
-    # The feature stage's branch exists on origin, as prework would leave it.
+    # One call carrying both stages: the feature branch already exists. (The
+    # router normally makes one call per stage; see test_grind_tracks.py.)
     h.git("push", "-q", "origin", f"main:{FEATURE}")
 
 
@@ -128,7 +139,7 @@ def _goal_roles(
     h: Harness, goal: str, *, lander: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
     """One goal's planner, worker, reviewer, integrator and lander."""
-    branch = f"grind/{goal}"
+    branch = _branch(goal)
     repo = str(h.repo)
     at = f"Goal {goal}:"
     plan = {
@@ -268,7 +279,7 @@ def test_bug_stage_integrates_before_any_feature_goal_is_planned(harness: Harnes
     for bug in BUGS:
         for feature in FEATURES:
             assert first[f"integrator:{bug}"] < first[f"planner:{feature}"], (bug, feature, first)
-    assert _merged(harness) == [f"grind/{g}" for g in ("101", "102", "103", "104")]
+    assert _merged(harness) == [_branch(g) for g in ("101", "102", "103", "104")]
 
 
 def test_feature_integrator_uses_the_feature_branch_base(harness: Harness) -> None:
@@ -286,10 +297,10 @@ def test_stuck_bug_blocks_only_its_dependents(harness: Harness) -> None:
     gave_up = [_structured({"status": "gave_up", "summary": "stuck", "failure_log": "red"})]
     result = _run(harness, _all_roles(harness, **{"103": gave_up}), plan=_plan())
     merged = _merged(harness)
-    assert "grind/103" not in merged
-    assert "grind/104" not in merged
-    assert "grind/102" in merged, merged
-    assert "grind/101" in merged, merged
+    assert _branch("103") not in merged
+    assert _branch("104") not in merged
+    assert _branch("102") in merged, merged
+    assert _branch("101") in merged, merged
     ran = _first(result)
     assert "planner:104" not in ran, ran
     assert "integrator:104" not in ran, ran
@@ -305,4 +316,4 @@ def test_no_plan_keeps_old_order(harness: Harness) -> None:
         text = _prompt(result, f"integrator:{g}")
         assert "Base: origin/main" in text, (g, text[-3000:])
         assert FEATURE not in text
-    assert _merged(harness) == [f"grind/{g}" for g in ("101", "102", "103", "104")]
+    assert _merged(harness) == [_branch(g) for g in ("101", "102", "103", "104")]

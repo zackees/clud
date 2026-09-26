@@ -1,7 +1,8 @@
 """No overlap between feature PRs, on the real Claude Code (#1412, #1392 O1-O4).
 
 With `rules.no_overlap: bugs_only`, an open feature PR under the same top meta
-(head `grind/meta-<meta>-*`) makes the router set `plan.waiting_on_pr`, and
+(an open PR into `main` with head `grind/meta-<X>-*`, X the top meta or one
+of its sub-metas) makes the router set `plan.waiting_on_pr`, and
 `grind-run` then runs only the bug stage: every feature goal is reported
 `deferred` with a note naming the PR, and the run logs `no overlap`. Once that
 PR is merged, or when the open feature PR belongs to a different top meta, the
@@ -17,6 +18,7 @@ step, so an expectation about a command sits on the step after it.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -93,12 +95,30 @@ def _seed(h: Harness, prs: list[dict[str, Any]]) -> None:
     run.write_text(json.dumps({"mode": "sequential", "meta": META}), encoding="utf-8")
 
 
-def _waiting_on(h: Harness, meta: str) -> int | None:
-    """The router's rule: an open feature PR under this top meta, if any."""
-    for p in h.read_gh_state().get("prs", []):
-        if p.get("state") == "OPEN" and str(p.get("head", "")).startswith(f"grind/meta-{meta}-"):
+def _waiting_in(state: dict[str, Any], meta: str) -> int | None:
+    """The router's rule (skill section 1b): an open PR into `main` whose head
+    is `grind/meta-<X>-…`, where X is the top meta or one of its sub-issues
+    (a meta of metas names each feature branch after its sub-meta)."""
+    top = state["issues"].get(str(meta), {})
+    owners = {str(meta), *(str(s["number"]) for s in top.get("sub_issues", []))}
+    for p in state.get("prs", []):
+        head = str(p.get("head", ""))
+        if p.get("state") != "OPEN" or p.get("base", "main") != "main":
+            continue
+        owner = head.removeprefix("grind/meta-").split("-", 1)[0]
+        if head.startswith("grind/meta-") and owner in owners:
             return int(p["number"])
     return None
+
+
+def _waiting_on(h: Harness, meta: str) -> int | None:
+    return _waiting_in(h.read_gh_state(), meta)
+
+
+def _branch(goal: str) -> str:
+    """`grind/goal-<id>`, not `grind/<id>`: fake_gh reads a target whose last
+    path segment is a number as a PR number."""
+    return f"grind/goal-{goal}"
 
 
 def _plan(
@@ -152,7 +172,7 @@ def _prework() -> dict[str, Any]:
 
 def _goal_roles(h: Harness, goal: str) -> list[dict[str, Any]]:
     """One goal's planner, worker, reviewer, integrator and lander."""
-    branch = f"grind/{goal}"
+    branch = _branch(goal)
     repo = str(h.repo)
     at = f"Goal {goal}:"
     plan = {
@@ -272,11 +292,29 @@ def _feature_stage_ran(h: Harness, result: RunResult, features: list[str]) -> No
     merged = _merged(h)
     for f in features:
         assert f"planner:{f}" in ran, (f, ran)
-        assert f"grind/{f}" in merged, (f, merged)
-    assert "waiting on feature PR" not in _told(result)
+        assert _branch(f) in merged, (f, merged)
+    # The workflow source also contains the phrase; match only a rendered note.
+    assert not re.search(r"waiting on feature PR #\d", _told(result))
 
 
 # ---- tests ---------------------------------------------------------------------
+
+
+def _bugs_only_ran(h: Harness, result: RunResult) -> None:
+    """Bugs landed; every feature goal came back `deferred`, naming the PR."""
+    ran = _first(result)
+    merged = _merged(h)
+    for bug in BUGS:
+        assert _branch(bug) in merged, merged
+    for f in FEATURES:
+        assert f"planner:{f}" not in ran, (f, ran)
+        assert _branch(f) not in merged, merged
+    told = _told(result)
+    assert f"no overlap: waiting on feature PR #{FEATURE_PR}" in told, told[-3000:]
+    for f in FEATURES:
+        # The workflow's summary entry for the goal, JSON-escaped in the log.
+        pattern = rf'goal\\*"\s*:\s*\\*"{f}\\*".{{0,300}}?status\\*"\s*:\s*\\*"deferred'
+        assert re.search(pattern, told, re.DOTALL), (f, told[-3000:])
 
 
 def test_o1_open_feature_pr_runs_bugs_only(harness: Harness) -> None:
@@ -286,19 +324,51 @@ def test_o1_open_feature_pr_runs_bugs_only(harness: Harness) -> None:
     plan = _plan(BUGS, FEATURES, waiting=waiting)
     goals = ["101", "102", "103", "104"]
     result = _run(harness, _script(harness, _roles(harness, goals), goals, plan))
-    ran = _first(result)
-    merged = _merged(harness)
-    for bug in BUGS:
-        assert f"grind/{bug}" in merged, merged
-    for f in FEATURES:
-        assert f"planner:{f}" not in ran, (f, ran)
-        assert f"grind/{f}" not in merged, merged
-    told = _told(result)
-    assert "no overlap" in told, told[-3000:]
-    assert "deferred" in told, told[-3000:]
-    assert f"no overlap: waiting on feature PR #{FEATURE_PR}" in told, told[-3000:]
-    for f in FEATURES:
-        assert f"goal {f}" in told, (f, told[-3000:])
+    _bugs_only_ran(harness, result)
+
+
+def test_o1_open_sub_meta_feature_pr_runs_bugs_only(harness: Harness) -> None:
+    """Meta of metas: the waiting PR's branch is named after sub-meta #110 of
+    #100, and the bugs-only plan (skill section 1b) moves the feature group
+    out of `stages` into `deferred_groups`; its goals still never run."""
+    sub = 110
+    _seed(harness, [_feature_pr(f"grind/meta-{sub}-x", "OPEN")])
+    state = harness.read_gh_state()
+    state["issues"][str(sub)] = _issue(
+        "grind: auth rework", "<!-- grind:v1 -->", labels=["grind:meta"], parent=int(META)
+    )
+    state["issues"][META]["sub_issues"].append({"number": sub, "state": "open"})
+    harness.write_gh_state(state)
+    waiting = _waiting_on(harness, META)
+    assert waiting == FEATURE_PR
+    plan = _plan(BUGS, FEATURES, waiting=waiting)
+    group = plan["stages"].pop()
+    plan["deferred_groups"] = [
+        {"group": group["group"], "sub_meta": sub, "children": group["children"]}
+    ]
+    goals = ["101", "102", "103", "104"]
+    result = _run(harness, _script(harness, _roles(harness, goals), goals, plan))
+    _bugs_only_ran(harness, result)
+
+
+def test_o_rule_scope_is_the_top_meta_and_its_sub_metas() -> None:
+    """The router's no-overlap rule, on its own: which open PRs block #100."""
+    issues = {int(META): _issue("meta", ""), 110: _issue("sub", "", parent=int(META))}
+    issues[200] = _issue("other meta", "")
+    world = _world(issues)
+
+    def waiting(head: str, *, state: str = "OPEN", base: str = "main") -> int | None:
+        pr = {**_feature_pr(head, state), "base": base}
+        return _waiting_in({**world, "prs": [pr]}, META)
+
+    assert waiting(f"grind/meta-{META}-1f3a") == FEATURE_PR
+    assert waiting("grind/meta-110-1f3a") == FEATURE_PR
+    assert waiting("grind/meta-200-1f3a") is None
+    assert waiting(f"grind/meta-{META}-1f3a", state="MERGED") is None
+    assert waiting(f"grind/meta-{META}-1f3a", state="CLOSED") is None
+    # A goal PR into the feature branch is not a feature PR.
+    assert waiting(f"grind/meta-{META}-1f3a-goal", base=f"grind/meta-{META}-1f3a") is None
+    assert waiting(f"grind/meta-{META}0-1f3a") is None
 
 
 def test_o2_merged_feature_pr_lets_the_feature_stage_run(harness: Harness) -> None:
@@ -323,6 +393,12 @@ def test_o3_feature_pr_merged_in_run_unblocks_the_next_plan(harness: Harness) ->
     }
     goals = ["101", "102", "103", "104"]
     roles = [*_roles(harness, goals), _feature_lander()]
+    # The router records the feature in run.json before the feature-stage
+    # call (/grind 4b step 5); the hook reads the feature PR from there.
+    run = Path(harness.repo) / ".clud" / "grind" / "run.json"
+    run.parent.mkdir(parents=True, exist_ok=True)
+    facts = {"mode": "sequential", "meta": META, "feature": feature, "feature_merge": "auto"}
+    run.write_text(json.dumps(facts), encoding="utf-8")
     first = _run(harness, _script(harness, roles, goals, plan, feature))
     _feature_stage_ran(harness, first, FEATURES)
     assert FEATURE in _merged(harness), _merged(harness)
@@ -344,4 +420,4 @@ def test_o4_feature_pr_under_another_meta_does_not_block(harness: Harness) -> No
     goals = ["101", "102", "103", "104"]
     result = _run(harness, _script(harness, _roles(harness, goals), goals, plan))
     _feature_stage_ran(harness, result, FEATURES)
-    assert "no overlap" not in _told(result)
+    assert not re.search(r"no overlap: waiting on feature PR #\d", _told(result))

@@ -378,7 +378,15 @@ mod tests {
             "clud gc ",
             "clud --version",
         ];
+        // The /grind router, intake and lander run under clud-cmd-scan's rm-identity
+        // check, which refuses any program word containing `$`, so a
+        // `"$CLUD_EXE" tool run` call is denied there. They use a bare `clud`,
+        // as `/grind` already does for `clud grind-scripts` (#1405, #1414).
+        const BARE_CLUD_ALLOWED: &[&str] = &["grind", "grind-intake", "grind-land"];
         for skill in BUNDLED_SKILLS {
+            if BARE_CLUD_ALLOWED.contains(&skill.name) {
+                continue;
+            }
             for bare in BARE {
                 assert!(
                     !skill.skill_md.contains(bare),

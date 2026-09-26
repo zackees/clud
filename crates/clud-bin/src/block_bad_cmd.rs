@@ -3417,12 +3417,17 @@ mod block_bad_cmd_cwd_changed;
 #[path = "block_bad_cmd_grind_caps.rs"]
 mod block_bad_cmd_grind_caps;
 
-/// The `/grind` role-cap denial for this call, if its agent is a capped role.
+/// The `/grind` role-cap denial for this call, if its agent is a capped role,
+/// or the feature-branch-mode router caps for any other caller while
+/// `run.json` records a feature.
 fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
-    let role = payload.agent_type.as_deref()?;
-    if !block_bad_cmd_grind_caps::is_grind_role(role) {
-        return None;
-    }
+    let Some(role) = payload
+        .agent_type
+        .as_deref()
+        .filter(|role| block_bad_cmd_grind_caps::is_grind_role(role))
+    else {
+        return grind_router_reason(payload);
+    };
     let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
     if let Some(reason) = block_bad_cmd_grind_caps::tool_reason(role, &payload.tool_name, &run) {
         return Some(format!("Blocked by the /grind role caps: {reason}."));
@@ -3432,6 +3437,19 @@ fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     }
     block_bad_cmd_grind_caps::shell_reason(role, &payload.command, &run)
         .map(|reason| format!("Blocked by the /grind role caps: {reason}."))
+}
+
+/// The main-session `/grind` router carries no `grind-*` agent type, so its
+/// feature-mode caps (#1410, #1393) key on `run.json` recording a feature.
+fn grind_router_reason(payload: &HookPayloadView) -> Option<String> {
+    if !block_bad_cmd_gate::gates_tool(&payload.tool_name)
+        || !block_bad_cmd_grind_caps::may_concern_router(&payload.command)
+    {
+        return None;
+    }
+    let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
+    block_bad_cmd_grind_caps::router_reason(&payload.command, &run)
+        .map(|reason| format!("Blocked by the /grind feature-mode caps: {reason}."))
 }
 
 /// The lexical repo-root walk, for callers outside this module.
@@ -3503,6 +3521,44 @@ mod tests {
         assert!(line.starts_with("RM-IDENTITY-BLOCKED "));
         assert!(line.contains("tool_name=\"Bash\""));
         assert!(line.contains("reason=\"reason\""));
+    }
+
+    /// #1407 U11: the hook payload path denies `AskUserQuestion` to every
+    /// `grind-*` subagent, in either payload spelling, and leaves the main
+    /// session (no `agent_type`) and other subagents alone: the router's
+    /// one question round happens there, before prework.
+    #[test]
+    fn grind_caps_deny_ask_user_question_only_for_grind_subagents() {
+        let dir = tempdir().unwrap();
+        let payload = |extra: &str| {
+            let raw = format!(
+                r#"{{"tool_name":"AskUserQuestion","tool_input":{{"questions":[]}}{extra}}}"#
+            );
+            parse_payload(&raw, dir.path()).expect("payload parses")
+        };
+        for role in [
+            "grind-planner",
+            "grind-worker",
+            "grind-reviewer",
+            "grind-integrator",
+            "grind-lander",
+            "grind-prework",
+        ] {
+            for extra in [
+                format!(r#","agent_type":"{role}""#),
+                format!(r#","agentType":"{role}""#),
+            ] {
+                let reason = grind_caps_reason(&payload(extra.as_str()))
+                    .unwrap_or_else(|| panic!("{role} may ask ({extra})"));
+                assert!(reason.contains("/grind role caps"), "{reason}");
+                assert!(reason.contains("up front"), "{reason}");
+            }
+        }
+        assert_eq!(grind_caps_reason(&payload("")), None);
+        assert_eq!(
+            grind_caps_reason(&payload(r#","agent_type":"general-purpose""#)),
+            None
+        );
     }
 
     fn denies(command: &str) -> bool {

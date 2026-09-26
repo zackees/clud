@@ -10,6 +10,15 @@
 //! from. This module owns the narrow first-run repair path: detect an
 //! installed clud missing the helper and rewrite only the exact old managed
 //! hook commands once the sibling helper is available.
+//!
+//! Project-scoped configs (`<repo>/.claude/settings*.json`,
+//! `<repo>/.codex/hooks.json`) are usually committed and shared, so they are
+//! never pinned to the launching executable's absolute path: that path exists
+//! on one machine only, and writing it dirtied tracked files every time a dev
+//! build or the test suite launched clud inside a checkout (#1333, #1426).
+//! There, only the legacy command shapes are rewritten, to the portable bare
+//! `clud-cmd-scan`. User-scoped configs under the hook home keep #1279's
+//! pinning.
 
 use serde_json::Value;
 use std::io;
@@ -38,6 +47,16 @@ pub struct MigrationReport {
     pub files_changed: usize,
     pub commands_changed: usize,
     pub stale_commands_blocked: usize,
+}
+
+/// Where a hook config lives, which decides whether it may be pinned to the
+/// launching executable (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigScope {
+    /// Inside the repo; usually committed, so only portable rewrites.
+    Project,
+    /// Under the hook home; machine-local, so pinning is safe.
+    User,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -145,11 +164,11 @@ pub fn migrate_hook_configs_at(
     helper_available: bool,
 ) -> io::Result<MigrationReport> {
     let mut report = MigrationReport::default();
-    for path in hook_config_paths(repo_root, home) {
+    for (path, scope) in hook_config_paths(repo_root, home) {
         if !path.is_file() {
             continue;
         }
-        let outcome = migrate_file(&path, helper_available)?;
+        let outcome = migrate_file(&path, helper_available, scope)?;
         if outcome.commands_changed > 0 {
             report.files_changed += 1;
             report.commands_changed += outcome.commands_changed;
@@ -159,27 +178,38 @@ pub fn migrate_hook_configs_at(
     Ok(report)
 }
 
-fn hook_config_paths(repo_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-    let mut paths = vec![
-        repo_root.join(".claude").join("settings.json"),
-        repo_root.join(".claude").join("settings.local.json"),
-        repo_root.join(".codex").join("hooks.json"),
-    ];
+const PROJECT_CONFIGS: [(&str, &str); 3] = [
+    (".claude", "settings.json"),
+    (".claude", "settings.local.json"),
+    (".codex", "hooks.json"),
+];
+const USER_CONFIGS: [(&str, &str); 2] = [(".claude", "settings.json"), (".codex", "hooks.json")];
+
+fn hook_config_paths(repo_root: &Path, home: Option<&Path>) -> Vec<(PathBuf, ConfigScope)> {
+    let mut paths = Vec::new();
+    for (dir, file) in PROJECT_CONFIGS {
+        paths.push((repo_root.join(dir).join(file), ConfigScope::Project));
+    }
     if let Some(home) = home {
-        paths.push(home.join(".claude").join("settings.json"));
-        paths.push(home.join(".codex").join("hooks.json"));
+        for (dir, file) in USER_CONFIGS {
+            paths.push((home.join(dir).join(file), ConfigScope::User));
+        }
     }
     paths
 }
 
-fn migrate_file(path: &Path, helper_available: bool) -> io::Result<FileMigration> {
+fn migrate_file(
+    path: &Path,
+    helper_available: bool,
+    scope: ConfigScope,
+) -> io::Result<FileMigration> {
     let text = std::fs::read_to_string(path)?;
     let mut json: Value = match serde_json::from_str(&text) {
         Ok(json) => json,
         Err(_) => return Ok(FileMigration::default()),
     };
 
-    let stale = count_stale_commands(&json);
+    let stale = count_stale_commands(&json, scope);
     if stale == 0 {
         return Ok(FileMigration::default());
     }
@@ -191,7 +221,7 @@ fn migrate_file(path: &Path, helper_available: bool) -> io::Result<FileMigration
     }
 
     let mut changed = 0usize;
-    migrate_value(&mut json, &mut changed, helper_available);
+    migrate_value(&mut json, &mut changed, helper_available, scope);
     if changed == 0 {
         return Ok(FileMigration::default());
     }
@@ -201,53 +231,58 @@ fn migrate_file(path: &Path, helper_available: bool) -> io::Result<FileMigration
     std::fs::write(path, body)?;
     Ok(FileMigration {
         commands_changed: changed,
-        stale_commands_blocked: count_stale_commands(&json),
+        stale_commands_blocked: count_stale_commands(&json, scope),
     })
 }
 
-fn count_stale_commands(value: &Value) -> usize {
+fn count_stale_commands(value: &Value, scope: ConfigScope) -> usize {
     match value {
         Value::Object(map) => {
             let here = map
                 .get("command")
                 .and_then(Value::as_str)
-                .filter(|command| command_is_stale(command))
+                .filter(|command| command_is_stale(command, scope))
                 .map(|_| 1)
                 .unwrap_or(0);
-            here + map.values().map(count_stale_commands).sum::<usize>()
+            let nested: usize = map.values().map(|v| count_stale_commands(v, scope)).sum();
+            here + nested
         }
-        Value::Array(values) => values.iter().map(count_stale_commands).sum(),
+        Value::Array(values) => values.iter().map(|v| count_stale_commands(v, scope)).sum(),
         _ => 0,
     }
 }
 
-fn migrate_value(value: &mut Value, changed: &mut usize, helper_available: bool) {
+fn migrate_value(
+    value: &mut Value,
+    changed: &mut usize,
+    helper_available: bool,
+    scope: ConfigScope,
+) {
     match value {
         Value::Object(map) => {
-            if let Some(command) = map.get("command").and_then(Value::as_str) {
-                if let Some(replacement) = replacement_command_for(command, helper_available) {
-                    map.insert(
-                        "command".to_string(),
-                        Value::String(replacement.to_string()),
-                    );
-                    *changed += 1;
-                }
+            let replacement = map
+                .get("command")
+                .and_then(Value::as_str)
+                .and_then(|command| replacement_command_for(command, helper_available, scope));
+            if let Some(replacement) = replacement {
+                map.insert("command".to_string(), Value::String(replacement));
+                *changed += 1;
             }
             for value in map.values_mut() {
-                migrate_value(value, changed, helper_available);
+                migrate_value(value, changed, helper_available, scope);
             }
         }
         Value::Array(values) => {
             for value in values {
-                migrate_value(value, changed, helper_available);
+                migrate_value(value, changed, helper_available, scope);
             }
         }
         _ => {}
     }
 }
 
-fn command_is_stale(command: &str) -> bool {
-    replacement_command(command).is_some()
+fn command_is_stale(command: &str, scope: ConfigScope) -> bool {
+    replacement_command(command, scope).is_some()
 }
 
 fn has_legacy_python_shim(value: &Value) -> bool {
@@ -268,7 +303,16 @@ fn has_legacy_python_shim(value: &Value) -> bool {
     }
 }
 
-fn replacement_command_for(command: &str, helper_available: bool) -> Option<String> {
+fn replacement_command_for(
+    command: &str,
+    helper_available: bool,
+    scope: ConfigScope,
+) -> Option<String> {
+    if helper_available && scope == ConfigScope::Project {
+        // Portable only: never write this machine's helper path into a
+        // (usually committed) project file (#1333, #1426).
+        return replacement_command(command, scope).map(str::to_string);
+    }
     if helper_available {
         let parent = std::env::current_exe().ok()?.parent()?.to_path_buf();
         let helper = parent.join(native_helper_name());
@@ -297,7 +341,13 @@ fn replacement_command_for(command: &str, helper_available: bool) -> Option<Stri
     }
 }
 
-fn replacement_command(command: &str) -> Option<&'static str> {
+/// The portable command a stale one migrates to, or `None` when `command` is
+/// current. The bare helper is current in a project file (it must stay
+/// portable) but stale in a user file, where it gets pinned (#1279).
+fn replacement_command(command: &str, scope: ConfigScope) -> Option<&'static str> {
+    if scope == ConfigScope::Project && matches!(command, NEW_COMMAND | NEW_COMMAND_EXIT) {
+        return None;
+    }
     match command {
         LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND | NEW_COMMAND => Some(NEW_COMMAND),
         LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT | NEW_COMMAND_EXIT => {
@@ -322,6 +372,11 @@ mod tests {
     fn write(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
+    }
+
+    /// What a user-scoped command is pinned to by this test binary.
+    fn pinned(command: &str) -> String {
+        replacement_command_for(command, true, ConfigScope::User).unwrap()
     }
 
     #[test]
@@ -385,11 +440,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            replacement_command_for(LEGACY_PYTHON_SHIM_COMMAND, true).unwrap()
+            pinned(LEGACY_PYTHON_SHIM_COMMAND)
         );
         assert_eq!(
             codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            replacement_command_for(LEGACY_PYTHON_SHIM_COMMAND_EXIT, true).unwrap()
+            pinned(LEGACY_PYTHON_SHIM_COMMAND_EXIT)
         );
 
         let second = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
@@ -427,11 +482,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            replacement_command_for(LEGACY_NATIVE_COMMAND, true).unwrap()
+            pinned(LEGACY_NATIVE_COMMAND)
         );
         assert_eq!(
             codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            replacement_command_for(LEGACY_NATIVE_COMMAND_EXIT, true).unwrap()
+            pinned(LEGACY_NATIVE_COMMAND_EXIT)
         );
     }
 
@@ -468,10 +523,7 @@ mod tests {
 
         assert_eq!(report.commands_changed, 1);
         let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(
-            config["hooks"][0]["command"],
-            replacement_command_for(NEW_COMMAND, true).unwrap()
-        );
+        assert_eq!(config["hooks"][0]["command"], pinned(NEW_COMMAND));
     }
 
     #[test]
@@ -510,5 +562,116 @@ mod tests {
 
         assert_eq!(report, MigrationReport::default());
         assert_eq!(fs::read_to_string(path).unwrap(), body);
+    }
+
+    /// This repo's own committed hook configs, as a launch inside the
+    /// checkout sees them (#1333, #1426).
+    const COMMITTED_CLAUDE_SETTINGS: &str = include_str!("../../../.claude/settings.json");
+    const COMMITTED_CODEX_HOOKS: &str = include_str!("../../../.codex/hooks.json");
+
+    const PROJECT_CONFIG_RELS: [&str; 3] = [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".codex/hooks.json",
+    ];
+
+    #[test]
+    fn project_bare_helper_is_never_pinned_to_the_launching_install() {
+        // #1426: a dev build (or the test suite) launched inside a checkout
+        // rewrote the committed `clud-cmd-scan` to its own absolute path.
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let body = r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"command":"clud-cmd-scan"},{"command":"clud-cmd-scan; exit $LASTEXITCODE"}]}]}}"#;
+        for rel in PROJECT_CONFIG_RELS {
+            write(&repo.join(rel), body);
+        }
+
+        for helper_available in [true, false] {
+            let report = migrate_hook_configs_at(&repo, Some(&home), helper_available).unwrap();
+            assert_eq!(report, MigrationReport::default());
+        }
+        for rel in PROJECT_CONFIG_RELS {
+            assert_eq!(fs::read_to_string(repo.join(rel)).unwrap(), body, "{rel}");
+        }
+    }
+
+    #[test]
+    fn project_legacy_commands_migrate_to_the_portable_bare_helper() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let path = repo.join(".claude/settings.json");
+        write(
+            &path,
+            r#"{"hooks":[{"command":"clud tool run hooks/block-bad-cmd.py"},{"command":"clud-block-bad-cmd; exit $LASTEXITCODE"}]}"#,
+        );
+
+        let report = migrate_hook_configs_at(&repo, None, true).unwrap();
+
+        assert_eq!(report.files_changed, 1);
+        assert_eq!(report.commands_changed, 2);
+        assert_eq!(report.stale_commands_blocked, 0);
+        let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(config["hooks"][0]["command"], NEW_COMMAND);
+        assert_eq!(config["hooks"][1]["command"], NEW_COMMAND_EXIT);
+    }
+
+    #[test]
+    fn committed_repo_hook_configs_use_the_portable_bare_helper() {
+        // #1333 and #1428 both committed a machine-local helper path.
+        for (name, body) in [
+            (".claude/settings.json", COMMITTED_CLAUDE_SETTINGS),
+            (".codex/hooks.json", COMMITTED_CODEX_HOOKS),
+        ] {
+            let json: Value = serde_json::from_str(body).unwrap();
+            let mut commands = Vec::new();
+            collect_commands(&json, &mut commands);
+            let scans: Vec<_> = commands
+                .iter()
+                .filter(|command| command.contains("clud-cmd-scan"))
+                .collect();
+            assert!(!scans.is_empty(), "{name} lost its clud-cmd-scan hook");
+            for command in scans {
+                assert_eq!(command, NEW_COMMAND, "{name} must not pin clud-cmd-scan");
+            }
+        }
+    }
+
+    #[test]
+    fn committed_repo_hook_configs_survive_a_launch_unchanged() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let claude = repo.join(".claude/settings.json");
+        let codex = repo.join(".codex/hooks.json");
+        write(&claude, COMMITTED_CLAUDE_SETTINGS);
+        write(&codex, COMMITTED_CODEX_HOOKS);
+
+        for helper_available in [true, false] {
+            let report = migrate_hook_configs_at(&repo, None, helper_available).unwrap();
+            assert_eq!(report, MigrationReport::default());
+        }
+        let claude_after = fs::read_to_string(claude).unwrap();
+        let codex_after = fs::read_to_string(codex).unwrap();
+        assert_eq!(claude_after, COMMITTED_CLAUDE_SETTINGS);
+        assert_eq!(codex_after, COMMITTED_CODEX_HOOKS);
+    }
+
+    fn collect_commands(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(command) = map.get("command").and_then(Value::as_str) {
+                    out.push(command.to_string());
+                }
+                for value in map.values() {
+                    collect_commands(value, out);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect_commands(value, out);
+                }
+            }
+            _ => {}
+        }
     }
 }

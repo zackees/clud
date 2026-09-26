@@ -499,7 +499,7 @@ which test tier a change belongs in — lives in
   fail-closed path consults when the hook could not parse its input at all —
   separate from the command-text probe next to it, because raw bytes may be
   truncated mid-token, write newlines as `\n`, and name the program by path.
-- `block_bad_cmd_grind_caps.rs` - per-role shell caps for the `/grind` agents, keyed on the payload's `agent_type` and `.clud/grind/run.json`; see [grind.md](../../../docs/architecture/grind.md#role-caps).
+- `block_bad_cmd_grind_caps.rs` - per-role shell caps for the `/grind` agents, keyed on the payload's `agent_type` and `.clud/grind/run.json`, plus the feature-mode router caps (`router_reason`) for callers without a grind role while `run.json` records a feature; see [grind.md](../../../docs/architecture/grind.md#role-caps).
 - `block_bad_cmd_gate.rs` - the command gate: an **allowlist** requiring every
   statement in a shell tool call to be invoked through a wrapper (`tap` by
   default), so the wrapper sees post-expansion argv instead of the hook having
@@ -587,7 +587,9 @@ Skills and hooks:
   behind `clud --fix-hooks`.
 - `block_bad_cmd_rollout.rs` - startup health/migration for the native
   `clud-block-bad-cmd` helper: stale install warning plus exact old hook
-  command rewrites when the helper is available.
+  command rewrites when the helper is available. User-scoped configs are
+  pinned to the launching install; project-scoped (usually committed) ones
+  only ever get the portable bare `clud-cmd-scan` (#1426).
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).
@@ -720,6 +722,9 @@ Quick lookup, which file owns a given subcommand:
   relaunches, headless path, or iteration ceiling. Other harnesses fail before
   launch. See the [grind architecture](../../../docs/architecture/grind.md). An explicit URL
   is passed through verbatim.
+- `clud grind reconcile` -> `grind_reconcile.rs` (dispatched in `main.rs` via
+  `args::is_reconcile`): the feature-branch repair pass of #1393, reading only
+  GitHub; see [grind.md](../../../docs/architecture/grind.md#never-losing-issues-in-feature-mode).
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.
