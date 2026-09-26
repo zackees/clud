@@ -137,13 +137,13 @@ fn native_reader_translates_navigation_and_preserves_shift_enter() {
             assert_eq!(got, expected, "virtual-key code {virtual_key:#x}");
         }
 
-        // running-process emits CSI-u for Shift+Enter; clud deliberately
-        // retains its historical literal-LF contract at the adapter boundary.
+        // running-process emits CSI-u for Shift+Enter; clud sends ESC CR at
+        // the adapter boundary because ConPTY rewrites a bare LF into CR (#1369).
         inject_key(VK_RETURN, b'\r' as u16, SHIFT_PRESSED);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(2))
                 .expect("Shift+Enter event"),
-            b"\n"
+            b"\x1b\r"
         );
 
         inject_key(VK_RETURN, b'\r' as u16, 0);

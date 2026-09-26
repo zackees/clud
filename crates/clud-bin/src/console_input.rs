@@ -5,8 +5,11 @@
 //! Clud only applies its two product-specific policies before forwarding each
 //! translated event to the PTY as one channel chunk:
 //!
-//! - Shift+Enter remains a literal line feed for compatibility with clud's
-//!   existing Claude/Codex prompt-newline behavior.
+//! - Shift+Enter becomes ESC CR (the Alt+Enter newline Claude Code and Codex
+//!   accept). ConPTY rewrites a bare LF into CR, so a literal LF would reach
+//!   the child as plain Enter (#1369). This adapter only feeds the PTY (see
+//!   `runner_execution.rs`); the inherited-console path does not use it and
+//!   keeps LF.
 //! - Ctrl+V may expand a clipboard image to its saved path.
 //!
 //! Keeping the generic translator in `running-process` prevents navigation
@@ -119,10 +122,12 @@ where
     F: FnMut() -> Option<Vec<u8>>,
 {
     // running-process represents Shift+Enter as CSI-u so generic terminal
-    // consumers can distinguish it. Clud's established contract is a literal
-    // LF, so retain that policy explicitly at the adapter boundary.
+    // consumers can distinguish it. ConPTY rewrites a bare LF into CR, so a
+    // literal LF would arrive as plain Enter (#1369). This adapter only feeds
+    // the PTY, so send ESC CR (the Alt+Enter newline Claude Code and Codex
+    // accept), which ConPTY passes through unchanged.
     if event.virtual_key_code == VK_RETURN && event.shift && !event.ctrl && !event.alt {
-        return vec![b'\n'; usize::from(event.repeat_count.max(1))];
+        return b"\x1b\r".repeat(usize::from(event.repeat_count.max(1)));
     }
 
     if event.virtual_key_code == VK_V && event.ctrl {
@@ -169,16 +174,24 @@ mod tests {
     }
 
     #[test]
-    fn shift_enter_preserves_literal_line_feed_contract() {
+    fn shift_enter_emits_esc_cr_that_conpty_preserves() {
         let upstream = event(b"\x1b[13;2u", VK_RETURN, true, false, false);
-        assert_eq!(adapt_event_with_clipboard(upstream, || None), b"\n");
+        let bytes = adapt_event_with_clipboard(upstream, || None);
+        assert_eq!(bytes, b"\x1b\r");
+        assert!(
+            !bytes.contains(&b'\n'),
+            "ConPTY rewrites LF into CR, so Shift+Enter must not emit LF; got {bytes:?}"
+        );
     }
 
     #[test]
     fn shift_enter_honors_repeat_count() {
         let mut upstream = event(b"\x1b[13;2u\x1b[13;2u", VK_RETURN, true, false, false);
         upstream.repeat_count = 2;
-        assert_eq!(adapt_event_with_clipboard(upstream, || None), b"\n\n");
+        assert_eq!(
+            adapt_event_with_clipboard(upstream, || None),
+            b"\x1b\r\x1b\r"
+        );
     }
 
     #[test]
