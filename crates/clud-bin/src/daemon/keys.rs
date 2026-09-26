@@ -112,7 +112,11 @@ mod tests {
     #[test]
     fn altgr_brackets_and_backslash_forward_literal() {
         for ch in ['[', ']', '\\', '{', '}', '|', '~'] {
-            assert_eq!(forwarded(ch, altgr()), ch.to_string().into_bytes(), "{ch:?}");
+            assert_eq!(
+                forwarded(ch, altgr()),
+                ch.to_string().into_bytes(),
+                "{ch:?}"
+            );
         }
     }
 
@@ -128,8 +132,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_is_interrupt() {
-        let action =
-            translate_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let action = translate_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(action, KeyAction::Interrupt));
     }
 
