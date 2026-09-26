@@ -138,14 +138,13 @@ fn fallback_may_kill(daemons: &HashSet<u32>, pid: u32) -> bool {
     !daemons.contains(&pid)
 }
 
+/// Kills the tree rooted at a pid, sparing every pid the predicate rejects.
+type TreeKill<'a> = dyn FnMut(u32, &dyn Fn(u32) -> bool) + 'a;
+
 /// Drive the fallback tree teardown through an injected `kill`, so the
 /// wiring is unit-testable off Windows. `None` (no child pid) is a no-op.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn fallback_tree_teardown(
-    pid: Option<u32>,
-    daemons: &HashSet<u32>,
-    kill: &mut dyn FnMut(u32, &dyn Fn(u32) -> bool),
-) {
+fn fallback_tree_teardown(pid: Option<u32>, daemons: &HashSet<u32>, kill: &mut TreeKill<'_>) {
     if let Some(pid) = pid {
         kill(pid, &|p| fallback_may_kill(daemons, p));
     }
