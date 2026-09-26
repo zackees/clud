@@ -792,6 +792,9 @@ survived. Two things close it:
 - `ci/run_bundle.py::run_streamed` runs pytest through running-process,
   echoes each line and tees it to `logs/pytest-<suite>.log`, flushed per
   line, with `PYTHONUNBUFFERED=1` on the child.
+- `ci/pytest_progress.py` also flushes test start/finish records to
+  `logs/pytest-<suite>-progress.jsonl`. An unmatched start identifies the test
+  active when pytest exits before writing a summary or JUnit XML (#1178).
 - The `Upload failure logs` step runs on `failure() || cancelled()`, so that
   file reaches the artifact even when the step log did not.
 
