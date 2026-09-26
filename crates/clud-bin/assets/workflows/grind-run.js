@@ -125,11 +125,18 @@ const PLAN = {
 const WORK = { type: 'object', required: ['files_touched', 'summary'], properties: {
   files_touched: { type: 'array', items: { type: 'string' } }, summary: { type: 'string' }, blocked: { type: 'string' }, problems: PROBLEMS } }
 const REVIEW = { type: 'object', required: ['approved', 'summary'], properties: {
-  approved: { type: 'boolean' }, summary: { type: 'string' }, fixes_applied: { type: 'array', items: { type: 'string' } }, problems: PROBLEMS } }
+  approved: { type: 'boolean' }, summary: { type: 'string' }, fixes_applied: { type: 'array', items: { type: 'string' } },
+  must_verify: { type: 'array', items: { type: 'string' }, description: 'checks the integrator must run before pushing (focused test, reproduction, script); an unrun check goes here, never into a rejection' },
+  problems: PROBLEMS } }
 const INTEG = { type: 'object', required: ['pushed', 'summary'], properties: {
   pushed: { type: 'boolean' }, pr_url: { type: 'string' }, summary: { type: 'string' }, failure_log: { type: 'string' }, problems: PROBLEMS } }
 const LAND = { type: 'object', required: ['status', 'summary'], properties: {
   status: { type: 'string', enum: ['merged', 'needs_fix', 'gave_up'] }, summary: { type: 'string' }, failure_log: { type: 'string' }, problems: PROBLEMS } }
+const PARK = { type: 'object', required: ['parked', 'clean', 'summary'], properties: {
+  parked: { type: 'boolean', description: "true when the goal's changes were committed to the park branch" },
+  branch: { type: 'string' }, files: { type: 'array', items: { type: 'string' } },
+  clean: { type: 'boolean', description: "git status --porcelain shows none of the goal's paths afterwards" },
+  summary: { type: 'string' }, problems: PROBLEMS } }
 
 const CLASSIFY = {
   type: 'object', required: ['children', 'groups', 'order', 'confident'],
@@ -376,6 +383,27 @@ const land = (p, g, pr, round) => agent(
   `Follow your built-in /grind-land procedure.\n\n${ctx(g)}\n\nPR: ${pr}\nBranch: ${p.branch}\nFix rounds used: ${round} of ${MAX_FIX}.${featureLandNote(g)}`,
   opts('lander', `land:${g.id}#${round}`, 'Land', LAND)).then(r => collect(r, 'lander', g.id))
 
+// Parking (#1424): in sequential mode every goal shares one checkout, so a
+// goal that ends unmerged with work nobody pushed would leak its files into
+// the next goal's lint and plan. The workflow has no shell; the integrator
+// moves the goal's files to a local wip/grind-<goal> branch, under the build
+// lock, and returns the checkout to origin/<base>.
+const parkBranch = (g) => `wip/grind-${slug(g.id) || 'goal'}`
+const goalFiles = (p, results) => [...new Set([
+  ...(p.tasks || []).flatMap(t => t.files || []),
+  ...(results || []).flatMap(r => (r && Array.isArray(r.files_touched)) ? r.files_touched : []),
+].map(String).filter(Boolean))]
+const preflightNote = () => (args.plan && args.plan.preflight)
+  ? JSON.stringify(args.plan.preflight)
+  : '(none recorded: the checkout was clean when the run started)'
+const park = (p, results, g, why) => exclusive(() => agent(
+  `Follow the Park procedure of your built-in /grind-integrate instructions (park only: no goal commit, push, PR, lint or test).\n\n${ctx(g)}\n\n` +
+  `PARK goal ${g.id}: ${why}. Its changes must not stay in the checkout for the next goal.\n` +
+  `Checkout: ${p.checkout}\nPark branch: ${parkBranch(g)} (local only, never pushed)\nReturn to: origin/${baseOf(g)}\n` +
+  `Goal files: ${goalFiles(p, results).join(', ') || '(none listed)'}\n` +
+  `Preflight (the user's pre-run state; never park, reset or discard it): ${preflightNote()}`,
+  opts('integrator', `park:${g.id}`, 'Integrate', PARK)).then(r => collect(r, 'integrator', g.id)))
+
 // Dependents wait until what they depend on has merged, then rebase onto the
 // new origin/<base> of their stage (main for bugs, the feature branch for a
 // feature stage); isolated goals go straight to origin/<base>.
@@ -414,46 +442,131 @@ const routeCheckTasks = (p) => {
   }
 }
 
-const integrateAndLand = async ({ p, review: rv }, g) => {
-  if (!rv || !rv.approved) return { merged: false, note: `review rejected: ${rv ? rv.summary : 'no review'}` }
+// Review gate (#1424): the reviewer cannot run anything, so "nothing has been
+// run yet" is the integrator's to-do list, not a verdict. Such a rejection is
+// overridden; the integrator runs must_verify and is told to treat any real
+// defect the summary names as a reason not to push.
+const NOT_RUN = new RegExp([
+  String.raw`\bnothing (?:has|had) (?:yet )?been (?:run|executed|tested|verified)\b`,
+  String.raw`\b(?:has|have|had)(?: not|n[’']t) (?:yet )?been (?:run|executed|tested|verified)\b`,
+  String.raw`\bnot (?:been )?(?:run|executed|tested|verified) yet\b`,
+  String.raw`\b(?:my role|reviewers?|i) (?:can ?not|can[’']t|may not|am not allowed to|am unable to|is unable to|are unable to) (?:run|build|lint|test|execute)\b`,
+].join('|'), 'i')
+const mustVerify = (rv) => (rv && Array.isArray(rv.must_verify) ? rv.must_verify : [])
+  .map(s => String(s || '').trim()).filter(Boolean)
+const reviewGate = (rv) => {
+  if (rv && rv.approved) return { ok: true }
+  if (rv && NOT_RUN.test(String(rv.summary || ''))) return { ok: true, overridden: true }
+  return { ok: false }
+}
+// must_verify joins the verify commands, so fix rounds rerun it too.
+const withMustVerify = (p, rv) => {
+  const mv = mustVerify(rv)
+  if (!mv.length) return p
+  return { ...p, verify: [p.verify, `# reviewer must_verify (the reviewer cannot run anything; run each, and treat a failure as a defect to fix):`, ...mv].filter(Boolean).join('\n') }
+}
+const reviewNote = (rv, gate) => `Reviewer summary: ${rv.summary}` +
+  (mustVerify(rv).length ? `\nThe reviewer's must_verify items are in the verify commands above; run every one before pushing.` : '') +
+  (gate.overridden ? `\nThe reviewer returned approved=false only because nothing had been run yet; that is your job, so the rejection was overridden. If the summary names a real defect, fix it before pushing, or return pushed=false.` : '')
+
+// Dependents (#1424): what a settled goal's dependents are told.
+const outcome = {}
+const depNote = (dep) => {
+  const r = outcome[String(dep)]
+  return `blocked: dependency ${dep} ${r && r.rejected ? 'was rejected' : r && r.blocked ? 'is blocked' : 'did not land'}`
+}
+const settledBlock = (p) => {
+  const dep = p.depends_on.find(d => String(d) in outcome && !outcome[String(d)].merged)
+  return dep === undefined ? null : { merged: false, blocked: true, note: depNote(dep) }
+}
+
+const integrateAndLand = async ({ p: planned, review: rv }, g) => {
+  const gate = reviewGate(rv)
+  if (!gate.ok) return { merged: false, rejected: !!rv, note: `review rejected: ${rv ? rv.summary : 'no review'}` }
+  if (gate.overridden) log(`goal ${g.id}: the reviewer only said nothing had been run; integrating (the integrator runs the checks)`)
+  const p = withMustVerify(planned, rv)
   for (const dep of p.depends_on) {
-    if (!(await landed[dep])) return { merged: false, note: `dependency ${dep} did not land` }
+    if (!(await landed[dep])) return { merged: false, blocked: true, note: depNote(dep) }
   }
-  let integ = await integrate(p, g, `Reviewer summary: ${rv.summary}`)
+  let integ = await integrate(p, g, reviewNote(rv, gate))
   // One watch per push: the first push, then one per fix round.
   for (let fixes = 0; ; fixes++) {
-    if (!integ || !integ.pushed) return { merged: false, pr: integ && integ.pr_url, note: integ ? integ.failure_log || integ.summary : 'integrator died' }
+    if (!integ || !integ.pushed) return { merged: false, pushed: false, pr: integ && integ.pr_url, note: integ ? integ.failure_log || integ.summary : 'integrator died' }
     const l = await land(p, g, integ.pr_url, fixes)
-    if (l && l.status === 'merged') return { merged: true, pr: integ.pr_url, note: l.summary }
-    if (!l || l.status === 'gave_up' || fixes >= MAX_FIX) return { merged: false, pr: integ.pr_url, note: l ? l.failure_log || l.summary : 'lander died' }
+    if (l && l.status === 'merged') return { merged: true, pushed: true, pr: integ.pr_url, note: l.summary }
+    if (!l || l.status === 'gave_up' || fixes >= MAX_FIX) return { merged: false, pushed: true, pr: integ.pr_url, note: l ? l.failure_log || l.summary : 'lander died' }
     log(`goal ${g.id}: PR not green, fix round ${fixes + 1} of ${MAX_FIX}`)
     integ = await integrate(p, g, `FIX ROUND ${fixes + 1} of ${MAX_FIX}: the PR ${integ.pr_url} failed. Fix, re-verify${SCRIPTS ? ` (focused test, then ${scriptLines().join(', then ')})` : ''}, push to the same branch.\n${l.failure_log || l.summary}`)
   }
 }
 
+// Set when a park left the shared sequential checkout dirty: every later
+// goal is blocked rather than built on top of it (#1424).
+let DIRTY_AFTER = null
+
+const attemptGoal = async (g, state) => {
+  if (!PARALLEL && DIRTY_AFTER !== null) return { merged: false, blocked: true, note: `blocked: checkout not clean after parking goal ${DIRTY_AFTER}` }
+  // Stuck-bug rule: a failed bug blocks only the feature children that list it.
+  if (STUCK_BUG_BLOCKS) {
+    for (const bug of bugDepsOf(g)) {
+      if (!(bug in landed)) continue
+      if (!(await landed[bug])) return { merged: false, blocked: true, note: `blocked: bug #${bug} did not land` }
+    }
+  }
+  const planned = await plan(g)
+  if (!planned) return { merged: false, note: 'planner died' }
+  const p = routeCheckTasks(earlierDeps(planned, g))
+  if (!p.tasks.length) return { merged: false, note: 'plan had no file-writing tasks; nothing for workers to do' }
+  // A dependency that already settled unmerged blocks this goal before any
+  // worker writes on top of it (#1424).
+  const early = settledBlock(p)
+  if (early) return early
+  state.p = p
+  const worked = await work(p, g)
+  state.results = worked.results
+  return integrateAndLand(await review(worked, g), g)
+}
+
+// Sequential mode: a goal that wrote files and ends unmerged with nothing
+// pushed has its changes parked before the next goal starts (#1424).
+const parkIfNeeded = async (g, state, result) => {
+  if (PARALLEL || !state.p || result.merged || result.pushed) return result
+  const why = result.rejected ? 'its review was rejected' : result.blocked ? 'it was blocked' : 'it failed before its work was pushed'
+  let pk = null
+  try {
+    pk = await park(state.p, state.results, g, why)
+  } catch (e) {
+    log(`goal ${g.id}: park failed: ${e && e.message ? e.message : e}`)
+  }
+  if (!pk || !pk.clean) {
+    DIRTY_AFTER = String(g.id)
+    log(`goal ${g.id}: checkout not clean after parking; blocking the goals after it`)
+    return { ...result, note: `${result.note}; checkout NOT clean after parking (${pk ? pk.summary : 'park agent died'})` }
+  }
+  return pk.parked
+    ? { ...result, parked: pk.branch || parkBranch(g), note: `${result.note}; parked on ${pk.branch || parkBranch(g)}` }
+    : result
+}
+
 // Every goal settles exactly once, whatever happens to it, so a dependent can
 // never wait on a goal that died, threw, or was rejected.
 const runGoal = async (g) => {
+  const state = {}
   let result = { merged: false, note: 'dropped' }
   try {
-    // Stuck-bug rule: a failed bug blocks only the feature children that list it.
-    if (STUCK_BUG_BLOCKS) {
-      for (const bug of bugDepsOf(g)) {
-        if (!(bug in landed)) continue
-        if (!(await landed[bug])) return (result = { merged: false, note: `blocked: bug #${bug} did not land` })
-      }
-    }
-    const planned = await plan(g)
-    if (!planned) return (result = { merged: false, note: 'planner died' })
-    const p = routeCheckTasks(earlierDeps(planned, g))
-    if (!p.tasks.length) return (result = { merged: false, note: 'plan had no file-writing tasks; nothing for workers to do' })
-    result = await integrateAndLand(await review(await work(p, g), g), g)
-    return result
+    result = await attemptGoal(g, state)
   } catch (e) {
-    return (result = { merged: false, note: `failed: ${e && e.message ? e.message : e}` })
+    result = { merged: false, note: `failed: ${e && e.message ? e.message : e}` }
+  }
+  try {
+    result = await parkIfNeeded(g, state, result)
+  } catch (e) {
+    log(`goal ${g.id}: park step failed: ${e && e.message ? e.message : e}`)
   } finally {
+    outcome[String(g.id)] = result
     settle[g.id](!!result.merged)
   }
+  return result
 }
 
 const runBatch = async (goals) => {
