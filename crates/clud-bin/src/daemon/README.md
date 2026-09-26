@@ -181,6 +181,7 @@ Dead rows are omitted by default. Passing `--since <duration>` sets `include_dea
 - `fn resolve_session_id(&Path, &str)` — `sessions.rs:20`
 - `struct WorkerShared` (+ `attach_client`, `push_output`, `broadcast_exit`, `evict_dead_client`, log rotation) — `worker_shared.rs:95`
 - `fn translate_key_event(KeyEvent) -> KeyAction` — `keys.rs:5`
+  Ctrl+Alt with a non-letter char is treated as AltGr and forwarded literally (#1352).
 - `fn resolve_backlog_bytes(Option<&str>) -> Option<usize>` — `io_helpers.rs:77`
 - `fn signal_process_tree(u32, Signal)` — `process_utils.rs:67`;
   `fn signal_process_tree_as(&ProcessIdentity, Signal)` — `process_utils.rs:57`
