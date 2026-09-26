@@ -76,6 +76,27 @@ class RunResult:
         """Everything the model saw from the user in the role's first request."""
         return json.dumps(self.first_request(role).get("messages"))
 
+    def questions_before(self, role: str) -> list[dict[str, Any]]:
+        """See :func:`questions_before`."""
+        return questions_before(self, role)
+
+
+def questions_before(result: RunResult, role: str) -> list[dict[str, Any]]:
+    """The `AskUserQuestion` hook records made before `role` first acted.
+
+    Walks ``result.hooks`` in order and stops at the first record whose
+    ``agent_type`` is `role`; if `role` never appears, every AskUserQuestion
+    record is returned. Lets a test assert how many questions were asked
+    before, say, the ``grind-planner`` started.
+    """
+    found: list[dict[str, Any]] = []
+    for record in result.hooks:
+        if record.get("agent_type") == role:
+            break
+        if record.get("tool_name") == "AskUserQuestion":
+            found.append(record)
+    return found
+
 
 class Harness:
     def __init__(self, root: Path) -> None:
@@ -210,11 +231,13 @@ class Harness:
         env.update(extra or {})
         return env
 
-    def settings(self, *, cmd_scan: bool = True) -> Path:
+    def settings(self, *, cmd_scan: bool = True, answers: dict[str, str] | None = None) -> Path:
         """A `--settings` file: the recorder, then clud's real command guard.
 
         Project `.claude/settings.json` hooks do not fire under an isolated
         CLAUDE_CONFIG_DIR, so hooks are passed this way (#1323, pitfall 2).
+        With `answers`, an `AskUserQuestion` hook (``answer_hook.py``) picks
+        each question's option from that table (#1402).
         """
         record = f'"{sys.executable}" "{HERE / "record_hook.py"}" "{self.logs / "hooks.jsonl"}"'
         pre = [{"type": "command", "command": record}]
@@ -222,9 +245,18 @@ class Harness:
             pre.append(
                 {"type": "command", "command": f'"{self.clud.parent / ("clud-cmd-scan" + EXE)}"'}
             )
+        pre_entries: list[dict[str, Any]] = []
+        if answers is not None:
+            answers_path = self.root / "answers.json"
+            answers_path.write_text(json.dumps(answers, indent=1), encoding="utf-8")
+            answer = f'"{sys.executable}" "{HERE / "answer_hook.py"}" "{answers_path}"'
+            pre_entries.append(
+                {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": answer}]}
+            )
+        pre_entries.append({"matcher": "*", "hooks": pre})
         settings = {
             "hooks": {
-                "PreToolUse": [{"matcher": "*", "hooks": pre}],
+                "PreToolUse": pre_entries,
                 "UserPromptSubmit": [{"hooks": [{"type": "command", "command": record}]}],
             }
         }
@@ -280,6 +312,7 @@ class Harness:
         extra_args: list[str] | None = None,
         extra_env: dict[str, str] | None = None,
         timeout: float = 120,
+        answers: dict[str, str] | None = None,
     ) -> RunResult:
         (self.logs / "hooks.jsonl").write_text("", encoding="utf-8")
         with self.backend(script) as base_url:
@@ -292,7 +325,7 @@ class Harness:
                 "--model",
                 "claude-sonnet-5",
                 "--settings",
-                str(self.settings(cmd_scan=cmd_scan)),
+                str(self.settings(cmd_scan=cmd_scan, answers=answers)),
             ]
             if skip_permissions:
                 argv.append("--dangerously-skip-permissions")

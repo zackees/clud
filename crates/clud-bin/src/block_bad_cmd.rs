@@ -3420,12 +3420,16 @@ mod block_bad_cmd_grind_caps;
 /// The `/grind` role-cap denial for this call, if its agent is a capped role.
 fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     let role = payload.agent_type.as_deref()?;
-    if !block_bad_cmd_grind_caps::is_grind_role(role)
-        || !block_bad_cmd_gate::gates_tool(&payload.tool_name)
-    {
+    if !block_bad_cmd_grind_caps::is_grind_role(role) {
         return None;
     }
     let run = block_bad_cmd_grind_caps::RunFacts::discover(&payload.cwd);
+    if let Some(reason) = block_bad_cmd_grind_caps::tool_reason(role, &payload.tool_name, &run) {
+        return Some(format!("Blocked by the /grind role caps: {reason}."));
+    }
+    if !block_bad_cmd_gate::gates_tool(&payload.tool_name) {
+        return None;
+    }
     block_bad_cmd_grind_caps::shell_reason(role, &payload.command, &run)
         .map(|reason| format!("Blocked by the /grind role caps: {reason}."))
 }

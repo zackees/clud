@@ -128,7 +128,7 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 1. **Enumerate candidates (main agent).**
    - No arg → `gh issue list --state open --limit 200 --search "created:>=$(date -d '7 days ago' --iso-8601 2>/dev/null || date -v-7d +%Y-%m-%d)" --json number,title,labels,createdAt,updatedAt`.
    - `all` → `gh issue list --state open --limit 1000 --json number,title,labels,createdAt,updatedAt`.
-2. **Filter (main agent, fast pass).** Drop issues that are obviously not triage candidates: anything labeled `discussion`, `meta`, `roadmap`, `wontfix`, `duplicate`, `question`; anything updated in the last 24h (active conversation); anything with zero linked PRs/cross-references. The remainder is the work set.
+2. **Filter (main agent, fast pass).** Drop issues that are obviously not triage candidates: anything labeled `grind:on-feature` (see Failure modes), `discussion`, `meta`, `roadmap`, `wontfix`, `duplicate`, `question`; anything updated in the last 24h (active conversation); anything with zero linked PRs/cross-references. The remainder is the work set.
 3. **Set the goal.** With `<N>` candidates known, invoke `/goal Triage <N> candidate issues; for each: close if unambiguously resolved or file CodeRabbit follow-ups, then report aggregate Closed/Follow-ups counts and tear down every worktree.` so the harness Stop hook blocks until the aggregate report is emitted and every worktree is gone. If the filtered set is empty, report that and clear the goal — do not set it.
 4. **Stale-worktree prompt + .gitignore gate.** Same as [[clud-git]]'s **Worktree creation playbook**. Confirm `.gitignore` covers `.claude/`. Ask the user about deleting any stale `.claude/worktrees/triage-*` older than 24h before starting.
 5. **Plan worktrees.** One worktree per issue: `.claude/worktrees/triage-<num>/`. Branch off `origin/<default>` (read-only — these worktrees only inspect, they don't commit code). `git fetch origin && git worktree add --detach .claude/worktrees/triage-<num> origin/<default>` for each.
@@ -146,6 +146,7 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 
 ## Failure modes to avoid
 
+- **Touching a `grind:on-feature` issue.** Never pick up or close an issue labelled `grind:on-feature`, in single-issue or bulk mode: its code sits on an open `/grind` feature branch, and the feature PR's `Closes` line closes it when that PR merges into the default branch. Report it as left open.
 - **Closing on weak evidence.** A PR that merely *mentions* the issue isn't resolution. Read the diff, match it to the criteria, or leave the issue open.
 - **Closing on a stack-base merge.** A merged PR with `baseRefName != <default-branch>` did NOT land on main. Treat as not-resolved.
 - **Asking before filing follow-ups.** The skill's job is to file silently. Asking defeats the point.

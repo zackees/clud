@@ -55,7 +55,33 @@ server and merge.
      jobs and runner labels. Return `status=gave_up`.
    - A cancelled check superseded by a newer run of the same workflow is
      ignored, so concurrency cancellations are not failures.
-3. You cannot edit or build. The workflow gives a `needs_fix` to the
+3. **Feature stage.** A goal PR in the feature stage has the feature branch
+   as its base and merges into it only, never into `<main>`: on exit `0`
+   use `gh pr merge <n> --admin --merge` instead of step 2's command. No
+   `--delete-branch` on any merge while the feature PR is open. Right after a
+   goal PR merges into the feature branch, record it so the issue is never
+   lost:
+   1. `gh label create grind:on-feature --force` (safe when it exists).
+   2. `gh issue edit <N> --add-label grind:on-feature` on the goal issue;
+      on the first child to land, also on the meta issue (and on the
+      original issue when intake converted it into the meta).
+   3. `gh issue comment <N>` with a readable line (`Landed on feature branch
+      <feature-branch> via #<gpr>; closes when feature PR #<fpr> merges.`)
+      followed by the hidden marker, exactly
+      `<!-- grind:v1 feature-pr=#<fpr> branch=<feature-branch> goal-pr=#<gpr> run=<run-id> -->`.
+   4. `gh pr edit <fpr> --body-file <f>`: append `Closes #<N>` and rewrite
+      the goals table (goal, goal PR, status).
+   Never `gh issue close`: the feature PR's `Closes` lines close the issues
+   when it merges into `<main>`, and clud's hook denies the command. The
+   feature PR
+   itself is merged only when the run's `feature_merge` is `auto`: once
+   every feature goal has landed and its checks are green, `gh pr ready
+   <feature-pr>` then `gh pr merge <feature-pr> --merge`; never `--admin`,
+   `--squash` or `--delete-branch` on it. If required review blocks the
+   merge, stop and return "waiting for review". Under `later` or `comment`
+   leave the feature PR alone. clud's command hook enforces these rules for
+   the lander.
+4. You cannot edit or build. The workflow gives a `needs_fix` to the
    integrator and calls you again, up to 10 rounds. Each fix round goes back
    through the integrator, which reruns the run's lint and test scripts
    before pushing.

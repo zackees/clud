@@ -19,8 +19,14 @@ You hold the run's build lock, so nothing else builds while you do.
      (`git stash` first if the switch needs it).
    Commit the goal's files by name (never `git add -A`) with a conventional
    message naming the issue.
-2. **Rebase** onto `origin/<main>` after a fresh fetch. A dependent goal's
-   dependency has already merged, so `origin/<main>` contains it.
+2. **Rebase** onto `origin/<base>` after a fresh fetch, where `<base>` is
+   `<main>` in the bug stage and the feature branch
+   (`grind/meta-<M>-<run-id>`) in the feature stage. A dependent goal's
+   dependency has already merged, so `origin/<base>` contains it. In the
+   feature stage, first check whether `origin/<main>` moved past the feature
+   branch; if so, merge (never rebase) `origin/<main>` into the feature
+   branch in its worktree and push it, then rebase the goal onto the
+   updated feature branch.
 3. **RED -> GREEN.** Run the goal's focused regression test and show it
    fails without the fix (check out the test alone on the base, or cite the
    reproduction), then passes with it.
@@ -45,7 +51,10 @@ You hold the run's build lock, so nothing else builds while you do.
    feature branch) use `Refs #<id>` instead, because GitHub only auto-closes
    on merges into the default branch and a premature close would lose the
    issue. Either keyword names the goal's own issue, never the parent of a
-   meta issue.
+   meta issue. So feature-stage goal PRs (base = the feature branch) use
+   `Refs #N`, and you add a `Closes #N` line for the goal to the feature
+   PR's body (`gh pr edit <feature-pr> --body-file ...`) so the issue closes
+   when the feature PR merges into `<main>`.
    Return `pushed=true` and the PR URL. The lander watches CI; do not wait
    for it here.
 

@@ -569,6 +569,9 @@ pub enum Command {
     /// forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues`
     /// for GitLab); errors if the remote is neither. An explicit URL is
     /// used verbatim, exactly like a URL passed to `clud do`.
+    ///
+    /// `clud grind reconcile` instead runs the feature-branch reconcile pass
+    /// (#1393) in the current checkout and exits with its status.
     Grind {
         url: Option<String>,
     },
@@ -1785,6 +1788,34 @@ mod grind_scripts_parse_tests {
         assert!(matches!(args.command, Some(Command::GrindScripts)));
         assert!(args.passthrough.is_empty());
     }
+
+    #[test]
+    fn grind_reconcile_parses_as_grind_subcommand_not_passthrough() {
+        let raw: Vec<String> = ["clud", "grind", "reconcile"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let args = Args::parse_from_raw(raw);
+        match &args.command {
+            Some(Command::Grind { url }) => assert_eq!(url.as_deref(), Some("reconcile")),
+            other => panic!("expected Command::Grind, got {other:?}"),
+        }
+        assert!(args.passthrough.is_empty());
+    }
+
+    #[test]
+    fn is_reconcile_matches_only_the_reconcile_keyword() {
+        assert!(is_reconcile(Some("reconcile")));
+        assert!(!is_reconcile(None));
+        assert!(!is_reconcile(Some("https://github.com/o/r/issues/1")));
+        assert!(!is_reconcile(Some("Reconcile")));
+    }
+}
+
+/// True when `clud grind`'s positional argument selects the reconcile pass
+/// (`clud grind reconcile`, #1393) rather than a goal URL.
+pub fn is_reconcile(url: Option<&str>) -> bool {
+    url == Some("reconcile")
 }
 
 /// A provider API key passed on the command line. `Debug` never prints it, so
