@@ -54,6 +54,23 @@ bosn run --task lint               # runs the required bash lint
 bosn run --task test               # broad Rust + Python suite when warranted
 ```
 
+For Windows-only code (anything under `#[cfg(windows)]`), run the Windows
+clippy locally before spending a `ci-windows` run on it:
+
+```bash
+bash lint --windows    # host lint, then clippy for x86_64-pc-windows-msvc
+```
+
+`--windows` adds `soldr cargo clippy --workspace --all-targets --target
+x86_64-pc-windows-msvc -- -D warnings` after the host clippy. soldr prepares
+the MSVC sysroot, so this runs on a Linux or macOS host, and it type-checks
+every Windows `cfg` branch, tests included. It does not link or run anything.
+Behaviour still needs the `ci-windows` label (static checks plus the Windows
+x64 build, unit and integration suites; see
+[Current CI selection](#current-ci-selection)). It must go through soldr: a
+plain `cargo --target` run fails on the read-only artifacts soldr's cache
+links into `target/` (#1158).
+
 For a GitHub Actions behavior change, exercise the affected **Linux** job with
 `act` as well when it is installed and the job is supported. Select a runner
 image explicitly to avoid an interactive first-run prompt; for example:
