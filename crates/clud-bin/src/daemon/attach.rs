@@ -25,7 +25,7 @@ use super::wire_prost::{daemon_wire_format_from_env, decode_worker_server_line, 
 use crate::console_title::OscTitleStripper;
 use crate::ctrl_c_track::CtrlEventKind;
 use crate::session::{
-    InteractiveHooks, KeyboardEnhancementGuard, KeyboardEnhancementTracker, PtyInputSink,
+    F3Events, InteractiveHooks, KeyboardEnhancementGuard, KeyboardEnhancementTracker, PtyInputSink,
 };
 use crate::voice::VoiceMode;
 
@@ -411,7 +411,7 @@ pub(super) fn attach_to_session(
     });
 
     let local_result = if interactive {
-        run_remote_interactive(Arc::clone(&writer), format, interrupted, session.detachable)
+        run_remote_interactive(Arc::clone(&writer), format, interrupted, &exit_code)
     } else {
         wait_for_remote_or_interrupt(&exit_code, interrupted)
     };
@@ -542,7 +542,7 @@ fn run_remote_interactive(
     writer: Arc<Mutex<TcpStream>>,
     format: DaemonWireFormat,
     interrupted: &AtomicBool,
-    _detachable: bool,
+    remote_exit: &Mutex<Option<i32>>,
 ) -> LocalAttachResult {
     // #1355: raw bytes, not `crossterm::event`, so terminal replies such as
     // the answer to ConPTY's startup `ESC[6n` reach the worker. Same setup
@@ -562,30 +562,6 @@ fn run_remote_interactive(
         }
     };
     let mut filter = RemoteInputFilter::new(input.expands_ctrl_v());
-    // VoiceMode + PtyInputSink: same `InteractiveHooks` plumbing the
-    // local-PTY pump uses, just with input bytes routed through the
-    // daemon-worker TCP socket instead of `NativePtyProcess::write_impl`.
-    // When voice is disabled by env (`CLUD_VOICE_*` unset, no model
-    // present) `intercept_f3()` returns false and all the hook calls
-    // below are constant-time no-ops.
-    let mut voice = VoiceMode::from_env();
-    let mut sink = WorkerInputSink {
-        writer: Arc::clone(&writer),
-        format,
-    };
-    let send_input = |bytes: &[u8], submit: bool| {
-        let _ = send_worker_message(
-            &writer,
-            &WorkerClientMessage::Input {
-                data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                submit,
-            },
-            format,
-        );
-    };
-    // Without crossterm's event source nothing reports a resize, so the
-    // loop compares the terminal size on every tick.
-    let mut last_size = crossterm::terminal::size().ok();
 
     // Issue #79: register the console IDropTarget so dropped paths reach
     // the daemon-owned PTY just like keystrokes. Held for the lifetime of
@@ -596,6 +572,132 @@ fn run_remote_interactive(
     #[cfg(not(windows))]
     let (_dnd_guard, dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) =
         (None, None);
+    let mut io = TerminalAttachIo {
+        input: &mut input,
+        writer: &writer,
+        format,
+        // VoiceMode + PtyInputSink: same `InteractiveHooks` plumbing the
+        // local-PTY pump uses, just with input bytes routed through the
+        // daemon-worker TCP socket instead of `NativePtyProcess::write_impl`.
+        // When voice is disabled by env (`CLUD_VOICE_*` unset, no model
+        // present) `intercept_f3()` returns false and all the hook calls
+        // are constant-time no-ops.
+        voice: VoiceMode::from_env(),
+        sink: WorkerInputSink {
+            writer: Arc::clone(&writer),
+            format,
+        },
+        // Without crossterm's event source nothing reports a resize, so the
+        // loop compares the terminal size on every tick.
+        last_size: crossterm::terminal::size().ok(),
+        dnd_rx,
+    };
+    pump_remote_input(&mut io, &mut filter, interrupted, remote_exit)
+}
+
+/// What the interactive attach loop touches outside its own decisions: the
+/// terminal input source, the worker socket, and the per-tick hooks (voice,
+/// resize, drag-and-drop). [`pump_remote_input`] owns when the loop sends,
+/// flushes and returns; this trait is the seam its tests drive (#1448).
+trait RemoteAttachIo {
+    /// Wait up to `timeout` for the next chunk of terminal input.
+    fn poll_input(&mut self, timeout: Duration) -> InputPoll;
+    /// Send input bytes to the worker as `WorkerClientMessage::Input`.
+    fn send_input(&mut self, bytes: &[u8], submit: bool);
+    /// Run the voice hooks for the F3 presses and releases one chunk held.
+    fn f3(&mut self, events: F3Events);
+    /// Per-tick work that runs whether or not input arrived.
+    fn tick(&mut self);
+}
+
+/// The real terminal and worker socket behind [`RemoteAttachIo`].
+struct TerminalAttachIo<'a> {
+    input: &'a mut RawInput,
+    writer: &'a Arc<Mutex<TcpStream>>,
+    format: DaemonWireFormat,
+    voice: VoiceMode,
+    sink: WorkerInputSink,
+    last_size: Option<(u16, u16)>,
+    dnd_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+}
+
+impl RemoteAttachIo for TerminalAttachIo<'_> {
+    fn poll_input(&mut self, timeout: Duration) -> InputPoll {
+        self.input.poll(timeout)
+    }
+
+    fn send_input(&mut self, bytes: &[u8], submit: bool) {
+        let _ = send_worker_message(
+            self.writer,
+            &WorkerClientMessage::Input {
+                data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                submit,
+            },
+            self.format,
+        );
+    }
+
+    fn f3(&mut self, events: F3Events) {
+        if !self.voice.intercept_f3() {
+            return;
+        }
+        for _ in 0..events.presses {
+            if let Err(err) = self.voice.on_f3_press(&mut self.sink) {
+                eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
+            }
+        }
+        for _ in 0..events.releases {
+            if let Err(err) = self.voice.on_f3_release(&mut self.sink) {
+                eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
+            }
+        }
+    }
+
+    fn tick(&mut self) {
+        let size = crossterm::terminal::size().ok();
+        if size != self.last_size {
+            self.last_size = size;
+            if let Some((cols, rows)) = size {
+                let _ = send_worker_message(
+                    self.writer,
+                    &WorkerClientMessage::Resize { rows, cols },
+                    self.format,
+                );
+            }
+        }
+        // Tick the voice hook even when no keyboard event arrived: this
+        // drains pending whisper transcripts into `WorkerInputSink` and
+        // runs the VAD auto-stop for terminals that don't emit F3
+        // release events.
+        if let Err(err) = self.voice.on_tick(&mut self.sink) {
+            eprintln!("[clud] warning: voice tick hook failed: {}", err);
+        }
+
+        // Drain any drop-target bytes the OLE worker pushed since the
+        // last tick. Each chunk is one dropped path (or a paste-batched
+        // group). `submit=false` keeps the cursor in the input box so
+        // the user can edit before submitting, matching the local-PTY
+        // runner's behavior.
+        let chunks: Vec<Vec<u8>> = match &self.dnd_rx {
+            Some(rx) => rx.try_iter().collect(),
+            None => Vec::new(),
+        };
+        for chunk in chunks {
+            self.send_input(&chunk, false);
+        }
+    }
+}
+
+/// The interactive attach's input loop. It forwards filtered terminal
+/// input to the worker and returns on a local interrupt, when the input
+/// source closes, or once the reader thread records the session's exit
+/// code in `remote_exit`.
+fn pump_remote_input(
+    io: &mut impl RemoteAttachIo,
+    filter: &mut RemoteInputFilter,
+    interrupted: &AtomicBool,
+    remote_exit: &Mutex<Option<i32>>,
+) -> LocalAttachResult {
     loop {
         // Issue #517: this loop polls every 25ms, so the reason is
         // deliberately NOT logged here (would spam the log on every
@@ -605,70 +707,43 @@ fn run_remote_interactive(
         if interrupted.load(Ordering::SeqCst) {
             return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
         }
+        // #1448: the reader thread records the exit only after relaying the
+        // session's last output, so the session is over. Release a held Esc
+        // (the same send the idle tick would make), then end the attach
+        // with the session's code instead of reading keys until Ctrl+C.
+        let exited = *remote_exit.lock().expect("exit code mutex poisoned");
+        if let Some(code) = exited {
+            let pending = filter.flush_pending();
+            if !pending.is_empty() {
+                io.send_input(&pending, false);
+            }
+            return LocalAttachResult::Completed(code);
+        }
         let wait = if filter.has_pending() {
             ATTACH_PENDING_FLUSH
         } else {
             ATTACH_INPUT_TICK
         };
-        match input.poll(wait) {
+        match io.poll_input(wait) {
             InputPoll::Chunk(chunk) => {
                 let filtered = filter.process(&chunk);
                 if filtered.interrupt {
                     return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
                 }
                 if !filtered.bytes.is_empty() {
-                    send_input(&filtered.bytes, filtered.submit());
+                    io.send_input(&filtered.bytes, filtered.submit());
                 }
-                if voice.intercept_f3() {
-                    for _ in 0..filtered.f3.presses {
-                        if let Err(err) = voice.on_f3_press(&mut sink) {
-                            eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
-                        }
-                    }
-                    for _ in 0..filtered.f3.releases {
-                        if let Err(err) = voice.on_f3_release(&mut sink) {
-                            eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
-                        }
-                    }
-                }
+                io.f3(filtered.f3);
             }
             InputPoll::Idle => {
                 let pending = filter.flush_pending();
                 if !pending.is_empty() {
-                    send_input(&pending, false);
+                    io.send_input(&pending, false);
                 }
             }
             InputPoll::Closed => return LocalAttachResult::Completed(1),
         }
-        let size = crossterm::terminal::size().ok();
-        if size != last_size {
-            last_size = size;
-            if let Some((cols, rows)) = size {
-                let _ = send_worker_message(
-                    &writer,
-                    &WorkerClientMessage::Resize { rows, cols },
-                    format,
-                );
-            }
-        }
-        // Tick the voice hook even when no keyboard event arrived: this
-        // drains pending whisper transcripts into `WorkerInputSink` and
-        // runs the VAD auto-stop for terminals that don't emit F3
-        // release events.
-        if let Err(err) = voice.on_tick(&mut sink) {
-            eprintln!("[clud] warning: voice tick hook failed: {}", err);
-        }
-
-        // Drain any drop-target bytes the OLE worker pushed since the
-        // last tick. Each chunk is one dropped path (or a paste-batched
-        // group). `submit=false` keeps the cursor in the input box so
-        // the user can edit before submitting, matching the local-PTY
-        // runner's behavior.
-        if let Some(rx) = &dnd_rx {
-            while let Ok(chunk) = rx.try_recv() {
-                send_input(&chunk, false);
-            }
-        }
+        io.tick();
     }
 }
 
@@ -794,6 +869,81 @@ fn render_background_prompt(remaining: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1448 test double: plays a script of input polls, and can record the
+    /// session's exit the way the reader thread does, mid-script.
+    enum Step {
+        Poll(InputPoll),
+        /// Record `code` as the remote exit, then return the poll.
+        ExitThen(i32, InputPoll),
+    }
+
+    struct ScriptedIo<'a> {
+        steps: std::collections::VecDeque<Step>,
+        remote_exit: &'a Mutex<Option<i32>>,
+        sent: Vec<(Vec<u8>, bool)>,
+    }
+
+    impl RemoteAttachIo for ScriptedIo<'_> {
+        fn poll_input(&mut self, _timeout: Duration) -> InputPoll {
+            match self.steps.pop_front() {
+                Some(Step::Poll(poll)) => poll,
+                Some(Step::ExitThen(code, poll)) => {
+                    *self.remote_exit.lock().unwrap() = Some(code);
+                    poll
+                }
+                // An exhausted script is stdin reaching EOF: the only way
+                // the loop ended before #1448.
+                None => InputPoll::Closed,
+            }
+        }
+
+        fn send_input(&mut self, bytes: &[u8], submit: bool) {
+            self.sent.push((bytes.to_vec(), submit));
+        }
+
+        fn f3(&mut self, _events: F3Events) {}
+
+        fn tick(&mut self) {}
+    }
+
+    fn pump_script(steps: Vec<Step>) -> (LocalAttachResult, Vec<(Vec<u8>, bool)>, usize) {
+        let remote_exit = Mutex::new(None);
+        let mut io = ScriptedIo {
+            steps: steps.into(),
+            remote_exit: &remote_exit,
+            sent: Vec::new(),
+        };
+        let mut filter = RemoteInputFilter::new(false);
+        let result = pump_remote_input(&mut io, &mut filter, &AtomicBool::new(false), &remote_exit);
+        (result, io.sent, io.steps.len())
+    }
+
+    /// #1448: the session ends while the attach waits for input. The loop
+    /// must return the session's exit code on the next tick, not keep
+    /// reading keys until Ctrl+C or EOF.
+    #[test]
+    fn interactive_attach_returns_the_remote_exit_code_when_the_session_ends() {
+        let (result, sent, unread) = pump_script(vec![
+            Step::Poll(InputPoll::Chunk(b"a".to_vec())),
+            Step::ExitThen(7, InputPoll::Idle),
+            Step::Poll(InputPoll::Chunk(b"typed after exit".to_vec())),
+        ]);
+        assert_eq!(result, LocalAttachResult::Completed(7));
+        assert_eq!(sent, vec![(b"a".to_vec(), false)]);
+        assert_eq!(unread, 1, "the loop kept reading input after the exit");
+    }
+
+    /// #1448: the session ends while a lone Esc is held for a possible
+    /// bracketed-paste prefix. The held byte is released exactly once
+    /// before the loop returns, so no input the filter accepted is lost.
+    #[test]
+    fn remote_exit_releases_a_held_esc_once_before_returning() {
+        let (result, sent, _) =
+            pump_script(vec![Step::ExitThen(0, InputPoll::Chunk(b"\x1b".to_vec()))]);
+        assert_eq!(result, LocalAttachResult::Completed(0));
+        assert_eq!(sent, vec![(b"\x1b".to_vec(), false)]);
+    }
 
     /// #1363: a child TUI in a daemon session pushes a kitty keyboard frame,
     /// then the attach ends (detach, Ctrl+C, the session dying) before the
