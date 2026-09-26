@@ -243,10 +243,12 @@ Console and terminal:
   `running_process::pty::terminal_input::TerminalInputCore` (issues #141 /
   #575): forwards upstream's complete virtual-key translations atomically
   while retaining clud's Shift+Enter-as-ESC-CR (ConPTY rewrites LF, #1369) and Ctrl+V image policies.
-- `console_setup.rs` - RAII guard that enables
-  `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin and `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
-  on a terminal stdout (#1345) for the lifetime of a PTY session and
-  restores the prior console modes on drop; no-op on POSIX.
+- `console_setup.rs` - `enable_console_vt_output`, which `main` calls first
+  to enable `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stdout and stderr
+  consoles for the process's life (#1374, DD-105), and the RAII guard that
+  enables `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin and VT processing on a
+  terminal stdout (#1345) for the lifetime of a PTY session and restores the
+  prior console modes on drop; no-op on POSIX.
 - `console_title.rs` - stamps `clud <cwd-name>` once on launch and runs a
   background keeper that re-applies the title when downstream OSC 0/2 sequences
   overwrite it.

@@ -1,7 +1,8 @@
-//! Windows console-mode plumbing: for the duration of a PTY session, enable
-//! `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin and
-//! `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on stdout, and restore both prior
-//! modes on drop. No-op on POSIX.
+//! Windows console-mode plumbing. At startup, enable
+//! `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stdout and stderr consoles for
+//! the life of the process (#1374). For the duration of a PTY session, also
+//! enable `ENABLE_VIRTUAL_TERMINAL_INPUT` on stdin and re-assert VT
+//! processing on stdout, restoring both prior modes on drop. No-op on POSIX.
 
 use std::io;
 
@@ -10,8 +11,93 @@ use std::io;
 const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 
 /// Windows console output mode flag for virtual terminal processing.
-#[cfg(windows)]
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+/// A standard stream clud writes escape sequences to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// Console-mode access for the output streams. Windows implements it with
+/// `Get/SetConsoleMode`; tests substitute a fake so the enable logic runs on
+/// every platform.
+pub(crate) trait OutputConsoleModes {
+    /// The stream's console mode, or `None` when it is not a console (a pipe,
+    /// a file, or any stream off Windows).
+    fn get(&self, stream: OutputStream) -> Option<u32>;
+    fn set(&mut self, stream: OutputStream, mode: u32);
+}
+
+/// The process's real standard output streams.
+struct StdConsole;
+
+#[cfg(windows)]
+impl StdConsole {
+    fn handle(stream: OutputStream) -> isize {
+        use std::os::windows::io::AsRawHandle;
+        match stream {
+            OutputStream::Stdout => io::stdout().as_raw_handle() as isize,
+            OutputStream::Stderr => io::stderr().as_raw_handle() as isize,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl OutputConsoleModes for StdConsole {
+    fn get(&self, stream: OutputStream) -> Option<u32> {
+        let mut mode: u32 = 0;
+        // SAFETY: the handle is the process's own std handle and `mode` is a
+        // valid out-pointer. A non-console handle makes the call fail.
+        (unsafe { GetConsoleMode(Self::handle(stream), &mut mode) } != 0).then_some(mode)
+    }
+
+    fn set(&mut self, stream: OutputStream, mode: u32) {
+        // SAFETY: the handle is the process's own std handle. A failure
+        // leaves the mode unchanged, which is all a retry could achieve.
+        unsafe {
+            SetConsoleMode(Self::handle(stream), mode);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl OutputConsoleModes for StdConsole {
+    fn get(&self, _stream: OutputStream) -> Option<u32> {
+        None
+    }
+
+    fn set(&mut self, _stream: OutputStream, _mode: u32) {}
+}
+
+/// Enable `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on every standard output
+/// stream that is a console, so the escape sequences clud writes (colored
+/// notices, selector frames, graphics headers, relayed child output) are
+/// interpreted instead of printed literally.
+///
+/// `main` calls this before dispatching anything, so no launch path depends
+/// on some earlier code having enabled it (#1374). It is deliberately not
+/// restored at exit: clud writes escape sequences for its whole life,
+/// including after a PTY session ends and on `process::exit` paths where no
+/// destructor runs. Cheap and idempotent, so a selector calls it again in
+/// case a child sharing the console cleared the bit. No-op on POSIX.
+pub fn enable_console_vt_output() {
+    enable_vt_processing(&mut StdConsole);
+}
+
+/// OR VT processing into each console stream that lacks it. Stdout and stderr
+/// usually share one screen buffer, so the second stream then already has it
+/// and is left alone.
+pub(crate) fn enable_vt_processing(console: &mut impl OutputConsoleModes) {
+    for stream in [OutputStream::Stdout, OutputStream::Stderr] {
+        if let Some(mode) = console.get(stream) {
+            if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0 {
+                console.set(stream, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 extern "system" {
@@ -115,6 +201,144 @@ pub fn atty_is_terminal() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// #1374: VT output processing is enabled explicitly, first thing in
+    /// `main`, so every launch path gets it. It used to come only from
+    /// crossterm's `supports_ansi`, which the selector called: a `Once`-latched
+    /// side effect that never undoes itself. Escape sequences clud writes
+    /// outside the PTY session's guard (colored notices, the graphics header,
+    /// early relayed attach output) therefore rendered on a launch that showed
+    /// a picker and printed as literal text on an ordinary repeat launch. That
+    /// side effect hid the missing enable whenever a selector ran first.
+    #[test]
+    fn vt_output_is_enabled_at_startup_not_by_a_selector_side_effect() {
+        let main_rs = include_str!("main.rs");
+        let main_body = main_rs
+            .split("\nfn main() {\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("main.rs defines `fn main`");
+        assert!(
+            main_body.contains("console_setup::enable_console_vt_output();"),
+            "`fn main` must enable VT output processing before dispatching any launch path"
+        );
+
+        for (name, source) in [
+            ("main.rs", main_rs),
+            ("selector.rs", include_str!("selector.rs")),
+            ("harness_picker.rs", include_str!("harness_picker.rs")),
+            ("launch_setup.rs", include_str!("launch_setup.rs")),
+            ("settings_tui.rs", include_str!("settings_tui.rs")),
+            (
+                "foreground_runtime.rs",
+                include_str!("foreground_runtime.rs"),
+            ),
+            (
+                "session_history/picker.rs",
+                include_str!("session_history/picker.rs"),
+            ),
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+            assert!(
+                !production.contains("ansi_support::"),
+                "{name} relies on crossterm's Once-latched VT enable; \
+                 call console_setup::enable_console_vt_output instead"
+            );
+        }
+    }
+
+    use super::{
+        enable_vt_processing, OutputConsoleModes, OutputStream, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    };
+
+    /// A console where each stream is a screen buffer (`Some(index)`) or not
+    /// a console at all (`None`). Streams that share an index share a mode,
+    /// like stdout and stderr in one console window.
+    struct FakeConsole {
+        buffers: Vec<u32>,
+        stdout: Option<usize>,
+        stderr: Option<usize>,
+        sets: Vec<OutputStream>,
+    }
+
+    impl FakeConsole {
+        fn buffer(&self, stream: OutputStream) -> Option<usize> {
+            match stream {
+                OutputStream::Stdout => self.stdout,
+                OutputStream::Stderr => self.stderr,
+            }
+        }
+    }
+
+    impl OutputConsoleModes for FakeConsole {
+        fn get(&self, stream: OutputStream) -> Option<u32> {
+            self.buffer(stream).map(|index| self.buffers[index])
+        }
+
+        fn set(&mut self, stream: OutputStream, mode: u32) {
+            let index = self.buffer(stream).expect("set on a non-console stream");
+            self.buffers[index] = mode;
+            self.sets.push(stream);
+        }
+    }
+
+    const LEGACY_OUTPUT_MODE: u32 = 0x0003; // processed output + wrap at EOL
+
+    #[test]
+    fn enables_vt_processing_on_each_console_stream_and_keeps_other_bits() {
+        let mut console = FakeConsole {
+            buffers: vec![LEGACY_OUTPUT_MODE, LEGACY_OUTPUT_MODE],
+            stdout: Some(0),
+            stderr: Some(1),
+            sets: Vec::new(),
+        };
+        enable_vt_processing(&mut console);
+        let enabled = LEGACY_OUTPUT_MODE | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        assert_eq!(console.buffers, vec![enabled, enabled]);
+    }
+
+    #[test]
+    fn a_shared_screen_buffer_is_set_once() {
+        let mut console = FakeConsole {
+            buffers: vec![LEGACY_OUTPUT_MODE],
+            stdout: Some(0),
+            stderr: Some(0),
+            sets: Vec::new(),
+        };
+        enable_vt_processing(&mut console);
+        assert_eq!(
+            console.buffers[0],
+            LEGACY_OUTPUT_MODE | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        );
+        assert_eq!(console.sets, vec![OutputStream::Stdout]);
+    }
+
+    /// Redirected stdout (`clud ... > log`) still gets VT processing on the
+    /// console stderr, where clud's colored notices and one selector go.
+    #[test]
+    fn a_redirected_stream_is_skipped_without_skipping_the_other() {
+        let mut console = FakeConsole {
+            buffers: vec![LEGACY_OUTPUT_MODE],
+            stdout: None,
+            stderr: Some(0),
+            sets: Vec::new(),
+        };
+        enable_vt_processing(&mut console);
+        assert_eq!(console.sets, vec![OutputStream::Stderr]);
+    }
+
+    #[test]
+    fn a_mode_that_already_has_vt_processing_is_not_rewritten() {
+        let enabled = LEGACY_OUTPUT_MODE | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        let mut console = FakeConsole {
+            buffers: vec![enabled, enabled],
+            stdout: Some(0),
+            stderr: Some(1),
+            sets: Vec::new(),
+        };
+        enable_vt_processing(&mut console);
+        assert!(console.sets.is_empty());
+    }
+
     /// Windows: `enable_console_vt_input()` must actually set the
     /// `ENABLE_VIRTUAL_TERMINAL_INPUT` bit (0x0200) on the console input
     /// handle, and restore the original mode on drop. Without this bit,

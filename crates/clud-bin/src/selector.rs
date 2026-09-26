@@ -349,8 +349,10 @@ pub fn run<S: Selector, W: Write>(out: &mut W, selector: &mut S) -> io::Result<S
     let _raw = RawModeGuard::enable()?;
     // Raw mode changes input only. A legacy Windows console also needs VT
     // output processing, or every escape sequence below prints as literal text.
-    #[cfg(windows)]
-    let _ = crossterm::ansi_support::supports_ansi();
+    // `main` already enabled it; re-assert it in case a child sharing the
+    // console cleared it. Never crossterm's `supports_ansi`: its `Once`-latched
+    // enable is what hid clud's missing startup enable (#1374).
+    crate::console_setup::enable_console_vt_output();
     out.write_all(HIDE_CURSOR)?;
     out.flush()?;
     let mut terminal = CrosstermTerminal {
