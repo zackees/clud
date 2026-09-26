@@ -34,10 +34,10 @@ The Windows COM lifecycle (`OleInitialize` worker thread, `RegisterDragDrop` dis
 - `build_input_records(s: &str) -> Vec<u8>` — `injectors.rs:71`
 - `join_paths_for_injection(paths: &[String]) -> String` — `injectors.rs:126`
 - `pty_master_injector(master) -> DropInjector` — `injectors.rs:138`
-- `subprocess_console_injector() -> DropInjector` (Windows only) — `injectors.rs:157`
-- `write_to_console_input(records_bytes: &[u8]) -> io::Result<()>` (Windows only) — `injectors.rs:176`
-- `input_record_count(len)` / `check_all_records_written(expected, written)` — pure length and short-write checks, tested on every host — `injectors.rs`
-- `console_input_injector(resolve)` / `decode_input_records(bytes)` / `write_records_to_handle(handle, bytes)` (Windows only; records are decoded field by field, never pointer-cast, since a `&[u8]` need not be 4-byte aligned) — `injectors.rs`
+- `subprocess_console_injector() -> DropInjector` (Windows only) — `injectors.rs:189`
+- `write_to_console_input(records_bytes: &[u8]) -> io::Result<()>` (Windows only) — `injectors.rs:228`
+- `input_record_count(len)` / `check_all_records_written(expected, written)` — pure length and short-write checks, tested on every host — `injectors.rs:158`, `:175`
+- `console_input_injector(resolve)` / `decode_input_records(bytes)` / `write_records_to_handle(handle, bytes)` (Windows only; records are decoded field by field, never pointer-cast, since a `&[u8]` need not be 4-byte aligned) — `injectors.rs:197`, `:244`, `:276`
 - `INPUT_RECORD_SIZE = 20` — `injectors.rs:58`
 
 ## Testing

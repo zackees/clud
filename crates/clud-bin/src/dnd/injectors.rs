@@ -173,8 +173,8 @@ pub fn input_record_count(len: usize) -> std::io::Result<usize> {
 ///
 /// Pure function — testable on every host.
 pub fn check_all_records_written(expected: usize, written: usize) -> std::io::Result<()> {
-    if written <= expected {
-        return Ok(()); // RED(#1370): deliberately broken, reverted next commit
+    if written == expected {
+        return Ok(());
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::WriteZero,
@@ -206,9 +206,7 @@ pub fn console_input_injector(
         // Best-effort — like the PTY path, we can't surface failures
         // from inside the OLE callback.
         if let Ok(handle) = resolve() {
-            // RED(#1370): deliberately drop the trailing space's records.
-            let cut = records.len().saturating_sub(2 * INPUT_RECORD_SIZE);
-            let _ = write_records_to_handle(handle, &records[..cut]);
+            let _ = write_records_to_handle(handle, &records);
         }
     })
 }
