@@ -1256,6 +1256,10 @@ fn run(mut args: args::Args) {
             // was typed, so a dry run shows what will actually be billed.
             "codex_model": plan.codex_model,
             "model_selection": plan.model_selection,
+            "codex_model_source": plan.model_selection.as_ref()
+                .and_then(|selection| selection.model.as_deref())
+                .filter(|model| matches!(*model, "codex-sol" | "codex-luna"))
+                .map(|_| clud::codex_runtime::active_choice().source.as_str()),
             // The cost boundary, auditable without a paid request: every
             // model this launch may reach, not just the one it starts on
             // (#1257).

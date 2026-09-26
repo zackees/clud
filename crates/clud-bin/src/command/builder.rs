@@ -748,10 +748,9 @@ fn codex_model_selection(
     if let Some(selection) = selection {
         let mut value = selection.wire_model.clone().or_else(|| {
             selection.effort.map(|_| {
-                provider_catalog::reviewed_default_model(ModelProvider::Codex)
-                    .expect("Codex must have a reviewed catalog default")
-                    .wire_id
-                    .to_string()
+                let row = provider_catalog::reviewed_default_model(ModelProvider::Codex)
+                    .expect("Codex must have a reviewed catalog default");
+                crate::codex_runtime::wire_id(row.cli_id, row.wire_id)
             })
         })?;
         if let Some(effort) = selection.effort {

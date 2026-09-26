@@ -19,6 +19,10 @@ on:
       - .github/workflows/install-pages.yml
   workflow_dispatch:
 
+concurrency:
+  group: clud-pages-deployment
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -42,6 +46,8 @@ jobs:
           python -m pytest -q tests/test_installer_catalog.py
       - name: Generate every installable published version
         run: python -m installer.site site
+      - name: Preserve published model document
+        run: python -m models.preserve site
       - name: Validate catalog schema, semantics, and site
         run: |
           python -m pip install 'git+https://github.com/zackees/manifest.json@main'

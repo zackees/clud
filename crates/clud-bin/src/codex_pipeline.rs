@@ -1668,7 +1668,7 @@ mod tests {
         // What the fake actually received is the real assertion: a translation
         // regression must fail here, not merely change our own output.
         let sent = server.request();
-        assert_eq!(sent["model"], "gpt-5.6-sol");
+        assert_eq!(sent["model"], "gpt-6-sol");
         assert_eq!(sent["instructions"], "be brief");
         assert!(sent.get("max_output_tokens").is_none());
         assert_eq!(sent["stream"], true);
@@ -1705,7 +1705,7 @@ mod tests {
                 "id": "msg_agg",
                 "type": "message",
                 "role": "assistant",
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "content": [{"type": "text", "text": "Hello world"}],
                 "stop_reason": "end_turn",
                 "stop_sequence": null,
@@ -1871,7 +1871,7 @@ mod tests {
             )
             .unwrap();
         let sent = server.request();
-        assert_eq!(sent["model"], "gpt-5.6-sol");
+        assert_eq!(sent["model"], "gpt-6-sol");
         assert_eq!(sent["reasoning"]["effort"], "low");
     }
 

@@ -115,6 +115,10 @@ Entry and orchestration:
   `output_config` can (DD-035). The compound spelling remains a compatibility
   input; current Claude launches advertise provider-scoped discovery IDs and
   carry ordinary effort separately.
+- `codex_runtime.rs` - #1476's bounded Pages model-manifest fetch and local
+  Codex `model/list` availability gate. It maps stable Sol/Luna catalog and
+  discovery IDs to current wire IDs with last-good then built-in fallback;
+  see [model-pages.md](../../../docs/architecture/model-pages.md).
 - `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
   mapping: typed in/out structs, transcript-order-preserving tool loops,
   auth-mode-dependent system placement, reasoning round-trip, and bounded
