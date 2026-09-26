@@ -62,15 +62,24 @@ server and merge.
    goal PR merges into the feature branch, record it so the issue is never
    lost:
    1. `gh label create grind:on-feature --force` (safe when it exists).
-   2. `gh issue edit <N> --add-label grind:on-feature` on the goal issue;
-      on the first child to land, also on the meta issue (and on the
-      original issue when intake converted it into the meta).
-   3. `gh issue comment <N>` with a readable line (`Landed on feature branch
-      <feature-branch> via #<gpr>; closes when feature PR #<fpr> merges.`)
-      followed by the hidden marker, exactly
+   2. `gh issue edit <N> --add-label grind:on-feature` on the goal issue,
+      and the same on the meta issue (the feature group's sub-meta in a meta
+      of metas) and on the original issue when intake converted it into the
+      meta. Adding a label twice is harmless.
+   3. `gh issue comment <N> --body '...'` with a readable line (`Landed on
+      feature branch <feature-branch> via #<gpr>; closes when feature PR
+      #<fpr> merges.`) followed by the hidden marker, exactly
       `<!-- grind:v1 feature-pr=#<fpr> branch=<feature-branch> goal-pr=#<gpr> run=<run-id> -->`.
-   4. `gh pr edit <fpr> --body-file <f>`: append `Closes #<N>` and rewrite
-      the goals table (goal, goal PR, status).
+      On the meta (and original) issue, first read its comments
+      (`gh issue view <m> --json comments`); only if none carries a marker
+      with `feature-pr=#<fpr>`, post the same marker without `goal-pr`.
+   4. `gh pr view <fpr> --json body`, then `gh pr edit <fpr> --body '...'`
+      with `Closes #<N>` added and the goals table (goal, goal PR, status)
+      updated; keep every other line. You have no file tools, so pass the
+      body inline. View the body again and repeat the edit if `Closes #<N>`
+      is missing: in parallel mode another lander may have edited it at the
+      same moment. Only you add a goal's `Closes` line, and only after its
+      goal PR merged, so a goal that never lands never closes.
    Never `gh issue close`: the feature PR's `Closes` lines close the issues
    when it merges into `<main>`, and clud's hook denies the command. The
    feature PR

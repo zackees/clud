@@ -380,16 +380,36 @@ const featureCheckout = (g) => (!PARALLEL && isFeatureGoal(g))
 const featurePlanNote = (g) => !isFeatureGoal(g) ? '' : PARALLEL
   ? `\n\nFeature-stage goal: create the goal worktree and branch from origin/${FEATURE.branch}, not origin/${MAIN}.`
   : `\n\nFeature-stage goal, sequential mode: checkout must be the feature worktree ${FEATURE.worktree}, never ${REPO}; branch from origin/${FEATURE.branch}.`
+// #1393: the feature PR number, the run id, and the issue that carries the
+// feature's Closes line and marker (a meta of metas' sub-meta, else the meta).
+const featurePrNum = () => String(FEATURE.pr || '').replace(/\/+$/, '').replace(/^.*\//, '').replace(/^#/, '')
+const FEATURE_RUN_ID = (args.plan && args.plan.run_id) || (FEATURE ? String(FEATURE.branch).replace(/^grind\/meta-\d+-/, '') : '')
+const featureMetaOf = (g) => (stageOf[String(g.id)] && stageOf[String(g.id)].sub_meta) || (args.plan && args.plan.meta) || args.meta
+const ON_FEATURE = 'grind:on-feature'
 const featureIntegrateNote = (g) => !isFeatureGoal(g) ? '' :
   `\n\nFeature-stage goal (feature branch ${FEATURE.branch}, feature PR ${FEATURE.pr || '(none)'}, feature worktree ${FEATURE.worktree}):\n` +
   `1. Before rebasing the goal onto origin/${FEATURE.branch}: git fetch; if origin/${MAIN} has commits not in origin/${FEATURE.branch}, ` +
-  `merge ${MAIN} into the feature branch in the feature worktree (git merge --no-ff origin/${MAIN}), then plain push of ${FEATURE.branch} (no force). ` +
+  `merge ${MAIN} into the feature branch in the feature worktree (first git merge --ff-only origin/${FEATURE.branch}, then git merge --no-ff origin/${MAIN}), then plain push of ${FEATURE.branch} (no force). ` +
   `Never rebase the feature branch.\n` +
   `2. Rebase the goal branch onto origin/${FEATURE.branch}. The goal PR's base is ${FEATURE.branch}, not ${MAIN}; its body uses \`Refs #${g.id}\`, not Closes.\n` +
-  `3. After the goal PR exists, append \`Closes #${g.id}\` to the feature PR ${FEATURE.pr || ''} body (gh pr view --json body, add the line, gh pr edit ${FEATURE.pr || '<feature pr>'} --body-file <file>); ` +
-  `keep its existing Closes lines${args.meta ? `, including \`Closes #${args.meta}\`` : ''}.`
-const featureLandNote = (g) => !isFeatureGoal(g) ? '' :
-  `\n\nFeature-stage goal: merge this PR into the feature branch ${FEATURE.branch} with \`gh pr merge <n> --merge\`, never into ${MAIN}.`
+  `3. Do not edit the feature PR: the lander adds \`Closes #${g.id}\` to it only once this goal has landed on the feature branch, so a goal that never lands is never closed by the feature merge.`
+const featureLandNote = (g) => {
+  if (!isFeatureGoal(g)) return ''
+  const fpr = featurePrNum() || '<feature pr>'
+  const meta = featureMetaOf(g)
+  const original = args.plan && args.plan.original
+  const marker = (goalPr) => `<!-- grind:v1 feature-pr=#${fpr} branch=${FEATURE.branch}${goalPr ? ` goal-pr=#${goalPr}` : ''} run=${FEATURE_RUN_ID || '<run-id>'} -->`
+  const others = [meta, original].filter(Boolean).map(n => `#${n}`)
+  return `\n\nFeature-stage goal: merge this PR into the feature branch ${FEATURE.branch} with \`gh pr merge <n> --admin --merge\` (never --delete-branch), never into ${MAIN}.\n` +
+    `Once it has merged, record the landing so issue #${g.id} is never lost (#1393):\n` +
+    `1. gh label create ${ON_FEATURE} --force\n` +
+    `2. gh issue edit ${g.id} --add-label ${ON_FEATURE}` + (others.length ? `, and the same for ${others.join(' and ')}` : '') + `.\n` +
+    `3. gh issue comment ${g.id} --body 'Landed on feature branch ${FEATURE.branch} via #<n>; closes when feature PR #${fpr} merges into ${MAIN}. ${marker('<n>')}'` +
+    (others.length ? `. For ${others.join(' and ')}: read its comments (gh issue view <m> --json comments) and, only if none has a marker with feature-pr=#${fpr}, post one: ${marker(null)}` : '') + `.\n` +
+    `4. gh pr view ${fpr} --json body, then gh pr edit ${fpr} --body '<body>' with a \`Closes #${g.id}\` line added and the goals table row for #${g.id} updated; keep every other line, including the other Closes lines. ` +
+    `View it again and repeat the edit if \`Closes #${g.id}\` is missing (another lander may have edited the body at the same time).\n` +
+    `Never gh issue close; the feature PR's Closes lines close the issues when it merges into ${MAIN}.`
+}
 // Stuck-bug rule (#1409): `block_dependents_only` is the only rule the spec
 // defines, so it also applies when the plan omits rules.stuck_bug.
 const STUCK_RULE = args.plan && args.plan.rules && args.plan.rules.stuck_bug
@@ -691,7 +711,7 @@ if (!FEATURE.pr) {
 } else if (FEATURE_MERGE === 'comment_only') {
   feature.note = 'the router posts the result comment; feature PR stays draft'
 } else {
-  feature.note = 'feature PR left open for the user'
+  feature.note = 'feature PR left open for the user; the router marks it ready once every feature goal landed'
 }
 log(`feature ${feature.branch}: PR ${feature.pr || '(none)'}, policy ${feature.policy}, ${feature.merged ? 'merged' : 'not merged'}: ${feature.note}`)
 feature.problems = problemsOf('feature')

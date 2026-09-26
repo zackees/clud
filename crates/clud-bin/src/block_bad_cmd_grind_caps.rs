@@ -3,7 +3,9 @@
 //! Claude Code puts `agent_type` in a subagent's PreToolUse payload. When it
 //! names one of the bundled `grind-*` roles, the role's shell allowlist (or,
 //! for the integrator, denylist) decides the call. Every other caller —
-//! the primary session, other subagents — is untouched.
+//! the primary session, other subagents — is untouched, except that while
+//! `run.json` records a feature branch the router caps ([`router_reason`])
+//! apply to it: the main-session router carries no agent type to key on.
 //!
 //! The agent definitions' `tools:` frontmatter is the hard limit on *which
 //! tools* a role has (workers and reviewers get a shell only for read-only
@@ -106,8 +108,8 @@ pub(super) struct RunFacts {
 /// The feature branch a feature-branch-mode run lands its goal PRs into.
 ///
 /// The main-session router keeps a single feature worktree (`worktree`);
-/// that rule is enforced by the `/grind` skill, not here: the router is not
-/// a capped role, and this hook only sees `grind-*` agent types.
+/// [`router_reason`] refuses any other `git worktree add` from a caller that
+/// is not a `grind-*` role while the feature is recorded.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct FeatureFacts {
     pub branch: String,
@@ -430,6 +432,16 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
             if inspect_ok(&program, words) || is_gh_read(words) {
                 return None;
             }
+            if let Some(verdict) = lander_records_landing(role, words, run) {
+                return verdict;
+            }
+            // pr_merge_watch exit 7 (a stale check): re-run its workflow once.
+            if program == "gh"
+                && words.get(1).is_some_and(|w| w == "run")
+                && words.get(2).is_some_and(|w| w == "rerun")
+            {
+                return None;
+            }
             if program == "gh"
                 && words.get(1).is_some_and(|w| w == "pr")
                 && words.get(2).is_some_and(|w| {
@@ -589,6 +601,15 @@ fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String
             format!("{role} may not delete grind/* branches while the feature PR is open")
         });
     }
+    if program == "gh" && words.get(1).is_some_and(|w| w == "api") {
+        let deletes = words
+            .iter()
+            .any(|w| w.to_ascii_uppercase().ends_with("DELETE"))
+            && words.iter().any(|w| w.contains("git/refs/heads/grind/"));
+        return deletes.then(|| {
+            format!("{role} may not delete grind/* branches while the feature PR is open")
+        });
+    }
     if program != "gh"
         || words.get(1).is_none_or(|w| w != "pr")
         || words.get(2).is_none_or(|w| w != "merge")
@@ -625,13 +646,165 @@ fn feature_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String
             "the feature PR lands as a merge commit (--merge), not squash or rebase".to_string(),
         );
     }
-    (run.feature_merge != FeatureMerge::Auto).then(|| {
-        format!(
+    if run.feature_merge != FeatureMerge::Auto {
+        return Some(format!(
             "{role} may not merge the feature PR: feature_merge is {}, which leaves the PR \
              for the user",
             policy_name(run.feature_merge)
-        )
+        ));
+    }
+    (!has(&["--merge", "-m"])).then(|| {
+        "the feature PR lands as a merge commit: pass --merge explicitly".to_string()
     })
+}
+
+/// Feature mode only: after a goal PR merges into the feature branch, the
+/// lander records it so the issue is never lost (#1393 §2): it creates the
+/// `grind:on-feature` label, adds it to the issue, posts the `grind:v1`
+/// marker comment, and adds the goal's `Closes #N` line to the feature PR's
+/// body. `None` when `words` is none of those commands (the lander's other
+/// rules then apply); `Some(None)` allows, `Some(Some(reason))` denies.
+fn lander_records_landing(
+    role: &str,
+    words: &[String],
+    run: &RunFacts,
+) -> Option<Option<String>> {
+    let feature = run.feature.as_ref()?;
+    if program_name(&words[0]) != "gh" {
+        return None;
+    }
+    let unquote = |w: &String| w.trim_matches(&['\'', '"'][..]).to_string();
+    let sub: Vec<String> = words[1..].iter().map(unquote).collect();
+    fn is_label(w: &str) -> bool {
+        w == ON_FEATURE_LABEL
+    }
+    let verdict = match sub.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["label", "create", name, ..] => (!is_label(name)).then(|| {
+            format!("{role} may create only the `{ON_FEATURE_LABEL}` label")
+        }),
+        ["issue", "edit", _, rest @ ..] => {
+            let mut ok = !rest.is_empty();
+            let mut i = 0;
+            while let Some(word) = rest.get(i) {
+                i += 1;
+                ok &= match *word {
+                    "--add-label" => rest.get(i).is_some_and(|v| is_label(v)),
+                    "-R" | "--repo" => true,
+                    w => w.strip_prefix("--add-label=").is_some_and(is_label),
+                };
+                if matches!(*word, "--add-label" | "-R" | "--repo") {
+                    i += 1;
+                }
+            }
+            (!ok).then(|| {
+                format!("{role} may only add the `{ON_FEATURE_LABEL}` label with `gh issue edit`")
+            })
+        }
+        ["issue", "comment", ..] => match comment_target(&words[3..]) {
+            Err(flag) => Some(format!("{role} may not pass `{flag}` to gh issue comment")),
+            Ok(Some(_)) => None,
+            Ok(None) => Some(format!("{role} must name one issue to comment on")),
+        },
+        ["pr", "edit", ..] => {
+            let args = &words[3..];
+            let target = pr_target(args);
+            let only_body = args.iter().enumerate().all(|(i, w)| {
+                !w.starts_with('-')
+                    || matches!(
+                        w.split('=').next().unwrap_or(w),
+                        "-b" | "--body" | "-F" | "--body-file" | "-R" | "--repo"
+                    )
+                    || (i > 0 && matches!(args[i - 1].as_str(), "-b" | "--body"))
+            });
+            match (target.as_deref(), feature.pr.as_deref()) {
+                (Some(t), Some(pr)) if t == pr && only_body => None,
+                (Some(t), Some(pr)) if t == pr => Some(format!(
+                    "{role} may change only the feature PR's body (--body/--body-file)"
+                )),
+                _ => Some(format!("{role} may edit only the feature PR's body")),
+            }
+        }
+        _ => return None,
+    };
+    Some(verdict)
+}
+
+/// The label a feature-branch run puts on every issue with a fix on the
+/// feature branch (#1393); `clud grind reconcile` reads it.
+const ON_FEATURE_LABEL: &str = "grind:on-feature";
+
+/// Feature-branch-mode caps for callers that are not `grind-*` roles: the
+/// main-session `/grind` router, which the hook cannot tell apart from any
+/// other session, so they apply only while `run.json` records a feature
+/// (#1392 §6, #1393 §1). The router keeps exactly one worktree (the feature
+/// worktree), never closes an issue (the feature PR and `clud grind
+/// reconcile` do), never merges the feature PR (the lander does, under
+/// `auto`), and never deletes a `grind/*` branch while the feature PR is open.
+pub(super) fn router_reason(command: &str, run: &RunFacts) -> Option<String> {
+    let feature = run.feature.as_ref()?;
+    let stale = "; if no /grind run is active, remove the stale .clud/grind/run.json";
+    let statements = statement_words(command).ok()?;
+    statements.iter().find_map(|words| {
+        if closes_issue(words) {
+            return Some(format!(
+                "the /grind router never closes issues in feature-branch mode: the feature PR's \
+                 Closes lines and `clud grind reconcile` do (#1393){stale}"
+            ));
+        }
+        if program_name(&words[0]) == "git" {
+            let sub = git_subcommand(words)?;
+            if sub.len() >= 2 && sub[0] == "worktree" && sub[1] == "add" {
+                let recorded = feature.worktree.as_deref().unwrap_or_default();
+                let path = worktree_add_path(&sub[2..]);
+                let same = path.as_deref().is_some_and(|p| {
+                    let (p, r) = (Path::new(p.trim_end_matches('/')), Path::new(recorded));
+                    !recorded.is_empty() && (p.ends_with(r) || r.ends_with(p))
+                });
+                return (!same).then(|| {
+                    format!(
+                        "the /grind router keeps exactly one worktree, the feature worktree \
+                         ({recorded}); goal worktrees belong to the grind-planner{stale}"
+                    )
+                });
+            }
+        }
+        if program_name(&words[0]) == "gh"
+            && words.get(1).is_some_and(|w| w == "pr")
+            && words.get(2).is_some_and(|w| w == "merge")
+            && run.feature_pr().is_some()
+            && pr_target(&words[3..]).as_deref() == run.feature_pr()
+        {
+            return Some(format!(
+                "the /grind router never merges the feature PR: the grind-lander does under \
+                 feature_merge=auto, otherwise the user does{stale}"
+            ));
+        }
+        feature_reason("the /grind router", words, run)
+    })
+}
+
+/// The `<path>` of `git worktree add [<options>] <path> [<commit-ish>]`.
+fn worktree_add_path(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while let Some(word) = args.get(i) {
+        i += 1;
+        if word.starts_with('-') {
+            if matches!(word.as_str(), "-b" | "-B" | "--reason") {
+                i += 1;
+            }
+            continue;
+        }
+        return Some(word.clone());
+    }
+    None
+}
+
+/// A cheap prefilter for [`router_reason`], so an ordinary session's shell
+/// calls never read `run.json`.
+pub(super) fn may_concern_router(command: &str) -> bool {
+    ["worktree", "close", "state=closed", "merge", "delete", "branch", ":grind/"]
+        .iter()
+        .any(|needle| command.contains(needle))
 }
 
 /// The issue number a `gh issue comment` argument list targets (`#` stripped,
@@ -1107,6 +1280,8 @@ mod tests {
         ));
         assert!(allowed(LANDER, "gh pr merge 5 --admin --squash", &facts));
         assert!(allowed(LANDER, "gh run view 99 --log-failed", &facts));
+        assert!(allowed(LANDER, "gh run rerun 99", &facts));
+        assert!(!allowed(LANDER, "gh run cancel 99", &facts));
         assert!(!allowed(LANDER, "cargo test", &facts));
         assert!(!allowed(LANDER, "git commit -am fix", &facts));
     }
@@ -1514,6 +1689,99 @@ mod tests {
             &run(true, false)
         ));
         assert!(allowed(INTEGRATOR, "git branch -D feat/x", &facts));
+        let api = "gh api -X DELETE repos/o/r/git/refs/heads/grind/5-x";
+        assert!(!allowed(INTEGRATOR, api, &facts));
+        assert!(allowed(INTEGRATOR, api, &run(true, false)));
+    }
+
+    #[test]
+    fn feature_pr_merge_must_name_the_merge_method() {
+        let auto = feature_run(FeatureMerge::Auto);
+        let reason = shell_reason(LANDER, "gh pr merge 9", &auto).expect("bare merge allowed");
+        assert!(reason.contains("--merge"), "{reason}");
+        assert!(allowed(LANDER, "gh pr merge 9 -m", &auto));
+        // Goal PRs are not the feature PR: their method is the lander's call.
+        assert!(allowed(LANDER, "gh pr merge 5 --admin --squash", &auto));
+    }
+
+    #[test]
+    fn lander_records_a_landed_goal_in_feature_mode_only() {
+        let facts = feature_run(FeatureMerge::DecideLater);
+        for command in [
+            "gh label create grind:on-feature --force",
+            "gh issue edit 102 --add-label grind:on-feature",
+            "gh issue edit 100 --add-label=grind:on-feature -R o/r",
+            "gh issue comment 102 --body 'Landed on grind/meta-100-r1 via #5. \
+             <!-- grind:v1 feature-pr=#9 branch=grind/meta-100-r1 goal-pr=#5 run=r1 -->'",
+            "gh pr edit 9 --body 'Closes #100 Closes #102'",
+            "gh pr edit https://github.com/o/r/pull/9 --body-file body.md",
+        ] {
+            assert!(allowed(LANDER, command, &facts), "{command}");
+            assert!(!allowed(LANDER, command, &run(true, false)), "{command}");
+        }
+        for command in [
+            "gh label create wontfix",
+            "gh issue edit 102 --add-label wontfix",
+            "gh issue edit 102 --remove-label grind:on-feature",
+            "gh issue edit 102 --title x",
+            "gh issue edit 102",
+            "gh issue comment 102 --edit-last --body x",
+            "gh pr edit 5 --body 'Closes #102'",
+            "gh pr edit 9 --base main",
+            "gh pr edit 9 --title x",
+            "gh issue close 102",
+        ] {
+            assert!(!allowed(LANDER, command, &facts), "{command}");
+        }
+    }
+
+    #[test]
+    fn router_caps_apply_only_while_a_feature_is_recorded() {
+        let facts = feature_run(FeatureMerge::Auto);
+        let plain = run(true, false);
+        let wt = ".clud/grind/worktrees/feature";
+        let denied = |command: &str, needle: &str| {
+            let reason = router_reason(command, &facts)
+                .unwrap_or_else(|| panic!("router allowed `{command}`"));
+            assert!(reason.contains(needle), "`{command}`: {reason}");
+            assert!(router_reason(command, &plain).is_none(), "{command}");
+        };
+        // S3: the router never closes an issue in feature mode.
+        for command in [
+            "gh issue close 102",
+            "gh api repos/o/r/issues/102 -X PATCH -f state=closed",
+        ] {
+            denied(command, "never closes issues");
+        }
+        // Exactly one router worktree: the feature one.
+        denied(
+            "git -C /r worktree add /r-wt-2 -b grind/x origin/main",
+            "exactly one worktree",
+        );
+        for command in [
+            format!("git -C /r worktree add /r/{wt} -b grind/meta-100-r1 origin/main"),
+            format!("git worktree add -q {wt} grind/meta-100-r1"),
+        ] {
+            assert_eq!(router_reason(&command, &facts), None, "{command}");
+        }
+        // The feature PR is merged by the lander (auto) or the user, never the router.
+        denied("gh pr merge 9 --merge", "never merges the feature PR");
+        // grind/* branches stay while the feature PR is open.
+        denied("git push origin --delete grind/102", "grind/*");
+        denied("git branch -D grind/meta-100-r1", "grind/*");
+        for command in [
+            "gh issue reopen 102",
+            "gh issue comment 100 --body 'grind result'",
+            "gh pr ready 9",
+            "clud grind reconcile",
+            "git worktree list",
+        ] {
+            assert_eq!(router_reason(command, &facts), None, "{command}");
+        }
+        assert!(may_concern_router("gh issue close 1"));
+        assert!(may_concern_router("git worktree add x"));
+        assert!(!may_concern_router("ls -la"));
+        assert!(!may_concern_router("gh issue view 12"));
     }
 
     #[test]

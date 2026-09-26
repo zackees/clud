@@ -69,8 +69,10 @@ changes no code, so the RED -> GREEN rule applies later, in
 
 `/grind` never closes the meta issue (or any issue) itself. Issues close
 only through a merged PR's `Closes` line into the default branch (for the
-feature stage, the feature PR), through GitHub's sub-issue tracking, or by
-the user.
+feature stage, the feature PR), through `clud grind reconcile` (after a
+feature PR merged into the default branch, or for the top meta issue of a
+meta of metas once every sub-issue has landed), or by the user. GitHub never
+closes a parent issue on its own when its sub-issues close.
 
 ### Attach and verify
 

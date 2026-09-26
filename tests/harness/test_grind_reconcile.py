@@ -9,7 +9,11 @@ built `clud` directly; no scripted agent is needed.
 Cases:
 1. the feature PR is closed unmerged -> every issue open and unlabelled;
 2. a goal issue closed by hand mid-run (closer none) -> reopened;
-3. the feature PR merged into `main` -> every issue closed and unlabelled.
+3. the feature PR merged into `main` -> every issue closed and unlabelled;
+4. a converted original issue is protected like the meta issue (S4);
+5. a child closed by hand before its goal landed (no label yet) is reopened
+   through the meta issue's sub-issues;
+6. an open feature PR waiting for a required review is reported (F5).
 """
 
 from __future__ import annotations
@@ -129,3 +133,86 @@ def test_reconcile_is_idempotent(harness: Harness) -> None:
     before = _issues(harness)
     _reconcile(harness)
     assert _issues(harness) == before
+
+
+def test_reconcile_is_idempotent_after_reopening(harness: Harness) -> None:
+    _seed(harness, closed_by_hand=GOALS[0])
+    _reconcile(harness)
+    before = _issues(harness)
+    _reconcile(harness)
+    assert _issues(harness) == before
+    reopens = [c for c in before[GOALS[0]]["comments"] if "Reopened by" in c["body"]]
+    assert len(reopens) == 1, before[GOALS[0]]["comments"]
+
+
+ORIGINAL = "99"
+
+
+def _seed_original(h: Harness, *, closed_by_hand: bool) -> None:
+    """Meta #100 converted from #99: #99 carries the label and the meta marker."""
+    _seed(h)
+    state = h.read_gh_state()
+    original = _issue("the original multi-part issue", "Split into meta #100", labels=[LABEL])
+    original["comments"] = [{"id": 2999, "body": _marker(None)}]
+    if closed_by_hand:
+        original["state"] = "closed"
+        original["closed_by"] = {"kind": "user", "pr": None}
+    state["issues"][ORIGINAL] = original
+    state["prs"][0]["body"] += f" Closes #{ORIGINAL}"
+    h.write_gh_state(state)
+
+
+def test_s4_converted_original_is_reopened_early_and_closes_with_the_feature(
+    harness: Harness,
+) -> None:
+    _seed_original(harness, closed_by_hand=True)
+    _reconcile(harness)
+    original = _issues(harness)[ORIGINAL]
+    assert original["state"] == "open", original
+    assert LABEL in original["labels"], original
+
+    _merge_feature(harness)
+    _reconcile(harness)
+    issues = _issues(harness)
+    for n in (ORIGINAL, *ALL):
+        assert issues[n]["state"] == "closed", (n, issues[n])
+        assert issues[n]["closed_by"] == {"kind": "pr", "pr": int(PR)}, (n, issues[n])
+        assert LABEL not in issues[n]["labels"], (n, issues[n])
+
+
+def test_unlabelled_child_closed_by_hand_mid_run_is_reopened(harness: Harness) -> None:
+    """#103 has not landed yet (no label, no marker) when a person closes it."""
+    _seed(harness)
+    state = harness.read_gh_state()
+    child = state["issues"][GOALS[1]]
+    child["labels"] = []
+    child["comments"] = []
+    child["state"] = "closed"
+    child["closed_by"] = {"kind": "user", "pr": None}
+    for s in state["issues"][META]["sub_issues"]:
+        if str(s["number"]) == GOALS[1]:
+            s["state"] = "closed"
+    harness.write_gh_state(state)
+    _reconcile(harness)
+    issues = _issues(harness)
+    assert issues[GOALS[1]]["state"] == "open", issues[GOALS[1]]
+    assert any(
+        f"feature PR #{PR}" in c["body"] and "Reopened by" in c["body"]
+        for c in issues[GOALS[1]]["comments"]
+    ), issues[GOALS[1]]
+    assert LABEL not in issues[GOALS[1]]["labels"]
+
+
+def test_f5_open_feature_pr_waiting_for_review_is_reported(harness: Harness) -> None:
+    _seed(harness)
+    state = harness.read_gh_state()
+    state["prs"][0].update({"draft": False, "reviews_required": True, "approved": False})
+    harness.write_gh_state(state)
+    result = _reconcile(harness)
+    out = result.stdout or ""
+    assert f"feature PR #{PR} ({FEATURE}): ready, waiting for review" in out, out
+    for n in ALL:
+        assert f"#{n}" in out, out
+    # Reporting changes nothing on GitHub.
+    issues = _issues(harness)
+    assert all(issues[n]["state"] == "open" and LABEL in issues[n]["labels"] for n in ALL)

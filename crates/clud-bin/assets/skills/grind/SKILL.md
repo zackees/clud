@@ -47,11 +47,11 @@ not emulate the workflow by hand.
 ## 0b. Reconcile
 
 At the start of every `/grind`, before intake, run `clud grind reconcile`
-from the repository root and report each stale line it prints (an issue
-whose goal PR landed on a feature branch but lacks the `grind:on-feature`
-label, marker or feature PR `Closes` line, or a `grind/*` branch whose
-commits survive only at `refs/pull/<n>/head`). A failure is reported, not
-fatal. Optionally, mention once that a GitHub Action could run the same
+from the repository root and report what it prints: each issue it reopened,
+closed or unlabelled, every open feature PR with its state (draft, ready,
+waiting for review) and the issues waiting on it, and each stale feature PR.
+It reads only GitHub (the `grind:on-feature` label and `grind:v1` markers),
+never `run.json`. A failure is reported, not fatal. Optionally, mention once that a GitHub Action could run the same
 reconcile on a schedule; setting one up is out of scope for this run.
 
 ## 1. Intake
@@ -331,8 +331,8 @@ agents at once, and exactly one integrator.
 
 ## 4b. Feature stage (feature-branch mode)
 
-Only when the plan has feature children, at the start of the feature stage:
-after the bug-stage `grind-run` call returns (section 4, step 1), so the
+Only when the plan has feature children: after the bug-stage `grind-run`
+call returns (section 4, step 1) and before the feature-stage call, so the
 branch contains every bug fix that merged:
 
 1. `git fetch origin <main>`.
@@ -355,8 +355,13 @@ branch contains every bug fix that merged:
    under the plain caps, where the lander merges each bug PR into `<main>`.
 
 The router creates no other worktree and never touches the user's checkout
-after preflight. If `origin/<main>` moves during the stage, merge it into the
-feature branch (`git merge origin/<main>`); never rebase the feature branch.
+after preflight. When `origin/<main>` moves during the feature stage, the
+integrator merges it into the feature branch before the next feature goal
+(`git merge --no-ff origin/<main>` in the feature worktree); nobody rebases
+the feature branch. While `run.json` records the feature,
+clud's hook refuses the router a second `git worktree add`, any
+`gh issue close` (or `gh api … -f state=closed`), merging the feature PR,
+and deleting a `grind/*` branch.
 
 ## 5. Finish (always, as the very last step)
 
@@ -367,10 +372,14 @@ two), whether or not every goal merged:
    open with its reason, including each feature child blocked by a stuck
    bug (`blocked: bug #N did not land`) next to that bug. For a feature
    stage, by `feature_merge`:
-   - `later`: report the open draft feature PR.
+   - `later`: when every feature goal landed, mark the feature PR ready
+     (`gh pr ready <fpr>`) but never merge it; report it as waiting for the
+     user. If a goal did not land, leave it a draft and say which.
    - `comment`: post one result comment on the meta issue (branch, goals
      landed, feature PR) and keep the PR draft.
    - `auto`: report the feature PR as merged, or as "waiting for review".
+     Once it merged, run `clud grind reconcile` again so every issue it
+     closed loses the `grind:on-feature` label.
 2. **File problems (router only).** Gather every `problems` item from each
    workflow result (each goal entry's `problems`, `feature.problems`, and the
    top-level `problems`), and dedupe by kind + summary + related_issue. Then,
@@ -394,8 +403,7 @@ two), whether or not every goal merged:
    (kind, summary, evidence) in the final report under "Problems not filed".
    Follow-ups never block the meta issue closing or the no-overlap rule,
    because they are not sub-issues.
-3. **No files left behind.** Remove `.clud/grind/run.json` and
-   `.clud/grind/plan.json`. Remove every
+3. **No files left behind.** Remove every
    worktree and temporary branch the run created, but only after checking
    it has no unpushed work (see `/clud-git`); push every worktree before
    removing it. Never delete a `grind/*` branch while its feature PR is
@@ -403,7 +411,10 @@ two), whether or not every goal merged:
    delete a `wip/grind-<goal>` park branch (a goal's `parked` result, #1424):
    it holds a rejected or failed goal's only copy; report it. A merged
    goal PR's commits stay reachable at `refs/pull/<n>/head`, but an
-   unpushed worktree has no such copy, so push first. Then `git status --porcelain`
+   unpushed worktree has no such copy, so push first. Only then remove
+   `.clud/grind/run.json` and `.clud/grind/plan.json` (last, because the
+   hook reads `run.json` to guard `grind/*` branches during the cleanup).
+   Then `git status --porcelain`
    prints nothing: no untracked files, no uncommitted changes, and no stash
    the run created.
 4. **Restore only what `preflight` recorded.** `git fetch origin`, then
