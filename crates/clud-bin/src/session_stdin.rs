@@ -15,7 +15,7 @@ pub(super) fn should_spawn_byte_stream_stdin_reader(
     !(cfg!(windows) && interactive_real_stdin && has_extra_rx)
 }
 
-pub(super) fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
+pub(crate) fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
     if cfg!(windows) {
         for byte in chunk {
             if *byte == 0x08 {
@@ -53,7 +53,7 @@ pub(super) fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
 /// one keystroke as one `write`, and a key held long enough to matter
 /// repeats, so a torn first chunk is followed by an intact one within
 /// milliseconds.
-pub(super) fn stdin_chunk_requests_interrupt(chunk: &[u8]) -> bool {
+pub(crate) fn stdin_chunk_requests_interrupt(chunk: &[u8]) -> bool {
     chunk.contains(&0x03) || contains_csi_u_ctrl_c(chunk)
 }
 

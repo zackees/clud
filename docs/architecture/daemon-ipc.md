@@ -27,7 +27,7 @@ Three processes, one binary. All files in `crates/clud-bin/src/daemon/`.
 - `attach.rs` — interactive attach loop, raw-terminal keyboard forwarding, Ctrl+C → background-prompt flow, exit-code propagation.
 - `commands.rs` — `clud kill`, `clud list`, `clud logs` (pm2-style tail / follow with rotation handling).
 - `sessions.rs` — `resolve_session_id` (exact / name / unique prefix), `most_recent_session[_any]`, `list_attachable_sessions`.
-- `keys.rs` — `crossterm::KeyEvent` → terminal byte sequences (Ctrl chords, arrow keys, F-keys).
+- `attach_input.rs` — raw terminal input for the interactive attach: the byte source and the filter that forwards it to the worker (#1355).
 - `entry.rs` — single dispatch point: feature-flag check, special-command routing, `run_centralized_session`.
 - `io_helpers.rs` — JSON line read / write, atomic file writes, session-id generator, backlog-size parser.
 
@@ -208,11 +208,11 @@ security boundary.
    - **Subprocess sessions**: the raw backlog — a deque of byte chunks capped at `DEFAULT_BACKLOG_LIMIT_BYTES` (256 KiB, overridable via `--backlog-size` or `CLUD_BACKLOG_BYTES`). Line-oriented output replays cleanly because each line is self-contained.
    - If `snapshot.exit_code` is already set the worker writes a final `Exited` and closes immediately.
 6. The worker spawns a writer thread that drains its per-client mpsc receiver into the TCP stream, and the main connection thread enters a `read_worker_line` loop dispatching `Input` / `Resize` / `Interrupt` to the `SessionRuntime`.
-7. On the client, a reader thread parses `Output` / `Exited` / `Error` and writes to stdout. In parallel, `run_remote_interactive` (`attach.rs:491`) puts the terminal in raw mode (`RawTerminalGuard`, `types.rs:759`), polls `crossterm` events, and runs each `KeyEvent` through `translate_key_event` (`keys.rs:5`):
-   - `KeyAction::Forward(bytes)` → `WorkerClientMessage::Input { submit: bytes == b"\r" }`.
-   - `Event::Paste(text)` → `Input { submit: false }`.
-   - `Event::Resize(cols, rows)` → `WorkerClientMessage::Resize`.
-   - `KeyAction::Interrupt` (Ctrl+C) → break the loop with `LocalAttachResult::InterruptRequested`.
+7. On the client, a reader thread parses `Output` / `Exited` / `Error` and writes to stdout. In parallel, `run_remote_interactive` (`attach.rs`) forwards the terminal's input as raw bytes, mirroring the local PTY pump. It starts the byte source (`attach_input::RawInput`: the `console_input` reader on Windows, polled stdin elsewhere), then VT input, then raw mode (`RawTerminalGuard`, `types.rs`), and runs each chunk through `RemoteInputFilter` (`attach_input.rs`):
+   - Every byte except Ctrl+C goes to the worker as `WorkerClientMessage::Input { submit: bytes == b"\r" }`. That includes terminal replies no key parser recognizes. The worker answers ConPTY's startup `ESC[6n` only while no client is attached (`CprScanner`, #1366). With a client attached, the answer is the one the client's terminal writes to stdin, so dropping it hangs the child (#1355). The old `crossterm::event` loop dropped it.
+   - Ctrl+C (`0x03` or kitty CSI u, `stdin_chunk_requests_interrupt`) is not forwarded. It breaks the loop with `LocalAttachResult::InterruptRequested`.
+   - F3 presses and releases (`F3Observer`) drive the voice hooks and are still forwarded, as in the local pump. Bracketed paste goes through `BracketedPasteNormalizer`. A held lone Esc is released after 5 ms idle.
+   - A terminal-size change seen on the 25 ms tick → `WorkerClientMessage::Resize`.
 8. On `InterruptRequested`: the stamped interrupt reason decides first (`background_decision_for_reason`, #1208) — a window close, logoff, shutdown, `SIGHUP` or `SIGTERM` backgrounds a detachable session immediately rather than spending the shutdown budget on a prompt. Otherwise, if `session.detachable`, show the 5s `BACKGROUND_PROMPT_TIMEOUT` prompt (`prompt_continue_in_background`, `attach.rs:658`). Y/Enter/timeout → `shutdown_worker_connection` and return 0 (session continues in background). N/Esc → `request_session_termination` and return 130. If not detachable, send `WorkerClientMessage::Interrupt` to the worker and wait up to 5s for `Exited`.
 
 ## Snapshot and log persistence

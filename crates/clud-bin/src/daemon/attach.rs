@@ -9,17 +9,17 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 
+use super::attach_input::{InputPoll, RawInput, RemoteInputFilter};
 use super::client::{
     ensure_daemon, request_session_interrupt, send_daemon_request, send_worker_message,
     shutdown_worker_connection, write_worker_message,
 };
-use super::keys::translate_key_event;
 use super::process_utils::identity_is_alive;
 use super::sessions::resolve_session_id;
 use super::types::{
     unix_millis_now, BackgroundPromptDecision, CtrlCProfile, DaemonRequest, DaemonResponse,
-    KeyAction, LocalAttachResult, LocalInterruptProfile, RawTerminalGuard, SessionKind,
-    SessionSnapshot, WorkerClientMessage, WorkerServerMessage, BACKGROUND_PROMPT_TIMEOUT,
+    LocalAttachResult, LocalInterruptProfile, RawTerminalGuard, SessionKind, SessionSnapshot,
+    WorkerClientMessage, WorkerServerMessage, BACKGROUND_PROMPT_TIMEOUT,
 };
 use super::wire_prost::{daemon_wire_format_from_env, decode_worker_server_line, DaemonWireFormat};
 use crate::ctrl_c_track::CtrlEventKind;
@@ -488,12 +488,27 @@ fn send_interrupt_fast_path(
     let _ = shutdown_worker_connection(writer);
 }
 
+/// How long the attach loop waits for input before it ticks the voice hook,
+/// drains drag-drop chunks and checks the terminal size.
+const ATTACH_INPUT_TICK: Duration = Duration::from_millis(25);
+
+/// How long a held partial bracketed-paste prefix (usually a lone Esc)
+/// waits for its continuation before it is released to the worker.
+const ATTACH_PENDING_FLUSH: Duration = Duration::from_millis(5);
+
 fn run_remote_interactive(
     writer: Arc<Mutex<TcpStream>>,
     format: DaemonWireFormat,
     interrupted: &AtomicBool,
     _detachable: bool,
 ) -> LocalAttachResult {
+    // #1355: raw bytes, not `crossterm::event`, so terminal replies such as
+    // the answer to ConPTY's startup `ESC[6n` reach the worker. Same setup
+    // order as `runner_execution.rs`: the input reader first (on Windows it
+    // snapshots the original console mode), then VT input, then raw mode.
+    // Locals drop in reverse, so raw mode is undone first.
+    let mut input = RawInput::start();
+    let _console_vt = crate::console_setup::enable_console_vt_input();
     let _guard = match RawTerminalGuard::enter() {
         Ok(guard) => guard,
         Err(err) => {
@@ -504,6 +519,7 @@ fn run_remote_interactive(
             return LocalAttachResult::Completed(1);
         }
     };
+    let mut filter = RemoteInputFilter::new();
     // VoiceMode + PtyInputSink: same `InteractiveHooks` plumbing the
     // local-PTY pump uses, just with input bytes routed through the
     // daemon-worker TCP socket instead of `NativePtyProcess::write_impl`.
@@ -515,6 +531,19 @@ fn run_remote_interactive(
         writer: Arc::clone(&writer),
         format,
     };
+    let send_input = |bytes: &[u8], submit: bool| {
+        let _ = send_worker_message(
+            &writer,
+            &WorkerClientMessage::Input {
+                data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                submit,
+            },
+            format,
+        );
+    };
+    // Without crossterm's event source nothing reports a resize, so the
+    // loop compares the terminal size on every tick.
+    let mut last_size = crossterm::terminal::size().ok();
 
     // Issue #79: register the console IDropTarget so dropped paths reach
     // the daemon-owned PTY just like keystrokes. Held for the lifetime of
@@ -534,62 +563,51 @@ fn run_remote_interactive(
         if interrupted.load(Ordering::SeqCst) {
             return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
         }
-        match event::poll(Duration::from_millis(25)) {
-            Ok(true) => match event::read() {
-                Ok(Event::Key(key)) => match translate_key_event(key) {
-                    KeyAction::Forward(bytes) => {
-                        let submit = bytes == b"\r";
-                        let _ = send_worker_message(
-                            &writer,
-                            &WorkerClientMessage::Input {
-                                data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                                submit,
-                            },
-                            format,
-                        );
-                    }
-                    KeyAction::Interrupt => {
-                        return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
-                    }
-                    KeyAction::F3Press => {
-                        if voice.intercept_f3() {
-                            if let Err(err) = voice.on_f3_press(&mut sink) {
-                                eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
-                            }
+        let wait = if filter.has_pending() {
+            ATTACH_PENDING_FLUSH
+        } else {
+            ATTACH_INPUT_TICK
+        };
+        match input.poll(wait) {
+            InputPoll::Chunk(chunk) => {
+                let filtered = filter.process(&chunk);
+                if filtered.interrupt {
+                    return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
+                }
+                if !filtered.bytes.is_empty() {
+                    send_input(&filtered.bytes, filtered.submit());
+                }
+                if voice.intercept_f3() {
+                    for _ in 0..filtered.f3.presses {
+                        if let Err(err) = voice.on_f3_press(&mut sink) {
+                            eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
                         }
                     }
-                    KeyAction::F3Release => {
-                        if voice.intercept_f3() {
-                            if let Err(err) = voice.on_f3_release(&mut sink) {
-                                eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
-                            }
+                    for _ in 0..filtered.f3.releases {
+                        if let Err(err) = voice.on_f3_release(&mut sink) {
+                            eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
                         }
                     }
-                    KeyAction::Ignore => {}
-                },
-                Ok(Event::Paste(text)) => {
-                    let _ = send_worker_message(
-                        &writer,
-                        &WorkerClientMessage::Input {
-                            data_b64: base64::engine::general_purpose::STANDARD
-                                .encode(text.as_bytes()),
-                            submit: false,
-                        },
-                        format,
-                    );
                 }
-                Ok(Event::Resize(cols, rows)) => {
-                    let _ = send_worker_message(
-                        &writer,
-                        &WorkerClientMessage::Resize { rows, cols },
-                        format,
-                    );
+            }
+            InputPoll::Idle => {
+                let pending = filter.flush_pending();
+                if !pending.is_empty() {
+                    send_input(&pending, false);
                 }
-                Ok(_) => {}
-                Err(_) => return LocalAttachResult::Completed(1),
-            },
-            Ok(false) => {}
-            Err(_) => return LocalAttachResult::Completed(1),
+            }
+            InputPoll::Closed => return LocalAttachResult::Completed(1),
+        }
+        let size = crossterm::terminal::size().ok();
+        if size != last_size {
+            last_size = size;
+            if let Some((cols, rows)) = size {
+                let _ = send_worker_message(
+                    &writer,
+                    &WorkerClientMessage::Resize { rows, cols },
+                    format,
+                );
+            }
         }
         // Tick the voice hook even when no keyboard event arrived: this
         // drains pending whisper transcripts into `WorkerInputSink` and
@@ -606,14 +624,7 @@ fn run_remote_interactive(
         // runner's behavior.
         if let Some(rx) = &dnd_rx {
             while let Ok(chunk) = rx.try_recv() {
-                let _ = send_worker_message(
-                    &writer,
-                    &WorkerClientMessage::Input {
-                        data_b64: base64::engine::general_purpose::STANDARD.encode(&chunk),
-                        submit: false,
-                    },
-                    format,
-                );
+                send_input(&chunk, false);
             }
         }
     }

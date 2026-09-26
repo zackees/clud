@@ -102,6 +102,25 @@ impl BracketedPasteNormalizer {
         }
         out
     }
+
+    /// True while a partial `PASTE_START` prefix is held outside a paste,
+    /// waiting for the bytes that decide whether it opens one. A lone Esc
+    /// keypress is the common case.
+    pub fn has_pending(&self) -> bool {
+        self.inside.is_none() && self.start_match > 0
+    }
+
+    /// Release a held partial `PASTE_START` prefix verbatim, so a lone Esc
+    /// is not stuck until the next keystroke. Returns nothing inside a
+    /// paste body, which only its end marker may close.
+    pub fn flush_pending(&mut self) -> Vec<u8> {
+        if !self.has_pending() {
+            return Vec::new();
+        }
+        let pending = PASTE_START[..self.start_match].to_vec();
+        self.start_match = 0;
+        pending
+    }
 }
 
 impl Default for BracketedPasteNormalizer {

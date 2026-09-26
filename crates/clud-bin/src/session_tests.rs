@@ -451,6 +451,30 @@ fn paste_normalizer_broken_start_prefix_is_flushed() {
 }
 
 #[test]
+fn paste_normalizer_flush_releases_a_held_lone_esc() {
+    // #1355: a lone Esc keypress is a PASTE_START prefix, so `process`
+    // holds it. `flush_pending` must hand it back verbatim.
+    let mut p = BracketedPasteNormalizer::new();
+    assert!(p.process(b"\x1b").is_empty());
+    assert!(p.has_pending());
+    assert_eq!(p.flush_pending(), b"\x1b");
+    assert!(!p.has_pending());
+    assert_eq!(p.process(b"a"), b"a");
+}
+
+#[test]
+fn paste_normalizer_flush_never_splits_an_open_paste() {
+    let mut p = BracketedPasteNormalizer::new();
+    assert!(p.process(b"\x1b[200~partial").is_empty());
+    assert!(!p.has_pending());
+    assert!(p.flush_pending().is_empty());
+    assert_eq!(
+        p.process(b"\x1b[201~"),
+        b"\x1b[200~partial\x1b[201~".to_vec()
+    );
+}
+
+#[test]
 fn paste_normalizer_two_pastes_back_to_back() {
     // Two pastes, neither path-shaped, should pass through cleanly.
     let mut p = BracketedPasteNormalizer::new();
