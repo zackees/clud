@@ -3,6 +3,14 @@
 //! This file deliberately uses raw Win32 process/job APIs instead of
 //! `running_process::NativeProcess`: the point of the spike is to measure the
 //! primitives that NativeProcess normally wraps or hides.
+//!
+//! Run manually:
+//!
+//! ```bash
+//! soldr cargo test -p clud --test diagnostics win32_hooking_probe -- --ignored --nocapture --test-threads=1
+//! ```
+//!
+//! Listed in docs/architecture/ci.md "Manual Windows probes"; keep that checklist in sync.
 
 #[cfg(not(target_os = "windows"))]
 #[test]
