@@ -123,8 +123,11 @@ The complexity threshold is
 `grind-run.js::thresholdVerdict`: it picks `path: regroup` only for a confident
 classification with every child placed, 8+ children, and at least 2
 independent feature groups of 3+; otherwise it logs
-`keeping #T as is: <reason>` and the meta issue is left untouched. The
-router then rewrites `run.json` without `phase` for the real run.
+`keeping #T as is: <reason>` and the meta issue is left untouched. A child
+the planner leaves out is printed `#N unclassified` and counts as unplaced.
+The router then rewrites `run.json` without `phase` for the real run. The
+`phase` marker in `run.json` is the hook's only plan-only signal; the
+`PLAN-ONLY` prompt text is for the planner, and the hook never reads it.
 
 ### Meta of metas and no overlap
 
@@ -246,15 +249,33 @@ Issue [#1409](https://github.com/zackees/clud/issues/1409). The stage fields
 are defined by the plan; see
 [Prework and the plan comment](#prework-and-the-plan-comment).
 
-- **Order.** `grind-run` runs every bug-stage goal against `origin/<main>`
-  first. Only then does it run each feature stage, against that stage's
-  `stage.base`.
-- **Base override.** For a run without a plan, `args.base` replaces the
-  default base (`origin/<main>`).
-- **Stuck bug.** The rule is `block_dependents_only`. When a bug does not
-  merge, only the feature children that list it in `depends_on_bugs` are
-  blocked, reported as `blocked: bug #N did not land`. Every other goal
-  proceeds.
+- **One call per stage.** The feature branch must be cut from `<main>`
+  *after* the bug stage has merged, and only the router may create it, so
+  the router starts `grind-run` twice. The bug-stage call gets `plan`, the
+  bug children and `base: <main>`; prework posts the plan there, and the
+  result carries `plan_url`. An all-feature plan still makes this call, with
+  no goals, so the plan is recorded before any branch exists. The router
+  then sets up the feature branch and starts the feature-stage call with the
+  feature children, `base: <feature branch>`, `plan_url` (prework is
+  skipped), `feature`, `feature_merge`, `problem_reporting` and
+  `stuck_bugs`.
+- **Order.** Given goals from both stages in one call, `grind-run` still
+  runs every bug-stage goal first and each feature stage after it, against
+  that stage's `stage.base`.
+- **Base.** A goal's base is its plan stage's `base`; `args.base` (default
+  `<main>`) covers goals in no stage.
+- **Ids.** Plan stages hold numbers, goals and planner output strings or
+  `#N`; the workflow compares them after stripping `#` (`idKey`).
+- **Stuck bug.** The rule is `block_dependents_only` (also when the plan
+  omits `rules.stuck_bug`). When a bug does not merge, in this call or as
+  listed in `stuck_bugs`, only the feature children that list it in
+  `depends_on_bugs` are blocked, reported as `blocked: bug #N did not land`.
+  Every other goal proceeds.
+- **Caps.** While the bug stage runs, `run.json` has no `feature`, so the
+  lander merges bug PRs into `<main>` under the plain caps.
+
+Why two calls:
+[DD-099](../DESIGN_DECISIONS.md#dd-099-the-grind-router-starts-grind-run-once-per-stage).
 
 ### Feature-branch mode
 

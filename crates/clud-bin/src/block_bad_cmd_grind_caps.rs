@@ -1065,6 +1065,35 @@ mod tests {
         assert!(!allowed(LANDER, "git commit -am fix", &facts));
     }
 
+    /// #1409: during the bug stage `run.json` has no `feature` yet (the router
+    /// adds it when the feature stage starts), so the lander merges each bug
+    /// PR into `<main>`, whatever the feature merge policy will be.
+    #[test]
+    fn bug_stage_lander_may_merge_into_main() {
+        for policy in ["auto", "later", "comment"] {
+            let bugs = RunFacts::from_json(&serde_json::json!({
+                "mode": "parallel", "meta": 100, "feature_merge": policy,
+                "tracks": {"101": "bug", "102": "feature"}
+            }));
+            assert!(bugs.feature.is_none(), "{policy}");
+            for command in [
+                "gh pr merge 101 --merge",
+                "gh pr merge 101 --squash --admin",
+                "gh pr merge https://github.com/o/r/pull/101 --merge",
+            ] {
+                assert!(allowed(LANDER, command, &bugs), "{policy}: {command}");
+            }
+        }
+        // Once the feature stage starts, a goal PR still merges (into the
+        // feature branch), but the feature PR follows the policy.
+        let feature = RunFacts::from_json(&serde_json::json!({
+            "mode": "parallel", "meta": 100, "feature_merge": "later",
+            "feature": {"branch": "grind/meta-100-1f3a", "pr": 7}
+        }));
+        assert!(allowed(LANDER, "gh pr merge 102 --merge", &feature));
+        assert!(!allowed(LANDER, "gh pr merge 7 --merge", &feature));
+    }
+
     #[test]
     fn no_grind_subagent_can_create_issues() {
         for facts in [run(false, false), run(true, false)] {

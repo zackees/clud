@@ -14,8 +14,8 @@ You hold the run's build lock, so nothing else builds while you do.
 
 1. **Branch.** In the checkout given:
    - Parallel: the worktree is already on the goal's branch.
-   - Sequential: `git fetch origin <main>`, then
-     `git switch -c <branch> origin/<main>`, carrying the worker edits
+   - Sequential: `git fetch origin <base>`, then
+     `git switch -c <branch> origin/<base>` (`<base>` as in step 2), carrying the worker edits
      (`git stash` first if the switch needs it).
    Commit the goal's files by name (never `git add -A`) with a conventional
    message naming the issue.
