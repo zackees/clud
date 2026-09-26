@@ -306,7 +306,11 @@ pub fn resolve(
     let parent = match std::fs::canonicalize(parent) {
         Ok(parent) => parent,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Resolved::Missing(absolute));
+            // Still hold a missing path to the roots: on Windows `/etc/x`
+            // becomes `C:\etc\x`, whose parent is usually absent.
+            let path = canonical_with_missing_tail(&absolute)?;
+            roots.containing(&path)?;
+            return Ok(Resolved::Missing(path));
         }
         Err(error) => return Err(format!("cannot resolve its directory: {error}")),
     };
@@ -335,6 +339,23 @@ pub fn resolve(
         is_dir,
         is_symlink,
     }))
+}
+
+/// `path` with its deepest existing ancestor canonicalized and the missing
+/// components re-appended, so it compares against the canonical roots.
+fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
+    let mut tail = Vec::new();
+    let mut ancestor = path;
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(base) => return Ok(tail.iter().rev().fold(base, |acc, part| acc.join(part))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tail.push(ancestor.file_name().ok_or("has no existing ancestor")?);
+                ancestor = ancestor.parent().ok_or("has no existing ancestor")?;
+            }
+            Err(error) => return Err(format!("cannot resolve its directory: {error}")),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
