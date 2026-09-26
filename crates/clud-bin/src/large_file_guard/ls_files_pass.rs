@@ -127,6 +127,7 @@ pub(super) fn ls_files_pass(root: &Path) -> Option<Vec<(PathBuf, u32)>> {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().ok()?;
 

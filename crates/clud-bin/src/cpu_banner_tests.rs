@@ -545,6 +545,7 @@ fn bench_sampler_cost_50_procs() {
             create_process_group: false,
             stdin_mode: StdinMode::Null,
             nice: None,
+            address_space_limit_bytes: None,
         });
         if c.start().is_ok() {
             children.push(c);

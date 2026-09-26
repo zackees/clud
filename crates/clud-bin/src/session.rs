@@ -888,10 +888,7 @@ fn spawn_os_resize_watcher(resize_tx: std::sync::mpsc::Sender<(u16, u16)>) {
     {
         std::thread::spawn(move || {
             let mut last: Option<(u16, u16)> = None;
-            loop {
-                let Ok((cols, rows)) = crossterm::terminal::size() else {
-                    break;
-                };
+            while let Ok((cols, rows)) = crossterm::terminal::size() {
                 let now = (rows, cols);
                 if Some(now) != last {
                     if resize_tx.send(now).is_err() {

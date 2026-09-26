@@ -352,6 +352,7 @@ pub(crate) fn run_capture(
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process

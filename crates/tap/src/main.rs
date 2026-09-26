@@ -90,6 +90,7 @@ fn exec(argv: &[String]) -> std::process::ExitCode {
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
 
     if let Err(error) = process.start() {

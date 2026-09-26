@@ -50,7 +50,7 @@ GIT_CONFIG_COUNT = "1"
 GIT_CONFIG_KEY_0 = "safe.directory"
 GIT_CONFIG_VALUE_0 = "/workspace"
 # This repository pins Soldr through its packaging/CI flow rather than a
-# rust-toolchain.toml; the image itself pins Rust 1.94.
+# rust-toolchain.toml; the image itself pins Rust 1.95.0.
 SOLDR_ALLOW_UNPINNED = "1"
 
 [task.lint]

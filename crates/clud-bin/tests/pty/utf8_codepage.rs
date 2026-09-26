@@ -70,6 +70,7 @@ fn cmd_wrapper_round_trips_utf8_bytes() {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().expect("start cmd shim");
 

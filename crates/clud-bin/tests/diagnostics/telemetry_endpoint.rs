@@ -89,6 +89,7 @@ fn telemetry_round_trip_via_clud_log_subprocess() {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process.start().expect("spawn clud log");
@@ -191,6 +192,7 @@ fn clud_log_no_env_with_fail_flag_exits_nonzero() {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process.start().expect("spawn clud log");
@@ -242,6 +244,7 @@ fn clud_log_unreachable_server_with_fail_flag_exits_nonzero() {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process.start().expect("spawn clud log");

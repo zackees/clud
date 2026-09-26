@@ -34,6 +34,7 @@ fn run_isolated(home: &std::path::Path, args: &[&str]) -> (i32, Vec<u8>) {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().expect("spawn clud");
     let mut output = Vec::new();

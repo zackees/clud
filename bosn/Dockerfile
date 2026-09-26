@@ -1,4 +1,4 @@
-FROM rust:1.94-bookworm
+FROM rust:1.95.0-bookworm
 
 # Bosn derives a managed image identity from this Dockerfile. Keep this
 # project-specific label so an unrelated registry cannot claim the same tag.

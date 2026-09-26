@@ -75,6 +75,7 @@ fn run_argv(session_root: &Path, argv: Vec<String>) -> Run {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().expect("tap binary must start");
 

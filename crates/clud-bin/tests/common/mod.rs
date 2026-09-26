@@ -101,6 +101,7 @@ pub fn mock_agent_path() -> PathBuf {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process.start().expect("spawn cargo build -p mock-agent");

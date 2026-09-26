@@ -55,6 +55,7 @@ fn run_clud(args: &[&str], state_dir: &std::path::Path) -> (i32, String) {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().expect("spawn clud");
 

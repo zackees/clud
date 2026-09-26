@@ -128,7 +128,7 @@ Incremental builders (cargo, ccache, make, ninja) compare **source mtime vs buil
 - **Native Linux developer:** host bind mounts are fast on Linux; just `cargo build`. The tool detects this and short-circuits.
 - **Production / shippable images:** use multi-stage Dockerfile with cargo-chef instead. See `/clud-docker-rust-app-dev` for the development-vs-production discussion.
 - **macOS x86 emulation:** use `/clud-docker-mac-x86`.
-- **Single-shot one-off builds:** no warm cycle to optimize; just run `docker run --rm rust:1.94 cargo build` and move on.
+- **Single-shot one-off builds:** no warm cycle to optimize; just run `docker run --rm rust:1.95.0 cargo build` and move on.
 
 ## v0 scope (this PR — zackees/clud#421)
 

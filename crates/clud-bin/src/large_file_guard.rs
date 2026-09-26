@@ -201,7 +201,7 @@ fn report_from_index_pass(root: &Path, output: index_pass::IndexPassOutput) -> R
             }
         }
     }
-    files.sort_by(|a, b| b.size.cmp(&a.size));
+    files.sort_by_key(|file| std::cmp::Reverse(file.size));
     let total_qualifying = files.len();
     files.truncate(REPORT_LIMIT);
     Report {
@@ -272,7 +272,7 @@ fn collect(root: &Path, deadline: Duration) -> Report {
 
     let timed_out = start.elapsed() >= deadline;
     let mut files = hits.into_inner().unwrap();
-    files.sort_by(|a, b| b.size.cmp(&a.size));
+    files.sort_by_key(|file| std::cmp::Reverse(file.size));
     let total = files.len();
     files.truncate(REPORT_LIMIT);
     Report {

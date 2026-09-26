@@ -67,6 +67,7 @@ pub fn run(bucket: &str, target: Option<String>, command: &[String]) -> i32 {
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     if process.start().is_err() {
         eprintln!("clud test run: failed to start {:?}", command[0]);
