@@ -161,3 +161,7 @@ cmd = "sh /workspace/ci/act_ci.sh static"
 [task.act-ci-linux]
 stack = "clud_act"
 cmd = "sh /workspace/ci/act_ci.sh test-linux-x64-unit"
+
+[task.act-installer-pages]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=install-pages.yml sh /workspace/ci/act_ci.sh build-site"
