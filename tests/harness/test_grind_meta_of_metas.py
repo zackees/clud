@@ -683,7 +683,10 @@ def test_m6_only_the_picked_feature_group_is_worked(harness: Harness) -> None:
         "rules": {},
     }
     url = f"https://github.com/o/r/issues/{TOP}#issuecomment-1000"
-    body = f"{PLAN_MARKER}{RUN_ID} -->\n```json\n{json.dumps({'schema': 'grind-plan/v1'})}\n```"
+    # Marker only: clud's rm-vars hook reads the backticks of a ```json fence
+    # inside a single-quoted --body as a command substitution and blocks the
+    # whole command. This test is about the feature pick, not the plan body.
+    body = f"{PLAN_MARKER}{RUN_ID} -->"
     prework = _role(
         "prework",
         "prework",
