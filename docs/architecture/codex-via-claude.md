@@ -88,7 +88,9 @@ Claude Code 2.1.223 or newer discovers a Codex-only catalog from the bridge's
 authenticated `GET /v1/models`. The three rows use reserved harness-facing
 IDs (`clud-claude-codex-sol`, `clud-claude-codex-terra`, and
 `clud-claude-codex-luna`); the bridge rewrites the selected row to its real
-`gpt-5.6-*` wire ID before calling OpenAI. Unknown reserved IDs fail locally.
+current account-checked `gpt-*` wire ID before calling OpenAI. Unknown reserved
+IDs fail locally. The Sol and Luna IDs come from the separate model Pages
+manifest; Terra remains a reviewed catalog row. See [model-pages.md](model-pages.md).
 Provider wire IDs and the legacy `<model>@<effort>` spelling remain accepted
 for continued sessions, but clud no longer emits a compound wire ID to Claude
 Code.

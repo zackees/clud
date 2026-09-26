@@ -528,7 +528,7 @@ fn repeat_command_pins_the_resolved_codex_catalog_default() {
     let command = build_repeat_once_command(&args, &plan).unwrap();
     assert!(command
         .windows(2)
-        .any(|part| part == ["--model", "gpt-5.6-sol"]));
+        .any(|part| part == ["--model", "gpt-6-sol"]));
     assert!(command.windows(2).any(|part| part == ["--effort", "low"]));
     assert!(!command
         .iter()

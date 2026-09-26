@@ -144,7 +144,7 @@ pub fn default_model_spec() -> ModelSpec {
     let model = provider_catalog::reviewed_default_model(ModelProvider::Codex)
         .expect("the Codex catalog must contain exactly one reviewed provider default");
     ModelSpec {
-        model: model.wire_id.to_string(),
+        model: crate::codex_runtime::wire_id(model.cli_id, model.wire_id),
         effort: None,
     }
 }
@@ -1649,14 +1649,14 @@ mod tests {
         // pins a model through a gateway that never validates the string.
         assert_eq!(resolved(Some("gpt-5.6-luna")).model, "gpt-5.6-luna");
         // ... and the short name is expanded on the way.
-        assert_eq!(resolved(Some("sol")).model, "gpt-5.6-sol");
+        assert_eq!(resolved(Some("sol")).model, "gpt-6-sol");
 
         // The harness's own ids are meaningless upstream.
         for claude in ["claude-opus-4-8", "Claude-3", "   "] {
             assert_eq!(resolved(Some(claude)), default, "{claude}");
         }
         assert_eq!(resolved(None), default);
-        assert_eq!(default_model_spec().model, "gpt-5.6-sol");
+        assert_eq!(default_model_spec().model, "gpt-6-sol");
     }
 
     /// Issue #820: every model the picker can name has to reach the wire as

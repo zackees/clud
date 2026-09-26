@@ -6,6 +6,6 @@ LABEL org.opencontainers.image.title="clud-bosn-validation"
 
 RUN apt-get update \
     # Debian package names. python-name-lint: allow-next-line
-    && apt-get install -y --no-install-recommends clang lld python3 python3-pip git pkg-config libssl-dev \
+    && apt-get install -y --no-install-recommends clang lld python3 python3-pip python-is-python3 git pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && pip3 install --break-system-packages uv soldr

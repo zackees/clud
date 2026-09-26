@@ -26,14 +26,20 @@ pub fn codex_models() -> impl Iterator<Item = CatalogModel> {
 
 /// Look up a catalog row by wire id.
 pub fn model_by_id(id: &str) -> Option<CatalogModel> {
-    codex_models().find(|model| model.wire_id == id)
+    codex_models()
+        .find(|model| model.wire_id == id)
+        .or_else(|| {
+            codex_models().find(|model| {
+                matches!(model.cli_id, "codex-sol" | "codex-luna")
+                    && crate::codex_runtime::wire_id(model.cli_id, model.wire_id) == id
+            })
+        })
 }
 
 fn model_by_alias(alias: &str) -> Option<CatalogModel> {
     let alias = alias.trim().to_ascii_lowercase();
     codex_models().find(|model| {
         model.cli_id == alias
-            || model.wire_id == alias
             || model
                 .legacy_aliases
                 .iter()
@@ -103,7 +109,7 @@ impl ModelSpec {
         };
 
         let model = match model_by_alias(model_part) {
-            Some(model) => model.wire_id.to_string(),
+            Some(model) => crate::codex_runtime::wire_id(model.cli_id, model.wire_id),
             None if looks_like_full_id(model_part) => model_part.to_string(),
             None => {
                 return Err(SelectionError::UnknownAlias {
@@ -179,9 +185,9 @@ mod tests {
 
     #[test]
     fn short_names_expand_to_wire_ids() {
-        assert_eq!(ModelSpec::parse("sol").unwrap().model, "gpt-5.6-sol");
+        assert_eq!(ModelSpec::parse("sol").unwrap().model, "gpt-6-sol");
         assert_eq!(ModelSpec::parse("terra").unwrap().model, "gpt-5.6-terra");
-        assert_eq!(ModelSpec::parse("luna").unwrap().model, "gpt-5.6-luna");
+        assert_eq!(ModelSpec::parse("luna").unwrap().model, "gpt-6-luna");
         assert_eq!(ModelSpec::parse(" TERRA ").unwrap().model, "gpt-5.6-terra");
     }
 

@@ -29,6 +29,7 @@ pub mod codex_hook_normalize;
 pub mod codex_lf;
 pub mod codex_model;
 pub mod codex_pipeline;
+pub mod codex_runtime;
 pub mod codex_sse;
 pub mod codex_translate;
 pub mod codex_upstream;
