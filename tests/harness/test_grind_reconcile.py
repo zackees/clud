@@ -109,7 +109,8 @@ def test_r2_goal_closed_by_hand_mid_run_is_reopened(harness: Harness) -> None:
     assert any("Reopened by `clud grind reconcile`" in c["body"] for c in goal["comments"]), goal
     # The feature PR is still open and healthy: the others are untouched.
     for n in (META, GOALS[1]):
-        assert issues[n]["state"] == "open" and LABEL in issues[n]["labels"], issues[n]
+        assert issues[n]["state"] == "open", issues[n]
+        assert LABEL in issues[n]["labels"], issues[n]
 
 
 def test_r3_feature_pr_merged_into_default_closes_and_unlabels(harness: Harness) -> None:

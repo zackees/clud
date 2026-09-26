@@ -64,6 +64,30 @@ act pull_request -W .github/workflows/ci.yml -j static \
   -P ubuntu-24.04=catthehacker/ubuntu:act-latest
 ```
 
+The same jobs also run through Bosn, so the host needs only Docker and Bosn,
+not `act`:
+
+```bash
+bosn run --task act-ci-list        # the jobs act sees in ci.yml
+bosn run --task act-ci-static      # the `static` job
+bosn run --task act-ci-linux       # build-linux-x64, then test-linux-x64-unit
+```
+
+These tasks use the `clud_act` stack (`bosn/act.Dockerfile`), which carries
+only the `act` and `docker` clients and drives the host engine through the
+mounted socket. `ci/act_ci.sh` works around three things act can't handle
+directly:
+
+- **Git metadata:** the checkout is mounted read-only, and a worktree's `.git`
+  points outside the mount. The script snapshots the tree into a throwaway
+  one-commit repo.
+- **Checkout:** act skips `actions/checkout` only when its `ref` matches
+  `github.ref`, and `ci.yml` pins `ref` to a SHA. The script swaps checkout
+  for a local action that unpacks the snapshot.
+- **Container names:** act names job containers from the workflow and job
+  names alone, so two concurrent runs on one host would remove each other's
+  containers. The script gives every workflow a per-run name.
+
 `act --dryrun` is useful for planning/validation but does not run action code.
 Its Docker runner is not a native macOS or Windows runner, and this workflow's
 reusable jobs, artifacts, and runner environment can differ from GitHub's.

@@ -368,7 +368,7 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
         taken = [int(k) for k in issues if k.isdigit()] + [
             p["number"] for p in state.get("prs", [])
         ]
-        number = str(max(taken + [0]) + 1)
+        number = str(max([*taken, 0]) + 1)
         issues[number] = {
             "title": _flag(argv, "--title") or "",
             "body": body,

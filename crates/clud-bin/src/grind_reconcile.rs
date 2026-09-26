@@ -100,8 +100,13 @@ pub fn last_marker<'a>(comments: impl IntoIterator<Item = &'a str>) -> Option<Ma
 pub enum Closer {
     /// Closed by hand (or not closed at all).
     None,
-    PullRequest { merged: bool, base_ref: String },
-    Commit { on_default: bool },
+    PullRequest {
+        merged: bool,
+        base_ref: String,
+    },
+    Commit {
+        on_default: bool,
+    },
 }
 
 /// State of the feature PR named in the marker.
@@ -202,7 +207,10 @@ fn closer_landed(closer: &Closer, default_branch: &str) -> bool {
 
 fn closer_reason(closer: &Closer, default_branch: &str) -> String {
     match closer {
-        Closer::PullRequest { merged: true, base_ref } => {
+        Closer::PullRequest {
+            merged: true,
+            base_ref,
+        } => {
             format!("closed by a PR merged into `{base_ref}`, not `{default_branch}`")
         }
         Closer::PullRequest { .. } => "closed by an unmerged PR".to_string(),
@@ -398,7 +406,14 @@ fn gather_facts(
         let g = gh_json(
             cwd,
             &[
-                "api", "graphql", "-F", "owner={owner}", "-F", "repo={repo}", "-f", &q,
+                "api",
+                "graphql",
+                "-F",
+                "owner={owner}",
+                "-F",
+                "repo={repo}",
+                "-f",
+                &q,
             ],
         )?;
         match closer_from_graphql(&g) {
@@ -579,7 +594,10 @@ mod tests {
         assert!(!on_default);
         assert_eq!(closer, Closer::Commit { on_default: false });
         let feature = feature_from_pr_json(&open_pr(), NOW, true);
-        let acts = decide(&facts(false, Closer::Commit { on_default }, feature), "main");
+        let acts = decide(
+            &facts(false, Closer::Commit { on_default }, feature),
+            "main",
+        );
         assert!(matches!(acts[0], Action::Reopen { .. }), "{acts:?}");
     }
 

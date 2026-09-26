@@ -373,7 +373,8 @@ def test_m1_regroup_creates_one_sub_meta_per_group_and_leaves_bugs(harness: Harn
         assert _parent(after, n) == TOP
     assert all(_parent(after, k) == docs for k in (2, 3, 4, 5))
     assert all(_parent(after, k) == cli for k in (6, 7, 8, 9))
-    assert _parent(after, 10) == TOP and _parent(after, 11) == TOP
+    assert _parent(after, 10) == TOP
+    assert _parent(after, 11) == TOP
     assert _subs(after, TOP) == {10, 11, docs, cli}
     assert len(_calls(after, "issue", "create")) == 2
     assert plan["structure"] == "meta_of_metas"
@@ -436,7 +437,8 @@ def test_m5_grind_made_sub_meta_and_its_children_are_untouched(harness: Harness)
         old["body"],
         old["labels"],
     )
-    assert _parent(after, 4) == 3 and _parent(after, 5) == 3
+    assert _parent(after, 4) == 3
+    assert _parent(after, 5) == 3
     assert _subs(after, 3) == {4, 5}
     assert not [c for c in _calls(after, "issue", "edit") if c[2] == "3"]
     moved = [c for c in _calls(after, "api") if "sub_issue_id=4" in c or "sub_issue_id=5" in c]

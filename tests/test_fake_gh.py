@@ -65,7 +65,8 @@ def test_legacy_state_shape_still_works(world, capsys):
 def test_create_comment_labels_and_list(world, capsys):
     world()
     code, out, _ = _run(capsys, "issue", "create", "--title", "A", "--body", "x", "--label", "bug")
-    assert code == 0 and out.strip() == "https://github.com/o/r/issues/1"
+    assert code == 0
+    assert out.strip() == "https://github.com/o/r/issues/1"
     _run(capsys, "issue", "create", "--title", "B", "--body", "y", "--label", "a,b")
     code, out, _ = _run(capsys, "issue", "comment", "1", "--body", "hi")
     first = int(out.strip().rsplit("#issuecomment-", 1)[1])
@@ -86,7 +87,8 @@ def test_create_comment_labels_and_list(world, capsys):
     assert [i["number"] for i in json.loads(out)] == [1]
     _, out, _ = _run(capsys, "issue", "list", "--state", "closed", "--json", "number")
     rows = json.loads(out)
-    assert rows[0]["number"] == 2 and rows[0]["state"] == "CLOSED"
+    assert rows[0]["number"] == 2
+    assert rows[0]["state"] == "CLOSED"
     _, out, _ = _run(capsys, "issue", "list", "--state", "all", "--json", "number")
     assert len(json.loads(out)) == 2
 
@@ -101,7 +103,8 @@ def test_close_and_reopen_record_closer(world, capsys):
     assert issue["comments"][0]["body"] == "done"
     _run(capsys, "issue", "reopen", "3")
     issue = _state(world)["issues"]["3"]
-    assert issue["state"] == "open" and issue["closed_by"] is None
+    assert issue["state"] == "open"
+    assert issue["closed_by"] is None
 
 
 def test_comment_patch_and_get(world, capsys):
@@ -113,7 +116,8 @@ def test_comment_patch_and_get(world, capsys):
     )
     assert code == 0
     code, out, _ = _run(capsys, "api", f"repos/o/r/issues/comments/{cid}")
-    assert code == 0 and json.loads(out)["body"] == "new"
+    assert code == 0
+    assert json.loads(out)["body"] == "new"
 
 
 def _issues(n: int) -> dict:
@@ -137,7 +141,8 @@ def test_sub_issue_post_replace_one_parent_and_delete(world, capsys):
     world({"issues": _issues(3)})
     assert _add(capsys, 1, 3)[0] == 0
     code, _, err = _add(capsys, 2, 3)
-    assert code == 1 and "422" in err
+    assert code == 1
+    assert "422" in err
     assert _add(capsys, 2, 3, "-F", "replace_parent=true")[0] == 0
     state = _state(world)
     assert state["issues"]["1"]["sub_issues"] == []
@@ -150,7 +155,8 @@ def test_sub_issue_post_replace_one_parent_and_delete(world, capsys):
     )
     assert code == 0
     state = _state(world)
-    assert state["issues"]["2"]["sub_issues"] == [] and state["issues"]["3"]["parent"] is None
+    assert state["issues"]["2"]["sub_issues"] == []
+    assert state["issues"]["3"]["parent"] is None
 
 
 def test_sub_issue_hundred_limit(world, capsys):
@@ -160,7 +166,8 @@ def test_sub_issue_hundred_limit(world, capsys):
         issues[str(i)]["parent"] = 1
     world({"issues": issues})
     code, _, err = _add(capsys, 1, 102)
-    assert code == 1 and "422" in err
+    assert code == 1
+    assert "422" in err
 
 
 def test_sub_issue_eight_level_limit(world, capsys):
@@ -168,23 +175,27 @@ def test_sub_issue_eight_level_limit(world, capsys):
     for level in range(1, 8):
         assert _add(capsys, level, level + 1)[0] == 0
     code, _, err = _add(capsys, 8, 9)
-    assert code == 1 and "422" in err
+    assert code == 1
+    assert "422" in err
 
 
 def test_pr_create_draft_ready_edit(world, capsys):
     world()
-    code, out, _ = _run(
+    _code, out, _ = _run(
         capsys, "pr", "create", "--head", "f", "--title", "t", "--body", "b", "--draft"
     )
     number = out.strip().rsplit("/", 1)[1]
     _, out, _ = _run(capsys, "pr", "view", number, "--json", "isDraft,baseRefName,body")
     data = json.loads(out)
-    assert data["isDraft"] is True and data["baseRefName"] == "main" and data["body"] == "b"
+    assert data["isDraft"] is True
+    assert data["baseRefName"] == "main"
+    assert data["body"] == "b"
     assert _run(capsys, "pr", "merge", number, "--squash")[0] == 1
     _run(capsys, "pr", "ready", number)
     _run(capsys, "pr", "edit", number, "--body", "b2")
     _, out, _ = _run(capsys, "pr", "view", number, "--json", "isDraft,body")
-    assert json.loads(out)["isDraft"] is False and json.loads(out)["body"] == "b2"
+    assert json.loads(out)["isDraft"] is False
+    assert json.loads(out)["body"] == "b2"
 
 
 def test_merge_records_method_and_admin_and_requires_review(world, capsys):
@@ -237,7 +248,9 @@ def test_closing_keyword_only_on_default_branch(world, capsys):
     query += "{ nodes { ... on ClosedEvent { closer { __typename } } } } } } }"
     _, out, _ = _run(capsys, "api", "graphql", "-f", f"query={query}")
     nodes = json.loads(out)["data"]["repository"]["issue"]["timelineItems"]["nodes"]
-    assert nodes == [{"closer": {"__typename": "PullRequest", "number": 101}}]
+    # The closer carries what reconcile (#1393) needs to judge it legitimate.
+    closer = {"__typename": "PullRequest", "number": 101, "merged": True, "baseRefName": "main"}
+    assert nodes == [{"closer": closer}]
     _run(capsys, "issue", "close", "6")
     _, out, _ = _run(capsys, "api", "graphql", "-f", f"query={query}", "-F", "number=6")
     nodes = json.loads(out)["data"]["repository"]["issue"]["timelineItems"]["nodes"]
@@ -252,7 +265,8 @@ def test_fault_injection_consumed_by_times(world, capsys):
         }
     )
     code, _, err = _run(capsys, "issue", "close", "1")
-    assert code == 1 and "boom" in err
+    assert code == 1
+    assert "boom" in err
     assert _state(world)["issues"]["1"]["state"] == "open"
     assert _run(capsys, "issue", "close", "1")[0] == 0
     assert _state(world)["issues"]["1"]["state"] == "closed"
@@ -262,16 +276,20 @@ def test_fault_injection_consumed_by_times(world, capsys):
 def test_api_method_fault_key(world, capsys):
     world({"issues": {}, "faults": {"api PATCH": {"code": 2, "stderr": "nope", "times": 1}}})
     code, _, err = _run(capsys, "api", "-X", "PATCH", "repos/o/r/issues/comments/1")
-    assert code == 2 and "nope" in err
+    assert code == 2
+    assert "nope" in err
 
 
 def test_body_limit_65536(world, capsys):
     world({"issues": {"1": {"title": "t", "body": "", "state": "open"}}})
     big = "x" * 65537
     code, _, err = _run(capsys, "issue", "comment", "1", "--body", big)
-    assert code == 1 and "65536" in err
+    assert code == 1
+    assert "65536" in err
     code, _, err = _run(capsys, "issue", "create", "--title", "t", "--body", big)
-    assert code == 1 and "65536" in err
+    assert code == 1
+    assert "65536" in err
     code, _, err = _run(capsys, "pr", "create", "--head", "h", "--title", "t", "--body", big)
-    assert code == 1 and "65536" in err
+    assert code == 1
+    assert "65536" in err
     assert _run(capsys, "issue", "comment", "1", "--body", "x" * 65536)[0] == 0

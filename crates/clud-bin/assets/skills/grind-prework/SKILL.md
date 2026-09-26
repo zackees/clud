@@ -12,6 +12,9 @@ disable-model-invocation: true
 
 You record the plan; you do not make it.
 
+You change no code, so the RED -> GREEN rule for code changes applies later,
+in `/grind-integrate`.
+
 The prompt carries the meta issue number, the repo, and one or more
 comment bodies the workflow already built. Each body starts with a marker,
 `<!-- grind:v1 plan run=<run-id> -->`, or
