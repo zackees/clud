@@ -23,7 +23,9 @@ use super::types::{
 };
 use super::wire_prost::{daemon_wire_format_from_env, decode_worker_server_line, DaemonWireFormat};
 use crate::ctrl_c_track::CtrlEventKind;
-use crate::session::{InteractiveHooks, PtyInputSink};
+use crate::session::{
+    InteractiveHooks, KeyboardEnhancementGuard, KeyboardEnhancementTracker, PtyInputSink,
+};
 use crate::voice::VoiceMode;
 
 const INTERRUPT_EXIT_GRACE: Duration = Duration::from_millis(500);
@@ -351,6 +353,19 @@ pub(super) fn attach_to_session(
         }
     };
 
+    let interactive = matches!(session.kind, SessionKind::Pty)
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal();
+    // #1363: the same kitty keyboard frame the local PTY pump holds
+    // (`session::RawTerminalGuard`). Pushed before the reader starts, so the
+    // push cannot land inside a relayed escape sequence, and bound here
+    // rather than in `run_remote_interactive` so it outlives `reader.join()`
+    // below: the child's frames are unwound only after its last output has
+    // been observed, on every return path and on unwind.
+    let keyboard = interactive.then(KeyboardEnhancementGuard::push);
+    let child_keyboard = keyboard
+        .as_ref()
+        .map(KeyboardEnhancementGuard::child_tracker);
     let exit_code = Arc::new(Mutex::new(None));
     let reader_exit = Arc::clone(&exit_code);
     let reader = thread::spawn(move || loop {
@@ -367,8 +382,8 @@ pub(super) fn attach_to_session(
                         if let Ok(bytes) =
                             base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
                         {
-                            let _ = io::stdout().write_all(&bytes);
-                            let _ = io::stdout().flush();
+                            let mut stdout = io::stdout().lock();
+                            relay_worker_output(&mut stdout, &bytes, child_keyboard.as_deref());
                         }
                     }
                     WorkerServerMessage::Exited { exit_code } => {
@@ -386,10 +401,7 @@ pub(super) fn attach_to_session(
         }
     });
 
-    let local_result = if matches!(session.kind, SessionKind::Pty)
-        && io::stdin().is_terminal()
-        && io::stdout().is_terminal()
-    {
+    let local_result = if interactive {
         run_remote_interactive(Arc::clone(&writer), format, interrupted, session.detachable)
     } else {
         wait_for_remote_or_interrupt(&exit_code, interrupted)
@@ -446,6 +458,9 @@ pub(super) fn attach_to_session(
         let _ = shutdown_worker_connection(&writer);
     }
     let _ = reader.join();
+    // The relay has stopped, so every child frame is counted: unwind them,
+    // then the attach's own frame, before the shell gets the terminal back.
+    drop(keyboard);
     if local_result == 130 {
         return 130;
     }
@@ -454,6 +469,21 @@ pub(super) fn attach_to_session(
         .expect("exit code mutex poisoned")
         .unwrap_or(local_result);
     final_exit_code
+}
+
+/// Write one chunk of the session's output to the local terminal, feeding it
+/// first to the attach's keyboard-frame tracker (#1363), as the local pump's
+/// output writer does.
+fn relay_worker_output(
+    out: &mut dyn Write,
+    bytes: &[u8],
+    child_keyboard: Option<&KeyboardEnhancementTracker>,
+) {
+    if let Some(tracker) = child_keyboard {
+        tracker.observe(bytes);
+    }
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
 }
 
 fn send_interrupt_fast_path(
@@ -752,6 +782,45 @@ fn render_background_prompt(remaining: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1363: a child TUI in a daemon session pushes a kitty keyboard frame,
+    /// then the attach ends (detach, Ctrl+C, the session dying) before the
+    /// child pops it. The relay must feed the child's output to the attach's
+    /// keyboard guard, which unwinds that frame and then its own, leaving the
+    /// terminal's pre-attach frames alone.
+    #[test]
+    fn attach_unwinds_a_relayed_child_keyboard_frame_before_its_own() {
+        let mut keyboard = KeyboardEnhancementGuard::with_pushed(true);
+        let tracker = keyboard.child_tracker();
+        let mut terminal = Vec::new();
+        relay_worker_output(&mut terminal, b"tui\x1b[>", Some(&tracker));
+        relay_worker_output(&mut terminal, b"7u frame", Some(&tracker));
+
+        keyboard.unwind_to(&mut terminal);
+
+        assert_eq!(
+            terminal, b"tui\x1b[>7u frame\x1b[<1u\x1b[<1u",
+            "child frame, then the attach's own frame, pop in LIFO order"
+        );
+    }
+
+    /// A child that balances its own frame leaves only the attach's frame
+    /// to pop, and the relayed bytes reach the terminal unchanged.
+    #[test]
+    fn attach_pops_only_its_own_frame_after_a_balanced_child() {
+        let mut keyboard = KeyboardEnhancementGuard::with_pushed(true);
+        let tracker = keyboard.child_tracker();
+        let mut terminal = Vec::new();
+        relay_worker_output(&mut terminal, b"\x1b[>1uhi\x1b[<u", Some(&tracker));
+
+        keyboard.unwind_to(&mut terminal);
+        keyboard.unwind_to(&mut terminal);
+
+        assert_eq!(
+            terminal, b"\x1b[>1uhi\x1b[<u\x1b[<1u",
+            "unwind is idempotent"
+        );
+    }
 
     #[test]
     fn noninteractive_background_prompt_always_backgrounds() {
