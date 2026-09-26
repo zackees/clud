@@ -445,7 +445,6 @@ const DROPEFFECT_COPY_BITS: u32 = 1;
 /// and when the source does not allow a copy, because a target must
 /// return an effect the source permits.
 #[cfg(any(windows, test))]
-#[allow(dead_code)] // RED-evidence commit only
 fn drag_effect(source_allowed: u32, carries_files: bool) -> u32 {
     if carries_files && source_allowed & DROPEFFECT_COPY_BITS != 0 {
         DROPEFFECT_COPY_BITS
@@ -457,7 +456,6 @@ fn drag_effect(source_allowed: u32, carries_files: bool) -> u32 {
 // ─── Windows-only implementation ──────────────────────────────────────
 
 #[cfg(windows)]
-#[allow(dead_code)] // RED-evidence commit only
 mod win {
     use super::*;
     use crate::dnd::drop_host::{resolve_drop_host, DropHost, ProcessEntry};
@@ -568,9 +566,14 @@ mod win {
             _pt: &POINTL,
             effect: *mut DROPEFFECT,
         ) -> windows_core::Result<()> {
-            // RED: pre-#1362 behavior, always COPY.
-            let _ = &data;
-            unsafe { write_effect(effect, super::DROPEFFECT_COPY_BITS) };
+            let carries_files = data.as_ref().is_some_and(offers_cf_hdrop);
+            self.carries_files.store(carries_files, Ordering::SeqCst);
+            // SAFETY: `effect` is the in/out pointer OLE passes per the
+            // IDropTarget contract.
+            unsafe {
+                let bits = super::drag_effect(source_allowed(effect), carries_files);
+                write_effect(effect, bits);
+            }
             Ok(())
         }
 
@@ -580,8 +583,12 @@ mod win {
             _pt: &POINTL,
             effect: *mut DROPEFFECT,
         ) -> windows_core::Result<()> {
-            // RED: pre-#1362 behavior, always COPY.
-            unsafe { write_effect(effect, super::DROPEFFECT_COPY_BITS) };
+            let carries_files = self.carries_files.load(Ordering::SeqCst);
+            // SAFETY: see DragEnter.
+            unsafe {
+                let bits = super::drag_effect(source_allowed(effect), carries_files);
+                write_effect(effect, bits);
+            }
             Ok(())
         }
 
@@ -597,26 +604,15 @@ mod win {
             _pt: &POINTL,
             effect: *mut DROPEFFECT,
         ) -> windows_core::Result<()> {
-            // RED: pre-#1362 behavior (COPY whenever bytes were
-            // extracted) plus a deliberately leaked IDataObject reference.
-            let mut accepted = false;
-            if let Some(data_obj) = data.as_ref() {
-                std::mem::forget(data_obj.clone());
-                if let Some(buf) = unsafe { copy_cf_hdrop_bytes(data_obj) } {
-                    if let Ok(guard) = self.injector.lock() {
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            super::dispatch_dropfiles_to_injector(&buf, &guard);
-                        }));
-                    }
-                    accepted = true;
-                }
-            }
-            let bits = if accepted {
-                super::DROPEFFECT_COPY_BITS
-            } else {
-                super::DROPEFFECT_NONE_BITS
-            };
-            unsafe { write_effect(effect, bits) };
+            self.carries_files.store(false, Ordering::SeqCst);
+            // SAFETY: see DragEnter.
+            let allowed = unsafe { source_allowed(effect) };
+            // A source that forbids a copy gets nothing injected: the
+            // drop is refused, so it must have no side effect either.
+            let delivered = allowed & super::DROPEFFECT_COPY_BITS != 0
+                && data.as_ref().is_some_and(|data| self.deliver(data));
+            // SAFETY: see DragEnter.
+            unsafe { write_effect(effect, super::drag_effect(allowed, delivered)) };
             Ok(())
         }
     }
@@ -654,7 +650,8 @@ mod win {
     /// `data` must be a live, AddRef'd `IDataObject`.
     pub(super) unsafe fn copy_cf_hdrop_bytes(data: &IDataObject) -> Option<Vec<u8>> {
         use windows::Win32::System::Com::TYMED_HGLOBAL;
-        use windows::Win32::System::Memory::{GlobalLock, GlobalSize};
+        use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+        use windows::Win32::System::Ole::ReleaseStgMedium;
 
         let format = cf_hdrop_format();
 
@@ -672,7 +669,9 @@ mod win {
             } else {
                 let len = unsafe { GlobalSize(hglobal) };
                 let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
-                // RED: GlobalUnlock deliberately skipped.
+                unsafe {
+                    let _ = GlobalUnlock(hglobal);
+                }
                 Some(bytes)
             }
         } else {
@@ -682,8 +681,9 @@ mod win {
         // SAFETY: pairs with GetData; ReleaseStgMedium handles the
         // union member and frees the HGLOBAL when pUnkForRelease is
         // null.
-        // RED: ReleaseStgMedium deliberately skipped.
-        let _ = &mut medium;
+        unsafe {
+            ReleaseStgMedium(&mut medium);
+        }
 
         bytes
     }

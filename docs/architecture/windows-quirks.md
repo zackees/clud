@@ -290,7 +290,12 @@ the codebase stays portable.
   any later re-registration. The IDropTarget callback parses the
   `CF_HDROP` payload via the panic-free `parse_dropfiles_buffer`,
   normalizes each path via `dnd::normalize_dropped_path`, and hands the
-  list to a per-launch-mode `DropInjector`:
+  list to a per-launch-mode `DropInjector`. The target reports
+  `DROPEFFECT_COPY` only while the payload offers `CF_HDROP` and the
+  source allows a copy, and `DROPEFFECT_NONE` otherwise (a text drag,
+  a malformed payload, a move-only source). It never claims `MOVE`,
+  which would make Explorer delete the dragged file (#1362). The
+  injectors:
   - **Subprocess mode**: synthesizes Win32 `INPUT_RECORD` bytes (20-byte
     records, key-down + key-up per char, `VK_RETURN` for `\n`) into the
     console input buffer via `WriteConsoleInputW`.
@@ -323,10 +328,11 @@ the codebase stays portable.
   - **Anything else** (legacy conhost, unknown hosts):
     `GetConsoleWindow()` only; no process snapshot is taken.
 
-- **File**: `crates/clud-bin/src/dnd/console_drop_target.rs:384`
-  (`register_console_drop_target`, Windows); `:392` (POSIX stub);
-  `ConsoleDropTargetGuard` at `:333`; platform-agnostic dispatch at `:407`
-  (`dispatch_dropfiles_to_injector`). Injectors at
+- **File**: `crates/clud-bin/src/dnd/console_drop_target.rs:386`
+  (`register_console_drop_target`, Windows); `:394` (POSIX stub);
+  `ConsoleDropTargetGuard` at `:335`; platform-agnostic dispatch at `:413`
+  (`dispatch_dropfiles_to_injector`) and the effect decision at `:448`
+  (`drag_effect`). Injectors at
   `crates/clud-bin/src/dnd/injectors.rs:71` (`build_input_records`),
   `:138` (`pty_master_injector`), `:157` (`subprocess_console_injector`,
   Windows only).
@@ -337,8 +343,13 @@ the codebase stays portable.
   `file://` URIs); the cross-platform `dnd::normalize_dropped_path` and
   `looks_like_dropped_path` string transforms in `dnd/mod.rs:49,77`
   handle those. The non-Windows stub of `register_console_drop_target`
-  at `:392` returns `Err(RegisterError::UnsupportedPlatform)` so POSIX
+  at `:394` returns `Err(RegisterError::UnsupportedPlatform)` so POSIX
   call sites simply no-op.
+
+- **Tests**: the COM layer (the `IDropTarget` vtable and the `CF_HDROP`
+  `HGLOBAL` extraction) runs on the Windows unit lane against a fake
+  `IDataObject`; the `RegisterDragDrop` round trip stays manual. See the
+  [dnd README](../../crates/clud-bin/src/dnd/README.md#testing).
 
 ### (g) `CREATE_NO_WINDOW` for invisible helper spawns
 
@@ -577,7 +588,7 @@ the codebase stays portable.
   - `console_setup::ConsoleVtGuard` (`console_setup.rs:8`) restores the
     saved console-input mode.
   - `dnd::console_drop_target::ConsoleDropTargetGuard`
-    (`dnd/console_drop_target.rs:333`) revokes each registered window
+    (`dnd/console_drop_target.rs:335`) revokes each registered window
     and calls `OleUninitialize` on the same STA thread.
   - `trampoline::windows_stdio::NonInheritableStdioGuard`
     (`trampoline.rs`) restores `HANDLE_FLAG_INHERIT` on the three
