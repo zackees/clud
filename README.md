@@ -837,6 +837,11 @@ directly. Before anything runs, `/grind` asks:
 | Models | planner, worker, reviewer, integrator. Each defaults to the session's model, including whatever `--deepseek`, `--codex` or OpenRouter resolved. |
 | Local CI | run the `ci.yml` job under `act` before each push. Only offered when Docker works and `.github/workflows/ci.yml` exists. |
 
+Before any goal starts, a `grind-prework` agent posts the run's plan as one
+JSON comment on the meta issue (it may only comment there; nobody edits that
+comment), and every later agent is given its URL. If the plan cannot be
+posted, no work happens.
+
 Then the bundled workflow takes each goal through five roles. Each role is its
 own agent type with hard caps:
 
@@ -854,13 +859,18 @@ it. The run ends with the checkout rebased onto `origin/main` and a clean
 `git status`. `grind` requires the Claude harness; clud never runs its own
 loop for it.
 
+Problems an agent finds outside its task (a flaky test, an unrelated bug)
+are returned to `/grind`, which files them as you chose up front: one
+`grind:followup` issue each (linked with `Refs #<meta>`, never a sub-issue,
+so it never holds the meta issue open), or one comment each.
+
 **Where it lives in the repo:**
 
 | What | Where |
 |---|---|
 | Contract and design | [`docs/architecture/grind.md`](docs/architecture/grind.md), [DD-087](docs/DESIGN_DECISIONS.md#dd-087-grind-is-a-skill-dag-with-capped-agent-roles) |
 | Router skill | [`assets/skills/grind/SKILL.md`](crates/clud-bin/assets/skills/grind/SKILL.md) |
-| Leaf skills | [`grind-intake`](crates/clud-bin/assets/skills/grind-intake/SKILL.md), [`grind-plan`](crates/clud-bin/assets/skills/grind-plan/SKILL.md), [`grind-work`](crates/clud-bin/assets/skills/grind-work/SKILL.md), [`grind-review`](crates/clud-bin/assets/skills/grind-review/SKILL.md), [`grind-integrate`](crates/clud-bin/assets/skills/grind-integrate/SKILL.md), [`grind-land`](crates/clud-bin/assets/skills/grind-land/SKILL.md), [`grind-cron`](crates/clud-bin/assets/skills/grind-cron/SKILL.md) |
+| Leaf skills | [`grind-intake`](crates/clud-bin/assets/skills/grind-intake/SKILL.md), [`grind-prework`](crates/clud-bin/assets/skills/grind-prework/SKILL.md), [`grind-plan`](crates/clud-bin/assets/skills/grind-plan/SKILL.md), [`grind-work`](crates/clud-bin/assets/skills/grind-work/SKILL.md), [`grind-review`](crates/clud-bin/assets/skills/grind-review/SKILL.md), [`grind-integrate`](crates/clud-bin/assets/skills/grind-integrate/SKILL.md), [`grind-land`](crates/clud-bin/assets/skills/grind-land/SKILL.md), [`grind-cron`](crates/clud-bin/assets/skills/grind-cron/SKILL.md) |
 | Workflow script | [`assets/workflows/grind-run.js`](crates/clud-bin/assets/workflows/grind-run.js) (named `grind-run` so `/grind` stays the router) |
 | Agent types | [`assets/agents/`](crates/clud-bin/assets/agents/) (`grind-planner.md` … `grind-lander.md`) |
 | Installer for agents + workflow | [`src/claude_files.rs`](crates/clud-bin/src/claude_files.rs) |

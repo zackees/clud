@@ -82,6 +82,19 @@ def _flags(argv: list[str], *names: str) -> list[str]:
     return out
 
 
+def _body_arg(argv: list[str]) -> str | None:
+    """`--body`/`-b`, else `--body-file`/`-F` (a path, or `-` for stdin)."""
+    body = _flag(argv, "--body")
+    if body is None:
+        body = _flag(argv, "-b")
+    if body is not None:
+        return body
+    source = _flag(argv, "--body-file") or _flag(argv, "-F")
+    if source is None:
+        return None
+    return sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+
+
 def _split_labels(values: list[str]) -> list[str]:
     return [p.strip() for v in values for p in v.split(",") if p.strip()]
 
@@ -362,7 +375,7 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
     sub = argv[1] if len(argv) > 1 else ""
 
     if sub == "create":
-        body = _flag(argv, "--body") or ""
+        body = _body_arg(argv) or ""
         if _too_long(body):
             return 1
         taken = [int(k) for k in issues if k.isdigit()] + [
@@ -423,7 +436,7 @@ def _issue(path: Path, state: dict, argv: list[str]) -> int:
         return 0
 
     if sub == "comment":
-        body = _flag(argv, "--body") or _flag(argv, "-b") or ""
+        body = _body_arg(argv) or ""
         if _too_long(body):
             return 1
         cid = _next_comment_id(state)

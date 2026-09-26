@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -293,3 +294,20 @@ def test_body_limit_65536(world, capsys):
     assert code == 1
     assert "65536" in err
     assert _run(capsys, "issue", "comment", "1", "--body", "x" * 65536)[0] == 0
+
+
+def test_body_file_from_stdin_and_path(world, capsys, monkeypatch, tmp_path):
+    # /grind-prework pipes the plan into `--body-file -` (#1408);
+    # the router may file a follow-up with `--body-file <f>` (#1411).
+    world({"issues": {"1": {"title": "t", "body": "", "state": "open"}}})
+    plan = "<!-- grind:v1 plan run=r -->\n~~~json\n{}\n~~~\n"
+    monkeypatch.setattr("sys.stdin", io.StringIO(plan))
+    assert _run(capsys, "issue", "comment", "1", "--body-file", "-")[0] == 0
+    body = tmp_path / "followup.md"
+    body.write_text("evidence\nRefs #1\n", encoding="utf-8")
+    code, out, _ = _run(capsys, "issue", "create", "--title", "x", "-F", str(body))
+    assert code == 0
+    state = _state(world)
+    assert state["issues"]["1"]["comments"][0]["body"] == plan
+    number = out.strip().rsplit("/", 1)[-1]
+    assert state["issues"][number]["body"] == "evidence\nRefs #1\n"
