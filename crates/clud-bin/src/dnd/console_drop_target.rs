@@ -406,18 +406,58 @@ pub fn register_console_drop_target(
 /// callback) so it can be unit-tested on every CI host. The Windows
 /// `IDropTarget::Drop` implementation is a thin wrapper around this —
 /// extract the `CF_HDROP` HGLOBAL bytes, then hand them here.
-pub fn dispatch_dropfiles_to_injector(buf: &[u8], injector: &DropInjector) {
+///
+/// Returns `true` when the injector was called, `false` when the buffer
+/// held no paths (empty or malformed), so `Drop` can report
+/// `DROPEFFECT_NONE` for a drop that delivered nothing.
+pub fn dispatch_dropfiles_to_injector(buf: &[u8], injector: &DropInjector) -> bool {
     let parsed = parse_dropfiles_buffer(buf);
     if parsed.is_empty() {
-        return;
+        return false;
     }
     let normalized: Vec<String> = parsed.iter().map(|p| normalize_dropped_path(p)).collect();
     injector(&normalized);
+    true
+}
+
+/// `DROPEFFECT_NONE` (oleidl.h) as a plain bit mask, so [`drag_effect`]
+/// is testable on every host. A Windows test pins it to the `windows`
+/// crate constant.
+#[cfg(any(windows, test))]
+const DROPEFFECT_NONE_BITS: u32 = 0;
+/// `DROPEFFECT_COPY` (oleidl.h); see [`DROPEFFECT_NONE_BITS`].
+#[cfg(any(windows, test))]
+const DROPEFFECT_COPY_BITS: u32 = 1;
+
+/// The effect clud's `IDropTarget` reports back to OLE from
+/// `DragEnter`, `DragOver` and `Drop`.
+///
+/// `source_allowed` is the `*pdwEffect` value OLE passes in: the effects
+/// the drag source permits. `carries_files` is whether the payload
+/// offers `CF_HDROP` (during the drag) or whether the paths were
+/// delivered to the injector (on `Drop`).
+///
+/// clud only ever reads the dropped paths, so the one effect it can
+/// claim is `DROPEFFECT_COPY`. It must never claim `MOVE`: Explorer
+/// deletes the source file after a move. It reports `NONE` when the
+/// payload has no files, so a text or image drag shows the no-drop
+/// cursor rather than a copy cursor for a drop that would do nothing,
+/// and when the source does not allow a copy, because a target must
+/// return an effect the source permits.
+#[cfg(any(windows, test))]
+#[allow(dead_code)] // RED-evidence commit only
+fn drag_effect(source_allowed: u32, carries_files: bool) -> u32 {
+    if carries_files && source_allowed & DROPEFFECT_COPY_BITS != 0 {
+        DROPEFFECT_COPY_BITS
+    } else {
+        DROPEFFECT_NONE_BITS
+    }
 }
 
 // ─── Windows-only implementation ──────────────────────────────────────
 
 #[cfg(windows)]
+#[allow(dead_code)] // RED-evidence commit only
 mod win {
     use super::*;
     use crate::dnd::drop_host::{resolve_drop_host, DropHost, ProcessEntry};
@@ -433,7 +473,7 @@ mod win {
     };
     use windows::Win32::System::Ole::{
         IDropTarget, IDropTarget_Impl, OleInitialize, OleUninitialize, RegisterDragDrop,
-        RevokeDragDrop, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
+        RevokeDragDrop, DROPEFFECT,
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
     use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -441,33 +481,96 @@ mod win {
         EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
     };
 
-    /// COM object implementing `IDropTarget`. Accepts every drop with
-    /// `DROPEFFECT_COPY` (so the cursor switches from ⊘ to a copy
-    /// indicator), then on `Drop()` extracts the `CF_HDROP` bytes and
-    /// hands them to [`super::dispatch_dropfiles_to_injector`].
+    /// COM object implementing `IDropTarget`. Advertises
+    /// `DROPEFFECT_COPY` for a file drag (so the cursor switches from ⊘
+    /// to a copy indicator) and `DROPEFFECT_NONE` for anything else,
+    /// per [`super::drag_effect`]; on `Drop()` it extracts the
+    /// `CF_HDROP` bytes and hands them to
+    /// [`super::dispatch_dropfiles_to_injector`].
     #[windows::core::implement(IDropTarget)]
     struct ConsoleDropTarget {
         injector: Mutex<DropInjector>,
+        /// Whether the data object seen by the current `DragEnter`
+        /// offers `CF_HDROP`. `DragOver` gets no data object, so it
+        /// reuses this; `DragLeave` and `Drop` clear it.
+        carries_files: AtomicBool,
+    }
+
+    /// Build the `IDropTarget` clud registers. Split out of
+    /// [`register`] so tests can drive the real COM vtable without a
+    /// console window or `RegisterDragDrop` (#1362).
+    pub(super) fn new_drop_target(injector: DropInjector) -> IDropTarget {
+        ComObject::new(ConsoleDropTarget {
+            injector: Mutex::new(injector),
+            carries_files: AtomicBool::new(false),
+        })
+        .to_interface::<IDropTarget>()
+    }
+
+    /// The effects the drag source allows, read from the in/out
+    /// `pdwEffect`. A null pointer violates the `IDropTarget` contract;
+    /// treat it as "copy allowed" (the result cannot be written back
+    /// anyway).
+    ///
+    /// # Safety
+    ///
+    /// `effect` is null or points to a readable `DROPEFFECT`.
+    unsafe fn source_allowed(effect: *const DROPEFFECT) -> u32 {
+        if effect.is_null() {
+            super::DROPEFFECT_COPY_BITS
+        } else {
+            // SAFETY: non-null per the check above; caller guarantees
+            // it is readable.
+            unsafe { (*effect).0 }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `effect` is null or points to a writable `DROPEFFECT`.
+    unsafe fn write_effect(effect: *mut DROPEFFECT, bits: u32) {
+        if !effect.is_null() {
+            // SAFETY: non-null per the check above; caller guarantees
+            // it is writable.
+            unsafe { *effect = DROPEFFECT(bits) };
+        }
+    }
+
+    impl ConsoleDropTarget {
+        /// Deliver a dropped payload. Returns whether the injector was
+        /// called with at least one path.
+        fn deliver(&self, data: &IDataObject) -> bool {
+            // SAFETY: `data` is a live interface borrowed from OLE for
+            // the duration of `Drop`; STGMEDIUM bookkeeping is handled
+            // inside.
+            let Some(buf) = (unsafe { copy_cf_hdrop_bytes(data) }) else {
+                return false;
+            };
+            let Ok(guard) = self.injector.lock() else {
+                return false;
+            };
+            // A panic must not unwind across the COM boundary. The
+            // guard is held outside the closure, so a panicking
+            // injector does not poison the mutex for the next drop.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::dispatch_dropfiles_to_injector(&buf, &guard)
+            }))
+            .unwrap_or(false)
+        }
     }
 
     #[allow(non_snake_case)]
     impl IDropTarget_Impl for ConsoleDropTarget_Impl {
         fn DragEnter(
             &self,
-            _data: windows_core::Ref<'_, IDataObject>,
+            data: windows_core::Ref<'_, IDataObject>,
             _key_state: MODIFIERKEYS_FLAGS,
             _pt: &POINTL,
             effect: *mut DROPEFFECT,
         ) -> windows_core::Result<()> {
-            // Always advertise DROPEFFECT_COPY so the cursor changes
-            // from ⊘ to a copy indicator.
-            // SAFETY: `effect` is a non-null out-pointer per the
-            // IDropTarget contract.
-            unsafe {
-                if !effect.is_null() {
-                    *effect = DROPEFFECT_COPY;
-                }
-            }
+            // RED: pre-#1362 behavior, always COPY.
+            let _ = &data;
+            unsafe { write_effect(effect, super::DROPEFFECT_COPY_BITS) };
             Ok(())
         }
 
@@ -477,16 +580,13 @@ mod win {
             _pt: &POINTL,
             effect: *mut DROPEFFECT,
         ) -> windows_core::Result<()> {
-            // SAFETY: see DragEnter.
-            unsafe {
-                if !effect.is_null() {
-                    *effect = DROPEFFECT_COPY;
-                }
-            }
+            // RED: pre-#1362 behavior, always COPY.
+            unsafe { write_effect(effect, super::DROPEFFECT_COPY_BITS) };
             Ok(())
         }
 
         fn DragLeave(&self) -> windows_core::Result<()> {
+            self.carries_files.store(false, Ordering::SeqCst);
             Ok(())
         }
 
@@ -497,14 +597,12 @@ mod win {
             _pt: &POINTL,
             effect: *mut DROPEFFECT,
         ) -> windows_core::Result<()> {
+            // RED: pre-#1362 behavior (COPY whenever bytes were
+            // extracted) plus a deliberately leaked IDataObject reference.
             let mut accepted = false;
             if let Some(data_obj) = data.as_ref() {
-                // SAFETY: copy_cf_hdrop_bytes only does FFI under the
-                // standard IDataObject contract; STGMEDIUM bookkeeping
-                // is handled inside.
+                std::mem::forget(data_obj.clone());
                 if let Some(buf) = unsafe { copy_cf_hdrop_bytes(data_obj) } {
-                    // Wrap the user-supplied injector in catch_unwind
-                    // so a panic cannot unwind across the FFI boundary.
                     if let Ok(guard) = self.injector.lock() {
                         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             super::dispatch_dropfiles_to_injector(&buf, &guard);
@@ -513,18 +611,36 @@ mod win {
                     accepted = true;
                 }
             }
-            // SAFETY: see DragEnter.
-            unsafe {
-                if !effect.is_null() {
-                    *effect = if accepted {
-                        DROPEFFECT_COPY
-                    } else {
-                        DROPEFFECT_NONE
-                    };
-                }
-            }
+            let bits = if accepted {
+                super::DROPEFFECT_COPY_BITS
+            } else {
+                super::DROPEFFECT_NONE_BITS
+            };
+            unsafe { write_effect(effect, bits) };
             Ok(())
         }
+    }
+
+    /// The one format clud reads: `CF_HDROP` in an `HGLOBAL`.
+    fn cf_hdrop_format() -> windows::Win32::System::Com::FORMATETC {
+        use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
+        use windows::Win32::System::Ole::CF_HDROP;
+
+        FORMATETC {
+            cfFormat: CF_HDROP.0,
+            ptd: core::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        }
+    }
+
+    /// Whether `data` can render [`cf_hdrop_format`]. Only `S_OK`
+    /// counts: some data objects answer `S_FALSE` for "not available".
+    fn offers_cf_hdrop(data: &IDataObject) -> bool {
+        let format = cf_hdrop_format();
+        // SAFETY: `data` is a live interface; `format` outlives the call.
+        (unsafe { data.QueryGetData(&format) }) == windows::Win32::Foundation::S_OK
     }
 
     /// Pull the `CF_HDROP` payload out of an `IDataObject` and copy
@@ -536,18 +652,11 @@ mod win {
     /// # Safety
     ///
     /// `data` must be a live, AddRef'd `IDataObject`.
-    unsafe fn copy_cf_hdrop_bytes(data: &IDataObject) -> Option<Vec<u8>> {
-        use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
-        use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-        use windows::Win32::System::Ole::{ReleaseStgMedium, CF_HDROP};
+    pub(super) unsafe fn copy_cf_hdrop_bytes(data: &IDataObject) -> Option<Vec<u8>> {
+        use windows::Win32::System::Com::TYMED_HGLOBAL;
+        use windows::Win32::System::Memory::{GlobalLock, GlobalSize};
 
-        let format = FORMATETC {
-            cfFormat: CF_HDROP.0,
-            ptd: core::ptr::null_mut(),
-            dwAspect: DVASPECT_CONTENT.0,
-            lindex: -1,
-            tymed: TYMED_HGLOBAL.0 as u32,
-        };
+        let format = cf_hdrop_format();
 
         let mut medium = match unsafe { data.GetData(&format) } {
             Ok(m) => m,
@@ -563,9 +672,7 @@ mod win {
             } else {
                 let len = unsafe { GlobalSize(hglobal) };
                 let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
-                unsafe {
-                    let _ = GlobalUnlock(hglobal);
-                }
+                // RED: GlobalUnlock deliberately skipped.
                 Some(bytes)
             }
         } else {
@@ -575,9 +682,8 @@ mod win {
         // SAFETY: pairs with GetData; ReleaseStgMedium handles the
         // union member and frees the HGLOBAL when pUnkForRelease is
         // null.
-        unsafe {
-            ReleaseStgMedium(&mut medium);
-        }
+        // RED: ReleaseStgMedium deliberately skipped.
+        let _ = &mut medium;
 
         bytes
     }
@@ -693,10 +799,7 @@ mod win {
         // 2. Construct the IDropTarget COM object up-front. This is
         //    cheap and lets us hand a single `Arc<OleRegistrar>`
         //    into the worker thread.
-        let drop_target = ComObject::new(ConsoleDropTarget {
-            injector: Mutex::new(injector),
-        });
-        let target_iface: IDropTarget = drop_target.to_interface::<IDropTarget>();
+        let target_iface = new_drop_target(injector);
 
         let registrar = Arc::new(OleRegistrar {
             hwnds: hwnds.into_iter().map(SendHwnd).collect(),
@@ -922,3 +1025,9 @@ mod win {
 #[cfg(test)]
 #[path = "console_drop_target_tests.rs"]
 mod tests;
+
+/// The real COM layer: the `IDropTarget` vtable driven with a fake
+/// `IDataObject`, and the `CF_HDROP` `HGLOBAL` extraction (#1362).
+#[cfg(all(test, windows))]
+#[path = "console_drop_target_com_tests.rs"]
+mod com_tests;
