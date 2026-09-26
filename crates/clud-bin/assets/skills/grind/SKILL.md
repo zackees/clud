@@ -377,7 +377,9 @@ After the workflow returns, whether or not every goal merged:
    worktree and temporary branch the run created, but only after checking
    it has no unpushed work (see `/clud-git`); push every worktree before
    removing it. Never delete a `grind/*` branch while its feature PR is
-   open; Finish leaves those branches for the feature PR's merge. A merged
+   open; Finish leaves those branches for the feature PR's merge. Never
+   delete a `wip/grind-<goal>` park branch (a goal's `parked` result, #1424):
+   it holds a rejected or failed goal's only copy; report it. A merged
    goal PR's commits stay reachable at `refs/pull/<n>/head`, but an
    unpushed worktree has no such copy, so push first. Then `git status --porcelain`
    prints nothing: no untracked files, no uncommitted changes, and no stash

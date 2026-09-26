@@ -4421,3 +4421,40 @@ linked without that coupling.
 `Refs` backlink. A failed filing is listed in the router's final report
 rather than stopping the run. The contract is owned by
 [architecture/grind.md](architecture/grind.md#problem-reporting).
+
+## DD-099: A /grind review never rejects for unrun checks, and a failed sequential goal is parked
+
+**Status:** Accepted
+
+**Context:** #1424. The reviewer cannot build, lint or test, yet its skill
+said to reject when the goal "cannot be made correct without running
+something". A reviewer rejected goal #1402 because "nothing has been run
+yet", and the goal was dropped. In sequential mode that goal's uncommitted
+files stayed in the shared checkout: the next goals' lint picked them up,
+integrators stashed around them, and a dependent was planned on top of them.
+
+**Decision:** The reviewer approves on reading and lists the checks it
+wants under `must_verify`, which `grind-run.js` appends to the goal's verify
+commands. A rejection whose summary only says nothing has been run is
+overridden by a narrow pattern (`NOT_RUN`), and the integrator is told so.
+A sequential goal that wrote files and ends unmerged with nothing pushed is
+parked by one more integrator call: its paths go to a local
+`wip/grind-<goal>` branch and the checkout returns to a detached
+`origin/<base>`. A goal whose dependency settled unmerged is blocked right
+after planning.
+
+**Rationale:** The workflow has no shell, and the integrator is the only
+role allowed to change git state, so parking is an integrator prompt under
+the build lock rather than a new role. A park branch rather than a stash
+keeps the work visible and away from the shared stash stack, and switching
+to a detached `origin/<base>` instead of `git reset --hard` cannot destroy
+the user's carried changes. The override accepts a small risk that a real
+rejection mentioning unrun checks is integrated; the integrator still runs
+every check and is told to refuse a real defect, so a wrong change fails
+verification rather than landing silently.
+
+**Consequences:** A goal that pushed a PR which then did not merge is not
+parked: its work is on the pushed branch. Park branches are local and never
+deleted by Finish. If a park leaves the checkout dirty, every later goal in
+the run is blocked. The contract is owned by
+[architecture/grind.md](architecture/grind.md#review-gate-parking-and-dependents-1424).

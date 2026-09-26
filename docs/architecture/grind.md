@@ -386,6 +386,36 @@ Issue [#1336](https://github.com/zackees/clud/issues/1336).
 The rationale is in
 [DD-091](../DESIGN_DECISIONS.md#dd-091-grind-gets-repo-linttest-scripts-from-a-clud-subcommand-asked-once-per-run).
 
+- **Failures are read, not retried (#1425).** After a failed lint or test
+  run the integrator reads the failing tests first. It reruns unchanged only
+  for a known infrastructure error, at most twice; the same test failing on
+  two consecutive runs is real (fix it, or show it also fails on untouched
+  `origin/<main>`). It waits on a background run by its exit, not in fixed
+  sleep blocks. The caps hook refuses the integrator a shell loop
+  (`for`/`while`/`until`) that runs a lint/test script.
+
+### Review gate, parking and dependents (#1424)
+
+- **"Not yet run" never rejects.** The reviewer cannot run anything, so it
+  approves on reading and lists the checks it wants under `must_verify`.
+  `grind-run.js` appends them to the goal's verify commands, so the first
+  integration and every fix round run them. A rejection whose summary only
+  says nothing has been run (`NOT_RUN` in the workflow) is overridden; the
+  integrator is told so and must still refuse to push a real defect.
+- **Parking.** Sequential goals share one checkout. A goal that wrote files
+  and ends unmerged with nothing pushed (rejected, blocked, or its
+  integration failed) gets one more integrator call, under the build lock,
+  with a `PARK goal` prompt: it commits the goal's paths to a local
+  `wip/grind-<goal>` branch, never the preflight's pre-run state, and
+  returns the checkout to a detached `origin/<base>`. If the checkout is
+  still dirty afterwards, every later goal in the run is blocked. Finish
+  keeps and reports park branches.
+- **Dependents.** `depends_on` is known only after planning, so a goal
+  whose dependency already settled unmerged stops right after its plan,
+  before any worker writes, with `blocked: dependency X was rejected` (or
+  `did not land`, `is blocked`). In parallel mode a dependency that is still
+  running is awaited before integration, as before.
+
 ### Integration order
 
 - Plan, work and review run at most **4** agents at a time.
@@ -423,7 +453,7 @@ The rationale is in
 | `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the `run.json` meta issue only; no edits, worktrees or builds |
 | `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh` only |
 | `grind-reviewer` | same as worker | same as worker |
-| `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, and `act` when CI is off |
+| `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, `act` when CI is off, and a shell loop around lint/test |
 | `grind-lander` | Read, Grep, Glob, Bash, Skill | `gh pr`, `gh run view|list`, read-only git, `git push`, `pr_merge_watch` |
 
 Claude Code enforces the tool lists. Shell commands are enforced by clud's
@@ -462,6 +492,8 @@ it covers:
   feature-branch mode.
 - `test_grind_problems.py` — problem reporting.
 - `test_grind_reconcile.py` — reconcile.
+- `test_grind_review_gate.py` — the review gate, parking, dependents of a
+  rejected goal, and the integrator's retry rules.
 - `test_grind_e2e.py` — the three user scenarios of
   [#1392](https://github.com/zackees/clud/issues/1392) end to end.
 

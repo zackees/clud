@@ -295,9 +295,30 @@ pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<
         Ok(statements) => statements,
         Err(construct) => return Some(format!("{role} may not use {construct}")),
     };
+    if role == INTEGRATOR && is_script_retry_loop(&statements) {
+        return Some(format!(
+            "{role} may not rerun lint or test in a shell loop: read the failing tests first, and \
+             rerun unchanged only an infrastructure error, at most twice (#1425)"
+        ));
+    }
     statements
         .iter()
         .find_map(|words| statement_reason(role, words, run))
+}
+
+/// Whether a command is a shell loop that runs the repo's lint or test script
+/// (`for i in 1 2 3; do bash test; done`, `until ./test; do :; done`), which
+/// reruns a deterministic failure instead of reading it (#1425). The flat
+/// scanner splits the loop into statements, so a loop keyword heading one
+/// statement plus a script in any statement is enough. A wait loop on a
+/// marker file (`until [ -f test.exit ]; do sleep 5; done`) runs no script.
+fn is_script_retry_loop(statements: &[Vec<String>]) -> bool {
+    let looped = statements.iter().any(|words| {
+        words
+            .first()
+            .is_some_and(|w| matches!(w.as_str(), "for" | "while" | "until"))
+    });
+    looped && statements.iter().any(|words| runs_repo_script(words.as_slice()))
 }
 
 /// The denial reason for a non-shell tool call from `role`, or `None` to
@@ -918,6 +939,31 @@ mod tests {
 
     fn allowed(role: &str, command: &str, facts: &RunFacts) -> bool {
         shell_reason(role, command, facts).is_none()
+    }
+
+    /// #1425: a retry loop around the repo's lint/test scripts is refused;
+    /// single runs and marker-file wait loops are not.
+    #[test]
+    fn integrator_may_not_retry_lint_or_test_in_a_loop() {
+        let facts = run(false, false);
+        for command in [
+            "for i in 1 2 3; do bash test; done",
+            "for i in 1 2; do bash ./test --integration; done",
+            "until bash ./test; do sleep 1; done",
+            "while ! ./lint; do true; done",
+        ] {
+            let reason = shell_reason(INTEGRATOR, command, &facts)
+                .unwrap_or_else(|| panic!("integrator allowed `{command}`"));
+            assert!(reason.contains("#1425"), "`{command}`: {reason}");
+        }
+        for command in [
+            "bash ./test",
+            "bash ./lint && bash ./test --integration",
+            "until [ -f test.exit ]; do sleep 5; done",
+            "for f in a.rs b.rs; do cat $f; done",
+        ] {
+            assert!(allowed(INTEGRATOR, command, &facts), "{command}");
+        }
     }
 
     #[test]
