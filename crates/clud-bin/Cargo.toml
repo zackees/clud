@@ -53,6 +53,7 @@ gix-hash = { version = "=0.26.0", features = ["sha1"] }
 notify = "7"
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
+url = "2"
 # Issue #73 / #110: embedded KV store for the session and tracked-entry
 # registries. `redb` is pure Rust (no bundled C toolchain), single-writer
 # at the file level, and ships its own file locking — replaces the

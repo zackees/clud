@@ -30,6 +30,16 @@ channel rather than assuming the first row is stable. Browser choice opens
 the opener fails.
 
 An accepted selection becomes either `InstallIntent::CurrentExecutable` or
-`InstallIntent::Published(asset)`. The installation transaction is owned by
-#1494. Until it is connected, an accepted choice fails explicitly and leaves
-the user's installation untouched.
+`InstallIntent::Published(asset)`. `transaction.rs::plan` runs without writes,
+records the source digest and destination state, and shows the exact plan
+before consent. Only then does `execute` create the approved per-user bin
+directory, acquire its install lock, stage a private executable, verify its
+format, digest, and version, and commit it with a recoverable prior copy.
+The running-executable path copies offline. The release path uses the exact
+catalog asset, bounds and hashes its transfer, validates every redirect, and
+extracts only one executable from a historical wheel. A matching direct
+release can reuse the invoking executable only when its digest matches.
+
+The binary commit returns a pending activation status. Persistent shell or
+Windows User PATH edits and fresh name-based lookup are owned by #1495, so
+an absolute-path version check cannot claim overall install success.

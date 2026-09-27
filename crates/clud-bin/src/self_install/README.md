@@ -7,8 +7,9 @@ bare, interactive `clud` invocation when no executable named `clud` resolves
 on the effective PATH. `picker.rs` supplies the menu, confirmation, and full
 release-list models to the shared `selector.rs` terminal driver. The automatic
 menu defaults to **Not now**; the explicit menu defaults to **Install this
-version**. All install intents are read-only until the transaction engine is
-added. Accepting an install currently returns an explicit failure.
+version**. `transaction.rs` builds the read-only plan, verifies the selected
+source, and commits one executable. Persistent PATH activation is separate;
+binary commit alone reports a pending status.
 
 `catalog.rs` parses the bounded, duplicate-key rejecting v1 Catalog published
 at the Pages installer endpoint. `Catalog::compatible_releases` lists complete

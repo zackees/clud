@@ -562,6 +562,20 @@ fn verify_static_elf(bytes: &[u8], arch: Arch) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn verify_static_elf_file(file: &mut std::fs::File, arch: Arch) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(256 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > 256 * 1024 * 1024 {
+        return Err("static musl executable is too large".into());
+    }
+    verify_static_elf(&bytes, arch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

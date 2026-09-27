@@ -4746,11 +4746,34 @@ splitter, then dispatch explicit requests immediately after argument
 normalization. A bare interactive launch can offer installation if no `clud`
 resolves by name on PATH; any other launch shape stays on the normal path.
 Both entry points use selector models, with the automatic offer defaulting to
-**Not now**. The selection is an install intent; the transaction engine is a
-separate component, so an accepted intent fails explicitly until that engine
-is connected.
+**Not now**. The selection is an install intent passed to a separate
+transaction component.
 
 **Consequences:** Installer entry cannot trigger the runtime-cache hop,
 trampoline, title keeper, daemon, or backend preflight. The bounded offer gate
 avoids prompting on invalid or utility launches. The detailed contract lives
 in [architecture/native-installer.md](architecture/native-installer.md).
+
+## DD-109: Self-install shares one consented binary transaction
+
+**Status:** Accepted.
+
+**Context:** #1494. Copying the running executable and installing a selected
+release have different source checks but must obey the same destination,
+consent, staging, and rollback rules. A successful absolute-path launch does
+not establish that a new shell can resolve `clud` by name.
+
+**Decision:** Build a read-only plan for either source and show its version,
+source, digest, destination, replacement, and PATH proposal before any
+installer-owned write. After consent, lock one approved user bin directory,
+stage and validate one executable, preserve the prior bytes, then commit and
+verify the final digest and version. Restrict release transfers to the exact
+catalog URL and approved HTTPS asset redirects. Report binary commit as
+pending until a separate activation step proves fresh name-based lookup.
+
+**Consequences:** A declined plan changes no files. A transfer or verification
+failure cannot replace the prior executable. Historical wheel assets need
+bounded extraction of exactly one native binary. Recovery checks a prior
+backup before another attempt. Windows replacement can fail when the old
+executable is in use, and must preserve it in that case. The detailed flow
+lives in [architecture/native-installer.md](architecture/native-installer.md).
