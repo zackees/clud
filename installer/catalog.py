@@ -207,7 +207,12 @@ def catalog_from_releases(
     entries = []
     for release in releases:
         version = release["tag_name"].removeprefix("v")
-        if release.get("draft") or not VERSION.fullmatch(version):
+        if (
+            release.get("draft")
+            or release.get("prerelease")
+            or not VERSION.fullmatch(version)
+            or "-" in version
+        ):
             continue
         platforms = []
         seen = set()
@@ -327,6 +332,44 @@ def catalog_from_releases(
         "online_url": ONLINE_URL,
         "channels": {"latest-stable": stable},
         "releases": entries,
+    }
+
+
+def candidate_catalog_from_release(
+    candidate: dict, stable_catalog: dict, fetch_bytes=None
+) -> dict:
+    """Bind one public prerelease to the previously published stable catalog."""
+    if fetch_bytes is None:
+        fetch_bytes = fetch
+    version = candidate.get("tag_name", "").removeprefix("v")
+    if candidate.get("draft") or candidate.get("prerelease") is not True:
+        raise ValueError("candidate must be a public prerelease")
+    if not VERSION.fullmatch(version) or "-" in version:
+        raise ValueError("candidate requires a stable-form version")
+    if (
+        stable_catalog.get("kind") != "Catalog"
+        or stable_catalog.get("schema_version") != 1
+        or stable_catalog.get("tool") != "clud"
+        or stable_catalog.get("online_url") != ONLINE_URL
+        or set(stable_catalog.get("channels", {})) != {"latest-stable"}
+    ):
+        raise ValueError("previous stable catalog is invalid")
+    previous = stable_catalog["channels"]["latest-stable"]
+    if version_key(version) <= version_key(previous):
+        raise ValueError("candidate must be newer than previous stable")
+    previous_rows = stable_catalog.get("releases", [])
+    if not any(row.get("version") == previous for row in previous_rows):
+        raise ValueError("previous stable release is missing")
+    if any(row.get("version") == version for row in previous_rows):
+        raise ValueError("candidate is already in the stable catalog")
+    candidate_release = {**candidate, "prerelease": False}
+    built = catalog_from_releases([candidate_release], fetch_bytes)
+    if built["channels"]["latest-stable"] != version:
+        raise ValueError("candidate release is incomplete")
+    return {
+        **built,
+        "channels": {"latest-stable": previous, "candidate": version},
+        "releases": built["releases"] + previous_rows,
     }
 
 

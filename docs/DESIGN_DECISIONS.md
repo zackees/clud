@@ -4863,3 +4863,30 @@ require every VM and distribution result in the installer aggregate.
 **Consequences:** A skipped or failed VM or distribution blocks PR acceptance.
 The ARM64 hosted VM has passed within the 30-minute job budget. Public HTTPS
 candidate and stable gates will reuse these checks in the release flow.
+
+## DD-114: Promote public native bytes only after a separate candidate catalog passes
+
+**Status:** Accepted.
+
+**Context:** #1499. A release built and tested privately can still differ from
+the bytes served by GitHub. Publishing a new tag as stable before exercising
+its public URLs would move normal installers to an unproven binary. Release
+events created by `GITHUB_TOKEN` do not start a second workflow reliably.
+
+**Decision:** Publish the final native assets under the final tag as a public
+prerelease with `make_latest` disabled. Attach a versioned candidate catalog
+that points to those exact assets but keeps `latest-stable` at the prior
+release. Call the reusable six-host, NixOS, and distro matrix directly in
+candidate mode. Require anonymous HTTPS catalog and asset downloads, exact
+digest evidence, and fresh name-based activation. Publish PyPI only after
+that gate, then promote the same GitHub asset IDs and deploy canonical Pages.
+Call the same matrix again in released mode. On post-promotion failure,
+demote the release, restore the previous latest release and Pages pointer,
+and keep the workflow red. Serialize the release and both Pages publishers
+with a shared non-canceling queue; recheck the prior public state before
+promotion.
+
+**Consequences:** A failed candidate gate leaves the previous stable pointer
+and Pages untouched. A failed released gate triggers an explicit rollback
+whose own failure remains visible. The compact APE stays in the first gated
+release so its retirement can follow evidence from both public modes.

@@ -61,19 +61,35 @@ def test_release_workflow_gates_every_publish_path() -> None:
     text = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     assert "candidate_sha: ${{ steps.meta.outputs.candidate_sha }}" in text
     assert "run: python -m ci.release_gate" in text
+    assert "needs: [preflight, full-ci-gate]" in text
     assert "needs: [preflight, full-ci-gate, release-matrix]" in text
-    assert "needs: [preflight, full-ci-gate, build, verify-static-musl-arm64]" in text
     publish_needs = (
-        "needs: [preflight, full-ci-gate, build, build-static-musl, "
-        "verify-static-musl-arm64, "
-        "build-installer, publish-pypi]"
+        "needs: [preflight, full-ci-gate, snapshot-public, build, "
+        "build-static-musl, verify-static-musl-arm64, build-installer]"
     )
     assert publish_needs in text
+    assert "name: Publish final bytes as public prerelease" in text
+    assert "prerelease: true" in text
+    assert "make_latest: false" in text
+    pypi_needs = (
+        "needs: [preflight, full-ci-gate, build, "
+        "verify-candidate-installer, verify-prior-public]"
+    )
+    assert pypi_needs in text
+    assert "needs: [preflight, publish-pypi, verify-prior-public]" in text
+    assert "needs: [preflight, promote-release]" in text
+    assert "mode: candidate" in text
+    assert "mode: released" in text
+    assert "rollback-public:" in text
+    assert "python -m ci.public_release verify-rollback" in text
     assert "name: Execute release static musl ARM64" in text
     installer = (WORKFLOWS / "installer-check.yml").read_text(encoding="utf-8")
     assert "candidate-build:" in installer
     assert "candidate-host:" in installer
     assert "candidate-aggregate:" in installer
+    assert "public-host:" in installer
+    assert "public-nixos:" in installer
+    assert "public-distros:" in installer
     assert "if: always() && github.event_name == 'pull_request' &&" in installer
     assert "contains(github.event.pull_request.labels.*.name, 'ci-full')" in installer
     assert "contains(github.event.pull_request.labels.*.name, 'ci:full')" in installer

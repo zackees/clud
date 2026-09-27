@@ -10,6 +10,7 @@ use super::picker::{self, ConfirmChoice, MenuChoice, ReleaseChoice};
 use super::transaction;
 
 const CATALOG_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
+const CANDIDATE_CATALOG_NAME: &str = "installer-candidate-manifest.json";
 pub const INSTALL_PAGE: &str = "https://zackees.github.io/clud/install/index.html";
 const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -273,6 +274,29 @@ fn fetch_catalog() -> Result<Catalog, String> {
         }
         return Catalog::parse(&bytes);
     }
+    if let Some(tag) = std::env::var_os("CLUD_INSTALLER_CANDIDATE_TAG") {
+        let tag = tag
+            .into_string()
+            .map_err(|_| "candidate tag is not valid UTF-8")?;
+        let (url, version) = candidate_catalog_url(&tag)?;
+        let response = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(30))
+            .redirects(3)
+            .build()
+            .get(&url)
+            .call()
+            .map_err(|error| format!("candidate catalog fetch failed: {error}"))?;
+        if !response.get_url().starts_with("https://") {
+            return Err("candidate catalog response is not HTTPS".into());
+        }
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(MAX_CATALOG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("candidate catalog read failed: {error}"))?;
+        return Catalog::parse_candidate(&bytes, version);
+    }
     let response = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(12))
         .redirects(0)
@@ -290,6 +314,22 @@ fn fetch_catalog() -> Result<Catalog, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| format!("catalog read failed: {error}"))?;
     Catalog::parse(&bytes)
+}
+
+fn candidate_catalog_url(tag: &str) -> Result<(String, &str), String> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    if version.is_empty()
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return Err("candidate tag must be a numeric release version".into());
+    }
+    crate::self_install::catalog::validate_version(version)?;
+    Ok((
+        format!("https://github.com/zackees/clud/releases/download/{tag}/{CANDIDATE_CATALOG_NAME}"),
+        version,
+    ))
 }
 
 fn host() -> Result<Host, String> {
@@ -412,6 +452,19 @@ mod tests {
 
     fn parse(parts: &[&str]) -> Args {
         Args::parse_from_raw(parts.iter().map(|part| (*part).to_owned()).collect())
+    }
+
+    #[test]
+    fn candidate_tag_can_only_select_a_fixed_release_asset() {
+        let (url, version) = candidate_catalog_url("v2.10.0").unwrap();
+        assert_eq!(version, "2.10.0");
+        assert_eq!(
+            url,
+            "https://github.com/zackees/clud/releases/download/v2.10.0/installer-candidate-manifest.json"
+        );
+        for invalid in ["2.10.0/other", "2.10.0?x=1", "2.10.0-rc.1", "2.10", ""] {
+            assert!(candidate_catalog_url(invalid).is_err());
+        }
     }
 
     #[test]

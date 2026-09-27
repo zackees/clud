@@ -21,6 +21,9 @@ versions for a host, and `Catalog::resolve` chooses an exact version or the
 `latest-stable` channel. Linux always prefers the static musl variant. A GNU
 asset is eligible only after the caller supplies a verified non-NixOS GNU
 loader and glibc 2.17+ result through `Host::gnu`.
+`Catalog::parse_candidate` admits one complete newer candidate row only when
+an explicit fixed-origin release tag selects the versioned public candidate
+catalog; ordinary parsing rejects its candidate channel.
 
 `ResolvedAsset::verify_bytes` checks the catalog size and SHA-256 before
 installation. The selected musl asset must also be a matching ELF64 binary

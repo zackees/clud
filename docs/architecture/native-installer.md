@@ -29,6 +29,14 @@ channel rather than assuming the first row is stable. Browser choice opens
 `https://zackees.github.io/clud/install/index.html` and prints that URL if
 the opener fails.
 
+Public prerelease acceptance sets `CLUD_INSTALLER_CANDIDATE_TAG` to a numeric
+tag and calls `--install-version` explicitly. The binary constructs the fixed
+GitHub release URL for `installer-candidate-manifest.json`, requires the
+requested candidate version to be complete and newer than the previous
+`latest-stable`, then uses the same transaction and activation proof. An
+ordinary catalog read rejects a candidate channel, so a prerelease cannot
+enter normal discovery through a mixed catalog.
+
 An accepted selection becomes either `InstallIntent::CurrentExecutable` or
 `InstallIntent::Published(asset)`. `transaction.rs::plan` runs without writes,
 records the source digest and destination state, and shows the exact plan

@@ -207,6 +207,14 @@ impl Catalog {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        Self::parse_internal(bytes, None)
+    }
+
+    pub fn parse_candidate(bytes: &[u8], expected_version: &str) -> Result<Self, String> {
+        Self::parse_internal(bytes, Some(expected_version))
+    }
+
+    fn parse_internal(bytes: &[u8], expected_candidate: Option<&str>) -> Result<Self, String> {
         let document = crate::server_settings::parse_strict_json(bytes, MAX_CATALOG_BYTES)?;
         let root = object(&document, "catalog")?;
         require_string(root, "$schema", SCHEMA)?;
@@ -220,6 +228,25 @@ impl Catalog {
         let latest_stable = string(field(channels, "latest-stable")?, "latest-stable")?.to_owned();
         if !Version::parse(&latest_stable)?.pre.is_empty() {
             return Err("latest-stable points to a prerelease".into());
+        }
+        match expected_candidate {
+            Some(expected) => {
+                if channels.len() != 2
+                    || channels.get("candidate").and_then(Value::as_str) != Some(expected)
+                {
+                    return Err("candidate channel does not match requested version".into());
+                }
+                let candidate_version = Version::parse(expected)?;
+                if !candidate_version.pre.is_empty()
+                    || candidate_version <= Version::parse(&latest_stable)?
+                {
+                    return Err("candidate must be a newer stable-form version".into());
+                }
+            }
+            None if channels.contains_key("candidate") => {
+                return Err("candidate channel requires explicit candidate mode".into());
+            }
+            None => {}
         }
         let raw_releases = field(root, "releases")?
             .as_array()
@@ -268,9 +295,22 @@ impl Catalog {
         if !complete(stable) {
             return Err("latest-stable release is incomplete".into());
         }
+        if let Some(expected) = expected_candidate {
+            let candidate = releases
+                .iter()
+                .find(|release| release.version == expected)
+                .ok_or("candidate release is missing")?;
+            if !complete(candidate) {
+                return Err("candidate release is incomplete".into());
+            }
+        }
         let newest_complete_stable = releases
             .iter()
-            .filter(|r| r.order.pre.is_empty() && complete(r))
+            .filter(|r| {
+                r.order.pre.is_empty()
+                    && complete(r)
+                    && Some(r.version.as_str()) != expected_candidate
+            })
             .max_by(|a, b| a.order.cmp(&b.order))
             .ok_or("no complete stable release")?;
         if newest_complete_stable.version != latest_stable {
@@ -694,6 +734,33 @@ mod tests {
             arch: Arch::X86_64,
             gnu,
         }
+    }
+
+    #[test]
+    fn candidate_channel_keeps_previous_stable_and_requires_explicit_parse() {
+        let mut document = catalog(true, false);
+        let mut candidate = document["releases"][0].clone();
+        candidate["version"] = json!("2.10.0");
+        for row in candidate["platforms"].as_array_mut().unwrap() {
+            let asset = row["asset"].as_object_mut().unwrap();
+            for key in ["filename", "urls"] {
+                let replaced = asset[key].to_string().replace("2.9.0", "2.10.0");
+                asset.insert(key.to_owned(), serde_json::from_str(&replaced).unwrap());
+            }
+        }
+        document["releases"].as_array_mut().unwrap().push(candidate);
+        document["channels"]["candidate"] = json!("2.10.0");
+        let bytes = serde_json::to_vec(&document).unwrap();
+        assert!(Catalog::parse(&bytes).is_err());
+        let parsed = Catalog::parse_candidate(&bytes, "2.10.0").unwrap();
+        assert_eq!(parsed.latest_stable_version(), "2.9.0");
+        assert!(parsed
+            .resolve(
+                VersionChoice::Exact("2.10.0".into()),
+                linux_x64(GnuEligibility::Unverified),
+            )
+            .is_ok());
+        assert!(Catalog::parse_candidate(&bytes, "2.11.0").is_err());
     }
 
     #[test]

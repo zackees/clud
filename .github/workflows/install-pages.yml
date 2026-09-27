@@ -18,7 +18,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: clud-pages-deployment
+  group: clud-pages-publication
+  queue: max
   cancel-in-progress: false
 
 permissions:

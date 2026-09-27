@@ -13,7 +13,8 @@ on:
     - cron: '23 5 * * *'
 
 concurrency:
-  group: clud-pages-deployment
+  group: clud-pages-publication
+  queue: max
   cancel-in-progress: false
 
 permissions:

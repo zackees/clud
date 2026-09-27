@@ -12,9 +12,10 @@ on:
         required: false
         type: string
 
-# Never cancelled and never coalesced: every publish runs to completion.
+# Serialize release publication with both Pages publishers.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.run_id }}
+  group: clud-pages-publication
+  queue: max
   cancel-in-progress: false
 
 permissions:
@@ -142,6 +143,31 @@ jobs:
           CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
         run: python -m ci.release_gate
 
+  snapshot-public:
+    name: Snapshot prior public stable release and Pages pointer
+    needs: [preflight, full-ci-gate]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      prior_tag: ${{ steps.snapshot.outputs.prior_tag }}
+      prior_id: ${{ steps.snapshot.outputs.prior_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - name: Refuse an existing tag and record previous public stable state
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: python -m ci.public_release snapshot "$RELEASE_TAG" prior-public-state.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prior-public-state
+          path: prior-public-state.json
+          if-no-files-found: error
+
   # The release matrix comes from ci/ci_matrix.py, the same table CI uses, so
   # release wheels are produced by the same cross-compile strategy CI exercised.
   # Shipping natively-built wheels while CI only ever tested cross-built
@@ -244,7 +270,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [preflight, full-ci-gate, build, verify-static-musl-arm64]
+    needs: [preflight, full-ci-gate, build, verify-candidate-installer, verify-prior-public]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -267,8 +293,8 @@ jobs:
           skip-existing: true
 
   publish-release:
-    name: Publish GitHub release
-    needs: [preflight, full-ci-gate, build, build-static-musl, verify-static-musl-arm64, build-installer, publish-pypi]
+    name: Publish final bytes as public prerelease
+    needs: [preflight, full-ci-gate, snapshot-public, build, build-static-musl, verify-static-musl-arm64, build-installer]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -338,10 +364,12 @@ jobs:
           mv "$checksum_file" dist/SHA256SUMS
           cat dist/SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.preflight.outputs.release_tag }}
           name: clud ${{ needs.preflight.outputs.version }}
+          prerelease: true
+          make_latest: false
           generate_release_notes: true
           body: |
             ## Install
@@ -378,9 +406,122 @@ jobs:
           # asserted explicitly by the checksums step above.
           fail_on_unmatched_files: false
 
+  publish-candidate-catalog:
+    name: Attach versioned public candidate catalog
+    needs: [preflight, publish-release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - name: Generate from anonymous published bytes while keeping prior stable
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          python -m installer.candidate_catalog "$RELEASE_TAG" installer-candidate-manifest.json
+          python -m pip install 'git+https://github.com/zackees/manifest.json@main'
+          manifest-validate installer-candidate-manifest.json
+      - name: Attach immutable candidate catalog to the same release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" installer-candidate-manifest.json
+
+  verify-candidate-public:
+    name: Verify anonymous final bytes and prerelease asset identity
+    needs: [preflight, snapshot-public, publish-candidate-catalog]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: prior-public-state
+          path: release-state
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: standalone-musl-*
+          path: standalone
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Reconstruct exact six final native files
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: python -m installer.release_assets "$RELEASE_VERSION" dist standalone
+      - name: Compare anonymous HTTPS assets to final build bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          python -m ci.public_release verify-prerelease \
+            "$RELEASE_TAG" standalone release-state/prior-public-state.json \
+            release-state/candidate-public-state.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-public-state
+          path: release-state/candidate-public-state.json
+          if-no-files-found: error
+
+  verify-candidate-installer:
+    name: Verify public prerelease on every native host and guest
+    needs: [preflight, verify-candidate-public]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/installer-check.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      mode: candidate
+
+  verify-prior-public:
+    name: Prove failed candidate cannot move previous stable
+    needs: [preflight, verify-candidate-installer]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-public-state
+          path: release-state
+      - name: Recheck prior public release and Pages digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m ci.public_release verify-prior release-state/candidate-public-state.json
+
+  promote-release:
+    name: Promote the same public asset IDs to stable
+    needs: [preflight, publish-pypi, verify-prior-public]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-public-state
+          path: release-state
+      - name: Compare and swap prerelease to latest stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m ci.public_release promote release-state/candidate-public-state.json
+
   build-install-site:
     name: Build and validate installer Pages
-    needs: [preflight, publish-release]
+    needs: [preflight, promote-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -397,6 +538,8 @@ jobs:
           python-version: '3.11'
       - name: Generate catalog and site from published release assets
         run: python -m installer.site site
+      - name: Preserve published model document
+        run: python -m models.preserve site
       - name: Validate v1 catalog and public site paths
         run: |
           python -m pip install 'git+https://github.com/zackees/manifest.json@main'
@@ -445,11 +588,82 @@ jobs:
           echo '::error::Public installer Pages never matched the staged artifact' >&2
           exit 1
 
-  verify-published-installer:
-    name: Verify published installer on all host platforms
+  verify-promoted-public:
+    name: Prove promoted release is canonical latest stable
     needs: [preflight, deploy-install-site]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-public-state
+          path: release-state
+      - name: Verify public release asset IDs and Pages pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m ci.public_release verify-promoted release-state/candidate-public-state.json
+
+  verify-published-installer:
+    name: Verify promoted public bytes on all host platforms and guests
+    needs: [preflight, verify-promoted-public]
     permissions:
       contents: read
     uses: ./.github/workflows/installer-check.yml
     with:
       release_tag: ${{ needs.preflight.outputs.release_tag }}
+      mode: released
+
+  rollback-public:
+    name: Restore previous public stable after post-promotion failure
+    if: always() && needs.publish-pypi.result == 'success' && needs.verify-published-installer.result != 'success'
+    needs: [preflight, publish-pypi, promote-release, deploy-install-site, verify-promoted-public, verify-published-installer]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-public-state
+          path: release-state
+      - name: Demote exact failed release and restore prior latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m ci.public_release rollback release-state/candidate-public-state.json
+      - name: Rebuild previous canonical installer Pages and preserve models
+        run: |
+          python -m installer.site site
+          python -m models.preserve site
+          python -m pip install 'git+https://github.com/zackees/manifest.json@main'
+          manifest-validate site/install/manifest.json
+          python -m installer.verify_site site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          name: github-pages-rollback
+          path: site
+      - uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-rollback
+      - name: Prove public prior pointer is restored
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 12); do
+            if python -m ci.public_release verify-rollback release-state/candidate-public-state.json; then exit 0; fi
+            sleep 5
+          done
+          exit 1
