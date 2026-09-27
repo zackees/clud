@@ -524,7 +524,7 @@ mod tests {
             "2  new review activity",
             "3  PR closed or merged",
             "4  timeout",
-            "124  `clud tool run` watchdog stopped",
+            "124  the tool runner's watchdog stopped",
         ] {
             assert!(
                 tool.body.contains(code_line),

@@ -28,9 +28,6 @@ Exit codes:
   2  new review activity (unresolved coderabbit/human review)
   3  PR closed or merged out from under us
   4  timeout (configurable via --timeout, default 60min)
- 124  `clud tool run` watchdog stopped a resumable watch before the tool
-      completed; re-invoke with the same args (the terminal JSON says
-      `status: in-progress`)
   5  approval required: a workflow run or check is `action_required` (a fork
      PR waiting for a maintainer); reported immediately, never pending
   6  never reported: a required check has no check run while every workflow
@@ -49,10 +46,12 @@ Exit codes:
      polls in a row, or no repository could be resolved; the final event
      carries gh's stderr
  11  QUEUED: a run waited longer than `--max-queued` to start (off by default)
+ 124  the tool runner's watchdog stopped a resumable watch before the tool
+      completed; re-invoke with the same args (`status: in-progress`)
  130/143  killed by SIGINT/SIGTERM: a final `EXIT` event with reason `killed`,
      and nothing is cancelled
 
-A watch under `clud tool run` clamps its own timeout to at least 60 seconds
+A watch under the tool runner clamps its own timeout to at least 60 seconds
 below the wrapper's command cap, so it can exit 4 and finish cancellation.
 If the wrapper stops first, exit 124 means watch again; it is never green.
 
@@ -2416,7 +2415,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=_env_int("CLUD_PR_MERGE_WATCH_TIMEOUT", DEFAULT_TIMEOUT_SEC),
         help="overall wait cap in seconds (default $CLUD_PR_MERGE_WATCH_TIMEOUT, else "
-        "3600); clamped below clud tool run's command cap when present",
+        "3600); clamped below the tool runner's command cap when present",
     )
     p.add_argument(
         "--no-checks-grace",
