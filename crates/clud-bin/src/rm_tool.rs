@@ -379,7 +379,7 @@ fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
 
 #[cfg(any(test, windows))]
 pub(crate) fn msys_drive_path(raw: &str) -> Option<String> {
-    let normalized = raw.replace('\\', "/");
+    let normalized = crate::path_norm::slash_separators(raw);
     let bytes = normalized.as_bytes();
     if bytes.len() < 2
         || bytes[0] != b'/'

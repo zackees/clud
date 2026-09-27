@@ -58,7 +58,7 @@ pub fn protected_reason(path: &Path, home: Option<&Path>) -> Option<String> {
 
 #[cfg(any(test, windows))]
 fn windows_catastrophe_reason(raw: &str) -> Option<&'static str> {
-    let normalized = raw.replace('\\', "/");
+    let normalized = crate::path_norm::slash_separators(raw);
     let trimmed = normalized.trim_end_matches('/');
     if trimmed.eq_ignore_ascii_case("%USERPROFILE%") {
         return Some("home directory");
