@@ -337,6 +337,9 @@ pub fn ensure_installed_at(
     let mut results = Vec::new();
     for backend in active_backends(home) {
         let report = install_to(&backend.skills_dir(home), BUNDLED_SKILLS)?;
+        if backend.backend == Backend::Codex {
+            install_explicit_invocation_policies(&backend.skills_dir(home))?;
+        }
         results.push((backend, report));
     }
     Ok(results)
@@ -367,7 +370,51 @@ pub fn ensure_installed_for_backend_at(
         return Ok(None);
     }
     let report = install_to(&skill_backend.skills_dir(home), BUNDLED_SKILLS)?;
+    if matches!(backend, Backend::Codex) {
+        install_explicit_invocation_policies(&skill_backend.skills_dir(home))?;
+    }
     Ok(Some((skill_backend, report)))
+}
+
+/// Codex reads invocation policy from agents/openai.yaml, not SKILL.md.
+/// Preserve user-owned policy files while refreshing copies installed by clud.
+fn install_explicit_invocation_policies(base: &Path) -> Result<(), InstallError> {
+    const DO_POLICY: &str = include_str!("../assets/skills/do/agents/openai.yaml");
+    const GRIND_POLICY: &str = include_str!("../assets/skills/grind/agents/openai.yaml");
+    const GRIND_SKILLS: &[&str] = &[
+        "grind",
+        "grind-intake",
+        "grind-plan",
+        "grind-prework",
+        "grind-work",
+        "grind-review",
+        "grind-integrate",
+        "grind-land",
+        "grind-cron",
+    ];
+    for (name, policy) in std::iter::once(("do", DO_POLICY))
+        .chain(GRIND_SKILLS.iter().map(|name| (*name, GRIND_POLICY)))
+    {
+        let skill_dir = base.join(name);
+        let skill_md = skill_dir.join("SKILL.md");
+        let Ok(skill_body) = std::fs::read_to_string(&skill_md) else {
+            continue;
+        };
+        if !skill_body.contains(MANAGED_BY_CLUD_MARKER) {
+            continue;
+        }
+        let agents_dir = skill_dir.join("agents");
+        let path = agents_dir.join("openai.yaml");
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if !existing.contains(MANAGED_BY_CLUD_MARKER) => continue,
+            Ok(existing) if normalize(&existing) == normalize(policy) => continue,
+            _ => {
+                std::fs::create_dir_all(&agents_dir)?;
+                std::fs::write(&path, policy)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn backend_for(backend: Backend) -> Option<&'static SkillBackend> {
