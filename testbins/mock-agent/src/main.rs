@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 const CODEX_BRIDGE_PROBE_REQUEST: &str = include_str!("../assets/codex_bridge_probe_request.json");
 
+mod codex_app_server;
 mod serve;
 
 fn main() {
@@ -41,6 +42,13 @@ fn main() {
     // test tier (#1323). Everything below is the fake-`claude` behavior.
     if args.get(1).map(String::as_str) == Some("serve") {
         std::process::exit(serve::run(&args[2..]));
+    }
+    if args.get(1).map(String::as_str) == Some("app-server") {
+        if let Err(error) = codex_app_server::run() {
+            eprintln!("mock Codex app-server failed: {error}");
+            std::process::exit(1);
+        }
+        return;
     }
 
     // Extract --mock-exit-code if present (our own flag, not forwarded by clud)
