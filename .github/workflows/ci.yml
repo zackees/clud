@@ -118,12 +118,11 @@ jobs:
         run: .venv/bin/python -m ci.lint --static-only
 
   # ---------------------------------------------------------------- dylint --
-  # Dylint installs a nightly toolchain and runs only in full mode. The merge
-  # queue and explicitly full PRs therefore exercise it before merge.
+  # Dylint is required in every mode. The reusable workflow runs the custom
+  # lint on each supported host's selected Rust source.
   dylint:
     name: Dylint
     needs: static
-    if: needs.static.outputs.mode == 'full'
     uses: ./.github/workflows/_dylint.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -369,10 +368,12 @@ jobs:
           MODE: ${{ needs.static.outputs.mode }}
           STATIC: ${{ needs.static.result }}
           WINDOWS: >-
+            ${{ needs.dylint.result }}
             ${{ needs.build-windows-x64.result }}
             ${{ needs.test-windows-x64.result }}
           MINIMAL: >-
             ${{ needs.static.result }}
+            ${{ needs.dylint.result }}
             ${{ needs.build-linux-x64.result }}
             ${{ needs.test-linux-x64-unit.result }}
           EXTENDED: >-

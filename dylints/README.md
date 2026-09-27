@@ -9,19 +9,23 @@ workspace build because they use rustc internals and pin their own nightly.
 Run locally:
 
 ```bash
-soldr rustup toolchain install nightly-2026-05-28 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
-SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS=1 RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo dylint --all -- --workspace --all-targets
+export SOLDR_DYLINT_TOOLCHAIN=nightly-2026-05-28
+env -u RUSTUP_TOOLCHAIN soldr dylint prepare
+env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
 ```
 
-Soldr 0.9.10's blessed 6.0.3 Dylint lane supplies precompiled `cargo-dylint`
-and `dylint-link` binaries for the host platform. Keep `dylint_linting` at
+Soldr 0.9.23's verified 6.0.3 Dylint lane supplies precompiled `cargo-dylint`,
+`dylint-link`, and the matching nightly driver for each supported host. Keep `dylint_linting` at
 **6.0.3** with those tools, and keep the nightly above matched to
 `ban_manual_slash_normalize/rust-toolchain`. `tests/test_dylint_stack.py`
 asserts that lockstep.
 
-`SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS=1` is also intentional. It prevents a
-previously installed `cargo-dylint` or `dylint-link` on `PATH` from replacing
-Soldr's matched 6.0.3 tool set.
+Clearing an inherited `RUSTUP_TOOLCHAIN` for `soldr dylint prepare` is
+intentional: CI's stable Rust selector must not override the lint crate's
+nightly pin. Set `SOLDR_DYLINT_TOOLCHAIN=nightly-2026-05-28` for these commands:
+Soldr's preparer reads `rust-toolchain.toml`, while this crate intentionally
+retains Dylint's bare `rust-toolchain` file. Soldr then selects the matching
+verified tool, linker, and driver set.
 
 The legacy bare `rust-toolchain` filename is intentional. Dylint 6.0.3 unsets
 `RUSTUP_TOOLCHAIN` while building its driver and recognizes this filename when

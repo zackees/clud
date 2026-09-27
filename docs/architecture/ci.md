@@ -11,8 +11,10 @@ The literal `ci-test` PR label adds Linux x64 integration and Windows x64.
 Linux integration stays in `ci-full` and release validation too;
 it was moved out of ordinary runs after the measured minimal lane exceeded
 the 12.5% runner-minute budget.
-`ci-full` (and existing `ci:full` labels), merge queue runs, and manual full
-runs select all six targets plus Dylint. A manual run requires a reachable
+Every PR runs native Linux, Windows, and macOS Dylint for the custom late lint;
+full local `bash lint` runs the host Dylint pass after Clippy. `ci-full` (and
+existing `ci:full` labels), merge queue runs, and manual full runs select all
+six build targets. A manual run requires a reachable
 `candidate_sha`; its CI workflow and helper tree must match the selected
 branch's workflow revision, so the same candidate can be retried after
 unrelated `main` changes. Every checkout uses that SHA. The required `CI OK`
@@ -175,9 +177,9 @@ and make the producer side live on Linux.
 ```
   ┌──────────┐  ┌──────────┐   per triple, independently:
   │  static  │  │  dylint  │
-  │  ubuntu  │  │  ubuntu  │   ┌──────────────┐   bundle-<triple>   ┌────────────┐
-  │ ruff/fmt │  │ full mode│   │ build-<trip> │ ─────────────────►  │ test-<trip>│
-  │ /banned  │  │  only    │   │  ubuntu-24   │  .tar.gz artifact   │   NATIVE   │
+  │  ubuntu  │  │ 3 native│   ┌──────────────┐   bundle-<triple>   ┌────────────┐
+  │ ruff/fmt │  │  hosts   │   │ build-<trip> │ ─────────────────►  │ test-<trip>│
+  │ /banned  │  │all modes │   │  ubuntu-24   │  .tar.gz artifact   │   NATIVE   │
   └────┬─────┘  └────┬─────┘   │  clippy +    │                     │  unit +    │
        │             │         │  bins +      │                     │ integration│
        │             │         │  test bins   │                     │ no cargo,  │
@@ -215,7 +217,7 @@ Three structural claims, in the order they matter:
 2. **The build host is always Linux.**
    Linux runners are the cheapest and least contended, and — critically — all
    targets then share one runner class, so cache behaviour is uniform.
-3. **macOS/Windows runners never compile.** They download a bundle and execute
+3. **macOS/Windows test runners never compile product artifacts.** They download a bundle and execute
    it. Their job duration collapses from "cold C++ build + test" to "test",
    which is what makes using them sparingly viable.
 
@@ -223,27 +225,30 @@ Three structural claims, in the order they matter:
 
 The `ci-windows` label is an iteration mode for Windows-only work (#1310): it
 runs static checks plus the Windows x64 build and both Windows suites, and
-skips every Linux and macOS lane. `CI OK` passes exactly when static checks and
-the Windows lanes pass; `ci-test`/`ci-full` take precedence, and the merge
+skips Linux and macOS build/test lanes, but retains native Dylint on all three
+hosts. `CI OK` passes only when Dylint, static checks, and the Windows lanes
+pass; `ci-test`/`ci-full` take precedence, and the merge
 queue still runs the full matrix before anything merges.
 `ci/ci_matrix.py` defines the target inventory consumed by the workflow. Not
 every push needs all six targets.
 
 | Tier | Triples | Trigger |
 | --- | --- | --- |
-| `minimal` | `x86_64-unknown-linux-gnu` build + unit suite | ordinary PR and `main` push |
+| `minimal` | native three-OS Dylint + `x86_64-unknown-linux-gnu` build and unit suite | ordinary PR and `main` push |
 | `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
-| `windows` | static + `x86_64-pc-windows-msvc` build, unit and integration only | PR labeled `ci-windows` |
-| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples, and Dylint | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
+| `windows` | native three-OS Dylint + static + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
+| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
 
-`ci-test` covers Linux and Windows. Both hosted macOS architectures run only
-in `ci-full` and release validation. Routine events use Linux x64 for fast
+`ci-test` covers Linux and Windows product build/tests. Both hosted macOS
+architectures run product tests only in `ci-full` and release validation;
+the macOS Dylint leg runs in every mode. Routine events use Linux x64 for fast
 feedback, while the merge queue still requires the complete matrix.
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old
 `MACOS_SDK_URL` gate and native macOS fallback no longer exist. The macOS
-runners only execute the resulting bundle.
+runners only execute the resulting product bundle in test jobs; native Dylint
+separately compiles the lint and selected workspace code.
 
 Two trigger-level notes:
 
@@ -422,8 +427,8 @@ and exports the resulting environment to later workflow steps.
 That environment includes `SDKROOT` plus target-scoped compiler/linker
 settings. `ci/xbuild.py` forwards the same path as `CMAKE_OSX_SYSROOT`, then
 routes link-producing builds through `soldr build`. Both Darwin triples now
-build on `ubuntu-24.04`; native macOS runners only download and execute the
-bundles.
+build on `ubuntu-24.04`; native macOS product-test runners only download and
+execute the bundles. The native Dylint job is separate.
 
 ## Cache model
 
@@ -672,14 +677,14 @@ Wheel sizes are then checked by `python -m ci.check_wheel_size --dist-dir dist/`
 | `ci/banned_imports.py` | 6x | 1x (`static`) |
 | `ci/banned_cross_tools.py` | — (#637; new) | 1x (`static`) |
 | `cargo clippy --workspace --all-targets` | 6x native | 2x, both on Linux |
-| dylint | 2x per PR (`push` + `pull_request` both fire) | 0x per PR; 1x on merge/main, Linux only |
+| dylint | 2x per PR (`push` + `pull_request` both fire) | 3 native OS legs per PR; one reusable workflow call |
 | Rust doc-tests | 6x | 1x (host triple) |
 
-`ci/lint.py` gains `--static-only`, and the checks inside it are reordered
+`ci/lint.py` has `--static-only`, and the checks inside it are ordered
 cheapest-first (ruff → banned imports → banned cross tools → `cargo fmt`) so
 the most common failure
 reds out in seconds instead of behind a cargo subprocess. `bash lint` with no
-flags still runs the whole suite, unchanged.
+flags runs the whole suite including host Dylint after Clippy.
 
 **Clippy runs on two triples, not six.** It is worth stating why, because the
 obvious intuition is wrong: clippy is *not* nearly free once the dependency
@@ -692,15 +697,10 @@ gating in this workspace is by OS rather than architecture, `x86_64-unknown-linu
 plus `x86_64-pc-windows-msvc` type-check every `cfg(windows)` / `cfg(unix)`
 branch. The other four triples would pay a full extra pass for no new coverage.
 
-**Dylint is full-only.** It is Linux-only by construction — it needs a
-nightly toolchain with `rustc-dev` and `llvm-tools` and builds a cdylib driver
-for the host — so requirement (3) ("no dylint off Linux") is satisfied
-structurally: `_dylint.yml` pins `ubuntu-24.04` and nothing else can reach it.
-But it is also ~25 minutes of cold nightly work, which would make a
-slash-normalization style lint the longest pole in every ordinary PR. It now
-runs on `merge_group`, `ci-full` PRs, and exact-SHA manual dispatches.
-The old `dylint.yml` also fired on both `push` and `pull_request`, so it ran
-twice per PR.
+**Dylint is required in every mode.** `_dylint.yml` runs a native Linux,
+Windows, and macOS matrix so the late lint observes each host-selected module.
+All hosts use Soldr's verified 6.0.3 tools and nightly driver prebuilts. The
+`CI OK` gate requires the aggregate Dylint result even on an unlabeled PR.
 
 **Doc-tests run once.** They were covered by the old `cargo test --workspace`
 but produce no harness binary, so they cannot ride along in a bundle. They are
@@ -718,7 +718,7 @@ currently copy-pasted four times in exactly one place.
 | `.github/actions/setup-exec/action.yml` | composite: python + uv + `uv sync --group test`, then **deletes** the Rust toolchain. Used by exec jobs. |
 | `.github/workflows/_build-target.yml` | reusable: one triple → one bundle (+ optional wheel/sdist artifact). Called by `ci.yml` and `auto-release.yml`. |
 | `.github/workflows/_run-tests.yml` | reusable: one triple × one suite → test execution. |
-| `.github/workflows/_dylint.yml` | reusable + dispatchable: the nightly Linux lint. |
+| `.github/workflows/_dylint.yml` | reusable + dispatchable: native Linux, Windows, and macOS Dylint. |
 | `.github/workflows/ci.yml` | the only push/PR entrypoint. |
 | `.github/workflows/auto-release.yml` | unchanged triggers; now the sole caller that may pass `profile: release`. |
 | `ci/ci_matrix.py` | the triple table, shared by CI and the release matrix. |
@@ -784,7 +784,7 @@ Per PR push, `core` tier:
 | macOS runner jobs | 4 cold builds | 2 exec only |
 | Windows runner jobs | 4 cold builds | 2 exec only |
 | Platform-independent lint runs | 18 | 3 |
-| dylint runs | 2 | 0 |
+| dylint runs | 2 | 3 native OS legs |
 
 Critical path is `build-<triple>` → `test-<triple>` per lane, in parallel across
 lanes, with `static` failing fast alongside. The Linux lane reports red/green

@@ -40,9 +40,11 @@ def test_dylint_stack_versions_stay_in_lockstep() -> None:
 
     assert lint_manifest["dependencies"]["dylint_linting"] == DYLINT_VERSION
     assert toolchain["toolchain"]["channel"] == DYLINT_NIGHTLY
-    assert re.search(r"(?m)^\s*- name: Install Dylint\s*$", workflow) is None
-    assert "cargo install cargo-dylint dylint-link" not in workflow
+    assert "env -u RUSTUP_TOOLCHAIN soldr dylint prepare" in workflow
+    assert "env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets" in workflow
     assert 'SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS: "1"' in workflow
+    assert "SOLDR_DYLINT_TOOLCHAIN: nightly-2026-05-28" in workflow
+    assert "dylint: true" in workflow
     # Every nightly the workflow names must be the one the lint crate pins;
     # a stray second date means the driver and the lints disagree.
     assert set(re.findall(r"nightly-\d{4}-\d{2}-\d{2}", workflow)) == {DYLINT_NIGHTLY}
@@ -51,8 +53,17 @@ def test_dylint_stack_versions_stay_in_lockstep() -> None:
     # the lockstep is how you get a green suite that hands people a
     # mismatched cargo-dylint — the tool/library skew #911 was about.
     readme = (ROOT / "dylints" / "README.md").read_text(encoding="utf-8")
-    assert f"Soldr 0.9.10's blessed {DYLINT_VERSION}" in readme
+    assert f"Soldr 0.9.23's verified {DYLINT_VERSION}" in readme
     assert set(re.findall(r"nightly-\d{4}-\d{2}-\d{2}", readme)) == {DYLINT_NIGHTLY}
+
+
+def test_full_local_lint_runs_the_custom_dylint() -> None:
+    script = (ROOT / "lint").read_text(encoding="utf-8")
+    assert "-m ci.lint" in script
+    assert "env -u RUSTUP_TOOLCHAIN soldr dylint prepare" in script
+    assert "export SOLDR_DYLINT_TOOLCHAIN=nightly-2026-05-28" in script
+    assert "env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets" in script
+    assert "--static-only" in script
 
 
 def test_dylint_lockfile_matches_the_pinned_version() -> None:
@@ -65,13 +76,13 @@ def test_dylint_workflow_runs_one_plain_invocation() -> None:
     """No retry, no alias reconstruction, no hand-built driver (issue #911)."""
     workflow = _workflow_text()
 
-    # Exactly one `cargo dylint` run — the recovery path ran it twice.
+    # Exactly one managed workspace pass — the recovery path ran it twice.
     managed_invocations = re.findall(
-        r"(?m)^\s*(?:run:\s*)?(?:RUSTUP_TOOLCHAIN=\S+\s+)?soldr\s+--no-cache\s+cargo\s+dylint\b",
+        r"(?m)^\s*(?:run:\s*)?env -u RUSTUP_TOOLCHAIN soldr dylint --all\b",
         workflow,
     )
     assert len(managed_invocations) == 1
-    assert "cargo-dylint dylint" not in workflow
+    assert "cargo install cargo-dylint" not in workflow
 
     # The specific scaffolding that was removed. Each of these appearing again
     # means someone restored the workaround instead of moving the version pin.

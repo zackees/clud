@@ -200,6 +200,11 @@ def test_workflow_binds_dispatch_and_labels_to_mode():
 
 def test_every_build_waits_for_mode_and_full_is_complete():
     text = CI_YML.read_text(encoding="utf-8")
+    dylint = text.split("\n  dylint:\n", 1)[1].split("\n  build-linux-x64:\n", 1)[0]
+    assert "mode == 'full'" not in dylint
+    assert "dylint.result" in text.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
+    dylint_workflow = (CI_YML.parent / "_dylint.yml").read_text(encoding="utf-8")
+    assert "os: [ubuntu-24.04, windows-2025, macos-15]" in dylint_workflow
     for name in ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
         block = text.split(f"\n  build-{name}:\n", 1)[1].split("\n  test-", 1)[0]
         assert "    needs: static\n" in block, name
