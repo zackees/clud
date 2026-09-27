@@ -315,6 +315,44 @@ fn extra_input_f3_is_observed() {
 }
 
 #[test]
+fn local_pump_releases_lone_esc_after_short_idle_without_toast() {
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let result = filter_user_input_chunk(b"\x1b", &mut paste, &mut mouse, None);
+    assert!(result.bytes.is_empty());
+    assert_eq!(
+        pending_user_input_wait(PUMP_TICK, &paste, &mouse, false),
+        INPUT_PENDING_FLUSH
+    );
+    assert_eq!(
+        flush_pending_user_input(&mut paste, &mut mouse, None),
+        b"\x1b"
+    );
+    assert_eq!(
+        pending_user_input_wait(PUMP_TICK, &paste, &mouse, false),
+        PUMP_TICK
+    );
+}
+
+#[test]
+fn local_pump_releases_lone_esc_through_toast_filter() {
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let result = filter_user_input_chunk(b"\x1b", &mut paste, &mut mouse, parity_targets());
+    assert!(result.bytes.is_empty());
+    assert_eq!(
+        pending_user_input_wait(PUMP_TICK, &paste, &mouse, true),
+        INPUT_PENDING_FLUSH
+    );
+    assert_eq!(
+        flush_pending_user_input(&mut paste, &mut mouse, parity_targets()),
+        b"\x1b"
+    );
+    assert!(!paste.has_pending());
+    assert!(!mouse.has_pending());
+}
+
+#[test]
 fn ctrl_c_byte_requests_interrupt() {
     assert!(!stdin_chunk_requests_interrupt(b"abc"));
     assert!(stdin_chunk_requests_interrupt(b"a\x03c"));
