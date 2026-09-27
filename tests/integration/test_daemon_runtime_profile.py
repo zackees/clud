@@ -415,6 +415,10 @@ def test_detached_worker_blocks_configured_production_idle_timeout(
         clud_binary,
         env,
         "--codex",
+        # This checks worker liveness, not model discovery. The latter has a
+        # bounded multi-second probe that can outlast this 2 s idle window.
+        "--model",
+        "gpt-6-sol",
         "-p",
         "worker-keeps-daemon-alive",
         "--",
@@ -457,6 +461,8 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
         [
             str(clud_binary),
             "--codex",
+            "--model",
+            "gpt-6-sol",
             "--subprocess",
             "-p",
             "foreground-lease-keeps-daemon-alive",
