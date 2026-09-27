@@ -576,8 +576,8 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
              lint/test before every push"
         )),
         WORKER | REVIEWER => Some(format!(
-            "{role} may only run read-only `gh` (issue/pr/run view|list, search) and `rm-file` / \
-             `rm-dir` on literal paths in its task's directories; it cannot build, lint or test"
+            "{role} may only run read-only `gh` (issue/pr/run view|list, search) and `safe-rm` \
+             on literal paths in its task's directories; it cannot build, lint or test"
         )),
         _ => deny(&program),
     }
@@ -585,14 +585,14 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
 
 /// A deletion statement a grind role may type (#1340).
 enum RmStatement {
-    /// `rm-file` / `rm-dir` (or `clud rm-file`): its path operands.
+    /// `safe-rm` (or `clud safe-rm`): its path operands.
     Direct(Vec<String>),
-    /// `find <paths> … -exec rm-file|rm-dir …`: find's starting paths.
+    /// `find <paths> … -exec safe-rm|safe-rm …`: find's starting paths.
     Find(Vec<String>),
 }
 
 fn rm_statement(words: &[String]) -> Option<RmStatement> {
-    const TOOLS: &[&str] = &["rm-file", "rm-dir"];
+    let tools = crate::deletion_rules::generated().safe_aliases;
     let program = program_name(&words[0]);
     let operands = |args: &[String]| {
         let mut out = Vec::new();
@@ -606,16 +606,16 @@ fn rm_statement(words: &[String]) -> Option<RmStatement> {
         }
         out
     };
-    if TOOLS.contains(&program.as_str()) {
+    if tools.contains(&program.as_str()) {
         return Some(RmStatement::Direct(operands(&words[1..])));
     }
-    if is_clud(&words[0]) && words.get(1).is_some_and(|w| TOOLS.contains(&w.as_str())) {
+    if is_clud(&words[0]) && words.get(1).is_some_and(|w| tools.contains(&w.as_str())) {
         return Some(RmStatement::Direct(operands(&words[2..])));
     }
     if program == "find"
         && words.windows(2).any(|w| {
             matches!(w[0].as_str(), "-exec" | "-execdir")
-                && TOOLS.contains(&program_name(&w[1]).as_str())
+                && tools.contains(&program_name(&w[1]).as_str())
         })
     {
         let starts = words[1..]
@@ -643,7 +643,7 @@ fn normalize(path: &Path) -> std::path::PathBuf {
     out
 }
 
-/// The per-role deletion roots for `rm-file` / `rm-dir` (#1340), checked
+/// The per-role deletion roots for `safe-rm` (#1340), checked
 /// before the tools run (which enforce the session's roots themselves):
 ///
 /// - a worker or reviewer may delete only under the directories of the
@@ -661,21 +661,33 @@ pub(super) fn rm_tool_verdict(
     run: &RunFacts,
     cwd: &Path,
 ) -> Option<Option<String>> {
-    if !matches!(role, WORKER | REVIEWER | INTEGRATOR) {
-        return None;
-    }
+    let profile = match role {
+        INTEGRATOR => crate::deletion_rules::Profile::GrindIntegrator,
+        WORKER => crate::deletion_rules::Profile::GrindWorker,
+        REVIEWER => crate::deletion_rules::Profile::GrindReviewer,
+        PLANNER => crate::deletion_rules::Profile::GrindPlanner,
+        PREWORK => crate::deletion_rules::Profile::GrindPrework,
+        LANDER => crate::deletion_rules::Profile::GrindLander,
+        _ => return None,
+    };
     let statements = statement_words(command).ok()?;
     let parsed: Vec<Option<RmStatement>> = statements.iter().map(|w| rm_statement(w)).collect();
     if parsed.iter().all(Option::is_none) {
         return None;
     }
+    let scope = crate::deletion_rules::scope(profile).ok()?;
+    if scope == crate::deletion_rules::DeleteScope::None {
+        return Some(Some(format!("{role} may not delete")));
+    }
     let cwd = normalize(cwd);
     let checkout = super::nearest_repo_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let allowed = match role {
-        INTEGRATOR => vec![checkout.clone()],
-        _ => run
+    let allowed = match scope {
+        crate::deletion_rules::DeleteScope::Checkout => vec![checkout.clone()],
+        crate::deletion_rules::DeleteScope::TaskDirs => run
             .task_dirs(&checkout)
             .unwrap_or_else(|| vec![checkout.clone()]),
+        crate::deletion_rules::DeleteScope::Session => vec![checkout.clone()],
+        crate::deletion_rules::DeleteScope::None => unreachable!(),
     };
     let shown = allowed
         .iter()
@@ -689,7 +701,7 @@ pub(super) fn rm_tool_verdict(
             None => return None,
             Some(RmStatement::Find(_)) if role != INTEGRATOR => {
                 return Some(Some(format!(
-                    "{role} may not run `find -exec` deletions; name each path to rm-file / rm-dir"
+                    "{role} may not run `find -exec` deletions; name each path to safe-rm"
                 )))
             }
             Some(RmStatement::Find(starts)) => (starts, true),
@@ -707,7 +719,7 @@ pub(super) fn rm_tool_verdict(
             let globbed = operand.contains(['*', '?', '[']);
             if dynamic || (globbed && role != INTEGRATOR) {
                 return Some(Some(format!(
-                    "{role} may pass only literal paths to rm-file / rm-dir, not {operand:?}"
+                    "{role} may pass only literal paths to safe-rm, not {operand:?}"
                 )));
             }
             // A glob is checked by the directory it expands in.
@@ -1361,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn deletion_roots_follow_the_role() {
+    fn rm_profile_deletion_roots_follow_the_role() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("repo-wt-1");
         std::fs::create_dir_all(wt.join(".git")).unwrap();
@@ -1374,22 +1386,22 @@ mod tests {
         let verdict = |role: &str, command: &str| rm_tool_verdict(role, command, &facts, &wt);
 
         // A worker deletes only under its task's directories, literally.
-        assert_eq!(verdict(WORKER, "rm-file src/cache/old.rs"), Some(None));
+        assert_eq!(verdict(WORKER, "safe-rm src/cache/old.rs"), Some(None));
         assert_eq!(
-            verdict(REVIEWER, "rm-dir --purge src/cache/tmp"),
+            verdict(REVIEWER, "safe-rm --purge -r src/cache/tmp"),
             Some(None)
         );
         for command in [
-            "rm-file src/main.rs",
-            "rm-dir src",
-            "rm-file ../other/x",
-            "rm-file src/cache/../../README.md",
-            "rm-file \"$X\"",
-            "rm-file src/cache/*.rs",
-            "rm-file src/cache/{x,../../other}",
-            "rm-file src/cache/\\.\\./\\.\\./README.md",
-            "find src -exec rm-file {} +",
-            "rm-file",
+            "safe-rm src/main.rs",
+            "safe-rm -r src",
+            "safe-rm ../other/x",
+            "safe-rm src/cache/../../README.md",
+            "safe-rm \"$X\"",
+            "safe-rm src/cache/*.rs",
+            "safe-rm src/cache/{x,../../other}",
+            "safe-rm src/cache/\\.\\./\\.\\./README.md",
+            "find src -exec safe-rm {} +",
+            "safe-rm",
         ] {
             assert!(
                 matches!(verdict(WORKER, command), Some(Some(_))),
@@ -1397,43 +1409,51 @@ mod tests {
             );
         }
         // Mixed with anything else, a worker's usual rules decide.
-        assert_eq!(verdict(WORKER, "rm-file src/cache/a && ls"), None);
+        assert_eq!(verdict(WORKER, "safe-rm src/cache/a && ls"), None);
         assert_eq!(verdict(WORKER, "ls"), None);
 
         // With no recorded tasks for this checkout, its whole checkout.
         let untracked = RunFacts::default();
         assert_eq!(
-            rm_tool_verdict(WORKER, "rm-file docs/x.md", &untracked, &wt),
+            rm_tool_verdict(WORKER, "safe-rm docs/x.md", &untracked, &wt),
             Some(None)
         );
         assert!(matches!(
-            rm_tool_verdict(WORKER, &format!("rm-dir {}", wt.display()), &untracked, &wt),
+            rm_tool_verdict(
+                WORKER,
+                &format!("safe-rm -r {}", wt.display()),
+                &untracked,
+                &wt
+            ),
             Some(Some(_))
         ));
 
         // The integrator: anywhere inside its checkout, globs and find too.
         for command in [
-            "rm-dir target/debug/incremental",
-            "rm-file build/*.o",
-            "find . -name '*.tmp' -exec rm-file {} +",
-            "cargo build && rm-file out.log",
+            "safe-rm -r target/debug/incremental",
+            "safe-rm build/*.o",
+            "find . -name '*.tmp' -exec safe-rm {} +",
+            "cargo build && safe-rm out.log",
         ] {
             assert_eq!(verdict(INTEGRATOR, command), None, "{command}");
         }
         for command in [
-            "rm-dir ../repo",
-            "rm-file /etc/hosts",
-            "find / -exec rm-dir {} +",
-            "rm-dir {x,/abs/sibling-wt/dir}",
+            "safe-rm -r ../repo",
+            "safe-rm /etc/hosts",
+            "find / -exec safe-rm -r {} +",
+            "safe-rm -r {x,/abs/sibling-wt/dir}",
         ] {
             assert!(
                 matches!(verdict(INTEGRATOR, command), Some(Some(_))),
                 "{command}"
             );
         }
-        // Other roles are untouched here; their allowlists refuse the tools.
-        assert_eq!(verdict(LANDER, "rm-file src/cache/a"), None);
-        assert!(!allowed(LANDER, "rm-file src/cache/a", &facts));
+        // Roles without deletion scope refuse the tool.
+        assert!(matches!(
+            verdict(LANDER, "safe-rm src/cache/a"),
+            Some(Some(_))
+        ));
+        assert!(!allowed(LANDER, "safe-rm src/cache/a", &facts));
         // The planner records tasks, and nothing else through clud.
         assert!(allowed(
             PLANNER,

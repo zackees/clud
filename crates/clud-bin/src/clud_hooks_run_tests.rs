@@ -28,8 +28,8 @@ fn python_hook(dir: &Path, name: &str, body: &str) -> String {
 /// installs Python as `python`, the one name clud uses everywhere (see
 /// `ci/banned_python3.py`).
 fn python_exe() -> String {
-    if which::which("python").is_ok() {
-        return "python".to_string();
+    if let Ok(path) = which::which("python") {
+        return slashed(&path);
     }
     panic!("no `python` on PATH; the hook-execution tests need an interpreter");
 }

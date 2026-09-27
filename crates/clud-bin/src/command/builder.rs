@@ -303,6 +303,61 @@ pub(crate) fn build_launch_plan_at(
     build_launch_plan_for_target_at(args, target, backend_path, cwd)
 }
 
+fn merge_claude_append_prompt(passthrough: &[String]) -> (String, Vec<String>) {
+    let mut prompt = crate::deletion_rules::generated().instructions;
+    let mut remaining = Vec::new();
+    let mut index = 0;
+    while index < passthrough.len() {
+        let argument = &passthrough[index];
+        let value = if argument == "--append-system-prompt" {
+            passthrough.get(index + 1).map(String::as_str)
+        } else {
+            argument.strip_prefix("--append-system-prompt=")
+        };
+        if let Some(value) = value {
+            prompt.push_str("\n\n");
+            prompt.push_str(value);
+            index += if argument == "--append-system-prompt" {
+                2
+            } else {
+                1
+            };
+        } else {
+            remaining.push(argument.clone());
+            index += 1;
+        }
+    }
+    (prompt, remaining)
+}
+
+fn take_codex_developer_instructions(passthrough: &mut Vec<String>) -> Option<String> {
+    let mut found = None;
+    let mut index = 0;
+    while index + 1 < passthrough.len() {
+        if passthrough[index] == "-c" {
+            if let Some(value) = passthrough[index + 1]
+                .strip_prefix("developer_instructions=")
+                .and_then(parse_codex_instruction_override)
+            {
+                found = Some(value);
+                passthrough.drain(index..index + 2);
+                continue;
+            }
+        }
+        index += 1;
+    }
+    found
+}
+
+fn parse_codex_instruction_override(raw: &str) -> Option<String> {
+    format!("value = {raw}")
+        .parse::<toml::Table>()
+        .ok()?
+        .get("value")?
+        .as_str()
+        .map(str::to_string)
+}
+
 fn build_launch_plan_for_target_at(
     args: &Args,
     target: ResolvedLaunchTarget,
@@ -311,6 +366,14 @@ fn build_launch_plan_for_target_at(
 ) -> LaunchPlan {
     let backend = target.effective_harness;
     let mut cmd = vec![backend_path.to_string()];
+    let (deletion_instructions, mut passthrough) = if backend == Backend::Claude {
+        merge_claude_append_prompt(&args.passthrough)
+    } else {
+        (String::new(), args.passthrough.clone())
+    };
+    let codex_passthrough_instructions = (backend == Backend::Codex)
+        .then(|| take_codex_developer_instructions(&mut passthrough))
+        .flatten();
     let mut iterations = 1u32;
     let mut repeat_schedule: Option<RepeatSchedule> = None;
     let mut task_summary: Option<String> = None;
@@ -364,10 +427,37 @@ fn build_launch_plan_for_target_at(
         }
     }
 
+    if matches!(backend, Backend::Claude) {
+        cmd.push("--append-system-prompt".into());
+        cmd.push(deletion_instructions);
+    }
+
     if codex_uses_exec {
         cmd.push("exec".to_string());
     } else if codex_uses_resume {
         cmd.push("resume".to_string());
+    }
+
+    if matches!(backend, Backend::Codex) {
+        // Codex resolves session-flag hook trust from the subcommand's config
+        // layer. Keep these overrides alongside the exec/resume flags.
+        let scan = "clud-cmd-scan";
+        cmd.extend(["-c".into(), format!("hooks.PreToolUse=[{{matcher=\"Bash\",hooks=[{{type=\"command\",command=\"{scan}\"}}]}}]")]);
+        cmd.extend(["-c".into(), format!("hooks.state={{\"/<session-flags>/config.toml:pre_tool_use:0:0\"={{trusted_hash=\"{}\"}}}}", codex_hook_hash(scan))]);
+        let mut instructions = codex_passthrough_instructions
+            .or_else(|| existing_codex_instructions(args))
+            .unwrap_or_default();
+        if !instructions.is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(&crate::deletion_rules::generated().instructions);
+        cmd.extend([
+            "-c".into(),
+            format!(
+                "developer_instructions={}",
+                toml::Value::String(instructions)
+            ),
+        ]);
     }
 
     if !args.safe {
@@ -580,8 +670,8 @@ fn build_launch_plan_for_target_at(
         Some(Command::GrindFacts { .. }) => {
             unreachable!("grind-facts is handled directly in main")
         }
-        Some(Command::RmFile { .. } | Command::RmDir { .. }) => {
-            unreachable!("rm-file / rm-dir are handled directly in main")
+        Some(Command::SafeRm { .. }) => {
+            unreachable!("safe-rm are handled directly in main")
         }
         Some(Command::InstallAssets { .. }) => {
             unreachable!("install-assets is handled directly in main")
@@ -653,7 +743,7 @@ fn build_launch_plan_for_target_at(
         }
     }
 
-    cmd.extend(args.passthrough.iter().cloned());
+    cmd.extend(passthrough);
 
     let is_loop_cmd = matches!(&args.command, Some(Command::Loop { .. }));
     // Headless: Claude `-p`/`--print` (from clud or passthrough), `codex exec`,
@@ -727,6 +817,35 @@ fn build_launch_plan_for_target_at(
         coauthor: crate::attribution::resolve_from_env(args.coauthor.as_deref()),
         pinned_from_previous_selection: args.model_pin_is_from_previous_selection(),
     }
+}
+
+fn codex_hook_hash(command: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let value = serde_json::json!({
+        "event_name": "pre_tool_use",
+        "hooks": [{"async": false, "command": command, "timeout": 600, "type": "command"}],
+        "matcher": "Bash",
+    });
+    format!("sha256:{:x}", Sha256::digest(value.to_string().as_bytes()))
+}
+
+fn existing_codex_instructions(args: &Args) -> Option<String> {
+    args.codex_config_overrides
+        .iter()
+        .rev()
+        .find_map(|value| {
+            let raw = value.strip_prefix("developer_instructions=")?;
+            parse_codex_instruction_override(raw)
+        })
+        .or_else(|| {
+            let path = dirs::home_dir()?.join(".codex/config.toml");
+            let text = std::fs::read_to_string(path).ok()?;
+            text.parse::<toml::Value>()
+                .ok()?
+                .get("developer_instructions")?
+                .as_str()
+                .map(str::to_string)
+        })
 }
 
 /// Canonicalize `--model` for a Codex-provider / Claude-harness launch.
@@ -899,4 +1018,21 @@ pub fn summarize_task_name(input: &str, max_chars: usize) -> String {
     let keep = max_chars.saturating_sub(3);
     let prefix: String = normalized.chars().take(keep).collect();
     format!("{prefix}...")
+}
+
+#[cfg(test)]
+mod codex_hook_hash_tests {
+    use super::codex_hook_hash;
+
+    #[test]
+    fn canonical_hook_hash_golden_vectors() {
+        assert_eq!(
+            codex_hook_hash("clud-cmd-scan"),
+            "sha256:0b359276e29d1bb5bb14f8a3151259417ee1fe86ed339a80fb57ba3798b2dbc9"
+        );
+        assert_eq!(
+            codex_hook_hash("/tmp/clud cmd-scan --event PreToolUse"),
+            "sha256:207fd7661e69092031acc67bd4ee7bc06df7e758faca2fdbed8e9cfe6bf101cc"
+        );
+    }
 }

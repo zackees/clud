@@ -27,6 +27,8 @@ pub const SHIM_DAEMON_SOCKET_VAR: &str = "CLUD_DAEMON_SOCKET";
 /// Env var name for `PATH`. Same on Unix and Windows (Windows is
 /// case-insensitive but uppercase is conventional).
 pub const PATH_ENV_VAR: &str = "PATH";
+/// Read by the generated BASH_ENV file after a login shell resets PATH.
+pub const RM_SHIM_DIR_KEY: &str = "CLUD_RM_SHIM_DIR";
 
 /// Mutate `env` in place: prepend `shims_dir` to PATH and set
 /// `CLUD_DAEMON_SOCKET` to `daemon_socket`. Returns `(path_prepended,
@@ -123,6 +125,7 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
     match result {
         Ok(dir) => {
             prepend_to_path(env, &dir);
+            set_env(env, RM_SHIM_DIR_KEY, &dir.to_string_lossy());
         }
         Err(error) => {
             eprintln!("[clud rm shim] installation failed; shell identity guard will deny: {error}")

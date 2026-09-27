@@ -134,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from ci.banned_cross_tools import main as check_banned_cross_tools
     from ci.banned_imports import main as check_banned_imports
+    from ci.banned_legacy_deletion import main as check_banned_legacy_deletion
     from ci.banned_python3 import main as check_banned_python3
     from ci.banned_skill_sources import main as check_banned_skill_sources
 
@@ -144,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     if run([sys.executable, "-m", "ruff", "check", "src", "tests", "ci"]) != 0:
         return 1
     if check_banned_imports() != 0:
+        return 1
+    if check_banned_legacy_deletion() != 0:
         return 1
     # #637: soldr owns Apple/MSVC cross builds. Static-only by nature (it reads
     # .github/ and ci/), so it belongs in the platform-independent half that CI

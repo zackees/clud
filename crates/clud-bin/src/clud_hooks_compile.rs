@@ -73,6 +73,19 @@ pub const PRE_TOOL_USE: &str = "PreToolUse";
 /// PreToolUse scanner never sees — an alias or a script that chdirs.
 pub const CWD_CHANGED_EVENT: &str = "CwdChanged";
 
+#[must_use]
+pub fn deletion_safety_fragment() -> Value {
+    json!({
+        "permissions": { "deny": crate::deletion_rules::generated().claude_denies },
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
+            }]
+        }
+    })
+}
+
 /// The command string a compiled line runs for `event`.
 #[must_use]
 pub fn dispatcher_command(event: &str) -> String {

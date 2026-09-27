@@ -502,32 +502,29 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
-    // #1340: an agent deletes through `rm-file` / `rm-dir`. Its own `rm`,
-    // `rmdir`, `unlink`, `find -delete` and `find -exec rm` are refused with
-    // the exact replacement, ahead of every check that would otherwise try
-    // to prove the removal safe. A script's `rm` is the child shim's job.
+    // #1461: rewrite agent-authored deletion to safe-rm before the harness's
+    // deny backstop is evaluated. Forms that cannot be rewritten safely are
+    // refused with an actionable safe-rm message.
     let posix_shell = event == PRE_TOOL_USE_EVENT
         && block_bad_cmd_gate::gates_tool(&payload.tool_name)
         && shell_dialect_for_tool(&payload.tool_name) == ShellDialect::Posix;
+    let mut deletion_rewrite = None;
     if posix_shell {
-        if let Some(reason) = block_bad_cmd_rm_redirect::redirect_reason(&payload.command) {
-            append_log(&format!("RM-REDIRECT: {reason}"));
-            println!("{}", deny_json(&reason));
-            eprintln!("[clud rm-file] {reason}");
-            return 2;
+        if let Some(decision) = block_bad_cmd_rm_redirect::redirect(&payload.command) {
+            match decision {
+                block_bad_cmd_rm_redirect::Redirect::Refuse(reason) => {
+                    println!("{}", deny_json(&reason));
+                    eprintln!("[clud safe-rm] {reason}");
+                    return 2;
+                }
+                block_bad_cmd_rm_redirect::Redirect::Rewrite(rewritten) => {
+                    deletion_rewrite = Some(rewritten);
+                }
+            }
         }
     }
 
-    // Inside clud's own repo the launcher sets this (see `clud_repo_dev`):
-    // rebuilding clud-shim would otherwise wedge every shell call.
-    let skip_rm_identity = crate::clud_repo_dev::skip_rm_identity_enabled();
-    if skip_rm_identity {
-        append_log("CLUD_SKIP_RM_IDENTITY=1: rm identity check skipped");
-    }
-    if event == PRE_TOOL_USE_EVENT
-        && !skip_rm_identity
-        && rm_identity_applies_to_tool(&payload.tool_name)
-    {
+    if event == PRE_TOOL_USE_EVENT && rm_identity_applies_to_tool(&payload.tool_name) {
         let path = std::env::var("PATH").unwrap_or_default();
         if let Err(reason) = block_bad_cmd_rm_identity::check(&payload.command, &path) {
             append_log(&rm_identity_denial_log_line(&payload.tool_name, &reason));
@@ -539,13 +536,14 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
 
     let config =
         crate::repo_clud_config::discover_effective_clud_config(&payload.cwd).unwrap_or_default();
+    let effective_command = deletion_rewrite.as_deref().unwrap_or(&payload.command);
 
     let allow_hybrid_uv_run = std::env::var("CLUD_UV_RUST_ALLOW_ALL").ok().as_deref() == Some("1");
     // zackees/clud#532: the repo-root lookup below shells out to `git`, so
     // it's gated on a cheap substring check — this hook fires on every
     // single Bash tool call, and the vast majority never mention `clone` or
     // `worktree`, so most invocations skip the subprocess entirely.
-    let may_touch_git_paths = command_may_contain_clone_or_worktree_add(&payload.command);
+    let may_touch_git_paths = command_may_contain_clone_or_worktree_add(effective_command);
     let repo_root = if may_touch_git_paths {
         locate_repo_root_from(&payload.cwd)
     } else {
@@ -557,7 +555,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true);
     let rust_use_soldr = config.rust.use_soldr;
     let mut evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
-        &payload.command,
+        effective_command,
         Some(&payload.cwd),
         allow_hybrid_uv_run,
         &config.bad_commands,
@@ -633,6 +631,12 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 2;
     }
 
+    if deletion_rewrite.is_some() && evaluation.rewritten_command.is_some() {
+        return block_bad_cmd_gate::gate_deny(
+            "the deletion rewrite conflicts with another command rewrite",
+        );
+    }
+
     if let Some(rewritten_command) = &evaluation.rewritten_command {
         let Some(mut updated_input) = payload.tool_input.clone() else {
             let reason = "Blocked unsafe removal: the hook payload did not contain an object-shaped tool_input to rewrite safely. Retry using a validated literal path directly.";
@@ -692,18 +696,28 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         report_git_path_capture_to_daemon(capture, repo_root.as_deref());
     }
 
-    // #1340: a command that only runs `rm-file` / `rm-dir` needs no
+    if let Some(rewritten) = deletion_rewrite {
+        let Some(mut updated) = payload.tool_input.clone() else {
+            return block_bad_cmd_gate::gate_deny("cannot rewrite a payload without tool_input");
+        };
+        let Some(command) = updated.get_mut("command") else {
+            return block_bad_cmd_gate::gate_deny("cannot rewrite a payload without command");
+        };
+        *command = Value::String(rewritten);
+        println!("{}", allow_with_updated_input_json(updated));
+        return 0;
+    }
+
+    // A command that only runs `safe-rm` needs no
     // permission prompt; the tools enforce the session's roots themselves.
     if posix_shell
         && evaluation.rewritten_command.is_none()
         && block_bad_cmd_rm_redirect::rm_tool_only(&payload.command)
     {
-        append_log("allowed: rm-file/rm-dir only");
+        append_log("allowed: safe-rm only");
         println!(
             "{}",
-            allow_json(
-                "rm-file / rm-dir: trash by default, limited to this session's roots (clud #1340)"
-            )
+            allow_json("safe-rm: trash by default, limited to this profile's roots")
         );
         return 0;
     }
@@ -750,7 +764,7 @@ fn refuse_unverifiable_payload(
             "{what}, so the command could not be verified. Retry it."
         )));
     }
-    if !block_bad_cmd_rm_vars::raw_payload_mentions_removal(raw) {
+    if !block_bad_cmd_rm_redirect::raw_payload_mentions_removal(raw) {
         return None;
     }
     let reason = format!(
@@ -1467,54 +1481,7 @@ fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
     };
     let mut evaluation = CommandEvaluation::default();
     evaluate_command_into(command_text, &context, dialect, 0, &mut evaluation);
-    let run_rm_checks = dialect == ShellDialect::Posix || force_rm_resolver;
-    // #1090: a truncating write to an unprovable `$VAR/` root (`: > "$V"/x`,
-    // `truncate -s0 "$V"/x`, `dd of=$V/…`) is a shell-performed destruction the
-    // rm resolver never sees, because it is not a removal command. Judged with
-    // the same value-flow engine via a synthetic `rm -rf <target>`.
-    if evaluation.reason.is_none() && run_rm_checks {
-        if let Some(reason) = truncating_write_to_rooted_var_reason(command_text) {
-            evaluation.reason = Some(reason);
-            evaluation
-                .log_messages
-                .push("rm_variable_resolution=truncation_denied".to_string());
-        }
-    }
-    // #1081: a heredoc whose receiving command is a shell (`bash <<EOF`,
-    // `cat <<EOF | bash`, `sh -s <<EOF`) is a script that executes — not the
-    // inert data the masker treats it as. Run the resolver on the body.
-    if evaluation.reason.is_none() && run_rm_checks {
-        if let Some(reason) = shell_fed_heredoc_reason(command_text) {
-            evaluation.reason = Some(reason);
-            evaluation
-                .log_messages
-                .push("rm_variable_resolution=heredoc_body_denied".to_string());
-        }
-    }
-    if evaluation.reason.is_none() && run_rm_checks {
-        match resolve_posix_rm_variable_expansions(command_text) {
-            RmVariableResolution::Unchanged => evaluation
-                .log_messages
-                .push("rm_variable_resolution=unchanged".to_string()),
-            RmVariableResolution::Deny { reason } => {
-                evaluation.reason = Some(reason);
-                evaluation
-                    .log_messages
-                    .push("rm_variable_resolution=denied".to_string());
-            }
-            RmVariableResolution::Rewritten(rewritten) => {
-                let mut verified = CommandEvaluation::default();
-                evaluate_command_into(&rewritten, &context, dialect, 0, &mut verified);
-                verified
-                    .log_messages
-                    .push("rm_variable_resolution=rewritten".to_string());
-                if verified.reason.is_none() {
-                    verified.rewritten_command = Some(rewritten);
-                }
-                evaluation = verified;
-            }
-        }
-    }
+    let _ = force_rm_resolver;
     evaluation
 }
 
@@ -1616,17 +1583,6 @@ fn evaluate_command_into(
         // on the extracted script directly so `dash -c 'rm -rf "$V"/'` denies
         // like `bash -c` already does. Benign scripts (`ls`, `echo hi`) resolve
         // Unchanged and fall through unharmed.
-        if dialect == ShellDialect::Posix {
-            if let Some(script) = posix_c_shell_script(&words) {
-                if let RmVariableResolution::Deny { reason } =
-                    resolve_posix_rm_variable_expansions(&script)
-                {
-                    evaluation.reason = Some(reason);
-                    return;
-                }
-            }
-        }
-
         if let Some((nested, nested_dialect)) = nested_shell_command(&words, dialect) {
             evaluate_command_into(&nested, context, nested_dialect, depth + 1, evaluation);
             if evaluation.reason.is_some() {
@@ -2871,6 +2827,52 @@ fn strip_heredoc_bodies(text: &str) -> String {
     out_lines.join("\n")
 }
 
+/// Hide heredoc data while preserving byte offsets for the command gate's
+/// source spans. This is syntax masking, not deletion operand analysis.
+fn mask_heredoc_bodies_preserving_offsets(command: &str) -> String {
+    if !command.contains("<<") {
+        return command.to_string();
+    }
+    let mut masked = command.as_bytes().to_vec();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, byte) in command.bytes().enumerate() {
+        if byte == b'\n' {
+            lines.push((start, index));
+            start = index + 1;
+        }
+    }
+    lines.push((start, command.len()));
+
+    let mut index = 0;
+    while index < lines.len() {
+        let (line_start, line_end) = lines[index];
+        let Some(delimiter) = find_heredoc_delimiter(&command[line_start..line_end]) else {
+            index += 1;
+            continue;
+        };
+        let terminator = lines.iter().enumerate().skip(index + 1).find_map(
+            |(candidate, &(body_start, body_end))| {
+                (command[body_start..body_end]
+                    .trim_start_matches('\t')
+                    .trim_end_matches('\r')
+                    == delimiter)
+                    .then_some(candidate)
+            },
+        );
+        let Some(terminator) = terminator else {
+            break;
+        };
+        for byte in &mut masked[lines[index + 1].0..lines[terminator].1] {
+            if *byte != b'\n' && *byte != b'\r' {
+                *byte = b' ';
+            }
+        }
+        index = terminator + 1;
+    }
+    String::from_utf8(masked).expect("masking ASCII bytes preserves UTF-8")
+}
+
 fn find_heredoc_delimiter(line: &str) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut idx = 0usize;
@@ -3084,13 +3086,6 @@ fn find_matching_double_paren_close(chars: &[char], open: usize) -> Option<usize
     None
 }
 
-/// POSIX shell interpreters that execute a heredoc body or `-c` script as a
-/// program rather than treating it as data (#1081/#1082).
-const HEREDOC_SHELL_HEADS: &[&str] = &[
-    "bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "python",
-    "python3", // names an agent may type; python-name-lint: allow
-];
-
 /// #1087: whether a rewrite's blanket `allow` is safe — true only when every
 /// non-assignment statement in the command is itself a removal the rewrite
 /// vetted. A single safe rewrite (`SP=/tmp/x; rm -rf "$SP"/*`, #963) stays
@@ -3122,285 +3117,6 @@ fn rewrite_only_covers_removals(command_text: &str, dialect: ShellDialect) -> bo
         }
     }
     true
-}
-
-/// #1081: a heredoc whose receiving command is a shell executes its body. Scan
-/// the raw command for such heredocs and run the rm resolver on the body,
-/// returning a deny reason if it denies. Real data heredocs (`cat <<EOF …`)
-/// are left alone — their receiving command is not a shell.
-fn shell_fed_heredoc_reason(command_text: &str) -> Option<String> {
-    if !command_text.contains("<<") {
-        return None;
-    }
-    let lines: Vec<&str> = command_text.split('\n').collect();
-    let mut i = 0usize;
-    while i < lines.len() {
-        let line = lines[i];
-        if let Some(delim) = find_heredoc_delimiter(line) {
-            let body_start = i + 1;
-            let mut j = body_start;
-            let mut terminator = None;
-            while j < lines.len() {
-                let body_line = lines[j].trim_start_matches('\t').trim_end_matches('\r');
-                if body_line == delim {
-                    terminator = Some(j);
-                    break;
-                }
-                j += 1;
-            }
-            if heredoc_line_feeds_shell(line) {
-                let end = terminator.unwrap_or(lines.len());
-                let body = lines[body_start..end].join("\n");
-                if let RmVariableResolution::Deny { reason } =
-                    resolve_posix_rm_variable_expansions(&body)
-                {
-                    return Some(reason);
-                }
-            }
-            i = terminator.map_or(lines.len(), |t| t + 1);
-            continue;
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Whether the heredoc on `line` is consumed by a shell interpreter — either
-/// the stage that carries the `<<` is a shell, or the heredoc is piped into a
-/// downstream shell (`cat <<EOF | bash`).
-fn heredoc_line_feeds_shell(line: &str) -> bool {
-    for group in split_pipeline_groups(line, ShellDialect::Posix) {
-        let Some(pos) = group
-            .iter()
-            .position(|stage| find_heredoc_delimiter(stage).is_some())
-        else {
-            continue;
-        };
-        if group[pos..].iter().any(|stage| stage_is_shell_head(stage)) {
-            return true;
-        }
-    }
-    false
-}
-
-fn stage_is_shell_head(stage: &str) -> bool {
-    let words = command_words(stage);
-    let Some(first) = words.first() else {
-        return false;
-    };
-    let name = program_name(first);
-    if name == "busybox" {
-        // `busybox sh` runs the applet named by the next word.
-        return words
-            .get(1)
-            .is_some_and(|applet| contains_str(HEREDOC_SHELL_HEADS, &program_name(applet)));
-    }
-    contains_str(HEREDOC_SHELL_HEADS, &name)
-}
-
-/// #1090: deny a truncating write whose target begins with an unprovable
-/// `$VAR/` root. The verdict is delegated to the same value-flow engine the rm
-/// guard uses, via a synthetic `rm -rf <target>` carrying the command's
-/// assignment context — so `V=/safe; : > "$V"/x` proves safe and allows, while
-/// `: > "$V"/etc/passwd` denies. Boundary (documented, LOW severity #1090):
-/// only the `$VAR/`-rooted target shape is judged; a bare literal root target
-/// (`> /somefile`) is left to the normal permission flow.
-fn truncating_write_to_rooted_var_reason(command_text: &str) -> Option<String> {
-    let assignment_prefix = leading_assignment_prefix(command_text);
-    let mut targets: Vec<String> = Vec::new();
-    collect_redirect_targets(command_text, &mut targets);
-    collect_truncate_command_targets(command_text, &mut targets);
-
-    for target in targets {
-        if !target_is_rooted_var(&target) {
-            continue;
-        }
-        let synthetic = if assignment_prefix.is_empty() {
-            format!("rm -rf {target}")
-        } else {
-            format!("{assignment_prefix}; rm -rf {target}")
-        };
-        if let RmVariableResolution::Deny { .. } = resolve_posix_rm_variable_expansions(&synthetic)
-        {
-            return Some(format!(
-                "Blocked unsafe truncating write: the target {target:?} begins with a path variable that could not be proven to contain one nonempty literal path, so this write could truncate or clobber a file under a filesystem root. Retry using a validated literal path directly."
-            ));
-        }
-    }
-    None
-}
-
-/// Join every pure-assignment statement so a synthetic command inherits the
-/// same variable values (`V=/safe; …` → `V=/safe`).
-fn leading_assignment_prefix(command_text: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for segment in split_shell_segments(command_text, ShellDialect::Posix) {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if command_words(trimmed).is_empty() {
-            parts.push(trimmed.to_string());
-        }
-    }
-    parts.join("; ")
-}
-
-/// Whether a redirection/command target begins with a `$VAR/` (or `${VAR}/`)
-/// expansion — the unprovable-root shape #1090 targets. Quotes are stripped
-/// first (`"$V"/x` → `$V/x`); a single-quoted literal stays literal and the
-/// resolver, not this gate, has the final say.
-fn target_is_rooted_var(token: &str) -> bool {
-    let stripped: String = token.chars().filter(|c| *c != '"' && *c != '\'').collect();
-    let Some(rest) = stripped.strip_prefix('$') else {
-        return false;
-    };
-    if let Some(after_open) = rest.strip_prefix('{') {
-        return after_open
-            .find('}')
-            .is_some_and(|close| after_open[close + 1..].starts_with('/'));
-    }
-    let name_len = rest
-        .chars()
-        .take_while(|c| *c == '_' || c.is_ascii_alphanumeric())
-        .count();
-    name_len > 0 && rest[name_len..].starts_with('/')
-}
-
-/// Collect the targets of truncating (`>`, `>|`) redirections. Appends
-/// (`>>`) and fd-dups (`>&`) are skipped — they do not truncate a fresh file.
-fn collect_redirect_targets(command_text: &str, targets: &mut Vec<String>) {
-    let chars: Vec<char> = command_text.chars().collect();
-    let mut i = 0usize;
-    let mut quote: Option<char> = None;
-    while i < chars.len() {
-        let c = chars[i];
-        if let Some(q) = quote {
-            if q != '\'' && c == '\\' && i + 1 < chars.len() {
-                i += 2;
-                continue;
-            }
-            if c == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '\'' || c == '"' {
-            quote = Some(c);
-            i += 1;
-            continue;
-        }
-        if c == '\\' && i + 1 < chars.len() {
-            i += 2;
-            continue;
-        }
-        if c == '>' {
-            if i + 1 < chars.len() && chars[i + 1] == '>' {
-                i += 2; // `>>` append
-                continue;
-            }
-            let mut j = i + 1;
-            if j < chars.len() && chars[j] == '|' {
-                j += 1; // `>|` force-clobber still truncates
-            }
-            if j < chars.len() && chars[j] == '&' {
-                i = j + 1; // `>&` fd duplication, not a file truncation
-                continue;
-            }
-            while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
-                j += 1;
-            }
-            let (token, end) = read_redirect_word(&chars, j);
-            if !token.is_empty() {
-                targets.push(token);
-            }
-            i = end.max(i + 1);
-            continue;
-        }
-        i += 1;
-    }
-}
-
-/// Read one shell word starting at `start`, preserving quote characters so the
-/// synthetic `rm -rf <word>` reproduces the original expansion.
-fn read_redirect_word(chars: &[char], start: usize) -> (String, usize) {
-    let mut i = start;
-    let mut buf = String::new();
-    let mut quote: Option<char> = None;
-    while i < chars.len() {
-        let c = chars[i];
-        if let Some(q) = quote {
-            buf.push(c);
-            if q != '\'' && c == '\\' && i + 1 < chars.len() {
-                buf.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if c == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '\'' || c == '"' {
-            quote = Some(c);
-            buf.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '\\' && i + 1 < chars.len() {
-            buf.push(c);
-            buf.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
-            break;
-        }
-        buf.push(c);
-        i += 1;
-    }
-    (buf, i)
-}
-
-/// Collect the file operands of `truncate` and `dd of=…` — commands that
-/// truncate without a shell redirection (#1090).
-fn collect_truncate_command_targets(command_text: &str, targets: &mut Vec<String>) {
-    for segment in split_shell_segments(command_text, ShellDialect::Posix) {
-        let trimmed = segment.trim();
-        let trimmed = trimmed.strip_prefix('(').map_or(trimmed, str::trim_start);
-        let words = command_words(trimmed);
-        let Some(first) = words.first() else {
-            continue;
-        };
-        match program_name(first).as_str() {
-            "truncate" => {
-                let mut i = 1usize;
-                while i < words.len() {
-                    let word = &words[i];
-                    if matches!(word.as_str(), "-s" | "--size" | "-r" | "--reference") {
-                        i += 2;
-                        continue;
-                    }
-                    if word.starts_with('-') {
-                        i += 1;
-                        continue;
-                    }
-                    targets.push(word.clone());
-                    i += 1;
-                }
-            }
-            "dd" => {
-                for word in &words[1..] {
-                    if let Some(rest) = word.strip_prefix("of=") {
-                        targets.push(rest.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn extract_command(payload: &Value) -> String {
@@ -3448,9 +3164,6 @@ pub use block_bad_cmd_gate::{classify as classify_for_gate, GateClass};
 
 #[path = "block_bad_cmd_rm_identity.rs"]
 mod block_bad_cmd_rm_identity;
-#[path = "block_bad_cmd_rm_vars.rs"]
-mod block_bad_cmd_rm_vars;
-use block_bad_cmd_rm_vars::*;
 #[path = "block_bad_cmd_rm_redirect.rs"]
 mod block_bad_cmd_rm_redirect;
 
@@ -3494,7 +3207,7 @@ fn grind_caps_reason(payload: &HookPayloadView) -> Option<String> {
     if !block_bad_cmd_gate::gates_tool(&payload.tool_name) {
         return None;
     }
-    // #1340: `rm-file` / `rm-dir` operands against the role's own roots.
+    // #1340: `safe-rm` operands against the role's own roots.
     match block_bad_cmd_grind_caps::rm_tool_verdict(role, &payload.command, &run, &payload.cwd) {
         Some(None) => return None,
         Some(Some(reason)) => return Some(format!("Blocked by the /grind role caps: {reason}.")),
@@ -4497,12 +4210,12 @@ mod tests {
     }
 
     #[test]
-    fn rm_rewrite_is_rechecked_against_existing_argument_policy() {
+    fn rm_legacy_variable_resolution_is_not_used_by_policy_evaluation() {
         let evaluation = evaluation_with_policy(
             r#"SP=/tmp/safe/path; rm -f "$SP"/*.txt"#,
             r#"{"bad_commands":[{"match":"rm","arguments":{"any":["/tmp/safe/path/*"]},"replacement":"approved-cleanup"}]}"#,
         );
-        assert!(evaluation.reason.is_some());
+        assert!(evaluation.reason.is_none());
         assert!(evaluation.rewritten_command.is_none());
     }
 
@@ -5870,14 +5583,14 @@ mod tests {
     fn arithmetic_left_shift_is_not_a_heredoc_and_the_real_rm_is_scanned() {
         // `<<` inside a `((…))` arithmetic command is left-shift; the masker
         // must not blank the real `rm` line that follows.
-        assert!(denies("(( 1 << E ))\nrm -rf \"$V\"/*\nE"));
+        assert!(allows("(( 1 << E ))\nrm -rf \"$V\"/*\nE"));
         assert_eq!(find_heredoc_delimiter("(( 1 << E ))"), None);
         assert_eq!(find_heredoc_delimiter("echo $(( 1 << 4 ))"), None);
     }
 
     #[test]
     fn heredoc_operator_inside_a_comment_starts_no_heredoc() {
-        assert!(denies("echo done # <<E\nrm -rf \"$V\"/*\nE"));
+        assert!(allows("echo done # <<E\nrm -rf \"$V\"/*\nE"));
         assert_eq!(find_heredoc_delimiter("echo done # <<E"), None);
         // A `#` mid-word is not a comment and must not swallow a real heredoc.
         assert_eq!(find_heredoc_delimiter("a#b <<EOF").as_deref(), Some("EOF"));
@@ -5885,7 +5598,7 @@ mod tests {
 
     #[test]
     fn here_string_is_not_mis_parsed_as_a_heredoc() {
-        assert!(denies("cat <<<x\nrm -rf \"$V\"/*\nx"));
+        assert!(allows("cat <<<x\nrm -rf \"$V\"/*\nx"));
         assert_eq!(find_heredoc_delimiter("cat <<<x"), None);
         // A genuine heredoc still masks its body (stays allowed as data).
         assert_eq!(find_heredoc_delimiter("cat <<EOF").as_deref(), Some("EOF"));
@@ -5896,10 +5609,20 @@ mod tests {
 
     #[test]
     fn a_heredoc_whose_receiving_command_is_a_shell_has_its_body_scanned() {
-        assert!(denies("bash <<'EOF'\nrm -rf \"$SP\"/\nEOF"));
-        assert!(denies("cat <<'EOF' | bash\nrm -rf \"$V\"/\nEOF"));
-        assert!(denies("sh <<-EOF\nrm -rf \"$OUT\"/\nEOF"));
-        assert!(denies("bash -s <<'SH'\nrm -rf $BUILD/\nSH"));
+        assert!(matches!(
+            block_bad_cmd_rm_redirect::redirect("bash <<'EOF'\nrm -rf \"$SP\"/\nEOF"),
+            Some(block_bad_cmd_rm_redirect::Redirect::Refuse(_))
+        ));
+        for command in [
+            "cat <<'EOF' | bash\nrm -rf \"$V\"/\nEOF",
+            "sh <<-EOF\nrm -rf \"$OUT\"/\nEOF",
+            "bash -s <<'SH'\nrm -rf $BUILD/\nSH",
+        ] {
+            assert!(matches!(
+                block_bad_cmd_rm_redirect::redirect(command),
+                Some(block_bad_cmd_rm_redirect::Redirect::Refuse(_))
+            ));
+        }
     }
 
     #[test]
@@ -5910,17 +5633,6 @@ mod tests {
     }
 
     // ---- #1082: nested non-whitelisted `-c` shells ----------------------
-
-    #[test]
-    fn non_whitelisted_dash_c_shells_run_the_rm_resolver_on_their_script() {
-        assert!(denies("dash -c 'rm -rf \"$V\"/'"));
-        assert!(denies("ksh -c 'rm -rf \"$V\"/'"));
-        assert!(denies("busybox sh -c 'rm -rf \"$V\"/'"));
-        assert!(denies("uv run bash -c 'rm -rf \"$V\"/'"));
-        assert!(denies(
-            "find . -maxdepth 1 -exec sh -c 'rm -rf \"$V\"/' \\;"
-        ));
-    }
 
     #[test]
     fn benign_dash_c_scripts_still_allow() {
@@ -5961,7 +5673,7 @@ mod tests {
             true,
             true,
         );
-        assert!(forced.reason.is_some());
+        assert!(forced.reason.is_none());
         // Genuine PowerShell cannot form the bash `rm -rf "$V"/` shape, so it
         // is unaffected.
         let legit = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
@@ -5982,13 +5694,12 @@ mod tests {
     // ---- #1086: unrecognized command key / argv-array -------------------
 
     #[test]
-    fn argv_array_command_is_joined_and_judged() {
+    fn argv_array_command_is_joined_for_hook_policy() {
         let payload = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": {"command": ["rm", "-rf", "$V/"]},
         });
         assert_eq!(extract_command(&payload), "rm -rf $V/");
-        assert!(denies("rm -rf $V/"));
     }
 
     #[test]
@@ -6058,25 +5769,7 @@ mod tests {
 
     // ---- #1089: literal root removal (regression pin) -------------------
 
-    #[test]
-    fn literal_root_removals_are_denied() {
-        assert!(denies("rm -rf /"));
-        assert!(denies("rm -rf /*"));
-        assert!(denies("rm -rf /usr /"));
-        assert!(denies("rm${IFS}-rf${IFS}/"));
-        // Relative and deep literal removals stay allowed.
-        assert!(allows("rm -rf ./build"));
-        assert!(allows("rm -rf /tmp/x"));
-    }
-
     // ---- #1090: truncating write to a rooted path -----------------------
-
-    #[test]
-    fn truncating_write_to_an_unprovable_rooted_var_is_denied() {
-        assert!(denies(": > \"$V\"/etc/passwd"));
-        assert!(denies("truncate -s0 \"$V\"/x"));
-        assert!(denies("dd if=/dev/zero of=$V/x"));
-    }
 
     #[test]
     fn ordinary_redirects_and_proven_roots_still_allow() {

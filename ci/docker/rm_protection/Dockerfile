@@ -1,37 +1,27 @@
-# Inert JSON command corpus, guaranteed dry-run argv cases, and a separate
-# disposable-file CI + Docker execution gate test. No hazardous source is run.
-# Build with the hook and packaged shim artifacts from the same build.
+# Disposable GNU-rm process checks for #1461. Hazardous operands only reach a
+# recording next-PATH stub; the real-mount test uses a read-only disposable bind.
 ARG BASE=ubuntu:24.04
 FROM ${BASE}
 
-# Python generates the payload corpus; bash runs the assertions. Neither ever
-# hands a case to a shell.
-RUN apt-get update \
-    # Debian package names. python-name-lint: allow-next-line
-    && apt-get install -y --no-install-recommends python3 python3-venv proot ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git && apt-get clean # python-name-lint: allow
 
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir running-process==4.10.1 # Debian image has no `python`; python-name-lint: allow
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir pytest==9.0.3 running-process==4.10.1 # python-name-lint: allow
 
+ARG CLUD_BINARY=target/debug/clud
+ARG HOOK_BINARY=target/debug/clud-cmd-scan
 ARG SHIM_BINARY=target/debug/clud-shim
+COPY ${CLUD_BINARY} /usr/local/bin/clud
+COPY ${HOOK_BINARY} /usr/local/bin/clud-cmd-scan
 COPY ${SHIM_BINARY} /usr/local/bin/clud-shim
-RUN mkdir /opt/rm-shims && cp /usr/local/bin/clud-shim /opt/rm-shims/rm && chmod 755 /opt/rm-shims/rm
-COPY ci/docker/rm_protection/stub_cases.json /opt/rm-protection/stub_cases.json
-COPY ci/docker/rm_protection/verify_stub.py /opt/rm-protection/verify_stub.py
-ARG BINARY
-COPY ${BINARY} /usr/local/bin/clud-block-bad-cmd
-COPY ci/docker/rm_protection/generate_cases.py /opt/rm-protection/generate_cases.py
-COPY ci/docker/rm_protection/verify.sh /opt/rm-protection/verify.sh
-RUN chmod +x /usr/local/bin/clud-block-bad-cmd /opt/rm-protection/verify.sh
+COPY ${SHIM_BINARY} /build/target/debug/clud-shim
+COPY tests/__init__.py tests/process.py tests/test_rm_shim.py tests/test_mount_floor.py /workspace/tests/
+COPY ci/docker/rm_protection/stub_cases.json /workspace/ci/docker/rm_protection/stub_cases.json
 
-# Unprivileged, with a writable scratch dir the hook can log into. Nothing of
-# value is mounted, so even a defect here has nothing to delete.
-RUN useradd --create-home --uid 10001 checker \
-    && mkdir -p /work \
-    && chown checker:checker /work
+RUN useradd --create-home --uid 10001 checker
 USER checker
-ENV PATH=/opt/rm-shims:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    HOME=/home/checker \
-    WORK_DIR=/work \
-    CASE_DIR=/tmp/rm-protection-cases
-
-ENTRYPOINT ["/opt/rm-protection/verify.sh"]
+WORKDIR /workspace
+ENV PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin \
+    CLUD_TEST_BINARY=/usr/local/bin/clud \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/home/checker
+CMD ["python", "-m", "pytest", "-p", "no:cacheprovider", "-q", "tests/test_rm_shim.py::test_old_stub_corpus_maps_to_new_floor_and_hook"]

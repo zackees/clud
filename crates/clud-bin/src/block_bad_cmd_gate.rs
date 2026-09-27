@@ -323,7 +323,7 @@ enum Decomposition {
 /// text cannot be lexed at all. Refusing costs one extra tool call; guessing
 /// costs the guarantee.
 fn decompose(command: &str) -> Decomposition {
-    let masked = super::block_bad_cmd_rm_vars::mask_heredoc_bodies_preserving_offsets(command);
+    let masked = super::mask_heredoc_bodies_preserving_offsets(command);
     let chars: Vec<char> = masked.chars().collect();
     let mut statements: Vec<String> = Vec::new();
     let mut buf = String::new();

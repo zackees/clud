@@ -172,17 +172,18 @@ def scan_file(path: Path) -> list[tuple[int, str, str]]:
     # A marked Command is configuration-only: it may be handed to
     # running_process, but it may never execute directly. Match across
     # whitespace/newlines so rustfmt cannot turn a raw launch into a bypass.
-    code_only = _rust_code_only(content)
-    for name in command_builders:
-        raw_execution = re.compile(
-            rf"\b{re.escape(name)}\s*\.\s*(?:spawn|status|output)\s*\("
-        )
-        for match in raw_execution.finditer(code_only):
-            line_num = code_only.count("\n", 0, match.start()) + 1
-            line = content.splitlines()[line_num - 1].strip()
-            violations.append(
-                (line_num, line, "hand std::process::Command to running_process")
+    if command_builders:
+        code_only = _rust_code_only(content)
+        for name in command_builders:
+            raw_execution = re.compile(
+                rf"\b{re.escape(name)}\s*\.\s*(?:spawn|status|output)\s*\("
             )
+            for match in raw_execution.finditer(code_only):
+                line_num = code_only.count("\n", 0, match.start()) + 1
+                line = content.splitlines()[line_num - 1].strip()
+                violations.append(
+                    (line_num, line, "hand std::process::Command to running_process")
+                )
 
     return violations
 

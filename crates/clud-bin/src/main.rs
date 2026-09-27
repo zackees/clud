@@ -104,11 +104,8 @@ fn run(mut args: args::Args) {
     if let Some(args::Command::GrindFacts { args }) = &args.command {
         std::process::exit(clud::grind_facts::run_cli(args));
     }
-    if let Some(args::Command::RmFile { args }) = &args.command {
-        std::process::exit(clud::rm_tool::run(clud::rm_tool::Kind::File, args));
-    }
-    if let Some(args::Command::RmDir { args }) = &args.command {
-        std::process::exit(clud::rm_tool::run(clud::rm_tool::Kind::Dir, args));
+    if let Some(args::Command::SafeRm { args }) = &args.command {
+        std::process::exit(clud::rm_tool::run(args));
     }
 
     if let Some(args::Command::InstallAssets { home }) = &args.command {
@@ -1236,8 +1233,16 @@ fn run(mut args: args::Args) {
     }
 
     if args.dry_run {
+        let dry_run_command = if backend == backend::Backend::Claude {
+            clud::foreground_runtime::dry_run_claude_command(&plan).unwrap_or_else(|error| {
+                eprintln!("[clud] cannot render Claude settings: {error}");
+                std::process::exit(2);
+            })
+        } else {
+            plan.command.clone()
+        };
         let json = serde_json::json!({
-            "command": clud::secret_redaction::redact_args(&plan.command),
+            "command": clud::secret_redaction::redact_args(&dry_run_command),
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
             "routing_mode": launch_target.routing_mode.as_str(),

@@ -34,7 +34,7 @@ later, one goal at a time.
    Record each task before returning, one call per task:
    `clud grind-facts task --checkout <checkout> -- <file>...`, with the
    checkout's absolute path and the task's repo-relative files. clud's hook
-   then lets that task's worker and reviewer delete (`rm-file` / `rm-dir`)
+   then lets that task's worker and reviewer delete with `safe-rm`
    only under those files' directories.
 4. **Dependencies.** `depends_on` lists other goals in this run that must
    land first (shared files, an API this goal consumes). Only goals listed

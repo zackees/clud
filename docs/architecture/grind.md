@@ -559,9 +559,9 @@ The rationale is in
 |---|---|---|
 | `grind-planner` | Read, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only git and `gh`; `git worktree add` in parallel mode only, never in the plan-only phase (the hook also refuses it Write/Edit); `clud grind-facts task` to record each task's files |
 | `grind-prework` | Bash, Read, Grep, Glob | read-only git and `gh`; `gh issue comment` on the run facts' meta issue only, fed by `printf '%s' '<body>'`; no edits, worktrees or builds |
-| `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh`; `rm-file` / `rm-dir` on literal paths inside its task's directories ([rm-tools.md](rm-tools.md#grind-per-role-roots)) |
+| `grind-worker` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | read-only `gh`; `safe-rm` on literal paths inside its task's directories ([rm-tools.md](rm-tools.md#location-policy)) |
 | `grind-reviewer` | same as worker | same as worker |
-| `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, `act` when CI is off, and a shell loop around lint/test; `rm-file` / `rm-dir` only inside its checkout |
+| `grind-integrator` | Read, Edit, Write, Grep, Glob, Bash, WebSearch, WebFetch, Skill | anything except `bosn`, direct `docker`/`podman`, `git worktree add`, `act` when CI is off, and a shell loop around lint/test; `safe-rm` only inside its checkout |
 | `grind-lander` | Read, Grep, Glob, Bash, Skill | `gh pr view\|checks\|diff\|list\|merge`, `gh pr ready` on the feature PR under `feature_merge: auto` only, `gh run view\|list`, read-only git, plain `git push`, `pr_merge_watch` |
 
 Claude Code enforces the tool lists. Shell commands are enforced by clud's

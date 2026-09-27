@@ -220,14 +220,12 @@ into each frontend's native surface and passes it at launch:
   document into a session-lifetime tempfile and injects `--settings`, and
   already merges into a user-supplied `--settings` so neither shadows the
   other.
-- **Codex has no argument surface for hooks at all.** Its `-c key=value`
-  overrides values that would otherwise come from `config.toml`, and codex
-  hooks live in a separate `hooks.json`; no flag points at an alternate one,
-  and `CODEX_HOME` would relocate auth and config along with it. So codex keeps
-  the PreToolUse coverage its already-installed `clud-cmd-scan` line gives it —
-  which runs declared hooks too — and gets nothing for other events, matching
-  codex's own apparent single-event support. clud does **not** write
-  `~/.codex/hooks.json` to close the gap.
+- **Codex** accepts `-c hooks.PreToolUse=...` plus `-c hooks.state=...` at
+  launch. clud injects a `clud-cmd-scan` command hook and a trusted hash for
+  its exact canonical JSON, without bypassing hook trust. It also injects
+  generated deletion instructions through `developer_instructions`. Existing
+  user hooks and instructions are preserved. clud does not write to
+  `~/.codex/hooks.json` or `config.toml`.
 
 This removes a whole hazard class that writing files would carry: idempotence,
 read-modify-write lost updates, two writers fighting over one file (the #847

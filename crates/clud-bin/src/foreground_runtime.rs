@@ -1674,9 +1674,11 @@ fn declared_hooks_settings(plan: &LaunchPlan) -> Result<Option<ClaudeSettings>, 
     if !plan.effective_harness().settings_surface().accepts_hooks() {
         return Ok(None);
     }
-    let Some(fragment) = declared_hook_fragment(plan) else {
-        return Ok(None);
-    };
+    let mut fragment = serde_json::json!({"hooks": {}});
+    if let Some(declared) = declared_hook_fragment(plan) {
+        crate::clud_hooks_compile::merge_hook_settings(&mut fragment, &declared)
+            .map_err(BridgeError::Settings)?;
+    }
     compose_launch_settings(plan, fragment).map(Some)
 }
 
@@ -1717,8 +1719,20 @@ fn compose_launch_settings(
     plan: &LaunchPlan,
     settings: serde_json::Value,
 ) -> Result<ClaudeSettings, BridgeError> {
+    let (document, replaces_user_argument) = compose_launch_settings_document(plan, settings)?;
+    write_launch_scoped_settings(document, replaces_user_argument)
+}
+
+fn compose_launch_settings_document(
+    plan: &LaunchPlan,
+    mut settings: serde_json::Value,
+) -> Result<(serde_json::Value, bool), BridgeError> {
+    let safety = crate::clud_hooks_compile::deletion_safety_fragment();
+    crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
+        .map_err(BridgeError::Settings)?;
+    merge_deletion_denies(&mut settings, &safety)?;
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
-        return write_launch_scoped_settings(settings, false);
+        return Ok((settings, false));
     };
     let mut user_settings = read_user_settings(user_argument, plan.cwd.as_deref())?;
     let user_root = user_settings.as_object_mut().ok_or_else(|| {
@@ -1753,7 +1767,52 @@ fn compose_launch_settings(
                 .cloned(),
         );
     }
-    write_launch_scoped_settings(user_settings, true)
+    merge_deletion_denies(&mut user_settings, &settings)?;
+    Ok((user_settings, true))
+}
+
+/// Render the same deletion settings in a dry-run plan without creating a
+/// launch-scoped file or changing the executable plan.
+pub fn dry_run_claude_command(plan: &LaunchPlan) -> Result<Vec<String>, String> {
+    let (settings, _) = compose_launch_settings_document(plan, serde_json::json!({}))
+        .map_err(|error| error.to_string())?;
+    let mut command = plan.command.clone();
+    remove_user_settings_argument(&mut command);
+    command.insert(1, settings.to_string());
+    command.insert(1, "--settings".to_string());
+    Ok(command)
+}
+
+fn merge_deletion_denies(
+    base: &mut serde_json::Value,
+    overlay: &serde_json::Value,
+) -> Result<(), BridgeError> {
+    let generated = overlay
+        .pointer("/permissions/deny")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let root = base
+        .as_object_mut()
+        .ok_or_else(|| BridgeError::Settings("settings must be a JSON object".into()))?;
+    let permissions = root
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| BridgeError::Settings("settings permissions must be an object".into()))?;
+    let deny = permissions
+        .entry("deny")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| {
+            BridgeError::Settings("settings permissions.deny must be an array".into())
+        })?;
+    for value in generated {
+        if !deny.contains(&value) {
+            deny.push(value);
+        }
+    }
+    Ok(())
 }
 
 fn write_launch_scoped_settings(
@@ -4019,7 +4078,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repo_that_declares_nothing_gets_an_untouched_launch() {
+    fn a_repo_that_declares_nothing_gets_deletion_guard_and_history_hooks() {
         let repo = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(repo.path().join(".git")).unwrap();
 
@@ -4034,19 +4093,24 @@ mod tests {
         let document: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = document["hooks"].as_object().unwrap();
+        let mut expected: std::collections::BTreeSet<String> = crate::session_history::hook::EVENTS
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+        expected.insert("PreToolUse".to_string());
         assert_eq!(
             hooks
                 .keys()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
-            crate::session_history::hook::EVENTS
-                .iter()
-                .map(|e| e.to_string())
-                .collect()
+            expected
         );
         for entries in hooks.values() {
             let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(command.contains(" session-hook "), "{command}");
+            assert!(
+                command.contains(" session-hook ") || command.contains("clud-cmd-scan"),
+                "{command}"
+            );
         }
         assert!(document.get("attribution").is_none());
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_none());
@@ -4371,8 +4435,8 @@ mod tests {
             ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &FakeSecretStore(None))
                 .unwrap();
         assert!(
-            runtime.claude_settings.is_none(),
-            "precondition: nothing declared"
+            runtime.claude_settings.is_some(),
+            "deletion guard supplies settings"
         );
 
         runtime

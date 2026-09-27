@@ -4,6 +4,14 @@ fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
+#[test]
+fn msys_drive_paths_normalize_without_touching_unc_paths() {
+    assert_eq!(msys_drive_path("/c/work/file"), Some("C:/work/file".into()));
+    assert_eq!(msys_drive_path("/d"), Some("D:/".into()));
+    assert_eq!(msys_drive_path("//server/share"), None);
+    assert_eq!(msys_drive_path("/home/user"), None);
+}
+
 struct World {
     _tmp: tempfile::TempDir,
     root: PathBuf,
@@ -90,10 +98,10 @@ impl World {
 
 #[test]
 fn argv0_names_select_the_command() {
-    assert_eq!(Kind::from_program_name("rm-file"), Some(Kind::File));
-    assert_eq!(Kind::from_program_name("rm-dir"), Some(Kind::Dir));
-    assert_eq!(Kind::from_program_name("rm-file.exe"), Some(Kind::File));
-    assert_eq!(Kind::from_program_name("rm-dir.exe"), Some(Kind::Dir));
+    assert_eq!(Kind::from_program_name("safe-rm"), Some(Kind::Safe));
+    assert_eq!(Kind::from_program_name("safe-rm.exe"), Some(Kind::Safe));
+    assert_eq!(Kind::from_program_name(concat!("rm", "-file")), None);
+    assert_eq!(Kind::from_program_name(concat!("rm", "-dir")), None);
     assert_eq!(Kind::from_program_name("rm"), None);
     assert_eq!(Kind::from_program_name("clud"), None);
 }
@@ -118,9 +126,15 @@ fn only_three_flags_parse() {
     assert!(!later.purge);
     assert_eq!(later.paths, args(&["a", "--purge", "--"]));
     assert_eq!(parse_args(&args(&["--help"])).unwrap(), None);
-    assert!(parse_args(&args(&["-rf", "x"])).is_err());
-    assert!(parse_args(&args(&["--force", "x"])).is_err());
+    let compatible = parse_args(&args(&["-Rfv", "x"])).unwrap().unwrap();
+    assert!(compatible.recursive && compatible.force && compatible.verbose);
+    assert!(parse_args(&args(&["--force", "x"])).unwrap().unwrap().force);
     assert!(parse_args(&args(&["--purge"])).is_err(), "no paths");
+    assert!(parse_args(&args(&["-f"]))
+        .unwrap()
+        .unwrap()
+        .paths
+        .is_empty());
 }
 
 #[test]
@@ -211,16 +225,30 @@ fn a_symlinked_parent_that_leaves_the_roots_is_refused_and_a_final_link_is_remov
     assert_eq!(code, 1);
     assert!(err.contains("outside"), "{err}");
     assert!(outside.join("keep").exists());
-    // `rm-dir escape` would follow nothing: the link is not a directory.
+    // `safe-rm escape` would follow nothing: the link is not a directory.
     let (code, _, err) = w.run(Kind::Dir, &["escape"]);
     assert_eq!(code, 1);
-    assert!(err.contains("use rm-file"), "{err}");
-    // `rm-file escape` trashes the link itself; the target survives.
+    assert!(err.contains("not a directory"), "{err}");
+    // `safe-rm escape` trashes the link itself; the target survives.
     let (code, out, err) = w.run(Kind::File, &["escape"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.starts_with("trashed"), "{out}");
+    assert!(out.is_empty(), "{out}");
     assert!(std::fs::symlink_metadata(w.root.join("escape")).is_err());
     assert!(outside.join("keep").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_parent_into_git_metadata_is_refused() {
+    let w = world();
+    let git = w.root.join(".git");
+    std::fs::create_dir_all(&git).unwrap();
+    std::fs::write(git.join("config"), b"keep").unwrap();
+    std::os::unix::fs::symlink(&git, w.root.join("link")).unwrap();
+    let (code, _, err) = w.run(Kind::File, &["--purge", "link/config"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("git metadata"), "{err}");
+    assert!(git.join("config").exists());
 }
 
 #[test]
@@ -231,7 +259,7 @@ fn trash_by_default_keeps_paths_relative_to_their_root_with_a_manifest() {
     std::fs::write(w.root.join("notes.txt"), b"note").unwrap();
     let (code, out, err) = w.run(Kind::Dir, &["build"]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("trashed"), "{out}");
+    assert!(out.is_empty(), "{out}");
     assert!(!w.root.join("build").exists());
     let entries = w.entries();
     assert_eq!(entries.len(), 1, "one call is one trash entry");
@@ -245,12 +273,12 @@ fn trash_by_default_keeps_paths_relative_to_their_root_with_a_manifest() {
     );
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(entry.join(TRASH_MANIFEST)).unwrap()).unwrap();
-    assert_eq!(manifest["command"], "rm-dir");
+    assert_eq!(manifest["command"], "safe-rm");
     assert_eq!(
         manifest["items"][0]["origin"],
         w.root.join("build").display().to_string()
     );
-    // rm-file on a file, into a second entry.
+    // safe-rm on a file, into a second entry.
     let (code, _, _) = w.run(Kind::File, &["notes.txt"]);
     assert_eq!(code, 0);
     assert_eq!(w.entries().len(), 2);
@@ -285,15 +313,15 @@ fn wrong_kind_gets_a_hint_and_batches_keep_going() {
     std::fs::write(w.root.join("other"), b"o").unwrap();
     let (code, _, err) = w.run(Kind::File, &["dir", "other"]);
     assert_eq!(code, 1);
-    assert!(err.contains("is a directory; use rm-dir"), "{err}");
+    assert!(err.contains("is a directory"), "{err}");
     assert!(
         !w.root.join("other").exists(),
         "the rest of the batch still runs"
     );
     let (code, _, err) = w.run(Kind::Dir, &["file"]);
     assert_eq!(code, 1);
-    assert!(err.contains("use rm-file"), "{err}");
-    // `find -exec rm-dir {} +` order: the parent first, then its child.
+    assert!(err.contains("not a directory"), "{err}");
+    // `find -exec safe-rm {} +` order: the parent first, then its child.
     let (code, _, err) = w.run(Kind::Dir, &["dir", "dir/inner"]);
     assert_eq!(
         code, 0,
@@ -340,7 +368,7 @@ fn every_call_writes_one_audit_record() {
     let records = w.audit_records();
     assert_eq!(records.len(), 1);
     let r = &records[0];
-    assert_eq!(r["command"], "rm-file");
+    assert_eq!(r["command"], "safe-rm");
     assert_eq!(r["session_id"], "session-1");
     assert_eq!(r["role"], "agent");
     assert_eq!(r["exit"], 1);

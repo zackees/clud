@@ -29,6 +29,13 @@ mod serve;
 fn main() {
     trace("start");
     let args: Vec<String> = std::env::args().collect();
+    // Windows shim tests copy this executable to the next PATH entry. It is
+    // a recording handoff only: even a missed catastrophe guard cannot delete.
+    if let Some(path) = std::env::var_os("MOCK_RM_STUB_LOG") {
+        let payload = serde_json::to_vec(&args[1..]).expect("serialize recording-stub args");
+        std::fs::write(path, payload).expect("write recording-stub args");
+        return;
+    }
 
     // `mock-agent serve …`: the scripted model backend for the real-harness
     // test tier (#1323). Everything below is the fake-`claude` behavior.

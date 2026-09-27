@@ -4675,3 +4675,33 @@ enabled, as it already did after any launch that showed a picker. A guard
 test fails if `fn main` stops making the call, or if a selector module calls
 crossterm's `supports_ansi` again. The contract is owned by
 [architecture/windows-quirks.md](architecture/windows-quirks.md#c-enable_virtual_terminal_input-raii).
+
+## DD-106: Separate agent deletion from the child-process catastrophe floor
+
+**Status:** Accepted; supersedes the deletion architecture in DD-104.
+
+**Context:** #1461. The earlier in-roots child shim prevented legitimate
+installers, including Codex's in-app update, from cleaning their own files
+outside a checkout. The older agent aliases and hook refusals also led to
+avoidable permission prompts and duplicate command policy.
+
+**Decision:** Agents use one recoverable command, `safe-rm`, restricted by the
+active profile's allowed locations. The command-scan hook rewrites recognized
+direct deletion to it, refuses ambiguous or privileged forms, and leaves
+quoted data alone. The deletion rule table supplies the aliases, redirect
+mapping, Claude deny rules, and agent instructions. Claude receives a deny-list
+backstop; Codex receives a trusted PreToolUse hook through launch arguments.
+User configuration is merged, not overwritten.
+
+Human-authored child scripts keep an `rm` PATH shim, but that shim enforces only
+a catastrophe floor: roots, top-level directories, HOME, whole-home globs and
+mounts are refused before any operand is handed off. All other requests go to
+the next real `rm` on PATH with platform mount-preservation arguments. No CI
+or Docker gate is involved. Both launch routes use the same shim and audit.
+
+**Consequences:** Agent deletion is recoverable and profile-scoped; script
+deletion remains compatible with installers, including cleanup outside the
+checkout. The child shim is not a full sandbox or an agent-policy enforcement
+point. Real-mount and real-harness tests cover the boundary. The operational
+contract lives in [rm-tools.md](architecture/rm-tools.md) and
+[rm-protection.md](architecture/rm-protection.md).
