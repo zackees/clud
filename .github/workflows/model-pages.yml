@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - models/**
+      - installer/**
       - tests/test_model_manifest.py
       - .github/workflows/model-pages.yml
       - .github/workflows/install-pages.yml

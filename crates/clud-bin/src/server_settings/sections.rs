@@ -174,7 +174,8 @@ mod tests {
         let choice = crate::codex_runtime::Choice {
             sol: "gpt-7-sol".to_string(),
             luna: "gpt-7-luna".to_string(),
-            source: crate::codex_runtime::Source::Published,
+            sol_source: crate::codex_runtime::Source::Published,
+            luna_source: crate::codex_runtime::Source::Published,
         };
         assert_eq!(
             dynamic_codex_context_window("gpt-7-sol", &choice),

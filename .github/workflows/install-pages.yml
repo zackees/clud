@@ -3,9 +3,7 @@ name: Installer Pages
 on:
   pull_request:
     paths:
-      - installer/catalog.py
-      - installer/site.py
-      - installer/verify_site.py
+      - installer/**
       - tests/test_installer_catalog.py
       - .github/workflows/install-pages.yml
       - ci/act_ci.sh
@@ -13,9 +11,7 @@ on:
   push:
     branches: [main]
     paths:
-      - installer/catalog.py
-      - installer/site.py
-      - installer/verify_site.py
+      - installer/**
       - .github/workflows/install-pages.yml
   workflow_dispatch:
 

@@ -4,12 +4,19 @@ pub const FALLBACK_SOL: &str = "gpt-6-sol";
 pub const FALLBACK_LUNA: &str = "gpt-6-luna";
 pub const MANIFEST_URL: &str = "https://zackees.github.io/clud/models/manifest.json";
 const CACHE_PATH: &str = ".clud/cache/models/manifest.json";
+const LAST_GOOD_PATH: &str = ".clud/cache/models/last-good.json";
 const CACHE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const MAX_MODEL_PAGES: usize = 8;
+const MAX_MODEL_BYTES: usize = 512 * 1024;
+const MAX_MODEL_FRAME_BYTES: usize = 128 * 1024;
 
+use fs4::fs_std::FileExt;
 use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode, StreamKind,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -17,6 +24,10 @@ use std::time::{Duration, Instant};
 
 fn cache_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(CACHE_PATH))
+}
+
+fn last_good_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(LAST_GOOD_PATH))
 }
 
 fn read_cached(path: &Path) -> Option<Manifest> {
@@ -66,13 +77,56 @@ fn fetch_manifest(url: &str) -> Result<Manifest, String> {
     Manifest::parse(&bytes)
 }
 
-fn write_cached(path: &Path, manifest: &Manifest) -> Result<(), String> {
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let parent = path.parent().ok_or("model cache has no parent directory")?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = path.with_extension("json.partial");
-    let bytes = serde_json::to_vec(manifest).map_err(|error| error.to_string())?;
-    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    std::fs::rename(temporary, path).map_err(|error| error.to_string())
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    serde_json::to_writer(&mut temporary, value).map_err(|error| error.to_string())?;
+    temporary.persist(path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct LastGood {
+    schema_version: u64,
+    sol: Option<String>,
+    luna: Option<String>,
+}
+
+impl LastGood {
+    fn from_manifest(manifest: &Manifest) -> Self {
+        Self {
+            schema_version: 1,
+            sol: Some(manifest.families.sol.clone()),
+            luna: Some(manifest.families.luna.clone()),
+        }
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        let value = crate::server_settings::parse_strict_json(bytes, 64 * 1024)?;
+        let state: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if state.schema_version != 1
+            || state.sol.as_deref().is_some_and(|id| !stable_id(id, "sol"))
+            || state
+                .luna
+                .as_deref()
+                .is_some_and(|id| !stable_id(id, "luna"))
+        {
+            return Err("invalid last-good Codex models".to_string());
+        }
+        Ok(state)
+    }
+}
+
+fn read_last_good(path: &Path) -> Option<LastGood> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    LastGood::parse(&bytes).ok()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -193,23 +247,10 @@ impl Manifest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct EffortOption {
-    #[serde(rename = "reasoningEffort")]
-    reasoning_effort: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AvailableModel {
-    id: String,
-    #[serde(default)]
-    hidden: bool,
-    #[serde(rename = "supportedReasoningEfforts")]
-    supported_reasoning_efforts: Vec<EffortOption>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct ModelList {
-    data: Vec<AvailableModel>,
+    data: Vec<Value>,
+    #[serde(default, rename = "nextCursor")]
+    next_cursor: Option<String>,
 }
 
 pub fn usable_low_effort_ids(result: &serde_json::Value) -> Result<Vec<String>, String> {
@@ -218,14 +259,54 @@ pub fn usable_low_effort_ids(result: &serde_json::Value) -> Result<Vec<String>, 
         .data
         .into_iter()
         .filter(|model| {
-            !model.hidden
+            model.get("hidden").is_none_or(|hidden| hidden == false)
                 && model
-                    .supported_reasoning_efforts
-                    .iter()
-                    .any(|effort| effort.reasoning_effort == "low")
+                    .get("supportedReasoningEfforts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|efforts| {
+                        efforts.iter().any(|effort| {
+                            effort.get("reasoningEffort").and_then(Value::as_str) == Some("low")
+                        })
+                    })
         })
-        .map(|model| model.id)
+        .filter_map(|model| model.get("id")?.as_str().map(str::to_string))
         .collect())
+}
+
+type PageResult = Result<(Value, usize), String>;
+type ModelPageFetch<'a> = dyn FnMut(usize, Option<&str>, Instant) -> PageResult + 'a;
+
+fn collect_model_pages(
+    deadline: Instant,
+    fetch_page: &mut ModelPageFetch<'_>,
+) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    let mut cursor = None;
+    let mut seen = HashSet::new();
+    let mut total_bytes = 0_usize;
+    for page in 0..MAX_MODEL_PAGES {
+        if Instant::now() >= deadline {
+            return Err("Codex model list timed out".to_string());
+        }
+        let (result, bytes) = fetch_page(page + 1, cursor.as_deref(), deadline)?;
+        if Instant::now() >= deadline {
+            return Err("Codex model list timed out".to_string());
+        }
+        total_bytes = total_bytes.saturating_add(bytes);
+        if total_bytes > MAX_MODEL_BYTES {
+            return Err("Codex model list pages are too large".to_string());
+        }
+        let list: ModelList = serde_json::from_value(result.clone()).map_err(|e| e.to_string())?;
+        ids.extend(usable_low_effort_ids(&result)?);
+        match list.next_cursor {
+            None => return Ok(ids),
+            Some(next) if !next.is_empty() && next.len() <= 1024 && seen.insert(next.clone()) => {
+                cursor = Some(next);
+            }
+            Some(_) => return Err("Codex model list returned an invalid cursor".to_string()),
+        }
+    }
+    Err("Codex model list exceeded the page limit".to_string())
 }
 
 /// Ask the installed Codex App Server which models this account can use at low effort.
@@ -253,31 +334,45 @@ pub fn local_low_effort_models() -> Result<Vec<String>, String> {
             .write_stdin_streaming(messages.as_bytes())
             .map_err(|error| error.to_string())?;
         let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if Instant::now() >= deadline {
-                return Err("Codex model/list timed out".to_string());
+        collect_model_pages(deadline, &mut |request_id, cursor, deadline| {
+            if let Some(cursor) = cursor {
+                let request = serde_json::json!({
+                    "method": "model/list",
+                    "id": request_id,
+                    "params": {"limit": 100, "includeHidden": true, "cursor": cursor},
+                });
+                process
+                    .write_stdin_streaming(format!("{request}\n").as_bytes())
+                    .map_err(|error| error.to_string())?;
             }
-            match process.read_stream(StreamKind::Stdout, Some(Duration::from_millis(50))) {
-                ReadStatus::Line(bytes) => {
-                    if bytes.len() > 128 * 1024 {
-                        return Err("Codex model/list response is too large".to_string());
-                    }
-                    let Ok(frame) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                        continue;
-                    };
-                    if frame.get("id").and_then(serde_json::Value::as_i64) == Some(1) {
-                        return match frame.get("result") {
-                            Some(value) => usable_low_effort_ids(value),
-                            None => Err(format!("Codex model/list failed: {}", frame["error"])),
+            loop {
+                if Instant::now() >= deadline {
+                    return Err("Codex model/list timed out".to_string());
+                }
+                match process.read_stream(StreamKind::Stdout, Some(Duration::from_millis(50))) {
+                    ReadStatus::Line(bytes) => {
+                        if bytes.len() > MAX_MODEL_FRAME_BYTES {
+                            return Err("Codex model/list response is too large".to_string());
+                        }
+                        let Ok(frame) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                            continue;
                         };
+                        if frame.get("id").and_then(serde_json::Value::as_u64)
+                            == Some(request_id as u64)
+                        {
+                            return match frame.get("result") {
+                                Some(value) => Ok((value.clone(), bytes.len())),
+                                None => Err(format!("Codex model/list failed: {}", frame["error"])),
+                            };
+                        }
                     }
+                    ReadStatus::Eof => {
+                        return Err("Codex app-server closed before model/list".to_string())
+                    }
+                    ReadStatus::Timeout => {}
                 }
-                ReadStatus::Eof => {
-                    return Err("Codex app-server closed before model/list".to_string())
-                }
-                ReadStatus::Timeout => {}
             }
-        }
+        })
     })();
     let _ = process.kill();
     result
@@ -304,34 +399,110 @@ impl Source {
 pub struct Choice {
     pub sol: String,
     pub luna: String,
-    pub source: Source,
+    pub sol_source: Source,
+    pub luna_source: Source,
 }
 
-pub fn choose(
-    published: Option<&Manifest>,
-    last_good: Option<&Manifest>,
-    available: &[String],
-) -> Choice {
-    for (candidate, source) in [
-        (published, Source::Published),
-        (last_good, Source::LastGood),
-    ] {
-        if let Some(manifest) = candidate {
-            let families = manifest.families();
-            if available.contains(&families.sol) && available.contains(&families.luna) {
-                return Choice {
-                    sol: families.sol.clone(),
-                    luna: families.luna.clone(),
-                    source,
-                };
-            }
+impl Choice {
+    pub fn source_for(&self, cli_id: &str) -> Option<Source> {
+        match cli_id {
+            "codex-sol" => Some(self.sol_source),
+            "codex-luna" => Some(self.luna_source),
+            _ => None,
         }
     }
-    Choice {
-        sol: FALLBACK_SOL.to_string(),
-        luna: FALLBACK_LUNA.to_string(),
-        source: Source::BuiltIn,
+}
+
+fn choose_family(
+    published: Option<&str>,
+    last_good: Option<&str>,
+    available: &[String],
+    built_in: &str,
+) -> (String, Source) {
+    if let Some(id) = published.filter(|id| available.iter().any(|item| item == id)) {
+        return (id.to_string(), Source::Published);
     }
+    if let Some(id) = last_good.filter(|id| available.iter().any(|item| item == id)) {
+        return (id.to_string(), Source::LastGood);
+    }
+    (built_in.to_string(), Source::BuiltIn)
+}
+
+fn choose(
+    published: Option<&Manifest>,
+    last_good: Option<&LastGood>,
+    available: &[String],
+) -> Choice {
+    let (sol, sol_source) = choose_family(
+        published.map(|value| value.families.sol.as_str()),
+        last_good.and_then(|value| value.sol.as_deref()),
+        available,
+        FALLBACK_SOL,
+    );
+    let (luna, luna_source) = choose_family(
+        published.map(|value| value.families.luna.as_str()),
+        last_good.and_then(|value| value.luna.as_deref()),
+        available,
+        FALLBACK_LUNA,
+    );
+    Choice {
+        sol,
+        luna,
+        sol_source,
+        luna_source,
+    }
+}
+
+fn updated_last_good(previous: Option<&LastGood>, choice: &Choice) -> LastGood {
+    let mut state = previous.cloned().unwrap_or(LastGood {
+        schema_version: 1,
+        sol: None,
+        luna: None,
+    });
+    if choice.sol_source == Source::Published {
+        state.sol = Some(choice.sol.clone());
+    } else if choice.sol_source == Source::LastGood {
+        state.sol.get_or_insert_with(|| choice.sol.clone());
+    }
+    if choice.luna_source == Source::Published {
+        state.luna = Some(choice.luna.clone());
+    } else if choice.luna_source == Source::LastGood {
+        state.luna.get_or_insert_with(|| choice.luna.clone());
+    }
+    state
+}
+
+fn persist_last_good(
+    path: &Path,
+    fallback: Option<&LastGood>,
+    choice: &Choice,
+) -> Result<(), String> {
+    let parent = path.parent().ok_or("model cache has no parent directory")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("json.lock"))
+        .map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        match FileExt::try_lock_exclusive(&lock) {
+            Ok(true) => break,
+            Ok(false) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(false) => return Err("timed out waiting for model cache lock".to_string()),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let stored = read_last_good(path);
+    let updated = updated_last_good(stored.as_ref().or(fallback), choice);
+    if stored.as_ref() != Some(&updated) {
+        write_json_atomic(path, &updated)?;
+    }
+    Ok(())
 }
 
 /// The per-process effective dynamic Codex choice. Explicit pins never use it.
@@ -366,6 +537,11 @@ fn load_choice() -> Choice {
         .filter(|value| !value.trim().is_empty());
     let path = url_override.is_none().then(cache_path).flatten();
     let cached = path.as_deref().and_then(read_cached);
+    let good_path = url_override.is_none().then(last_good_path).flatten();
+    let last_good = good_path
+        .as_deref()
+        .and_then(read_last_good)
+        .or_else(|| cached.as_ref().map(LastGood::from_manifest));
     let fresh = cached.is_some() && path.as_deref().is_some_and(cache_fresh);
     let recently_attempted = match path.as_deref() {
         Some(candidate) => cache_fresh(&attempt_path(candidate)),
@@ -393,17 +569,23 @@ fn load_choice() -> Choice {
             Vec::new()
         }
     };
-    let choice = choose(served.as_ref(), cached.as_ref(), &available);
-    if choice.source == Source::Published && !fresh && !recently_attempted {
+    let choice = choose(served.as_ref(), last_good.as_ref(), &available);
+    if !fresh && !recently_attempted {
         if let (Some(path), Some(manifest)) = (path.as_deref(), served.as_ref()) {
-            if let Err(error) = write_cached(path, manifest) {
+            if let Err(error) = write_json_atomic(path, manifest) {
                 eprintln!("[clud] could not cache model manifest: {error}");
             }
         }
-    } else {
+    }
+    if let Some(path) = good_path.as_deref() {
+        if let Err(error) = persist_last_good(path, last_good.as_ref(), &choice) {
+            eprintln!("[clud] could not cache last-good Codex models: {error}");
+        }
+    }
+    if choice.sol_source != Source::Published || choice.luna_source != Source::Published {
         eprintln!(
-            "[clud] Codex model fallback: {:?} (Sol {}, low)",
-            choice.source, choice.sol
+            "[clud] Codex model sources: Sol {} ({:?}), Luna {} ({:?}); effort low",
+            choice.sol, choice.sol_source, choice.luna, choice.luna_source
         );
     }
     choice
@@ -472,18 +654,166 @@ mod tests {
     fn published_then_last_good_then_builtin() {
         let latest = manifest("gpt-7-sol", "gpt-7-luna");
         let previous = manifest("gpt-6-sol", "gpt-6-luna");
+        let previous = LastGood::from_manifest(&previous);
         let all = ["gpt-7-sol", "gpt-7-luna", "gpt-6-sol", "gpt-6-luna"].map(str::to_string);
         assert_eq!(
-            choose(Some(&latest), Some(&previous), &all).source,
+            choose(Some(&latest), Some(&previous), &all).sol_source,
             Source::Published
         );
         assert_eq!(
-            choose(Some(&latest), Some(&previous), &all[2..]).source,
+            choose(Some(&latest), Some(&previous), &all[2..]).sol_source,
             Source::LastGood
         );
         let fallback = choose(Some(&latest), Some(&previous), &[]);
-        assert_eq!(fallback.source, Source::BuiltIn);
+        assert_eq!(fallback.sol_source, Source::BuiltIn);
         assert_eq!(fallback.sol, "gpt-6-sol");
+    }
+
+    #[test]
+    fn issue_1480_sol_and_luna_rollouts_are_independent() {
+        let latest = manifest("gpt-7-sol", "gpt-7-luna");
+        let previous = manifest("gpt-6-sol", "gpt-6-luna");
+        let previous = LastGood::from_manifest(&previous);
+        let sol_only = ["gpt-7-sol", "gpt-6-luna"].map(str::to_string);
+        let choice = choose(Some(&latest), Some(&previous), &sol_only);
+        assert_eq!(choice.sol, "gpt-7-sol");
+        assert_eq!(choice.luna, "gpt-6-luna");
+        assert_eq!(choice.sol_source, Source::Published);
+        assert_eq!(choice.luna_source, Source::LastGood);
+        assert_eq!(choice.source_for("codex-sol"), Some(Source::Published));
+        assert_eq!(choice.source_for("codex-luna"), Some(Source::LastGood));
+
+        let no_luna = ["gpt-7-sol".to_string()];
+        let choice = choose(Some(&latest), Some(&previous), &no_luna);
+        assert_eq!(choice.sol, "gpt-7-sol");
+        assert_eq!(choice.luna, FALLBACK_LUNA);
+        assert_eq!(choice.luna_source, Source::BuiltIn);
+
+        let luna_only = ["gpt-6-sol", "gpt-7-luna"].map(str::to_string);
+        let choice = choose(Some(&latest), Some(&previous), &luna_only);
+        assert_eq!(choice.sol, "gpt-6-sol");
+        assert_eq!(choice.luna, "gpt-7-luna");
+        assert_eq!(choice.sol_source, Source::LastGood);
+        assert_eq!(choice.luna_source, Source::Published);
+    }
+
+    #[test]
+    fn issue_1480_unrelated_missing_efforts_does_not_discard_valid_rows() {
+        let result = json!({"data": [
+            {"id": "unrelated"},
+            {"id": "gpt-7-sol", "supportedReasoningEfforts": [{"reasoningEffort": "low"}]},
+            {"id": "gpt-7-luna", "supportedReasoningEfforts": "malformed"}
+        ]});
+        assert_eq!(usable_low_effort_ids(&result).unwrap(), ["gpt-7-sol"]);
+    }
+
+    #[test]
+    fn issue_1480_last_good_survives_asymmetric_refresh_and_offline_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("last-good.json");
+        let old = LastGood::from_manifest(&manifest("gpt-6-sol", "gpt-6-luna"));
+        let published = manifest("gpt-7-sol", "gpt-7-luna");
+        let available = ["gpt-7-sol", "gpt-6-luna"].map(str::to_string);
+        let choice = choose(Some(&published), Some(&old), &available);
+        persist_last_good(&path, Some(&old), &choice).unwrap();
+        let saved = read_last_good(&path).unwrap();
+        assert_eq!(saved.sol.as_deref(), Some("gpt-7-sol"));
+        assert_eq!(saved.luna.as_deref(), Some("gpt-6-luna"));
+
+        let offline = choose(None, Some(&saved), &available);
+        assert_eq!(offline.sol, "gpt-7-sol");
+        assert_eq!(offline.luna, "gpt-6-luna");
+        assert_eq!(offline.sol_source, Source::LastGood);
+        assert_eq!(offline.luna_source, Source::LastGood);
+    }
+
+    #[test]
+    fn issue_1480_concurrent_family_updates_merge_without_corrupting_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("last-good.json");
+        let old = LastGood::from_manifest(&manifest("gpt-6-sol", "gpt-6-luna"));
+        write_json_atomic(&path, &old).unwrap();
+        let published = manifest("gpt-7-sol", "gpt-7-luna");
+        let sol = choose(
+            Some(&published),
+            Some(&old),
+            &["gpt-7-sol", "gpt-6-luna"].map(str::to_string),
+        );
+        let luna = choose(
+            Some(&published),
+            Some(&old),
+            &["gpt-6-sol", "gpt-7-luna"].map(str::to_string),
+        );
+        let barrier = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            for choice in [&sol, &luna] {
+                let barrier = &barrier;
+                let path = &path;
+                let old = &old;
+                scope.spawn(move || {
+                    barrier.wait();
+                    persist_last_good(path, Some(old), choice).unwrap();
+                });
+            }
+            barrier.wait();
+        });
+        let saved = read_last_good(&path).unwrap();
+        assert_eq!(saved.sol.as_deref(), Some("gpt-7-sol"));
+        assert_eq!(saved.luna.as_deref(), Some("gpt-7-luna"));
+    }
+
+    #[test]
+    fn issue_1480_page_two_is_discovered_without_accepting_hidden_or_missing_low() {
+        let rows = [
+            json!({"data": [
+                {"id": "gpt-8-sol", "hidden": true, "supportedReasoningEfforts": [{"reasoningEffort": "low"}]},
+                {"id": "gpt-8-luna"}
+            ], "nextCursor": "next"}),
+            json!({"data": [
+                {"id": "gpt-7-sol", "supportedReasoningEfforts": [{"reasoningEffort": "low"}]},
+                {"id": "gpt-7-luna", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}
+            ], "nextCursor": null}),
+        ];
+        let found = collect_model_pages(
+            Instant::now() + Duration::from_secs(1),
+            &mut |page, cursor, _| {
+                assert_eq!(cursor, if page == 1 { None } else { Some("next") });
+                Ok((rows[page - 1].clone(), rows[page - 1].to_string().len()))
+            },
+        )
+        .unwrap();
+        assert_eq!(found, ["gpt-7-sol"]);
+    }
+
+    #[test]
+    fn issue_1480_incomplete_or_malformed_listing_is_not_treated_as_absence() {
+        let deadline = || Instant::now() + Duration::from_secs(1);
+        let invalid = collect_model_pages(deadline(), &mut |_, _, _| Ok((json!({"data": {}}), 12)));
+        assert!(invalid.is_err());
+
+        let repeated = collect_model_pages(deadline(), &mut |_, _, _| {
+            Ok((json!({"data": [], "nextCursor": "again"}), 32))
+        });
+        assert!(repeated.unwrap_err().contains("cursor"));
+
+        let too_many = collect_model_pages(deadline(), &mut |page, _, _| {
+            Ok((
+                json!({"data": [], "nextCursor": format!("page-{page}")}),
+                32,
+            ))
+        });
+        assert!(too_many.unwrap_err().contains("page limit"));
+
+        let too_large = collect_model_pages(deadline(), &mut |_, _, _| {
+            Ok((json!({"data": [], "nextCursor": null}), MAX_MODEL_BYTES + 1))
+        });
+        assert!(too_large.unwrap_err().contains("too large"));
+
+        let expired =
+            collect_model_pages(Instant::now() - Duration::from_millis(1), &mut |_, _, _| {
+                panic!("expired lookup must not request a page")
+            });
+        assert!(expired.unwrap_err().contains("timed out"));
     }
 
     #[test]

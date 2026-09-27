@@ -8,7 +8,7 @@ from zipfile import ZipFile
 import pytest
 
 from installer.catalog import catalog_from_releases, executable_member, version_key
-from installer.site import build_site
+from installer.site import build_site, published_paths
 from installer.verify_site import verify
 
 
@@ -95,6 +95,27 @@ def test_pages_paths_redirect_and_only_manifest_link(tmp_path) -> None:
     assert "releases/latest/download/clud-installer.exe" not in page
     assert '"latest-stable": "2.9.0"' in public
     assert catalog["online_url"] == "https://zackees.github.io/clud/install/manifest.json"
+    rendered = {
+        path.relative_to(tmp_path).as_posix()
+        for path in tmp_path.rglob("*")
+        if path.is_file() and path.name != ".nojekyll"
+    }
+    assert rendered == set(published_paths())
+
+
+def test_issue_1480_site_inventory_covers_added_asset(tmp_path, monkeypatch) -> None:
+    from installer import site
+
+    monkeypatch.setattr(site, "STATIC_ASSETS", {"install/site.css": b"body {}"})
+    data = wheel("clud.exe", b"MZpayload")
+    build_site(tmp_path, [release("2.9.0", "https://example.com/29", data)], lambda _: data)
+    rendered = {
+        path.relative_to(tmp_path).as_posix()
+        for path in tmp_path.rglob("*")
+        if path.is_file() and path.name != ".nojekyll"
+    }
+    assert rendered == set(published_paths())
+    assert (tmp_path / "install" / "site.css").read_bytes() == b"body {}"
 
 
 def test_direct_binary_wins_over_wheel_for_same_target() -> None:

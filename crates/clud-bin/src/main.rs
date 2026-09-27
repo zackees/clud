@@ -1258,8 +1258,8 @@ fn run(mut args: args::Args) {
             "model_selection": plan.model_selection,
             "codex_model_source": plan.model_selection.as_ref()
                 .and_then(|selection| selection.model.as_deref())
-                .filter(|model| matches!(*model, "codex-sol" | "codex-luna"))
-                .map(|_| clud::codex_runtime::active_choice().source.as_str()),
+                .and_then(|model| clud::codex_runtime::active_choice().source_for(model))
+                .map(clud::codex_runtime::Source::as_str),
             // The cost boundary, auditable without a paid request: every
             // model this launch may reach, not just the one it starts on
             // (#1257).

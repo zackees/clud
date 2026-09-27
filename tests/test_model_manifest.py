@@ -1,9 +1,11 @@
 """Model publication checks for the Pages site."""
 
+import json
 from datetime import datetime, timezone
 
 import pytest
 
+from models import preserve as installer_preserve
 from models import publish
 from models.manifest import build_manifest, merge_manifest, should_publish, validate_manifest
 
@@ -109,6 +111,37 @@ def test_model_only_stage_preserves_installer_bytes(
     for url, body in original.items():
         assert (tmp_path / url.removeprefix(f"{publish.PAGES}/")).read_bytes() == body
     assert (tmp_path / "models" / "manifest.json").exists()
+
+
+def test_issue_1480_model_stage_preserves_added_installer_asset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from installer import site as installer_site
+
+    monkeypatch.setattr(installer_site, "STATIC_ASSETS", {"install/site.css": b"body {}"})
+    monkeypatch.setattr(publish, "_previous_document", lambda: None)
+    monkeypatch.setattr(publish, "observed_model_ids", lambda: set())
+    copied = []
+
+    def fake_fetch(url: str) -> bytes:
+        copied.append(url)
+        return b"body {}" if url.endswith("site.css") else b"existing"
+
+    monkeypatch.setattr(publish, "fetch", fake_fetch)
+    now = datetime(2026, 9, 26, 21, tzinfo=timezone.utc)
+    assert publish.stage_site(tmp_path, trigger="manual", now=now) == "publish"
+    assert (tmp_path / "install" / "site.css").read_bytes() == b"body {}"
+    assert f"{publish.PAGES}/install/site.css" in copied
+
+
+def test_issue_1480_installer_stage_preserves_published_model_document(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    document = build_manifest(["gpt-6-sol", "gpt-6-luna"], checked_at="2026-09-26T21:00:00Z")
+    original = json.dumps(document, indent=2).encode()
+    monkeypatch.setattr(installer_preserve, "fetch", lambda _: original)
+    assert installer_preserve.preserve(tmp_path)
+    assert (tmp_path / "models" / "manifest.json").read_bytes() == original
 
 
 def test_recent_manual_and_unchanged_do_not_stage(
