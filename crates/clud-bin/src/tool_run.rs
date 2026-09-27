@@ -54,6 +54,11 @@ const MANAGED_PYTHON_DIR: &str = "python";
 const TEXT_SNIFF_LIMIT: usize = 8192;
 const TOOL_TELEMETRY_TIMEOUT: Duration = Duration::from_millis(50);
 
+struct ToolRunState {
+    telemetry: ToolTelemetry,
+    watchdog: Watchdog,
+}
+
 /// Resolve and execute a bundled tool by relative path. Returns the
 /// inner `uv` process's exit code so the CLI can surface it verbatim.
 ///
@@ -105,7 +110,10 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
         watchdog.command_timeout.as_secs().to_string(),
     ));
     let argv = build_tool_argv(&tool_path, &tool_bytes, args, &tools_root, &env)?;
-    let telemetry = ToolTelemetry::start(rel_path);
+    let run_state = ToolRunState {
+        telemetry: ToolTelemetry::start(rel_path),
+        watchdog,
+    };
 
     // Resolve session context up front. None means no daemon / CI fallback;
     // we run the tool in plain passthrough mode (no capture, no tee, no
@@ -122,9 +130,9 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
     // containers where the daemon isn't present.
     match (session_ctx.as_ref(), tool_id) {
         (Some(ctx), Some(tool_id)) => {
-            run_with_session(ctx, tool_id, rel_path, args, argv, env, telemetry, watchdog)
+            run_with_session(ctx, tool_id, rel_path, args, argv, env, run_state)
         }
-        _ => run_passthrough(rel_path, args, argv, env, telemetry, watchdog),
+        _ => run_passthrough(rel_path, args, argv, env, run_state),
     }
 }
 
@@ -136,9 +144,12 @@ fn run_passthrough(
     args: &[String],
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    telemetry: ToolTelemetry,
-    mut watchdog: Watchdog,
+    run_state: ToolRunState,
 ) -> io::Result<i32> {
+    let ToolRunState {
+        telemetry,
+        mut watchdog,
+    } = run_state;
     let argv_for_diagnostic = argv.clone();
     let process = NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(argv),
@@ -268,9 +279,12 @@ fn run_with_session(
     args: &[String],
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    telemetry: ToolTelemetry,
-    mut watchdog: Watchdog,
+    run_state: ToolRunState,
 ) -> io::Result<i32> {
+    let ToolRunState {
+        telemetry,
+        mut watchdog,
+    } = run_state;
     // Open the per-invocation log dir + JSONL writers BEFORE starting the
     // subprocess so any open-time failure surfaces immediately (no
     // half-spawned child with no log destination).

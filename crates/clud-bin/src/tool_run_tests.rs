@@ -56,8 +56,10 @@ fn resumable_fixture_exit_code(progress_timeout: bool, with_session: bool) -> i3
             &[],
             argv,
             env,
-            telemetry,
-            watchdog,
+            ToolRunState {
+                telemetry,
+                watchdog,
+            },
         )
         .unwrap()
     } else {
@@ -66,8 +68,10 @@ fn resumable_fixture_exit_code(progress_timeout: bool, with_session: bool) -> i3
             &[],
             argv,
             env,
-            telemetry,
-            watchdog,
+            ToolRunState {
+                telemetry,
+                watchdog,
+            },
         )
         .unwrap()
     }
@@ -479,8 +483,10 @@ fn session_started_event_records_the_real_child_pid() {
         &[],
         argv,
         env,
-        telemetry,
-        Watchdog::for_rel_path("tests/pid-fixture"),
+        ToolRunState {
+            telemetry,
+            watchdog: Watchdog::for_rel_path("tests/pid-fixture"),
+        },
     );
     assert_eq!(ran.unwrap(), 0, "fixture child must exit 0");
 
