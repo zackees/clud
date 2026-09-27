@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from ci import public_release
 from ci.public_release import capture_prior, require_prerelease, require_promoted, require_rollback
 
 
@@ -58,3 +59,32 @@ def test_rollback_requires_bad_release_demoted_and_prior_pointer_restored() -> N
         require_rollback(release("2.8.15", prerelease=False), latest, catalog, prior)
     with pytest.raises(ValueError, match="rollback"):
         require_rollback(demoted, {"id": 42, "tag_name": "2.8.15"}, catalog, prior)
+
+
+def test_rollback_demotes_exact_release_then_restores_prior_latest(monkeypatch) -> None:
+    state = {
+        "bad": release("2.8.15", prerelease=False),
+        "latest": {"id": 42, "tag_name": "2.8.15"},
+    }
+    patches = []
+
+    def fake_api(path: str, *, method: str = "GET", body: dict | None = None) -> dict:
+        if method == "GET":
+            return state["latest"] if path == "releases/latest" else state["bad"]
+        patches.append((path, body))
+        if path == "releases/42":
+            state["bad"] = {**state["bad"], "prerelease": True}
+            return state["bad"]
+        state["latest"] = {"id": 11, "tag_name": "2.8.14"}
+        return state["latest"]
+
+    monkeypatch.setattr(public_release, "api", fake_api)
+    snapshot = {"release_id": 42, "tag": "2.8.15", "prior_id": 11, "prior_tag": "2.8.14"}
+    public_release.rollback_command(snapshot)
+    assert patches == [
+        ("releases/42", {"prerelease": True, "make_latest": "false"}),
+        ("releases/11", {"make_latest": "true"}),
+    ]
+    state["latest"] = {"id": 99, "tag_name": "2.9.0"}
+    with pytest.raises(ValueError, match="unrelated"):
+        public_release.rollback_command(snapshot)

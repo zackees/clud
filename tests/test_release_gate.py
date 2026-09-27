@@ -61,8 +61,8 @@ def test_release_workflow_gates_every_publish_path() -> None:
     text = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     assert "candidate_sha: ${{ steps.meta.outputs.candidate_sha }}" in text
     assert "run: python -m ci.release_gate" in text
+    assert "needs: [preflight, full-ci-gate]" in text
     assert "needs: [preflight, full-ci-gate, release-matrix]" in text
-    assert "needs: [preflight, full-ci-gate, build, verify-static-musl-arm64]" in text
     publish_needs = (
         "needs: [preflight, full-ci-gate, snapshot-public, build, "
         "build-static-musl, verify-static-musl-arm64, build-installer]"

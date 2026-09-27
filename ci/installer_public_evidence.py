@@ -39,7 +39,13 @@ def require_evidence(rows: list[dict], expected: dict[str, dict], mode: str, tag
         raise ValueError("missing public host evidence")
 
 
-def require_guest_evidence(nixos: list[dict], distros: list[dict], expected: dict[str, dict], mode: str, tag: str) -> None:
+def require_guest_evidence(
+    nixos: list[dict],
+    distros: list[dict],
+    expected: dict[str, dict],
+    mode: str,
+    tag: str,
+) -> None:
     if len(nixos) != 2 or {row.get("host_arch") for row in nixos} != {"x86_64", "aarch64"}:
         raise ValueError("missing public NixOS guest evidence")
     for row in nixos:
@@ -52,7 +58,9 @@ def require_guest_evidence(nixos: list[dict], distros: list[dict], expected: dic
             or row.get("resolved_path") != "/home/alice/.local/bin/clud"
         ):
             raise ValueError("public NixOS guest evidence differs from published asset")
-    if len(distros) != 3 or {row.get("distro") for row in distros} != {"archlinux", "fedora", "alpine"}:
+    if len(distros) != 3 or {row.get("distro") for row in distros} != {
+        "archlinux", "fedora", "alpine"
+    }:
         raise ValueError("missing public distribution guest evidence")
     x64 = expected["x86_64-unknown-linux-musl"]["sha256"]
     for row in distros:
@@ -70,7 +78,11 @@ def require_guest_evidence(nixos: list[dict], distros: list[dict], expected: dic
 def log_rows(directory: Path, marker: str) -> list[dict]:
     rows = []
     for path in directory.rglob("*.txt"):
-        lines = [line.split(marker, 1)[1].strip() for line in path.read_text(encoding="utf-8").splitlines() if marker in line]
+        lines = [
+            line.split(marker, 1)[1].strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if marker in line
+        ]
         if len(lines) != 1:
             raise ValueError(f"missing or duplicated guest evidence in {path}")
         if marker == "PUBLIC_NIXOS_EVIDENCE ":
@@ -98,7 +110,10 @@ def main() -> None:
     nixos = log_rows(args.nixos, "PUBLIC_NIXOS_EVIDENCE ")
     distros = log_rows(args.distros, "PUBLIC_DISTRO_EVIDENCE ")
     require_guest_evidence(nixos, distros, expected, args.mode, args.tag)
-    print(f"PUBLIC_AGGREGATE mode={args.mode} tag={args.tag} hosts={len(rows)} nixos={len(nixos)} distros={len(distros)}")
+    print(
+        f"PUBLIC_AGGREGATE mode={args.mode} tag={args.tag} "
+        f"hosts={len(rows)} nixos={len(nixos)} distros={len(distros)}"
+    )
 
 
 if __name__ == "__main__":

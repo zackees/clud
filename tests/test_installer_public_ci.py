@@ -53,7 +53,7 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     require_evidence(rows, expected, "candidate", tag)
     with pytest.raises(ValueError, match="missing"):
         require_evidence(rows[:-1], expected, "candidate", tag)
-    with pytest.raises(ValueError, match="different"):
+    with pytest.raises(ValueError, match="differs"):
         require_evidence([*rows[:-1], {**rows[-1], "sha256": "b" * 64}], expected, "candidate", tag)
 
     nixos = [
@@ -75,7 +75,13 @@ def test_public_aggregate_rejects_missing_and_changed_host_bytes() -> None:
     with pytest.raises(ValueError, match="missing"):
         require_guest_evidence(nixos[:-1], distros, expected, "candidate", tag)
     with pytest.raises(ValueError, match="differs"):
-        require_guest_evidence(nixos, [*distros[:-1], {**distros[-1], "sha256": "b" * 64}], expected, "candidate", tag)
+        require_guest_evidence(
+            nixos,
+            [*distros[:-1], {**distros[-1], "sha256": "b" * 64}],
+            expected,
+            "candidate",
+            tag,
+        )
 
 
 def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> None:  # noqa: F811
