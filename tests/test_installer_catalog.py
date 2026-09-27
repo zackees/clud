@@ -15,7 +15,7 @@ from installer.catalog import (
     verify_static_musl_elf,
     version_key,
 )
-from installer.site import build_site, published_paths
+from installer.site import build_site, published_paths, render_page
 from installer.verify_site import verify
 
 
@@ -145,7 +145,7 @@ def test_pages_paths_redirect_and_only_manifest_link(tmp_path) -> None:
     assert links.hrefs == ["/clud/install/manifest.json"]
     assert "location.replace('/clud/install/index.html')" in root
     assert "2.9.0" in page
-    assert "Universal installer coming in the next release" in page
+    assert "No native downloads are available for this stable release" in page
     assert "releases/latest/download/clud-installer.exe" not in page
     assert '"latest-stable": "2.9.0"' in public
     assert catalog["online_url"] == "https://zackees.github.io/clud/install/manifest.json"
@@ -155,6 +155,80 @@ def test_pages_paths_redirect_and_only_manifest_link(tmp_path) -> None:
         if path.is_file() and path.name != ".nojekyll"
     }
     assert rendered == set(published_paths())
+
+
+def test_page_links_only_verified_native_asset_from_selected_stable(tmp_path) -> None:
+    import hashlib
+
+    data = wheel("clud.exe", b"MZpayload")
+    direct = pe_x64()
+    item = release("2.9.0", "https://example.com/wheel", data)
+    direct_url = "https://example.com/verified-native.exe"
+    item["assets"].append(
+        {
+            "name": "clud-2.9.0-x86_64-pc-windows-msvc.exe",
+            "browser_download_url": direct_url,
+            "digest": "sha256:" + hashlib.sha256(direct).hexdigest(),
+            "size": len(direct),
+        }
+    )
+    build_site(
+        tmp_path,
+        [item],
+        lambda url: direct if url == direct_url else data,
+    )
+    page = (tmp_path / "install" / "index.html").read_text(encoding="utf-8")
+    assert f'href="{direct_url}"' in page
+    assert "https://example.com/wheel" not in page
+    assert "releases/latest/download" not in page
+    assert "--installer" in page
+
+
+def test_page_prefers_static_musl_and_escapes_catalog_urls() -> None:
+    version = "2.10.0"
+    base = {
+        "platform": {"os": "linux", "arch": "x86_64"},
+        "asset": {
+            "filename": "clud-2.10.0-x86_64-unknown-linux-musl",
+            "media_type": "application/octet-stream",
+            "urls": ["https://example.com/static?a=1&b=2"],
+        },
+        "variant": {"flavor": "static-musl"},
+    }
+    gnu = {
+        "platform": {"os": "linux", "arch": "x86_64", "libc": "glibc"},
+        "asset": {
+            "filename": "clud-2.10.0-x86_64-unknown-linux-gnu",
+            "media_type": "application/octet-stream",
+            "urls": ["https://example.com/gnu"],
+        },
+        "variant": {"flavor": "gnu"},
+    }
+    catalog = {
+        "channels": {"latest-stable": version},
+        "releases": [
+            {
+                "version": version,
+                "platforms": [
+                    gnu,
+                    base,
+                    {
+                        "platform": {"os": "darwin", "arch": "aarch64"},
+                        "asset": {
+                            "filename": "clud-2.10.0-aarch64-apple-darwin",
+                            "media_type": "application/octet-stream",
+                            "urls": ["https://example.com/macos"],
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+    page = render_page(catalog)
+    assert 'href="https://example.com/static?a=1&amp;b=2"' in page
+    assert "https://example.com/gnu" not in page
+    assert "chmod +x" in page
+    assert "Open Anyway" in page
 
 
 def test_issue_1480_site_inventory_covers_added_asset(tmp_path, monkeypatch) -> None:
@@ -324,7 +398,7 @@ def test_static_musl_rejects_loader_dependency_and_wrong_architecture() -> None:
         verify_static_musl_elf(bytes(payload), "x86_64")
 
 
-def test_public_site_rejects_incomplete_latest(tmp_path, monkeypatch) -> None:
+def test_public_site_rejects_incomplete_latest(tmp_path) -> None:
     import json
 
     data = wheel("clud.exe", b"MZpayload")
@@ -333,19 +407,15 @@ def test_public_site_rejects_incomplete_latest(tmp_path, monkeypatch) -> None:
     catalog = json.loads(manifest.read_text(encoding="utf-8"))
     catalog["releases"][0]["platforms"].pop()
     manifest.write_text(json.dumps(catalog), encoding="utf-8")
-    monkeypatch.setattr(
-        "installer.verify_site.fetch",
-        lambda _: json.dumps({"tag_name": "2.9.0"}).encode(),
-    )
     with pytest.raises(ValueError, match="incomplete"):
         verify(tmp_path)
 
 
-def test_page_links_installer_only_when_latest_release_contains_it(tmp_path) -> None:
+def test_page_does_not_link_unverified_installer_asset(tmp_path) -> None:
     data = wheel("clud.exe", b"MZpayload")
     item = release("2.9.0", "https://example.com/29", data)
     item["assets"].append({"name": "clud-installer.exe"})
     build_site(tmp_path, [item], lambda _: data)
     page = (tmp_path / "install" / "index.html").read_text(encoding="utf-8")
-    assert "releases/latest/download/clud-installer.exe" in page
-    assert "Universal installer coming" not in page
+    assert "releases/latest/download/clud-installer.exe" not in page
+    assert "No native downloads are available" in page

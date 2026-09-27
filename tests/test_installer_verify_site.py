@@ -35,15 +35,6 @@ def write_site(destination, targets: set[tuple[str, str]]) -> None:
     )
 
 
-@pytest.fixture(autouse=True)
-def latest_release(monkeypatch):
-    monkeypatch.setattr(
-        verify_site,
-        "fetch",
-        lambda _url: json.dumps({"tag_name": "2.10.0"}).encode(),
-    )
-
-
 def test_verify_site_accepts_six_targets(tmp_path) -> None:
     targets = {(os_name, arch) for os_name, arch, _ in TARGETS.values()}
     write_site(tmp_path, targets)
@@ -76,4 +67,38 @@ def test_verify_site_rejects_unexpected_target(tmp_path) -> None:
     write_site(tmp_path, targets)
 
     with pytest.raises(ValueError, match="incomplete"):
+        verify_site.verify(tmp_path)
+
+
+def test_verify_site_keeps_catalog_stable_when_newer_release_is_incomplete(tmp_path) -> None:
+    targets = {(os_name, arch) for os_name, arch, _ in TARGETS.values()}
+    write_site(tmp_path, targets)
+    manifest = tmp_path / "install" / "manifest.json"
+    catalog = json.loads(manifest.read_text(encoding="utf-8"))
+    catalog["releases"].append({"version": "2.11.0", "platforms": []})
+    manifest.write_text(json.dumps(catalog), encoding="utf-8")
+    assert verify_site.verify(tmp_path) == "2.10.0"
+
+
+def test_verify_site_rejects_download_url_not_in_catalog(tmp_path) -> None:
+    targets = {(os_name, arch) for os_name, arch, _ in TARGETS.values()}
+    write_site(tmp_path, targets)
+    manifest = tmp_path / "install" / "manifest.json"
+    catalog = json.loads(manifest.read_text(encoding="utf-8"))
+    native = next(
+        item
+        for item in catalog["releases"][0]["platforms"]
+        if item["platform"] == {"os": "windows", "arch": "x86_64"}
+    )
+    native["asset"] = {
+        "filename": "clud-2.10.0-x86_64-pc-windows-msvc.exe",
+        "media_type": "application/octet-stream",
+        "urls": ["https://example.com/verified.exe"],
+    }
+    manifest.write_text(json.dumps(catalog), encoding="utf-8")
+    (tmp_path / "install" / "index.html").write_text(
+        'Latest stable release: 2.10.0 <a href="https://example.com/wrong.exe">Windows x64</a>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"download|link|catalog"):
         verify_site.verify(tmp_path)

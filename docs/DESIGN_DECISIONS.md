@@ -4800,3 +4800,23 @@ Unknown or shadowed lookup cannot be reported as installed. Machine Path
 shadows on Windows require manual repair because User Path cannot outrank
 them. The contract lives in
 [architecture/native-installer.md](architecture/native-installer.md).
+
+## DD-111: Pages downloads follow the verified stable catalog entry
+
+**Status:** Accepted.
+
+**Context:** #1496. GitHub's latest-release redirect can advance before all
+native assets have been published and verified. Historical stable releases
+can contain only wheels, which are not direct native downloads.
+
+**Decision:** Render download links only for verified direct assets in the
+catalog's `latest-stable` entry, using its exact immutable URLs and filenames.
+Prefer static musl to GNU for each Linux architecture. Show an explicit
+no-download message when that entry has no direct native assets. Verify the
+generated page against the catalog and repeat the check on the public Pages
+artifact after deployment.
+
+**Consequences:** Pages may temporarily show no native downloads while a new
+stable release is incomplete, and it never advertises a guessed installer
+asset. Catalog promotion and page visibility remain separate checks in the
+release flow.

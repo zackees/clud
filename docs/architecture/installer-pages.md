@@ -30,13 +30,19 @@ back to GNU.
 `installer/site.py` renders the exact Pages artifact paths: `index.html`,
 `install/index.html`, and `install/manifest.json`. The project root is a static
 client-side redirect to `/clud/install/index.html` with one hyperlink to the
-catalog. Until a release actually contains `clud-installer.exe`, the landing
-page links to the current release rather than a nonexistent installer asset.
+catalog. The landing page lists only verified direct native assets from the catalog's
+`latest-stable` release. It prefers static musl over GNU Linux assets and shows
+an explicit no-download message for wheel-only releases. Each link uses the
+catalog's immutable release URL, filename, OS, architecture, and variant; the
+page does not construct `/releases/latest/download/` links. It provides
+terminal launch commands for the downloaded executable and links to Apple's
+Open Anyway guidance for macOS. The verifier checks those links against the
+generated catalog.
 
 `.github/workflows/install-pages.yml` runs the unit suite and upstream
 `manifest-validate` on PRs, then publishes only on `main` or manual dispatch.
-It performs an unauthenticated smoke check of all three public URLs after
-deployment. `bosn run --task act-installer-pages` executes the build/validation
+It fetches all three public URLs anonymously after deployment and verifies the
+published page against the published catalog. `bosn run --task act-installer-pages` executes the build/validation
 job locally through `act`; it cannot stand in for the Pages deployment API.
 The full-history verification downloads about 5.5 GB across the 27 releases
 present when this flow was introduced, so its build job has a 30-minute limit.

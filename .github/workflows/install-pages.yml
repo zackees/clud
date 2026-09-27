@@ -29,6 +29,8 @@ jobs:
     name: Verify release history and build Pages
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      public_digest: ${{ steps.digest.outputs.value }}
     permissions:
       contents: read
       actions: write
@@ -51,6 +53,10 @@ jobs:
           python -m pip install 'git+https://github.com/zackees/manifest.json@main'
           manifest-validate site/install/manifest.json
           python -m installer.verify_site site
+      - name: Record staged installer Pages digest
+        id: digest
+        if: github.event_name != 'pull_request'
+        run: echo "value=$(sha256sum site/index.html site/install/index.html site/install/manifest.json | cut -d ' ' -f 1 | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/configure-pages@v5
         if: github.event_name != 'pull_request'
       - uses: actions/upload-pages-artifact@v3
@@ -70,18 +76,26 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
       - id: deployment
         uses: actions/deploy-pages@v4
       - name: Smoke public Pages without authentication
         run: |
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/index.html -o root.html
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/index.html -o install.html
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/manifest.json -o manifest.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          catalog = json.loads(Path('manifest.json').read_text(encoding='utf-8'))
-          assert catalog['kind'] == 'Catalog'
-          assert catalog['channels']['latest-stable'] in Path('install.html').read_text(encoding='utf-8')
-          assert "location.replace('/clud/install/index.html')" in Path('root.html').read_text(encoding='utf-8')
-          PY
+          mkdir -p public-site/install
+          expected='${{ needs.build-site.outputs.public_digest }}'
+          for attempt in $(seq 1 12); do
+            actual=fetch-failed
+            if curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/index.html -o public-site/index.html &&
+               curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/index.html -o public-site/install/index.html &&
+               curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/manifest.json -o public-site/install/manifest.json; then
+              actual=$(sha256sum public-site/index.html public-site/install/index.html public-site/install/manifest.json | cut -d ' ' -f 1 | sha256sum | cut -d ' ' -f 1)
+              if [ "$actual" = "$expected" ]; then
+                python -m installer.verify_site public-site
+                exit 0
+              fi
+            fi
+            echo "Waiting for Pages propagation ($attempt/12): $actual"
+            sleep 5
+          done
+          echo '::error::Public installer Pages never matched the staged artifact' >&2
+          exit 1
