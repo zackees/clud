@@ -194,6 +194,8 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.candidate_sha }}
       - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.19"
       - name: Compile and verify APE format
         run: bash installer/build_ape.sh
       - uses: actions/upload-artifact@v4

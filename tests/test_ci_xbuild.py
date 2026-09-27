@@ -146,6 +146,30 @@ def test_static_musl_build_stages_one_verified_native_binary(
     assert not (tmp_path / "dist").exists()
 
 
+def test_candidate_build_stages_exact_head_and_dev_binary(tmp_path, monkeypatch) -> None:
+    from ci.installer_candidate import verify_artifact
+    from tests.test_installer_verify_native_assets import native_payload
+
+    target = "x86_64-unknown-linux-musl"
+    source = tmp_path / "target" / target / "debug" / "clud"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(native_payload("elf", "x86_64"))
+    monkeypatch.setattr(xbuild, "ROOT", tmp_path)
+    monkeypatch.setattr(xbuild, "build_env", lambda *_args: {})
+    monkeypatch.setattr(xbuild, "_project_version", lambda: "2.8.14")
+    commands = []
+    monkeypatch.setattr(xbuild, "run", lambda argv, _env: commands.append(argv) or 0)
+    monkeypatch.setattr(xbuild.process, "check_output", lambda *_args, **_kwargs: "a" * 40)
+    args = argparse.Namespace(target=target, strategy="soldr", profile="dev")
+
+    assert xbuild.cmd_candidate(args) == 0
+    assert ["--features", "installer-ci-fixture"] == commands[0][6:8]
+    assert verify_artifact(tmp_path / "candidate", target, "a" * 40, "2.8.14")
+    args.profile = "release"
+    with pytest.raises(ValueError, match="dev"):
+        xbuild.cmd_candidate(args)
+
+
 def test_release_linux_wheel_builds_without_zig() -> None:
     """The release GNU wheel links through soldr's blessed catalogue toolchain,
     not the old zig path. The glibc-2.17 floor comes from `soldr prepare`'s

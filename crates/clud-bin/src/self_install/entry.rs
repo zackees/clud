@@ -263,6 +263,16 @@ fn terminal_available() -> bool {
 }
 
 fn fetch_catalog() -> Result<Catalog, String> {
+    #[cfg(feature = "installer-ci-fixture")]
+    if let Some(directory) = std::env::var_os("CLUD_INSTALLER_CI_FIXTURE_DIR") {
+        let path = std::path::PathBuf::from(directory).join("catalog.json");
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("candidate catalog {}: {error}", path.display()))?;
+        if bytes.len() as u64 > MAX_CATALOG_BYTES {
+            return Err("candidate catalog exceeds size limit".into());
+        }
+        return Catalog::parse(&bytes);
+    }
     let response = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(12))
         .redirects(0)
@@ -332,7 +342,66 @@ fn gnu_eligibility(arch: Arch) -> GnuEligibility {
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+fn gnu_eligibility(arch: Arch) -> GnuEligibility {
+    let nixos = std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .is_some_and(|text| {
+            text.lines()
+                .any(|line| line.trim_matches('"') == "ID=nixos" || line == "ID=\"nixos\"")
+        });
+    if nixos {
+        return GnuEligibility::Unverified;
+    }
+    let loader = match arch {
+        Arch::X86_64 => "/lib64/ld-linux-x86-64.so.2",
+        Arch::Aarch64 => "/lib/ld-linux-aarch64.so.1",
+    };
+    if !std::path::Path::new(loader).exists() {
+        return GnuEligibility::Unverified;
+    }
+    let Ok(process) = crate::subprocess::ManagedSubprocess::start_inheriting_env(
+        vec!["/usr/bin/getconf".into(), "GNU_LIBC_VERSION".into()],
+        None,
+        true,
+        None,
+    ) else {
+        return GnuEligibility::Unverified;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut output = Vec::new();
+    loop {
+        if std::time::Instant::now() >= deadline || output.len() > 64 {
+            let _ = process.kill();
+            return GnuEligibility::Unverified;
+        }
+        match process.read_stdout(Some(Duration::from_millis(50))) {
+            running_process::ReadStatus::Line(line) => output.extend_from_slice(&line),
+            running_process::ReadStatus::Timeout => {
+                let _ = process.poll();
+            }
+            running_process::ReadStatus::Eof => break,
+        }
+    }
+    if process.wait(Some(Duration::from_secs(1))) != Ok(0) {
+        return GnuEligibility::Unverified;
+    }
+    let Ok(text) = std::str::from_utf8(&output) else {
+        return GnuEligibility::Unverified;
+    };
+    let Some(version) = text.trim().strip_prefix("glibc ") else {
+        return GnuEligibility::Unverified;
+    };
+    let Some((major, minor)) = version.split_once('.') else {
+        return GnuEligibility::Unverified;
+    };
+    match (major.parse::<u64>(), minor.parse::<u64>()) {
+        (Ok(major), Ok(minor)) if (major, minor) >= (2, 17) => GnuEligibility::VerifiedGlibc217,
+        _ => GnuEligibility::Unverified,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 fn gnu_eligibility(_arch: Arch) -> GnuEligibility {
     GnuEligibility::Unverified
 }

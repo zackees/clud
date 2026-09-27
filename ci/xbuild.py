@@ -408,6 +408,50 @@ def cmd_standalone(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_candidate(args: argparse.Namespace) -> int:
+    """Build one dev-profile direct executable with exact-source provenance."""
+    from ci.installer_candidate import TARGETS, candidate_filename
+    from installer.verify_native_assets import verify_format
+
+    if args.target not in TARGETS or args.strategy != "soldr" or args.profile != "dev":
+        raise ValueError("candidate build requires a supported soldr dev target")
+    env = build_env(args.target, args.strategy)
+    command = cargo_argv(
+        ["build", "-p", "clud", "--bin", "clud", "--features", "installer-ci-fixture"],
+        args.target,
+        args.strategy,
+    )
+    if run(command, env) != 0:
+        return 1
+    os_name, arch, kind, suffix = TARGETS[args.target]
+    source = cargo_target_dir(env, ROOT / "target") / args.target / "debug" / f"clud{suffix}"
+    payload = source.read_bytes()
+    verify_format(payload, kind, arch)
+    version = _project_version()
+    filename = candidate_filename(version, args.target)
+    destination_dir = ROOT / "candidate"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / filename
+    destination.write_bytes(payload)
+    if os_name != "windows":
+        destination.chmod(0o755)
+    source_sha = process.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).strip()
+    metadata = {
+        "source_sha": source_sha,
+        "target": args.target,
+        "version": version,
+        "profile": "dev",
+        "filename": filename,
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    (destination_dir / "provenance.json").write_text(
+        json.dumps(metadata, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"staged candidate {filename}: source={source_sha} sha256={metadata['sha256']}")
+    return 0
+
+
 def cmd_doctest(args: argparse.Namespace) -> int:
     """Run doc-tests.
 
@@ -800,6 +844,10 @@ def main(argv: list[str] | None = None) -> int:
     add_common(standalone)
     standalone.add_argument("--defer-native-version-check", action="store_true")
     standalone.set_defaults(func=cmd_standalone)
+
+    candidate = sub.add_parser("candidate")
+    add_common(candidate)
+    candidate.set_defaults(func=cmd_candidate)
 
     args = parser.parse_args(argv)
 

@@ -256,7 +256,13 @@ def activate() -> None:
 # auto-enables in its own repo, or `CLUD_ROUTE_CONTEXT`) that leaks into
 # `bash test` when it runs from inside a clud session and flips hook
 # behavior under test (#1423).
-_TEST_HARNESS_CLUD_PREFIXES = ("CLUD_TEST_", "CLUD_HARNESS_", "CLUD_REAL_CLAUDE")
+_TEST_HARNESS_CLUD_PREFIXES = (
+    "CLUD_TEST_",
+    "CLUD_HARNESS_",
+    "CLUD_REAL_CLAUDE",
+    "CLUD_CANDIDATE_",
+    "CLUD_INSTALLER_CI_",
+)
 _TEST_HARNESS_CLUD_NAMES = frozenset(
     {
         "CLUD_INTEGRATION_TESTS",

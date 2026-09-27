@@ -584,11 +584,25 @@ fn stage_published(asset: &ResolvedAsset, target: &mut File) -> Result<(), Strin
     validate_asset_url(asset)?;
     if asset.media_type == MediaType::Direct {
         let current = std::env::current_exe().map_err(|error| error.to_string())?;
-        if current_matches_asset(&current, asset)? {
+        #[cfg(feature = "installer-ci-fixture")]
+        let force_download =
+            std::env::var_os("CLUD_INSTALLER_CI_FORCE_DOWNLOAD").is_some_and(|value| value == "1");
+        #[cfg(not(feature = "installer-ci-fixture"))]
+        let force_download = false;
+        if !force_download && current_matches_asset(&current, asset)? {
             let mut source = File::open(current).map_err(|error| error.to_string())?;
             io::copy(&mut source, target).map_err(|error| error.to_string())?;
             return Ok(());
         }
+    }
+    #[cfg(feature = "installer-ci-fixture")]
+    if let Some(directory) = std::env::var_os("CLUD_INSTALLER_CI_FIXTURE_DIR") {
+        let path = PathBuf::from(directory)
+            .join("assets")
+            .join(&asset.filename);
+        let mut source = File::open(&path)
+            .map_err(|error| format!("candidate asset {}: {error}", path.display()))?;
+        return consume_published_reader(&mut source, target, asset);
     }
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
@@ -620,11 +634,19 @@ fn stage_published(asset: &ResolvedAsset, target: &mut File) -> Result<(), Strin
     }
     let response = response.ok_or("too many release redirects")?;
     let mut reader = response.into_reader();
+    consume_published_reader(&mut reader, target, asset)
+}
+
+fn consume_published_reader(
+    reader: &mut impl Read,
+    target: &mut File,
+    asset: &ResolvedAsset,
+) -> Result<(), String> {
     if asset.media_type == MediaType::Direct {
-        verify_direct_reader(&mut reader, target, asset)?;
+        verify_direct_reader(reader, target, asset)?;
     } else {
         let mut wheel = tempfile::tempfile().map_err(|error| error.to_string())?;
-        io::copy(&mut reader.by_ref().take(asset.size_bytes + 1), &mut wheel)
+        io::copy(&mut reader.take(asset.size_bytes + 1), &mut wheel)
             .map_err(|error| error.to_string())?;
         wheel
             .seek(SeekFrom::Start(0))

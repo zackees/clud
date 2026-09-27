@@ -4820,3 +4820,26 @@ artifact after deployment.
 stable release is incomplete, and it never advertises a guessed installer
 asset. Catalog promotion and page visibility remain separate checks in the
 release flow.
+
+## DD-112: PR installer acceptance runs the exact native candidate
+
+**Status:** Accepted.
+
+**Context:** #1497. An APE test can pass without executing the Rust binary
+that a PR changes. Cross-built candidates also need proof that native-host
+results came from the exact PR head and uploaded bytes.
+
+**Decision:** Cross-build six dev-profile direct binaries from the PR head,
+each with a provenance record. Bind their digests into a strict catalog
+fixture, run each binary on its matching native host, and require six
+successful records with fresh name-based version proof. Compare those host
+records with the uploaded provenance in an always-run aggregate. Compile a
+local fixture transport only in candidate builds so catalog selection,
+digest verification, staging, rollback, and activation remain the production
+paths. Keep APE checks for release workflow calls until the public release
+gate replaces them.
+
+**Consequences:** PR acceptance requires six native runners; a missing,
+skipped, or failed cell blocks the aggregate. Fixture transport cannot be
+used by release/default binaries. The prior-release wheel test verifies a
+published digest before exercising selection through the candidate binary.
