@@ -159,7 +159,7 @@ def test_candidate_build_stages_exact_head_and_dev_binary(tmp_path, monkeypatch)
     monkeypatch.setattr(xbuild, "_project_version", lambda: "2.8.14")
     commands = []
     monkeypatch.setattr(xbuild, "run", lambda argv, _env: commands.append(argv) or 0)
-    monkeypatch.setattr(xbuild.process, "check_output", lambda *_args, **_kwargs: b"a" * 40)
+    monkeypatch.setattr(xbuild.process, "check_output", lambda *_args, **_kwargs: "a" * 40)
     args = argparse.Namespace(target=target, strategy="soldr", profile="dev")
 
     assert xbuild.cmd_candidate(args) == 0

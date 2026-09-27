@@ -20,6 +20,7 @@ runs:
 
     - uses: astral-sh/setup-uv@v5
       with:
+        version: "0.12.19"
         # Keep uv's wheel cache on Linux/macOS when the .venv cache misses.
         # Windows already restores .venv below; setup-uv's post-job cache
         # prune intermittently exits 2 after passing tests (#1475), turning

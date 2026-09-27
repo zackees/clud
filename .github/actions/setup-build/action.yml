@@ -36,6 +36,7 @@ runs:
 
     - uses: astral-sh/setup-uv@v5
       with:
+        version: "0.12.19"
         enable-cache: false
 
     # Keyed on OS+arch even though every build job now runs on the same Linux

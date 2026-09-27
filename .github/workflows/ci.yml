@@ -95,6 +95,8 @@ jobs:
           PROVENANCE_VERIFIED: ${{ env.PROVENANCE_VERIFIED }}
         run: python -m ci.ci_matrix
       - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.19"
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11
       - name: Setup soldr

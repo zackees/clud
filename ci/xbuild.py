@@ -435,11 +435,7 @@ def cmd_candidate(args: argparse.Namespace) -> int:
     destination.write_bytes(payload)
     if os_name != "windows":
         destination.chmod(0o755)
-    source_sha = (
-        process.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT)
-        .decode("ascii")
-        .strip()
-    )
+    source_sha = process.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).strip()
     metadata = {
         "source_sha": source_sha,
         "target": args.target,

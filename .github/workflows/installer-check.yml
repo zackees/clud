@@ -299,6 +299,8 @@ jobs:
         if: github.event_name != 'workflow_call'
       - uses: astral-sh/setup-uv@v5
         if: github.event_name != 'workflow_call'
+        with:
+          version: "0.12.19"
       - name: Compile installer APE for pull request validation
         if: github.event_name != 'workflow_call'
         run: bash installer/build_ape.sh
