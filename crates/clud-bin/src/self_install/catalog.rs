@@ -189,6 +189,11 @@ impl Version {
     }
 }
 
+/// Check an exact release version without fetching a catalog.
+pub fn validate_version(value: &str) -> Result<(), String> {
+    Version::parse(value).map(|_| ())
+}
+
 fn valid_identifiers(value: &str) -> bool {
     !value.is_empty()
         && value.split('.').all(|part| {
@@ -197,6 +202,10 @@ fn valid_identifiers(value: &str) -> bool {
 }
 
 impl Catalog {
+    pub fn latest_stable_version(&self) -> &str {
+        &self.latest_stable
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let document = crate::server_settings::parse_strict_json(bytes, MAX_CATALOG_BYTES)?;
         let root = object(&document, "catalog")?;

@@ -97,7 +97,7 @@ jobs:
             tests/test_release_gate.py
 
   resolver-unit:
-    name: Native Rust catalog resolver unit tests
+    name: Native Rust self-installer unit tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +107,7 @@ jobs:
           strategy: soldr
           profile: dev
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: soldr cargo test -p clud --lib self_install::catalog::tests -- --test-threads=1
+      - run: 'soldr cargo test -p clud --lib self_install:: -- --test-threads=1'
 
   catalog-site:
     name: Published release to catalog and Pages

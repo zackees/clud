@@ -4,9 +4,9 @@ use clud::{
     gc, graphics, grind, harness_picker, hook_health, job_orphan_reaper, kitty_term,
     large_file_guard, launch_log, launch_setup, log_event, loop_artifacts, loop_spec,
     openrouter_catalog, optimize, orphan_reaper, provider_auth, runner, runtime_cache,
-    settings_tui, skills, soldr_activate, stage_trace, startup, symbols, test_runtime, toast,
-    tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm,
-    webterm, workspace_trust, worktrees,
+    self_install, settings_tui, skills, soldr_activate, stage_trace, startup, symbols,
+    test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
+    verbose_log, wasm, webterm, workspace_trust, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -46,6 +46,12 @@ fn run(mut args: args::Args) {
     // without `--model` still launches with a main model inside its own
     // boundary (#1257).
     args.normalize_model_allowlist();
+    if let Some(code) = self_install::entry::run_explicit(&args) {
+        std::process::exit(code);
+    }
+    if let Some(code) = self_install::entry::run_auto_offer(&args) {
+        std::process::exit(code);
+    }
     if let Some(exit_code) = kitty_term::handle(&args) {
         std::process::exit(exit_code);
     }
