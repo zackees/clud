@@ -234,7 +234,7 @@ fn run_baseline(script: &str) -> Result<String, String> {
         .map(|(_, value)| PathBuf::from(value))
         .ok_or("OS-built User environment lacks SystemRoot")?;
     let program = system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let mut command = Command::new(program);
+    let mut command = Command::new(program); // running-process: command-builder
     command.args([
         "-NoLogo",
         "-NoProfile",
