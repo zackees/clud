@@ -246,6 +246,27 @@ pub struct Args {
     #[arg(long = "yes", short = 'y')]
     pub yes: bool,
 
+    /// Open the native clud installer selector before ordinary startup.
+    #[arg(long = "installer")]
+    pub installer: bool,
+
+    /// Select the invoking executable for installation.
+    #[arg(
+        long = "install-current",
+        requires = "installer",
+        conflicts_with = "install_version"
+    )]
+    pub install_current: bool,
+
+    /// Select an exact published clud release for installation.
+    #[arg(
+        long = "install-version",
+        value_name = "VERSION",
+        requires = "installer",
+        conflicts_with = "install_current"
+    )]
+    pub install_version: Option<String>,
+
     /// Issue #83: allow `--clean-worktrees` to remove dirty / unpushed
     /// worktrees. Locked worktrees are still preserved.
     #[arg(long = "force")]
@@ -1511,6 +1532,7 @@ fn split_inline_key_assignments(raw: &[String]) -> Result<Vec<String>, String> {
 }
 
 const SPLITTER_VALUE_FLAGS: &[&str] = &[
+    "--install-version",
     "--prompt",
     "--message",
     "--resume",
@@ -1558,6 +1580,8 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
     let value_flags: &[&str] = SPLITTER_VALUE_FLAGS;
     let short_value_flags: &[&str] = SPLITTER_SHORT_VALUE_FLAGS;
     let bool_flags: &[&str] = &[
+        "--installer",
+        "--install-current",
         "--continue",
         "--claude",
         "--codex",

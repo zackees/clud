@@ -1004,6 +1004,10 @@ mod tests {
                 "session_history/picker.rs",
                 include_str!("session_history/picker.rs"),
             ),
+            (
+                "self_install/picker.rs",
+                include_str!("self_install/picker.rs"),
+            ),
         ] {
             // Only production code: tests legitimately assert on the escape
             // sequences the shared renderer emits. Colored output elsewhere in

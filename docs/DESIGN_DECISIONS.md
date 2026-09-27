@@ -4731,3 +4731,26 @@ toasts need one atomic keyed hub snapshot, and an ordinary close click must
 not dismiss the CPU event. Token counters stay in the status line; model and
 cache health stay in the title fallback. The operational contract lives in
 [architecture/toasts.md](architecture/toasts.md).
+
+## DD-108: Installer entry precedes launch side effects and shares the selector
+
+**Status:** Accepted.
+
+**Context:** #1493. The installer must work without backend credentials or a
+running daemon, and its first-run offer must never appear during utilities or
+error paths. The established selector already owns raw terminal handling and
+Windows ConPTY behavior.
+
+**Decision:** Parse installer flags with the regular clap and known/unknown
+splitter, then dispatch explicit requests immediately after argument
+normalization. A bare interactive launch can offer installation if no `clud`
+resolves by name on PATH; any other launch shape stays on the normal path.
+Both entry points use selector models, with the automatic offer defaulting to
+**Not now**. The selection is an install intent; the transaction engine is a
+separate component, so an accepted intent fails explicitly until that engine
+is connected.
+
+**Consequences:** Installer entry cannot trigger the runtime-cache hop,
+trampoline, title keeper, daemon, or backend preflight. The bounded offer gate
+avoids prompting on invalid or utility launches. The detailed contract lives
+in [architecture/native-installer.md](architecture/native-installer.md).
