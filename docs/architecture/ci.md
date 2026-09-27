@@ -494,6 +494,21 @@ redesign requires; everything else is CI plumbing.
 
 ## Release profile containment
 
+PR installer acceptance builds six direct `clud` candidates from the exact PR
+head with `soldr` in the dev profile. `_build-target.yml` uploads one binary
+and a provenance record for each target. `ci/installer_candidate.py` checks
+source SHA, target format, size, and digest before assembling the six-asset
+candidate catalog. Each native Windows, macOS, and Linux runner downloads its
+own artifact, installs it, and reports the installed digest and fresh
+name-based lookup. The always-run aggregate checks all six host records
+against the uploaded binary provenance and fails on a skipped or missing
+lane. A fixture-only Cargo feature supplies a local copy of the candidate
+catalog and asset bytes through the normal parser and transaction verifier;
+release and default builds omit that feature. The fixture includes the
+published 2.8.13 wheel row to exercise older-version selection. The APE jobs
+remain for the release workflow call while PR acceptance uses native
+candidates.
+
 Native Linux downloads use two additional release-profile jobs, one for each
 `*-unknown-linux-musl` architecture. Both build on x64 Ubuntu because soldr's
 musl compiler bundles are x64-hosted. The ARM artifact is then downloaded and

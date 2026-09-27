@@ -335,8 +335,9 @@ def test_zsh_custom_zdotdir_activation(tmp_path: Path) -> None:
 
 def test_exact_older_release_downloads_selected_executable(installer_target) -> None:
     env, destination = installer_target
+    prior_version = os.environ.get("CLUD_TEST_PRIOR_VERSION", "2.8.13")
     result = run_process(
-        [str(clud_binary()), "--installer", "--install-version", "2.8.13", "--yes"],
+        [str(clud_binary()), "--installer", "--install-version", prior_version, "--yes"],
         env=env,
         capture_output=True,
         timeout=120,
@@ -352,7 +353,7 @@ def test_exact_older_release_downloads_selected_executable(installer_target) -> 
         check=False,
     )
     assert selected.returncode == 0, selected.stderr.decode(errors="replace")
-    assert selected.stdout.strip() == b"clud 2.8.13"
+    assert selected.stdout.strip() == f"clud {prior_version}".encode()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires a running Windows executable")

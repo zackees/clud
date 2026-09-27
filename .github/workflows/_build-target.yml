@@ -49,6 +49,11 @@ on:
         required: false
         type: string
         default: ""
+      candidate-artifact:
+        description: If non-empty, build and upload one dev native PR candidate with provenance.
+        required: false
+        type: string
+        default: ""
       include-sdist:
         description: Also build an sdist (exactly one target in the release matrix should set this).
         required: false
@@ -95,6 +100,15 @@ jobs:
           echo "Only the Auto Release workflow may build --release. CI builds dev."
           exit 1
 
+      - name: Guard PR candidate isolation
+        if: >-
+          ${{ inputs.candidate-artifact != '' &&
+              (inputs.profile != 'dev' || inputs.standalone-artifact != '' ||
+               inputs.bundle || inputs.wheel-artifact != '' || inputs.include-sdist) }}
+        run: |
+          echo '::error::A PR candidate must be one dev-profile direct executable.'
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
@@ -122,7 +136,7 @@ jobs:
         run: '"$VENV_PY" -m ci.xbuild clippy --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Build binaries and test harnesses
-        if: ${{ inputs.standalone-artifact == '' }}
+        if: ${{ inputs.standalone-artifact == '' && inputs.candidate-artifact == '' }}
         run: >
           "$VENV_PY" -m ci.xbuild compile
           --target ${{ inputs.target }}
@@ -146,6 +160,24 @@ jobs:
           name: ${{ inputs.standalone-artifact }}
           path: standalone/clud-*
           if-no-files-found: error
+          compression-level: 0
+
+      - name: Build native PR candidate
+        if: ${{ inputs.candidate-artifact != '' }}
+        run: >
+          "$VENV_PY" -m ci.xbuild candidate
+          --target ${{ inputs.target }}
+          --strategy ${{ inputs.strategy }}
+          --profile ${{ inputs.profile }}
+
+      - name: Upload native PR candidate
+        if: ${{ inputs.candidate-artifact != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.candidate-artifact }}
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 3
           compression-level: 0
 
       # Doc-tests were covered by the old `cargo test --workspace`
@@ -205,7 +237,7 @@ jobs:
       # mis-selected -gnu target, which is a new failure mode the native build
       # could not have had.
       - name: Verify Windows wheel has no MinGW runtime imports
-        if: ${{ contains(inputs.target, 'windows') }}
+        if: ${{ contains(inputs.target, 'windows') && (inputs.bundle || inputs.wheel-artifact != '') }}
         run: '"$VENV_PY" -m ci.check_windows_wheel --dist-dir dist/'
 
       - name: Pack bundle

@@ -30,3 +30,8 @@ an error; callers must not try another catalog variant after verification.
 The host probe in `entry.rs` verifies the non-NixOS GNU loader and glibc floor
 before it grants GNU eligibility. The published catalog generator remains in
 `installer/catalog.py`; this module is the native reader of its output.
+Static musl builds use the canonical GNU loader and `/usr/bin/getconf
+GNU_LIBC_VERSION` to probe a GNU host without linking glibc into the
+candidate. The `installer-ci-fixture` feature is compiled only into dev PR
+candidate builds; it reads local catalog and asset bytes while retaining the
+normal parser, digest, extraction, staging, and activation paths.

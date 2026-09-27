@@ -255,6 +255,8 @@ path = "src/bin/clud_kittyterm_paste.rs"
 # six CI platforms -- a measurement harness should not tax every lint lane.
 [features]
 bench = []
+# Only candidate CI builds may read a local release transport fixture.
+installer-ci-fixture = []
 
 [[bin]]
 name = "clud-bench-proc-sampler"

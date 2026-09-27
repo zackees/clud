@@ -71,9 +71,10 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert publish_needs in text
     assert "name: Execute release static musl ARM64" in text
     installer = (WORKFLOWS / "installer-check.yml").read_text(encoding="utf-8")
-    assert "native-linux-arm64-execute:" in installer
-    assert "needs: native-linux-arm64" in installer
-    assert "NATIVE_ARM64_EXECUTE: ${{ needs.native-linux-arm64-execute.result }}" in installer
+    assert "candidate-build:" in installer
+    assert "candidate-host:" in installer
+    assert "candidate-aggregate:" in installer
+    assert "if: always() && github.event_name != 'workflow_call'" in installer
     assert "name: Build universal APE installer" in text
     assert "source_ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "ref: ${{ needs.preflight.outputs.candidate_sha }}" in text

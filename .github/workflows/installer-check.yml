@@ -8,13 +8,22 @@ on:
       - crates/clud-bin/**
       - ci/ci_matrix.py
       - ci/xbuild.py
+      - ci/installer_candidate.py
+      - ci/bundle.py
+      - ci/act_ci.sh
       - .github/workflows/_build-target.yml
+      - .github/workflows/_run-tests.yml
+      - .github/workflows/ci.yml
+      - .github/actions/setup-build/**
+      - .github/workflows/install-pages.yml
+      - site/**
+      - docs/architecture/native-installer.md
+      - docs/architecture/installer-pages.md
       - Cargo.toml
       - Cargo.lock
       - pyproject.toml
       - .github/workflows/installer-check.yml
       - .github/workflows/auto-release.yml
-      - ci/act_ci.sh
       - bosn.toml
   workflow_dispatch:
   workflow_call:
@@ -28,37 +37,35 @@ permissions:
   contents: read
 
 jobs:
-  native-linux-x64:
-    name: Build and execute candidate static musl x64
+  candidate-build:
+    name: Build exact PR candidate ${{ matrix.target }}
     if: github.event_name != 'workflow_call'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      target: x86_64-unknown-linux-musl
+      target: ${{ matrix.target }}
       runs-on: ubuntu-24.04
       strategy: soldr
+      profile: dev
       bundle: false
       clippy: false
-      standalone-artifact: standalone-musl-x86_64
+      candidate-artifact: candidate-${{ matrix.target }}
 
-  native-linux-arm64:
-    name: Cross-build candidate static musl ARM64
+  candidate-catalog:
+    name: Bind all six candidate assets into one catalog
+    needs: candidate-build
     if: github.event_name != 'workflow_call'
-    uses: ./.github/workflows/_build-target.yml
-    with:
-      source_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      target: aarch64-unknown-linux-musl
-      runs-on: ubuntu-24.04
-      strategy: soldr
-      bundle: false
-      clippy: false
-      standalone-artifact: standalone-musl-aarch64
-
-  native-linux-arm64-execute:
-    name: Execute candidate static musl ARM64
-    if: github.event_name != 'workflow_call'
-    needs: native-linux-arm64
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,21 +73,166 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
-          name: standalone-musl-aarch64
-          path: standalone
-      - name: Verify and execute uploaded ARM64 bytes
+          pattern: candidate-*
+          path: candidate-artifacts
+      - name: Verify exact source and build candidate catalog
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          version=$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
-          python -m installer.verify_native_assets "$version" standalone aarch64-unknown-linux-musl
-          binary="standalone/clud-$version-aarch64-unknown-linux-musl"
-          chmod +x "$binary"
-          test "$("$binary" --version)" = "clud $version"
+          version=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          python -m ci.installer_candidate build-fixture candidate-artifacts candidate-fixture "$SOURCE_SHA" "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-catalog
+          path: candidate-fixture/catalog.json
+          if-no-files-found: error
+
+  candidate-host:
+    name: Run exact PR candidate on ${{ matrix.runner }}
+    needs: candidate-catalog
+    if: github.event_name != 'workflow_call'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      CLUD_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      CLUD_CANDIDATE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-${{ matrix.target }}
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-catalog
+          path: candidate-fixture
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install native acceptance dependencies
+        shell: bash
+        run: |
+          python -m pip install pytest running-process
+          if [ "$RUNNER_OS" = Windows ]; then python -m pip install pywinpty==3.0.4; fi
+      - name: Verify artifact identity and expose exact binary
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+          from ci.installer_candidate import verify_artifact
+          version = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version']
+          directory = Path('candidate').resolve()
+          metadata = verify_artifact(directory, os.environ['CLUD_CANDIDATE_TARGET'], os.environ['CLUD_CANDIDATE_SHA'], version)
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as env:
+              env.write(f"CLUD_CANDIDATE_VERSION={version}\n")
+              env.write(f"CLUD_CANDIDATE_ARTIFACT={directory}\n")
+              env.write(f"CLUD_CANDIDATE_EVIDENCE=candidate-evidence/{metadata['target']}.json\n")
+              env.write(f"CLUD_TEST_BINARY={directory / metadata['filename']}\n")
+              env.write(f"CLUD_INSTALLER_CI_FIXTURE_DIR={Path('candidate-fixture').resolve()}\n")
+          assets = Path('candidate-fixture/assets')
+          assets.mkdir(exist_ok=True)
+          import shutil
+          shutil.copy2(directory / metadata['filename'], assets / metadata['filename'])
+          catalog = json.loads(Path('candidate-fixture/catalog.json').read_text(encoding='utf-8'))
+          candidate_row = next(row for row in catalog['releases'] if row['version'] == version)
+          os_name, arch, _, _ = __import__('ci.installer_candidate', fromlist=['TARGETS']).TARGETS[metadata['target']]
+          candidate_asset = next(row['asset'] for row in candidate_row['platforms'] if row['platform']['os'] == os_name and row['platform']['arch'] == arch)
+          if candidate_asset['filename'] != metadata['filename'] or candidate_asset['sha256'] != metadata['sha256'] or candidate_asset['size_bytes'] != metadata['size_bytes']:
+              raise ValueError('candidate catalog differs from exact host binary')
+          prior = next(row for row in catalog['releases'] if row['version'] == '2.8.13')
+          selected = next(row for row in prior['platforms'] if row['platform']['os'] == os_name and row['platform']['arch'] == arch)
+          asset = selected['asset']
+          from urllib.request import urlopen
+          import hashlib
+          with urlopen(asset['urls'][0], timeout=120) as response:
+              data = response.read(asset['size_bytes'] + 1)
+          if len(data) != asset['size_bytes'] or hashlib.sha256(data).hexdigest() != asset['sha256']:
+              raise ValueError('prior release asset differs from the published catalog')
+          (assets / asset['filename']).write_bytes(data)
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as env:
+              env.write('CLUD_TEST_PRIOR_VERSION=2.8.13\n')
+          print(json.dumps(metadata, sort_keys=True))
+          PY
+          if [ "$RUNNER_OS" != Windows ]; then chmod +x candidate/clud-*; fi
+      - name: Exercise native installer and terminal
+        shell: bash
+        run: |
+          mkdir -p candidate-evidence
+          python -m pytest -q \
+            tests/test_installer_candidate_ci.py::test_native_candidate_installs_by_name_and_writes_host_evidence \
+            tests/test_installer_native_entry.py
+      - name: Retain candidate host evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-evidence-${{ matrix.target }}
+          path: candidate-evidence/*
+          if-no-files-found: warn
+
+  candidate-aggregate:
+    name: Require six exact PR candidate hosts
+    needs: [catalog-unit, resolver-unit, catalog-site, candidate-build, candidate-catalog, candidate-host]
+    if: always() && github.event_name != 'workflow_call'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: candidate-evidence-*
+          path: candidate-evidence
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: candidate-*
+          path: candidate-artifacts
+      - name: Reject failed or missing lanes and evidence
+        env:
+          CATALOG_UNIT: ${{ needs.catalog-unit.result }}
+          RESOLVER_UNIT: ${{ needs.resolver-unit.result }}
+          CATALOG_SITE: ${{ needs.catalog-site.result }}
+          CANDIDATE_BUILD: ${{ needs.candidate-build.result }}
+          CANDIDATE_CATALOG: ${{ needs.candidate-catalog.result }}
+          CANDIDATE_HOST: ${{ needs.candidate-host.result }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          for result in "$CATALOG_UNIT" "$RESOLVER_UNIT" "$CATALOG_SITE" "$CANDIDATE_BUILD" "$CANDIDATE_CATALOG" "$CANDIDATE_HOST"; do
+            test "$result" = success
+          done
+          version=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          python -m ci.installer_candidate aggregate candidate-evidence "$SOURCE_SHA" "$version" --artifacts candidate-artifacts
 
   catalog-unit:
     name: Native catalog and release wiring unit tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -102,6 +254,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: ./.github/actions/setup-build
         with:
           target: x86_64-unknown-linux-gnu
@@ -116,6 +271,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -134,6 +292,7 @@ jobs:
 
   build-ape:
     name: Obtain installer APE
+    if: github.event_name == 'workflow_call'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -160,6 +319,7 @@ jobs:
 
   ape-host:
     name: Install and verify on ${{ matrix.runner }}
+    if: github.event_name == 'workflow_call'
     needs: build-ape
     strategy:
       fail-fast: false
@@ -270,6 +430,7 @@ jobs:
 
   ape-core-tests:
     name: APE catalog and terminal unit tests
+    if: github.event_name == 'workflow_call'
     needs: build-ape
     runs-on: ubuntu-24.04
     steps:
@@ -295,6 +456,7 @@ jobs:
 
   linux-distro:
     name: Install on ${{ matrix.image }} container
+    if: github.event_name == 'workflow_call'
     needs: build-ape
     runs-on: ubuntu-24.04
     strategy:
@@ -324,8 +486,8 @@ jobs:
 
   installer-acceptance:
     name: Installer acceptance aggregate
-    needs: [catalog-unit, resolver-unit, catalog-site, native-linux-x64, native-linux-arm64, native-linux-arm64-execute, ape-core-tests, ape-host, linux-distro]
-    if: always()
+    needs: [catalog-unit, resolver-unit, catalog-site, ape-core-tests, ape-host, linux-distro]
+    if: always() && github.event_name == 'workflow_call'
     runs-on: ubuntu-24.04
     steps:
       - name: Reject missing, skipped, or failed coverage
@@ -336,10 +498,6 @@ jobs:
           APE_CORE: ${{ needs.ape-core-tests.result }}
           APE_HOSTS: ${{ needs.ape-host.result }}
           LINUX_DISTROS: ${{ needs.linux-distro.result }}
-          NATIVE_X64: ${{ needs.native-linux-x64.result }}
-          NATIVE_ARM64: ${{ needs.native-linux-arm64.result }}
-          NATIVE_ARM64_EXECUTE: ${{ needs.native-linux-arm64-execute.result }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$CATALOG" = success
           test "$CATALOG_UNIT" = success
@@ -347,8 +505,3 @@ jobs:
           test "$APE_CORE" = success
           test "$APE_HOSTS" = success
           test "$LINUX_DISTROS" = success
-          if [ "$EVENT_NAME" != workflow_call ]; then
-            test "$NATIVE_X64" = success
-            test "$NATIVE_ARM64" = success
-            test "$NATIVE_ARM64_EXECUTE" = success
-          fi
