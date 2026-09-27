@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       result: ${{ steps.stage.outputs.result }}
+      public_digest: ${{ steps.digest.outputs.value }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,6 +49,10 @@ jobs:
           manifest-validate site/install/manifest.json
           python -m pytest -q tests/test_model_manifest.py
           python -m json.tool site/models/manifest.json > /dev/null
+      - name: Record staged Pages digest
+        id: digest
+        if: steps.stage.outputs.result == 'publish'
+        run: echo "value=$(sha256sum site/index.html site/install/index.html site/install/manifest.json site/models/manifest.json | cut -d ' ' -f 1 | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/configure-pages@v5
         if: steps.stage.outputs.result == 'publish'
       - uses: actions/upload-pages-artifact@v3
@@ -86,3 +91,5 @@ jobs:
           assert models['defaults']['codex']['effort'] == 'low'
           PY
           python -m installer.verify_site public-site
+          actual=$(sha256sum public-site/index.html public-site/install/index.html public-site/install/manifest.json models.json | cut -d ' ' -f 1 | sha256sum | cut -d ' ' -f 1)
+          test "$actual" = '${{ needs.build-site.outputs.public_digest }}'
