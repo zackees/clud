@@ -74,8 +74,9 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "candidate-build:" in installer
     assert "candidate-host:" in installer
     assert "candidate-aggregate:" in installer
-    assert "if: always() && github.event_name == 'pull_request'" in installer
+    assert "if: always() && github.event_name == 'pull_request' &&" in installer
     assert "contains(github.event.pull_request.labels.*.name, 'ci-full')" in installer
+    assert "contains(github.event.pull_request.labels.*.name, 'ci:full')" in installer
     assert "name: Build universal APE installer" in text
     assert "source_ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
