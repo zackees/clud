@@ -85,7 +85,7 @@ fn prepend_path(directory: &str, raw: &str) -> String {
 }
 
 fn decode_path(bytes: &[u8]) -> Result<String, String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("User Path has malformed UTF-16 bytes".into());
     }
     let words: Vec<u16> = bytes
