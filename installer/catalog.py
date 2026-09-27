@@ -207,7 +207,12 @@ def catalog_from_releases(
     entries = []
     for release in releases:
         version = release["tag_name"].removeprefix("v")
-        if release.get("draft") or not VERSION.fullmatch(version):
+        if (
+            release.get("draft")
+            or release.get("prerelease")
+            or not VERSION.fullmatch(version)
+            or "-" in version
+        ):
             continue
         platforms = []
         seen = set()
