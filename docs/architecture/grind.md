@@ -59,16 +59,16 @@ Each workflow agent runs as its `grind-<role>` type and is told to invoke
 its leaf skill, so the procedure lives once, in the skill, and each leaf is
 also usable directly (for example `/grind-land` on an existing PR).
 
-### Only `/grind` is model-facing
+### Grind skills require explicit invocation
 
 The leaves and roles exist for the workflow, and for a person testing one by
 hand; a model must never pick them up from an ordinary prompt.
 
-- **The leaf skills** (`grind-intake` … `grind-cron`) are
-  `disable-model-invocation: true`. The model never sees them, but a user can
-  still type `/grind-work` to try one. `/grind` itself stays invocable, because
-  `clud do` tells the model to use it. The router reads `grind-intake` and
-  `grind-cron` as files next to its own directory instead of invoking them.
+- **All grind skills**, including `/grind`, have
+  `disable-model-invocation: true` for Claude and Codex's
+  `allow_implicit_invocation: false` policy. A person can still invoke them
+  directly. The router reads `grind-intake` and `grind-cron` as files next to
+  its own directory instead of invoking them.
 - **The agent types** ignore that frontmatter, so they're still listed to the
   model. clud's PreToolUse hook refuses any `Agent` call whose
   `subagent_type` is `grind-*`. The workflow's `agent()` spawns don't go

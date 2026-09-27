@@ -3,8 +3,7 @@ name: grind
 description: "Work through a list of goals (a meta issue, issue list, free-form goal, or the repo's issues page) to merged PRs: plan, write, review, integrate and land, in parallel worktrees, sequentially in the local checkout, or one issue per /loop tick. Router for the grind-* skills and the bundled grind workflow."
 triggers:
   - When the user runs /grind or clud grind
-  - When clud do or /goal has several independent deliverables to implement
-  - When the user asks to burn down a meta issue, an issue list, or the issues page
+disable-model-invocation: true
 allowed-tools: Bash(clud grind-scripts:*), Bash(clud grind-facts:*)
 ---
 <!-- managed-by: clud -->

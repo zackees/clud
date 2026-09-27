@@ -18,7 +18,7 @@ const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 /// One bundled file: its path relative to `~/.claude`, and its body.
 ///
 /// `procedure` names a bundled skill whose body is appended to an agent
-/// file at install. The `/grind` leaf skills are `disable-model-invocation`
+/// file at install. The `/grind` skills are `disable-model-invocation`
 /// so a user's prompt never pulls them in, which also means an agent cannot
 /// load them with the `Skill` tool or `skills:` preload. Appending keeps the
 /// skill the single source of the procedure.
@@ -346,18 +346,15 @@ mod tests {
         }
     }
 
-    /// The router may be pulled in by the model (clud do names it); every
-    /// leaf is for the workflow and for explicit `/name` testing only.
+    /// The router and leaves are available only through explicit invocation.
     #[test]
-    fn grind_leaf_skills_are_hidden_from_the_model() {
+    fn grind_skills_are_hidden_from_the_model() {
         for skill in crate::skills::BUNDLED_SKILLS {
             let hidden = skill
                 .skill_md
                 .contains("\ndisable-model-invocation: true\n");
-            if skill.name.starts_with("grind-") {
+            if skill.name == "grind" || skill.name.starts_with("grind-") {
                 assert!(hidden, "{} must be disable-model-invocation", skill.name);
-            } else if skill.name == "grind" {
-                assert!(!hidden, "the /grind router must stay model-invocable");
             }
         }
     }

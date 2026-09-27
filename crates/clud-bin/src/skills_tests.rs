@@ -42,6 +42,53 @@ fn fake_skills() -> Vec<BundledSkill> {
 }
 
 #[test]
+fn do_and_grind_skills_install_with_explicit_only_invocation() {
+    let dir = tempdir().unwrap();
+    let base = dir.path();
+    install_to(base, BUNDLED_SKILLS).unwrap();
+    install_explicit_invocation_policies(base).unwrap();
+
+    for name in [
+        "do",
+        "grind",
+        "grind-intake",
+        "grind-plan",
+        "grind-prework",
+        "grind-work",
+        "grind-review",
+        "grind-integrate",
+        "grind-land",
+        "grind-cron",
+    ] {
+        let body = std::fs::read_to_string(base.join(name).join("SKILL.md")).unwrap();
+        assert!(body.contains("disable-model-invocation: true"), "{name}");
+        let policy = std::fs::read_to_string(base.join(name).join("agents/openai.yaml")).unwrap();
+        assert!(
+            policy.contains("allow_implicit_invocation: false"),
+            "{name}"
+        );
+    }
+
+    let user_policy = base.join("grind/agents/openai.yaml");
+    std::fs::write(&user_policy, "policy:\n  allow_implicit_invocation: true\n").unwrap();
+    install_explicit_invocation_policies(base).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(user_policy).unwrap(),
+        "policy:\n  allow_implicit_invocation: true\n"
+    );
+
+    let user_skill = base.join("do/SKILL.md");
+    std::fs::write(&user_skill, "user-owned do skill\n").unwrap();
+    let do_policy = base.join("do/agents/openai.yaml");
+    std::fs::write(&do_policy, "# managed-by: clud\nold policy\n").unwrap();
+    install_explicit_invocation_policies(base).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(do_policy).unwrap(),
+        "# managed-by: clud\nold policy\n"
+    );
+}
+
+#[test]
 fn installs_when_missing() {
     let dir = tempdir().unwrap();
     let report = install_to(dir.path(), &fake_skills()).unwrap();
@@ -957,10 +1004,7 @@ fn do_skill_renders_its_prompt_through_clud_do_prompt() {
     // clud-launched session already puts clud's own directory on PATH.
     assert!(skill.contains("!`clud do-prompt \"$ARGUMENTS\"`"));
     assert!(skill.contains("allowed-tools: Bash(clud do-prompt:*)"));
-    assert!(
-        !skill.contains("disable-model-invocation"),
-        "/goal /do needs the model to load /do"
-    );
+    assert!(skill.contains("disable-model-invocation: true"));
 }
 
 /// `/grind` renders the repo's `./lint` / `./test` report at invocation via
