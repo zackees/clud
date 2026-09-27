@@ -1,0 +1,23 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1767313136,
+        "narHash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+        "type": "tarball",
+        "url": "https://codeload.github.com/NixOS/nixpkgs/tar.gz/ac62194c3917d5f474c1a844b6fd6da2db95077d"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://codeload.github.com/NixOS/nixpkgs/tar.gz/ac62194c3917d5f474c1a844b6fd6da2db95077d"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
