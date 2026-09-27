@@ -67,19 +67,22 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
       - id: deployment
         uses: actions/deploy-pages@v4
       - name: Smoke public model and installer manifests
         run: |
           curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/models/manifest.json -o models.json
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/manifest.json -o install.json
+          mkdir -p public-site/install
+          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/index.html -o public-site/index.html
+          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/index.html -o public-site/install/index.html
+          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/manifest.json -o public-site/install/manifest.json
           python - <<'PY'
           import json
           from pathlib import Path
           models = json.loads(Path('models.json').read_text(encoding='utf-8'))
-          install = json.loads(Path('install.json').read_text(encoding='utf-8'))
           assert models['schema_version'] == 1
           assert models['defaults']['codex']['model'] == models['families']['sol']
           assert models['defaults']['codex']['effort'] == 'low'
-          assert install['kind'] == 'Catalog'
           PY
+          python -m installer.verify_site public-site

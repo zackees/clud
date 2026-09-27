@@ -1,4 +1,4 @@
-"""Verify that generated Pages identify the actual latest GitHub release."""
+"""Verify that generated Pages match the catalog's selected stable release."""
 
 from __future__ import annotations
 
@@ -7,17 +7,40 @@ import sys
 from html.parser import HTMLParser
 from pathlib import Path
 
-from installer.catalog import TARGETS, fetch
+from installer.catalog import TARGETS
+from installer.site import select_native_downloads
 
 
 class Links(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.hrefs: list[str] = []
+        self.native: list[dict[str, str]] = []
+        self._current: dict[str, str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "a":
-            self.hrefs.extend(value for key, value in attrs if key == "href" and value)
+            values = dict(attrs)
+            href = values.get("href")
+            if href:
+                self.hrefs.append(href)
+            if "native-download" in (values.get("class") or "").split():
+                self._current = {
+                    "url": href or "",
+                    "os": values.get("data-os") or "",
+                    "arch": values.get("data-arch") or "",
+                    "flavor": values.get("data-flavor") or "",
+                    "filename": "",
+                }
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None:
+            self._current["filename"] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._current is not None:
+            self.native.append(self._current)
+            self._current = None
 
 
 def verify(site: Path) -> str:
@@ -30,10 +53,7 @@ def verify(site: Path) -> str:
         raise ValueError(f"root must link only to catalog: {links.hrefs}")
     if "location.replace('/clud/install/index.html')" not in root:
         raise ValueError("root does not redirect to installer page")
-    latest = json.loads(fetch("https://api.github.com/repos/zackees/clud/releases/latest"))
-    expected = latest["tag_name"].removeprefix("v")
-    if catalog["channels"]["latest-stable"] != expected:
-        raise ValueError(f"catalog latest is not published latest: {expected}")
+    expected = catalog["channels"]["latest-stable"]
     entry = next((item for item in catalog["releases"] if item["version"] == expected), None)
     if entry is None:
         raise ValueError("latest stable release is absent from the catalog")
@@ -63,6 +83,18 @@ def verify(site: Path) -> str:
         raise ValueError(f"latest stable release has incomplete static musl assets: {static_arches}")
     if expected not in page:
         raise ValueError("landing page does not show catalog latest")
+    page_links = Links()
+    page_links.feed(page)
+    expected_downloads = select_native_downloads(catalog)
+    if page_links.native != expected_downloads:
+        raise ValueError(
+            f"native download links differ from catalog: {page_links.native}"
+        )
+    allowed_links = {row["url"] for row in expected_downloads}
+    allowed_links.update(("manifest.json", "https://support.apple.com/en-us/102445"))
+    for href in page_links.hrefs:
+        if href not in allowed_links:
+            raise ValueError(f"page link is absent from catalog or site guidance: {href}")
     return expected
 
 

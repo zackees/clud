@@ -6,7 +6,7 @@ import html
 import json
 from pathlib import Path
 
-from installer.catalog import write_catalog
+from installer.catalog import direct_target, linux_variant, write_catalog
 
 INSTALLER_SITE_FILES = ("index.html", "install/index.html", "install/manifest.json")
 STATIC_ASSETS: dict[str, bytes] = {}
@@ -26,28 +26,111 @@ ROOT = """<!doctype html>
 """
 
 
-def render_page(catalog: dict, *, installer_available: bool) -> str:
+def select_native_downloads(catalog: dict) -> list[dict[str, str]]:
+    """Choose verified native assets from the catalog's selected stable release."""
+    version = catalog["channels"]["latest-stable"]
+    release = next(
+        (item for item in catalog["releases"] if item["version"] == version), None
+    )
+    if release is None:
+        raise ValueError("latest-stable release is absent from the catalog")
+    chosen: dict[tuple[str, str], dict[str, str]] = {}
+    for item in release["platforms"]:
+        asset = item.get("asset")
+        if not isinstance(asset, dict) or asset.get("media_type") != "application/octet-stream":
+            continue
+        filename = asset.get("filename")
+        if not isinstance(filename, str):
+            continue
+        target = direct_target(filename, version)
+        if target is None:
+            continue
+        os_name, arch, _executable = target
+        extra, variant = linux_variant(filename, os_name)
+        if item["platform"] != {"os": os_name, "arch": arch, **extra}:
+            raise ValueError(f"native asset platform disagrees with filename: {filename}")
+        if item.get("variant", {}) != variant:
+            raise ValueError(f"native asset variant disagrees with filename: {filename}")
+        urls = asset.get("urls")
+        if not isinstance(urls, list) or len(urls) != 1 or not isinstance(urls[0], str):
+            raise ValueError(f"native asset lacks one verified URL: {filename}")
+        row = {
+            "os": os_name,
+            "arch": arch,
+            "flavor": variant.get("flavor", "native"),
+            "filename": filename,
+            "url": urls[0],
+        }
+        key = (os_name, arch)
+        previous = chosen.get(key)
+        if previous is None:
+            chosen[key] = row
+        elif previous["flavor"] == row["flavor"]:
+            raise ValueError(f"duplicate native asset for {os_name}/{arch}")
+        elif row["flavor"] == "static-musl":
+            chosen[key] = row
+    order = {"windows": 0, "darwin": 1, "linux": 2}
+    return sorted(chosen.values(), key=lambda row: (order[row["os"]], row["arch"]))
+
+
+def render_page(catalog: dict) -> str:
     latest = html.escape(catalog["channels"]["latest-stable"])
-    if installer_available:
-        download = (
-            '<a href="https://github.com/zackees/clud/releases/latest/download/'
-            'clud-installer.exe">Download clud-installer.exe</a>'
+    downloads = select_native_downloads(catalog)
+    rows = []
+    instructions = []
+    labels = {"windows": "Windows", "darwin": "macOS", "linux": "Linux"}
+    for row in downloads:
+        platform = f"{labels[row['os']]} {row['arch']}"
+        if row["os"] == "linux":
+            platform += " (static musl)" if row["flavor"] == "static-musl" else " (glibc)"
+        url = html.escape(row["url"], quote=True)
+        filename = html.escape(row["filename"])
+        rows.append(
+            f'<li>{html.escape(platform)}: <a class="native-download" '
+            f'data-os="{row["os"]}" data-arch="{row["arch"]}" '
+            f'data-flavor="{row["flavor"]}" href="{url}">{filename}</a></li>'
         )
-        instructions = (
-            "Run the downloaded installer and select a version. It asks before writing files."
-        )
+        if row["os"] == "windows":
+            command = f'& "$HOME\\Downloads\\{row["filename"]}" --installer'
+            instructions.append(
+                f"<li>{html.escape(platform)}: open PowerShell and run "
+                f"<code>{html.escape(command)}</code>.</li>"
+            )
+        else:
+            path = f'"$HOME/Downloads/{row["filename"]}"'
+            command = f"chmod +x {path} && {path} --installer"
+            instructions.append(
+                f"<li>{html.escape(platform)}: open a terminal and run "
+                f"<code>{html.escape(command)}</code>.</li>"
+            )
+    if rows:
+        download_section = "<ul>" + "".join(rows) + "</ul>"
+        launch_section = "<ul>" + "".join(instructions) + "</ul>"
     else:
-        download = (
-            '<a href="https://github.com/zackees/clud/releases/latest">'
-            "Current release downloads</a> · Universal installer coming in the next release"
+        download_section = "<p>No native downloads are available for this stable release.</p>"
+        launch_section = ""
+    mac_help = ""
+    if any(row["os"] == "darwin" for row in downloads):
+        mac_help = (
+            "<p>If macOS blocks the downloaded executable, try the terminal command first. "
+            "If you trust the download, open System Settings &gt; Privacy &amp; Security, "
+            "choose Open Anyway, then confirm Open. "
+            '<a href="https://support.apple.com/en-us/102445">Apple’s instructions</a>. '
+            "This page does not promise Finder double-click launch.</p>"
         )
-        instructions = "Choose a platform download from the current release."
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Install clud</title></head>
 <body><main><h1>Install clud</h1>
 <p>Latest stable release: {latest}</p>
-<p>{download}</p>
-<p>{instructions}</p>
+<h2>Native downloads</h2>
+{download_section}
+<h2>Run the download</h2>
+{launch_section}
+{mac_help}
+<p>Run the downloaded program with <code>--installer</code> to choose a release, or
+<code>--installer --install-current</code> to install these same bytes. It shows the
+destination and asks before changing files. A bare interactive first run offers
+installation only when no <code>clud</code> executable is found on PATH.</p>
 <p><a href="manifest.json">View the release catalog</a></p>
 </main></body></html>
 """
@@ -65,16 +148,10 @@ def build_site(
         fetch_bytes,
         verified_catalog=previous_catalog,
     )
-    latest = catalog["channels"]["latest-stable"]
-    installer_available = any(
-        item["tag_name"].removeprefix("v") == latest
-        and any(asset["name"] == "clud-installer.exe" for asset in item.get("assets", []))
-        for item in releases
-    )
     (destination / "index.html").write_text(ROOT, encoding="utf-8")
     (destination / ".nojekyll").write_text("", encoding="utf-8")
     (destination / "install" / "index.html").write_text(
-        render_page(catalog, installer_available=installer_available), encoding="utf-8"
+        render_page(catalog), encoding="utf-8"
     )
     for relative, body in STATIC_ASSETS.items():
         asset = destination / relative
