@@ -10,9 +10,9 @@
 //! Behavior on timer fire depends on the tool's `kill_semantics`
 //! (slice 1's `BundledTool` field):
 //!
-//! - `Resumable` — emit an `in-progress` JSON terminal, exit 0. The
-//!   observer succeeded; the world holds the state; the caller can
-//!   re-invoke to resume.
+//! - `Resumable` — emit an `in-progress` JSON terminal, exit 124. The
+//!   world holds the state; the caller can re-invoke to resume. Exit 0
+//!   is reserved for a tool that actually completed successfully.
 //! - `Killable` — kill the process tree, emit an `aborted` JSON
 //!   terminal, exit non-zero. The diagnostic block (last lines /
 //!   process tree / open files) is slice 6 polish; V1 ships with
@@ -24,6 +24,10 @@ use serde_json::json;
 
 use crate::tools::{KillSemantics, BUNDLED_TOOLS};
 
+/// Exit status for either kind of watchdog stop. The JSON status distinguishes
+/// an in-progress resumable operation from an aborted killable operation.
+pub const WATCHDOG_EXIT_CODE: i32 = 124;
+
 /// What the watchdog decided to do at a poll boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatchdogDecision {
@@ -31,7 +35,7 @@ pub enum WatchdogDecision {
     Continue,
     /// Kill the tool process tree and emit an `aborted` terminal.
     KillAndAbort(AbortReason),
-    /// Tool is resumable; emit an `in-progress` terminal and exit 0.
+    /// Tool is resumable; emit an `in-progress` terminal and exit 124.
     ResumeLater(AbortReason),
 }
 
@@ -69,7 +73,7 @@ impl Watchdog {
     /// a user-installed tool the agent invokes by path.
     pub fn for_rel_path(rel_path: &str) -> Self {
         let now = Instant::now();
-        if let Some(tool) = BUNDLED_TOOLS.iter().find(|t| t.rel_path == rel_path) {
+        let watchdog = if let Some(tool) = BUNDLED_TOOLS.iter().find(|t| t.rel_path == rel_path) {
             Self {
                 kill_semantics: tool.kill_semantics,
                 command_timeout: tool.command_timeout,
@@ -87,7 +91,27 @@ impl Watchdog {
                 started_at: now,
                 last_output_at: now,
             }
+        };
+        // The CLI regression test needs a short timer while exercising a
+        // real bundled tool. Keep these knobs out of release binaries.
+        #[cfg(debug_assertions)]
+        let mut watchdog = watchdog;
+        #[cfg(debug_assertions)]
+        if rel_path == "github/pr_merge_watch.py" {
+            if let Some(ms) = std::env::var("CLUD_TEST_TOOL_COMMAND_TIMEOUT_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                watchdog.command_timeout = Duration::from_millis(ms);
+            }
+            if let Some(ms) = std::env::var("CLUD_TEST_TOOL_PROGRESS_TIMEOUT_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                watchdog.progress_timeout = Some(Duration::from_millis(ms));
+            }
         }
+        watchdog
     }
 
     /// Mark that the tool emitted output. Resets the progress timer.
@@ -120,7 +144,7 @@ impl Watchdog {
     }
 
     /// Render the resumable `in-progress` terminal payload as a single
-    /// JSON line. Caller writes this to stderr and exits 0.
+    /// JSON line. Caller writes this to stderr and exits 124.
     pub fn render_in_progress(&self, reason: AbortReason) -> String {
         let elapsed = self.started_at.elapsed();
         let value = json!({

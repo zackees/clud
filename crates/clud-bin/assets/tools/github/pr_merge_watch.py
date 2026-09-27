@@ -46,8 +46,14 @@ Exit codes:
      polls in a row, or no repository could be resolved; the final event
      carries gh's stderr
  11  QUEUED: a run waited longer than `--max-queued` to start (off by default)
+ 124  the tool runner's watchdog stopped a resumable watch before the tool
+      completed; re-invoke with the same args (`status: in-progress`)
  130/143  killed by SIGINT/SIGTERM: a final `EXIT` event with reason `killed`,
      and nothing is cancelled
+
+A watch under the tool runner clamps its own timeout to at least 60 seconds
+below the wrapper's command cap, so it can exit 4 and finish cancellation.
+If the wrapper stops first, exit 124 means watch again; it is never green.
 
 A watch only ever cancels runs on the head SHA it started on (#1418): when the
 head moves it logs `head_moved`, keeps judging the new head, and skips any
@@ -2385,7 +2391,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "3 PR closed, 4 timeout, 5 approval required, 6 required check never "
             "reported, 7 stale (re-run needed), 8 no checks will ever report, "
             "9 merge conflict, 10 GitHub unreachable, 11 queued too long, "
-            "130/143 killed\n\n"
+            "124 clud watchdog stopped the watch (retry), 130/143 killed\n\n"
             "supersession rule (#1330): checks on the PR's current head commit are "
             "grouped by (workflow file, check name) and ordered by check-run id. A "
             "cancelled check is replaced by any newer check, even a queued one; a "
@@ -2409,7 +2415,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=_env_int("CLUD_PR_MERGE_WATCH_TIMEOUT", DEFAULT_TIMEOUT_SEC),
         help="overall wait cap in seconds (default $CLUD_PR_MERGE_WATCH_TIMEOUT, else "
-        "3600); keep it below any tool-call cap of the caller",
+        "3600); clamped below the tool runner's command cap when present",
     )
     p.add_argument(
         "--no-checks-grace",
@@ -2471,7 +2477,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--no-retry", action="store_true", help="disable backoff/retry on cancel API calls"
     )
-    return p.parse_args(argv)
+    ns = p.parse_args(argv)
+    command_cap = _env_int("CLUD_TOOL_COMMAND_TIMEOUT_SECS", 0)
+    if command_cap > 0:
+        ns.timeout = min(ns.timeout, max(1, command_cap - 60))
+    return ns
 
 
 def _resolve_cancel_options(ns: argparse.Namespace) -> CancelOptions:

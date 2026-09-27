@@ -31,6 +31,10 @@ server and merge.
    - `3` (closed or merged elsewhere): report it; `status=merged` only if
      `gh pr view` says merged, else `gave_up`.
    - `4` (timeout): watch once more; a second timeout is `gave_up`.
+   - `124` with JSON `status: in-progress` (clud's resumable watchdog):
+     watch again with the same args; never treat it as green. A second
+     watchdog stop is `gave_up`. Exit `124` without that JSON is an error,
+     so report it as `gave_up` rather than merging.
    - `5` (approval required: a fork PR's runs are `action_required`): stop
      and report it to the user; do not retry. Return `status=gave_up`.
    - `6` (never reported: a required check never got a check run although

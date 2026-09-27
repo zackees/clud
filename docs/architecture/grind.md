@@ -546,7 +546,9 @@ The rationale is in
   `[skip ci]` marker, or nothing registered within the grace period; merge
   when `mergeStateStatus` is `CLEAN`), `9` conflict (back to the integrator),
   `10` GitHub unreachable (never reported as closed), `11` queued too long
-  (opt-in `--max-queued`). The lander passes `--timeout 540`, below its
+  (opt-in `--max-queued`). A `clud tool run` resumable watchdog stop exits
+  `124` with `status: in-progress`; the lander watches again and never merges
+  on that code. The lander passes `--timeout 540`, below its
   600 s tool cap, so the watch always exits on its own; a watch never cancels
   runs on a head SHA it did not start on (#1418). It judges each check by the newest run of
   its workflow, so a superseded cancelled run is not a failure; the full rule

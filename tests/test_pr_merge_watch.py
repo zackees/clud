@@ -48,6 +48,16 @@ def gate_snapshot(
     )
 
 
+def test_tool_watchdog_cap_clamps_default_and_explicit_timeout(
+    watcher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLUD_PR_MERGE_WATCH_TIMEOUT", raising=False)
+    monkeypatch.setenv("CLUD_TOOL_COMMAND_TIMEOUT_SECS", "1200")
+    assert watcher.parse_args(["527"]).timeout == 1140
+    assert watcher.parse_args(["527", "--timeout", "3000"]).timeout == 1140
+    assert watcher.parse_args(["527", "--timeout", "540"]).timeout == 540
+
+
 def test_watch_log_announces_path_and_uses_start_then_relative_time(
     watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
