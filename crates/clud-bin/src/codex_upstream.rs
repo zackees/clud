@@ -43,11 +43,11 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 pub const CODEX_BACKEND_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// Identifies the client to the Codex backend.
 pub const CODEX_ORIGINATOR: &str = "codex_cli_rs";
-/// Latest stable `openai/codex` release verified for the ChatGPT backend.
+/// Codex release verified against GPT-6 Sol on the ChatGPT backend.
 ///
 /// Keep this separate from clud's package version: the backend interprets it
 /// as a Codex compatibility version. See the request-header regression test.
-pub const CODEX_CLIENT_VERSION: &str = "0.146.0";
+pub const CODEX_CLIENT_VERSION: &str = "0.157.1";
 const CODEX_BETA_HEADER_VALUE: &str = "responses=experimental";
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle timeout between reads, not a cap on the whole turn: a model may think
@@ -377,7 +377,9 @@ fn error_detail(body_prefix: &str) -> Option<String> {
     let code = at("/error/code")
         .or_else(|| at("/error/type"))
         .or_else(|| at("/code"));
-    let message = at("/error/message").or_else(|| at("/message"));
+    let message = at("/error/message")
+        .or_else(|| at("/message"))
+        .or_else(|| at("/detail"));
     let detail = match (code, message) {
         (Some(code), Some(message)) => format!("{code}: {}", scrub(&message)),
         (Some(code), None) => code,
@@ -740,12 +742,13 @@ impl<C: CredentialSource> UpstreamClient<C> {
             .set("Accept", "application/json")
             .set("Authorization", &target.authorization)
             .set("originator", CODEX_ORIGINATOR)
+            .set("version", CODEX_CLIENT_VERSION)
             .set("session-id", &self.session_id)
             .set("thread-id", &self.session_id)
             .set("x-client-request-id", &self.session_id)
             .set(
                 "User-Agent",
-                &format!("{CODEX_ORIGINATOR}/{} (clud)", env!("CARGO_PKG_VERSION")),
+                &format!("{CODEX_ORIGINATOR}/{CODEX_CLIENT_VERSION} (clud)"),
             );
         if let Some(account_id) = target.account_id.as_deref() {
             request = request.set("ChatGPT-Account-ID", account_id);
@@ -1296,6 +1299,7 @@ mod tests {
         let request = server.requests().remove(0);
         assert!(request.starts_with("POST /v1/responses/compact HTTP/1.1"));
         assert!(request.contains("Accept: application/json"));
+        assert!(request.contains("version: 0.157.1"));
     }
 
     #[test]
@@ -1555,10 +1559,10 @@ mod tests {
         assert!(request.contains("Authorization: Bearer sk-upstream-key"));
         assert!(request.contains("Accept: text/event-stream"));
         assert!(request.contains("OpenAI-Beta: responses=experimental"));
-        // openai/codex 0.146.0 sends `codex_cli_rs/<Codex version>` and a
+        // openai/codex sends `codex_cli_rs/<Codex version>` and a
         // separate `version` header. Keep clud's own version out of both.
-        assert!(request.contains("User-Agent: codex_cli_rs/0.146.0 (clud)"));
-        assert!(request.contains("version: 0.146.0"));
+        assert!(request.contains("User-Agent: codex_cli_rs/0.157.1 (clud)"));
+        assert!(request.contains("version: 0.157.1"));
         assert!(request.contains(r#"{"model":"m"}"#));
         // The harness's own downstream bearer must never appear upstream.
         assert!(!request.contains("x-api-key"));
@@ -2124,6 +2128,18 @@ mod tests {
         assert!(scrubbed.contains("key"), "{scrubbed}");
         assert!(scrubbed.contains("for"), "{scrubbed}");
         assert!(scrubbed.contains("ok"), "{scrubbed}");
+    }
+
+    #[test]
+    fn chatgpt_top_level_detail_is_scrubbed_for_the_operator_log() {
+        let failure = failure_from(
+            400,
+            r#"{"detail":"The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account. key sk-secret-abc"}"#,
+        );
+        let detail = failure.detail().expect("ChatGPT detail should be visible");
+        assert!(detail.contains("gpt-6-sol"), "{detail}");
+        assert!(detail.contains("not supported"), "{detail}");
+        assert!(!detail.contains("sk-secret-abc"), "{detail}");
     }
 
     #[test]
