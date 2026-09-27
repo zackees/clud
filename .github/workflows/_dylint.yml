@@ -1,14 +1,6 @@
 name: Dylint
 
-# Dylint is inherently Linux-only here: it needs a nightly toolchain with
-# rustc-dev/llvm-tools and builds a cdylib driver for the host. It never ran on
-# macOS/Windows and `ci/lint.py` never invokes it, so the "no dylint off Linux"
-# requirement is satisfied structurally -- this workflow pins it to ubuntu and
-# nothing else can reach it.
-#
-# Previously dylint.yml fired on BOTH `push` and `pull_request`, so every PR ran
-# it twice. As a workflow_call target it runs exactly once, under ci.yml's
-# concurrency group.
+# One Linux Dylint pass is called from ci.yml under its concurrency group.
 
 on:
   workflow_call:
@@ -17,9 +9,6 @@ on:
         description: Exact source commit for the full CI run.
         required: false
         type: string
-  # Kept from the old dylint.yml: dylint is off the PR path now (ci.yml runs it
-  # only for non-PR events), so a manual entrypoint is the way to check a
-  # branch's lint state before opening a PR.
   workflow_dispatch: {}
 
 permissions:
@@ -33,6 +22,9 @@ env:
   # Ignore stale developer/runner PATH installs and select Soldr's blessed
   # precompiled cargo-dylint, dylint-link, and matching driver as one unit.
   SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS: "1"
+  # This crate uses Dylint's legacy bare rust-toolchain file. Soldr's
+  # preparer reads rust-toolchain.toml, so select the same nightly explicitly.
+  SOLDR_DYLINT_TOOLCHAIN: nightly-2026-05-28
   # See zackees/soldr#1879 -- authenticates soldr's cross-repo managed-tool
   # lookups so they are not rate-limited to 60 req/hr per runner IP.
   SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,6 +34,9 @@ jobs:
     name: Dylint
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,16 +46,23 @@ jobs:
         with:
           cache: true
           toolchain: 1.95.0
+          dylint-toolchain: nightly-2026-05-28
+          dylint: true
+          cargo-dylint-version: 6.0.3
+          dylint-link-version: 6.0.3
           cache-key-suffix: dylint
           prebuild-deps: none
           linker: platform-default
           cache-payload-warn-bytes: 2GiB
-      - name: Install Dylint nightly toolchain
-        timeout-minutes: 10
-        run: rustup toolchain install nightly-2026-05-28 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
+      - name: Prepare verified Dylint prebuilts
+        run: |
+          env -u RUSTUP_TOOLCHAIN soldr dylint prepare 2>&1 | tee "$RUNNER_TEMP/dylint-prepare.log"
+          sed -n 's/^soldr: dylint prepare: tool bin dir //p' "$RUNNER_TEMP/dylint-prepare.log" >> "$GITHUB_PATH"
       - name: Check dylint formatting
-        run: soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
+        run: |
+          soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
+          soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
       - name: Test dylint crate
         run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
       - name: Run dylint over workspace
-        run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo dylint --all -- --workspace --all-targets
+        run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
