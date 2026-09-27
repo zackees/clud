@@ -77,11 +77,24 @@ jobs:
         uses: actions/deploy-pages@v4
       - name: Smoke public model and installer manifests
         run: |
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/models/manifest.json -o models.json
           mkdir -p public-site/install
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/index.html -o public-site/index.html
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/index.html -o public-site/install/index.html
-          curl -fsSL --retry 12 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/manifest.json -o public-site/install/manifest.json
+          expected='${{ needs.build-site.outputs.public_digest }}'
+          for attempt in $(seq 1 12); do
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/models/manifest.json -o models.json
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/index.html -o public-site/index.html
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/index.html -o public-site/install/index.html
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 https://zackees.github.io/clud/install/manifest.json -o public-site/install/manifest.json
+            actual=$(sha256sum public-site/index.html public-site/install/index.html public-site/install/manifest.json models.json | cut -d ' ' -f 1 | sha256sum | cut -d ' ' -f 1)
+            if [ "$actual" = "$expected" ]; then
+              break
+            fi
+            echo "Waiting for Pages propagation ($attempt/12): $actual"
+            sleep 5
+          done
+          if [ "$actual" != "$expected" ]; then
+            echo '::error::Public model Pages never matched the staged artifact' >&2
+            exit 1
+          fi
           python - <<'PY'
           import json
           from pathlib import Path
@@ -91,5 +104,3 @@ jobs:
           assert models['defaults']['codex']['effort'] == 'low'
           PY
           python -m installer.verify_site public-site
-          actual=$(sha256sum public-site/index.html public-site/install/index.html public-site/install/manifest.json models.json | cut -d ' ' -f 1 | sha256sum | cut -d ' ' -f 1)
-          test "$actual" = '${{ needs.build-site.outputs.public_digest }}'
