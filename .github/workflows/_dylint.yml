@@ -64,7 +64,7 @@ jobs:
           env -u RUSTUP_TOOLCHAIN soldr dylint prepare 2>&1 | tee "$RUNNER_TEMP/dylint-prepare.log"
           sed -n 's/^soldr: dylint prepare: tool bin dir //p' "$RUNNER_TEMP/dylint-prepare.log" >> "$GITHUB_PATH"
       - name: Check dylint formatting
-        run: soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
+        run: RUSTUP_TOOLCHAIN=1.95.0 soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
       - name: Test dylint crate
         if: runner.os == 'Linux'
         run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
