@@ -35,8 +35,8 @@ the integration tests.
   `main`, falling back section by section to the last valid value, plus a strict
   JSON parser. See `docs/architecture/server-settings.md`.
 - [self_install/](self_install/README.md) - early installer CLI dispatch and
-  selector, native v1 Catalog parsing, host variant resolution, and selected
-  asset verification.
+  selector, native v1 Catalog parsing, host variant resolution, selected
+  asset verification, and the consented binary transaction.
 - `openrouter_catalog.rs` - #1256's separate bounded catalog consumer: fixed
   GitHub origin, last-known-good daemon-state cache, baked-in fallback, and
   weighted pricing for eligible OpenRouter models. See

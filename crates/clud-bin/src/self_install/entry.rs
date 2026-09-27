@@ -7,6 +7,7 @@ use crate::args::Args;
 
 use super::catalog::{Arch, Catalog, GnuEligibility, Host, Os, ResolvedAsset, VersionChoice};
 use super::picker::{self, ConfirmChoice, MenuChoice, ReleaseChoice};
+use super::transaction;
 
 const CATALOG_URL: &str = "https://zackees.github.io/clud/install/manifest.json";
 pub const INSTALL_PAGE: &str = "https://zackees.github.io/clud/install/index.html";
@@ -154,15 +155,20 @@ pub enum InstallIntent {
 }
 
 fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
-    if !yes {
-        if !terminal_available() {
-            eprintln!("clud installer: a terminal or --yes is required before installation");
-            return 2;
+    if !yes && !terminal_available() {
+        eprintln!("clud installer: a terminal or --yes is required before installation");
+        return 2;
+    }
+    let plan = match transaction::plan(intent) {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("clud installer: {error}");
+            return 1;
         }
-        let label = match &intent {
-            InstallIntent::CurrentExecutable => "Install this clud executable?".to_owned(),
-            InstallIntent::Published(asset) => format!("Install clud {}?", asset.version),
-        };
+    };
+    eprintln!("{}", plan.description());
+    if !yes {
+        let label = format!("Install clud {} at this destination?", plan.version);
         match picker::prompt_confirm(label) {
             Ok(ConfirmChoice::NotNow) => return 0,
             Ok(ConfirmChoice::Cancelled) => return 130,
@@ -174,10 +180,16 @@ fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
             Ok(ConfirmChoice::Proceed) => {}
         }
     }
-    // #1494 owns the installation transaction. Until that engine is wired,
-    // an accepted intent must never claim success or write a placeholder.
-    eprintln!("clud installer: installation is not available in this build");
-    1
+    match transaction::execute(plan) {
+        Ok(()) => {
+            eprintln!("clud installer: binary committed; fresh PATH activation is pending");
+            1
+        }
+        Err(error) => {
+            eprintln!("clud installer: {error}");
+            1
+        }
+    }
 }
 
 fn run_menu_choice(choice: MenuChoice) -> i32 {

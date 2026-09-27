@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import select
 import sys
@@ -50,7 +51,6 @@ def assert_crlf(output: bytes) -> None:
         (["--installer"], 2),
         (["--installer", "--install-current"], 2),
         (["--installer", "--install-version", "2.8.14"], 2),
-        (["--installer", "--install-current", "--yes"], 1),
     ],
 )
 def test_no_tty_never_writes(tmp_path: Path, flags: list[str], expected: int) -> None:
@@ -65,6 +65,122 @@ def test_no_tty_never_writes(tmp_path: Path, flags: list[str], expected: int) ->
     )
     assert result.returncode == expected, result.stderr.decode(errors="replace")
     assert not home.exists(), "installer entry wrote to the user home"
+
+
+def test_explicit_current_installs_verified_copy_offline(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    env = isolated_env(home)
+    env["HTTPS_PROXY"] = "http://127.0.0.1:1"
+    env["HTTP_PROXY"] = "http://127.0.0.1:1"
+    if sys.platform == "win32":
+        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+        destination = (
+            home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
+        )
+    else:
+        destination = home / ".local" / "bin" / "clud"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr.decode(errors="replace")
+    assert destination.is_file(), result.stderr.decode(errors="replace")
+    assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
+        clud_binary().read_bytes()
+    ).digest()
+    repeat = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert repeat.returncode == 1, repeat.stderr.decode(errors="replace")
+    assert destination.read_bytes() == clud_binary().read_bytes()
+    assert not list(destination.parent.glob(".clud-install-*"))
+    assert not destination.with_suffix(".clud-backup").exists()
+
+
+def test_interrupted_commit_restores_backup_before_reinstall(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    env = isolated_env(home)
+    if sys.platform == "win32":
+        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+        destination = home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
+    else:
+        destination = home / ".local" / "bin" / "clud"
+    command = [str(clud_binary()), "--installer", "--install-current", "--yes"]
+    first = run_process(command, env=env, capture_output=True, timeout=30, check=False)
+    assert first.returncode == 1, first.stderr.decode(errors="replace")
+    backup = destination.with_suffix(".clud-backup")
+    backup.write_bytes(destination.read_bytes())
+    backup.chmod(destination.stat().st_mode)
+    destination.write_bytes(b"interrupted commit")
+    recovered = run_process(command, env=env, capture_output=True, timeout=30, check=False)
+    assert recovered.returncode == 1, recovered.stderr.decode(errors="replace")
+    assert destination.read_bytes() == clud_binary().read_bytes()
+    assert not backup.exists()
+
+
+def test_exact_older_release_downloads_selected_executable(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    env = isolated_env(home)
+    if sys.platform == "win32":
+        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+        destination = (
+            home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
+        )
+    else:
+        destination = home / ".local" / "bin" / "clud"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-version", "2.8.13", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr.decode(errors="replace")
+    assert destination.is_file(), result.stderr.decode(errors="replace")
+    selected = run_process(
+        [str(destination), "--version"],
+        env=env,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert selected.returncode == 0, selected.stderr.decode(errors="replace")
+    assert selected.stdout.strip() == b"clud 2.8.13"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires a running Windows executable")
+def test_running_windows_target_remains_valid(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    env = isolated_env(home)
+    env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+    destination = home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
+    first = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert destination.is_file(), first.stderr.decode(errors="replace")
+    before = hashlib.sha256(destination.read_bytes()).digest()
+    running = run_process(
+        [str(destination), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert running.returncode == 1, running.stderr.decode(errors="replace")
+    assert destination.is_file()
+    assert hashlib.sha256(destination.read_bytes()).digest() == before
+    assert not destination.with_suffix(".clud-backup").exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")

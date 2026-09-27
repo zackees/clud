@@ -3,3 +3,4 @@
 pub mod catalog;
 pub mod entry;
 pub mod picker;
+pub mod transaction;
