@@ -78,6 +78,14 @@ def _daemon_diagnostics(state_dir: Path, session_id: str | None = None) -> str:
             lines.append(f"session {session_id}: {session_path.read_text(encoding='utf-8')}")
         except OSError as error:
             lines.append(f"session {session_id}: <unreadable: {error}>")
+        log_path = state_dir / "logs" / f"{session_id}.log"
+        try:
+            lines.append(
+                f"session log {session_id} (last 8192 chars): "
+                + log_path.read_text(encoding="utf-8", errors="replace")[-8192:]
+            )
+        except OSError as error:
+            lines.append(f"session log {session_id}: <unreadable: {error}>")
     try:
         entries = sorted(
             str(path.relative_to(state_dir)) for path in state_dir.rglob("*")
@@ -456,8 +464,8 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
             "--mock-sleep-ms",
             "10000",
         ],
-        stdout=process.DEVNULL,
-        stderr=process.DEVNULL,
+        stdout=process.PIPE,
+        stderr=process.PIPE,
         text=True,
         env=env,
     )
@@ -470,8 +478,16 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
     # No repeated daemon RPC is sent here. The client lease alone must outlive
     # the two-second idle setting while the foreground process is active.
     time.sleep(3)
-    _assert_daemon_alive(info, state_dir)
-    assert wait_for_exit(client, timeout=15) == 0
+    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"])), (
+        _daemon_diagnostics(state_dir)
+        + f"\nforeground client exit: {client.poll()}"
+        + f"\nforeground stdout: {client.stdout.read() if client.stdout else '<not captured>'}"
+        + f"\nforeground stderr: {client.stderr.read() if client.stderr else '<not captured>'}"
+    )
+    assert wait_for_exit(client, timeout=15) == 0, (
+        f"foreground stdout: {client.stdout.read() if client.stdout else '<not captured>'}\n"
+        f"foreground stderr: {client.stderr.read() if client.stderr else '<not captured>'}"
+    )
     _wait_for_identity_exit(info, timeout=8, state_dir=state_dir)
     assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
 
