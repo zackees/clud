@@ -956,6 +956,60 @@ fn build_state_with_empty_state_dir_returns_zeros() {
 }
 
 #[test]
+fn dashboard_state_does_not_wait_for_a_silent_daemon_snapshot_peer() {
+    // #1465: /state.json is served by the daemon itself. A peer that accepts
+    // its process-snapshot RPC but never replies must not hold the dashboard
+    // HTTP thread past the caller's two-second response deadline.
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let info = crate::daemon::types::DaemonInfo {
+        pid: std::process::id(),
+        pid_start: 0,
+        port,
+        dashboard_port: None,
+        dashboard_token: None,
+        api_token: None,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    };
+    std::fs::write(
+        dir.path().join("daemon.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let peer = std::thread::spawn(move || loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _stream = stream;
+                let _ = release_rx.recv_timeout(Duration::from_secs(3));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if release_rx.try_recv().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("fake daemon accept failed: {error}"),
+        }
+    });
+
+    let started = std::time::Instant::now();
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).unwrap();
+    let elapsed = started.elapsed();
+    let _ = release_tx.send(());
+    peer.join().unwrap();
+    assert!(state.process_tree.is_null());
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "dashboard waited {elapsed:?} for a silent process-snapshot peer"
+    );
+}
+
+#[test]
 fn tool_telemetry_merges_start_finish_and_aggregates_recent_calls() {
     let store = ToolTelemetryStore::new();
     let now = 1_700_000_000_000;
