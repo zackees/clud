@@ -33,6 +33,8 @@ def test_session_vars_are_scrubbed(name: str) -> None:
     "name",
     [
         "CLUD_TEST_BINARY",
+        "CLUD_CANDIDATE_ARTIFACT",
+        "CLUD_INSTALLER_CI_FIXTURE_DIR",
         "CLUD_TEST_BLOCK_BAD_CMD_BINARY",
         "CLUD_HARNESS_CLUD",
         "CLUD_INTEGRATION_TESTS",
