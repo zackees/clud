@@ -6,6 +6,7 @@ import errno
 import hashlib
 import os
 import select
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -38,6 +39,53 @@ def isolated_env(home: Path) -> dict[str, str]:
     return env
 
 
+@pytest.fixture
+def installer_target(tmp_path: Path):
+    if sys.platform != "win32":
+        home = tmp_path / "home"
+        env = isolated_env(home)
+        env["SHELL"] = shutil.which("bash") or "/bin/bash"
+        yield env, home / ".local" / "bin" / "clud"
+        return
+
+    if os.environ.get("CI") != "true":
+        pytest.skip("Windows User environment test requires an ephemeral CI account")
+    import winreg
+
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        pytest.skip("Windows User environment lacks LOCALAPPDATA")
+    destination = Path(local) / "Programs" / "clud" / "bin" / "clud.exe"
+    if destination.exists():
+        pytest.skip("Windows User profile already has clud installed")
+    key = winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER,
+        "Environment",
+        0,
+        winreg.KEY_READ | winreg.KEY_WRITE,
+    )
+    try:
+        prior = winreg.QueryValueEx(key, "Path")
+    except FileNotFoundError:
+        prior = None
+    try:
+        yield os.environ.copy(), destination
+    finally:
+        if prior is None:
+            try:
+                winreg.DeleteValue(key, "Path")
+            except FileNotFoundError:
+                pass
+        else:
+            winreg.SetValueEx(key, "Path", 0, prior[1], prior[0])
+        key.Close()
+        if destination.exists():
+            destination.replace(tmp_path / "installed-clud.exe")
+        backup = destination.with_suffix(".clud-backup")
+        if backup.exists():
+            backup.replace(tmp_path / "installed-clud-backup")
+
+
 def assert_crlf(output: bytes) -> None:
     for index, byte in enumerate(output):
         if byte == 10:
@@ -67,18 +115,28 @@ def test_no_tty_never_writes(tmp_path: Path, flags: list[str], expected: int) ->
     assert not home.exists(), "installer entry wrote to the user home"
 
 
-def test_explicit_current_installs_verified_copy_offline(tmp_path: Path) -> None:
+def test_no_tty_refusal_preserves_existing_startup_file(tmp_path: Path) -> None:
     home = tmp_path / "home"
+    home.mkdir()
+    profile = home / ".bashrc"
+    profile.write_text("# user settings\n")
     env = isolated_env(home)
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current"],
+        env=env,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 2, result.stderr.decode(errors="replace")
+    assert profile.read_text() == "# user settings\n"
+    assert not (home / ".local").exists()
+
+
+def test_explicit_current_installs_verified_copy_offline(installer_target) -> None:
+    env, destination = installer_target
     env["HTTPS_PROXY"] = "http://127.0.0.1:1"
     env["HTTP_PROXY"] = "http://127.0.0.1:1"
-    if sys.platform == "win32":
-        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
-        destination = (
-            home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
-        )
-    else:
-        destination = home / ".local" / "bin" / "clud"
     result = run_process(
         [str(clud_binary()), "--installer", "--install-current", "--yes"],
         env=env,
@@ -86,7 +144,7 @@ def test_explicit_current_installs_verified_copy_offline(tmp_path: Path) -> None
         timeout=30,
         check=False,
     )
-    assert result.returncode == 1, result.stderr.decode(errors="replace")
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert destination.is_file(), result.stderr.decode(errors="replace")
     assert hashlib.sha256(destination.read_bytes()).digest() == hashlib.sha256(
         clud_binary().read_bytes()
@@ -98,43 +156,150 @@ def test_explicit_current_installs_verified_copy_offline(tmp_path: Path) -> None
         timeout=30,
         check=False,
     )
-    assert repeat.returncode == 1, repeat.stderr.decode(errors="replace")
+    assert repeat.returncode == 0, repeat.stderr.decode(errors="replace")
     assert destination.read_bytes() == clud_binary().read_bytes()
     assert not list(destination.parent.glob(".clud-install-*"))
     assert not destination.with_suffix(".clud-backup").exists()
+    if sys.platform != "win32":
+        for profile in (
+            destination.parents[2] / ".bash_profile",
+            destination.parents[2] / ".bashrc",
+        ):
+            assert profile.read_text().count("# >>> clud installer PATH >>>") == 1
 
 
-def test_interrupted_commit_restores_backup_before_reinstall(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    env = isolated_env(home)
-    if sys.platform == "win32":
-        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
-        destination = home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
-    else:
-        destination = home / ".local" / "bin" / "clud"
+def test_interrupted_commit_restores_backup_before_reinstall(installer_target) -> None:
+    env, destination = installer_target
     command = [str(clud_binary()), "--installer", "--install-current", "--yes"]
     first = run_process(command, env=env, capture_output=True, timeout=30, check=False)
-    assert first.returncode == 1, first.stderr.decode(errors="replace")
+    assert first.returncode == 0, first.stderr.decode(errors="replace")
     backup = destination.with_suffix(".clud-backup")
     backup.write_bytes(destination.read_bytes())
     backup.chmod(destination.stat().st_mode)
     destination.write_bytes(b"interrupted commit")
     recovered = run_process(command, env=env, capture_output=True, timeout=30, check=False)
-    assert recovered.returncode == 1, recovered.stderr.decode(errors="replace")
+    assert recovered.returncode == 0, recovered.stderr.decode(errors="replace")
     assert destination.read_bytes() == clud_binary().read_bytes()
     assert not backup.exists()
 
 
-def test_exact_older_release_downloads_selected_executable(tmp_path: Path) -> None:
-    home = tmp_path / "home"
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX bash startup files")
+def test_bash_fresh_login_and_interactive_lookup(tmp_path: Path) -> None:
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("bash is unavailable")
+    home = tmp_path / "home with spaces and 'quotes' $dollars"
     env = isolated_env(home)
-    if sys.platform == "win32":
-        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
-        destination = (
-            home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
+    env["SHELL"] = shell
+    env["PATH"] = "/usr/bin:/bin"
+    installed = home / ".local" / "bin" / "clud"
+    source_version = run_process(
+        [str(clud_binary()), "--version"],
+        env=env,
+        capture_output=True,
+        timeout=15,
+        check=True,
+    ).stdout.strip()
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    for mode in ("-lc", "-ic", "-lic"):
+        fresh = run_process(
+            [shell, mode, "command -v clud; clud --version"],
+            env=env,
+            capture_output=True,
+            timeout=15,
+            check=False,
         )
-    else:
-        destination = home / ".local" / "bin" / "clud"
+        assert fresh.returncode == 0, fresh.stderr.decode(errors="replace")
+        assert fresh.stdout.splitlines() == [
+            os.fsencode(installed),
+            source_version,
+        ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX bash startup files")
+def test_existing_user_bin_and_first_bash_login_file(tmp_path: Path) -> None:
+    shell = shutil.which("bash")
+    if shell is None:
+        pytest.skip("bash is unavailable")
+    home = tmp_path / "home"
+    bin_dir = home / "bin"
+    bin_dir.mkdir(parents=True)
+    login = home / ".bash_login"
+    login.write_text("# existing login settings\n")
+    env = isolated_env(home)
+    env["SHELL"] = shell
+    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert (bin_dir / "clud").is_file()
+    assert login.read_text().startswith("# existing login settings\n")
+    assert login.read_text().count("# >>> clud installer PATH >>>") == 1
+    assert not (home / ".bash_profile").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX fish startup files")
+def test_fish_custom_xdg_uses_nonuniversal_snippet(tmp_path: Path) -> None:
+    shell = shutil.which("fish")
+    if shell is None:
+        pytest.skip("fish is unavailable")
+    home = tmp_path / "home"
+    config = home / "custom config"
+    env = isolated_env(home)
+    env["SHELL"] = shell
+    env["XDG_CONFIG_HOME"] = str(config)
+    env["PATH"] = "/usr/bin:/bin"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    snippet = config / "fish" / "conf.d" / "clud-path.fish"
+    assert snippet.is_file()
+    assert "fish_add_path --path --move --" in snippet.read_text()
+    assert not (config / "fish" / "fish_variables").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX zsh startup files")
+def test_zsh_custom_zdotdir_activation(tmp_path: Path) -> None:
+    shell = shutil.which("zsh")
+    if shell is None:
+        pytest.skip("zsh is unavailable")
+    home = tmp_path / "home"
+    dotdir = home / "custom zsh"
+    env = isolated_env(home)
+    env["SHELL"] = shell
+    env["ZDOTDIR"] = str(dotdir)
+    env["PATH"] = "/usr/bin:/bin"
+    result = run_process(
+        [str(clud_binary()), "--installer", "--install-current", "--yes"],
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert (dotdir / ".zprofile").is_file()
+    assert (dotdir / ".zshrc").is_file()
+
+
+def test_exact_older_release_downloads_selected_executable(installer_target) -> None:
+    env, destination = installer_target
     result = run_process(
         [str(clud_binary()), "--installer", "--install-version", "2.8.13", "--yes"],
         env=env,
@@ -142,7 +307,7 @@ def test_exact_older_release_downloads_selected_executable(tmp_path: Path) -> No
         timeout=120,
         check=False,
     )
-    assert result.returncode == 1, result.stderr.decode(errors="replace")
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert destination.is_file(), result.stderr.decode(errors="replace")
     selected = run_process(
         [str(destination), "--version"],
@@ -156,11 +321,8 @@ def test_exact_older_release_downloads_selected_executable(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires a running Windows executable")
-def test_running_windows_target_remains_valid(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    env = isolated_env(home)
-    env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
-    destination = home / "AppData" / "Local" / "Programs" / "clud" / "bin" / "clud.exe"
+def test_running_windows_target_remains_valid(installer_target) -> None:
+    env, destination = installer_target
     first = run_process(
         [str(clud_binary()), "--installer", "--install-current", "--yes"],
         env=env,
