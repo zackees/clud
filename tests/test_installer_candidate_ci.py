@@ -148,6 +148,19 @@ def test_pr_workflow_declares_every_native_candidate_lane() -> None:
     assert "if: always()" in workflow
 
 
+def test_pr_workflow_requires_real_nixos_and_linux_distributions() -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "installer-check.yml"
+    ).read_text(encoding="utf-8")
+    assert "candidate-nixos:" in workflow
+    assert "ubuntu-24.04-arm" in workflow
+    assert "candidate-distros:" in workflow
+    for distribution in ("archlinux", "fedora", "alpine"):
+        assert distribution in workflow
+    assert "CANDIDATE_NIXOS" in workflow
+    assert "CANDIDATE_DISTROS" in workflow
+
+
 def test_native_candidate_installs_by_name_and_writes_host_evidence(
     installer_target,  # noqa: F811
 ) -> None:
