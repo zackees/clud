@@ -191,6 +191,19 @@ std::string path_join(const std::string &left, const std::string &right) {
   return left + (last == '/' || last == '\\' ? "" : (IsWindows() ? "\\" : "/")) + right;
 }
 
+std::string normalize_windows_path(std::string path) {
+  if (path.size() >= 3 && path[0] == '/' &&
+      std::isalpha(static_cast<unsigned char>(path[1])) && path[2] == '/') {
+    path = path.substr(1, 1) + ":\\" + path.substr(3);
+  } else if (path.size() >= 12 && path.compare(0, 10, "/cygdrive/") == 0 &&
+             std::isalpha(static_cast<unsigned char>(path[10])) && path[11] == '/') {
+    path = path.substr(10, 1) + ":\\" + path.substr(12);
+  }
+  for (char &c : path)
+    if (c == '/') c = '\\';
+  return path;
+}
+
 bool make_temp_directory(std::string *directory) {
   const char *temp = std::getenv(IsWindows() ? "TEMP" : "TMPDIR");
   const std::string base = temp && *temp ? temp : (IsWindows() ? "." : "/tmp");
@@ -484,13 +497,14 @@ std::string path_profile_snippet(const std::string &shell,
 
 bool make_install_plan(const Platform &platform, InstallPlan *plan,
                        std::string *error) {
-  const std::string home = IsWindows() ? environment("USERPROFILE") : environment("HOME");
+  const std::string home = IsWindows()
+      ? normalize_windows_path(environment("USERPROFILE")) : environment("HOME");
   if (home.empty()) {
     *error = "the home directory environment variable is missing";
     return false;
   }
   if (IsWindows()) {
-    std::string local = environment("LOCALAPPDATA");
+    std::string local = normalize_windows_path(environment("LOCALAPPDATA"));
     if (local.empty()) local = path_join(home, "AppData\\Local");
     plan->directory = path_join(local, "Programs\\clud\\bin");
     plan->executable = path_join(plan->directory, "clud.exe");
@@ -1271,6 +1285,17 @@ static int test_catalog() {
 }
 
 static int test_shell_profiles() {
+  if (normalize_windows_path("/D/a/_temp/clud-installer-home") !=
+          "D:\\a\\_temp\\clud-installer-home" ||
+      normalize_windows_path("/cygdrive/c/Users/example") !=
+          "c:\\Users\\example") {
+    std::fputs("Windows path normalization failed\n", stderr);
+    return 1;
+  }
+  if (IsWindows()) {
+    std::puts("installer Windows PATH tests passed");
+    return 0;
+  }
   const std::string home = "/home/example";
   const auto bash_default = shell_profiles(home, "/bin/bash", false, false);
   const auto bash_profile = shell_profiles(home, "/bin/bash", true, true);

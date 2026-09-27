@@ -142,6 +142,9 @@ jobs:
             mkdir -p "$testhome/AppData/Local"
             USERPROFILE="$(cygpath -w "$testhome")"
             export USERPROFILE
+            # Keep the native Windows profile path intact when Git Bash starts
+            # the PE APE; MSYS otherwise rewrites it into /D/... form.
+            export MSYS2_ENV_CONV_EXCL=USERPROFILE
             export HOME="$USERPROFILE"
             unset LOCALAPPDATA
             env -u LOCALAPPDATA ./clud-installer.exe --install-version "$version" --yes
@@ -154,18 +157,19 @@ jobs:
             mkdir -p "$testhome"
             export HOME="$testhome"
             export TMPDIR="$RUNNER_TEMP"
-            for profile in .profile .bash_profile .bash_login .bashrc .zprofile .zshrc; do
-              printf '%s\n' '# clud-installer managed PATH' > "$testhome/$profile"
-            done
-            PATH="$testhome/.local/bin:$PATH" env -u SHELL ./clud-installer.exe --install-version "$version" --yes
             if [ "$RUNNER_OS" = macOS ]; then
               test_shell=zsh
               test -x /bin/zsh
-              expected_executable="$testhome/.local/bin/clud"
+              export SHELL=/bin/zsh
             else
               test_shell=bash
-              expected_executable="$testhome/.local/bin/clud"
+              unset SHELL
             fi
+            for profile in .profile .bash_profile .bash_login .bashrc .zprofile .zshrc; do
+              printf '%s\n' '# clud-installer managed PATH' > "$testhome/$profile"
+            done
+            PATH="$testhome/.local/bin:$PATH" ./clud-installer.exe --install-version "$version" --yes
+            expected_executable="$testhome/.local/bin/clud"
             resolved=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -l -c 'command -v clud')
             test "$resolved" = "$testhome/.local/bin/clud"
             checked=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -l -c 'clud --version')
