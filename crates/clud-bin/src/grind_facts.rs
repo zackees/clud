@@ -426,6 +426,13 @@ mod tests {
     fn delete_pending_lock_is_retried_without_losing_facts() {
         use std::os::windows::ffi::OsStrExt;
         use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FileDispositionInfo, SetFileInformationByHandle, DELETE,
+            FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
 
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("grind");
@@ -441,16 +448,43 @@ mod tests {
             .share_mode(0x7) // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
             .open(&lock)
             .unwrap();
-        // Use the classic Win32 deletion API: Rust's remove_file may use
-        // POSIX-style disposition, which frees the name immediately and does
-        // not produce the delete-pending error seen in the CI failure.
+        // Mark the file for classic (non-POSIX) deletion while another handle
+        // remains open. DeleteFileW and Rust's remove_file both freed the name
+        // immediately on the CI runner, so neither reproduces error 5 there.
         let wide: Vec<u16> = lock.as_os_str().encode_wide().chain(Some(0)).collect();
+        let delete_handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                DELETE | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
         assert_ne!(
-            unsafe { windows_sys::Win32::Storage::FileSystem::DeleteFileW(wide.as_ptr()) },
+            delete_handle,
+            INVALID_HANDLE_VALUE,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        let delete_handle = unsafe { std::fs::File::from_raw_handle(delete_handle) };
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+        assert_ne!(
+            unsafe {
+                SetFileInformationByHandle(
+                    delete_handle.as_raw_handle(),
+                    FileDispositionInfo,
+                    &disposition as *const _ as *const _,
+                    std::mem::size_of_val(&disposition) as u32,
+                )
+            },
             0,
             "{}",
             std::io::Error::last_os_error()
         );
+        drop(delete_handle);
         let observed = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
