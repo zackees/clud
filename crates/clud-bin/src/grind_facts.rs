@@ -424,6 +424,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn delete_pending_lock_is_retried_without_losing_facts() {
+        use std::os::windows::ffi::OsStrExt;
         use std::os::windows::fs::OpenOptionsExt;
 
         let root = tempfile::tempdir().unwrap();
@@ -440,7 +441,16 @@ mod tests {
             .share_mode(0x7) // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
             .open(&lock)
             .unwrap();
-        std::fs::remove_file(&lock).unwrap();
+        // Use the classic Win32 deletion API: Rust's remove_file may use
+        // POSIX-style disposition, which frees the name immediately and does
+        // not produce the delete-pending error seen in the CI failure.
+        let wide: Vec<u16> = lock.as_os_str().encode_wide().chain(Some(0)).collect();
+        assert_ne!(
+            unsafe { windows_sys::Win32::Storage::FileSystem::DeleteFileW(wide.as_ptr()) },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
         let observed = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
