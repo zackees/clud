@@ -60,9 +60,7 @@ def installer_target(tmp_path: Path):
     if not local:
         pytest.skip("Windows User environment lacks LOCALAPPDATA")
     destination = Path(local) / "Programs" / "clud" / "bin" / "clud.exe"
-    programs = destination.parents[2]
     install_tree = destination.parents[1]
-    programs_existed = programs.exists()
     if install_tree.exists():
         pytest.skip("Windows User profile already has a clud install tree")
     key = winreg.OpenKey(
@@ -86,9 +84,7 @@ def installer_target(tmp_path: Path):
         else:
             winreg.SetValueEx(key, "Path", 0, prior[1], prior[0])
         key.Close()
-        if not programs_existed and programs.exists():
-            programs.replace(tmp_path / "installed-programs-tree")
-        elif install_tree.exists():
+        if install_tree.exists():
             install_tree.replace(tmp_path / "installed-clud-tree")
 
 
