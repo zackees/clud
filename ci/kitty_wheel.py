@@ -19,7 +19,7 @@ from pathlib import Path
 
 # Mirrors the runtime portion of the fork's Windows portable release. PDBs are
 # deliberately excluded; license notices and source provenance are mandatory.
-KITTY_SOURCE_REVISION = "6bd1663f9914dd605e1d1b7a93900ab7365cd442"
+KITTY_SOURCE_REVISION = "9b39ad5eb8552b20932323fe2afefdb0fa9ad68d"
 KITTY_BUNDLE_ENV = "CLUD_KITTYTERM_BUNDLE_DIR"
 KITTY_TARGET = "x86_64-pc-windows-msvc"
 KITTY_PE_MACHINE = 0x8664  # IMAGE_FILE_MACHINE_AMD64
@@ -47,7 +47,7 @@ KITTY_PE_FILES = tuple(
     name for name in KITTY_BUNDLE_FILES if name.lower().endswith((".exe", ".dll"))
 )
 KITTY_PASTE_HELPER = "clud-kittyterm-paste.exe"
-KITTY_GUI_REQUIRED_OPTION = b"return-initial-exit-code"
+KITTY_GUI_REQUIRED_OPTION = b"wait-exit"
 
 
 def _pe_machine(data: bytes) -> int:
@@ -95,7 +95,7 @@ def check_kitty_wheel(wheel: Path) -> list[str]:
             data = archive.read(member)
             if name == "wezterm-gui.exe" and KITTY_GUI_REQUIRED_OPTION not in data:
                 errors.append(
-                    f"{wheel.name}: {member} lacks --return-initial-exit-code support"
+                    f"{wheel.name}: {member} lacks --wait-exit support"
                 )
             if name in KITTY_PE_FILES or name == KITTY_PASTE_HELPER:
                 try:
@@ -151,7 +151,7 @@ def validate_kitty_bundle(bundle: Path) -> None:
             raise RuntimeError(f"Kitty GUI bundle has non-x64 PE {name}: 0x{machine:04x}")
         if name == "wezterm-gui.exe" and KITTY_GUI_REQUIRED_OPTION not in data:
             raise RuntimeError(
-                "Kitty GUI bundle wezterm-gui.exe lacks --return-initial-exit-code support"
+                "Kitty GUI bundle wezterm-gui.exe lacks --wait-exit support"
             )
     expected_revision = f"zackees/wezterm@{KITTY_SOURCE_REVISION}"
     actual_revision = (bundle / "SOURCE_REVISION").read_text(encoding="utf-8").strip()

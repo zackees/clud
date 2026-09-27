@@ -156,9 +156,7 @@ pub fn pty_master_injector(master: Arc<Mutex<Box<dyn Write + Send>>>) -> DropInj
 ///
 /// Pure function — testable on every host.
 pub fn input_record_count(len: usize) -> std::io::Result<usize> {
-    // `is_multiple_of` is stable since 1.87; clud's MSRV is 1.85.
-    #[allow(clippy::manual_is_multiple_of)]
-    if len % INPUT_RECORD_SIZE != 0 {
+    if !len.is_multiple_of(INPUT_RECORD_SIZE) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("records buffer length {len} is not a multiple of {INPUT_RECORD_SIZE}"),

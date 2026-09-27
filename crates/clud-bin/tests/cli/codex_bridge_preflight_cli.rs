@@ -40,6 +40,7 @@ fn run(home: &std::path::Path, path: &std::path::Path, args: &[String]) -> (i32,
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().expect("spawn clud");
     let mut output = String::new();

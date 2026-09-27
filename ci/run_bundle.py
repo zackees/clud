@@ -44,7 +44,7 @@ _PYTEST_NO_TESTS_COLLECTED = 5
 # pytest deciding something -- it came from the process dying.
 _PYTEST_EXIT_MEANINGS = {
     0: "all tests passed",
-    1: "tests failed (pytest ran to completion and printed a summary)",
+    1: "failure status (a failed test or abrupt exit; inspect the progress log)",
     2: "interrupted (Ctrl-C, or an internal KeyboardInterrupt)",
     3: "internal error in pytest itself",
     4: "pytest usage error (bad arguments)",
@@ -366,6 +366,11 @@ def pytest_junit_path(suite: str) -> Path:
     return LOG_DIR / f"pytest-{suite}.xml"
 
 
+def pytest_progress_path(suite: str) -> Path:
+    """A flushed test-start/finish journal that survives an abrupt pytest exit."""
+    return LOG_DIR / f"pytest-{suite}-progress.jsonl"
+
+
 def run_streamed(argv: list[str], env: dict[str, str], log_path: Path) -> int:
     """Run `argv`, echoing each output line as it arrives and teeing it to a file.
 
@@ -397,14 +402,10 @@ def run_streamed(argv: list[str], env: dict[str, str], log_path: Path) -> int:
 def run_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str) -> int:
     """Run pytest, teed to a log and also writing its own junit XML report.
 
-    #1178: on the Windows integration lane the teed stdout record stopped at
-    27% and never named the failing test, even though the step reported
-    pytest ran to completion. pytest writing its own junit XML gives a
-    second, structured record of the same run, and `junit_logging=all` puts
-    each test's captured stdout/stderr/log into it. That XML is written only
-    at pytest's `sessionfinish`, so it complements the tee (which survives a
-    cancelled job) rather than replacing it. This is a workaround; the
-    truncation's root cause stays unknown and open on #1178.
+    #1178: the Windows tee stopped at 27%, and pytest returned status 1 five
+    seconds later with no summary. Exit 1 alone does not prove sessionfinish
+    ran. JUnit XML covers ordinary test failures, while the separately
+    flushed progress journal names the active test if pytest exits abruptly.
     """
     argv = [
         sys.executable,
@@ -412,12 +413,16 @@ def run_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str
         "pytest",
         "-m",
         marker,
+        "-p",
+        "ci.pytest_progress",
         f"--junitxml={pytest_junit_path(suite)}",
         "-o",
         "junit_logging=all",
         *extra,
     ]
-    return run_streamed(argv, env, pytest_log_path(suite))
+    child_env = dict(env)
+    child_env["CLUD_PYTEST_PROGRESS_LOG"] = str(pytest_progress_path(suite))
+    return run_streamed(argv, child_env, pytest_log_path(suite))
 
 
 def report_pytest_exit(returncode: int) -> bool:

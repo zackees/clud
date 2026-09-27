@@ -20,9 +20,11 @@ runs:
 
     - uses: astral-sh/setup-uv@v5
       with:
-        # The separate .venv cache below covers warm exec jobs. uv's wheel
-        # cache post-job prune fails on Windows even after all tests pass.
-        enable-cache: false
+        # Keep uv's wheel cache on Linux/macOS when the .venv cache misses.
+        # Windows already restores .venv below; setup-uv's post-job cache
+        # prune intermittently exits 2 after passing tests (#1475), turning
+        # otherwise-green Windows jobs red. Disable only that cache path.
+        enable-cache: ${{ runner.os != 'Windows' }}
 
     - name: Cache venv
       uses: actions/cache@v4

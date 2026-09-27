@@ -40,7 +40,11 @@ def _start_daemon(
     return json.loads((state_dir / "daemon.json").read_text(encoding="utf-8"))
 
 
-def _wait_for_identity_exit(info: dict[str, object], timeout: float = 10.0) -> None:
+def _wait_for_identity_exit(
+    info: dict[str, object],
+    timeout: float = 10.0,
+    state_dir: Path | None = None,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not process_identity_is_alive(
@@ -49,7 +53,71 @@ def _wait_for_identity_exit(info: dict[str, object], timeout: float = 10.0) -> N
         ):
             return
         time.sleep(0.05)
-    raise AssertionError(f"daemon identity survived test hard maximum: {info}")
+    details = "" if state_dir is None else "\n" + _daemon_diagnostics(state_dir)
+    raise AssertionError(f"daemon identity survived test hard maximum: {info}{details}")
+
+
+def _daemon_diagnostics(state_dir: Path, session_id: str | None = None) -> str:
+    """Everything needed to tell why a daemon is (or is not) still alive (#1375).
+
+    The event log carries `ts_ms` and the exit reason (`daemon_idle_shutdown`,
+    `daemon_test_idle_expired`, `daemon_test_max_lifetime_expired`) with the
+    worker, lease and connection counts the daemon saw when it decided. A
+    liveness assertion that prints this explains itself; a bare
+    `assert False` on a PID sends the next reader guessing.
+    """
+    lines = [f"state_dir: {state_dir}"]
+    info_path = state_dir / "daemon.json"
+    try:
+        lines.append(f"daemon.json: {info_path.read_text(encoding='utf-8')}")
+    except OSError as error:
+        lines.append(f"daemon.json: <unreadable: {error}>")
+    if session_id is not None:
+        session_path = state_dir / "sessions" / f"{session_id}.json"
+        try:
+            lines.append(f"session {session_id}: {session_path.read_text(encoding='utf-8')}")
+        except OSError as error:
+            lines.append(f"session {session_id}: <unreadable: {error}>")
+    try:
+        entries = sorted(
+            str(path.relative_to(state_dir)) for path in state_dir.rglob("*")
+        )
+        lines.append(f"state dir entries: {entries}")
+    except OSError as error:
+        lines.append(f"state dir entries: <unreadable: {error}>")
+    events_path = state_dir / "daemon-events.jsonl"
+    try:
+        events = events_path.read_text(encoding="utf-8").splitlines()
+        lines.append(f"daemon events ({len(events)}):")
+        lines.extend(f"  {event}" for event in events)
+    except OSError as error:
+        lines.append(f"daemon events: <unreadable: {error}>")
+    return "\n".join(lines)
+
+
+def _assert_daemon_alive(
+    info: dict[str, object],
+    state_dir: Path,
+    session_id: str | None = None,
+) -> None:
+    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"])), (
+        f"daemon {info['pid']} (start {info['pid_start']}) is gone\n"
+        + _daemon_diagnostics(state_dir, session_id)
+    )
+
+
+def _poll_dashboard(info: dict[str, object], state_dir: Path) -> None:
+    """One authenticated `/state.json` poll that reports the daemon's state on failure."""
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(_dashboard_state_request(info), timeout=2) as response:
+            assert response.status == 200
+            response.read()
+    except OSError as error:
+        raise AssertionError(
+            f"dashboard poll failed after {time.monotonic() - started:.2f}s: "
+            f"{type(error).__name__}: {error}\n" + _daemon_diagnostics(state_dir)
+        ) from error
 
 
 def _wait_for_owned_identities(
@@ -308,13 +376,11 @@ def test_dashboard_polling_blocks_configured_production_idle_timeout(
 
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        with urllib.request.urlopen(_dashboard_state_request(info), timeout=2) as response:
-            assert response.status == 200
-            response.read()
-        assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+        _poll_dashboard(info, state_dir)
+        _assert_daemon_alive(info, state_dir)
         time.sleep(0.2)
 
-    _wait_for_identity_exit(info, timeout=6)
+    _wait_for_identity_exit(info, timeout=6, state_dir=state_dir)
     assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
 
 
@@ -323,25 +389,53 @@ def test_detached_worker_blocks_configured_production_idle_timeout(
     mock_env: dict[str, str],
     tmp_path: Path,
 ) -> None:
+    """A live detached worker keeps a 2 s-idle daemon up; its exit lets it retire.
+
+    #1375: the worker used to be a fixed `--mock-sleep-ms 4000` and the test
+    slept 3 s after the *launcher* exited. The worker's clock starts when the
+    daemon spawns it, which is before the launcher's `Create` RPC returns, its
+    stderr lines, and its own exit teardown. On a loaded Windows runner that
+    stretch exceeded the 1 s margin, the worker finished, the daemon idled out
+    exactly as designed, and the assertion blamed the daemon. The worker is
+    now held by a release file, so it is provably alive for as long as the
+    assertion needs it, and released only afterwards.
+    """
     state_dir = tmp_path / "daemon-state"
     env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 2)
-    proc, _session_id = launch_detached(
+    release = tmp_path / "release-worker"
+    proc, session_id = launch_detached(
         clud_binary,
         env,
         "--codex",
         "-p",
         "worker-keeps-daemon-alive",
         "--",
-        "--mock-sleep-ms",
-        "4000",
+        "--mock-wait-for-file",
+        str(release),
     )
     assert wait_for_exit(proc, timeout=10) == 0
     info = json.loads((state_dir / "daemon.json").read_text(encoding="utf-8"))
+    owned_identities = _wait_for_owned_identities(state_dir, session_id)
 
+    # Longer than the 2 s idle timeout with no client traffic at all: only the
+    # held worker can be keeping the daemon up now.
     time.sleep(3)
-    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
-    _wait_for_identity_exit(info, timeout=8)
-    assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
+    for pid, start_time in owned_identities:
+        assert process_identity_is_alive(pid, start_time), (
+            f"held worker/backend {pid} exited before release\n"
+            + _daemon_diagnostics(state_dir, session_id)
+        )
+    _assert_daemon_alive(info, state_dir, session_id)
+
+    release.write_text("release", encoding="utf-8")
+    _wait_for_identities_exit(owned_identities)
+    _wait_for_identity_exit(info, timeout=8, state_dir=state_dir)
+    shutdown = next(
+        (event for event in _events(state_dir) if event["op"] == "daemon_idle_shutdown"),
+        None,
+    )
+    assert shutdown is not None, _daemon_diagnostics(state_dir, session_id)
+    assert shutdown["worker_count"] == 0, _daemon_diagnostics(state_dir, session_id)
 
 
 def test_foreground_client_lease_blocks_configured_production_idle_timeout(
@@ -376,9 +470,9 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
     # No repeated daemon RPC is sent here. The client lease alone must outlive
     # the two-second idle setting while the foreground process is active.
     time.sleep(3)
-    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+    _assert_daemon_alive(info, state_dir)
     assert wait_for_exit(client, timeout=15) == 0
-    _wait_for_identity_exit(info, timeout=8)
+    _wait_for_identity_exit(info, timeout=8, state_dir=state_dir)
     assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
 
 
@@ -392,7 +486,7 @@ def test_zero_production_idle_timeout_remains_disabled(
     info = _start_daemon(clud_binary, env, state_dir)
 
     time.sleep(3)
-    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+    _assert_daemon_alive(info, state_dir)
     stop = process.run(
         [str(clud_binary), "daemon", "stop"],
         capture_output=True,
@@ -416,16 +510,11 @@ def test_dashboard_activity_defers_test_idle_expiry(
 
     polling_deadline = time.monotonic() + 4
     while time.monotonic() < polling_deadline:
-        with urllib.request.urlopen(_dashboard_state_request(info), timeout=2) as response:
-            assert response.status == 200
-            response.read()
-        assert process_identity_is_alive(
-            int(info["pid"]),
-            int(info["pid_start"]),
-        )
+        _poll_dashboard(info, state_dir)
+        _assert_daemon_alive(info, state_dir)
         time.sleep(0.25)
 
-    _wait_for_identity_exit(info, timeout=6)
+    _wait_for_identity_exit(info, timeout=6, state_dir=state_dir)
     assert "daemon_test_idle_expired" in {
         event["op"] for event in _events(state_dir)
     }

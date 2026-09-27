@@ -54,9 +54,18 @@ line. To prove the no-op `gc.insert` regression signal, copy a baseline, set
 the current no-op event stream must fail. Once #543 and #544 land, refresh the
 committed baselines so the normal budget makes that regression fail directly.
 
+No CI or scheduled runner currently checks the committed daemon or PTY
+baselines. In particular, the PTY baselines do **not** imply an active
+regression gate. DD-019 requires a quiet machine for meaningful absolute CPU
+budgets, and this repository has no dedicated runner. Until one is available,
+run all four cases with `--budget` on a quiet representative machine before
+releasing changes to the PTY pump or daemon idle path, and record the results
+in the change review. A shared hosted runner is not a reliable substitute.
+
 ## Update baselines
 
-Run the two 60-second commands above on a quiet representative machine after an
+Run the four 60-second commands above (daemon n1/n8 under Run, plus the
+`--mode pty` n1/n6 commands for the PTY baselines) on a quiet representative machine after an
 intentional idle-cost change. Commit the resulting JSON together with the PR and
 state the machine/OS and before/after totals in the PR body. Never update a
 baseline merely to hide an unexplained regression.

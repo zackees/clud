@@ -126,6 +126,7 @@ fn run_one(entry: &HookEntry, repo_root: &Path, payload: &str) -> Result<OneResu
         create_process_group: false,
         stdin_mode: StdinMode::Piped,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process

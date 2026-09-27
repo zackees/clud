@@ -550,11 +550,12 @@ def test_dry_run_codex() -> None:
     assert data["provider_source"] == "cli"
     assert data["harness_source"] == "built_in_default"
     assert data["model_selection"]["model"] == "codex-sol"
-    assert data["model_selection"]["wire_model"] == "gpt-5.6-sol"
+    assert data["model_selection"]["wire_model"] == "gpt-6-sol"
+    assert data["codex_model_source"] in {"published", "last_good", "built_in"}
     assert data["model_selection"]["effort"] == "low"
     assert data["model_selection"]["model_source"] == "catalog_default"
     assert data["model_selection"]["effort_source"] == "catalog_default"
-    assert data["command"].count("gpt-5.6-sol") == 1
+    assert data["command"].count("gpt-6-sol") == 1
     assert 'model_reasoning_effort="low"' in data["command"]
     assert not any("terra" in arg or arg == "medium" for arg in data["command"])
 
@@ -924,7 +925,8 @@ def test_dry_run_reports_independent_provider_and_harness() -> None:
     assert "--harness" not in data["command"]
     model_index = data["command"].index("--model")
     assert data["model_selection"]["model"] == "codex-sol"
-    assert data["model_selection"]["wire_model"] == "gpt-5.6-sol"
+    assert data["model_selection"]["wire_model"] == "gpt-6-sol"
+    assert data["codex_model_source"] in {"published", "last_good", "built_in"}
     assert data["model_selection"]["effort"] == "low"
     assert data["model_selection"]["model_source"] == "catalog_default"
     assert data["model_selection"]["effort_source"] == "catalog_default"
@@ -1015,7 +1017,7 @@ def test_dry_run_keeps_sol_selected_through_the_claude_loop_path() -> None:
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["iterations"] == 1
-    assert data["model_selection"]["wire_model"] == "gpt-5.6-sol"
+    assert data["model_selection"]["wire_model"] == "gpt-6-sol"
     model_index = data["command"].index("--model")
     assert data["command"][model_index + 1] == "clud-claude-codex-sol"
     effort_index = data["command"].index("--effort")

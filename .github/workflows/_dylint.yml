@@ -50,7 +50,7 @@ jobs:
       - uses: zackees/setup-soldr@v0
         with:
           cache: true
-          toolchain: 1.94.1
+          toolchain: 1.95.0
           cache-key-suffix: dylint
           prebuild-deps: none
           linker: platform-default

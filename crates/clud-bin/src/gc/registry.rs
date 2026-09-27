@@ -252,7 +252,7 @@ impl Registry {
                 last_cwd: row.last_cwd,
             });
         }
-        out.sort_by(|a, b| b.last_visited_unix.cmp(&a.last_visited_unix));
+        out.sort_by_key(|entry| std::cmp::Reverse(entry.last_visited_unix));
         Ok(out)
     }
 
@@ -312,7 +312,7 @@ impl Registry {
     pub fn list(&self, filter_kind: Option<&str>) -> Result<Vec<TrackedEntry>, GcError> {
         let mut rows = self.collect_all(filter_kind)?;
         // ORDER BY created_unix DESC.
-        rows.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_unix));
         Ok(rows)
     }
 
@@ -326,7 +326,7 @@ impl Registry {
     ) -> Result<Vec<TrackedEntry>, GcError> {
         let mut rows = self.collect_all(filter_kind)?;
         rows.retain(|r| r.created_unix < cutoff);
-        rows.sort_by(|a, b| a.created_unix.cmp(&b.created_unix));
+        rows.sort_by_key(|row| row.created_unix);
         Ok(rows)
     }
 

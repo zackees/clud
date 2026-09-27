@@ -131,7 +131,7 @@ pub const MODELS: &[CatalogModel] = &[
     CatalogModel {
         cli_id: "codex-sol",
         provider: ModelProvider::Codex,
-        wire_id: "gpt-5.6-sol",
+        wire_id: "gpt-6-sol",
         discovery_id: Some("clud-claude-codex-sol"),
         display_name: "Codex Sol (OpenAI)",
         legacy_aliases: &["sol"],
@@ -163,7 +163,7 @@ pub const MODELS: &[CatalogModel] = &[
     CatalogModel {
         cli_id: "codex-luna",
         provider: ModelProvider::Codex,
-        wire_id: "gpt-5.6-luna",
+        wire_id: "gpt-6-luna",
         discovery_id: Some("clud-claude-codex-luna"),
         display_name: "Codex Luna (OpenAI)",
         legacy_aliases: &["luna"],
@@ -781,8 +781,18 @@ pub fn resolve(
         effective_context.as_deref(),
     )?;
 
-    let mut wire_model =
-        catalog.map_or_else(|| base_model.to_string(), |entry| entry.wire_id.to_string());
+    let mut wire_model = catalog.map_or_else(
+        || base_model.to_string(),
+        |entry| {
+            if entry.provider == ModelProvider::Codex
+                && base_model.eq_ignore_ascii_case(entry.wire_id)
+            {
+                base_model.to_string()
+            } else {
+                crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
+            }
+        },
+    );
     // "This model has a 1m context tier" rather than `model_provider ==
     // ModelProvider::DeepSeek`: `contexts` is already the resolved model's
     // (or, for an uncataloged wire ID, the provider's fallback) supported
@@ -1019,10 +1029,32 @@ fn model_ids_identify_the_same_row(entry: &str, requested: &str) -> bool {
     if entry_base.eq_ignore_ascii_case(requested_base) {
         return true;
     }
+    let entry_codex = codex_wire_identity(entry_base);
+    let requested_codex = codex_wire_identity(requested_base);
+    if entry_codex.is_some() || requested_codex.is_some() {
+        return entry_codex.is_some() && entry_codex == requested_codex;
+    }
     match (catalog_match(entry_base), catalog_match(requested_base)) {
         (Some(entry_row), Some(requested_row)) => entry_row.cli_id == requested_row.cli_id,
         _ => false,
     }
+}
+
+fn codex_wire_identity(value: &str) -> Option<String> {
+    if let Some(row) = catalog_match(value).filter(|row| row.provider == ModelProvider::Codex) {
+        return Some(if value.eq_ignore_ascii_case(row.wire_id) {
+            value.to_string()
+        } else {
+            crate::codex_runtime::wire_id(row.cli_id, row.wire_id)
+        });
+    }
+    if value.ends_with("-sol") && value == crate::codex_runtime::active_choice().sol {
+        return Some(value.to_string());
+    }
+    if value.ends_with("-luna") && value == crate::codex_runtime::active_choice().luna {
+        return Some(value.to_string());
+    }
+    None
 }
 
 /// The model an auxiliary slot resolves to on a constrained launch, or `None`
@@ -1637,7 +1669,7 @@ mod tests {
             .unwrap();
         assert_eq!(selection.provider, ModelProvider::Codex);
         assert_eq!(selection.model.as_deref(), Some("codex-sol"));
-        assert_eq!(selection.wire_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(selection.wire_model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(
             selection.model_source,
             Some(SelectionSource::CatalogDefault)

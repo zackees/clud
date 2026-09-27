@@ -26,7 +26,7 @@ inputs:
   toolchain:
     description: Rust toolchain version (must match rust-toolchain.toml).
     required: false
-    default: "1.94.1"
+    default: "1.95.0"
 runs:
   using: composite
   steps:

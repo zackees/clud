@@ -39,6 +39,7 @@ fn captured_subprocess_output_is_forwardable_before_exit() {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().unwrap();
 

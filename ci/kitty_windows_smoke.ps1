@@ -49,7 +49,7 @@ try {
 # wezterm.exe is a console application. wezterm-gui.exe has no console output
 # on Windows, so inspect flags and parse the real config through this binary.
 $helpText = (& $wezterm start --help 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0 -or -not $helpText.Contains('--return-initial-exit-code')) {
+if ($LASTEXITCODE -ne 0 -or -not $helpText.Contains('--wait-exit')) {
     throw "Installed WezTerm lacks required exit flag: exit=$LASTEXITCODE help=$helpText"
 }
 $keys = (& $wezterm --config-file $config show-keys 2>&1 | Out-String)

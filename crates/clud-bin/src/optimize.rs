@@ -581,6 +581,7 @@ fn run_status_string(argv: Vec<String>, cwd: Option<&Path>) -> Result<i32, Strin
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process
         .start()

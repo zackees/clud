@@ -219,7 +219,7 @@ fn sol_through_claude_loop_keeps_the_discovery_model_and_wire_selection() {
         plan.model_selection
             .as_ref()
             .and_then(|selection| selection.wire_model.as_deref()),
-        Some("gpt-5.6-sol")
+        Some("gpt-6-sol")
     );
 }
 
@@ -269,7 +269,7 @@ fn native_codex_catalog_default_is_sol_at_low_effort() {
     assert_eq!(
         plan.command
             .windows(2)
-            .filter(|pair| pair == &["-m", "gpt-5.6-sol"])
+            .filter(|pair| pair == &["-m", "gpt-6-sol"])
             .count(),
         1,
         "{}",
@@ -668,7 +668,7 @@ fn model_less_bridge_effort_pins_the_reviewed_default_model() {
         .command
         .windows(2)
         .any(|pair| pair == ["--effort", "high"]));
-    assert_eq!(plan.codex_model.as_deref(), Some("gpt-5.6-sol@high"));
+    assert_eq!(plan.codex_model.as_deref(), Some("gpt-6-sol@high"));
 }
 
 #[test]

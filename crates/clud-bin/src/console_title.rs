@@ -359,7 +359,7 @@ fn current_desired_title_locked(state: &mut TitleState, now: Instant) -> String 
     }
     let flash_tick = now.saturating_duration_since(alert.observed_at).as_millis()
         / CPU_FLASH_INTERVAL.as_millis();
-    if flash_tick % 2 == 0 {
+    if flash_tick.is_multiple_of(2) {
         alert.title.clone()
     } else {
         state.base_title.clone()

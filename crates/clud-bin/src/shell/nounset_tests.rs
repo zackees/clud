@@ -313,6 +313,7 @@ fn bash_under(env: Vec<(String, String)>, script: &str) -> (i32, String) {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().expect("bash must be runnable");
 

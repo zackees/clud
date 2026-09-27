@@ -287,7 +287,7 @@ pub fn read_recent(state_dir: &Path) -> Vec<LaunchRecord> {
         };
         records.push(record);
     }
-    records.sort_by(|a, b| b.launched_at_ms.cmp(&a.launched_at_ms));
+    records.sort_by_key(|record| std::cmp::Reverse(record.launched_at_ms));
     records.truncate(MAX_RECORDS);
     records
 }

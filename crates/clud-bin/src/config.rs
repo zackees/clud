@@ -231,6 +231,7 @@ fn run_editor(argv: Vec<String>) -> Result<(), String> {
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process
         .start()

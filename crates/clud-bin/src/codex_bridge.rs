@@ -571,6 +571,10 @@ pub struct BridgeHandle {
 
 impl BridgeHandle {
     pub fn start(config: BridgeConfig) -> Result<Self, BridgeError> {
+        // Resolve the bounded remote/local model checks before the listener is
+        // handed to Claude. A first /v1/messages request must not spend its
+        // short response deadline waiting for Codex app-server model/list.
+        let _ = crate::codex_runtime::active_choice();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(BridgeError::Bind)?;
         listener.set_nonblocking(true).map_err(BridgeError::Bind)?;
         let socket_addr = listener.local_addr().map_err(BridgeError::Bind)?;
@@ -1758,15 +1762,25 @@ fn serve_unified_messages(
             model: None,
             spec: None,
         },
-        Some(entry) => Attempt {
-            provider: entry.provider,
-            route: conversation_route_for(entry.provider),
-            model: Some(codex_effort_suffix.map_or_else(
-                || entry.wire_id.to_string(),
-                |effort| format!("{}@{effort}", entry.wire_id),
-            )),
-            spec: None,
-        },
+        Some(entry) => {
+            let requested_base = model.split_once('@').map_or(model, |(base, _)| base);
+            let target = if entry.provider == ModelProvider::Codex
+                && requested_base.eq_ignore_ascii_case(entry.wire_id)
+            {
+                requested_base.to_string()
+            } else {
+                crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
+            };
+            Attempt {
+                provider: entry.provider,
+                route: conversation_route_for(entry.provider),
+                model: Some(
+                    codex_effort_suffix
+                        .map_or_else(|| target.clone(), |effort| format!("{target}@{effort}")),
+                ),
+                spec: None,
+            }
+        }
     };
 
     // Descend the ladder. Probing is enabled only while a further rung exists,
@@ -2573,9 +2587,10 @@ fn serve_codex_discovery_messages(
     if is_anthropic_main_model_pick(base) {
         let served = config.default_model.as_ref().map_or_else(
             || {
-                provider_catalog::reviewed_default_model(ModelProvider::Codex)
-                    .map_or("the Codex default", |entry| entry.wire_id)
-                    .to_string()
+                provider_catalog::reviewed_default_model(ModelProvider::Codex).map_or_else(
+                    || "the Codex default".to_string(),
+                    |entry| crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id),
+                )
             },
             ModelSpec::display,
         );
@@ -2583,10 +2598,13 @@ fn serve_codex_discovery_messages(
         record_model_substitution(log, base, &served);
     }
     if let Some(entry) = discovered {
-        let wire_model = effort.map_or_else(
-            || entry.wire_id.to_string(),
-            |effort| format!("{}@{effort}", entry.wire_id),
-        );
+        let target = if base.eq_ignore_ascii_case(entry.wire_id) {
+            base.to_string()
+        } else {
+            crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
+        };
+        let wire_model =
+            effort.map_or_else(|| target.clone(), |effort| format!("{target}@{effort}"));
         request["model"] = serde_json::Value::String(wire_model);
     }
     let rewritten = serde_json::to_vec(&request).unwrap_or_default();
@@ -4502,7 +4520,7 @@ Connection: close
             thread::sleep(Duration::from_millis(5));
         };
         assert_eq!(usage.provider, "codex");
-        assert_eq!(usage.model, "gpt-5.6-sol");
+        assert_eq!(usage.model, "gpt-6-sol");
         assert_eq!(usage.request_count, 4);
         assert_eq!(usage.cached_input_tokens, 0);
         assert_eq!(usage.uncached_input_tokens, 400_000);
@@ -4990,13 +5008,13 @@ Connection: close
         let sent = upstream.requests().remove(0);
         let sent_body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
         let json: serde_json::Value = serde_json::from_str(sent_body).expect("JSON body");
-        assert_eq!(json["model"], "gpt-5.6-sol", "{sent_body}");
+        assert_eq!(json["model"], "gpt-6-sol", "{sent_body}");
         bridge.shutdown().unwrap();
 
         let text = std::fs::read_to_string(&log_path).unwrap();
         assert!(text.contains(r#""event":"model_substituted""#), "{text}");
         assert!(text.contains(r#""requested":"claude-opus-5""#), "{text}");
-        assert!(text.contains(r#""served":"gpt-5.6-sol@xhigh""#), "{text}");
+        assert!(text.contains(r#""served":"gpt-6-sol@xhigh""#), "{text}");
         // Ambient: the session kept working, so it must not end on a
         // "problems were recorded" hint the terminal line already covered.
         let log = bridge.log.as_ref().expect("configured log");
@@ -5374,14 +5392,14 @@ Connection: close
             .with_log_path(log_path.clone());
         let mut bridge = BridgeHandle::start(config).unwrap();
         let bearer = bridge.bearer_token().to_string();
-        let body = PROBE_BODY.replace("claude-x", "gpt-5.6-sol");
+        let body = PROBE_BODY.replace("claude-x", "gpt-6-sol");
         let refused = request(
             bridge.socket_addr(),
             &authorized("POST", "/v1/messages", &bearer, &body),
         );
         assert_eq!(status(&refused), 400, "{refused}");
         let payload = captured_body(&refused);
-        assert!(payload.contains("gpt-5.6-sol"), "{payload}");
+        assert!(payload.contains("gpt-6-sol"), "{payload}");
         assert!(payload.contains("codex-terra"), "{payload}");
         assert!(payload.contains("not allowed for this launch"), "{payload}");
         assert!(
@@ -5392,7 +5410,7 @@ Connection: close
 
         let text = std::fs::read_to_string(&log_path).unwrap();
         assert!(
-            text.contains(r#""model":"gpt-5.6-sol","reason":"model_not_allowed""#),
+            text.contains(r#""model":"gpt-6-sol","reason":"model_not_allowed""#),
             "{text}"
         );
         assert!(!text.contains(&bearer), "{text}");
@@ -5717,7 +5735,7 @@ Connection: close
         for (raw, wire_id) in
             codex_requests
                 .iter()
-                .zip(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+                .zip(["gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna"])
         {
             assert!(raw.starts_with("POST /v1/responses "));
             assert!(raw.contains(wire_id), "{raw}");
@@ -6669,7 +6687,7 @@ Connection: close
             status(&unified_request(&bridge, thinking, "codex-thinking", None)),
             200
         );
-        expected.push(("gpt-5.6-luna", "high"));
+        expected.push(("gpt-6-luna", "high"));
 
         let catalog_default = r#"{"model":"clud-claude-codex-sol","messages":[{"role":"user","content":"default fallback"}],"thinking":{"type":"adaptive"},"stream":false}"#;
         assert_eq!(
@@ -6681,7 +6699,7 @@ Connection: close
             )),
             200
         );
-        expected.push(("gpt-5.6-sol", "low"));
+        expected.push(("gpt-6-sol", "low"));
 
         let requests = codex.requests();
         assert_eq!(requests.len(), expected.len());
@@ -6926,7 +6944,7 @@ Connection: close
             codex_requests.last().expect("returning Codex request"),
         ))
         .expect("Responses JSON");
-        assert_eq!(reseeded["model"], "gpt-5.6-luna");
+        assert_eq!(reseeded["model"], "gpt-6-luna");
         assert_eq!(reseeded["reasoning"]["effort"], "high");
         let text = reseeded["input"].to_string();
         for visible in [
@@ -8391,7 +8409,7 @@ Connection: close
         // Translated shape, not a passed-through Anthropic body.
         let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
         let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
-        assert_eq!(json["model"], "gpt-5.6-sol");
+        assert_eq!(json["model"], "gpt-6-sol");
         assert_eq!(json["stream"], true, "upstream is always streamed");
         assert_eq!(json["input"][0]["content"][0]["type"], "input_text");
         assert!(json.get("messages").is_none(), "Anthropic shape leaked");
@@ -8552,7 +8570,7 @@ Connection: close
         let sent = upstream.requests().remove(0);
         let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
         let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
-        assert_eq!(json["model"], "gpt-5.6-luna");
+        assert_eq!(json["model"], "gpt-6-luna");
         assert_eq!(json["reasoning"]["effort"], "high");
         assert!(
             !body.contains("luna@high"),
@@ -8610,7 +8628,7 @@ Connection: close
         let sent = upstream.requests().remove(0);
         let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
         let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
-        assert_eq!(json["model"], "gpt-5.6-sol");
+        assert_eq!(json["model"], "gpt-6-sol");
         assert_eq!(json["reasoning"]["effort"], "xhigh");
     }
 

@@ -177,11 +177,7 @@ impl EscapeTracker {
     fn csi(&mut self, byte: u8) {
         match byte {
             // Parameter bytes (0x30..=0x3f) and intermediates (0x20..=0x2f).
-            0x20..=0x3f => {
-                if self.params.len() < MAX_PARAM_BYTES {
-                    self.params.push(byte);
-                }
-            }
+            0x20..=0x3f if self.params.len() < MAX_PARAM_BYTES => self.params.push(byte),
             0x40..=0x7e => {
                 self.dispatch_csi(byte);
                 self.params.clear();

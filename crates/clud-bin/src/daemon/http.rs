@@ -191,7 +191,7 @@ impl TelemetryStore {
                 }
             })
             .collect();
-        rows.sort_by(|a, b| b.last_at_ms.cmp(&a.last_at_ms));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.last_at_ms));
         rows
     }
 
@@ -326,7 +326,7 @@ impl ToolTelemetryStore {
     fn view_at(&self, now_ms: u64) -> ToolTelemetryView {
         let guard = self.inner.lock().expect("tool telemetry store poisoned");
         let mut entries: Vec<_> = guard.entries.iter().cloned().collect();
-        entries.sort_by(|a, b| b.start_time_ms.cmp(&a.start_time_ms));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.start_time_ms));
         ToolTelemetryView {
             aggregate: tool_aggregate_at(&entries, now_ms),
             entries,

@@ -31,6 +31,8 @@ re-explaining.
 | [architecture/process-reaping.md](architecture/process-reaping.md) | ~200 | The two disjoint reapers, the `(pid, creation_time)` keyspace and its single purge sweep, daemon-sparing by OS signal (marker second, whitelist last), the cooperative-marker caveat, and which test tier a reaper change belongs in |
 | [architecture/rm-tools.md](architecture/rm-tools.md) | ~170 | `safe-rm` (#1461): trash, profile roots, audit, hook rewrite, and the child catastrophe floor |
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
+| [architecture/installer-pages.md](architecture/installer-pages.md) | ~30 | Published release assets to validated v1 Catalog, exact Pages paths, and unauthenticated deployment smoke |
+| [architecture/model-pages.md](architecture/model-pages.md) | ~35 | Nightly/manual Codex model publication, Pages coexistence, local availability checks, and fallback |
 | [architecture/provider-failover.md](architecture/provider-failover.md) | ~200 | Surviving provider exhaustion mid-session (#968): routing OpenRouter through the gateway, the route-health failure taxonomy, the cost-labeled failover ladder, pre-commit request replay versus post-commit degradation, and cooldown recovery |
 | [architecture/test-runtime-memory.md](architecture/test-runtime-memory.md) | ~220 | **Design proposal (#405, not yet implemented):** `.clud/`-local test-runtime histogram — append-only JSONL over redb/SQLite and why, raw `(duration, cpu_load)` with query-time normalization, count-based compaction, and the run-all-vs-targeted recommendation policy |
 | [architecture/toasts.md](architecture/toasts.md) | ~200 | In-terminal toasts (#1189): toast model and hub, tier selection (kitty graphics, alternate-screen text cells, status line/title fallback), the PTY writer-thread compositor and its safe-injection rules, Claude `statusLine` chaining, click-to-dismiss |
@@ -51,6 +53,7 @@ re-explaining.
 - **"When does clud write agent setup files?"** -> [launch-setup.md](architecture/launch-setup.md)
 - **"Why is `~/.clud/data.redb` behind a daemon?"** -> [gc-and-registry.md](architecture/gc-and-registry.md)
 - **"Why does CI compile on Linux but test on macOS/Windows?"** -> [ci.md](architecture/ci.md)
+- **"Where does the installer version list come from?"** -> [installer-pages.md](architecture/installer-pages.md)
 - **"What is clud allowed to kill, and where does my reaper test go?"** -> [process-reaping.md](architecture/process-reaping.md)
 - **"Why does Windows do X differently?"** -> [windows-quirks.md](architecture/windows-quirks.md)
 - **"Where does the argv that clud runs come from?"** -> [launch-plan.md](architecture/launch-plan.md)

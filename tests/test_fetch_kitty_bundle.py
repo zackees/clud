@@ -17,9 +17,9 @@ from ci.kitty_wheel import KITTY_BUNDLE_FILES
 ROOT = Path(__file__).resolve().parent.parent
 PINNED_URL = (
     "https://github.com/zackees/wezterm/releases/download/"
-    "kitty-windows-compat-6bd1663f/WezTerm-windows-portable.zip"
+    "kitty-windows-compat-9b39ad5e/WezTerm-windows-portable.zip"
 )
-PINNED_SHA256 = "bb3b3e7c86baf9be2688e0c2e62ac10dec5ba384c17878d29b9b1dca62ee0371"
+PINNED_SHA256 = "8ba9d0c7a79ce9380108a09cc91bf415ac6c92da669483ee740820fb34556bf7"
 
 
 def test_windows_x64_wheel_fetches_pinned_bundle_before_build() -> None:
@@ -71,7 +71,7 @@ def _archive(revision: str = SOURCE_REVISION, overrides: dict[str, bytes] | None
             elif name == "SOURCE_REVISION":
                 data = revision.encode()
             elif name.lower().endswith((".exe", ".dll")):
-                data = _pe() + (b"--return-initial-exit-code" if name == "wezterm-gui.exe" else b"")
+                data = _pe() + (b"--wait-exit" if name == "wezterm-gui.exe" else b"")
             else:
                 data = b"fixture"
             archive.writestr(name, data)
@@ -89,7 +89,7 @@ def _fetch(tmp_path: Path, archive: bytes, digest: str | None = None) -> Path:
 
 def test_fetch_verified_bundle(tmp_path: Path) -> None:
     bundle = _fetch(tmp_path, _archive())
-    assert b"--return-initial-exit-code" in (bundle / "wezterm-gui.exe").read_bytes()
+    assert b"--wait-exit" in (bundle / "wezterm-gui.exe").read_bytes()
     assert (bundle / "SOURCE_REVISION").read_text() == SOURCE_REVISION
 
 
@@ -126,7 +126,7 @@ def test_rejects_zip_traversal(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"wezterm-gui.exe": _pe()}, "return-initial-exit-code"),
+        ({"wezterm-gui.exe": _pe()}, "wait-exit"),
         ({"wezterm-gui.exe": b"fixture"}, "invalid PE wezterm-gui.exe"),
         ({"conpty.dll": _pe(0xAA64)}, "non-x64 PE conpty.dll"),
     ],

@@ -56,7 +56,7 @@ Create `docker/<name>/Dockerfile` (or `ci/docker/<name>.Dockerfile` for multi-im
 # rewrites mtimes per container start and cargo rebuilds the world (~6 min on
 # a 21-crate workspace vs ~1 s when warm).
 
-FROM rust:1.94.1-bookworm
+FROM rust:1.95.0-bookworm
 
 # Build deps for any cc-rs / pkg-config / -sys crates in the dep graph.
 RUN apt-get update \
@@ -69,7 +69,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Pin the toolchain at image-build time so per-run cargo never re-downloads it.
-RUN rustup default 1.94.1 \
+RUN rustup default 1.95.0 \
  && rustup component add rustfmt clippy
 
 # Explicit so the named-volume mount points are unambiguous.

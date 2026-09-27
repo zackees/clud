@@ -184,6 +184,23 @@ jobs:
       wheel-artifact: ${{ matrix.artifact }}
       include-sdist: ${{ matrix['include-sdist'] }}
 
+  build-installer:
+    name: Build universal APE installer
+    needs: [preflight, full-ci-gate]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Compile and verify APE format
+        run: bash installer/build_ape.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clud-installer-ape
+          path: clud-installer.exe
+          if-no-files-found: error
+
   publish-pypi:
     name: Publish to PyPI
     needs: [preflight, full-ci-gate, build]
@@ -210,7 +227,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    needs: [preflight, full-ci-gate, build, publish-pypi]
+    needs: [preflight, full-ci-gate, build, build-installer, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -225,6 +242,11 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: clud-installer-ape
+          path: dist
+
       # Sidecar debug info for the released binaries (Linux `.dwp`; see
       # Cargo.toml [profile.release]). Downloaded into its own directory --
       # never dist/ -- and only here, so it can never reach publish-pypi's
@@ -237,6 +259,9 @@ jobs:
           pattern: debuginfo-*
           path: debuginfo
           merge-multiple: true
+
+      - name: Extract standalone clud executables from release wheels
+        run: python -m installer.release_assets '${{ needs.preflight.outputs.version }}' dist standalone
 
       - name: Generate checksums
         shell: bash
@@ -252,15 +277,15 @@ jobs:
           # attached file. Hashing happens inside each directory so the entries
           # stay bare `./<name>` -- assets attach flat to the release, so a
           # `dist/` or `debuginfo/` prefix would break `sha256sum -c` for
-          # anyone who downloads them into one directory. `! -name SHA256SUMS`
-          # because the shell creates the redirect target before `find` scans,
-          # so without it the file hashes its own partial content.
-          for dir in dist debuginfo; do
+          # anyone who downloads them into one directory. Exclude any
+          # pre-existing SHA256SUMS sidecars from the uploaded input dirs.
+          checksum_file="$RUNNER_TEMP/clud-release-SHA256SUMS"
+          for dir in dist debuginfo standalone; do
             [ -d "$dir" ] || continue
             ( cd "$dir" && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 |
                 sort -z | xargs -0 -r sha256sum )
-          done > SHA256SUMS
-          mv SHA256SUMS dist/SHA256SUMS
+          done > "$checksum_file"
+          mv "$checksum_file" dist/SHA256SUMS
           cat dist/SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
@@ -297,7 +322,71 @@ jobs:
           files: |
             dist/*
             debuginfo/*
+            standalone/*
           # False only because `debuginfo/*` is legitimately allowed to be
           # empty. The "dist must not be empty" guard it used to provide is
           # asserted explicitly by the checksums step above.
           fail_on_unmatched_files: false
+
+  build-install-site:
+    name: Build and validate installer Pages
+    needs: [preflight, publish-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Generate catalog and site from published release assets
+        run: python -m installer.site site
+      - name: Validate v1 catalog and public site paths
+        run: |
+          python -m pip install 'git+https://github.com/zackees/manifest.json@main'
+          manifest-validate site/install/manifest.json
+          python -m installer.verify_site site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy-install-site:
+    name: Deploy installer Pages
+    needs: build-install-site
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Confirm public Pages are visible
+        run: |
+          curl -fsSL --retry 12 --retry-delay 5 https://zackees.github.io/clud/index.html -o root.html
+          curl -fsSL --retry 12 --retry-delay 5 https://zackees.github.io/clud/install/index.html -o install.html
+          curl -fsSL --retry 12 --retry-delay 5 https://zackees.github.io/clud/install/manifest.json -o manifest.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          catalog = json.loads(Path('manifest.json').read_text(encoding='utf-8'))
+          assert catalog['kind'] == 'Catalog'
+          assert catalog['channels']['latest-stable'] in Path('install.html').read_text(encoding='utf-8')
+          assert "location.replace('/clud/install/index.html')" in Path('root.html').read_text(encoding='utf-8')
+          PY
+
+  verify-published-installer:
+    name: Verify published installer on all host platforms
+    needs: [preflight, deploy-install-site]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/installer-check.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}

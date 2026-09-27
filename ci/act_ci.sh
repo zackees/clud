@@ -1,6 +1,7 @@
 #!/bin/sh
-# Run a Linux job of .github/workflows/ci.yml under act, inside the bosn
-# `clud_act` stack (bosn.toml). Usage: act_ci.sh <job-id> | --list
+# Run a Linux workflow job under act inside the bosn `clud_act` stack.
+# Defaults to ci.yml; set ACT_WORKFLOW for another workflow in the same dir.
+# Usage: act_ci.sh <job-id> | --list
 #
 # The checkout is mounted read-only, and a worktree's `.git` is a file that
 # points outside the mount. So the tree is copied to a per-run scratch dir and
@@ -13,6 +14,7 @@ WORK="/tmp/$RUN/src"
 CHECKOUT="/tmp/$RUN/checkout"
 IMAGE="${ACT_IMAGE:-catthehacker/ubuntu:act-24.04}"
 REPO="${ACT_REPO:-zackees/clud}"
+WORKFLOW="${ACT_WORKFLOW:-ci.yml}"
 # Both live in machine-scoped bosn volumes (bosn.toml `clud_act`), so they
 # outlive this container: action checkouts, and the Actions cache server that
 # backs actions/cache, setup-uv and setup-soldr's caches.
@@ -53,7 +55,7 @@ git -C "$WORK" -c user.name=act -c user.email=act@localhost commit -q -m "act sn
 
 cd "$WORK"
 if [ "${1:-}" = "--list" ]; then
-    act -l -W .github/workflows/ci.yml
+    act -l -W ".github/workflows/$WORKFLOW"
     exit
 fi
 JOB="${1:?usage: act_ci.sh <job-id> | --list}"
@@ -110,7 +112,7 @@ fi
 # the volume makes the reuse explicit. Without a persistent path every run
 # restored nothing: a cold venv, and 0 zccache hits in the Rust build.
 # --pull=false: reuse the local runner image (a missing one is still pulled).
-act pull_request -W .github/workflows/ci.yml -j "$JOB" \
+act pull_request -W ".github/workflows/$WORKFLOW" -j "$JOB" \
     -e "/tmp/$RUN/event.json" \
     --local-repository "actions/checkout@v4=$CHECKOUT" \
     -P "ubuntu-24.04=$IMAGE" \
@@ -119,5 +121,4 @@ act pull_request -W .github/workflows/ci.yml -j "$JOB" \
     --container-options "--label clud.act-run=$RUN" \
     --artifact-server-path "/tmp/$RUN/artifacts" \
     --action-cache-path "$ACTION_CACHE" \
-    --cache-server-path "$SERVER_CACHE" \
-    "$@"
+    --cache-server-path "$SERVER_CACHE" "$@"

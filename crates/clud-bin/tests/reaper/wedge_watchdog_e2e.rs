@@ -15,8 +15,10 @@
 //! `--include-ignored`). Run manually:
 //!
 //! ```bash
-//! soldr cargo test -p clud --test wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
+//! soldr cargo test -p clud --test reaper wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! Listed in docs/architecture/ci.md "Manual Windows probes"; keep that checklist in sync.
 //!
 //! `--test-threads=1` matters: all three tests share one process, and the
 //! sampler's "hottest thread" measurement would get noisy if two of these

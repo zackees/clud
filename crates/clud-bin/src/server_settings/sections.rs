@@ -141,13 +141,48 @@ pub fn effective_context_window(wire_id: &str) -> Option<u32> {
     {
         return Some(tokens);
     }
+    if wire_id.starts_with("gpt-") {
+        let choice = crate::codex_runtime::active_choice();
+        if let Some(tokens) = dynamic_codex_context_window(wire_id, choice) {
+            return Some(tokens);
+        }
+    }
     model_contexts().windows.get(wire_id).copied()
+}
+
+fn dynamic_codex_context_window(
+    wire_id: &str,
+    choice: &crate::codex_runtime::Choice,
+) -> Option<u32> {
+    let cli_id = if wire_id == choice.sol {
+        "codex-sol"
+    } else if wire_id == choice.luna {
+        "codex-luna"
+    } else {
+        return None;
+    };
+    provider_catalog::model_by_cli_id(cli_id).and_then(|entry| entry.claude_max_context_tokens)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server_settings::built_in;
+
+    #[test]
+    fn future_codex_wire_id_uses_reviewed_context() {
+        let choice = crate::codex_runtime::Choice {
+            sol: "gpt-7-sol".to_string(),
+            luna: "gpt-7-luna".to_string(),
+            sol_source: crate::codex_runtime::Source::Published,
+            luna_source: crate::codex_runtime::Source::Published,
+        };
+        assert_eq!(
+            dynamic_codex_context_window("gpt-7-sol", &choice),
+            Some(1_050_000)
+        );
+        assert_eq!(dynamic_codex_context_window("gpt-7-sol-pro", &choice), None);
+    }
 
     fn deepseek_section(default_model: &str, subagent_model: &str) -> Result<(), String> {
         DeepSeekSettings {
@@ -317,8 +352,8 @@ mod tests {
     fn effective_context_window_prefers_the_catalog_then_the_served_map() {
         // Catalog wins: the Codex row carries a reviewed
         // `claude_max_context_tokens`, and the served map has no such key.
-        assert_eq!(effective_context_window("gpt-5.6-sol"), Some(1_050_000));
-        assert!(!model_contexts().windows.contains_key("gpt-5.6-sol"));
+        assert_eq!(effective_context_window("gpt-6-sol"), Some(1_050_000));
+        assert!(!model_contexts().windows.contains_key("gpt-6-sol"));
         // Served map: uncataloged OpenRouter IDs resolve from the datasheet.
         assert_eq!(
             effective_context_window("xiaomi/mimo-v2.6-flash"),

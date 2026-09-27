@@ -45,23 +45,47 @@ scope = "machine"
 destination = "/root/.rustup"
 
 [stack.clud_1044_final_retry.volumes.soldr-home]
-scope = "machine"
+scope = "stack"
 destination = "/root/.soldr"
 
 [stack.clud_1044_final_retry.env]
 CARGO_TARGET_DIR = "/build/target"
 UV_CACHE_DIR = "/root/.cache/uv"
 RUFF_CACHE_DIR = "/root/.cache/ruff"
-# This repository pins Soldr through its packaging/CI flow rather than a
-# rust-toolchain.toml; the image itself pins Rust 1.94.
-SOLDR_ALLOW_UNPINNED = "1"
 GIT_CONFIG_COUNT = "1"
 GIT_CONFIG_KEY_0 = "safe.directory"
 GIT_CONFIG_VALUE_0 = "/workspace"
+# This repository pins Soldr through its packaging/CI flow rather than a
+# rust-toolchain.toml; the image itself pins Rust 1.95.0.
+SOLDR_ALLOW_UNPINNED = "1"
 
 [task.lint]
 stack = "clud_1044_final_retry"
 cmd = "cd /workspace && bash lint"
+
+[task.model-manifest-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && uv sync --frozen --group dev --no-install-project && .venv/bin/python -m pytest -q tests/test_model_manifest.py"
+
+[task.model-live-data]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && .venv/bin/python -c 'from models.manifest import build_manifest; from models.publish import observed_model_ids; print(build_manifest(observed_model_ids(), checked_at=\"2026-09-26T00:00:00Z\")[\"families\"])'"
+
+[task.codex-runtime-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo test -p clud --lib codex_runtime::tests"
+
+[task.codex-model-integration-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && soldr cargo test -p clud --lib codex_model::tests && soldr cargo test -p clud --lib provider_catalog::tests && soldr cargo test -p clud --lib codex_translate::tests"
+
+[task.codex-all-lib-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && uv sync --frozen --group dev --no-install-project && soldr cargo build -p mock-agent && CLUD_TEST_MOCK_AGENT_BINARY=/workspace/target/debug/mock-agent soldr cargo test -p clud --lib -- --quiet"
+
+[task.codex-integration-test]
+stack = "clud_1044_final_retry"
+cmd = "cd /workspace && uv sync --frozen --group dev --no-install-project && soldr cargo build -p clud && CLUD_INTEGRATION_TESTS=1 CLUD_NO_UNLOCK=1 CLUD_TEST_BINARY=/workspace/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/workspace/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/workspace/target/debug/mock-agent .venv/bin/python -m pytest -q tests/integration/test_mock_agents.py -k 'test_codex_flag or test_unified_route_matrix_through_one_mocked_claude_session or test_cross_route_translates_upstream_and_closes_listener or test_sol_selection_survives_single_iteration_claude_loop or test_published_sol_or_fallback_reaches_billed_bridge_turn'"
 
 [task.focused-test]
 stack = "clud_1044_final_retry"
@@ -376,3 +400,19 @@ cmd = "cd /workspace && soldr cargo build -p mock-agent && (uv sync --frozen --g
 [task.rm-pytest-full-verify]
 stack = "clud_rm_verify"
 cmd = "cd /workspace && soldr cargo build -p clud -p mock-agent --bins && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && CLUD_TEST_BINARY=/build/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/build/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/build/target/debug/mock-agent /workspace/.venv/bin/python -m pytest -p no:cacheprovider -m 'not integration'"
+
+[task.act-installer-pages]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=install-pages.yml sh /workspace/ci/act_ci.sh build-site"
+
+[task.act-model-pages]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=model-pages.yml sh /workspace/ci/act_ci.sh build-site"
+
+[task.act-installer-core]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh ape-core-tests"
+
+[task.act-installer-linux]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh linux-distro"

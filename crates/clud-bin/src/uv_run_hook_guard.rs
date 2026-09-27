@@ -63,6 +63,7 @@ pub fn run(project_root: &Path, verbose: bool) {
         create_process_group: true,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     let _ = run_guard_process(&process, DEADLINE, verbose);
 }
@@ -157,6 +158,7 @@ mod tests {
             create_process_group: true,
             stdin_mode: StdinMode::Inherit,
             nice: None,
+            address_space_limit_bytes: None,
         });
         let started = Instant::now();
         assert!(run_guard_process(

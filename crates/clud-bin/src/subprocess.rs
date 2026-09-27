@@ -119,6 +119,7 @@ impl ManagedSubprocess {
                 StdinMode::Null
             },
             nice: None,
+            address_space_limit_bytes: None,
         });
         process.start().map_err(|error| error.to_string())?;
         Ok(Self(ManagedSubprocessInner::Native(Box::new(process))))

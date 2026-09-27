@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import re
@@ -115,7 +116,7 @@ class TestBackendSelection:
         report = _parse_agent_report(result)
         assert "codex" in report["program"].lower()
         pairs = list(zip(report["args"], report["args"][1:], strict=False))
-        assert pairs.count(("-m", "gpt-5.6-sol")) == 1
+        assert pairs.count(("-m", "gpt-6-sol")) == 1
         assert pairs.count(("-c", 'model_reasoning_effort="low"')) == 1
         assert not any("terra" in arg or arg == "medium" for arg in report["args"])
 
@@ -160,7 +161,6 @@ class TestBackendSelection:
         assert report["clud_exe_probe"]["stdout"].strip() == expected_version.stdout.strip()
         assert "STUB-CLUD" not in report["clud_exe_probe"]["stdout"]
         assert not marker.exists(), "the PATH-first stub intercepted an internal invocation"
-
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object lifecycle")
     def test_tool_shell_exit_reaps_leaked_client(
@@ -226,11 +226,17 @@ class TestBackendSelection:
 def _responses_sse(reply_index: int, input_tokens: int, cached_tokens: int) -> bytes:
     """Return a valid Responses stream with deterministic cache usage."""
     completed = json.dumps(
-        {"type": "response.completed", "response": {"usage": {
-            "input_tokens": input_tokens,
-            "input_tokens_details": {"cached_tokens": cached_tokens},
-            "output_tokens": 2,
-        }}}, separators=(",", ":"),
+        {
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "input_tokens_details": {"cached_tokens": cached_tokens},
+                    "output_tokens": 2,
+                }
+            },
+        },
+        separators=(",", ":"),
     ).encode()
     return (
         b'event: response.created\ndata: {"type":"response.created"}\n\n'
@@ -242,7 +248,9 @@ def _responses_sse(reply_index: int, input_tokens: int, cached_tokens: int) -> b
         + b'"}\n\n'
         + b'event: response.output_text.done\ndata: {"type":"response.output_text.done",'
         + b'"output_index":0,"content_index":0}\n\n'
-        + b"event: response.completed\ndata: " + completed + b"\n\n"
+        + b"event: response.completed\ndata: "
+        + completed
+        + b"\n\n"
     )
 
 
@@ -319,11 +327,13 @@ class _FakeResponsesServer:
                         else 0
                     )
                     self._cache_inputs[cache_slot] = input_items
-                    self.cache_observations.append({
-                        "input_tokens": input_tokens,
-                        "cached_tokens": cached_tokens,
-                        "cache_hit": prefix_is_stable,
-                    })
+                    self.cache_observations.append(
+                        {
+                            "input_tokens": input_tokens,
+                            "cached_tokens": cached_tokens,
+                            "cache_hit": prefix_is_stable,
+                        }
+                    )
                     response = _responses_sse(len(self.requests), input_tokens, cached_tokens)
                     connection.sendall(
                         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -391,15 +401,18 @@ class _FakeAnthropicServer:
                             break
                         rest += chunk
                     self.requests.append(head + b"\r\n\r\n" + rest)
-                    response = json.dumps({
-                        "id": f"fake-{self.marker}-{len(self.requests)}",
-                        "type": "message",
-                        "role": "assistant",
-                        "model": "fake-model",
-                        "content": [{"type": "text", "text": f"fake {self.marker}"}],
-                        "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 3, "output_tokens": 2},
-                    }, separators=(",", ":")).encode()
+                    response = json.dumps(
+                        {
+                            "id": f"fake-{self.marker}-{len(self.requests)}",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": "fake-model",
+                            "content": [{"type": "text", "text": f"fake {self.marker}"}],
+                            "stop_reason": "end_turn",
+                            "usage": {"input_tokens": 3, "output_tokens": 2},
+                        },
+                        separators=(",", ":"),
+                    ).encode()
                     connection.sendall(
                         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                         b"Content-Length: %d\r\nConnection: close\r\n\r\n%s"
@@ -414,6 +427,37 @@ class _FakeAnthropicServer:
         self._listener.close()
 
 
+class _ModelDocumentServer:
+    """Serve one published-document fixture over the same HTTP path as Pages."""
+
+    def __init__(self, document: dict[str, Any]) -> None:
+        body = json.dumps(document).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_port}/models/manifest.json"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+
+
 @pytest.fixture
 def fake_responses():
     server = _FakeResponsesServer()
@@ -425,10 +469,7 @@ def fake_responses():
 
 @pytest.fixture
 def fake_anthropic_upstreams():
-    servers = {
-        name: _FakeAnthropicServer(name)
-        for name in ("claude", "deepseek", "openrouter")
-    }
+    servers = {name: _FakeAnthropicServer(name) for name in ("claude", "deepseek", "openrouter")}
     try:
         yield servers
     finally:
@@ -438,6 +479,112 @@ def fake_anthropic_upstreams():
 
 class TestCodexBridgeForeground:
     """Issue #626: Codex provider through the Claude foreground harness."""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="fixture uses a POSIX executable script")
+    @pytest.mark.parametrize(
+        ("available", "expected", "source", "page_two"),
+        [
+            (["gpt-7-sol", "gpt-7-luna"], "gpt-7-sol", "published", False),
+            (["gpt-6-sol", "gpt-6-luna"], "gpt-6-sol", "built_in", False),
+            (["gpt-7-sol", "gpt-6-luna"], "gpt-7-sol", "published", True),
+        ],
+    )
+    def test_published_sol_or_fallback_reaches_billed_bridge_turn(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        fake_responses: _FakeResponsesServer,
+        available: list[str],
+        expected: str,
+        source: str,
+        page_two: bool,
+    ) -> None:
+        """#1476: stable Claude argv, account-checked wire ID, and billed low effort."""
+        document = {
+            "schema_version": 1,
+            "source": "openrouter+models.dev-merge",
+            "checked_at": "2026-09-26T21:00:00Z",
+            "trigger": "manual",
+            "families": {"sol": "gpt-7-sol", "luna": "gpt-7-luna"},
+            "defaults": {"codex": {"model": "gpt-7-sol", "effort": "low"}},
+        }
+        server = _ModelDocumentServer(document)
+        bin_dir = tmp_path / "fake-codex-bin"
+        bin_dir.mkdir()
+        app_server = bin_dir / "codex"
+        rows = [
+            {"id": model, "supportedReasoningEfforts": [{"reasoningEffort": "low"}]}
+            for model in available
+        ]
+        script = (
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    frame = json.loads(line)\n"
+            "    if frame.get('method') == 'model/list':\n"
+            f"        if {page_two!r} and frame.get('params', {{}}).get('cursor') != 'second':\n"
+            "            result = {'data': [], 'nextCursor': 'second'}\n"
+            "        else:\n"
+            f"            result = {{'data': {rows!r}, 'nextCursor': None}}\n"
+            "        print(json.dumps({'id': frame['id'], 'result': result}), flush=True)\n"
+            "        if result['nextCursor'] is None:\n"
+            "            break\n"
+        )
+        app_server.write_text(script, encoding="utf-8")
+        app_server.chmod(0o755)
+        env = mock_env.copy()
+        env.update(
+            {
+                "PATH": str(bin_dir) + os.pathsep + env["PATH"],
+                "CLUD_MODEL_MANIFEST_URL": server.url,
+                "CLUD_INTEGRATION_TESTS": "1",
+                "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": fake_responses.base_url,
+            }
+        )
+        try:
+            dry = _run(
+                clud_binary, "--dry-run", "--codex", "--harness", "claude", "-p", "hello", env=env
+            )
+            assert dry.returncode == 0, dry.stderr
+            plan = json.loads(dry.stdout)
+            assert plan["model_selection"]["wire_model"] == expected
+            assert plan["model_selection"]["effort"] == "low"
+            assert plan["codex_model_source"] == source
+            native = _run(clud_binary, "--dry-run", "--codex", "-p", "hello", env=env)
+            assert native.returncode == 0, native.stderr
+            native_plan = json.loads(native.stdout)
+            assert native_plan["model_selection"]["wire_model"] == expected
+            assert native_plan["codex_model_source"] == source
+            assert native_plan["command"].count(expected) == 1
+            assert 'model_reasoning_effort="low"' in native_plan["command"]
+            model_index = plan["command"].index("--model")
+            assert plan["command"][model_index + 1] == "clud-claude-codex-sol"
+
+            probe_path = tmp_path / "published-sol-probe.json"
+            launched = _run(
+                clud_binary,
+                "--codex",
+                "--harness",
+                "claude",
+                "--subprocess",
+                "-p",
+                "hello",
+                "--",
+                "--mock-codex-bridge-probe",
+                str(probe_path),
+                env=env,
+            )
+            assert launched.returncode == 0, launched.stderr
+            probe = json.loads(probe_path.read_text(encoding="utf-8"))
+            assert probe["status"] == 200, probe
+            assert len(fake_responses.requests) == 1
+            _, _, body = fake_responses.requests[0].partition(b"\r\n\r\n")
+            billed = json.loads(body)
+            assert billed["model"] == expected
+            assert billed["reasoning"]["effort"] == "low"
+        finally:
+            server.close()
 
     def test_codex_cache_identity_is_stable_through_the_subprocess_harness(
         self,
@@ -506,8 +653,7 @@ class TestCodexBridgeForeground:
         for turn in range(1, 5):
             assert identities[turn] == identities[0]
             assert (
-                bodies[turn]["input"][: len(bodies[turn - 1]["input"])]
-                == bodies[turn - 1]["input"]
+                bodies[turn]["input"][: len(bodies[turn - 1]["input"])] == bodies[turn - 1]["input"]
             )
         assert identities[5] == identities[6]
         assert bodies[6]["input"][: len(bodies[5]["input"])] == bodies[5]["input"]
@@ -515,7 +661,14 @@ class TestCodexBridgeForeground:
 
         observations = fake_responses.cache_observations
         assert [entry["cache_hit"] for entry in observations] == [
-            False, True, True, True, True, False, True, False,
+            False,
+            True,
+            True,
+            True,
+            True,
+            False,
+            True,
+            False,
         ]
         total_uncached = sum(
             entry["input_tokens"] - entry["cached_tokens"] for entry in observations
@@ -535,20 +688,22 @@ class TestCodexBridgeForeground:
     ) -> None:
         """#1226: provider-shaped foreground coverage, not unit-only routing."""
         env = mock_env.copy()
-        env.update({
-            "CLUD_INTEGRATION_TESTS": "1",
-            "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": fake_responses.base_url,
-            "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": (
-                fake_anthropic_upstreams["claude"].base_url
-            ),
-            "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": (
-                fake_anthropic_upstreams["deepseek"].base_url
-            ),
-            "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": (
-                fake_anthropic_upstreams["openrouter"].base_url
-            ),
-            "ANTHROPIC_API_KEY": "ambient-key-must-not-reach-routed-fakes",
-        })
+        env.update(
+            {
+                "CLUD_INTEGRATION_TESTS": "1",
+                "CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL": fake_responses.base_url,
+                "CLUD_TEST_UNIFIED_ANTHROPIC_UPSTREAM_URL": (
+                    fake_anthropic_upstreams["claude"].base_url
+                ),
+                "CLUD_TEST_UNIFIED_DEEPSEEK_UPSTREAM_URL": (
+                    fake_anthropic_upstreams["deepseek"].base_url
+                ),
+                "CLUD_TEST_UNIFIED_OPENROUTER_UPSTREAM_URL": (
+                    fake_anthropic_upstreams["openrouter"].base_url
+                ),
+                "ANTHROPIC_API_KEY": "ambient-key-must-not-reach-routed-fakes",
+            }
+        )
         probe_path = tmp_path / "unified-route-probe.json"
         result = _run(
             clud_binary,
@@ -639,10 +794,7 @@ class TestCodexBridgeForeground:
         # the child turn is deliberately isolated from that cache scope. After
         # DeepSeek/OpenRouter the final main turn retains identity but is a
         # fresh route epoch, so it cannot replay Codex-private response items.
-        assert (
-            codex_bodies[1]["input"][: len(codex_bodies[0]["input"])]
-            == codex_bodies[0]["input"]
-        )
+        assert codex_bodies[1]["input"][: len(codex_bodies[0]["input"])] == codex_bodies[0]["input"]
         assert codex_bodies[0]["prompt_cache_key"] == codex_bodies[1]["prompt_cache_key"]
         assert codex_bodies[2]["prompt_cache_key"] != codex_bodies[1]["prompt_cache_key"]
         assert codex_bodies[3]["prompt_cache_key"] == codex_bodies[1]["prompt_cache_key"]
@@ -650,7 +802,10 @@ class TestCodexBridgeForeground:
         assert "unified-route-turn-2" not in final_input
         assert "unified-route-turn-3" not in final_input
         assert [entry["cache_hit"] for entry in fake_responses.cache_observations] == [
-            False, True, False, False,
+            False,
+            True,
+            False,
+            False,
         ]
 
     @pytest.mark.parametrize("launch_mode", ["--subprocess", "--pty"])
@@ -738,7 +893,7 @@ class TestCodexBridgeForeground:
         # literal on purpose: this is the one place the model id is observed
         # after travelling the whole path, so it is the assertion that would
         # catch an unintended change to what the user is charged.
-        assert sent["model"] == "gpt-5.6-sol"
+        assert sent["model"] == "gpt-6-sol"
         assert sent["reasoning"]["effort"] == "low"
         assert sent["stream"] is True
         assert sent["input"][0]["content"][0]["type"] == "input_text"
@@ -799,7 +954,7 @@ class TestCodexBridgeForeground:
         assert len(fake_responses.requests) == 1
         _, _, body = fake_responses.requests[0].partition(b"\r\n\r\n")
         sent = json.loads(body)
-        assert sent["model"] == "gpt-5.6-sol"
+        assert sent["model"] == "gpt-6-sol"
         assert sent["reasoning"]["effort"] == "low"
 
     @pytest.mark.parametrize("provider_flag", ["--claude", "--codex"])
