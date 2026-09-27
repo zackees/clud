@@ -697,6 +697,33 @@ mod tests {
     }
 
     #[test]
+    fn candidate_channel_keeps_previous_stable_and_requires_explicit_parse() {
+        let mut document = catalog(true, false);
+        let mut candidate = document["releases"][0].clone();
+        candidate["version"] = json!("2.10.0");
+        for row in candidate["platforms"].as_array_mut().unwrap() {
+            let asset = row["asset"].as_object_mut().unwrap();
+            for key in ["filename", "urls"] {
+                let replaced = asset[key].to_string().replace("2.9.0", "2.10.0");
+                asset.insert(key.to_owned(), serde_json::from_str(&replaced).unwrap());
+            }
+        }
+        document["releases"].as_array_mut().unwrap().push(candidate);
+        document["channels"]["candidate"] = json!("2.10.0");
+        let bytes = serde_json::to_vec(&document).unwrap();
+        assert!(Catalog::parse(&bytes).is_err());
+        let parsed = Catalog::parse_candidate(&bytes, "2.10.0").unwrap();
+        assert_eq!(parsed.latest_stable_version(), "2.9.0");
+        assert!(parsed
+            .resolve(
+                VersionChoice::Exact("2.10.0".into()),
+                linux_x64(GnuEligibility::Unverified),
+            )
+            .is_ok());
+        assert!(Catalog::parse_candidate(&bytes, "2.11.0").is_err());
+    }
+
+    #[test]
     fn both_linux_variants_choose_musl_even_when_gnu_comes_first() {
         let document = serde_json::to_vec(&catalog(true, true)).unwrap();
         let parsed = Catalog::parse(&document).unwrap();
