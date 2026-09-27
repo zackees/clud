@@ -557,7 +557,10 @@ mod posix {
                     return Err(format!("fresh shell {mode} lookup timed out"));
                 }
                 match process.read_stdout(Some(Duration::from_millis(100))) {
-                    ReadStatus::Line(line) => output.extend_from_slice(&line),
+                    ReadStatus::Line(line) => {
+                        output.extend_from_slice(&line);
+                        output.push(b'\n');
+                    }
                     ReadStatus::Timeout => {
                         let _ = process.poll();
                     }
