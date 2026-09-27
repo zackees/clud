@@ -48,16 +48,22 @@ def installer_target(tmp_path: Path):
         yield env, home / ".local" / "bin" / "clud"
         return
 
-    if os.environ.get("CI") != "true":
-        pytest.skip("Windows User environment test requires an ephemeral CI account")
+    if not (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    ):
+        pytest.skip("Windows User environment test requires a GitHub-hosted runner")
     import winreg
 
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         pytest.skip("Windows User environment lacks LOCALAPPDATA")
     destination = Path(local) / "Programs" / "clud" / "bin" / "clud.exe"
-    if destination.exists():
-        pytest.skip("Windows User profile already has clud installed")
+    programs = destination.parents[2]
+    install_tree = destination.parents[1]
+    programs_existed = programs.exists()
+    if install_tree.exists():
+        pytest.skip("Windows User profile already has a clud install tree")
     key = winreg.OpenKey(
         winreg.HKEY_CURRENT_USER,
         "Environment",
@@ -79,11 +85,10 @@ def installer_target(tmp_path: Path):
         else:
             winreg.SetValueEx(key, "Path", 0, prior[1], prior[0])
         key.Close()
-        if destination.exists():
-            destination.replace(tmp_path / "installed-clud.exe")
-        backup = destination.with_suffix(".clud-backup")
-        if backup.exists():
-            backup.replace(tmp_path / "installed-clud-backup")
+        if not programs_existed and programs.exists():
+            programs.replace(tmp_path / "installed-programs-tree")
+        elif install_tree.exists():
+            install_tree.replace(tmp_path / "installed-clud-tree")
 
 
 def assert_crlf(output: bytes) -> None:
@@ -131,6 +136,30 @@ def test_no_tty_refusal_preserves_existing_startup_file(tmp_path: Path) -> None:
     assert result.returncode == 2, result.stderr.decode(errors="replace")
     assert profile.read_text() == "# user settings\n"
     assert not (home / ".local").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows User registry")
+def test_no_tty_refusal_preserves_windows_user_path() -> None:
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        try:
+            before = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            before = None
+        result = run_process(
+            [str(clud_binary()), "--installer", "--install-current"],
+            env=os.environ.copy(),
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode == 2, result.stderr.decode(errors="replace")
+        try:
+            after = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            after = None
+        assert after == before
 
 
 def test_explicit_current_installs_verified_copy_offline(installer_target) -> None:

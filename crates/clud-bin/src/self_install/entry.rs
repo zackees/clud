@@ -180,10 +180,20 @@ fn run_selected(intent: InstallIntent, yes: bool) -> i32 {
             Ok(ConfirmChoice::Proceed) => {}
         }
     }
+    let activation = plan.activation.clone();
+    let version = plan.version.clone();
     match transaction::execute(plan) {
         Ok(()) => {
-            eprintln!("clud installer: binary committed; fresh PATH activation is pending");
-            1
+            match activation.apply_and_verify(&version) {
+                Ok(()) => {
+                    eprintln!("clud installer: installed clud {version} and verified fresh name-based lookup");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("clud installer: binary committed, but activation failed: {error}");
+                    1
+                }
+            }
         }
         Err(error) => {
             eprintln!("clud installer: {error}");
