@@ -10,7 +10,7 @@ case "$distro" in
     shell=/usr/bin/fish
     ;;
   fedora)
-    dnf install -y shadow-utils bash coreutils
+    dnf install -y shadow-utils util-linux-user bash coreutils
     shell=/bin/bash
     ;;
   alpine)

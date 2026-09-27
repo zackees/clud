@@ -6,7 +6,6 @@ let
 in
 pkgs.testers.runNixOSTest {
   name = "clud-native-installer-${builtins.currentSystem}";
-  qemu.forceAccel = false;
   nodes.machine = { pkgs, ... }: {
     virtualisation.memorySize = 2048;
     users.users.alice = {
