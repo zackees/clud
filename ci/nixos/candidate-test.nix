@@ -20,7 +20,6 @@ pkgs.testers.runNixOSTest {
     system.stateVersion = "25.05";
   };
   testScript = ''
-    import hashlib
     import json
 
     machine.wait_for_unit("multi-user.target")
