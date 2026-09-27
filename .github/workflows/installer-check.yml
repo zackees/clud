@@ -173,9 +173,125 @@ jobs:
           path: candidate-evidence/*
           if-no-files-found: warn
 
+  candidate-nixos:
+    name: Real NixOS VM ${{ matrix.target }}
+    needs: candidate-catalog
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-${{ matrix.target }}
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-catalog
+          path: candidate-fixture
+      - name: Verify and stage identical candidate bytes
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, shutil, tomllib
+          from ci.installer_candidate import verify_artifact
+          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          metadata = verify_artifact(pathlib.Path('candidate'), os.environ['TARGET'], os.environ['SOURCE_SHA'], version)
+          asset = pathlib.Path('candidate') / metadata['filename']
+          fixture_asset = pathlib.Path('candidate-fixture/assets') / metadata['filename']
+          fixture_asset.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(asset, fixture_asset)
+          with pathlib.Path(os.environ['GITHUB_ENV']).open('a') as env:
+              env.write(f"CANDIDATE_FILENAME={metadata['filename']}\nCANDIDATE_VERSION={version}\nCANDIDATE_SHA256={metadata['sha256']}\n")
+          print(json.dumps(metadata, sort_keys=True))
+          PY
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: system-features = nixos-test benchmark big-parallel kvm
+      - name: Boot matching NixOS architecture and install as fresh user
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64' || 'x86_64' }}"
+          nixpkgs=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./ci/nixos)).inputs.nixpkgs.outPath')
+          nix-build ci/nixos/candidate-test.nix --no-out-link \
+            --argstr nixpkgs "$nixpkgs" \
+            --argstr candidate "$PWD/candidate/$CANDIDATE_FILENAME" \
+            --argstr fixture "$PWD/candidate-fixture" \
+            --argstr version "$CANDIDATE_VERSION" \
+            --argstr digest "$CANDIDATE_SHA256"
+
+  candidate-distros:
+    name: Same musl bytes on ${{ matrix.distro }}
+    needs: candidate-catalog
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: archlinux
+            image: archlinux@sha256:f3691b4dde62ba4c4b6f0ae2c1fbf28e8c0c8c4b9a35c7e06dc1f70e21aa29f6
+          - distro: fedora
+            image: fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
+          - distro: alpine
+            image: alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-x86_64-unknown-linux-musl
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-catalog
+          path: candidate-fixture
+      - name: Verify exact shared asset and stage fixture
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, shutil, tomllib
+          from ci.installer_candidate import verify_artifact
+          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          metadata = verify_artifact(pathlib.Path('candidate'), 'x86_64-unknown-linux-musl', os.environ['SOURCE_SHA'], version)
+          fixture_asset = pathlib.Path('candidate-fixture/assets') / metadata['filename']
+          fixture_asset.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(pathlib.Path('candidate') / metadata['filename'], fixture_asset)
+          with pathlib.Path(os.environ['GITHUB_ENV']).open('a') as env:
+              env.write(f"CANDIDATE_VERSION={version}\nCANDIDATE_SHA256={metadata['sha256']}\n")
+          print(json.dumps(metadata, sort_keys=True))
+          PY
+      - name: Install and resolve on clean nonroot distribution
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          docker run --rm --platform linux/amd64 \
+            --mount "type=bind,src=$PWD/candidate,dst=/candidate,readonly" \
+            --mount "type=bind,src=$PWD/candidate-fixture,dst=/fixture,readonly" \
+            --mount "type=bind,src=$PWD/ci/installer_distro_guest.sh,dst=/guest.sh,readonly" \
+            '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$CANDIDATE_VERSION" "$CANDIDATE_SHA256"
+
   candidate-aggregate:
     name: Require six exact PR candidate hosts
-    needs: [catalog-unit, resolver-unit, catalog-site, candidate-build, candidate-catalog, candidate-host]
+    needs: [catalog-unit, resolver-unit, catalog-site, candidate-build, candidate-catalog, candidate-host, candidate-nixos, candidate-distros]
     if: always() && github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: ubuntu-24.04
     steps:
@@ -200,9 +316,11 @@ jobs:
           CANDIDATE_BUILD: ${{ needs.candidate-build.result }}
           CANDIDATE_CATALOG: ${{ needs.candidate-catalog.result }}
           CANDIDATE_HOST: ${{ needs.candidate-host.result }}
+          CANDIDATE_NIXOS: ${{ needs.candidate-nixos.result }}
+          CANDIDATE_DISTROS: ${{ needs.candidate-distros.result }}
           SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          for result in "$CATALOG_UNIT" "$RESOLVER_UNIT" "$CATALOG_SITE" "$CANDIDATE_BUILD" "$CANDIDATE_CATALOG" "$CANDIDATE_HOST"; do
+          for result in "$CATALOG_UNIT" "$RESOLVER_UNIT" "$CATALOG_SITE" "$CANDIDATE_BUILD" "$CANDIDATE_CATALOG" "$CANDIDATE_HOST" "$CANDIDATE_NIXOS" "$CANDIDATE_DISTROS"; do
             test "$result" = success
           done
           version=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
