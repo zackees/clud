@@ -121,5 +121,4 @@ act pull_request -W ".github/workflows/$WORKFLOW" -j "$JOB" \
     --container-options "--label clud.act-run=$RUN" \
     --artifact-server-path "/tmp/$RUN/artifacts" \
     --action-cache-path "$ACTION_CACHE" \
-    --cache-server-path "$SERVER_CACHE" \
-    "$@"
+    --cache-server-path "$SERVER_CACHE" "$@"

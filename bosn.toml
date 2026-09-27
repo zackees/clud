@@ -196,3 +196,11 @@ cmd = "ACT_WORKFLOW=install-pages.yml sh /workspace/ci/act_ci.sh build-site"
 [task.act-model-pages]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=model-pages.yml sh /workspace/ci/act_ci.sh build-site"
+
+[task.act-installer-core]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh ape-core-tests"
+
+[task.act-installer-linux]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh linux-distro"

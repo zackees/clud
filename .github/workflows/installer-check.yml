@@ -1,0 +1,256 @@
+name: Installer acceptance
+
+on:
+  pull_request:
+    paths:
+      - installer/**
+      - tests/test_installer_*.py
+      - .github/workflows/installer-check.yml
+      - .github/workflows/auto-release.yml
+      - ci/act_ci.sh
+      - bosn.toml
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Published tag whose installer should be tested.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  catalog-site:
+    name: Published release to catalog and Pages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Unit tests
+        run: |
+          python -m pip install pytest running-process
+          python -m pytest -q tests/test_installer_catalog.py tests/test_installer_verify_site.py
+      - name: Build complete site from actual published releases
+        run: python -m installer.site site
+      - name: Validate catalog structure and semantics
+        run: |
+          python -m pip install 'git+https://github.com/zackees/manifest.json@main'
+          manifest-validate site/install/manifest.json
+      - name: Assert exact Pages paths and latest release
+        run: |
+          test -f site/index.html
+          test -f site/install/index.html
+          test -f site/install/manifest.json
+          python -m installer.verify_site site
+
+  build-ape:
+    name: Obtain installer APE
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name != 'workflow_call'
+      - uses: astral-sh/setup-uv@v5
+        if: github.event_name != 'workflow_call'
+      - name: Compile installer APE for pull request validation
+        if: github.event_name != 'workflow_call'
+        run: bash installer/build_ape.sh
+      - name: Download the released installer APE
+        if: github.event_name == 'workflow_call'
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          curl -fLsS --retry 5 \
+            "https://github.com/zackees/clud/releases/download/${RELEASE_TAG}/clud-installer.exe" \
+            -o clud-installer.exe
+          test "$(head -c 6 clud-installer.exe)" = MZqFpD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clud-installer-ape
+          path: clud-installer.exe
+          if-no-files-found: error
+
+  ape-host:
+    name: Install and verify on ${{ matrix.runner }}
+    needs: build-ape
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            expected: linux x86_64
+          - runner: ubuntu-24.04-arm
+            expected: linux aarch64
+          - runner: macos-15-intel
+            expected: darwin x86_64
+          - runner: macos-15
+            expected: darwin aarch64
+          - runner: windows-2025
+            expected: windows x86_64
+          - runner: windows-11-arm
+            expected: windows aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.runner == 'windows-2025'
+      - uses: actions/download-artifact@v4
+        with:
+          name: clud-installer-ape
+      - uses: actions/setup-python@v5
+        if: matrix.runner == 'windows-2025'
+        with:
+          python-version: '3.13'
+      - name: Install Windows ConPTY test dependencies
+        if: matrix.runner == 'windows-2025'
+        shell: bash
+        run: python -m pip install pytest running-process pywinpty
+      - name: Exercise the selector in a real Windows ConPTY
+        if: matrix.runner == 'windows-2025'
+        shell: bash
+        run: python -m pytest -q tests/test_installer_pty.py
+      - name: Launch the same downloaded APE bytes
+        shell: bash
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.expected }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CLUD_TEST_VERSION: ''
+        run: |
+          set -euo pipefail
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum clud-installer.exe
+          else
+            shasum -a 256 clud-installer.exe
+          fi
+          chmod +x clud-installer.exe
+          ./clud-installer.exe --version
+          ./clud-installer.exe --self-test-json
+          ./clud-installer.exe --self-test-catalog
+          ./clud-installer.exe --self-test-tty
+          ./clud-installer.exe --self-test-sha256
+          ./clud-installer.exe --self-test-path
+          actual=$(./clud-installer.exe --host-platform)
+          echo "Detected host platform: $actual (expected $EXPECTED_PLATFORM)"
+          test "$actual" = "$EXPECTED_PLATFORM"
+          version=$(./clud-installer.exe --latest-stable)
+          echo "Testing latest stable clud $version on $actual (installer release ${RELEASE_TAG:-PR build})"
+          test -n "$version"
+          if [ "$RUNNER_OS" = Windows ]; then
+            testhome="$(cygpath -u "$RUNNER_TEMP")/clud-installer-home"
+            mkdir -p "$testhome/AppData/Local"
+            USERPROFILE="$(cygpath -w "$testhome")"
+            export USERPROFILE
+            # Keep the native Windows profile path intact when Git Bash starts
+            # the PE APE; MSYS otherwise rewrites it into /D/... form.
+            export MSYS2_ENV_CONV_EXCL=USERPROFILE
+            export HOME="$USERPROFILE"
+            unset LOCALAPPDATA
+            env -u LOCALAPPDATA ./clud-installer.exe --install-version "$version" --yes
+            # PowerShell environment variables must not be expanded by Bash.
+            # shellcheck disable=SC2016
+            CLUD_TEST_VERSION="$version" powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
+              '$d=Join-Path $env:USERPROFILE "AppData\Local\Programs\clud\bin"; $u=[Environment]::GetEnvironmentVariable("Path","User"); if(-not (($u -split ";")|Where-Object { $_ -and $_.TrimEnd([char]92) -ieq $d.TrimEnd([char]92) })) { throw "install directory missing from persistent user PATH" }; $env:Path="$u;$env:Path"; $c=Get-Command clud -CommandType Application -ErrorAction Stop; if($c.Source -ine (Join-Path $d "clud.exe")) { throw "wrong clud resolved: $($c.Source)" }; $out=& $c.Source --version; if($out -notmatch [regex]::Escape($env:CLUD_TEST_VERSION)) { throw "unexpected version: $out" }; Write-Output $c.Source; Write-Output $out'
+          else
+            testhome="$RUNNER_TEMP/clud-installer-home"
+            mkdir -p "$testhome"
+            export HOME="$testhome"
+            export TMPDIR="$RUNNER_TEMP"
+            if [ "$RUNNER_OS" = macOS ]; then
+              test_shell=zsh
+              test -x /bin/zsh
+              export SHELL=/bin/zsh
+            else
+              test_shell=bash
+              unset SHELL
+            fi
+            for profile in .profile .bash_profile .bash_login .bashrc .zprofile .zshrc; do
+              printf '%s\n' '# clud-installer managed PATH' > "$testhome/$profile"
+            done
+            PATH="$testhome/.local/bin:$PATH" ./clud-installer.exe --install-version "$version" --yes
+            expected_executable="$testhome/.local/bin/clud"
+            resolved=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -l -c 'command -v clud')
+            test "$resolved" = "$testhome/.local/bin/clud"
+            checked=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -l -c 'clud --version')
+            test "$checked" = "clud $version"
+            interactive_resolved=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -i -c 'command -v clud' 2>/dev/null)
+            test "$interactive_resolved" = "$expected_executable"
+            interactive_checked=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -i -c 'clud --version' 2>/dev/null)
+            test "$interactive_checked" = "clud $version"
+            echo "$resolved"
+            echo "$checked"
+            echo "Interactive-shell verification: $interactive_resolved -> $interactive_checked"
+          fi
+
+  ape-core-tests:
+    name: APE catalog and terminal unit tests
+    needs: build-ape
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: clud-installer-ape
+      - name: Exercise catalog parsing and terminal renderer in the built APE
+        run: |
+          chmod +x clud-installer.exe
+          python -m pip install pytest running-process
+          python -m pytest -q tests/test_installer_pty.py
+          ./clud-installer.exe --self-test-json
+          ./clud-installer.exe --self-test-catalog
+          ./clud-installer.exe --self-test-tty
+          ./clud-installer.exe --self-test-sha256
+          ./clud-installer.exe --self-test-path
+          ./clud-installer.exe --host-platform
+          ./clud-installer.exe --list
+
+  linux-distro:
+    name: Install on ${{ matrix.image }} container
+    needs: build-ape
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - archlinux:latest
+          - fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: clud-installer-ape
+      - name: Verify downloaded release on this Linux distribution
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          container="clud-installer-${DISTRO_IMAGE//[^a-zA-Z0-9]/-}-$$"
+          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "$container" "$DISTRO_IMAGE" tail -f /dev/null
+          docker exec "$container" mkdir -p /workspace/installer
+          docker cp clud-installer.exe "$container:/workspace/clud-installer.exe"
+          docker cp installer/test_linux_container.sh "$container:/workspace/installer/test_linux_container.sh"
+          docker exec --workdir /workspace "$container" bash installer/test_linux_container.sh
+
+  installer-acceptance:
+    name: Installer acceptance aggregate
+    needs: [catalog-site, ape-core-tests, ape-host, linux-distro]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject missing, skipped, or failed coverage
+        env:
+          CATALOG: ${{ needs.catalog-site.result }}
+          APE_CORE: ${{ needs.ape-core-tests.result }}
+          APE_HOSTS: ${{ needs.ape-host.result }}
+          LINUX_DISTROS: ${{ needs.linux-distro.result }}
+        run: |
+          test "$CATALOG" = success
+          test "$APE_CORE" = success
+          test "$APE_HOSTS" = success
+          test "$LINUX_DISTROS" = success
