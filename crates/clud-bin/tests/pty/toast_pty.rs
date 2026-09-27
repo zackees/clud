@@ -74,6 +74,23 @@ fn marker_child() -> Vec<String> {
     }
 }
 
+/// The child writes nothing during the HUD's appearance, fade, and expiry.
+fn quiet_child() -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "echo child-ready & ping -n 6 127.0.0.1 >nul & echo child-done".into(),
+        ]
+    } else {
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 'child-ready\\r\\n'; sleep 5; printf 'child-done\\r\\n'".into(),
+        ]
+    }
+}
+
 /// Run `argv` through the composited pump and return everything written.
 fn run_composited(
     argv: Vec<String>,
@@ -175,6 +192,43 @@ fn kitty_tier_places_and_removes_the_toast_around_live_child_output() {
         contents.contains("child-done"),
         "child text corrupted: {contents:?}"
     );
+}
+
+#[test]
+fn cpu_hud_appears_fades_and_expires_while_the_child_is_quiet() {
+    require_pty_or_skip!("cpu_hud_appears_fades_and_expires_while_the_child_is_quiet");
+    let hub = ToastHub::new();
+    let publisher_hub = Arc::clone(&hub);
+    let publisher = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        let now = std::time::Instant::now();
+        publisher_hub.publish(ToastEvent::Show(
+            Toast::new("cpu", "cpu 287 % quiet-e2e", Severity::Warn, now)
+                .expiring_after(Duration::from_millis(2500)),
+        ));
+    });
+    let bytes = run_composited(quiet_child(), hub, ToastTier::Kitty, Fallback::None);
+    publisher.join().unwrap();
+    let stream = String::from_utf8_lossy(&bytes);
+    let ready = stream.find("child-ready").expect("child ready marker");
+    let first_upload = stream.find("a=t,f=100").expect("CPU HUD appeared");
+    let second_upload = stream[first_upload + 1..]
+        .find("a=t,f=100")
+        .map(|offset| first_upload + 1 + offset)
+        .expect("CPU HUD faded after two seconds");
+    let removed = stream[second_upload..]
+        .find("a=d,d=i")
+        .map(|offset| second_upload + offset)
+        .expect("CPU HUD expired");
+    let done = stream.find("child-done").expect("child done marker");
+    assert!(ready < first_upload && first_upload < second_upload && second_upload < removed);
+    assert!(
+        removed < done,
+        "HUD lifecycle must finish before child output resumes"
+    );
+    let screen = replay(&bytes);
+    assert!(screen.screen().contents().contains("child-ready"));
+    assert!(screen.screen().contents().contains("child-done"));
 }
 
 /// Title fallback (Codex and other harnesses without an in-grid tier): the

@@ -25,13 +25,12 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 use super::kitty;
 use super::raster;
-use super::statusline::{
-    usage_details, usage_summary, usage_title, StatusStateWriter, StatusUsage,
-};
+use super::statusline::{usage_title, StatusStateWriter, StatusUsage};
 use super::text_tier::{self, CellRect};
 use super::tier::ToastTier;
 use super::tracker::EscapeTracker;
 use super::{Toast, ToastEvent, ToastHub};
+use crate::cpu_banner::CPU_TOAST_KEY;
 
 /// How long a synchronized-update block may hold a toast back before it is
 /// drawn anyway. A block that stays open this long is a child that stopped
@@ -42,8 +41,9 @@ pub const SYNC_DEFER_LIMIT: Duration = Duration::from_millis(250);
 /// expire.
 pub const TICK: Duration = Duration::from_millis(100);
 
-const USAGE_ROWS: u16 = 1;
-const USAGE_EXPANDED_ROWS: u16 = 3;
+const CPU_FADE_AFTER: Duration = Duration::from_secs(2);
+const CPU_INITIAL_OPACITY: u8 = 90;
+const CPU_RESTING_OPACITY: u8 = 50;
 
 /// What renders a toast when no in-grid tier applies.
 #[derive(Clone, Default)]
@@ -91,10 +91,9 @@ pub struct ToastInput {
 #[derive(Debug, Default)]
 struct InputState {
     close: Option<CellRect>,
-    usage: Option<CellRect>,
+    cpu: Option<CellRect>,
     hover_armed: bool,
-    manually_expanded: bool,
-    hovering_usage: bool,
+    hovering_cpu: bool,
 }
 
 impl ToastInput {
@@ -106,40 +105,36 @@ impl ToastInput {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).close = rect;
     }
 
-    pub fn usage_rect(&self) -> Option<CellRect> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).usage
+    pub fn cpu_rect(&self) -> Option<CellRect> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).cpu
     }
 
-    pub fn usage_hover_armed(&self) -> bool {
+    pub fn cpu_hover_armed(&self) -> bool {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .hover_armed
     }
 
-    pub fn toggle_usage(&self) {
+    pub fn set_cpu_hover(&self, hovering: bool) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.manually_expanded = !state.manually_expanded;
+        state.hovering_cpu = state.cpu.is_some() && state.hover_armed && hovering;
     }
 
-    pub fn set_usage_hover(&self, hovering: bool) {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .hovering_usage = hovering;
-    }
-
-    fn usage_expanded(&self) -> bool {
+    fn cpu_hovered(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.manually_expanded || state.hovering_usage
+        state.hovering_cpu && state.hover_armed && state.cpu.is_some()
     }
 
-    fn set_usage(&self, rect: Option<CellRect>, hover_armed: bool) {
+    fn set_cpu(&self, rect: Option<CellRect>, hover_armed: bool) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.usage = rect;
+        if state.cpu != rect {
+            state.hovering_cpu = false;
+        }
+        state.cpu = rect;
         state.hover_armed = hover_armed;
-        if rect.is_none() {
-            state.hovering_usage = false;
+        if rect.is_none() || !hover_armed {
+            state.hovering_cpu = false;
         }
     }
 }
@@ -162,7 +157,6 @@ pub struct Compositor {
     shadow: vt100::Parser,
     tracker: EscapeTracker,
     input: Arc<ToastInput>,
-    hub_version: Option<u64>,
     visible: Option<Toast>,
     drawn: Drawn,
     pending: bool,
@@ -174,9 +168,10 @@ pub struct Compositor {
     repaint_screen: bool,
     title_pushed: bool,
     usage: Option<StatusUsage>,
-    usage_expanded: bool,
-    usage_drawn: bool,
-    usage_transmitted: Option<(String, u16, u16)>,
+    cpu: Option<Toast>,
+    cpu_appeared_at: Option<Instant>,
+    cpu_drawn: bool,
+    cpu_transmitted: Option<(String, super::Severity, u16, u16, u8)>,
 }
 
 impl Compositor {
@@ -192,7 +187,6 @@ impl Compositor {
             shadow: vt100::Parser::new(rows, cols, 0),
             tracker: EscapeTracker::new(),
             input: Arc::new(ToastInput::default()),
-            hub_version: None,
             visible: None,
             drawn: Drawn::None,
             pending: false,
@@ -201,9 +195,10 @@ impl Compositor {
             repaint_screen: false,
             title_pushed: false,
             usage: None,
-            usage_expanded: false,
-            usage_drawn: false,
-            usage_transmitted: None,
+            cpu: None,
+            cpu_appeared_at: None,
+            cpu_drawn: false,
+            cpu_transmitted: None,
         }
     }
 
@@ -218,11 +213,10 @@ impl Compositor {
 
     /// Whether the writer should wake on [`TICK`] rather than block.
     pub fn wants_tick(&self) -> bool {
+        // Producers publish from another thread while the child TUI may be
+        // completely quiet. A bounded wake is needed even before the first
+        // event, and later for the opacity transition and expiry.
         self.tier != ToastTier::Off
-            && (self.pending
-                || self.drawn != Drawn::None
-                || self.usage_writer.is_some()
-                || !self.hub.snapshot(Instant::now()).is_empty)
     }
 
     /// Forward one child burst, compositing the toast around it.
@@ -234,7 +228,7 @@ impl Compositor {
         let mut out = Vec::with_capacity(bytes.len() + 64);
         self.sync_hub(now);
         self.sync_usage();
-        self.sync_usage_input();
+        self.sync_cpu_opacity(now);
 
         // A text-cell toast is lifted before the child draws so scrolls and
         // partial rewrites move the child's real content, not ours. If the
@@ -258,8 +252,8 @@ impl Compositor {
             // Kitty drops images on clear/reset/alt switch; the alternate
             // screen takes any text-cell toast with it.
             self.transmitted = None;
-            self.usage_transmitted = None;
-            self.usage_drawn = false;
+            self.cpu_transmitted = None;
+            self.cpu_drawn = false;
             if matches!(self.drawn, Drawn::Kitty { .. } | Drawn::Cells { .. }) {
                 self.drawn = Drawn::None;
             }
@@ -269,7 +263,7 @@ impl Compositor {
             // Images scroll with text: pin the toast back after every burst.
             self.pending = true;
         }
-        if self.usage_drawn {
+        if self.cpu_drawn {
             self.pending = true;
         }
         out.extend(self.render(now));
@@ -284,9 +278,14 @@ impl Compositor {
         if matches!(self.drawn, Drawn::Cells { .. }) {
             self.repaint_screen = true;
         }
-        if matches!(self.drawn, Drawn::Kitty { .. } | Drawn::Cells { .. }) {
+        // Keep Kitty placement ownership until render can either re-pin it or
+        // delete it when the resized screen no longer has room.
+        if matches!(self.drawn, Drawn::Cells { .. }) {
             self.drawn = Drawn::None;
         }
+        self.sync_hub(now);
+        self.sync_usage();
+        self.sync_cpu_opacity(now);
         self.pending = true;
         self.render(now)
     }
@@ -297,7 +296,7 @@ impl Compositor {
         }
         self.sync_hub(now);
         self.sync_usage();
-        self.sync_usage_input();
+        self.sync_cpu_opacity(now);
         self.render(now)
     }
 
@@ -306,30 +305,45 @@ impl Compositor {
     /// safe point.
     pub fn finish(&mut self) -> Vec<u8> {
         let mut out = self.remove_drawn();
-        out.extend(self.remove_usage_drawn());
+        out.extend(self.remove_cpu_drawn());
         if self.transmitted.take().is_some() {
             out.extend(kitty::delete_image(self.image_id));
         }
-        if self.usage_transmitted.take().is_some() {
-            out.extend(kitty::delete_image(self.usage_image_id()));
+        if self.cpu_transmitted.take().is_some() {
+            out.extend(kitty::delete_image(self.cpu_image_id()));
         }
         self.input.set(None);
         out
     }
 
     fn sync_hub(&mut self, now: Instant) {
-        let snapshot = self.hub.snapshot(now);
-        if self.hub_version == Some(snapshot.version) {
-            return;
-        }
-        self.hub_version = Some(snapshot.version);
-        let changed = match (&self.visible, &snapshot.visible) {
+        let snapshot = self.hub.snapshot_with_key(now, CPU_TOAST_KEY);
+        let cpu = snapshot
+            .keyed
+            .filter(|toast| self.cpu_cells(&toast.text).is_some());
+        let visible = if cpu.is_some() {
+            snapshot.other_visible
+        } else {
+            snapshot.visible
+        };
+        let changed = match (&self.visible, &visible) {
             (Some(a), Some(b)) => !a.same_content(b),
             (None, None) => false,
             _ => true,
         };
-        self.visible = snapshot.visible;
-        if changed {
+        let cpu_changed = match (&self.cpu, &cpu) {
+            (Some(a), Some(b)) => !a.same_content(b),
+            (None, None) => false,
+            _ => true,
+        };
+        if self.cpu.is_none() && cpu.is_some() {
+            self.cpu_appeared_at = Some(now);
+        } else if cpu.is_none() {
+            self.cpu_appeared_at = None;
+        }
+        self.visible = visible;
+        self.cpu = cpu;
+        if changed || cpu_changed {
             self.pending = true;
         }
     }
@@ -345,12 +359,32 @@ impl Compositor {
         }
     }
 
-    fn sync_usage_input(&mut self) {
-        let expanded = self.input.usage_expanded();
-        if expanded != self.usage_expanded {
-            self.usage_expanded = expanded;
+    fn sync_cpu_opacity(&mut self, now: Instant) {
+        if self.cpu.is_some()
+            && self.cpu_transmitted.as_ref().map(|content| content.4) != Some(self.cpu_opacity(now))
+        {
             self.pending = true;
         }
+    }
+
+    fn cpu_opacity(&self, now: Instant) -> u8 {
+        if self.input.cpu_hovered()
+            || self
+                .cpu_appeared_at
+                .is_some_and(|at| now.saturating_duration_since(at) < CPU_FADE_AFTER)
+        {
+            CPU_INITIAL_OPACITY
+        } else {
+            CPU_RESTING_OPACITY
+        }
+    }
+
+    fn cpu_cells(&self, text: &str) -> Option<(u16, u16)> {
+        let (term_rows, term_cols) = self.shadow.screen().size();
+        if self.tier != ToastTier::Kitty || term_rows < raster::TOAST_ROWS {
+            return None;
+        }
+        raster::cpu_cells(text, term_cols)
     }
 
     fn wrap_pending(&self) -> bool {
@@ -381,8 +415,8 @@ impl Compositor {
                 Drawn::Kitty { .. } | Drawn::Cells { .. } | Drawn::Title
             )
             || self.repaint_screen
-            || self.usage_drawn
-            || self.usage_target();
+            || self.cpu_drawn
+            || self.cpu_target();
         if needs_bytes && !self.injection_allowed(now) {
             return Vec::new();
         }
@@ -421,14 +455,14 @@ impl Compositor {
                 self.input.set(None);
             }
         }
-        out.extend(self.render_usage());
+        out.extend(self.render_cpu(now));
         out
     }
 
     fn target(&self) -> Target {
         if self.visible.is_none() {
             if self.usage.is_some()
-                && !self.usage_target()
+                && !self.cpu_target()
                 && matches!(self.fallback, Fallback::Title)
             {
                 return Target::Title;
@@ -437,7 +471,18 @@ impl Compositor {
         }
         let (rows, cols) = self.shadow.screen().size();
         match self.tier {
-            ToastTier::Kitty if raster::toast_cells("", cols).is_some() => return Target::Kitty,
+            ToastTier::Kitty
+                if raster::toast_cells("", cols).is_some()
+                    && rows
+                        >= raster::TOAST_ROWS
+                            + if self.cpu_target() {
+                                raster::TOAST_ROWS
+                            } else {
+                                0
+                            } =>
+            {
+                return Target::Kitty;
+            }
             ToastTier::TextCells
                 if self.shadow.screen().alternate_screen()
                     && text_tier::toast_rect("", rows, cols).is_some() =>
@@ -477,64 +522,48 @@ impl Compositor {
         }
     }
 
-    fn usage_image_id(&self) -> u32 {
+    fn cpu_image_id(&self) -> u32 {
         self.image_id ^ 0x0040_0000
     }
 
-    fn usage_content(&self) -> Option<(String, u16)> {
-        self.usage.as_ref().map(|usage| {
-            if self.usage_expanded {
-                (usage_details(usage), USAGE_EXPANDED_ROWS)
-            } else {
-                (usage_summary(usage), USAGE_ROWS)
-            }
-        })
+    fn cpu_target(&self) -> bool {
+        self.cpu
+            .as_ref()
+            .is_some_and(|toast| self.cpu_cells(&toast.text).is_some())
     }
 
-    fn usage_target(&self) -> bool {
-        let Some((text, rows)) = self.usage_content() else {
-            return false;
+    fn render_cpu(&mut self, now: Instant) -> Vec<u8> {
+        let Some(toast) = self.cpu.clone() else {
+            return self.remove_cpu_drawn();
         };
-        let (_, cols) = self.shadow.screen().size();
-        self.tier == ToastTier::Kitty && usage_cells(&text, cols, rows).is_some()
-    }
-
-    fn render_usage(&mut self) -> Vec<u8> {
-        if !self.usage_target() {
-            return self.remove_usage_drawn();
-        }
+        let Some((cols, rows)) = self.cpu_cells(&toast.text) else {
+            return self.remove_cpu_drawn();
+        };
         let (_, term_cols) = self.shadow.screen().size();
-        let (text, wanted_rows) = self.usage_content().expect("usage target has usage");
-        let Some((cols, rows)) = usage_cells(&text, term_cols, wanted_rows) else {
-            return self.remove_usage_drawn();
-        };
-        let content = (text.clone(), cols, rows);
+        let opacity = self.cpu_opacity(now);
+        let content = (toast.text.clone(), toast.severity, cols, rows, opacity);
         let mut out = Vec::new();
-        let image_id = self.usage_image_id();
-        if self.usage_transmitted.as_ref() != Some(&content) {
-            let Ok(png) = raster::render_usage_png(&text, cols, rows) else {
+        let image_id = self.cpu_image_id();
+        if self.cpu_transmitted.as_ref() != Some(&content) {
+            let Ok(png) = raster::render_cpu_png(&toast.text, toast.severity, cols, rows, opacity)
+            else {
                 return Vec::new();
             };
-            if self.usage_transmitted.is_some() {
+            if self.cpu_transmitted.is_some() {
                 out.extend(kitty::delete_image(image_id));
             }
             out.extend(kitty::transmit_png(image_id, &png));
-            self.usage_transmitted = Some(content);
+            self.cpu_transmitted = Some(content);
         }
         let col = term_cols.saturating_sub(cols + 1);
         let mut place = text_tier::cup(0, col).into_bytes();
-        place.extend(kitty::place(
-            image_id,
-            kitty::USAGE_PLACEMENT_ID,
-            cols,
-            rows,
-        ));
+        place.extend(kitty::place(image_id, kitty::CPU_PLACEMENT_ID, cols, rows));
         out.extend(self.with_cursor_parked(place));
-        self.usage_drawn = true;
+        self.cpu_drawn = true;
         let hover_armed = self.shadow.screen().mouse_protocol_mode()
             == MouseProtocolMode::AnyMotion
             && self.shadow.screen().mouse_protocol_encoding() == MouseProtocolEncoding::Sgr;
-        self.input.set_usage(
+        self.input.set_cpu(
             Some(CellRect {
                 row: 0,
                 col,
@@ -546,13 +575,19 @@ impl Compositor {
         out
     }
 
-    fn remove_usage_drawn(&mut self) -> Vec<u8> {
-        if !std::mem::take(&mut self.usage_drawn) {
-            self.input.set_usage(None, false);
-            return Vec::new();
+    fn remove_cpu_drawn(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if std::mem::take(&mut self.cpu_drawn) {
+            out.extend(kitty::delete_placement(
+                self.cpu_image_id(),
+                kitty::CPU_PLACEMENT_ID,
+            ));
         }
-        self.input.set_usage(None, false);
-        kitty::delete_placement(self.usage_image_id(), kitty::USAGE_PLACEMENT_ID)
+        self.input.set_cpu(None, false);
+        if self.cpu_transmitted.take().is_some() {
+            out.extend(kitty::delete_image(self.cpu_image_id()));
+        }
+        out
     }
 
     /// Repaint a text toast's cells from the shadow and put the cursor back.
@@ -580,7 +615,11 @@ impl Compositor {
             self.transmitted = Some(content);
         }
         let col = term_cols.saturating_sub(cols + 1);
-        let top_row = if self.usage_target() { USAGE_ROWS } else { 0 };
+        let top_row = if self.cpu_target() {
+            raster::TOAST_ROWS
+        } else {
+            0
+        };
         let mut place = text_tier::cup(top_row, col).into_bytes();
         place.extend(kitty::place(
             self.image_id,
@@ -693,20 +732,6 @@ enum Target {
     Title,
     Status,
     Nothing,
-}
-
-fn usage_cells(text: &str, term_cols: u16, rows: u16) -> Option<(u16, u16)> {
-    const MIN_COLS: u16 = 20;
-    const MAX_COLS: u16 = 76;
-    let available = term_cols.saturating_sub(2);
-    if available < MIN_COLS {
-        return None;
-    }
-    let wanted = u16::try_from(text.lines().map(str::len).max().unwrap_or(0))
-        .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .clamp(MIN_COLS, MAX_COLS);
-    Some((wanted.min(available), rows))
 }
 
 #[cfg(test)]

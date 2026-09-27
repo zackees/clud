@@ -42,10 +42,11 @@ the integration tests.
   per-cwd index of Claude-harness sessions kept by the hidden `session-hook`,
   the picker, and native/portable resume. See
   `docs/architecture/session-history.md`.
-- [toast/](toast/README.md) - in-terminal toasts (#1189): toast model and
-  hub, the PTY writer-thread compositor (kitty graphics, alternate-screen text
-  cells, title/status-line fallback), Claude `statusLine` chaining, and
-  click-to-dismiss. See `docs/architecture/toasts.md`.
+- [toast/](toast/README.md) - in-terminal toasts (#1189) and the transient
+  CPU health HUD (#1359): keyed model and hub, the PTY writer-thread compositor
+  (Kitty graphics, alternate-screen text cells, title/status-line fallback),
+  opacity/hover, Claude `statusLine` chaining, and ordinary-toast dismissal.
+  See `docs/architecture/toasts.md`.
 - [voice/](voice/README.md) - F3 push-to-talk voice mode: mic capture,
   start/stop cues, `whisper-rs` worker thread, transcript injection into the
   backend PTY.

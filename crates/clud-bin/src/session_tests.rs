@@ -219,7 +219,7 @@ const PARITY_CLOSE: crate::toast::text_tier::CellRect = crate::toast::text_tier:
 fn parity_targets() -> Option<ToastHitTargets> {
     Some(ToastHitTargets {
         close: Some(PARITY_CLOSE),
-        usage: None,
+        cpu: None,
         hover_armed: false,
     })
 }

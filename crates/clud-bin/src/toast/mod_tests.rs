@@ -143,3 +143,37 @@ fn a_hub_sink_feeds_the_hub() {
     sink.publish(ToastEvent::Show(Toast::new("a", "1", Severity::Info, now)));
     assert_eq!(hub.snapshot(now).visible.unwrap().text, "1");
 }
+
+#[test]
+fn keyed_snapshot_keeps_cpu_and_highest_priority_other_independent() {
+    let now = t0();
+    let hub = ToastHub::new();
+    hub.publish(ToastEvent::Show(Toast::new(
+        "cpu",
+        "hot",
+        Severity::Warn,
+        now,
+    )));
+    hub.publish(ToastEvent::Show(Toast::new(
+        "alert",
+        "urgent",
+        Severity::Alert,
+        now,
+    )));
+    hub.publish(ToastEvent::Show(Toast::new(
+        "info",
+        "later",
+        Severity::Info,
+        now,
+    )));
+
+    let snapshot = hub.snapshot_with_key(now, "cpu");
+    assert_eq!(snapshot.keyed.as_ref().unwrap().text, "hot");
+    assert_eq!(snapshot.other_visible.as_ref().unwrap().key, "alert");
+    assert_eq!(snapshot.visible.as_ref().unwrap().key, "alert");
+
+    hub.dismiss_visible_except(now, "cpu");
+    let after = hub.snapshot_with_key(now, "cpu");
+    assert_eq!(after.keyed.as_ref().unwrap().key, "cpu");
+    assert_eq!(after.other_visible.as_ref().unwrap().key, "info");
+}

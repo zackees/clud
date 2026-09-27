@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+
 use super::*;
 use crate::toast::statusline::{read_live_toast, state_path, StatusStateWriter, StatusUsage};
 use crate::toast::{Severity, Toast, ToastEvent, ToastHub};
@@ -73,6 +75,36 @@ fn count(bytes: &[u8], action: &str) -> usize {
                 .any(|kv| kv == action)
         })
         .count()
+}
+
+fn uploaded_max_alpha(bytes: &[u8]) -> u8 {
+    let mut payload = String::new();
+    let mut reading = false;
+    for command in apcs(bytes) {
+        let Some((control, data)) = command.split_once(';') else {
+            continue;
+        };
+        if control.split(',').any(|item| item == "a=t") {
+            reading = true;
+        }
+        if reading {
+            payload.push_str(data);
+            if control.split(',').any(|item| item == "m=0") {
+                break;
+            }
+        }
+    }
+    assert!(!payload.is_empty(), "expected a PNG upload");
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .unwrap();
+    image::load_from_memory(&png)
+        .unwrap()
+        .to_rgba8()
+        .pixels()
+        .map(|pixel| pixel[3])
+        .max()
+        .unwrap()
 }
 
 // ── kitty tier ────────────────────────────────────────────────────────────
@@ -167,7 +199,10 @@ fn expiry_deletes_the_placement_and_repaints_nothing() {
         0,
         "the text layer is untouched: no CSI at all"
     );
-    assert!(!c.wants_tick());
+    assert!(
+        c.wants_tick(),
+        "a new event must be noticed during a quiet TUI"
+    );
     let freed = c.finish();
     assert!(apcs(&freed).iter().any(|cmd| cmd.starts_with("a=d,d=I")));
 }
@@ -419,7 +454,12 @@ fn click_to_dismiss_is_armed_only_when_the_child_reports_sgr_mouse() {
     let now = Instant::now();
     let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
     let input = c.input();
-    show(&hub, "hot", now);
+    hub.publish(ToastEvent::Show(Toast::new(
+        "other",
+        "hot",
+        Severity::Warn,
+        now,
+    )));
     c.on_tick(now);
     assert!(
         input.close_rect().is_none(),
@@ -458,7 +498,7 @@ fn a_resize_re_pins_the_toast_to_the_new_top_right() {
 }
 
 #[test]
-fn exact_bridge_usage_is_a_persistent_separate_kitty_overlay() {
+fn token_usage_alone_never_creates_a_kitty_overlay() {
     let now = Instant::now();
     let dir = tempfile::tempdir().unwrap();
     let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 77)));
@@ -471,80 +511,272 @@ fn exact_bridge_usage_is_a_persistent_separate_kitty_overlay() {
         output_tokens: 2_630_000,
         cache_health: "healthy".into(),
     });
-    let (mut c, hub) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
-    let first = c.on_tick(now);
-    assert_eq!(count(&first, "a=t"), 1);
-    assert!(
-        String::from_utf8_lossy(&first).contains("p=2"),
-        "usage must use its own placement: {first:?}"
-    );
-    show(&hub, "cpu 300 %", now);
-    let combined = c.on_tick(now);
-    assert_eq!(count(&combined, "a=t"), 1, "only the toast is new");
-    let text = String::from_utf8_lossy(&combined);
-    let toast_place = text.find("p=1").unwrap();
-    assert!(
-        text[..toast_place].contains("\x1b[2;"),
-        "toast must start below the persistent top-row usage strip: {text:?}"
-    );
-    let re_pinned = c.on_child(b"child redraw", now);
-    assert_eq!(count(&re_pinned, "a=t"), 0);
-    assert!(String::from_utf8_lossy(&re_pinned).contains("p=2"));
-    let finish = String::from_utf8_lossy(&c.finish()).into_owned();
-    assert!(finish.contains("d=i,i=4194381,p=2"));
+    let (mut c, _) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
+    assert!(c.on_tick(now).is_empty());
 }
 
 #[test]
-fn a_narrow_resize_removes_an_existing_usage_overlay() {
+fn title_fallback_keeps_model_and_cache_health_when_cpu_hud_cannot_fit() {
     let now = Instant::now();
     let dir = tempfile::tempdir().unwrap();
-    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 78)));
+    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 80)));
     writer.publish_usage(StatusUsage {
         provider: "codex".into(),
-        model: "gpt-5.6-terra".into(),
+        model: "gpt-6-sol".into(),
         request_count: 1,
-        cached_input_tokens: 1,
-        uncached_input_tokens: 2,
+        cached_input_tokens: 10,
+        uncached_input_tokens: 20,
         output_tokens: 3,
         cache_health: "healthy".into(),
     });
-    let (mut c, _) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
-    c.on_tick(now);
-    let resized = String::from_utf8_lossy(&c.on_resize(ROWS, 19, now)).into_owned();
+    let (mut c, hub) = compositor_with_usage(ToastTier::Kitty, Fallback::Title, writer);
+    let idle = c.on_resize(ROWS, 15, now);
+    assert!(has(&idle, "gpt-6-sol"));
+    assert!(has(&idle, "healthy"));
+    assert_eq!(count(&idle, "a=t"), 0);
+
+    show(&hub, "cpu 300 %", now + Duration::from_secs(1));
+    let active = c.on_tick(now + Duration::from_secs(1));
+    assert!(has(&active, "cpu 300 %"));
+    assert_eq!(count(&active, "a=t"), 0);
+
+    hub.publish(ToastEvent::Close {
+        key: CPU_TOAST_KEY.into(),
+    });
+    let recovered = c.on_tick(now + Duration::from_secs(2));
+    assert!(has(&recovered, "gpt-6-sol"));
+    assert!(has(&recovered, "healthy"));
+}
+
+#[test]
+fn cpu_hud_is_keyed_timed_and_independent_of_other_toasts() {
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    assert!(c.on_tick(now).is_empty());
+    show(&hub, "cpu 300 %", now);
+    let first = c.on_tick(now);
+    assert_eq!(count(&first, "a=t"), 1);
+    assert!(has(&first, "p=2"));
+    assert!(!has(&first, "p=1"), "CPU must not be drawn twice");
+    assert_eq!(uploaded_max_alpha(&first), 230);
+    assert_eq!(
+        count(&c.on_tick(now + Duration::from_millis(1999)), "a=t"),
+        0
+    );
+
+    let faded = c.on_tick(now + Duration::from_secs(2));
+    assert_eq!(uploaded_max_alpha(&faded), 128);
+    show(&hub, "cpu 350 %", now + Duration::from_secs(3));
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(3))),
+        128
+    );
+
+    hub.publish(ToastEvent::Show(Toast::new(
+        "other",
+        "another alert",
+        Severity::Alert,
+        now + Duration::from_secs(4),
+    )));
+    let combined = c.on_tick(now + Duration::from_secs(4));
+    let text = String::from_utf8_lossy(&combined);
+    let toast_place = text.find("p=1").unwrap();
     assert!(
-        resized.contains("d=i,i=4194381,p=2"),
-        "a strip that no longer fits must be deleted: {resized:?}"
+        text[..toast_place].contains("\x1b[3;"),
+        "toast overlaps CPU: {text:?}"
+    );
+    assert!(has(&combined, "p=2"));
+
+    hub.dismiss_visible_except(now + Duration::from_secs(4), CPU_TOAST_KEY);
+    assert!(hub.snapshot(now + Duration::from_secs(4)).visible.is_some());
+    hub.publish(ToastEvent::Close {
+        key: CPU_TOAST_KEY.into(),
+    });
+    let closed = c.on_tick(now + Duration::from_secs(5));
+    assert!(has(&closed, "d=i,i=4194381,p=2"));
+    assert!(!c.input().cpu_hovered());
+
+    show(&hub, "cpu 200 %", now + Duration::from_secs(6));
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(6))),
+        230
     );
 }
 
 #[test]
-fn usage_strip_expands_on_toggle_and_arms_hover_only_for_any_motion_sgr() {
+fn cpu_hud_coexists_with_an_older_alert_and_releases_its_rows_on_close() {
     let now = Instant::now();
-    let dir = tempfile::tempdir().unwrap();
-    let writer = Arc::new(StatusStateWriter::new(state_path(dir.path(), 79)));
-    writer.publish_usage(StatusUsage {
-        provider: "openrouter".into(),
-        model: "anthropic/claude-sonnet".into(),
-        request_count: 2,
-        cached_input_tokens: 35,
-        uncached_input_tokens: 65,
-        output_tokens: 9,
-        cache_health: "unavailable".into(),
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    hub.publish(ToastEvent::Show(Toast::new(
+        "other",
+        "urgent",
+        Severity::Alert,
+        now,
+    )));
+    let ordinary = c.on_tick(now);
+    assert!(has(&ordinary, "p=1"));
+    assert!(!has(&ordinary, "p=2"));
+
+    show(&hub, "cpu 300 %", now + Duration::from_secs(1));
+    let both = c.on_tick(now + Duration::from_secs(1));
+    let text = String::from_utf8_lossy(&both);
+    let normal_place = text.find("p=1").unwrap();
+    assert!(text[..normal_place].contains("\x1b[3;"));
+    assert!(has(&both, "p=2"));
+
+    hub.publish(ToastEvent::Close {
+        key: CPU_TOAST_KEY.into(),
     });
-    let (mut c, _) = compositor_with_usage(ToastTier::Kitty, Fallback::None, writer);
+    let released = c.on_tick(now + Duration::from_secs(2));
+    let text = String::from_utf8_lossy(&released);
+    let normal_place = text.find("p=1").unwrap();
+    assert!(text[..normal_place].contains("\x1b[1;"));
+    assert!(has(&released, "d=i,i=4194381,p=2"));
+    assert!(has(&released, "d=I,i=4194381"));
+}
+
+#[test]
+fn shrinking_below_four_rows_deletes_the_ordinary_toast_but_keeps_cpu() {
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    hub.publish(ToastEvent::Show(Toast::new(
+        "other",
+        "urgent",
+        Severity::Alert,
+        now,
+    )));
+    show(&hub, "cpu 300 %", now);
+    let both = c.on_tick(now);
+    assert!(has(&both, "p=1"));
+    assert!(has(&both, "p=2"));
+
+    let shrunk = c.on_resize(3, COLS, now + Duration::from_secs(1));
+    assert!(has(&shrunk, "d=i,i=77,p=1"));
+    assert!(has(&shrunk, "p=2"));
+    assert!(!has(&c.finish(), "p=1"));
+}
+
+#[test]
+fn a_short_cpu_episode_hides_before_two_seconds_and_restarts_on_next_episode() {
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    show(&hub, "cpu 300 %", now);
+    assert_eq!(uploaded_max_alpha(&c.on_tick(now)), 230);
+    hub.publish(ToastEvent::Close {
+        key: CPU_TOAST_KEY.into(),
+    });
+    assert!(has(
+        &c.on_tick(now + Duration::from_secs(1)),
+        "d=i,i=4194381,p=2"
+    ));
+    show(&hub, "cpu 300 %", now + Duration::from_secs(3));
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(3))),
+        230
+    );
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(5))),
+        128
+    );
+}
+
+#[test]
+fn cpu_hud_re_pins_and_reuploads_after_child_image_drops() {
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    show(&hub, "cpu 300 %", now);
+    let first = c.on_tick(now);
+    assert!(has(&first, "p=2"));
+    for command in apcs(&first) {
+        assert!(command
+            .split(';')
+            .next()
+            .unwrap()
+            .split(',')
+            .any(|item| item == "q=2"));
+    }
+    let re_pinned = c.on_child(b"child redraw\r\n", now);
+    assert_eq!(count(&re_pinned, "a=t"), 0);
+    assert!(has(&re_pinned, "p=2"));
+    for sequence in [b"\x1b[2J".as_slice(), b"\x1bc", b"\x1b[?1049h"] {
+        let redrawn = c.on_child(sequence, now);
+        assert_eq!(count(&redrawn, "a=t"), 1);
+        assert!(has(&redrawn, "p=2"));
+    }
+    let finish = c.finish();
+    assert!(has(&finish, "d=i,i=4194381,p=2"));
+    assert!(has(&finish, "d=I,i=4194381"));
+}
+
+#[test]
+fn cpu_hover_overrides_opacity_without_expanding_or_extending_lifetime() {
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    show(&hub, "cpu 300 %", now);
     c.on_tick(now);
     let input = c.input();
-    assert!(!input.usage_hover_armed());
+    assert!(!input.cpu_hover_armed());
+    input.set_cpu_hover(true);
+    assert_eq!(c.cpu_opacity(now + Duration::from_secs(3)), 50);
     c.on_child(b"\x1b[?1000h\x1b[?1006h", now);
     assert!(
-        !input.usage_hover_armed(),
+        !input.cpu_hover_armed(),
         "click-only mouse mode is not hover"
     );
     c.on_child(b"\x1b[?1003h", now);
-    assert!(input.usage_hover_armed());
-    input.toggle_usage();
-    let expanded = String::from_utf8_lossy(&c.on_tick(now)).into_owned();
-    assert!(expanded.contains("p=2") && expanded.contains("r=3"));
+    assert!(input.cpu_hover_armed());
+    input.set_cpu_hover(true);
+    assert_eq!(c.cpu_opacity(now + Duration::from_secs(1)), 90);
+    input.set_cpu_hover(false);
+    assert_eq!(c.cpu_opacity(now + Duration::from_secs(1)), 90);
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(2))),
+        128
+    );
+    input.set_cpu_hover(true);
+    let hovered = c.on_tick(now + Duration::from_secs(3));
+    assert_eq!(uploaded_max_alpha(&hovered), 230);
+    assert!(has(&hovered, "r=2"), "hover must not expand the panel");
+    input.set_cpu_hover(false);
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(3))),
+        128
+    );
+
+    hub.publish(ToastEvent::Show(
+        Toast::new(
+            "cpu",
+            "cpu back to normal",
+            Severity::Info,
+            now + Duration::from_secs(4),
+        )
+        .expiring_after(Duration::from_secs(10)),
+    ));
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(4))),
+        128
+    );
+    input.set_cpu_hover(true);
+    assert_eq!(
+        uploaded_max_alpha(&c.on_tick(now + Duration::from_secs(4))),
+        230
+    );
+    let expired = c.on_tick(now + Duration::from_secs(14));
+    assert!(has(&expired, "d=i,i=4194381,p=2"));
+    assert!(!input.cpu_hovered(), "expiry must clear stale hover");
+}
+
+#[test]
+fn narrow_resize_removes_cpu_hud_and_wide_resize_starts_fresh_clock() {
+    let now = Instant::now();
+    let (mut c, hub) = compositor(ToastTier::Kitty, Fallback::None);
+    show(&hub, "cpu 300 %", now);
+    c.on_tick(now);
+    let narrow = c.on_resize(ROWS, 19, now + Duration::from_secs(3));
+    assert!(has(&narrow, "d=i,i=4194381,p=2"));
+    let wide = c.on_resize(ROWS, COLS, now + Duration::from_secs(4));
+    assert!(has(&wide, "p=2"));
+    assert_eq!(uploaded_max_alpha(&wide), 230);
 }
 
 #[test]

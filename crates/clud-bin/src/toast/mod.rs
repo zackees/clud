@@ -142,6 +142,19 @@ impl ToastBoard {
             .max_by_key(|toast| (toast.severity, toast.shown_at))
     }
 
+    /// Highest-priority toast other than `key`, for a dedicated overlay that
+    /// must not suppress an unrelated notification.
+    pub fn visible_except(&self, now: Instant, key: &str) -> Option<&Toast> {
+        self.toasts
+            .values()
+            .filter(|toast| toast.key != key && !toast.is_expired(now))
+            .max_by_key(|toast| (toast.severity, toast.shown_at))
+    }
+
+    pub fn get(&self, now: Instant, key: &str) -> Option<&Toast> {
+        self.toasts.get(key).filter(|toast| !toast.is_expired(now))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.toasts.is_empty()
     }
@@ -176,6 +189,16 @@ pub struct HubSnapshot {
     pub is_empty: bool,
 }
 
+/// A single atomic view of a dedicated keyed toast and the ordinary queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedHubSnapshot {
+    pub version: u64,
+    pub keyed: Option<Toast>,
+    pub other_visible: Option<Toast>,
+    pub visible: Option<Toast>,
+    pub is_empty: bool,
+}
+
 impl ToastHub {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
@@ -199,6 +222,21 @@ impl ToastHub {
         }
     }
 
+    /// Dismiss the ordinary visible toast without closing a dedicated HUD.
+    pub fn dismiss_visible_except(&self, now: Instant, excluded_key: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(key) = state
+            .board
+            .visible_except(now, excluded_key)
+            .map(|toast| toast.key.clone())
+        else {
+            return;
+        };
+        if state.board.apply(ToastEvent::Close { key }) {
+            state.version = state.version.wrapping_add(1);
+        }
+    }
+
     /// Expire due toasts and report the visible one.
     pub fn snapshot(&self, now: Instant) -> HubSnapshot {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -207,6 +245,22 @@ impl ToastHub {
         }
         HubSnapshot {
             version: state.version,
+            visible: state.board.visible(now).cloned(),
+            is_empty: state.board.is_empty(),
+        }
+    }
+
+    /// Expire due toasts and read both the keyed HUD and ordinary toast in
+    /// one lock acquisition, so their ordering cannot disagree.
+    pub fn snapshot_with_key(&self, now: Instant, key: &str) -> KeyedHubSnapshot {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.board.expire(now) {
+            state.version = state.version.wrapping_add(1);
+        }
+        KeyedHubSnapshot {
+            version: state.version,
+            keyed: state.board.get(now, key).cloned(),
+            other_visible: state.board.visible_except(now, key).cloned(),
             visible: state.board.visible(now).cloned(),
             is_empty: state.board.is_empty(),
         }

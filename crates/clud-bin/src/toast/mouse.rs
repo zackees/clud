@@ -22,9 +22,8 @@ pub struct MouseFilter {
 pub struct MouseResult {
     pub bytes: Vec<u8>,
     pub dismissed: bool,
-    pub usage_toggled: bool,
     /// `Some` only when the child has enabled any-motion SGR reporting.
-    pub usage_hover: Option<bool>,
+    pub cpu_hover: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,17 +54,16 @@ impl MouseFilter {
     }
 
     /// Filter one stdin chunk. clud consumes only clicks on its own visible
-    /// controls and hover reports over the usage panel; all other bytes reach
-    /// the child unchanged.
+    /// controls. CPU-panel hover is observed without consuming mouse reports;
+    /// all other bytes reach the child unchanged.
     pub fn process(
         &mut self,
         chunk: &[u8],
         close: Option<CellRect>,
-        usage: Option<CellRect>,
+        cpu: Option<CellRect>,
         hover_armed: bool,
     ) -> MouseResult {
-        if close.is_none() && usage.is_none() && self.pending.is_empty() && !self.swallowing_release
-        {
+        if close.is_none() && cpu.is_none() && self.pending.is_empty() && !self.swallowing_release {
             return MouseResult {
                 bytes: chunk.to_vec(),
                 ..MouseResult::default()
@@ -105,18 +103,11 @@ impl MouseFilter {
                 } => {
                     let left_press = press && button & 0b11 == 0 && button & (32 | 64) == 0;
                     let hit_close = close.is_some_and(|rect| rect.contains_1based(x, y));
-                    let hit_usage = usage.is_some_and(|rect| rect.contains_1based(x, y));
-                    let passive_motion = button & 32 != 0 && button & 0b11 == 3;
-                    if hover_armed && passive_motion {
-                        result.usage_hover = Some(hit_usage);
-                        if !hit_usage {
-                            out.extend_from_slice(&input[i..i + len]);
-                        }
-                    } else if left_press && hit_close {
+                    if hover_armed {
+                        result.cpu_hover = Some(cpu.is_some_and(|rect| rect.contains_1based(x, y)));
+                    }
+                    if left_press && hit_close {
                         result.dismissed = true;
-                        self.swallowing_release = true;
-                    } else if left_press && hit_usage {
-                        result.usage_toggled = true;
                         self.swallowing_release = true;
                     } else if !press && self.swallowing_release {
                         self.swallowing_release = false;
@@ -191,7 +182,7 @@ mod tests {
         width: 3,
         height: 1,
     };
-    const USAGE: CellRect = CellRect {
+    const CPU: CellRect = CellRect {
         row: 0,
         col: 20,
         width: 30,
@@ -266,25 +257,36 @@ mod tests {
     }
 
     #[test]
-    fn usage_clicks_toggle_and_sgr_any_motion_controls_hover() {
+    fn cpu_hover_observes_motion_without_swallowing_input() {
         let mut f = MouseFilter::new();
-        let click = f.process(b"\x1b[<0;21;1M\x1b[<0;21;1m", None, Some(USAGE), false);
-        assert!(click.usage_toggled);
-        assert!(
-            click.bytes.is_empty(),
-            "overlay click stays out of the child"
-        );
+        let click_bytes = b"\x1b[<0;21;1M\x1b[<0;21;1m";
+        let click = f.process(click_bytes, None, Some(CPU), false);
+        assert_eq!(click.bytes, click_bytes);
+        assert_eq!(click.cpu_hover, None, "no hover without any-motion");
 
-        let enter = f.process(b"\x1b[<35;21;1M", None, Some(USAGE), true);
-        assert_eq!(enter.usage_hover, Some(true));
-        assert!(enter.bytes.is_empty());
-        let leave = f.process(b"\x1b[<35;5;8M", None, Some(USAGE), true);
-        assert_eq!(leave.usage_hover, Some(false));
+        let enter_bytes = b"\x1b[<35;21;1M";
+        let enter = f.process(enter_bytes, None, Some(CPU), true);
+        assert_eq!(enter.cpu_hover, Some(true));
+        assert_eq!(enter.bytes, enter_bytes);
+        let leave = f.process(b"\x1b[<35;5;8M", None, Some(CPU), true);
+        assert_eq!(leave.cpu_hover, Some(false));
         assert_eq!(leave.bytes, b"\x1b[<35;5;8M");
 
         let drag = b"\x1b[<32;21;1M";
-        let dragging = f.process(drag, None, Some(USAGE), true);
-        assert_eq!(dragging.usage_hover, None);
+        let dragging = f.process(drag, None, Some(CPU), true);
+        assert_eq!(dragging.cpu_hover, Some(true));
         assert_eq!(dragging.bytes, drag);
+    }
+
+    #[test]
+    fn split_cpu_motion_report_is_forwarded_byte_exact_when_complete() {
+        let mut f = MouseFilter::new();
+        assert!(f
+            .process(b"\x1b[<35;2", None, Some(CPU), true)
+            .bytes
+            .is_empty());
+        let result = f.process(b"1;1M", None, Some(CPU), true);
+        assert_eq!(result.bytes, b"\x1b[<35;21;1M");
+        assert_eq!(result.cpu_hover, Some(true));
     }
 }
