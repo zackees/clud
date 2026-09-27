@@ -265,6 +265,7 @@ def test_existing_user_bin_and_first_bash_login_file(tmp_path: Path) -> None:
     bin_dir.mkdir(mode=0o700)
     login = home / ".bash_login"
     login.write_text("# existing login settings\n")
+    login.chmod(0o600)
     env = isolated_env(home)
     env["SHELL"] = shell
     env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
