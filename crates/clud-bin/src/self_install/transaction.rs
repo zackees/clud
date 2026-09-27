@@ -275,7 +275,7 @@ fn approved_destination() -> Result<PathBuf, String> {
         if !local.is_absolute() {
             return Err("per-user local app data must be absolute".into());
         }
-        return Ok(local.join("Programs/clud/bin/clud.exe"));
+        Ok(local.join("Programs/clud/bin/clud.exe"))
     }
     #[cfg(not(windows))]
     {
