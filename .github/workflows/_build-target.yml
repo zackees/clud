@@ -44,6 +44,11 @@ on:
         required: false
         type: string
         default: ""
+      standalone-artifact:
+        description: If non-empty, build and upload one static musl clud binary only.
+        required: false
+        type: string
+        default: ""
       include-sdist:
         description: Also build an sdist (exactly one target in the release matrix should set this).
         required: false
@@ -117,12 +122,30 @@ jobs:
         run: '"$VENV_PY" -m ci.xbuild clippy --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Build binaries and test harnesses
+        if: ${{ inputs.standalone-artifact == '' }}
         run: >
           "$VENV_PY" -m ci.xbuild compile
           --target ${{ inputs.target }}
           --strategy ${{ inputs.strategy }}
           --profile ${{ inputs.profile }}
           ${{ inputs.bundle && '--with-tests' || '' }}
+
+      - name: Build static musl clud
+        if: ${{ inputs.standalone-artifact != '' }}
+        run: >
+          "$VENV_PY" -m ci.xbuild standalone
+          --target ${{ inputs.target }}
+          --strategy ${{ inputs.strategy }}
+          --profile ${{ inputs.profile }}
+
+      - name: Upload static musl clud
+        if: ${{ inputs.standalone-artifact != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.standalone-artifact }}
+          path: standalone/clud-*
+          if-no-files-found: error
+          compression-level: 0
 
       # Doc-tests were covered by the old `cargo test --workspace`
       # (ci/test.py:137) but produce no harness binary, so they cannot ride

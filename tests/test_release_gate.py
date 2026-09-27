@@ -63,7 +63,11 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "run: python -m ci.release_gate" in text
     assert "needs: [preflight, full-ci-gate, release-matrix]" in text
     assert "needs: [preflight, full-ci-gate, build]" in text
-    assert "needs: [preflight, full-ci-gate, build, build-installer, publish-pypi]" in text
+    publish_needs = (
+        "needs: [preflight, full-ci-gate, build, build-static-musl, "
+        "build-installer, publish-pypi]"
+    )
+    assert publish_needs in text
     assert "name: Build universal APE installer" in text
     assert "source_ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "ref: ${{ needs.preflight.outputs.candidate_sha }}" in text

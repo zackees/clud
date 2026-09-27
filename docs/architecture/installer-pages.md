@@ -8,7 +8,11 @@ catalog URL is `https://zackees.github.io/clud/install/manifest.json`; it is a
 candidate wheel or direct clud asset against GitHub's published SHA-256 and byte
 size. Older wheel-only releases are advertised only when their archive contains
 exactly one `clud`/`clud.exe` member with executable-format bytes. A direct
-standalone binary takes precedence over a wheel for the same platform. The
+standalone binary takes precedence over a wheel for the same platform variant.
+Historical Linux GNU assets carry `platform.libc=glibc` and
+`variant.flavor=gnu`; verified static musl direct assets carry
+`variant.flavor=static-musl` without a host libc requirement. The generator
+rejects musl assets with an ELF interpreter or a needed shared library. The
 catalog retains every installable published version and puts semantic versions
 newest first; `latest-stable` is a channel pointer, not array position.
 

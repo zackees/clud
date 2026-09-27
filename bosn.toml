@@ -405,6 +405,14 @@ cmd = "cd /workspace && soldr cargo build -p clud -p mock-agent --bins && (uv sy
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=install-pages.yml sh /workspace/ci/act_ci.sh build-site"
 
+[task.act-installer-musl-x64]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh native-linux-x64"
+
+[task.act-installer-catalog]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh catalog-unit"
+
 [task.act-model-pages]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=model-pages.yml sh /workspace/ci/act_ci.sh build-site"

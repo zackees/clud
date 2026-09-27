@@ -179,6 +179,24 @@ def release_matrix() -> dict[str, list[dict[str, object]]]:
     }
 
 
+def static_musl_matrix() -> dict[str, list[dict[str, str]]]:
+    """Native Linux downloads built apart from the six PyPI wheel targets."""
+    return {
+        "include": [
+            {
+                "target": f"{arch}-unknown-linux-musl",
+                "strategy": "soldr",
+                "runs-on": runner,
+                "artifact": f"standalone-musl-{arch}",
+            }
+            for arch, runner in (
+                ("x86_64", "ubuntu-24.04"),
+                ("aarch64", "ubuntu-24.04-arm"),
+            )
+        ]
+    }
+
+
 def emit(outputs: dict[str, str]) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
     lines = [f"{key}={value}" for key, value in outputs.items()]
@@ -208,7 +226,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.release:
-        emit({"build": json.dumps(release_matrix(), separators=(",", ":"))})
+        emit({
+            "build": json.dumps(release_matrix(), separators=(",", ":")),
+            "static_musl": json.dumps(static_musl_matrix(), separators=(",", ":")),
+        })
         return 0
 
     tier = resolve_tier(

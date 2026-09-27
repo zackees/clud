@@ -5,6 +5,13 @@ on:
     paths:
       - installer/**
       - tests/test_installer_*.py
+      - crates/clud-bin/**
+      - ci/ci_matrix.py
+      - ci/xbuild.py
+      - .github/workflows/_build-target.yml
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
       - .github/workflows/installer-check.yml
       - .github/workflows/auto-release.yml
       - ci/act_ci.sh
@@ -21,6 +28,52 @@ permissions:
   contents: read
 
 jobs:
+  native-linux-x64:
+    name: Build and execute candidate static musl x64
+    if: github.event_name != 'workflow_call'
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      source_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      target: x86_64-unknown-linux-musl
+      runs-on: ubuntu-24.04
+      strategy: soldr
+      bundle: false
+      clippy: false
+      standalone-artifact: standalone-musl-x86_64
+
+  native-linux-arm64:
+    name: Build and execute candidate static musl ARM64
+    if: github.event_name != 'workflow_call'
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      source_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      target: aarch64-unknown-linux-musl
+      runs-on: ubuntu-24.04-arm
+      strategy: soldr
+      bundle: false
+      clippy: false
+      standalone-artifact: standalone-musl-aarch64
+
+  catalog-unit:
+    name: Native catalog and release wiring unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Unit tests
+        run: |
+          python -m pip install pytest running-process
+          python -m pytest -q \
+            tests/test_installer_catalog.py \
+            tests/test_installer_verify_site.py \
+            tests/test_installer_verify_native_assets.py \
+            tests/test_installer_release_assets.py \
+            tests/test_ci_matrix.py \
+            tests/test_ci_xbuild.py \
+            tests/test_release_gate.py
+
   catalog-site:
     name: Published release to catalog and Pages
     runs-on: ubuntu-24.04
@@ -30,10 +83,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Unit tests
-        run: |
-          python -m pip install pytest running-process
-          python -m pytest -q tests/test_installer_catalog.py tests/test_installer_verify_site.py
       - name: Build complete site from actual published releases
         run: python -m installer.site site
       - name: Validate catalog structure and semantics
@@ -239,18 +288,27 @@ jobs:
 
   installer-acceptance:
     name: Installer acceptance aggregate
-    needs: [catalog-site, ape-core-tests, ape-host, linux-distro]
+    needs: [catalog-unit, catalog-site, native-linux-x64, native-linux-arm64, ape-core-tests, ape-host, linux-distro]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - name: Reject missing, skipped, or failed coverage
         env:
           CATALOG: ${{ needs.catalog-site.result }}
+          CATALOG_UNIT: ${{ needs.catalog-unit.result }}
           APE_CORE: ${{ needs.ape-core-tests.result }}
           APE_HOSTS: ${{ needs.ape-host.result }}
           LINUX_DISTROS: ${{ needs.linux-distro.result }}
+          NATIVE_X64: ${{ needs.native-linux-x64.result }}
+          NATIVE_ARM64: ${{ needs.native-linux-arm64.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$CATALOG" = success
+          test "$CATALOG_UNIT" = success
           test "$APE_CORE" = success
           test "$APE_HOSTS" = success
           test "$LINUX_DISTROS" = success
+          if [ "$EVENT_NAME" != workflow_call ]; then
+            test "$NATIVE_X64" = success
+            test "$NATIVE_ARM64" = success
+          fi

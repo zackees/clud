@@ -22,6 +22,8 @@ def extract(
         if target is None:
             continue
         os_name, arch, executable = target
+        if os_name == "linux":
+            continue
         candidates = [suffix for suffix, mapped in DIRECT_TARGETS.items() if mapped == target]
         if len(candidates) != 1 or (os_name, arch) in found:
             raise ValueError(f"ambiguous target in {wheel_path.name}")
@@ -33,8 +35,9 @@ def extract(
         destination.write_bytes(payload)
         destination.chmod(0o755)
         results.append(destination)
-    if len(results) != len(TARGETS):
-        raise ValueError(f"expected {len(TARGETS)} wheel targets, found {len(results)}")
+    expected = sum(os_name != "linux" for os_name, _, _ in TARGETS.values())
+    if len(results) != expected:
+        raise ValueError(f"expected {expected} Windows/macOS wheel targets, found {len(results)}")
     return results
 
 

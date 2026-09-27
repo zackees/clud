@@ -41,8 +41,26 @@ def verify(site: Path) -> str:
         (item["platform"]["os"], item["platform"]["arch"]) for item in entry["platforms"]
     }
     required_targets = {(os_name, arch) for os_name, arch, _ in TARGETS.values()}
-    if actual_targets != required_targets or len(entry["platforms"]) != len(required_targets):
+    if actual_targets != required_targets:
         raise ValueError(f"latest stable release is incomplete: {actual_targets}")
+    variants = [
+        (
+            item["platform"]["os"],
+            item["platform"]["arch"],
+            item["platform"].get("libc"),
+            item.get("variant", {}).get("flavor"),
+        )
+        for item in entry["platforms"]
+    ]
+    if len(variants) != len(set(variants)):
+        raise ValueError("latest stable release has duplicate platform variants")
+    static_arches = {
+        arch
+        for os_name, arch, _libc, flavor in variants
+        if os_name == "linux" and flavor == "static-musl"
+    }
+    if static_arches and static_arches != {"x86_64", "aarch64"}:
+        raise ValueError(f"latest stable release has incomplete static musl assets: {static_arches}")
     if expected not in page:
         raise ValueError("landing page does not show catalog latest")
     return expected

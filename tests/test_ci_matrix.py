@@ -23,6 +23,7 @@ from ci.ci_matrix import (
     release_matrix,
     resolve_tier,
     selected,
+    static_musl_matrix,
 )
 
 CI_YML = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
@@ -67,6 +68,18 @@ def test_full_and_release_include_both_hosted_macos_architectures():
     full_gate = gate.split("FULL: >-", 1)[1]
     assert "needs.test-macos-arm.result" not in extended
     assert "needs.test-macos-arm.result" in full_gate
+
+
+def test_release_keeps_six_wheels_and_builds_two_separate_static_linux_assets() -> None:
+    wheels = release_matrix()["include"]
+    musl = static_musl_matrix()["include"]
+    assert len(wheels) == 6
+    assert {row["target"] for row in musl} == {
+        "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"
+    }
+    assert all(row["strategy"] == "soldr" for row in musl)
+    assert all(row["artifact"].startswith("standalone-musl-") for row in musl)
+    assert not any(row["artifact"].startswith("wheels-") for row in musl)
 
 
 def test_full_tier_is_a_superset_of_core():
@@ -420,6 +433,7 @@ def test_matrices_are_json_serializable_for_github_actions():
         build_matrix(selected("full")),
         exec_matrix(selected("core")),
         release_matrix(),
+        static_musl_matrix(),
     ):
         encoded = json.dumps(matrix, separators=(",", ":"))
         assert "\n" not in encoded
