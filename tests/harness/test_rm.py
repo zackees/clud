@@ -118,6 +118,23 @@ def test_an_agents_rm_is_rewritten_and_succeeds(harness: Harness) -> None:
     _no_notes(result)
     assert not (h.repo / "build").exists()
     assert _trashed_origins(h) == {"build"}
+    transcripts = list((h.home / ".claude" / "projects").rglob("*.jsonl"))
+    assert transcripts, "Claude did not write a session transcript"
+    rewritten_commands = set()
+    for transcript in transcripts:
+        for line in transcript.read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            attachment = entry.get("attachment") or {}
+            if attachment.get("type") != "hook_success":
+                continue
+            if attachment.get("hookEvent") != "PreToolUse":
+                continue
+            hook_output = json.loads(attachment["stdout"])
+            updated_input = hook_output.get("hookSpecificOutput", {}).get("updatedInput", {})
+            command = updated_input.get("command")
+            if isinstance(command, str):
+                rewritten_commands.add(command)
+    assert "safe-rm -rf build" in rewritten_commands
 
 
 def test_nested_shell_deletion_is_refused_with_safe_command(harness: Harness) -> None:
