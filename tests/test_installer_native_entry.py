@@ -85,7 +85,15 @@ def installer_target(tmp_path: Path):
             winreg.SetValueEx(key, "Path", 0, prior[1], prior[0])
         key.Close()
         if install_tree.exists():
-            install_tree.replace(tmp_path / "installed-clud-tree")
+            quarantine = tmp_path / "installed-clud-tree"
+            for attempt in range(20):
+                try:
+                    install_tree.replace(quarantine)
+                    break
+                except PermissionError:
+                    if attempt == 19:
+                        raise
+                    time.sleep(0.25)
 
 
 def assert_crlf(output: bytes) -> None:
