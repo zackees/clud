@@ -231,7 +231,14 @@ Build once per target triple **on Linux**, then execute the result on native
 runners that have no Rust toolchain at all. Full design and rationale:
 [`docs/architecture/ci.md`](docs/architecture/ci.md).
 
-Entrypoint: `.github/workflows/ci.yml` (the only push/PR workflow).
+Primary entrypoint: `.github/workflows/ci.yml`; the existing installer
+acceptance workflow also observes PR events but runs jobs only with `ci-full`.
+**Do not add new GitHub Actions workflow files** (`.github/workflows/*.yml`
+or `*.yaml`); extend the existing entrypoints and reusable workflows. Installer
+platform acceptance runs only during the release cycle or on a PR explicitly
+labeled `ci-full` (legacy `ci:full` is equivalent), never on routine PR commits.
+When editing its triggers, check every job, including catalog/site unit and
+aggregate jobs, for the same gate.
 Routine PRs and `main` updates run Linux x64 build + unit tests only. Use literal
 `ci-test` for Linux integration plus Windows x64, or `ci-full` for all six
 targets, including both hosted macOS architectures, and Dylint; existing
