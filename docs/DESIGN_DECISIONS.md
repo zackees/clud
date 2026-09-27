@@ -4777,3 +4777,26 @@ bounded extraction of exactly one native binary. Recovery checks a prior
 backup before another attempt. Windows replacement can fail when the old
 executable is in use, and must preserve it in that case. The detailed flow
 lives in [architecture/native-installer.md](architecture/native-installer.md).
+
+## DD-110: Activation requires fresh name-based proof
+
+**Status:** Accepted.
+
+**Context:** #1495. A committed executable at an absolute path can still be
+shadowed or absent from a new shell or Windows user environment. Startup files
+and the Windows User Path may contain unrelated user settings that the
+installer must preserve.
+
+**Decision:** Include an activation plan in the pre-consent preview. On POSIX,
+edit only marked owned stanzas in the active Bash or zsh login and interactive
+files, or a fish `conf.d` snippet using non-universal `fish_add_path`. On
+Windows, prepend only HKCU `Environment\\Path`, preserving its registry type
+and raw variable references. Verify exact path and version from new shells or
+an OS-built Windows User environment before reporting success. Roll back
+owned activation edits when verification fails.
+
+**Consequences:** Refusal changes no executable, profile, or registry value.
+Unknown or shadowed lookup cannot be reported as installed. Machine Path
+shadows on Windows require manual repair because User Path cannot outrank
+them. The contract lives in
+[architecture/native-installer.md](architecture/native-installer.md).

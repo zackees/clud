@@ -8,8 +8,12 @@ on the effective PATH. `picker.rs` supplies the menu, confirmation, and full
 release-list models to the shared `selector.rs` terminal driver. The automatic
 menu defaults to **Not now**; the explicit menu defaults to **Install this
 version**. `transaction.rs` builds the read-only plan, verifies the selected
-source, and commits one executable. Persistent PATH activation is separate;
-binary commit alone reports a pending status.
+source, and commits one executable. `activation.rs` builds the read-only
+shell plan shown before consent, updates owned Bash, zsh, or fish startup
+files, and proves fresh login and interactive name-based lookup.
+`activation_windows.rs` owns the HKCU User Path edit, change broadcast, and
+OS-built user-environment proof on Windows. A binary commit alone does not
+count as installer success.
 
 `catalog.rs` parses the bounded, duplicate-key rejecting v1 Catalog published
 at the Pages installer endpoint. `Catalog::compatible_releases` lists complete

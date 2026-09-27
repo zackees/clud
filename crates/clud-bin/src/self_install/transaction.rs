@@ -9,6 +9,7 @@ use fs4::fs_std::FileExt;
 use running_process::ReadStatus;
 use sha2::{Digest, Sha256};
 
+use super::activation::{self, ActivationPlan};
 use super::catalog::{Arch, Flavor, MediaType, Os, ResolvedAsset};
 use super::entry::InstallIntent;
 
@@ -23,6 +24,7 @@ pub struct InstallPlan {
     pub source_sha256: String,
     pub replacement: Option<String>,
     pub path_proposal: String,
+    pub activation: ActivationPlan,
     source: Source,
 }
 
@@ -79,7 +81,8 @@ pub fn plan(intent: InstallIntent) -> Result<InstallPlan, String> {
     } else {
         None
     };
-    let path_proposal = path_proposal(&destination)?;
+    let activation = activation::plan(&destination)?;
+    let path_proposal = activation.description();
     match intent {
         InstallIntent::CurrentExecutable => {
             let path = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -103,6 +106,7 @@ pub fn plan(intent: InstallIntent) -> Result<InstallPlan, String> {
                 source_sha256: sha,
                 replacement,
                 path_proposal,
+                activation,
                 source: Source::Current {
                     path,
                     file,
@@ -125,6 +129,7 @@ pub fn plan(intent: InstallIntent) -> Result<InstallPlan, String> {
                 source_sha256: asset.sha256.clone(),
                 replacement,
                 path_proposal,
+                activation,
                 source: Source::Published(asset),
             })
         }
@@ -149,9 +154,18 @@ impl InstallPlan {
 pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
     let parent = plan.destination.parent().ok_or("missing install parent")?;
     inspect_destination(&plan.destination, false)?;
+    #[cfg(unix)]
+    create_private_dirs(parent)?;
+    #[cfg(windows)]
     fs::create_dir_all(parent).map_err(|error| format!("create user bin: {error}"))?;
     inspect_destination(&plan.destination, false)?;
     let lock_path = parent.join(".clud-install.lock");
+    #[cfg(windows)]
+    if let Ok(meta) = fs::symlink_metadata(&lock_path) {
+        if windows_reparse(&meta) {
+            return Err("installer lock is a reparse point".into());
+        }
+    }
     let mut lock_options = OpenOptions::new();
     lock_options
         .read(true)
@@ -285,49 +299,55 @@ fn approved_destination() -> Result<PathBuf, String> {
         if !home.is_absolute() {
             return Err("HOME must be absolute".into());
         }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        for directory in [home.join(".local/bin"), home.join("bin")] {
+            let on_path = std::env::split_paths(&path).any(|entry| entry == directory);
+            if !on_path {
+                continue;
+            }
+            if let Ok(meta) = fs::symlink_metadata(&directory) {
+                use std::os::unix::fs::MetadataExt;
+                if meta.is_dir()
+                    && !meta.file_type().is_symlink()
+                    && meta.uid() == unsafe { libc::geteuid() }
+                    && meta.mode() & 0o022 == 0
+                {
+                    return Ok(directory.join("clud"));
+                }
+            }
+        }
         Ok(home.join(".local/bin/clud"))
     }
 }
 
-fn path_proposal(destination: &Path) -> Result<String, String> {
-    let bin = destination.parent().ok_or("missing install directory")?;
-    #[cfg(windows)]
-    return Ok(format!(
-        "prepend {} to HKCU\\Environment\\Path (REG_EXPAND_SZ); persistent activation is pending",
-        bin.display()
-    ));
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or("HOME is unavailable")?;
-        let quoted = shell_words::quote(&bin.to_string_lossy()).into_owned();
-        let line = format!("export PATH={quoted}:\"$PATH\"");
-        let shell = std::env::var_os("SHELL")
-            .and_then(|value| PathBuf::from(value).file_name().map(|name| name.to_owned()))
-            .unwrap_or_default();
-        let proposal = match shell.to_string_lossy().as_ref() {
-            "bash" => format!(
-                "append `{line}` to {} and {}",
-                home.join(".bashrc").display(),
-                home.join(".bash_profile").display()
-            ),
-            "zsh" => format!(
-                "append `{line}` to {} and {}",
-                home.join(".zshrc").display(),
-                home.join(".zprofile").display()
-            ),
-            "fish" => format!(
-                "write `fish_add_path --path {quoted}` to {}",
-                home.join(".config/fish/conf.d/clud-path.fish").display()
-            ),
-            _ => format!("manual activation: `{line}` in the user's shell startup file"),
-        };
-        Ok(format!("{proposal}; persistent activation is pending"))
+#[cfg(unix)]
+pub(super) fn create_private_dirs(parent: &Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut missing = Vec::new();
+    let mut current = Some(parent);
+    while let Some(directory) = current {
+        match fs::symlink_metadata(directory) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(directory.to_path_buf());
+                current = directory.parent();
+            }
+            Err(error) => return Err(format!("inspect {}: {error}", directory.display())),
+        }
     }
+    for directory in missing.iter().rev() {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(directory)
+            .map_err(|error| {
+                format!("create private directory {}: {error}", directory.display())
+            })?;
+    }
+    Ok(())
 }
 
-fn inspect_destination(destination: &Path, probe_version: bool) -> Result<(), String> {
+pub(super) fn inspect_destination(destination: &Path, probe_version: bool) -> Result<(), String> {
     let parent = destination.parent().ok_or("missing install directory")?;
     #[cfg(unix)]
     let home = std::env::var_os("HOME")
@@ -343,9 +363,9 @@ fn inspect_destination(destination: &Path, probe_version: bool) -> Result<(), St
             #[cfg(unix)]
             if path.starts_with(&home) {
                 use std::os::unix::fs::MetadataExt;
-                if meta.uid() != unsafe { libc::geteuid() } {
+                if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 {
                     return Err(format!(
-                        "install directory is not user-owned: {}",
+                        "install directory is not exclusively user-controlled: {}",
                         path.display()
                     ));
                 }
@@ -385,7 +405,7 @@ fn inspect_destination(destination: &Path, probe_version: bool) -> Result<(), St
 }
 
 #[cfg(windows)]
-fn windows_reparse(meta: &fs::Metadata) -> bool {
+pub(super) fn windows_reparse(meta: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     meta.file_attributes() & 0x400 != 0
 }

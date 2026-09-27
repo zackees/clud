@@ -40,6 +40,12 @@ catalog asset, bounds and hashes its transfer, validates every redirect, and
 extracts only one executable from a historical wheel. A matching direct
 release can reuse the invoking executable only when its digest matches.
 
-The binary commit returns a pending activation status. Persistent shell or
-Windows User PATH edits and fresh name-based lookup are owned by #1495, so
-an absolute-path version check cannot claim overall install success.
+The read-only activation plan also shows the exact startup-file or Windows
+User Path proposal before consent. On POSIX, activation uses owned stanzas in
+the active Bash login and interactive files, zsh login and interactive files,
+or a fish `conf.d` snippet with non-universal `fish_add_path`. Windows updates
+only HKCU `Environment\\Path`, preserving its registry type and raw variable
+references, then broadcasts the environment change. An install succeeds only
+after a fresh shell or OS-built Windows user environment resolves `clud` by
+name to the approved destination and returns the selected version. Shadows or
+startup files that undo the edit produce a repair error, not success.
