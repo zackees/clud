@@ -10,6 +10,7 @@ import pytest
 
 from installer.catalog import (
     TARGETS,
+    candidate_catalog_from_release,
     catalog_from_releases,
     executable_member,
     verify_static_musl_elf,
@@ -296,6 +297,22 @@ def test_published_prerelease_flag_cannot_displace_stable() -> None:
     catalog = catalog_from_releases([candidate, stable], lambda _: data)
     assert catalog["channels"]["latest-stable"] == "2.9.0"
     assert [entry["version"] for entry in catalog["releases"]] == ["2.9.0"]
+
+
+def test_versioned_candidate_catalog_preserves_prior_stable() -> None:
+    data = wheel("clud.exe", b"MZpayload")
+    stable = catalog_from_releases(
+        [release("2.9.0", "https://example.com/stable", data)], lambda _: data
+    )
+    candidate = release("2.10.0", "https://example.com/candidate", data)
+    candidate["prerelease"] = True
+    result = candidate_catalog_from_release(candidate, stable, lambda _: data)
+    assert result["channels"] == {"latest-stable": "2.9.0", "candidate": "2.10.0"}
+    assert [row["version"] for row in result["releases"]] == ["2.10.0", "2.9.0"]
+    with pytest.raises(ValueError, match="complete"):
+        candidate_catalog_from_release({**candidate, "assets": candidate["assets"][:-1]}, stable, lambda _: data)
+    with pytest.raises(ValueError, match="prerelease"):
+        candidate_catalog_from_release({**candidate, "prerelease": False}, stable, lambda _: data)
 
 
 def test_incomplete_newer_release_cannot_displace_complete_stable() -> None:
