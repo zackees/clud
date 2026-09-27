@@ -494,9 +494,13 @@ redesign requires; everything else is CI plumbing.
 
 ## Release profile containment
 
-PR installer acceptance builds six direct `clud` candidates from the exact PR
-head with `soldr` in the dev profile. `_build-target.yml` uploads one binary
-and a provenance record for each target. `ci/installer_candidate.py` checks
+Installer acceptance on a PR runs only while it has the `ci-full` label
+(legacy `ci:full` is equivalent); routine PR commits start no installer jobs.
+Adding or removing the label re-evaluates the gate, and subsequent commits on
+a labeled PR rerun it. The release workflow call remains independent of PR
+labels. Labeled PR acceptance builds six direct `clud` candidates from the
+exact PR head with `soldr` in the dev profile. `_build-target.yml` uploads one
+binary and a provenance record for each target. `ci/installer_candidate.py` checks
 source SHA, target format, size, and digest before assembling the six-asset
 candidate catalog. Each native Windows, macOS, and Linux runner downloads its
 own artifact, installs it, and reports the installed digest and fresh
