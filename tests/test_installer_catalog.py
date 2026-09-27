@@ -63,7 +63,7 @@ def test_semantic_version_sort_and_prerelease_not_latest() -> None:
         release("2.10.0", "https://example.com/210", data),
     ]
     catalog = catalog_from_releases(releases, lambda _: data)
-    assert [entry["version"] for entry in catalog["releases"]] == ["2.10.0", "2.10.0-rc.1", "2.9.0"]
+    assert [entry["version"] for entry in catalog["releases"]] == ["2.10.0", "2.9.0"]
     assert catalog["channels"]["latest-stable"] == "2.10.0"
     assert version_key("2.10.0") > version_key("2.9.0")
     assert version_key("2.10.0-rc.10") > version_key("2.10.0-rc.9")
@@ -295,6 +295,7 @@ def test_published_prerelease_flag_cannot_displace_stable() -> None:
     candidate["prerelease"] = True
     catalog = catalog_from_releases([candidate, stable], lambda _: data)
     assert catalog["channels"]["latest-stable"] == "2.9.0"
+    assert [entry["version"] for entry in catalog["releases"]] == ["2.9.0"]
 
 
 def test_incomplete_newer_release_cannot_displace_complete_stable() -> None:
