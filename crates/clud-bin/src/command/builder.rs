@@ -838,7 +838,14 @@ fn existing_codex_instructions(args: &Args) -> Option<String> {
             parse_codex_instruction_override(raw)
         })
         .or_else(|| {
-            let path = dirs::home_dir()?.join(".codex/config.toml");
+            let config_dir = std::env::var_os("CODEX_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|home| std::path::PathBuf::from(home).join(".codex"))
+                })
+                .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))?;
+            let path = config_dir.join("config.toml");
             let text = std::fs::read_to_string(path).ok()?;
             text.parse::<toml::Value>()
                 .ok()?

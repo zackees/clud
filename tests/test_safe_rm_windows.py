@@ -59,7 +59,7 @@ def test_recursive_target_containing_junction_is_refused(tmp_path: Path) -> None
     sentinel.write_text("keep", encoding="utf-8")
     junction = parent / "junction"
     created = process.run(
-        ["cmd", "/d", "/c", f'mklink /J "{junction}" "{outside}"'],
+        ["cmd", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
         capture_output=True,
         text=True,
         timeout=30,

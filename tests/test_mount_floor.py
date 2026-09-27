@@ -6,6 +6,8 @@ import os
 import shutil
 from pathlib import Path
 
+import pytest
+
 from tests import process
 
 
@@ -14,7 +16,15 @@ def test_bind_mount_is_not_deleted() -> None:
     parent = root / "parent"
     mounted = parent / "mounted"
     sentinel = mounted / "CLAUDE.md"
-    assert mounted.is_mount()
+    if not root.is_dir():
+        pytest.skip("bind-mount probe runs in the dedicated Docker lane")
+    try:
+        is_mount = mounted.is_mount()
+    except NotImplementedError:
+        pytest.skip("mount-point detection is unavailable on this platform")
+    if not is_mount and os.environ.get("CLUD_REQUIRE_MOUNT_PROBE") != "1":
+        pytest.skip("bind-mount probe runs in the dedicated Docker lane")
+    assert is_mount
     assert sentinel.is_file()
     shim_dir = root / "shim"
     shim_dir.mkdir(exist_ok=True)

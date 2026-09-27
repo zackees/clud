@@ -13,8 +13,10 @@ import pytest
 from tests import process
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows process startup is a separate budget")
+@pytest.mark.skipif(sys.platform != "linux", reason="hook latency budget is measured on Linux")
 def test_mixed_hook_payloads_have_sub_20ms_p99(tmp_path: Path) -> None:
+    if os.environ.get("RM_HOOK_BENCH") != "1":
+        pytest.skip("latency budget runs in the dedicated bosn benchmark lane")
     binary = Path(os.environ["CLUD_TEST_BINARY"]).with_name("clud-cmd-scan")
     home = tmp_path / "home"
     home.mkdir()

@@ -13,7 +13,7 @@ def plan(tmp_path: Path, *extra: str, backend: str = "claude") -> list[str]:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = os.environ.copy()
-    env.update(HOME=str(home), USERPROFILE=str(home))
+    env.update(HOME=str(home), USERPROFILE=str(home), CODEX_HOME=str(home / ".codex"))
     binary = Path(os.environ.get("CLUD_TEST_BINARY", "/build/target/debug/clud"))
     result = process.run(
         [str(binary), "--dry-run", f"--{backend}", "--no-daemon", "-p", "hello", *extra],

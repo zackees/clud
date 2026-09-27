@@ -633,6 +633,8 @@ pub fn run_with(
     let mut moved: Vec<(String, PathBuf)> = Vec::new();
     for target in &accepted {
         let shown = target.path.display().to_string();
+        #[cfg(windows)]
+        let shown = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string();
         let outcome = if options.dry_run {
             Outcome {
                 path: shown.clone(),

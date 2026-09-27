@@ -12,6 +12,8 @@ import hashlib
 import io
 import json
 import os
+import platform
+import sys
 import tarfile
 from pathlib import Path
 
@@ -23,7 +25,8 @@ from tests.integration._daemon_helpers import stop_daemon
 SCRIPT = Path(__file__).parent / "fixtures" / "codex-install-150e3cf6.b64"
 SCRIPT_SHA256 = "150e3cf675682efeaac115aa3747add3f27887896d04ce6d0b56478d8b428bf6"
 VERSION = "0.157.1"
-TARGET = "x86_64-unknown-linux-musl"
+ARCH = "aarch64" if platform.machine().lower() in {"aarch64", "arm64"} else "x86_64"
+TARGET = f"{ARCH}-apple-darwin" if sys.platform == "darwin" else f"{ARCH}-unknown-linux-musl"
 
 
 def _package(path: Path) -> str:
@@ -122,6 +125,7 @@ def _run_installer(
 
 @pytest.mark.parametrize("route", ["foreground", "daemon"])
 @pytest.mark.parametrize("prior", ["none", "stale", "complete"])
+@pytest.mark.skipif(os.name == "nt", reason="upstream install.sh supports macOS and Linux")
 def test_pinned_codex_installer_in_clud_child_environment(
     tmp_path: Path, prior: str, route: str
 ) -> None:

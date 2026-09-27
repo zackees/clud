@@ -186,7 +186,7 @@ def test_launcher_restores_shim_path_in_codex_login_shell(
     bin_dir.mkdir()
     codex = bin_dir / "codex"
     codex.write_text(
-        '#!/bin/sh\n/usr/bin/bash -lc \'printf "%s|%s|%s\\n" "${CLUD_RM_SHIM_DIR:-}" '
+        '#!/bin/sh\n/bin/bash -lc \'printf "%s|%s|%s\\n" "${CLUD_RM_SHIM_DIR:-}" '
         '"$(command -v safe-rm)" "${UNSET_FOR_TEST:-}"\'\n',
         encoding="utf-8",
     )
@@ -263,7 +263,8 @@ def test_handoff_is_the_first_real_executable_after_shim(world) -> None:
     result = run(shim, env, "-rf", str(home / "missing"))
     assert result.returncode == 0, result
     args = json.loads(log.read_text(encoding="utf-8"))
-    assert args == ["--preserve-root=all", "--one-file-system", "-rf", str(home / "missing")]
+    prefix = ["-x"] if sys.platform == "darwin" else ["--preserve-root=all", "--one-file-system"]
+    assert args == [*prefix, "-rf", str(home / "missing")]
 
 
 def test_handoff_ignores_a_recording_rm_before_the_shim(world, tmp_path: Path) -> None:
@@ -298,9 +299,9 @@ def test_handoff_injects_guard_flags_even_when_names_follow_double_dash(world) -
     result = run(shim, env, "--", "--preserve-root=all", "--one-file-system")
     assert result.returncode == 0, result
     args = json.loads(log.read_text(encoding="utf-8"))
+    prefix = ["-x"] if sys.platform == "darwin" else ["--preserve-root=all", "--one-file-system"]
     assert args == [
-        "--preserve-root=all",
-        "--one-file-system",
+        *prefix,
         "--",
         "--preserve-root=all",
         "--one-file-system",
