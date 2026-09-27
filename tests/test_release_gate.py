@@ -63,7 +63,8 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "run: python -m ci.release_gate" in text
     assert "needs: [preflight, full-ci-gate, release-matrix]" in text
     assert "needs: [preflight, full-ci-gate, build]" in text
-    assert "needs: [preflight, full-ci-gate, build, publish-pypi]" in text
+    assert "needs: [preflight, full-ci-gate, build, build-installer, publish-pypi]" in text
+    assert "name: Build universal APE installer" in text
     assert "source_ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "branches: [main]" not in text  # A main version bump cannot start a release.

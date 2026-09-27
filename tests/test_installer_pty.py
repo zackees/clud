@@ -27,6 +27,18 @@ def installer_executable() -> Path:
     return executable
 
 
+def home_snapshot(home: Path | None) -> tuple[tuple[str, bool, int, bytes], ...]:
+    if home is None or not home.exists():
+        return ()
+    snapshot = []
+    for path in sorted(home.rglob("*")):
+        info = path.lstat()
+        is_directory = path.is_dir()
+        content = path.read_bytes() if path.is_file() else b""
+        snapshot.append((str(path.relative_to(home)), is_directory, info.st_mode, content))
+    return tuple(snapshot)
+
+
 def available_versions(executable: Path) -> list[str]:
     if sys.platform == "win32":
         command = [str(executable), "--list"]
@@ -43,13 +55,16 @@ def available_versions(executable: Path) -> list[str]:
 
 
 def run_selector(
-    input_bytes: bytes, *, preloaded: bytes = b""
-) -> tuple[bytes, int, list, list | None]:
+    input_bytes: bytes, *, preloaded: bytes = b"", home: Path | None = None
+) -> tuple[bytes, int, list, list | None, bool]:
     executable = installer_executable()
     pid, master = pty.fork()
     if pid == 0:
         env = os.environ.copy()
         env.pop("BASH_ENV", None)
+        if home is not None:
+            home.mkdir(parents=True, exist_ok=True)
+            env["HOME"] = str(home)
         if preloaded:
             time.sleep(0.2)
         os.execve("/bin/bash", ["/bin/bash", "-c", str(executable)], env)
@@ -61,6 +76,7 @@ def run_selector(
     cutoff = time.monotonic() + 30
     status = None
     menu_seen_at = None
+    before_input = None
     restored = None
     try:
         if preloaded:
@@ -79,6 +95,7 @@ def run_selector(
                 output.extend(chunk)
             if b"Choose a clud version" in output and menu_seen_at is None:
                 menu_seen_at = time.monotonic()
+                before_input = home_snapshot(home)
             if menu_seen_at is not None and not sent:
                 if preloaded and time.monotonic() - menu_seen_at < 0.35:
                     pass
@@ -108,17 +125,18 @@ def run_selector(
         if status is None:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
-    return bytes(output), status, original, restored
+    unchanged = before_input == home_snapshot(home)
+    return bytes(output), status, original, restored, unchanged
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
-def test_menu_scrolls_and_restores_terminal_with_crlf_output() -> None:
+def test_menu_scrolls_and_restores_terminal_with_crlf_output(tmp_path: Path) -> None:
     executable = installer_executable()
     versions = available_versions(executable)
     assert len(versions) > 8, "the live version catalog must contain scrollable history"
     selected_version = versions[8]
-    output, status, original, restored = run_selector(
-        b"\x1b[B" * 8 + b"\r", preloaded=b"\r"
+    output, status, original, restored, home_unchanged = run_selector(
+        b"\x1b[B" * 8 + b"\r", preloaded=b"\r", home=tmp_path / "home"
     )
     assert os.waitstatus_to_exitcode(status) != 0
     assert f"Install clud {selected_version} for this user?".encode() in output
@@ -131,6 +149,7 @@ def test_menu_scrolls_and_restores_terminal_with_crlf_output() -> None:
         if byte == 10
     )
     assert restored == original, "terminal mode was not restored after selection"
+    assert home_unchanged, "declining consent modified HOME after startup"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows ConPTY")
@@ -178,8 +197,10 @@ def test_menu_scrolls_and_restores_terminal_through_windows_conpty() -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires a POSIX PTY")
-def test_escape_cancels_without_selecting_a_release() -> None:
-    output, status, original, restored = run_selector(b"\x1b")
+def test_escape_cancels_without_selecting_a_release(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    output, status, original, restored, home_unchanged = run_selector(b"\x1b", home=home)
     assert os.waitstatus_to_exitcode(status) != 0
     assert b"Installation cancelled" in output
     assert restored == original, "terminal mode was not restored after Escape"
+    assert home_unchanged, "Escape cancellation modified HOME after startup"

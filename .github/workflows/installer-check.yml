@@ -130,6 +130,7 @@ jobs:
           ./clud-installer.exe --self-test-catalog
           ./clud-installer.exe --self-test-tty
           ./clud-installer.exe --self-test-sha256
+          ./clud-installer.exe --self-test-path
           actual=$(./clud-installer.exe --host-platform)
           echo "Detected host platform: $actual (expected $EXPECTED_PLATFORM)"
           test "$actual" = "$EXPECTED_PLATFORM"
@@ -142,26 +143,40 @@ jobs:
             USERPROFILE="$(cygpath -w "$testhome")"
             export USERPROFILE
             export HOME="$USERPROFILE"
-            LOCALAPPDATA="$(cygpath -w "$testhome/AppData/Local")"
-            export LOCALAPPDATA
-            ./clud-installer.exe --install-version "$version" --yes
+            unset LOCALAPPDATA
+            env -u LOCALAPPDATA ./clud-installer.exe --install-version "$version" --yes
             # PowerShell environment variables must not be expanded by Bash.
             # shellcheck disable=SC2016
             CLUD_TEST_VERSION="$version" powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
-              '$d=Join-Path $env:LOCALAPPDATA "Programs\clud\bin"; $u=[Environment]::GetEnvironmentVariable("Path","User"); if(-not (($u -split ";")|Where-Object { $_ -and $_.TrimEnd([char]92) -ieq $d.TrimEnd([char]92) })) { throw "install directory missing from persistent user PATH" }; $env:Path="$u;$env:Path"; $c=Get-Command clud -CommandType Application -ErrorAction Stop; if($c.Source -ine (Join-Path $d "clud.exe")) { throw "wrong clud resolved: $($c.Source)" }; $out=& $c.Source --version; if($out -notmatch [regex]::Escape($env:CLUD_TEST_VERSION)) { throw "unexpected version: $out" }; Write-Output $c.Source; Write-Output $out'
+              '$d=Join-Path $env:USERPROFILE "AppData\Local\Programs\clud\bin"; $u=[Environment]::GetEnvironmentVariable("Path","User"); if(-not (($u -split ";")|Where-Object { $_ -and $_.TrimEnd([char]92) -ieq $d.TrimEnd([char]92) })) { throw "install directory missing from persistent user PATH" }; $env:Path="$u;$env:Path"; $c=Get-Command clud -CommandType Application -ErrorAction Stop; if($c.Source -ine (Join-Path $d "clud.exe")) { throw "wrong clud resolved: $($c.Source)" }; $out=& $c.Source --version; if($out -notmatch [regex]::Escape($env:CLUD_TEST_VERSION)) { throw "unexpected version: $out" }; Write-Output $c.Source; Write-Output $out'
           else
             testhome="$RUNNER_TEMP/clud-installer-home"
             mkdir -p "$testhome"
             export HOME="$testhome"
-            export SHELL=/bin/bash
             export TMPDIR="$RUNNER_TEMP"
-            ./clud-installer.exe --install-version "$version" --yes
-            resolved=$(env -u BASH_ENV HOME="$testhome" SHELL=/bin/bash bash --login -c 'command -v clud')
+            for profile in .profile .bash_profile .bash_login .bashrc .zprofile .zshrc; do
+              printf '%s\n' '# clud-installer managed PATH' > "$testhome/$profile"
+            done
+            PATH="$testhome/.local/bin:$PATH" env -u SHELL ./clud-installer.exe --install-version "$version" --yes
+            if [ "$RUNNER_OS" = macOS ]; then
+              test_shell=zsh
+              test -x /bin/zsh
+              expected_executable="$testhome/.local/bin/clud"
+            else
+              test_shell=bash
+              expected_executable="$testhome/.local/bin/clud"
+            fi
+            resolved=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -l -c 'command -v clud')
             test "$resolved" = "$testhome/.local/bin/clud"
-            checked=$(env -u BASH_ENV HOME="$testhome" SHELL=/bin/bash bash --login -c 'clud --version')
+            checked=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -l -c 'clud --version')
             test "$checked" = "clud $version"
+            interactive_resolved=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -i -c 'command -v clud' 2>/dev/null)
+            test "$interactive_resolved" = "$expected_executable"
+            interactive_checked=$(env -u BASH_ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$testhome" "$test_shell" -i -c 'clud --version' 2>/dev/null)
+            test "$interactive_checked" = "clud $version"
             echo "$resolved"
             echo "$checked"
+            echo "Interactive-shell verification: $interactive_resolved -> $interactive_checked"
           fi
 
   ape-core-tests:
@@ -185,6 +200,7 @@ jobs:
           ./clud-installer.exe --self-test-catalog
           ./clud-installer.exe --self-test-tty
           ./clud-installer.exe --self-test-sha256
+          ./clud-installer.exe --self-test-path
           ./clud-installer.exe --host-platform
           ./clud-installer.exe --list
 

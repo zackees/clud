@@ -9,6 +9,7 @@
 
 #include <sys/utsname.h>
 #include <sys/stat.h>
+#include <pwd.h>
 #include <poll.h>
 #include <termios.h>
 #include <unistd.h>
@@ -368,10 +369,11 @@ bool extract_wheel_executable(const std::vector<unsigned char> &wheel,
 struct InstallPlan {
   std::string directory;
   std::string executable;
-  std::string profile;
   std::string shell;
+  std::vector<std::string> profiles;
   std::string existing_clud;
   bool path_update = false;
+  bool verify_interactive_shell = false;
 };
 
 std::string environment(const char *name) {
@@ -384,6 +386,34 @@ bool path_exists(const std::string &path, bool *is_directory = nullptr) {
   if (stat(path.c_str(), &info) != 0) return false;
   if (is_directory) *is_directory = S_ISDIR(info.st_mode);
   return true;
+}
+
+std::string shell_name(const std::string &shell) {
+  const size_t slash = shell.find_last_of('/');
+  return shell.substr(slash == std::string::npos ? 0 : slash + 1);
+}
+
+std::string default_shell(const Platform &platform,
+                          const std::string &account_shell = "") {
+  if (!account_shell.empty()) return account_shell;
+  return platform.os == "darwin" ? "/bin/zsh" : "/bin/bash";
+}
+
+std::vector<std::string> shell_profiles(const std::string &home,
+                                        const std::string &shell,
+                                        bool bash_profile_exists,
+                                        bool bash_login_exists) {
+  const std::string name = shell_name(shell);
+  if (name == "bash") {
+    const std::string login = bash_profile_exists ? ".bash_profile"
+        : bash_login_exists ? ".bash_login" : ".profile";
+    return {path_join(home, login), path_join(home, ".bashrc")};
+  }
+  if (name == "zsh")
+    return {path_join(home, ".zprofile"), path_join(home, ".zshrc")};
+  if (name == "fish")
+    return {path_join(home, ".config/fish/conf.d/clud-path.fish")};
+  return {path_join(home, ".profile")};
 }
 
 bool path_equal(std::string left, std::string right) {
@@ -439,6 +469,19 @@ std::string shell_double_quote(const std::string &value) {
   return result;
 }
 
+std::string path_profile_snippet(const std::string &shell,
+                                 const std::string &directory) {
+  std::string snippet = "# clud-installer managed PATH\n";
+  const std::string quoted = shell_double_quote(directory);
+  if (shell_name(shell) == "fish") {
+    snippet += "fish_add_path --prepend \"" + quoted + "\"\n";
+  } else {
+    snippet += "case \"$PATH\" in\n  \"" + quoted + ":\"*) ;;\n";
+    snippet += "  *) PATH=\"" + quoted + ":$PATH\"; export PATH ;;\nesac\n";
+  }
+  return snippet;
+}
+
 bool make_install_plan(const Platform &platform, InstallPlan *plan,
                        std::string *error) {
   const std::string home = IsWindows() ? environment("USERPROFILE") : environment("HOME");
@@ -455,22 +498,40 @@ bool make_install_plan(const Platform &platform, InstallPlan *plan,
     plan->directory = path_join(home, ".local/bin");
     plan->executable = path_join(plan->directory, "clud");
     plan->shell = environment("SHELL");
-    if (plan->shell.empty()) plan->shell = "/bin/sh";
-    const std::string shell_name = plan->shell.substr(plan->shell.find_last_of('/') + 1);
-    if (shell_name == "fish") {
-      plan->profile = path_join(home, ".config/fish/conf.d/clud-path.fish");
-    } else if (shell_name == "zsh") {
-      plan->profile = path_join(home, ".zprofile");
-    } else if (shell_name == "bash") {
-      const std::string bash_profile = path_join(home, ".bash_profile");
-      plan->profile = path_exists(bash_profile) ? bash_profile : path_join(home, ".profile");
-    } else {
-      plan->profile = path_join(home, ".profile");
+    if (plan->shell.empty() || access(plan->shell.c_str(), X_OK) != 0) {
+      const struct passwd *account = getpwuid(getuid());
+      const std::string account_shell = account && account->pw_shell
+          ? account->pw_shell : "";
+      plan->shell = default_shell(platform, account_shell);
+      if (access(plan->shell.c_str(), X_OK) != 0) {
+        plan->shell = platform.os == "darwin" ? "/bin/bash" : "/bin/sh";
+        if (access(plan->shell.c_str(), X_OK) != 0) {
+          *error = "could not determine an executable login shell";
+          return false;
+        }
+      }
     }
+    const std::string bash_profile = path_join(home, ".bash_profile");
+    const std::string bash_login = path_join(home, ".bash_login");
+    plan->profiles = shell_profiles(home, plan->shell, path_exists(bash_profile),
+                                    path_exists(bash_login));
+    const std::string name = shell_name(plan->shell);
+    plan->verify_interactive_shell = name == "bash" || name == "zsh" || name == "fish";
   }
   const std::string path = environment("PATH");
   plan->existing_clud = find_existing_clud(path);
   plan->path_update = !first_path_is(path, plan->directory);
+  if (!IsWindows()) {
+    for (const auto &profile : plan->profiles) {
+      std::string contents;
+      if (!read_text_file(profile, &contents) ||
+          contents.find(path_profile_snippet(plan->shell, plan->directory)) ==
+              std::string::npos) {
+        plan->path_update = true;
+        break;
+      }
+    }
+  }
   (void)platform;
   return true;
 }
@@ -544,37 +605,44 @@ bool run_capture(const std::string &command, std::string *output) {
   return pclose(pipe) == 0;
 }
 
-bool write_path_profile(const InstallPlan &plan) {
-  if (plan.profile.empty()) return true;
-  const std::string marker = "# clud-installer managed PATH";
+bool write_path_profile(const std::string &profile, const std::string &shell,
+                        const std::string &directory) {
   std::string existing;
-  if (read_text_file(plan.profile, &existing) && existing.find(marker) != std::string::npos)
+  const bool exists = read_text_file(profile, &existing);
+  const std::string snippet = path_profile_snippet(shell, directory);
+  if (exists && existing.find(snippet) != std::string::npos)
     return true;
-  const size_t separator = plan.profile.find_last_of(IsWindows() ? "\\/" : "/");
-  if (separator != std::string::npos && !ensure_directory(plan.profile.substr(0, separator)))
+  const size_t separator = profile.find_last_of(IsWindows() ? "\\/" : "/");
+  if (separator != std::string::npos && !ensure_directory(profile.substr(0, separator)))
     return false;
-  FILE *file = std::fopen(plan.profile.c_str(), "ab");
+  FILE *file = std::fopen(profile.c_str(), "ab");
   if (!file) return false;
-  std::string snippet;
-  if (!existing.empty() && existing.back() != '\n') snippet.push_back('\n');
-  snippet += marker;
-  snippet.push_back('\n');
-  const std::string quoted = shell_double_quote(plan.directory);
-  const std::string shell_name = plan.shell.substr(plan.shell.find_last_of('/') + 1);
-  if (shell_name == "fish") {
-    snippet += "fish_add_path --prepend \"" + quoted + "\"\n";
-  } else {
-    snippet += "case \"$PATH\" in\n  \"" + quoted + ":\"*) ;;\n";
-    snippet += "  *) PATH=\"" + quoted + ":$PATH\"; export PATH ;;\nesac\n";
-  }
-  const bool written = std::fwrite(snippet.data(), 1, snippet.size(), file) == snippet.size();
+  std::string addition;
+  if (!existing.empty() && existing.back() != '\n') addition.push_back('\n');
+  addition += snippet;
+  const bool written = std::fwrite(addition.data(), 1, addition.size(), file) == addition.size();
   const bool closed = std::fclose(file) == 0;
   return written && closed;
 }
 
-bool update_windows_user_path() {
-  const std::string script =
-      "$d=Join-Path $env:LOCALAPPDATA 'Programs\\clud\\bin';"
+std::string powershell_quote(const std::string &value) {
+  std::string result = "'";
+  for (char c : value) {
+    result.push_back(c);
+    if (c == '\'') result.push_back('\'');
+  }
+  result.push_back('\'');
+  return result;
+}
+
+bool write_path_profiles(const InstallPlan &plan) {
+  for (const auto &profile : plan.profiles)
+    if (!write_path_profile(profile, plan.shell, plan.directory)) return false;
+  return true;
+}
+
+bool update_windows_user_path(const InstallPlan &plan) {
+  const std::string script = "$d=" + powershell_quote(plan.directory) + ";"
       "$p=[Environment]::GetEnvironmentVariable('Path','User');"
       "$items=@($p -split ';'|Where-Object {$_ -and $_.TrimEnd('\\') -ine $d.TrimEnd('\\')});"
       "[Environment]::SetEnvironmentVariable('Path',(@($d)+$items -join ';'),'User')";
@@ -592,7 +660,10 @@ bool confirm_install(const Release &release, const InstallPlan &plan,
   std::printf("  Destination: %s\n", plan.executable.c_str());
   if (plan.path_update) {
     if (IsWindows()) std::puts("  PATH:       prepend this directory to the current user's PATH");
-    else std::printf("  PATH:       update %s\n", plan.profile.c_str());
+    else {
+      std::puts("  PATH:       update shell startup files:");
+      for (const auto &profile : plan.profiles) std::printf("              %s\n", profile.c_str());
+    }
   } else {
     std::printf("  PATH:       %s is already first\n", plan.directory.c_str());
   }
@@ -679,20 +750,37 @@ bool verify_fresh_shell(const Release &release, const InstallPlan &plan,
                         std::string *output) {
   std::string command;
   if (IsWindows()) {
-    std::string script = "$d=Join-Path $env:LOCALAPPDATA 'Programs\\clud\\bin';";
+    std::string script = "$d=" + powershell_quote(plan.directory) + ";"
+                         "$e=" + powershell_quote(plan.executable) + ";";
     if (plan.path_update) {
       script += "$u=[Environment]::GetEnvironmentVariable('Path','User');"
                 "if(-not (($u -split ';')|Where-Object {$_ -and $_.TrimEnd('\\') -ieq $d.TrimEnd('\\')})){exit 3};";
     }
     script += "$env:Path=\"$d;$env:Path\";"
               "$c=Get-Command clud -CommandType Application -ErrorAction Stop;"
-              "if(($c.Source -replace '/','\\').ToLowerInvariant() -ne ((Join-Path $d 'clud.exe') -replace '/','\\').ToLowerInvariant()){exit 4};"
+              "if(($c.Source -replace '/','\\').ToLowerInvariant() -ne ($e -replace '/','\\').ToLowerInvariant()){exit 4};"
               "$c.Source;& $c.Source --version";
     command = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
               "-EncodedCommand " + base64_utf16le_ascii(script);
   } else {
     const std::string check = "command -v clud; clud --version";
-    command = "env -u BASH_ENV " + shell_quote(plan.shell) + " -l -c " + shell_quote(check);
+    const std::vector<std::string> modes = plan.verify_interactive_shell
+        ? std::vector<std::string>{"-l", "-i"} : std::vector<std::string>{"-l"};
+    const std::string baseline_path = "/usr/bin:/bin:/usr/sbin:/sbin";
+    for (const auto &mode : modes) {
+      std::string shell_output;
+      command = "env -u BASH_ENV PATH=" + shell_quote(baseline_path) + " " +
+                shell_quote(plan.shell) + " " + mode + " -c " + shell_quote(check);
+      if (!run_capture(command, &shell_output)) {
+        output->append(shell_output);
+        return false;
+      }
+      output->append(shell_output);
+      if (shell_output.find(plan.executable) == std::string::npos ||
+          shell_output.find(release.version) == std::string::npos)
+        return false;
+    }
+    return true;
   }
   if (!run_capture(command, output)) return false;
   std::string expected = plan.executable;
@@ -783,8 +871,8 @@ int install_release(const Release &release, const Platform &platform,
     std::fprintf(stderr, "clud-installer: %s\n", error.c_str());
     return 1;
   }
-  if (plan.path_update && !(IsWindows() ? update_windows_user_path()
-                                        : write_path_profile(plan))) {
+  if (plan.path_update && !(IsWindows() ? update_windows_user_path(plan)
+                                        : write_path_profiles(plan))) {
     std::fprintf(stderr, "clud-installer: installed %s but could not update PATH\n",
                  plan.executable.c_str());
     return 1;
@@ -1182,6 +1270,36 @@ static int test_catalog() {
   return 0;
 }
 
+static int test_shell_profiles() {
+  const std::string home = "/home/example";
+  const auto bash_default = shell_profiles(home, "/bin/bash", false, false);
+  const auto bash_profile = shell_profiles(home, "/bin/bash", true, true);
+  const auto bash_login = shell_profiles(home, "/bin/bash", false, true);
+  const auto zsh = shell_profiles(home, "/bin/zsh", false, false);
+  const auto fish = shell_profiles(home, "/usr/bin/fish", false, false);
+  const auto sh = shell_profiles(home, "/bin/sh", false, false);
+  if (bash_default != std::vector<std::string>{"/home/example/.profile",
+                                               "/home/example/.bashrc"} ||
+      bash_profile != std::vector<std::string>{"/home/example/.bash_profile",
+                                               "/home/example/.bashrc"} ||
+      bash_login != std::vector<std::string>{"/home/example/.bash_login",
+                                             "/home/example/.bashrc"} ||
+      zsh != std::vector<std::string>{"/home/example/.zprofile",
+                                     "/home/example/.zshrc"} ||
+      fish != std::vector<std::string>{
+          "/home/example/.config/fish/conf.d/clud-path.fish"} ||
+      sh != std::vector<std::string>{"/home/example/.profile"} ||
+      default_shell(Platform{"darwin", "aarch64"}) != "/bin/zsh" ||
+      default_shell(Platform{"linux", "x86_64"}) != "/bin/bash" ||
+      default_shell(Platform{"linux", "x86_64"}, "/usr/bin/fish") !=
+          "/usr/bin/fish") {
+    std::fputs("shell startup profile selection failed\n", stderr);
+    return 1;
+  }
+  std::puts("installer shell PATH profile tests passed");
+  return 0;
+}
+
 static int test_tty_renderer() {
   const std::string normalized =
       clud_installer::safe_crlf("lf\ncrlf\r\ncr\rcontrol\t\x1b[31m");
@@ -1280,6 +1398,9 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--self-test-sha256") == 0) {
     return test_sha256();
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--self-test-path") == 0) {
+    return test_shell_profiles();
   }
   if (argc == 2 && std::strcmp(argv[1], "--host-platform") == 0) {
     Platform platform;

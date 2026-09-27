@@ -19,8 +19,11 @@ test -n "$version"
 test_home=$(mktemp -d /tmp/clud-installer-home.XXXXXX)
 test_tmp=$(mktemp -d /tmp/clud-installer-tmp.XXXXXX)
 trap 'rm -rf -- "$test_home" "$test_tmp"' EXIT
+for profile in .profile .bash_profile .bash_login .bashrc; do
+  printf '%s\n' '# clud-installer managed PATH' > "$test_home/$profile"
+done
 
-env -u BASH_ENV HOME="$test_home" SHELL=/bin/bash TMPDIR="$test_tmp" \
+PATH="$test_home/.local/bin:$PATH" env -u BASH_ENV -u SHELL HOME="$test_home" TMPDIR="$test_tmp" \
   "$installer" --install-version "$version" --yes
 resolved=$(env -u BASH_ENV HOME="$test_home" SHELL=/bin/bash \
   bash --login -c 'command -v clud')
@@ -28,4 +31,10 @@ test "$resolved" = "$test_home/.local/bin/clud"
 actual=$(env -u BASH_ENV HOME="$test_home" SHELL=/bin/bash \
   bash --login -c 'clud --version')
 test "$actual" = "clud $version"
+interactive_resolved=$(env -u BASH_ENV HOME="$test_home" SHELL=/bin/bash \
+  bash -i -c 'command -v clud' 2>/dev/null)
+test "$interactive_resolved" = "$test_home/.local/bin/clud"
+interactive_actual=$(env -u BASH_ENV HOME="$test_home" SHELL=/bin/bash \
+  bash -i -c 'clud --version' 2>/dev/null)
+test "$interactive_actual" = "clud $version"
 printf 'Linux container acceptance passed: %s -> %s\n' "$resolved" "$actual"
