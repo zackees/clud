@@ -310,7 +310,9 @@ def test_versioned_candidate_catalog_preserves_prior_stable() -> None:
     assert result["channels"] == {"latest-stable": "2.9.0", "candidate": "2.10.0"}
     assert [row["version"] for row in result["releases"]] == ["2.10.0", "2.9.0"]
     with pytest.raises(ValueError, match="complete"):
-        candidate_catalog_from_release({**candidate, "assets": candidate["assets"][:-1]}, stable, lambda _: data)
+        candidate_catalog_from_release(
+            {**candidate, "assets": candidate["assets"][:-1]}, stable, lambda _: data
+        )
     with pytest.raises(ValueError, match="prerelease"):
         candidate_catalog_from_release({**candidate, "prerelease": False}, stable, lambda _: data)
 

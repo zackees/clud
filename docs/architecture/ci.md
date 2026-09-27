@@ -528,8 +528,21 @@ fresh nonroot install plus rejection of the historical GNU-only release.
 Both matrices are hard dependencies of the always-run aggregate. The ARM64
 guest script completed in about 270 seconds on the hosted runner in the first
 green run; the job allows 30 minutes including Nix setup and closure download.
-Public HTTPS prerelease and stable checks will reuse these assertions in the
-release gate; the PR fixture itself is local to the candidate workflow.
+The public prerelease and stable workflow calls run matching six-host, three
+distribution, and two NixOS lanes from anonymous HTTPS URLs. The NixOS guests
+fetch both catalog and binary inside the VM. A separate aggregate rejects a
+missing host record, changed digest, failed matrix, or skipped lane. The PR
+fixture remains local to the candidate workflow.
+
+`auto-release.yml` snapshots the previous latest release and canonical Pages
+digest, publishes final assets as a public prerelease, and attaches a
+versioned candidate catalog. Its direct reusable workflow call tests public
+candidate bytes before PyPI or stable promotion. Promotion checks unchanged
+GitHub asset IDs, then Pages deployment and a second direct reusable call
+test the canonical `latest-stable` path. If the post-promotion path fails,
+the rollback job demotes the release and redeploys the previous pointer.
+The release and both Pages workflows share a serialized queue; each release
+rechecks public state before mutation.
 
 Native Linux downloads use two additional release-profile jobs, one for each
 `*-unknown-linux-musl` architecture. Both build on x64 Ubuntu because soldr's

@@ -13,8 +13,12 @@ Historical Linux GNU assets carry `platform.libc=glibc` and
 `variant.flavor=gnu`; verified static musl direct assets carry
 `variant.flavor=static-musl` without a host libc requirement. The generator
 rejects musl assets with an ELF interpreter or a needed shared library. The
-catalog retains every installable published version and puts semantic versions
-newest first; `latest-stable` is a channel pointer, not array position.
+canonical catalog excludes drafts and prereleases, retains every installable
+stable version, and puts semantic versions newest first; `latest-stable` is a
+channel pointer, not array position. A public prerelease has a separate
+versioned `installer-candidate-manifest.json` attached to its final tag. That
+catalog carries `channels.candidate` for the new version while
+`channels.latest-stable` remains the previous public stable version.
 
 The Rust reader in `crates/clud-bin/src/self_install/catalog.rs` accepts only a
 bounded v1 clud Catalog with unique JSON keys, exact known platform variants,
@@ -26,6 +30,11 @@ requires an explicit host probe result proving a non-NixOS GNU loader and
 glibc 2.17 or newer. The selected asset's size and digest are checked before
 installation; a bad musl download is terminal rather than a reason to fall
 back to GNU.
+
+Candidate mode is opt-in through `CLUD_INSTALLER_CANDIDATE_TAG`. The native
+binary validates a numeric release tag, fetches only the fixed GitHub release
+asset URL, and parses a complete newer candidate row. Normal installs keep
+using the canonical Pages URL and reject a candidate channel.
 
 `installer/site.py` renders the exact Pages artifact paths: `index.html`,
 `install/index.html`, and `install/manifest.json`. The project root is a static
@@ -47,7 +56,14 @@ job locally through `act`; it cannot stand in for the Pages deployment API.
 The full-history verification downloads about 5.5 GB across the 27 releases
 present when this flow was introduced, so its build job has a 30-minute limit.
 
-The installer and release jobs will consume this catalog and deploy an updated
-site after new assets are published; those mechanics are described separately
-in the implementation issue rather than pretending this Pages phase installs
-clud by itself.
+`auto-release.yml` snapshots the prior public release and Pages digest, uploads
+final native bytes as a public prerelease, attaches the candidate catalog,
+and calls `installer-check.yml` in candidate mode. Every native host and the
+Arch, Fedora, Alpine, and NixOS guests fetch public HTTPS bytes and prove a
+fresh name-based install. Only after that gate passes does the workflow
+publish PyPI, promote the same GitHub asset IDs, and deploy the canonical
+Pages site. It calls the same installer matrix in released mode against the
+new `latest-stable` pointer. A failed post-promotion gate demotes the release,
+restores the prior latest release, redeploys the prior catalog pointer, and
+leaves the workflow red if any restoration step fails. Publication shares a
+serialized concurrency group with both Pages publishers.

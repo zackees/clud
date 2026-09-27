@@ -11,6 +11,11 @@ on:
         description: Published tag whose installer should be tested.
         required: true
         type: string
+      mode:
+        description: Candidate prerelease or canonical released catalog.
+        required: false
+        default: released
+        type: string
 
 permissions:
   contents: read
@@ -326,6 +331,161 @@ jobs:
           version=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
           python -m ci.installer_candidate aggregate candidate-evidence "$SOURCE_SHA" "$version" --artifacts candidate-artifacts
 
+  public-host:
+    name: Public ${{ inputs.mode }} native install on ${{ matrix.runner }}
+    if: github.event_name == 'workflow_call'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install native acceptance dependencies
+        shell: bash
+        run: |
+          python -m pip install pytest==9.0.3 running-process==4.10.1
+          if [ "$RUNNER_OS" = Windows ]; then python -m pip install pywinpty==3.0.5; fi
+      - name: Fetch anonymous HTTPS catalog and final binary, install by name
+        shell: bash
+        env:
+          CLUD_PUBLIC_MODE: ${{ inputs.mode }}
+          CLUD_PUBLIC_RELEASE_TAG: ${{ inputs.release_tag }}
+          CLUD_PUBLIC_EVIDENCE: public-evidence/${{ matrix.target }}.json
+        run: python -m pytest -q tests/test_installer_public_ci.py::test_public_release_installs_by_name
+      - name: Retain public host evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-evidence-${{ inputs.mode }}-${{ matrix.target }}
+          path: public-evidence/*.json
+          if-no-files-found: warn
+
+  public-nixos:
+    name: Public ${{ inputs.mode }} NixOS VM ${{ matrix.target }}
+    if: github.event_name == 'workflow_call'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve exact anonymous public asset digest
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MODE: ${{ inputs.mode }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from ci.installer_public_catalog import resolve
+          arch = os.environ['TARGET'].split('-', 1)[0]
+          asset = resolve(os.environ['MODE'], os.environ['RELEASE_TAG'], 'linux', arch)
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as env:
+              env.write(f"PUBLIC_VERSION={asset['version']}\nPUBLIC_SHA256={asset['sha256']}\n")
+          print(asset)
+          PY
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: system-features = nixos-test benchmark big-parallel kvm
+      - name: Fetch public HTTPS catalog and binary inside matching NixOS guest
+        timeout-minutes: 25
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64' || 'x86_64' }}"
+          nixpkgs=$(nix eval --raw --impure --expr '(builtins.getFlake (toString ./ci/nixos)).inputs.nixpkgs.outPath')
+          driver=$(nix-build ci/nixos/public-test.nix -A config.driver --no-out-link \
+            --argstr nixpkgs "$nixpkgs" \
+            --argstr tag "$RELEASE_TAG" \
+            --argstr version "$PUBLIC_VERSION" \
+            --argstr digest "$PUBLIC_SHA256" \
+            --argstr mode "$MODE")
+          mkdir -p "$RUNNER_TEMP/public-nixos-result"
+          "$driver/bin/nixos-test-driver" -o "$RUNNER_TEMP/public-nixos-result" 2>&1 | tee public-nixos.log
+          rg -m1 'PUBLIC_NIXOS_EVIDENCE ' public-nixos.log > public-nixos-evidence.txt
+      - name: Retain public NixOS guest evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-nixos-evidence-${{ inputs.mode }}-${{ matrix.target }}
+          path: public-nixos-evidence.txt
+          if-no-files-found: warn
+
+  public-distros:
+    name: Public ${{ inputs.mode }} on ${{ matrix.distro }}
+    if: github.event_name == 'workflow_call'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: archlinux
+            image: archlinux@sha256:f3691b4dde62ba4c4b6f0ae2c1fbf28e8c0c8c4b9a35c7e06dc1f70e21aa29f6
+          - distro: fedora
+            image: fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
+          - distro: alpine
+            image: alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve exact anonymous public musl digest
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from ci.installer_public_catalog import resolve
+          asset = resolve(os.environ['MODE'], os.environ['RELEASE_TAG'], 'linux', 'x86_64')
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as env:
+              env.write(f"PUBLIC_VERSION={asset['version']}\nPUBLIC_SHA256={asset['sha256']}\n")
+          print(asset)
+          PY
+      - name: Fetch public HTTPS catalog and same musl bytes inside fresh distribution
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 \
+            --mount "type=bind,src=$PWD/ci/installer_public_distro_guest.sh,dst=/guest.sh,readonly" \
+            '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$MODE" "$RELEASE_TAG" "$PUBLIC_VERSION" "$PUBLIC_SHA256" \
+            2>&1 | tee public-distro.log
+          rg -m1 'PUBLIC_DISTRO_EVIDENCE ' public-distro.log > public-distro-evidence.txt
+      - name: Retain public distribution guest evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-distro-evidence-${{ inputs.mode }}-${{ matrix.distro }}
+          path: public-distro-evidence.txt
+          if-no-files-found: warn
+
   catalog-unit:
     name: Native catalog and release wiring unit tests
     if: github.event_name == 'workflow_call' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full')))
@@ -344,6 +504,8 @@ jobs:
           python -m pytest -q \
             tests/test_installer_catalog.py \
             tests/test_installer_candidate_ci.py \
+            tests/test_installer_public_ci.py \
+            tests/test_public_release.py \
             tests/test_installer_verify_site.py \
             tests/test_installer_verify_native_assets.py \
             tests/test_installer_release_assets.py \
@@ -396,7 +558,7 @@ jobs:
 
   build-ape:
     name: Obtain installer APE
-    if: github.event_name == 'workflow_call'
+    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -425,7 +587,7 @@ jobs:
 
   ape-host:
     name: Install and verify on ${{ matrix.runner }}
-    if: github.event_name == 'workflow_call'
+    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
     needs: build-ape
     strategy:
       fail-fast: false
@@ -536,7 +698,7 @@ jobs:
 
   ape-core-tests:
     name: APE catalog and terminal unit tests
-    if: github.event_name == 'workflow_call'
+    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
     needs: build-ape
     runs-on: ubuntu-24.04
     steps:
@@ -562,7 +724,7 @@ jobs:
 
   linux-distro:
     name: Install on ${{ matrix.image }} container
-    if: github.event_name == 'workflow_call'
+    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
     needs: build-ape
     runs-on: ubuntu-24.04
     strategy:
@@ -592,22 +754,55 @@ jobs:
 
   installer-acceptance:
     name: Installer acceptance aggregate
-    needs: [catalog-unit, resolver-unit, catalog-site, ape-core-tests, ape-host, linux-distro]
+    needs: [catalog-unit, resolver-unit, catalog-site, public-host, public-nixos, public-distros, ape-core-tests, ape-host, linux-distro]
     if: always() && github.event_name == 'workflow_call'
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: public-evidence-${{ inputs.mode }}-*
+          path: public-evidence
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: public-nixos-evidence-${{ inputs.mode }}-*
+          path: public-nixos-evidence
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: public-distro-evidence-${{ inputs.mode }}-*
+          path: public-distro-evidence
       - name: Reject missing, skipped, or failed coverage
         env:
           CATALOG: ${{ needs.catalog-site.result }}
           CATALOG_UNIT: ${{ needs.catalog-unit.result }}
           RESOLVER_UNIT: ${{ needs.resolver-unit.result }}
+          PUBLIC_HOSTS: ${{ needs.public-host.result }}
+          PUBLIC_NIXOS: ${{ needs.public-nixos.result }}
+          PUBLIC_DISTROS: ${{ needs.public-distros.result }}
           APE_CORE: ${{ needs.ape-core-tests.result }}
           APE_HOSTS: ${{ needs.ape-host.result }}
           LINUX_DISTROS: ${{ needs.linux-distro.result }}
+          MODE: ${{ inputs.mode }}
         run: |
           test "$CATALOG" = success
           test "$CATALOG_UNIT" = success
           test "$RESOLVER_UNIT" = success
-          test "$APE_CORE" = success
-          test "$APE_HOSTS" = success
-          test "$LINUX_DISTROS" = success
+          test "$PUBLIC_HOSTS" = success
+          test "$PUBLIC_NIXOS" = success
+          test "$PUBLIC_DISTROS" = success
+          if [ "$MODE" = released ]; then
+            test "$APE_CORE" = success
+            test "$APE_HOSTS" = success
+            test "$LINUX_DISTROS" = success
+          else
+            test "$MODE" = candidate
+            test "$APE_CORE" = skipped
+            test "$APE_HOSTS" = skipped
+            test "$LINUX_DISTROS" = skipped
+          fi
+          python -m ci.installer_public_evidence public-evidence "$MODE" '${{ inputs.release_tag }}' \
+            --nixos public-nixos-evidence --distros public-distro-evidence

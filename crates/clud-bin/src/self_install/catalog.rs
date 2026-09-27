@@ -207,6 +207,14 @@ impl Catalog {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        Self::parse_internal(bytes, None)
+    }
+
+    pub fn parse_candidate(bytes: &[u8], expected_version: &str) -> Result<Self, String> {
+        Self::parse_internal(bytes, Some(expected_version))
+    }
+
+    fn parse_internal(bytes: &[u8], expected_candidate: Option<&str>) -> Result<Self, String> {
         let document = crate::server_settings::parse_strict_json(bytes, MAX_CATALOG_BYTES)?;
         let root = object(&document, "catalog")?;
         require_string(root, "$schema", SCHEMA)?;
@@ -220,6 +228,25 @@ impl Catalog {
         let latest_stable = string(field(channels, "latest-stable")?, "latest-stable")?.to_owned();
         if !Version::parse(&latest_stable)?.pre.is_empty() {
             return Err("latest-stable points to a prerelease".into());
+        }
+        match expected_candidate {
+            Some(expected) => {
+                if channels.len() != 2
+                    || channels.get("candidate").and_then(Value::as_str) != Some(expected)
+                {
+                    return Err("candidate channel does not match requested version".into());
+                }
+                let candidate_version = Version::parse(expected)?;
+                if !candidate_version.pre.is_empty()
+                    || candidate_version <= Version::parse(&latest_stable)?
+                {
+                    return Err("candidate must be a newer stable-form version".into());
+                }
+            }
+            None if channels.contains_key("candidate") => {
+                return Err("candidate channel requires explicit candidate mode".into());
+            }
+            None => {}
         }
         let raw_releases = field(root, "releases")?
             .as_array()
@@ -268,9 +295,22 @@ impl Catalog {
         if !complete(stable) {
             return Err("latest-stable release is incomplete".into());
         }
+        if let Some(expected) = expected_candidate {
+            let candidate = releases
+                .iter()
+                .find(|release| release.version == expected)
+                .ok_or("candidate release is missing")?;
+            if !complete(candidate) {
+                return Err("candidate release is incomplete".into());
+            }
+        }
         let newest_complete_stable = releases
             .iter()
-            .filter(|r| r.order.pre.is_empty() && complete(r))
+            .filter(|r| {
+                r.order.pre.is_empty()
+                    && complete(r)
+                    && Some(r.version.as_str()) != expected_candidate
+            })
             .max_by(|a, b| a.order.cmp(&b.order))
             .ok_or("no complete stable release")?;
         if newest_complete_stable.version != latest_stable {

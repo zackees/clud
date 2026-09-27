@@ -8,6 +8,8 @@ for the cross-file flow and the `bosn`/`act` validation command.
 `verify_native_assets.py` verifies those four files and the two separately
 built static musl Linux binaries before publication. The release build flow
 lives in [CI architecture](../docs/architecture/ci.md#release-profile-containment).
+`candidate_catalog.py` attaches a separate versioned catalog to a public
+prerelease while keeping the canonical stable pointer unchanged.
 
 The compact APE uses the operating system's `curl` command for HTTPS downloads.
 macOS and supported Windows versions provide it; minimal Linux installations
