@@ -1,7 +1,6 @@
 name: Dylint
 
-# Native jobs are required because the late lint sees only cfg-selected code.
-# This workflow is called once from ci.yml under its concurrency group.
+# One Linux Dylint pass is called from ci.yml under its concurrency group.
 
 on:
   workflow_call:
@@ -32,12 +31,8 @@ env:
 
 jobs:
   dylint:
-    name: Dylint (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
-    runs-on: ${{ matrix.os }}
+    name: Dylint
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -68,7 +63,6 @@ jobs:
           soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
           soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
       - name: Test dylint crate
-        if: runner.os == 'Linux'
         run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
       - name: Run dylint over workspace
         run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
