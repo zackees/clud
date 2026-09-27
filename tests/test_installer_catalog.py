@@ -398,7 +398,7 @@ def test_static_musl_rejects_loader_dependency_and_wrong_architecture() -> None:
         verify_static_musl_elf(bytes(payload), "x86_64")
 
 
-def test_public_site_rejects_incomplete_latest(tmp_path, monkeypatch) -> None:
+def test_public_site_rejects_incomplete_latest(tmp_path) -> None:
     import json
 
     data = wheel("clud.exe", b"MZpayload")
@@ -407,19 +407,15 @@ def test_public_site_rejects_incomplete_latest(tmp_path, monkeypatch) -> None:
     catalog = json.loads(manifest.read_text(encoding="utf-8"))
     catalog["releases"][0]["platforms"].pop()
     manifest.write_text(json.dumps(catalog), encoding="utf-8")
-    monkeypatch.setattr(
-        "installer.verify_site.fetch",
-        lambda _: json.dumps({"tag_name": "2.9.0"}).encode(),
-    )
     with pytest.raises(ValueError, match="incomplete"):
         verify(tmp_path)
 
 
-def test_page_links_installer_only_when_latest_release_contains_it(tmp_path) -> None:
+def test_page_does_not_link_unverified_installer_asset(tmp_path) -> None:
     data = wheel("clud.exe", b"MZpayload")
     item = release("2.9.0", "https://example.com/29", data)
     item["assets"].append({"name": "clud-installer.exe"})
     build_site(tmp_path, [item], lambda _: data)
     page = (tmp_path / "install" / "index.html").read_text(encoding="utf-8")
-    assert "releases/latest/download/clud-installer.exe" in page
-    assert "Universal installer coming" not in page
+    assert "releases/latest/download/clud-installer.exe" not in page
+    assert "No native downloads are available" in page
