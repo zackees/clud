@@ -35,20 +35,18 @@ episode ends below the clear threshold.
 
 | Launch | Surface | Where it renders |
 |---|---|---|
-| PTY, kitty graphics terminal | **Kitty tier** | semi-transparent image over the top-right cells |
+| PTY, kitty graphics terminal | **Kitty tier** | transient CPU HUD plus independent alert toasts over the top-right cells |
 | PTY, other terminal, child on the alternate screen | **Text-cell tier** | styled cells, top-right row |
 | PTY, other terminal, child on the main screen | **Fallback** | Claude: status line. Others: terminal title |
 | Subprocess, Claude | **Status line** | Claude Code's `statusLine` row |
 | Subprocess, other harness | none | toasts are dropped |
 
-When an enabled foreground bridge receives provider-terminal token usage, the
-Kitty tier additionally shows a persistent top-right strip such as
-`gpt-5.6-terra - R 1.74B (331M cached / 1.41B uncached) - W 2.63M`.
-It is a distinct graphics image and placement, not a toast: alert toasts move
-below it and cannot overwrite the accounting. The snapshot is launch-wide and
-is wired for every foreground harness, including the unified Claude,
-DeepSeek, and OpenRouter routes. It uses only observed terminal counters; it
-does not estimate prompts or retain request content.
+The Kitty tier reserves its separate top-right image placement for a `cpu`
+event only while that event exists. Other toasts appear below it. Exact
+provider-terminal token usage stays in Claude's status line, while the title
+fallback retains model/cache health when no status line is drawn. The
+launch-wide usage snapshot remains available for those surfaces; it is never
+rendered as a persistent Kitty strip.
 
 Tier selection is `toast/tier.rs::decide`:
 
@@ -71,8 +69,9 @@ kitty tier under WezTerm and text cells or the title elsewhere.
 `crates/clud-bin/src/toast/compositor.rs`, run on the PTY pump's writer thread
 (`session_output.rs::run_output_writer_composited`, extending DD-018's
 reader/writer split). The writer channel carries `OutputMsg::Child` bursts and
-`OutputMsg::Resize`; with a toast pending or visible the writer also wakes
-every 100 ms to handle expiry.
+`OutputMsg::Resize`; while the compositor is enabled, the writer wakes every
+100 ms so a CPU event can first appear, fade, or expire even when the child
+TUI emits no bytes.
 
 For every child burst the compositor forwards the bytes, feeds a `vt100`
 shadow of the child's intended screen and an `EscapeTracker`, then injects
@@ -101,20 +100,24 @@ with text, and the image is re-uploaded after `ED 2`, `RIS` or an
 alternate-screen switch, which drop images. Removal deletes the placement:
 the child's cells were never touched, so nothing is repainted.
 
-The usage strip has its own image and placement id. It is re-pinned after
-each child burst and is removed independently at session exit. The compositor
-polls the launch writer while toasts are enabled, allowing an upstream bridge
-completion to appear even during an otherwise quiet TUI.
+The CPU HUD has its own image and placement id. The keyed `cpu` toast is read
+alongside the highest-priority non-CPU toast, so one cannot hide the other.
+The HUD uses normal-toast-height text, has no close button, and is absent when
+the CPU toast is absent. Its whole image is 90% opaque for the first 2 seconds
+of an appearance, then 50% until the event closes or expires. Sample refreshes
+and the brief recovery toast do not restart that clock. A hover overrides
+opacity to 90% without changing content or lifetime. The image is re-pinned
+after child bursts, re-uploaded after terminal image-dropping events, and
+deleted when hidden or at session exit.
 
-### Usage-panel interaction
+### CPU HUD hover
 
-The collapsed strip expands to provider, model, request count, separate cached
-and uncached reads, output, and cache health. A click toggles it when the
-child has enabled SGR button reporting. Hover is enabled only when the child
-has also selected DECSET 1003 (any-motion) with SGR encoding; a pointer
-leaving the panel closes hover expansion. clud never enables either mode, and
-only consumes reports addressed to its panel. This retains selection and
-scrollback behavior for terminals and TUIs that do not request mouse input.
+Hover is observed only when the child has already selected DECSET 1003
+(any-motion) with SGR encoding. Entering the visible HUD raises opacity to
+90%; leaving returns it to the timed value. clud never enables mouse tracking
+itself and forwards clicks and motion over the CPU HUD byte-for-byte to the
+child. Without any-motion reporting, the timed opacity behavior still works.
+Only a normal toast's close button consumes a click and its release.
 
 When no Kitty overlay can be drawn, the title fallback carries the effective
 model and cache-health state. Claude's injected status line continues to show
@@ -178,7 +181,8 @@ released on the next idle poll.
   even when the transcript repeats a response or a sidechain appears in both
   locations. Offsets and opaque hashes live in a lock-guarded private cursor
   file; only aggregate counters and a public model label reach the atomic
-  `<pid>.usage.json` snapshot. The PTY compositor reads that same snapshot.
+  `<pid>.usage.json` snapshot. The PTY compositor reads that snapshot only for
+  the title fallback; the Kitty HUD reads CPU events from `ToastHub`.
   The one-line display contains one cumulative read/write triple and the last
   completed model, with no per-call fallback. A malformed complete record or
   conflicting cross-file response makes exact accounting unprovable, so the
@@ -220,8 +224,8 @@ runtime-cache or launch work, because Claude runs it every couple of seconds.
 |---|---|
 | Model, tracker, kitty encoding, raster, text tier, mouse, tier matrix, status line | `src/toast/*` unit tests (all CI lanes) |
 | Compositor byte streams (every tier, deferral, origin mode, dismiss, resize) | `src/toast/compositor_tests.rs` |
-| Persistent exact usage strip, separate placement, coexistence with a toast, redraw and cleanup | `src/toast/compositor_tests.rs` |
-| Usage click/hover filtering, split reports, keyboard-byte pass-through | `src/toast/mouse.rs` unit tests |
+| CPU HUD timing, separate placement, coexistence with a toast, redraw and cleanup | `src/toast/compositor_tests.rs` |
+| CPU hover observation, split reports, byte-exact mouse pass-through | `src/toast/mouse.rs` unit tests |
 | Banner never writes to the terminal; banner → toast events | `src/cpu_banner_tests.rs` |
 | Status-line injection into Claude settings | `src/foreground_runtime.rs` tests |
 | Real PTY sessions: kitty tier, title fallback (Linux, macOS, Windows), alternate-screen text tier (Unix) | `tests/pty/toast_pty.rs` |

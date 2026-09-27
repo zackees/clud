@@ -4705,3 +4705,29 @@ checkout. The child shim is not a full sandbox or an agent-policy enforcement
 point. Real-mount and real-harness tests cover the boundary. The operational
 contract lives in [rm-tools.md](architecture/rm-tools.md) and
 [rm-protection.md](architecture/rm-protection.md).
+
+## DD-107: The Kitty top-right surface is a transient CPU HUD, not a second usage meter
+
+**Status:** Accepted.
+
+**Context:** #1359. The persistent token/cache strip added in #1238 repeats
+the exact accounting already carried by the status line, while its one-row
+text and hover-expanded details are hard to read. The CPU banner already
+publishes a keyed, transient toast with the process-tree load and recovery
+state, so the top-right image surface has a more useful signal to show.
+
+**Decision:** The Kitty compositor renders the `cpu` event in its own
+two-row, non-dismissible image and keeps the highest-priority non-CPU toast
+independent below it. The panel is absent without a CPU event, appears at
+90% opacity for two seconds, rests at 50% while the event remains, and
+returns to 90% on hover when the child has already enabled SGR any-motion
+reporting. Hover does not consume input, restart the clock, or extend the
+event. clud does not enable mouse tracking itself. The existing banner
+watcher owns sampling and lifetime; the compositor only renders its events.
+
+**Consequences:** The writer needs a bounded wake even during a quiet TUI to
+notice a new event, the opacity boundary, and expiry. CPU and ordinary
+toasts need one atomic keyed hub snapshot, and an ordinary close click must
+not dismiss the CPU event. Token counters stay in the status line; model and
+cache health stay in the title fallback. The operational contract lives in
+[architecture/toasts.md](architecture/toasts.md).

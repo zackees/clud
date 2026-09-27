@@ -77,17 +77,38 @@ pub fn render_png(text: &str, severity: Severity, cols: u16, rows: u16) -> io::R
     Ok(png)
 }
 
-/// Render a persistent usage strip. It deliberately has no close affordance:
-/// usage is session state, not a dismissible notification.
-pub fn render_usage_png(text: &str, cols: u16, rows: u16) -> io::Result<Vec<u8>> {
-    let rgba = render_usage_rgba(text, cols, rows);
+/// Width and height for the transient, non-dismissible CPU HUD.
+pub fn cpu_cells(text: &str, term_cols: u16) -> Option<(u16, u16)> {
+    const MIN_COLS: u16 = 20;
+    const MAX_COLS: u16 = 76;
+    let available = term_cols.saturating_sub(2);
+    if available < MIN_COLS {
+        return None;
+    }
+    let wanted = u16::try_from(text.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(4)
+        .clamp(MIN_COLS, MAX_COLS);
+    Some((wanted.min(available), TOAST_ROWS))
+}
+
+/// Render a CPU panel without a close affordance. The CPU watcher owns its
+/// lifetime; only the compositor's timing and hover state affect opacity.
+pub fn render_cpu_png(
+    text: &str,
+    severity: Severity,
+    cols: u16,
+    rows: u16,
+    opacity: u8,
+) -> io::Result<Vec<u8>> {
+    let rgba = render_cpu_rgba(text, severity, cols, rows, opacity);
     let (w, h) = pixel_size(cols, rows);
     let image = image::RgbaImage::from_raw(w, h, rgba)
-        .ok_or_else(|| io::Error::other("usage buffer size mismatch"))?;
+        .ok_or_else(|| io::Error::other("cpu panel buffer size mismatch"))?;
     let mut png = Vec::new();
     image::DynamicImage::ImageRgba8(image)
         .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|err| io::Error::other(format!("failed to encode usage PNG: {err}")))?;
+        .map_err(|err| io::Error::other(format!("failed to encode CPU panel PNG: {err}")))?;
     Ok(png)
 }
 
@@ -147,8 +168,14 @@ pub fn render_rgba(text: &str, severity: Severity, cols: u16, rows: u16) -> Vec<
     canvas.pixels
 }
 
-/// Straight-alpha RGBA pixels for a non-interactive usage panel.
-pub fn render_usage_rgba(text: &str, cols: u16, rows: u16) -> Vec<u8> {
+/// Straight-alpha RGBA pixels for a non-dismissible CPU panel.
+pub fn render_cpu_rgba(
+    text: &str,
+    severity: Severity,
+    cols: u16,
+    rows: u16,
+    opacity: u8,
+) -> Vec<u8> {
     let (w, h) = pixel_size(cols.max(1), rows.max(1));
     let mut canvas = Canvas::new(w, h);
     let inset = 2.0;
@@ -169,22 +196,23 @@ pub fn render_usage_rgba(text: &str, cols: u16, rows: u16) -> Vec<u8> {
         radius,
         BORDER,
     );
+    let bar = accent(severity);
+    canvas.rounded_rect(
+        inset + 8.0,
+        h as f32 * 0.22,
+        inset + 14.0,
+        h as f32 * 0.78,
+        3.0,
+        [bar[0], bar[1], bar[2], 255],
+    );
     if let Some(font) = font() {
-        let line_count = u16::try_from(text.lines().count().max(1)).unwrap_or(u16::MAX);
-        let px = (h as f32 * 0.40 / f32::from(line_count)).max(12.0);
-        let left = CELL_W_PX as f32 * 0.7;
-        let spacing = h as f32 / f32::from(line_count);
-        for (index, line) in text.lines().enumerate() {
-            let fitted = fit_text(font, line, px, w as f32 - left * 2.0);
-            canvas.text(
-                font,
-                &fitted,
-                px,
-                left,
-                spacing * (index as f32 + 0.5),
-                TEXT,
-            );
-        }
+        let px = h as f32 * 0.40;
+        let left = (LEAD_COLS as u32 * CELL_W_PX) as f32;
+        let fitted = fit_text(font, text, px, w as f32 - left - CELL_W_PX as f32);
+        canvas.text(font, &fitted, px, left, h as f32 / 2.0, TEXT);
+    }
+    for pixel in canvas.pixels.chunks_exact_mut(4) {
+        pixel[3] = ((u16::from(pixel[3]) * u16::from(opacity.min(100)) + 50) / 100) as u8;
     }
     canvas.pixels
 }
@@ -418,5 +446,31 @@ mod tests {
         let (cols, _) = toast_cells(&"y".repeat(300), 40).unwrap();
         assert_eq!(cols, 38);
         assert_eq!(toast_cells("hi", 10), None);
+    }
+
+    #[test]
+    fn cpu_hud_keeps_all_metrics_legible_at_eighty_columns() {
+        let line = "cpu 287 % · 2.9 / 12 cores · rss 1.42 GiB · 24 procs · 7 m";
+        let (cols, rows) = cpu_cells(line, 80).unwrap();
+        assert_eq!(rows, TOAST_ROWS);
+        let font = font().unwrap();
+        let width = f32::from(cols) * CELL_W_PX as f32
+            - (LEAD_COLS as u32 * CELL_W_PX) as f32
+            - CELL_W_PX as f32;
+        assert_eq!(
+            fit_text(font, line, rows as f32 * CELL_H_PX as f32 * 0.40, width),
+            line
+        );
+    }
+
+    #[test]
+    fn cpu_hud_opacity_scales_the_whole_image_without_a_tiny_text_mode() {
+        let at_ninety = render_cpu_rgba("cpu 287 %", Severity::Warn, 30, 2, 90);
+        let at_fifty = render_cpu_rgba("cpu 287 %", Severity::Warn, 30, 2, 50);
+        assert_eq!(at_ninety.len(), at_fifty.len());
+        let max_alpha = |rgba: &[u8]| rgba.chunks_exact(4).map(|pixel| pixel[3]).max().unwrap();
+        assert_eq!(max_alpha(&at_ninety), 230);
+        assert_eq!(max_alpha(&at_fifty), 128);
+        assert!(at_ninety.chunks_exact(4).any(|pixel| pixel[3] > 0));
     }
 }

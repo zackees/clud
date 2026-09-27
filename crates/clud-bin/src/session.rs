@@ -1178,7 +1178,7 @@ where
 #[derive(Debug, Clone, Copy)]
 struct ToastHitTargets {
     close: Option<crate::toast::text_tier::CellRect>,
-    usage: Option<crate::toast::text_tier::CellRect>,
+    cpu: Option<crate::toast::text_tier::CellRect>,
     hover_armed: bool,
 }
 
@@ -1209,7 +1209,7 @@ fn filter_user_input_chunk(
 ) -> crate::toast::mouse::MouseResult {
     let outgoing = paste.process(chunk);
     match targets {
-        Some(t) => mouse.process(&outgoing, t.close, t.usage, t.hover_armed),
+        Some(t) => mouse.process(&outgoing, t.close, t.cpu, t.hover_armed),
         None => crate::toast::mouse::MouseResult {
             bytes: outgoing,
             ..Default::default()
@@ -1235,21 +1235,25 @@ fn forward_user_input<H: InteractiveHooks>(
 ) {
     let targets = toast_input.map(|input| ToastHitTargets {
         close: input.close_rect(),
-        usage: input.usage_rect(),
-        hover_armed: input.usage_hover_armed(),
+        cpu: input.cpu_rect(),
+        hover_armed: input.cpu_hover_armed(),
     });
     let result = filter_user_input_chunk(chunk, paste, mouse, targets);
     if result.dismissed {
         if let Some(hub) = toast_hub {
-            hub.dismiss_visible(std::time::Instant::now());
+            if targets.and_then(|target| target.cpu).is_some() {
+                hub.dismiss_visible_except(
+                    std::time::Instant::now(),
+                    crate::cpu_banner::CPU_TOAST_KEY,
+                );
+            } else {
+                hub.dismiss_visible(std::time::Instant::now());
+            }
         }
     }
     if let Some(input) = toast_input {
-        if result.usage_toggled {
-            input.toggle_usage();
-        }
-        if let Some(hovering) = result.usage_hover {
-            input.set_usage_hover(hovering);
+        if let Some(hovering) = result.cpu_hover {
+            input.set_cpu_hover(hovering);
         }
     }
     let write_result = if result.bytes.is_empty() {
