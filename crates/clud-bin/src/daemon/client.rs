@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{Shutdown, TcpStream};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command; // running-process: command-builder
 use std::sync::{Arc, Mutex};
@@ -369,23 +369,82 @@ pub(super) fn send_daemon_request(
     if let Some(response) = super::rp_broker::try_send_via_frame_lane(state_dir, request) {
         return Ok(response);
     }
+    send_daemon_request_over_tcp(state_dir, request, None)
+}
+
+fn send_daemon_request_over_tcp(
+    state_dir: &Path,
+    request: &DaemonRequest,
+    timeout: Option<Duration>,
+) -> io::Result<DaemonResponse> {
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
-    let mut stream = TcpStream::connect(("127.0.0.1", info.port))?;
+    let address = SocketAddr::from(([127, 0, 0, 1], info.port));
+    let mut stream = match timeout {
+        Some(timeout) => TcpStream::connect_timeout(&address, timeout)?,
+        None => TcpStream::connect(address)?,
+    };
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
     write_daemon_request(
         &mut stream,
         request,
         daemon_wire_format_from_env().map_err(wire_error_to_io)?,
     )?;
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let bytes = reader.read_line(&mut line)?;
-    if bytes == 0 || line.trim().is_empty() {
+    let line = match timeout {
+        Some(timeout) => read_daemon_response_with_deadline(&mut stream, timeout)?,
+        None => {
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line)?;
+            line
+        }
+    };
+    if line.trim().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "daemon closed connection without replying",
         ));
     }
     decode_daemon_response_line(&line).map_err(wire_error_to_io)
+}
+
+fn read_daemon_response_with_deadline(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> io::Result<String> {
+    const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+    let deadline = Instant::now() + timeout;
+    let mut line = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "daemon response exceeded dashboard deadline",
+            ));
+        }
+        stream.set_read_timeout(Some(remaining))?;
+        let bytes = stream.read(&mut chunk)?;
+        if bytes == 0 {
+            break;
+        }
+        let line_end = chunk[..bytes]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(bytes);
+        if line.len() + line_end > MAX_RESPONSE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "daemon response exceeds dashboard size limit",
+            ));
+        }
+        line.extend_from_slice(&chunk[..line_end]);
+        if line_end < bytes || line.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    String::from_utf8(line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 pub fn daemon_client_metrics(state_dir: &Path) -> io::Result<(u32, f32)> {
@@ -408,6 +467,30 @@ pub(super) fn daemon_client_proc_snapshot(
         &DaemonRequest::ProcSnapshot {
             include_dead_since_ms,
         },
+    )? {
+        DaemonResponse::ProcSnapshot { snapshot } => Ok(snapshot),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
+
+/// The dashboard runs inside the daemon and treats the process tree as
+/// optional data. Do not enter the broker frame lane or wait indefinitely on
+/// a self-RPC: a silent peer would otherwise block the single dashboard HTTP
+/// thread and make even unrelated `/state.json` polls time out (#1465).
+pub(super) fn daemon_client_proc_snapshot_for_dashboard(
+    state_dir: &Path,
+) -> io::Result<ProcTreeSnapshot> {
+    const SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(300);
+    match send_daemon_request_over_tcp(
+        state_dir,
+        &DaemonRequest::ProcSnapshot {
+            include_dead_since_ms: 0,
+        },
+        Some(SNAPSHOT_TIMEOUT),
     )? {
         DaemonResponse::ProcSnapshot { snapshot } => Ok(snapshot),
         DaemonResponse::Error { message } => Err(io::Error::other(message)),

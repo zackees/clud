@@ -8,6 +8,12 @@ Guidance for Claude Code when working in this repository.
 
 ### Essential Commands
 
+The commands below describe what the CI jobs execute. Agents must run local
+lint and tests only through `bosn run --task act-ci-static` and
+`bosn run --task act-ci-linux`; never invoke these commands on the host.
+Windows-only behavior requires the native `ci-windows` PR lane, including PTY
+tests.
+
 - **Build**: `bash build` — dev wheel (Rust binary + Python package)
 - **Lint**: `bash lint` — `cargo fmt`, `cargo clippy`, `ruff` (**MANDATORY** after any code edit). `bash lint --windows` also runs clippy for `x86_64-pc-windows-msvc` through soldr — run it before pushing Windows-only code ([ci.md](docs/architecture/ci.md#local-validation-before-remote-ci))
 - **Test**: `bash test` — Rust unit tests + Python unit tests
@@ -129,6 +135,9 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
   [`provider-selection.md`](docs/architecture/provider-selection.md#openrouter-model-selection-contract).
 
 ## Code Quality Standards
+
+For agents, the lint requirement below is fulfilled by the Bosn-managed
+`act-ci-static` and `act-ci-linux` jobs. Direct host execution is prohibited.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 

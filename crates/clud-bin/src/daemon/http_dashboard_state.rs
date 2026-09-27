@@ -69,10 +69,11 @@ pub(super) fn build_dashboard_state(
 
     // The daemon RPC returns the sampler's cached snapshot; this HTTP worker
     // never does an expensive process-table scan of its own.
-    let mut process_tree = super::super::client::daemon_client_proc_snapshot(state_dir, 0)
-        .ok()
-        .and_then(|snapshot| serde_json::to_value(snapshot).ok())
-        .unwrap_or(serde_json::Value::Null);
+    let mut process_tree =
+        super::super::client::daemon_client_proc_snapshot_for_dashboard(state_dir)
+            .ok()
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok())
+            .unwrap_or(serde_json::Value::Null);
     let cwd_by_session: HashMap<String, String> = sessions
         .iter()
         .filter_map(|session| session.cwd.clone().map(|cwd| (session.id.clone(), cwd)))
