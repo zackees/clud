@@ -8,6 +8,12 @@ Guidance for Claude Code when working in this repository.
 
 ### Essential Commands
 
+The commands below describe what the CI jobs execute. Agents must run local
+lint and tests only through `bosn run --task act-ci-static` and
+`bosn run --task act-ci-linux`; never invoke these commands on the host.
+Windows-only behavior requires the native `ci-windows` PR lane, including PTY
+tests.
+
 - **Build**: `bash build` — dev wheel (Rust binary + Python package)
 - **Lint**: `bash lint` — `cargo fmt`, `cargo clippy`, `ruff` (**MANDATORY** after any code edit). `bash lint --windows` also runs clippy for `x86_64-pc-windows-msvc` through soldr — run it before pushing Windows-only code ([ci.md](docs/architecture/ci.md#local-validation-before-remote-ci))
 - **Test**: `bash test` — Rust unit tests + Python unit tests
@@ -21,14 +27,14 @@ Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --glob
 
 ### Local validation before GitHub Actions
 
-For code or workflow-behavior changes, use a working local Docker engine before
-spending a GitHub Actions run: run the relevant focused test, then lint and the
-affected suites through the tasks in `bosn.toml`. For workflow changes, also run
-the applicable Linux job with `act` when it can represent that job. Do not treat
-an `act` dry run as execution or a local pass as proof of macOS/Windows behavior.
-If Docker or a required tool is unavailable, use the direct local checks and
-report the gap; do not push merely to discover a failure those checks could
-catch. The commands, limits, and pinned-action-input check are in
+**Mandatory for agents: run all local tests and lint through the Bosn-managed
+`act` container (`bosn run --task act-ci-*`).** Do not run tests or lint on the
+host or in a direct Bosn build task: those paths can interfere with the system
+`clud`. If `act` cannot represent an affected job (notably native Windows or
+macOS execution), use the relevant GitHub Actions lane for that validation and
+report the local coverage gap; never claim an `act` pass proves native behavior.
+If Bosn, Docker, or `act` is unavailable, report the blocker rather than
+falling back to host testing. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
 
 ## Repository Map
@@ -129,6 +135,9 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
   [`provider-selection.md`](docs/architecture/provider-selection.md#openrouter-model-selection-contract).
 
 ## Code Quality Standards
+
+For agents, the lint requirement below is fulfilled by the Bosn-managed
+`act-ci-static` and `act-ci-linux` jobs. Direct host execution is prohibited.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 
