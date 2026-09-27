@@ -184,7 +184,8 @@ mod posix {
                 vec![config.join("fish/conf.d/clud-path.fish")]
             }
             _ => {
-                let quoted = shell_words::quote(&bin.to_string_lossy());
+                let bin_text = bin.to_string_lossy();
+                let quoted = shell_words::quote(&bin_text);
                 return Ok(ActivationPlan {
                     destination: destination.to_path_buf(),
                     shell,
@@ -202,7 +203,8 @@ mod posix {
                 fish_quote(bin)?
             )
         } else {
-            let quoted = shell_words::quote(&bin.to_string_lossy());
+            let bin_text = bin.to_string_lossy();
+            let quoted = shell_words::quote(&bin_text);
             format!(
                 "{START}\ncase \"$PATH\" in\n  {quoted}:*) ;;\n  *) PATH={quoted}:\"$PATH\"; export PATH ;;\nesac\n{END}\n"
             )
@@ -353,7 +355,7 @@ mod posix {
             ));
         }
         let mut bytes = Vec::new();
-        file.by_ref()
+        std::io::Read::by_ref(&mut file)
             .take(MAX_PROFILE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|error| error.to_string())?;
