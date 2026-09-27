@@ -4890,3 +4890,21 @@ promotion.
 and Pages untouched. A failed released gate triggers an explicit rollback
 whose own failure remains visible. The compact APE stays in the first gated
 release so its retirement can follow evidence from both public modes.
+## DD-115: A resumable tool watchdog stop exits nonzero
+
+**Status:** Accepted.
+
+**Context:** #1431. `clud tool run` returned 0 after a resumable watchdog
+stop even though the child had not completed. `pr_merge_watch` uses exit 0
+as its green and mergeable verdict, so shell callers could merge while checks
+were still pending.
+
+**Decision:** Exit 0 means the tool process itself exited 0. Both command
+and progress watchdog stops return 124. The existing terminal JSON distinguishes
+`status: in-progress` (re-invoke with the same args) from `status: aborted`
+(the process was killed). Pass the command cap to the child so
+`pr_merge_watch` can clamp its own timeout below the cap and normally finish
+with its own exit 4 and cancellation behavior.
+
+**Consequences:** Callers must inspect 124 and the terminal JSON before
+retrying; they cannot interpret a wrapper timeout as a successful verdict.

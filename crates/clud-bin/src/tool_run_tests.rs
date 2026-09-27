@@ -18,6 +18,85 @@ fn fixture_filter(name: &str) -> String {
     format!("{test_module_path}::{name}")
 }
 
+fn resumable_fixture_exit_code(progress_timeout: bool, with_session: bool) -> i32 {
+    let executable = std::env::current_exe().unwrap();
+    let argv = vec![
+        executable.to_string_lossy().into_owned(),
+        "--ignored".to_string(),
+        "--exact".to_string(),
+        fixture_filter("resumable_watchdog_fixture_child"),
+        "--nocapture".to_string(),
+    ];
+    let mut env = std::env::vars().collect::<Vec<_>>();
+    env.push((
+        "CLUD_RESUMABLE_WATCHDOG_FIXTURE".to_string(),
+        "1".to_string(),
+    ));
+    let mut watchdog = Watchdog::for_rel_path("github/pr_merge_watch.py");
+    watchdog.command_timeout = if progress_timeout {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_millis(100)
+    };
+    watchdog.progress_timeout = progress_timeout.then_some(Duration::from_millis(100));
+    let telemetry = ToolTelemetry {
+        server: None,
+        token: None,
+        id: "test-1431".to_string(),
+        name: "github/pr_merge_watch.py".to_string(),
+        start_time_ms: 0,
+    };
+    if with_session {
+        let temp = TempDir::new().unwrap();
+        let ctx = SessionContext::from_state_root(temp.path(), 4242, 1);
+        run_with_session(
+            &ctx,
+            1,
+            "github/pr_merge_watch.py",
+            &[],
+            argv,
+            env,
+            telemetry,
+            watchdog,
+        )
+        .unwrap()
+    } else {
+        run_passthrough(
+            "github/pr_merge_watch.py",
+            &[],
+            argv,
+            env,
+            telemetry,
+            watchdog,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn resumable_command_timeout_exits_nonzero_in_both_runners() {
+    assert_eq!(
+        resumable_fixture_exit_code(false, false),
+        WATCHDOG_EXIT_CODE
+    );
+    assert_eq!(resumable_fixture_exit_code(false, true), WATCHDOG_EXIT_CODE);
+}
+
+#[test]
+fn resumable_progress_timeout_exits_nonzero_in_both_runners() {
+    assert_eq!(resumable_fixture_exit_code(true, false), WATCHDOG_EXIT_CODE);
+    assert_eq!(resumable_fixture_exit_code(true, true), WATCHDOG_EXIT_CODE);
+}
+
+#[test]
+#[ignore = "subprocess fixture invoked by resumable timeout tests"]
+fn resumable_watchdog_fixture_child() {
+    if std::env::var_os("CLUD_RESUMABLE_WATCHDOG_FIXTURE").is_none() {
+        return;
+    }
+    thread::sleep(Duration::from_millis(800));
+}
+
 #[test]
 fn captured_subprocess_output_is_forwardable_before_exit() {
     let executable = std::env::current_exe().unwrap();
@@ -401,6 +480,7 @@ fn session_started_event_records_the_real_child_pid() {
         argv,
         env,
         telemetry,
+        Watchdog::for_rel_path("tests/pid-fixture"),
     );
     assert_eq!(ran.unwrap(), 0, "fixture child must exit 0");
 

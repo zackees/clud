@@ -42,7 +42,7 @@ use crate::shim_uv;
 use crate::tool_install::{ensure_installed as ensure_tools_installed, tools_root};
 use crate::tool_tee::TeeWriter;
 use crate::tool_termination::{emit_termination, format_elapsed, ExitKind};
-use crate::tool_watchdog::{AbortReason, Watchdog, WatchdogDecision};
+use crate::tool_watchdog::{AbortReason, Watchdog, WatchdogDecision, WATCHDOG_EXIT_CODE};
 use crate::tools::clud_uv_cache_dir;
 
 /// Poll interval for draining captured stdout/stderr into the tee writer.
@@ -98,7 +98,12 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
 
     let tool_bytes = fs::read(&tool_path)?;
     let cache_dir = resolved_uv_cache_dir_from(std::env::var_os("UV_CACHE_DIR"));
-    let env: Vec<(String, String)> = build_child_env(&cache_dir);
+    let mut env: Vec<(String, String)> = build_child_env(&cache_dir);
+    let watchdog = Watchdog::for_rel_path(rel_path);
+    env.push((
+        "CLUD_TOOL_COMMAND_TIMEOUT_SECS".to_string(),
+        watchdog.command_timeout.as_secs().to_string(),
+    ));
     let argv = build_tool_argv(&tool_path, &tool_bytes, args, &tools_root, &env)?;
     let telemetry = ToolTelemetry::start(rel_path);
 
@@ -117,9 +122,9 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
     // containers where the daemon isn't present.
     match (session_ctx.as_ref(), tool_id) {
         (Some(ctx), Some(tool_id)) => {
-            run_with_session(ctx, tool_id, rel_path, args, argv, env, telemetry)
+            run_with_session(ctx, tool_id, rel_path, args, argv, env, telemetry, watchdog)
         }
-        _ => run_passthrough(rel_path, args, argv, env, telemetry),
+        _ => run_passthrough(rel_path, args, argv, env, telemetry, watchdog),
     }
 }
 
@@ -132,6 +137,7 @@ fn run_passthrough(
     argv: Vec<String>,
     env: Vec<(String, String)>,
     telemetry: ToolTelemetry,
+    mut watchdog: Watchdog,
 ) -> io::Result<i32> {
     let argv_for_diagnostic = argv.clone();
     let process = NativeProcess::new(ProcessConfig {
@@ -147,7 +153,6 @@ fn run_passthrough(
         address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
-    let mut watchdog = Watchdog::for_rel_path(rel_path);
     let mut emitted = 0usize;
     let mut last_drain_count = 0usize;
     let exit_code = loop {
@@ -173,15 +178,19 @@ fn run_passthrough(
                             reason,
                             stderr_tail.as_deref(),
                         );
-                        telemetry.finish(124, stderr_tail);
-                        return Ok(124);
+                        telemetry.finish(WATCHDOG_EXIT_CODE, stderr_tail);
+                        return Ok(WATCHDOG_EXIT_CODE);
                     }
                     WatchdogDecision::ResumeLater(reason) => {
                         let _ = drain_passthrough_output(&process, emitted);
                         let mut err = io::stderr().lock();
                         let _ = writeln!(err, "{}", watchdog.render_in_progress(reason));
                         let _ = err.flush();
-                        return Ok(0);
+                        telemetry.finish(
+                            WATCHDOG_EXIT_CODE,
+                            stderr_tail_200(&process.captured_stderr().concat()),
+                        );
+                        return Ok(WATCHDOG_EXIT_CODE);
                     }
                 }
             }
@@ -260,6 +269,7 @@ fn run_with_session(
     argv: Vec<String>,
     env: Vec<(String, String)>,
     telemetry: ToolTelemetry,
+    mut watchdog: Watchdog,
 ) -> io::Result<i32> {
     // Open the per-invocation log dir + JSONL writers BEFORE starting the
     // subprocess so any open-time failure surfaces immediately (no
@@ -310,7 +320,6 @@ fn run_with_session(
     // Slice 5 of #427: build the watchdog from the tool's BundledTool
     // entry (kill_semantics, command_timeout, progress_timeout, quiet_ok).
     // Unknown tools default to Killable + 60m + no progress watchdog.
-    let mut watchdog = Watchdog::for_rel_path(rel_path);
 
     // Poll-drain loop. `wait(Some(100ms))` returns `Err(ProcessError::Timeout)`
     // while the child is still running; we drain captured output each
@@ -359,12 +368,15 @@ fn run_with_session(
                             ExitKind::Aborted(reason),
                             None,
                         );
-                        telemetry.finish(124, stderr_tail_200(&process.captured_stderr().concat()));
-                        return Ok(124); // standard "command timed out" exit.
+                        telemetry.finish(
+                            WATCHDOG_EXIT_CODE,
+                            stderr_tail_200(&process.captured_stderr().concat()),
+                        );
+                        return Ok(WATCHDOG_EXIT_CODE); // standard "command timed out" exit.
                     }
                     WatchdogDecision::ResumeLater(reason) => {
                         // Resumable: the world owns the state; the
-                        // observer succeeded. Detach and exit 0 with the
+                        // observer has not completed. Detach and exit 124 with the
                         // in-progress payload so the caller can re-invoke.
                         let _ = drain_into_tee(&process, &mut tee, emitted);
                         let _ = tee.flush();
@@ -388,7 +400,11 @@ fn run_with_session(
                             ExitKind::InProgress(reason),
                             None,
                         );
-                        return Ok(0);
+                        telemetry.finish(
+                            WATCHDOG_EXIT_CODE,
+                            stderr_tail_200(&process.captured_stderr().concat()),
+                        );
+                        return Ok(WATCHDOG_EXIT_CODE);
                     }
                 }
             }

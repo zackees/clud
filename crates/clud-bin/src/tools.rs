@@ -47,7 +47,7 @@ pub const DEFAULT_KILLABLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 pub enum KillSemantics {
     /// Killing the tool process loses no underlying state — the world
     /// holds the state, the tool just observes. On `command_timeout` the
-    /// wrapper returns `status: in-progress` and exit 0; re-invocation
+    /// wrapper returns `status: in-progress` and exit 124; re-invocation
     /// with the same args resumes. Examples: `gh-pr-merge-wait`,
     /// `gh-watch-issue`.
     Resumable,
@@ -524,6 +524,7 @@ mod tests {
             "2  new review activity",
             "3  PR closed or merged",
             "4  timeout",
+            "124  `clud tool run` watchdog stopped",
         ] {
             assert!(
                 tool.body.contains(code_line),

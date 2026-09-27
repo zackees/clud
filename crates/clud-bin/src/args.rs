@@ -1150,6 +1150,9 @@ pub enum ToolSubcommand {
     /// Invoke a bundled tool by its `~/.clud/tools/`-relative path,
     /// forwarding any trailing args to the tool. Example:
     /// `clud tool run github/pr_merge_watch.py 404`.
+    /// A resumable watchdog timeout returns 124 with `status: in-progress`
+    /// on stderr; invoke the same tool again to keep watching. Exit 0 means
+    /// the tool itself completed successfully.
     Run {
         /// Path under `~/.clud/tools/` (e.g. `github/pr_merge_watch.py`).
         rel_path: String,
