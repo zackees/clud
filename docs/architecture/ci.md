@@ -518,6 +518,19 @@ published 2.8.13 wheel row to exercise older-version selection. The APE jobs
 remain for the release workflow call while PR acceptance uses native
 candidates.
 
+The PR gate also runs the exact uploaded x64 musl candidate in clean Arch,
+Fedora, and Alpine containers. Arch uses fish as the user's default shell;
+each distribution creates a fresh nonroot user and proves name-based lookup,
+version, and digest. Pinned NixOS 25.05 VM fixtures run on native x64 and
+ARM64 Ubuntu runners. They disable both the default stub ELF loader and
+`nix-ld`, assert no conventional GNU loader or ELF interpreter, and prove a
+fresh nonroot install plus rejection of the historical GNU-only release.
+Both matrices are hard dependencies of the always-run aggregate. The ARM64
+guest script completed in about 270 seconds on the hosted runner in the first
+green run; the job allows 30 minutes including Nix setup and closure download.
+Public HTTPS prerelease and stable checks will reuse these assertions in the
+release gate; the PR fixture itself is local to the candidate workflow.
+
 Native Linux downloads use two additional release-profile jobs, one for each
 `*-unknown-linux-musl` architecture. Both build on x64 Ubuntu because soldr's
 musl compiler bundles are x64-hosted. The ARM artifact is then downloaded and

@@ -4843,3 +4843,23 @@ gate replaces them.
 skipped, or failed cell blocks the aggregate. Fixture transport cannot be
 used by release/default binaries. The prior-release wheel test verifies a
 published digest before exercising selection through the candidate binary.
+
+## DD-113: Clean NixOS and Linux distro lanes are required PR gates
+
+**Status:** Accepted.
+
+**Context:** #1498. A static ELF check and an Ubuntu install cannot establish
+that a direct musl release works on clean NixOS or that shell activation works
+across Linux distributions. NixOS 25.05 installs a stub ELF loader by default,
+which can mask a missing GNU loader in a test VM.
+
+**Decision:** Run pinned NixOS x64 and ARM64 VM tests on matching native hosted
+runners, explicitly disabling the stub loader and `nix-ld`. Test the exact PR
+candidate bytes with a fresh nonroot user, no ELF interpreter, selected
+version and digest, name lookup, and rejection of a GNU-only historical
+release. Run the same x64 musl bytes on Arch with fish, Fedora, and Alpine;
+require every VM and distribution result in the installer aggregate.
+
+**Consequences:** A skipped or failed VM or distribution blocks PR acceptance.
+The ARM64 hosted VM has passed within the 30-minute job budget. Public HTTPS
+candidate and stable gates will reuse these checks in the release flow.

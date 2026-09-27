@@ -218,7 +218,7 @@ jobs:
               env.write(f"CANDIDATE_FILENAME={metadata['filename']}\nCANDIDATE_VERSION={version}\nCANDIDATE_SHA256={metadata['sha256']}\n")
           print(json.dumps(metadata, sort_keys=True))
           PY
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
         with:
           extra_nix_config: system-features = nixos-test benchmark big-parallel kvm
       - name: Boot matching NixOS architecture and install as fresh user
@@ -244,11 +244,11 @@ jobs:
       matrix:
         include:
           - distro: archlinux
-            image: archlinux:base
+            image: archlinux@sha256:f3691b4dde62ba4c4b6f0ae2c1fbf28e8c0c8c4b9a35c7e06dc1f70e21aa29f6
           - distro: fedora
-            image: fedora:42
+            image: fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814
           - distro: alpine
-            image: alpine:3.22
+            image: alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
