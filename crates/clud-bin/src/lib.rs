@@ -90,6 +90,7 @@ pub mod runner;
 pub mod runtime_cache;
 pub mod secret_redaction;
 pub mod selector;
+pub mod self_install;
 pub mod server_settings;
 pub mod session;
 pub mod session_history;
