@@ -22,7 +22,7 @@ def test_bind_mount_is_not_deleted() -> None:
         is_mount = mounted.is_mount()
     except NotImplementedError:
         pytest.skip("mount-point detection is unavailable on this platform")
-    if not is_mount and os.environ.get("CLUD_REQUIRE_MOUNT_PROBE") != "1":
+    if not is_mount and os.environ.get("RM_REQUIRE_MOUNT_PROBE") != "1":
         pytest.skip("bind-mount probe runs in the dedicated Docker lane")
     assert is_mount
     assert sentinel.is_file()

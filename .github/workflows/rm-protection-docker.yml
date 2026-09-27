@@ -100,7 +100,7 @@ jobs:
             --tmpfs /tmp:rw,exec,nosuid,mode=1777 \
             --tmpfs /home/checker:rw,noexec,nosuid,uid=10001,gid=10001,mode=0700 \
             --tmpfs /mount-probe:rw,exec,nosuid,uid=10001,gid=10001,mode=0700 \
-            -e CLUD_REQUIRE_MOUNT_PROBE=1 \
+            -e RM_REQUIRE_MOUNT_PROBE=1 \
             --mount "type=bind,source=$probe_source,target=/mount-probe/parent/mounted,readonly" \
             ${{ steps.image.outputs.tag }} \
             python -m pytest -p no:cacheprovider -q tests/test_mount_floor.py

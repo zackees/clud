@@ -167,7 +167,7 @@ cmd = "cd /workspace && soldr cargo build -p clud && (uv sync --frozen --group d
 
 [task.mount-probe]
 stack = "clud_1044_final_retry"
-cmd = "cd /workspace && soldr cargo build -p clud --bin clud-shim && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && CLUD_REQUIRE_MOUNT_PROBE=1 .venv/bin/python -m pytest -p no:cacheprovider -v tests/test_mount_floor.py"
+cmd = "cd /workspace && soldr cargo build -p clud --bin clud-shim && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && RM_REQUIRE_MOUNT_PROBE=1 .venv/bin/python -m pytest -p no:cacheprovider -v tests/test_mount_floor.py"
 
 [task.migration-process]
 stack = "clud_1044_final_retry"
