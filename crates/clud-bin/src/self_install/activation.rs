@@ -471,8 +471,7 @@ mod posix {
         inspect_parent(path)?;
         let parent = path.parent().ok_or("startup file has no parent")?;
         if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+            super::super::transaction::create_private_dirs(parent)?;
         }
         inspect_parent(path)?;
         let mode = if expected.is_some() {

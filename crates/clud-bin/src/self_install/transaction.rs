@@ -154,6 +154,9 @@ impl InstallPlan {
 pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
     let parent = plan.destination.parent().ok_or("missing install parent")?;
     inspect_destination(&plan.destination, false)?;
+    #[cfg(unix)]
+    create_private_dirs(parent)?;
+    #[cfg(windows)]
     fs::create_dir_all(parent).map_err(|error| format!("create user bin: {error}"))?;
     inspect_destination(&plan.destination, false)?;
     let lock_path = parent.join(".clud-install.lock");
@@ -315,6 +318,33 @@ fn approved_destination() -> Result<PathBuf, String> {
         }
         Ok(home.join(".local/bin/clud"))
     }
+}
+
+#[cfg(unix)]
+pub(super) fn create_private_dirs(parent: &Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut missing = Vec::new();
+    let mut current = Some(parent);
+    while let Some(directory) = current {
+        match fs::symlink_metadata(directory) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(directory.to_path_buf());
+                current = directory.parent();
+            }
+            Err(error) => return Err(format!("inspect {}: {error}", directory.display())),
+        }
+    }
+    for directory in missing.iter().rev() {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(directory)
+            .map_err(|error| {
+                format!("create private directory {}: {error}", directory.display())
+            })?;
+    }
+    Ok(())
 }
 
 pub(super) fn inspect_destination(destination: &Path, probe_version: bool) -> Result<(), String> {

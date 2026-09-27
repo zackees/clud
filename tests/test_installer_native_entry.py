@@ -43,6 +43,7 @@ def isolated_env(home: Path) -> dict[str, str]:
 def installer_target(tmp_path: Path):
     if sys.platform != "win32":
         home = tmp_path / "home"
+        home.mkdir(mode=0o700)
         env = isolated_env(home)
         env["SHELL"] = shutil.which("bash") or "/bin/bash"
         yield env, home / ".local" / "bin" / "clud"
@@ -218,6 +219,7 @@ def test_bash_fresh_login_and_interactive_lookup(tmp_path: Path) -> None:
     if shell is None:
         pytest.skip("bash is unavailable")
     home = tmp_path / "home with spaces and 'quotes' $dollars"
+    home.mkdir(mode=0o700)
     env = isolated_env(home)
     env["SHELL"] = shell
     env["PATH"] = "/usr/bin:/bin"
@@ -258,8 +260,9 @@ def test_existing_user_bin_and_first_bash_login_file(tmp_path: Path) -> None:
     if shell is None:
         pytest.skip("bash is unavailable")
     home = tmp_path / "home"
+    home.mkdir(mode=0o700)
     bin_dir = home / "bin"
-    bin_dir.mkdir(parents=True)
+    bin_dir.mkdir(mode=0o700)
     login = home / ".bash_login"
     login.write_text("# existing login settings\n")
     env = isolated_env(home)
@@ -285,6 +288,7 @@ def test_fish_custom_xdg_uses_nonuniversal_snippet(tmp_path: Path) -> None:
     if shell is None:
         pytest.skip("fish is unavailable")
     home = tmp_path / "home"
+    home.mkdir(mode=0o700)
     config = home / "custom config"
     env = isolated_env(home)
     env["SHELL"] = shell
@@ -310,6 +314,7 @@ def test_zsh_custom_zdotdir_activation(tmp_path: Path) -> None:
     if shell is None:
         pytest.skip("zsh is unavailable")
     home = tmp_path / "home"
+    home.mkdir(mode=0o700)
     dotdir = home / "custom zsh"
     env = isolated_env(home)
     env["SHELL"] = shell
