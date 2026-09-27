@@ -375,6 +375,7 @@ class TestDaemonManagedSessionFlags:
         env = managed_env(mock_env, state_dir)
         launch_cwd = tmp_path / "workspace"
         launch_cwd.mkdir()
+        release = tmp_path / "release-list-worker"
         proc, session_id = launch_detached(
             clud_binary,
             env,
@@ -382,8 +383,8 @@ class TestDaemonManagedSessionFlags:
             "-p",
             "list-session",
             "--",
-            "--mock-sleep-ms",
-            "3000",
+            "--mock-wait-for-file",
+            str(release),
             cwd=launch_cwd,
         )
         try:
@@ -402,6 +403,7 @@ class TestDaemonManagedSessionFlags:
             assert str(metadata["root_pid"]) in listed.stdout
             assert str(launch_cwd) in listed.stdout
         finally:
+            release.write_text("release", encoding="utf-8")
             kill_daemon_for_session(state_dir, session_id)
 
     def test_detachable_ctrl_c_yes_backgrounds_session(
