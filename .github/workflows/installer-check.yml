@@ -130,8 +130,8 @@ jobs:
       - name: Install native acceptance dependencies
         shell: bash
         run: |
-          python -m pip install pytest running-process
-          if [ "$RUNNER_OS" = Windows ]; then python -m pip install pywinpty==3.0.4; fi
+          python -m pip install pytest==9.0.3 running-process==4.10.1
+          if [ "$RUNNER_OS" = Windows ]; then python -m pip install pywinpty==3.0.5; fi
       - name: Verify artifact identity and expose exact binary
         shell: bash
         run: |
