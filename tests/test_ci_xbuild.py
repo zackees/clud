@@ -101,16 +101,22 @@ def test_static_musl_zigbuild_is_refused() -> None:
 
 
 @pytest.mark.parametrize("profile", ["dev", "release"])
+@pytest.mark.parametrize(
+    ("target", "machine", "defer"),
+    [
+        ("x86_64-unknown-linux-musl", 62, False),
+        ("aarch64-unknown-linux-musl", 183, True),
+    ],
+)
 def test_static_musl_build_stages_one_verified_native_binary(
-    tmp_path, monkeypatch, profile
+    tmp_path, monkeypatch, profile, target, machine, defer
 ) -> None:
-    target = "x86_64-unknown-linux-musl"
     output_profile = "release" if profile == "release" else "debug"
     binary = tmp_path / "target" / target / output_profile / "clud"
     binary.parent.mkdir(parents=True)
     payload = bytearray(128)
     payload[:6] = b"\x7fELF\x02\x01"
-    struct.pack_into("<HH", payload, 16, 2, 62)
+    struct.pack_into("<HH", payload, 16, 2, machine)
     struct.pack_into("<Q", payload, 32, 64)
     struct.pack_into("<HH", payload, 54, 56, 1)
     struct.pack_into("<I", payload, 64, 1)
@@ -120,18 +126,23 @@ def test_static_musl_build_stages_one_verified_native_binary(
     monkeypatch.setattr(xbuild, "build_env", lambda *_: {})
     monkeypatch.setattr(xbuild, "_project_version", lambda: "2.9.0")
     monkeypatch.setattr(xbuild, "run", lambda command, _env: commands.append(command) or 0)
+    native_calls = []
     monkeypatch.setattr(
-        xbuild.process, "run", lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout="clud 2.9.0\n", stderr=""
-        ),
+        xbuild.process,
+        "run",
+        lambda *_args, **_kwargs: native_calls.append(_args)
+        or SimpleNamespace(returncode=0, stdout="clud 2.9.0\n", stderr=""),
     )
-    args = argparse.Namespace(target=target, strategy="soldr", profile=profile)
+    args = argparse.Namespace(
+        target=target, strategy="soldr", profile=profile, defer_native_version_check=defer
+    )
     assert xbuild.cmd_standalone(args) == 0
     expected = ["soldr", "build", "-p", "clud", "--bin", "clud"]
     if profile == "release":
         expected.append("--release")
     assert commands == [[*expected, "--target", target]]
     assert (tmp_path / "standalone" / f"clud-2.9.0-{target}").read_bytes() == payload
+    assert len(native_calls) == (0 if defer else 1)
     assert not (tmp_path / "dist").exists()
 
 

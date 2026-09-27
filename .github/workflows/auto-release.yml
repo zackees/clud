@@ -219,9 +219,30 @@ jobs:
       clippy: false
       standalone-artifact: ${{ matrix.artifact }}
 
+  verify-static-musl-arm64:
+    name: Execute release static musl ARM64
+    needs: [preflight, build-static-musl]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: standalone-musl-aarch64
+          path: standalone
+      - name: Verify and execute uploaded ARM64 bytes
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          python -m installer.verify_native_assets "$RELEASE_VERSION" standalone aarch64-unknown-linux-musl
+          binary="standalone/clud-$RELEASE_VERSION-aarch64-unknown-linux-musl"
+          chmod +x "$binary"
+          test "$("$binary" --version)" = "clud $RELEASE_VERSION"
+
   publish-pypi:
     name: Publish to PyPI
-    needs: [preflight, full-ci-gate, build]
+    needs: [preflight, full-ci-gate, build, verify-static-musl-arm64]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -245,7 +266,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    needs: [preflight, full-ci-gate, build, build-static-musl, build-installer, publish-pypi]
+    needs: [preflight, full-ci-gate, build, build-static-musl, verify-static-musl-arm64, build-installer, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write

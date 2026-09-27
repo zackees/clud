@@ -495,9 +495,11 @@ redesign requires; everything else is CI plumbing.
 ## Release profile containment
 
 Native Linux downloads use two additional release-profile jobs, one for each
-`*-unknown-linux-musl` architecture. They run on matching Ubuntu host
-architectures, use `soldr prepare` and `soldr build`, and stage only a `clud`
-ELF in `standalone/`. The existing six wheel jobs still produce all PyPI
+`*-unknown-linux-musl` architecture. Both build on x64 Ubuntu because soldr's
+musl compiler bundles are x64-hosted. The ARM artifact is then downloaded and
+executed on a native ARM Ubuntu runner before either publication path starts.
+The jobs use `soldr prepare` and `soldr build`, and stage only a `clud` ELF in
+`standalone/`. The existing six wheel jobs still produce all PyPI
 wheels and the sdist. `installer/release_assets.py` extracts the four Windows
 and macOS direct downloads from those wheels; it never relabels a GNU Linux
 wheel executable as musl. `installer.verify_native_assets` checks the exact

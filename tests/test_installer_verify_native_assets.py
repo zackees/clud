@@ -6,7 +6,7 @@ import struct
 
 import pytest
 
-from installer.verify_native_assets import TARGETS, verify
+from installer.verify_native_assets import TARGETS, verify, verify_one
 
 
 def native_payload(kind: str, arch: str) -> bytes:
@@ -40,3 +40,12 @@ def test_six_native_downloads_have_exact_names_and_architectures(tmp_path) -> No
     (tmp_path / "clud-2.9.0-aarch64-unknown-linux-musl").rename(tmp_path / "unexpected-asset")
     with pytest.raises(ValueError, match="missing"):
         verify(tmp_path, "2.9.0")
+
+
+def test_uploaded_arm_binary_is_verified_before_execution(tmp_path) -> None:
+    path = tmp_path / "clud-2.9.0-aarch64-unknown-linux-musl"
+    path.write_bytes(native_payload("elf", "aarch64"))
+    assert verify_one(tmp_path, "2.9.0", "aarch64-unknown-linux-musl")[0] == 256
+    path.write_bytes(native_payload("elf", "x86_64"))
+    with pytest.raises(ValueError, match="architecture"):
+        verify_one(tmp_path, "2.9.0", "aarch64-unknown-linux-musl")

@@ -191,7 +191,7 @@ def static_musl_matrix() -> dict[str, list[dict[str, str]]]:
             }
             for arch, runner in (
                 ("x86_64", "ubuntu-24.04"),
-                ("aarch64", "ubuntu-24.04-arm"),
+                ("aarch64", "ubuntu-24.04"),
             )
         ]
     }

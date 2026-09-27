@@ -47,5 +47,22 @@ def verify(directory: Path, version: str) -> dict[str, tuple[int, str]]:
     return results
 
 
+def verify_one(directory: Path, version: str, target: str) -> tuple[int, str]:
+    """Verify the exact uploaded musl artifact before native ARM execution."""
+    if target not in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"):
+        raise ValueError(f"unsupported standalone target: {target}")
+    path = directory / f"clud-{version}-{target}"
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"missing standalone asset: {path.name}")
+    data = path.read_bytes()
+    verify_format(data, "elf", TARGETS[target][1])
+    digest = hashlib.sha256(data).hexdigest()
+    print(f"{path.name}: {len(data)} bytes sha256={digest}")
+    return len(data), digest
+
+
 if __name__ == "__main__":
-    verify(Path(sys.argv[2]), sys.argv[1])
+    if len(sys.argv) == 4:
+        verify_one(Path(sys.argv[2]), sys.argv[1], sys.argv[3])
+    else:
+        verify(Path(sys.argv[2]), sys.argv[1])

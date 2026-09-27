@@ -409,6 +409,10 @@ cmd = "ACT_WORKFLOW=install-pages.yml sh /workspace/ci/act_ci.sh build-site"
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh native-linux-x64"
 
+[task.act-installer-musl-arm64-cross]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh native-linux-arm64"
+
 [task.act-installer-catalog]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh catalog-unit"

@@ -372,6 +372,9 @@ def cmd_standalone(args: argparse.Namespace) -> int:
     targets = {"x86_64-unknown-linux-musl": "x86_64", "aarch64-unknown-linux-musl": "aarch64"}
     if args.target not in targets or args.strategy != "soldr":
         raise ValueError("standalone build requires a soldr static-musl target")
+    defer_native_check = getattr(args, "defer_native_version_check", False)
+    if defer_native_check and args.target != "aarch64-unknown-linux-musl":
+        raise ValueError("only the ARM64 cross-build can defer native execution")
     env = build_env(args.target, args.strategy)
     profile_args = ["--release"] if args.profile == "release" else []
     command = cargo_argv(
@@ -384,13 +387,14 @@ def cmd_standalone(args: argparse.Namespace) -> int:
     payload = source.read_bytes()
     verify_static_musl_elf(payload, targets[args.target])
     version = _project_version()
-    result = process.run(
-        [str(source), "--version"], cwd=ROOT, env=env, capture_output=True, text=True
-    )
-    if result.returncode != 0 or result.stdout.strip() != f"clud {version}":
-        raise ValueError(
-            f"standalone clud version check failed: {result.stdout!r} {result.stderr!r}"
+    if not defer_native_check:
+        result = process.run(
+            [str(source), "--version"], cwd=ROOT, env=env, capture_output=True, text=True
         )
+        if result.returncode != 0 or result.stdout.strip() != f"clud {version}":
+            raise ValueError(
+                f"standalone clud version check failed: {result.stdout!r} {result.stderr!r}"
+            )
     destination = ROOT / "standalone" / f"clud-{version}-{args.target}"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(payload)
@@ -794,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
 
     standalone = sub.add_parser("standalone")
     add_common(standalone)
+    standalone.add_argument("--defer-native-version-check", action="store_true")
     standalone.set_defaults(func=cmd_standalone)
 
     args = parser.parse_args(argv)

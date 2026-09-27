@@ -42,17 +42,38 @@ jobs:
       standalone-artifact: standalone-musl-x86_64
 
   native-linux-arm64:
-    name: Build and execute candidate static musl ARM64
+    name: Cross-build candidate static musl ARM64
     if: github.event_name != 'workflow_call'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       target: aarch64-unknown-linux-musl
-      runs-on: ubuntu-24.04-arm
+      runs-on: ubuntu-24.04
       strategy: soldr
       bundle: false
       clippy: false
       standalone-artifact: standalone-musl-aarch64
+
+  native-linux-arm64-execute:
+    name: Execute candidate static musl ARM64
+    if: github.event_name != 'workflow_call'
+    needs: native-linux-arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: standalone-musl-aarch64
+          path: standalone
+      - name: Verify and execute uploaded ARM64 bytes
+        run: |
+          version=$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          python -m installer.verify_native_assets "$version" standalone aarch64-unknown-linux-musl
+          binary="standalone/clud-$version-aarch64-unknown-linux-musl"
+          chmod +x "$binary"
+          test "$("$binary" --version)" = "clud $version"
 
   catalog-unit:
     name: Native catalog and release wiring unit tests
@@ -288,7 +309,7 @@ jobs:
 
   installer-acceptance:
     name: Installer acceptance aggregate
-    needs: [catalog-unit, catalog-site, native-linux-x64, native-linux-arm64, ape-core-tests, ape-host, linux-distro]
+    needs: [catalog-unit, catalog-site, native-linux-x64, native-linux-arm64, native-linux-arm64-execute, ape-core-tests, ape-host, linux-distro]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -301,6 +322,7 @@ jobs:
           LINUX_DISTROS: ${{ needs.linux-distro.result }}
           NATIVE_X64: ${{ needs.native-linux-x64.result }}
           NATIVE_ARM64: ${{ needs.native-linux-arm64.result }}
+          NATIVE_ARM64_EXECUTE: ${{ needs.native-linux-arm64-execute.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$CATALOG" = success
@@ -311,4 +333,5 @@ jobs:
           if [ "$EVENT_NAME" != workflow_call ]; then
             test "$NATIVE_X64" = success
             test "$NATIVE_ARM64" = success
+            test "$NATIVE_ARM64_EXECUTE" = success
           fi

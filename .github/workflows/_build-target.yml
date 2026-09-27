@@ -137,6 +137,7 @@ jobs:
           --target ${{ inputs.target }}
           --strategy ${{ inputs.strategy }}
           --profile ${{ inputs.profile }}
+          ${{ inputs.target == 'aarch64-unknown-linux-musl' && '--defer-native-version-check' || '' }}
 
       - name: Upload static musl clud
         if: ${{ inputs.standalone-artifact != '' }}

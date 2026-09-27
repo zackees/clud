@@ -80,6 +80,7 @@ def test_release_keeps_six_wheels_and_builds_two_separate_static_linux_assets() 
     assert all(row["strategy"] == "soldr" for row in musl)
     assert all(row["artifact"].startswith("standalone-musl-") for row in musl)
     assert not any(row["artifact"].startswith("wheels-") for row in musl)
+    assert all(row["runs-on"] == "ubuntu-24.04" for row in musl)
 
 
 def test_full_tier_is_a_superset_of_core():
