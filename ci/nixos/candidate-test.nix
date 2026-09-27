@@ -8,6 +8,8 @@ pkgs.testers.runNixOSTest {
   name = "clud-native-installer-${builtins.currentSystem}";
   nodes.machine = { pkgs, ... }: {
     virtualisation.memorySize = 2048;
+    environment.stub-ld.enable = false;
+    programs.nix-ld.enable = false;
     users.users.alice = {
       isNormalUser = true;
       createHome = true;
