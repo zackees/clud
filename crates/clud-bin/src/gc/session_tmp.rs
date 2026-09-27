@@ -394,7 +394,9 @@ fn sweep_stale_at_with_budget(
         &mut size_budget,
         &mut report,
     )?;
-    report.oversized.sort_by(|a, b| b.1.cmp(&a.1));
+    report
+        .oversized
+        .sort_by_key(|entry| std::cmp::Reverse(entry.1));
     Ok(report)
 }
 
@@ -838,7 +840,9 @@ mod tests {
             oversized: vec![(PathBuf::from("small"), 10), (PathBuf::from("big"), 100)],
             ..Default::default()
         };
-        report.oversized.sort_by(|a, b| b.1.cmp(&a.1));
+        report
+            .oversized
+            .sort_by_key(|entry| std::cmp::Reverse(entry.1));
         assert_eq!(report.oversized[0].0, PathBuf::from("big"));
     }
 

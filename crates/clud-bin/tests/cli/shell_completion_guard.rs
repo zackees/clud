@@ -83,6 +83,7 @@ fn login_shell_output(bash: &Path, script: &str, extra_env: &[(String, String)])
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     };
 
     let process = NativeProcess::new(config);

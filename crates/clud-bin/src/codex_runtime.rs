@@ -240,6 +240,7 @@ pub fn local_low_effort_models() -> Result<Vec<String>, String> {
         create_process_group: false,
         stdin_mode: StdinMode::Piped,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().map_err(|error| error.to_string())?;
     let messages = concat!(

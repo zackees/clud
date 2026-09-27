@@ -60,7 +60,7 @@ from running_process import CalledProcessError, CompletedProcess, RunningProcess
 STACK = "soldr"
 
 DOCKERFILE = r"""# managed-by: clud (docker_build_soldr.py)
-ARG RUST_VERSION=1.94.1
+ARG RUST_VERSION=1.95.0
 FROM rust:${RUST_VERSION}-trixie
 
 RUN apt-get update \
@@ -83,7 +83,7 @@ ENV HOME=/root \
 # Seed the toolchain into the same paths that later become named
 # volumes. Docker copies this image content into a fresh named volume
 # on first mount, so the first `docker exec` does not re-download Rust.
-ARG RUST_VERSION=1.94.1
+ARG RUST_VERSION=1.95.0
 RUN mkdir -p /target /cargo-home /rustup-home /cargo-chef /root/.soldr /src \
  && rustup default "${RUST_VERSION}" \
  && rustup component add rustfmt clippy

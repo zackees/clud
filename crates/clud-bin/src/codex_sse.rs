@@ -464,14 +464,12 @@ impl StreamTranslator {
                         }
                         self.finalize_thinking(&mut out);
                     }
-                    Some("message") => {
+                    Some("message") if !self.has_text_delta => {
                         // Fallback for a stream that never sent text deltas.
-                        if !self.has_text_delta {
-                            if let Some(text) = message_item_text(item) {
-                                let index = self.ensure_text_block((0, 0), &mut out);
-                                out.push(text_delta_frame(index, &text));
-                                self.close_block(index, &mut out);
-                            }
+                        if let Some(text) = message_item_text(item) {
+                            let index = self.ensure_text_block((0, 0), &mut out);
+                            out.push(text_delta_frame(index, &text));
+                            self.close_block(index, &mut out);
                         }
                     }
                     _ => {}

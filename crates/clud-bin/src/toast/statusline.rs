@@ -581,6 +581,7 @@ fn run_chain_spec(command: CommandSpec, stdin: &[u8]) -> Option<Vec<u8>> {
         create_process_group: false,
         stdin_mode: StdinMode::Piped,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process.start().ok()?;

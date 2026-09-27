@@ -253,8 +253,14 @@ fn is_bash_image(image: &str) -> bool {
     )
 }
 
-fn is_conhost_image(image: &str) -> bool {
-    normalized_image(image) == "conhost.exe"
+/// Console host images for both the inbox ConPTY (`conhost.exe`) and the
+/// sidecar backend (`OpenConsole.exe`), #1367. running-process's matching
+/// Job assignment and orphan scan are fixed in zackees/running-process#1222.
+fn is_console_host_image(image: &str) -> bool {
+    matches!(
+        normalized_image(image).as_str(),
+        "conhost.exe" | "openconsole.exe"
+    )
 }
 
 /// The reap graph, indexed once per reconcile pass.
@@ -456,7 +462,7 @@ pub(crate) fn plan_shell_exit(
         let role = roles.get(&item.pid).copied().unwrap_or(ProcessRole::Client);
         let own_spare = if let Some(reason) = spares.get(&item.pid).copied() {
             Some(reason)
-        } else if is_conhost_image(&process.image_name) {
+        } else if is_console_host_image(&process.image_name) {
             Some(ReapDecisionReason::ConsoleHost)
         } else if role == ProcessRole::Client
             && is_shell_image(&process.image_name)
@@ -3744,6 +3750,43 @@ mod lifecycle_tests {
         assert_eq!(decisions[0].action, DecisionAction::Reap);
         assert_eq!(decisions[0].reason, ReapDecisionReason::LeakedToolClient);
         assert_eq!(decisions[0].candidate_pid, Some(40));
+    }
+
+    /// #1367: the ConPTY sidecar backend hosts consoles in `OpenConsole.exe`,
+    /// not `conhost.exe`. It must be spared as a console host exactly like
+    /// conhost, bare or path-qualified, with its subtree pruned.
+    #[test]
+    fn openconsole_sidecar_host_is_treated_like_conhost() {
+        for image in [
+            "conhost.exe",
+            "OpenConsole.exe",
+            "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.0.0.0_x64__8wekyb3d8bbwe\\OpenConsole.exe",
+        ] {
+            let facts = facts_with(|_| {});
+            let processes = [
+                process(10, 1, "cmd.exe", true),
+                process(11, 10, "node.exe", true),
+                process(12, 11, "codex.exe", true),
+                process(20, 12, "powershell.exe", false),
+                process(40, 20, image, true),
+                process(41, 40, "node.exe", true),
+            ];
+            let graph = super::ProcessGraph::build(
+                processes.iter(),
+                &[RegisteredBackend::new(10, "codex.exe", 10)],
+            );
+            let spares = super::build_spare_list(&facts, graph.spare_candidates());
+            let decisions = super::plan_shell_exit(&graph, &spares, 20);
+
+            assert_eq!(decisions.len(), 1, "{image}: {decisions:?}");
+            assert_eq!(decisions[0].action, DecisionAction::Spare, "{image}");
+            assert_eq!(
+                decisions[0].reason,
+                ReapDecisionReason::ConsoleHost,
+                "{image}"
+            );
+            assert_eq!(decisions[0].candidate_pid, Some(40), "{image}");
+        }
     }
 
     /// Session isolation, as a decision-table property: a process that is not

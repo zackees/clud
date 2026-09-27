@@ -52,8 +52,15 @@ fn automatic_target_allowed(
     observed: ProcessIdentity,
     image_name: &str,
 ) -> bool {
-    automatic_identity_matches(recorded, observed)
-        && !image_name.eq_ignore_ascii_case("conhost.exe")
+    automatic_identity_matches(recorded, observed) && !is_console_host_image(image_name)
+}
+
+/// Console host images for both the inbox ConPTY (`conhost.exe`) and the
+/// sidecar backend (`OpenConsole.exe`), #1367. The upstream Job assignment
+/// and orphan scan are fixed in zackees/running-process#1222.
+#[cfg(any(windows, test))]
+fn is_console_host_image(name: &str) -> bool {
+    name.eq_ignore_ascii_case("conhost.exe") || name.eq_ignore_ascii_case("openconsole.exe")
 }
 
 /// Kill the process tree rooted at `pid`, including the root itself.
@@ -196,7 +203,8 @@ impl TopologySnapshot {
 /// identity and image observed by the selection snapshot.
 ///
 /// This path is deliberately stricter than [`kill_tree_filtered`]. Automatic
-/// cleanup must never act on a bare PID, and `conhost.exe` is rejected inside
+/// cleanup must never act on a bare PID, and console hosts (`conhost.exe`,
+/// `OpenConsole.exe`) are rejected inside
 /// the same last-responsible-moment snapshot used to select each kill target.
 #[cfg(windows)]
 pub fn kill_tree_filtered_automatic(
@@ -258,10 +266,7 @@ fn kill_identity_filtered_automatic(identity: ProcessIdentity, may_kill: &dyn Fn
 
 #[cfg(windows)]
 fn is_console_host(process: &sysinfo::Process) -> bool {
-    process
-        .name()
-        .to_string_lossy()
-        .eq_ignore_ascii_case("conhost.exe")
+    is_console_host_image(&process.name().to_string_lossy())
 }
 
 #[cfg(windows)]
@@ -481,6 +486,24 @@ mod tests {
 
         assert!(automatic_target_allowed(recorded, observed, "git.exe"));
         assert!(!automatic_target_allowed(recorded, observed, "ConHost.EXE"));
+    }
+
+    #[test]
+    fn automatic_target_refuses_openconsole_sidecar_host() {
+        let recorded = ProcessIdentity::new(41, 100);
+        let observed = ProcessIdentity::new(41, 100);
+
+        assert!(automatic_target_allowed(recorded, observed, "node.exe"));
+        assert!(!automatic_target_allowed(
+            recorded,
+            observed,
+            "OpenConsole.exe"
+        ));
+        assert!(!automatic_target_allowed(
+            recorded,
+            observed,
+            "openconsole.exe"
+        ));
     }
 
     #[test]

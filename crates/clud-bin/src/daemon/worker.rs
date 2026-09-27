@@ -440,6 +440,7 @@ fn run_repeat_once(
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     }));
     if let Err(err) = process.start() {
         shared
@@ -496,6 +497,7 @@ fn start_subprocess_session(
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     }));
     process
         .start()

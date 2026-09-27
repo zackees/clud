@@ -180,7 +180,7 @@ fn list_reports_newest_first(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
             Some((ms, e.path()))
         })
         .collect();
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     Ok(entries.into_iter().map(|(_, p)| p).collect())
 }
 
@@ -297,7 +297,7 @@ fn prune_cache(cache_root: &Path) -> usize {
     if versions.len() <= MAX_CACHED_VERSIONS {
         return 0;
     }
-    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    versions.sort_by_key(|version| std::cmp::Reverse(version.0));
     let mut removed = 0;
     for (_, path) in versions.into_iter().skip(MAX_CACHED_VERSIONS) {
         // Audit before acting (#893). These are large files clud fetched

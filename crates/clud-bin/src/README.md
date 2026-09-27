@@ -324,7 +324,8 @@ which test tier a change belongs in — lives in
   The runner registers each backend root by PID + start time; a pure role
   planner recognizes the exact Claude/Codex host, direct tool shells, Git Bash
   handoffs, nested detachments, declared daemons, and the unconditional
-  `conhost.exe` exclusion before any automatic client-tree reap (#616).
+  `conhost.exe` and sidecar `OpenConsole.exe` exclusions before any automatic
+  client-tree reap (#616, #1367).
   Daemon-sparing goes through the `ProcessFacts` seam and its precedence
   ordering (#673 Phase 1a); the tracked keyspace is bounded by one purge sweep
   (Phase 2). The seam itself now lives in `reaper_facts.rs` — this module adds

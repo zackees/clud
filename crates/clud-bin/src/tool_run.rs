@@ -144,6 +144,7 @@ fn run_passthrough(
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
     let mut watchdog = Watchdog::for_rel_path(rel_path);
@@ -276,6 +277,7 @@ fn run_with_session(
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
 
@@ -828,6 +830,7 @@ fn run_argv_passthrough(argv: Vec<String>, env: Vec<(String, String)>) -> io::Re
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
     process.wait(None).map_err(io::Error::other)
@@ -847,6 +850,7 @@ fn run_argv_capture(
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
     let exit_code = process.wait(None).map_err(io::Error::other)?;
@@ -891,6 +895,7 @@ fn ensure_managed_python(tools_root: &Path, env: &[(String, String)]) -> io::Res
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process.start().map_err(io::Error::other)?;
     let code = process.wait(None).map_err(io::Error::other)?;

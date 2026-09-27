@@ -180,6 +180,7 @@ pub(in crate::hook_health) fn run_backend_prompt(
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     };
     let process = NativeProcess::new(config);
     process

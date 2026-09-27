@@ -1000,6 +1000,7 @@ fn daemon_create_session(
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
+        address_space_limit_bytes: None,
         // `running-process-core` 3.4 removed the explicit `Containment`
         // knob; every `NativeProcess` is now automatically bound to a
         // kill-on-close Job Object on Windows. The worker can no longer

@@ -620,6 +620,7 @@ fn run_verified_codex_installer_with_parent_env(
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process
         .start()
@@ -722,6 +723,7 @@ fn run_interactive_command(command: CommandSpec, cwd: Option<PathBuf>) -> Result
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
+        address_space_limit_bytes: None,
     });
     process
         .start()

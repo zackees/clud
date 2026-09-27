@@ -495,23 +495,19 @@ impl MessageAggregator {
             return;
         };
         match block.get("type").and_then(serde_json::Value::as_str) {
-            Some("text") => {
-                if !text.is_empty() {
-                    block["text"] = serde_json::json!(text);
-                }
+            Some("text") if !text.is_empty() => {
+                block["text"] = serde_json::json!(text);
             }
-            Some("tool_use") => {
+            Some("tool_use") if !json.is_empty() => {
                 // Only write when something was buffered. `finish` may flush a
                 // block that `content_block_stop` already closed, and an
                 // unconditional write would clobber the parsed arguments with
                 // the empty-buffer reading.
-                if !json.is_empty() {
-                    // Fragments are only valid JSON once joined. An unparseable
-                    // join means the turn was truncated; an empty object is the
-                    // safe reading, since a malformed `input` would make the
-                    // client reject a turn it could otherwise partly use.
-                    block["input"] = serde_json::from_str(&json).unwrap_or(serde_json::json!({}));
-                }
+                // Fragments are only valid JSON once joined. An unparseable
+                // join means the turn was truncated; an empty object is the
+                // safe reading, since a malformed `input` would make the
+                // client reject a turn it could otherwise partly use.
+                block["input"] = serde_json::from_str(&json).unwrap_or(serde_json::json!({}));
             }
             _ => {}
         }

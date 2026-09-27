@@ -167,11 +167,11 @@ fn a_misaligned_buffer_is_decoded_not_reinterpreted() {
     // alignment, as a `&[u8]` is allowed to.
     let mut shifted = vec![0u8; bytes.len() + 4];
     let offset = (1..=4)
-        .find(|o| (shifted.as_ptr() as usize + o) % 4 != 0)
+        .find(|o| !(shifted.as_ptr() as usize + o).is_multiple_of(4))
         .unwrap();
     shifted[offset..offset + bytes.len()].copy_from_slice(&bytes);
     let misaligned = &shifted[offset..offset + bytes.len()];
-    assert_ne!(misaligned.as_ptr() as usize % 4, 0);
+    assert!(!(misaligned.as_ptr() as usize).is_multiple_of(4));
 
     write_records_to_handle(h, misaligned).expect("write misaligned records");
     assert_eq!(typed_text(&drain(h)), "ab");

@@ -163,7 +163,7 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
         });
     }
     // Newest first.
-    out.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
+    out.sort_by_key(|entry| std::cmp::Reverse(entry.created_at.unwrap_or(0)));
     Ok(out)
 }
 
@@ -207,7 +207,7 @@ fn merge_api_sessions(sessions: &mut Vec<SessionView>, state_dir: &Path) {
             ctrl_c: None,
         });
     }
-    sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at.unwrap_or(0)));
 }
 
 /// Merge live rows from the redb session registry into the dashboard's
@@ -264,7 +264,7 @@ fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<L
     }
 
     // Newest first across the merged list.
-    sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at.unwrap_or(0)));
 }
 
 fn merge_launch_records(sessions: &mut Vec<SessionView>, records: Vec<LaunchRecord>) {
@@ -304,7 +304,7 @@ fn merge_launch_records(sessions: &mut Vec<SessionView>, records: Vec<LaunchReco
             ctrl_c: None,
         });
     }
-    sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at.unwrap_or(0)));
 }
 
 fn ctrl_c_profile_view(profile: CtrlCProfile) -> CtrlCProfileView {

@@ -610,7 +610,7 @@ pub fn read_recent_events(state_dir: &Path, limit: usize) -> Vec<CtrlCEvent> {
             serde_json::from_slice::<CtrlCEvent>(&bytes).ok()
         })
         .collect();
-    events.sort_by(|a, b| b.exit_at_ms.cmp(&a.exit_at_ms));
+    events.sort_by_key(|event| std::cmp::Reverse(event.exit_at_ms));
     events.truncate(limit);
     events
 }
@@ -640,7 +640,7 @@ fn prune_old_events(dir: &Path, keep: usize) {
         return;
     }
     // Newest first; keep the head, delete the rest.
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|file| std::cmp::Reverse(file.0));
     for (_, path) in files.into_iter().skip(keep) {
         let _ = fs::remove_file(path);
     }
