@@ -842,7 +842,8 @@ int install_release(const Release &release, const Platform &platform,
   const std::string asset_path = path_join(temp_directory, "release-asset");
   if (!download_asset(release, asset_path)) {
     remove_temp_directory(temp_directory, asset_path);
-    std::fputs("clud-installer: release asset download failed\n", stderr);
+    std::fputs("clud-installer: release asset download failed; ensure curl is installed and HTTPS access works\n",
+               stderr);
     return 1;
   }
   uint64_t actual_size = 0;
@@ -967,7 +968,8 @@ bool fetch_manifest(std::string *text) {
   }
   const int status = pclose(pipe);
   if (status != 0 || text->empty()) {
-    std::fputs("clud-installer: could not download the release catalog\n", stderr);
+    std::fputs("clud-installer: could not download the release catalog; ensure curl is installed and HTTPS access works\n",
+               stderr);
     return false;
   }
   return true;
