@@ -234,7 +234,8 @@ runners that have no Rust toolchain at all. Full design and rationale:
 Primary entrypoint: `.github/workflows/ci.yml`; the existing installer
 acceptance workflow also observes PR events but runs jobs only with `ci-full`.
 **Do not add new GitHub Actions workflow files** (`.github/workflows/*.yml`
-or `*.yaml`); extend the existing entrypoints and reusable workflows. Installer
+or `*.yaml`) unless the user specifically requests them; otherwise extend the
+existing entrypoints and reusable workflows. Installer
 platform acceptance runs only during the release cycle or on a PR explicitly
 labeled `ci-full` (legacy `ci:full` is equivalent), never on routine PR commits.
 When editing its triggers, check every job, including catalog/site unit and
