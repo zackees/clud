@@ -1,8 +1,8 @@
-"""Reject hand-rolled cross toolchains; soldr owns Apple / Windows-MSVC (#637, #714).
+"""Reject hand-rolled cross toolchains; soldr owns shipped targets (#637, #714).
 
-soldr owns the blessed cross surface for `*-apple-darwin` and
-`*-pc-windows-msvc`: `soldr prepare --target ...` provisions the LLVM toolchain
-and the vendored MSVC CRT, and `soldr build --target ...` links against it.
+soldr owns the blessed cross surface for Apple, Windows-MSVC, and Linux:
+`soldr prepare --target ...` provisions the target toolchain, and
+`soldr build --target ...` links against it.
 `cargo xwin` and `cargo zigbuild --target *-apple-darwin` remain *technically*
 reachable, and soldr's own docs call them legacy passthroughs — which is exactly
 the failure mode this lint exists to prevent. Beyond correctness there is a
@@ -10,8 +10,7 @@ throughput argument: `cargo xwin` re-downloads and splats the MSVC CRT/SDK on
 every cold cache, minutes at a time, while `soldr prepare` fetches a prepared
 sysroot.
 
-**Zig stays legitimate for Linux.** `aarch64-unknown-linux-gnu` cross-builds
-through `cargo-zigbuild`, and the manylinux wheel links through `maturin --zig`.
+Zig is banned for all shipped targets, including static musl Linux binaries.
 
 ## Two rule classes, and why the split matters (#714)
 
@@ -68,7 +67,8 @@ ROOT = Path(__file__).resolve().parent.parent
 #: throughout these files in prose that *explains* the ban — matching the
 #: wildcard would make the rule impossible to document.
 SOLDR_OWNED_TARGET = re.compile(
-    r"\b(?:x86_64|aarch64|arm64|i686|armv7)-(?:apple-darwin|pc-windows-msvc)\b"
+    r"\b(?:x86_64|aarch64|arm64|i686|armv7)-"
+    r"(?:apple-darwin|pc-windows-msvc|unknown-linux-(?:gnu|musl))\b"
 )
 
 #: Tools with no legitimate use in this repo at any target, so the target is not

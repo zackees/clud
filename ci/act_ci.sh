@@ -112,13 +112,14 @@ fi
 # the volume makes the reuse explicit. Without a persistent path every run
 # restored nothing: a cold venv, and 0 zccache hits in the Rust build.
 # --pull=false: reuse the local runner image (a missing one is still pulled).
+# --init: reap detached daemon children so strict shutdown tests see exited PIDs.
 act pull_request -W ".github/workflows/$WORKFLOW" -j "$JOB" \
     -e "/tmp/$RUN/event.json" \
     --local-repository "actions/checkout@v4=$CHECKOUT" \
     -P "ubuntu-24.04=$IMAGE" \
     --pull=false \
     --rm \
-    --container-options "--label clud.act-run=$RUN" \
+    --container-options "--init --label clud.act-run=$RUN" \
     --artifact-server-path "/tmp/$RUN/artifacts" \
     --action-cache-path "$ACTION_CACHE" \
     --cache-server-path "$SERVER_CACHE" "$@"

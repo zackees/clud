@@ -152,6 +152,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       build: ${{ steps.matrix.outputs.build }}
+      static_musl: ${{ steps.matrix.outputs.static_musl }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -201,9 +202,47 @@ jobs:
           path: clud-installer.exe
           if-no-files-found: error
 
+  build-static-musl:
+    name: Build static musl clud
+    needs: [preflight, full-ci-gate, release-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-matrix.outputs.static_musl) }}
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      source_ref: ${{ needs.preflight.outputs.candidate_sha }}
+      target: ${{ matrix.target }}
+      runs-on: ${{ matrix.runs-on }}
+      strategy: ${{ matrix.strategy }}
+      profile: release
+      bundle: false
+      clippy: false
+      standalone-artifact: ${{ matrix.artifact }}
+
+  verify-static-musl-arm64:
+    name: Execute release static musl ARM64
+    needs: [preflight, build-static-musl]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: standalone-musl-aarch64
+          path: standalone
+      - name: Verify and execute uploaded ARM64 bytes
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          python -m installer.verify_native_assets "$RELEASE_VERSION" standalone aarch64-unknown-linux-musl
+          binary="standalone/clud-$RELEASE_VERSION-aarch64-unknown-linux-musl"
+          chmod +x "$binary"
+          test "$("$binary" --version)" = "clud $RELEASE_VERSION"
+
   publish-pypi:
     name: Publish to PyPI
-    needs: [preflight, full-ci-gate, build]
+    needs: [preflight, full-ci-gate, build, verify-static-musl-arm64]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -227,7 +266,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    needs: [preflight, full-ci-gate, build, build-installer, publish-pypi]
+    needs: [preflight, full-ci-gate, build, build-static-musl, verify-static-musl-arm64, build-installer, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -247,6 +286,12 @@ jobs:
           name: clud-installer-ape
           path: dist
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: standalone-musl-*
+          path: standalone
+          merge-multiple: true
+
       # Sidecar debug info for the released binaries (Linux `.dwp`; see
       # Cargo.toml [profile.release]). Downloaded into its own directory --
       # never dist/ -- and only here, so it can never reach publish-pypi's
@@ -260,8 +305,11 @@ jobs:
           path: debuginfo
           merge-multiple: true
 
-      - name: Extract standalone clud executables from release wheels
+      - name: Extract Windows and macOS clud executables from release wheels
         run: python -m installer.release_assets '${{ needs.preflight.outputs.version }}' dist standalone
+
+      - name: Verify six native download assets
+        run: python -m installer.verify_native_assets '${{ needs.preflight.outputs.version }}' standalone
 
       - name: Generate checksums
         shell: bash

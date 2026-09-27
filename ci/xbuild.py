@@ -46,6 +46,7 @@ Design: docs/architecture/ci.md
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -263,6 +264,7 @@ def is_soldr_owned(target: str) -> bool:
         target.endswith("-apple-darwin")
         or target.endswith("-pc-windows-msvc")
         or target.endswith("-unknown-linux-gnu")
+        or target.endswith("-unknown-linux-musl")
     )
 
 
@@ -360,6 +362,49 @@ def cmd_compile(args: argparse.Namespace) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(sorted(set(executables)), indent=2), encoding="utf-8")
     print(f"recorded {len(set(executables))} test harnesses -> {out}")
+    return 0
+
+
+def cmd_standalone(args: argparse.Namespace) -> int:
+    """Build one static Linux clud binary without creating a Python wheel."""
+    from installer.catalog import verify_static_musl_elf
+
+    targets = {"x86_64-unknown-linux-musl": "x86_64", "aarch64-unknown-linux-musl": "aarch64"}
+    if args.target not in targets or args.strategy != "soldr":
+        raise ValueError("standalone build requires a soldr static-musl target")
+    defer_native_check = getattr(args, "defer_native_version_check", False)
+    if defer_native_check and args.target != "aarch64-unknown-linux-musl":
+        raise ValueError("only the ARM64 cross-build can defer native execution")
+    env = build_env(args.target, args.strategy)
+    profile_args = ["--release"] if args.profile == "release" else []
+    command = cargo_argv(
+        ["build", "-p", "clud", "--bin", "clud", *profile_args], args.target, args.strategy
+    )
+    if run(command, env) != 0:
+        return 1
+    profile = "release" if args.profile == "release" else "debug"
+    source = cargo_target_dir(env, ROOT / "target") / args.target / profile / "clud"
+    payload = source.read_bytes()
+    verify_static_musl_elf(payload, targets[args.target])
+    version = _project_version()
+    if not defer_native_check:
+        result = process.run(
+            [str(source), "--version"], cwd=ROOT, env=env, capture_output=True, text=True
+        )
+        if result.returncode != 0 or result.stdout.strip() != f"clud {version}":
+            raise ValueError(
+                f"standalone clud version check failed: {result.stdout!r} {result.stderr!r}"
+            )
+    destination = ROOT / "standalone" / f"clud-{version}-{args.target}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+    if hashlib.sha256(destination.read_bytes()).digest() != hashlib.sha256(payload).digest():
+        raise ValueError("standalone clud changed while staging")
+    destination.chmod(0o755)
+    print(
+        f"staged {destination.name}: {len(payload)} bytes "
+        f"sha256={hashlib.sha256(payload).hexdigest()}"
+    )
     return 0
 
 
@@ -750,6 +795,11 @@ def main(argv: list[str] | None = None) -> int:
     wheel = sub.add_parser("wheel")
     add_common(wheel)
     wheel.set_defaults(func=cmd_wheel)
+
+    standalone = sub.add_parser("standalone")
+    add_common(standalone)
+    standalone.add_argument("--defer-native-version-check", action="store_true")
+    standalone.set_defaults(func=cmd_standalone)
 
     args = parser.parse_args(argv)
 

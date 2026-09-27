@@ -62,8 +62,18 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "candidate_sha: ${{ steps.meta.outputs.candidate_sha }}" in text
     assert "run: python -m ci.release_gate" in text
     assert "needs: [preflight, full-ci-gate, release-matrix]" in text
-    assert "needs: [preflight, full-ci-gate, build]" in text
-    assert "needs: [preflight, full-ci-gate, build, build-installer, publish-pypi]" in text
+    assert "needs: [preflight, full-ci-gate, build, verify-static-musl-arm64]" in text
+    publish_needs = (
+        "needs: [preflight, full-ci-gate, build, build-static-musl, "
+        "verify-static-musl-arm64, "
+        "build-installer, publish-pypi]"
+    )
+    assert publish_needs in text
+    assert "name: Execute release static musl ARM64" in text
+    installer = (WORKFLOWS / "installer-check.yml").read_text(encoding="utf-8")
+    assert "native-linux-arm64-execute:" in installer
+    assert "needs: native-linux-arm64" in installer
+    assert "NATIVE_ARM64_EXECUTE: ${{ needs.native-linux-arm64-execute.result }}" in installer
     assert "name: Build universal APE installer" in text
     assert "source_ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "ref: ${{ needs.preflight.outputs.candidate_sha }}" in text

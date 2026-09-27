@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import struct
 from io import BytesIO
 from zipfile import ZipFile
 
 import pytest
 
-from installer.catalog import catalog_from_releases, executable_member, version_key
+from installer.catalog import (
+    TARGETS,
+    catalog_from_releases,
+    executable_member,
+    verify_static_musl_elf,
+    version_key,
+)
 from installer.site import build_site, published_paths
 from installer.verify_site import verify
 
@@ -16,7 +23,18 @@ def wheel(executable: str, data: bytes) -> bytes:
     output = BytesIO()
     with ZipFile(output, "w") as archive:
         archive.writestr(f"clud-2.9.0.data/scripts/{executable}", data)
+        if executable == "clud.exe":
+            archive.writestr("clud-2.9.0.data/scripts/clud", b"\x7fELFportable-fixture")
     return output.getvalue()
+
+
+def pe_x64() -> bytes:
+    payload = bytearray(160)
+    payload[:2] = b"MZ"
+    struct.pack_into("<I", payload, 0x3C, 128)
+    payload[128:132] = b"PE\0\0"
+    struct.pack_into("<H", payload, 132, 0x8664)
+    return bytes(payload)
 
 
 def release(version: str, url: str, payload: bytes) -> dict:
@@ -27,11 +45,12 @@ def release(version: str, url: str, payload: bytes) -> dict:
         "published_at": "2026-09-01T00:00:00Z",
         "assets": [
             {
-                "name": f"clud-{version}-py3-none-win_amd64.whl",
+                "name": f"clud-{version}-py3-none-{platform}.whl",
                 "browser_download_url": url,
                 "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
                 "size": len(payload),
             }
+            for platform in TARGETS
         ],
     }
 
@@ -87,7 +106,10 @@ def test_cached_catalog_refetches_release_asset_when_digest_changes() -> None:
         [changed_release], lambda _: changed_wheel, verified_catalog=cached
     )
 
-    asset = catalog["releases"][0]["platforms"][0]["asset"]
+    asset = next(
+        entry["asset"] for entry in catalog["releases"][0]["platforms"]
+        if entry["platform"]["os"] == "windows" and entry["platform"]["arch"] == "x86_64"
+    )
     assert asset["sha256"] != cached["releases"][0]["platforms"][0]["asset"]["sha256"]
 
 
@@ -154,7 +176,7 @@ def test_direct_binary_wins_over_wheel_for_same_target() -> None:
     import hashlib
 
     data = wheel("clud.exe", b"MZwheel")
-    direct = b"MZdirect"
+    direct = pe_x64()
     item = release("2.9.0", "https://example.com/wheel", data)
     item["assets"].append(
         {
@@ -165,9 +187,141 @@ def test_direct_binary_wins_over_wheel_for_same_target() -> None:
         }
     )
     catalog = catalog_from_releases([item], lambda url: direct if url.endswith("direct") else data)
-    asset = catalog["releases"][0]["platforms"][0]["asset"]
+    asset = next(
+        entry["asset"]
+        for entry in catalog["releases"][0]["platforms"]
+        if entry["platform"]["os"] == "windows" and entry["platform"]["arch"] == "x86_64"
+    )
     assert asset["filename"].endswith("msvc.exe")
     assert asset["sha256"] == hashlib.sha256(direct).hexdigest()
+
+
+def test_direct_binary_rejects_wrong_architecture() -> None:
+    import hashlib
+
+    payload = bytearray(pe_x64())
+    struct.pack_into("<H", payload, 132, 0xAA64)
+    direct = bytes(payload)
+    data = wheel("clud.exe", b"MZwheel")
+    item = release("2.9.0", "https://example.com/wheel", data)
+    item["assets"].append({
+        "name": "clud-2.9.0-x86_64-pc-windows-msvc.exe",
+        "browser_download_url": "https://example.com/direct",
+        "digest": "sha256:" + hashlib.sha256(direct).hexdigest(),
+        "size": len(direct),
+    })
+    with pytest.raises(ValueError, match="PE architecture mismatch"):
+        catalog_from_releases([item], lambda url: direct if url.endswith("direct") else data)
+
+
+def test_published_prerelease_flag_cannot_displace_stable() -> None:
+    data = wheel("clud.exe", b"MZpayload")
+    stable = release("2.9.0", "https://example.com/stable", data)
+    candidate = release("2.10.0", "https://example.com/candidate", data)
+    candidate["prerelease"] = True
+    catalog = catalog_from_releases([candidate, stable], lambda _: data)
+    assert catalog["channels"]["latest-stable"] == "2.9.0"
+
+
+def test_incomplete_newer_release_cannot_displace_complete_stable() -> None:
+    data = wheel("clud.exe", b"MZpayload")
+    stable = release("2.9.0", "https://example.com/stable", data)
+    incomplete = release("2.10.0", "https://example.com/incomplete", data)
+    incomplete["assets"].pop()
+    catalog = catalog_from_releases([incomplete, stable], lambda _: data)
+    assert catalog["channels"]["latest-stable"] == "2.9.0"
+    assert catalog["releases"][0]["version"] == "2.10.0"
+
+
+def test_linux_gnu_history_is_classified_as_host_specific() -> None:
+    import hashlib
+
+    payload = bytearray(68)
+    payload[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", payload, 18, 62)
+    payload = bytes(payload)
+    item = release("2.9.0", "https://example.com/windows", wheel("clud.exe", b"MZpayload"))
+    item["assets"].append(
+        {
+            "name": "clud-2.9.0-x86_64-unknown-linux-gnu",
+            "browser_download_url": "https://example.com/linux",
+            "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    )
+    catalog = catalog_from_releases(
+        [item],
+        lambda url: payload if url.endswith("linux") else wheel("clud.exe", b"MZpayload"),
+    )
+    linux = next(
+        entry for entry in catalog["releases"][0]["platforms"]
+        if entry["platform"]["os"] == "linux"
+    )
+    assert linux["platform"]["libc"] == "glibc"
+    assert linux["variant"]["flavor"] == "gnu"
+
+
+def test_linux_musl_and_gnu_variants_remain_distinct() -> None:
+    import hashlib
+    import struct
+
+    payload = bytearray(128)
+    payload[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", payload, 16, 2)
+    struct.pack_into("<H", payload, 18, 62)
+    struct.pack_into("<Q", payload, 32, 64)
+    struct.pack_into("<HH", payload, 54, 56, 1)
+    struct.pack_into("<I", payload, 64, 1)  # PT_LOAD, no loader or dependencies
+    payload = bytes(payload)
+    item = release("2.9.0", "https://example.com/windows", wheel("clud.exe", b"MZpayload"))
+    for flavor in ("musl", "gnu"):
+        item["assets"].append(
+            {
+                "name": f"clud-2.9.0-x86_64-unknown-linux-{flavor}",
+                "browser_download_url": f"https://example.com/{flavor}",
+                "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        )
+    catalog = catalog_from_releases(
+        [item],
+        lambda url: payload if url.endswith(("musl", "gnu")) else wheel("clud.exe", b"MZpayload"),
+    )
+    linux = [
+        entry for entry in catalog["releases"][0]["platforms"]
+        if entry["platform"]["os"] == "linux" and entry["platform"]["arch"] == "x86_64"
+    ]
+    assert len(linux) == 2
+    assert {entry["variant"]["flavor"] for entry in linux} == {"static-musl", "gnu"}
+    musl = next(entry for entry in linux if entry["variant"]["flavor"] == "static-musl")
+    assert musl["platform"] == {
+        "os": "linux", "arch": "x86_64"
+    }
+
+
+def test_static_musl_rejects_loader_dependency_and_wrong_architecture() -> None:
+    import struct
+
+    payload = bytearray(128)
+    payload[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", payload, 16, 2)
+    struct.pack_into("<H", payload, 18, 62)
+    struct.pack_into("<Q", payload, 32, 64)
+    struct.pack_into("<HH", payload, 54, 56, 1)
+    struct.pack_into("<I", payload, 64, 1)
+    verify_static_musl_elf(bytes(payload), "x86_64")
+    with pytest.raises(ValueError, match="architecture"):
+        verify_static_musl_elf(bytes(payload), "aarch64")
+    struct.pack_into("<I", payload, 64, 3)
+    with pytest.raises(ValueError, match="PT_INTERP"):
+        verify_static_musl_elf(bytes(payload), "x86_64")
+    struct.pack_into("<I", payload, 64, 2)
+    struct.pack_into("<Q", payload, 72, 120)
+    struct.pack_into("<Q", payload, 96, 16)
+    payload.extend(b"\x00" * 16)
+    struct.pack_into("<q", payload, 120, 1)
+    with pytest.raises(ValueError, match="DT_NEEDED"):
+        verify_static_musl_elf(bytes(payload), "x86_64")
 
 
 def test_public_site_rejects_incomplete_latest(tmp_path, monkeypatch) -> None:
@@ -175,6 +329,10 @@ def test_public_site_rejects_incomplete_latest(tmp_path, monkeypatch) -> None:
 
     data = wheel("clud.exe", b"MZpayload")
     build_site(tmp_path, [release("2.9.0", "https://example.com/29", data)], lambda _: data)
+    manifest = tmp_path / "install" / "manifest.json"
+    catalog = json.loads(manifest.read_text(encoding="utf-8"))
+    catalog["releases"][0]["platforms"].pop()
+    manifest.write_text(json.dumps(catalog), encoding="utf-8")
     monkeypatch.setattr(
         "installer.verify_site.fetch",
         lambda _: json.dumps({"tag_name": "2.9.0"}).encode(),

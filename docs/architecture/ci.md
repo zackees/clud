@@ -494,6 +494,24 @@ redesign requires; everything else is CI plumbing.
 
 ## Release profile containment
 
+Native Linux downloads use two additional release-profile jobs, one for each
+`*-unknown-linux-musl` architecture. Both build on x64 Ubuntu because soldr's
+musl compiler bundles are x64-hosted. The ARM artifact is then downloaded and
+executed on a native ARM Ubuntu runner before either publication path starts.
+The jobs use `soldr prepare` and `soldr build`, and stage only a `clud` ELF in
+`standalone/`. The existing six wheel jobs still produce all PyPI
+wheels and the sdist. `installer/release_assets.py` extracts the four Windows
+and macOS direct downloads from those wheels; it never relabels a GNU Linux
+wheel executable as musl. `installer.verify_native_assets` checks the exact
+six-file direct-download set before checksums and release upload. The musl
+assets must have the expected ELF machine and no `PT_INTERP` or `DT_NEEDED`.
+
+The static musl build artifacts use `standalone-musl-*`, outside the `wheels-*`
+pattern consumed by PyPI. The release publisher downloads them from the same
+candidate SHA as the wheel jobs. Host and NixOS installation checks must use
+the uploaded bytes; see [installer Pages](installer-pages.md) for catalog
+compatibility rules.
+
 Requirement: nothing builds `--release` except the release pipeline.
 
 - `_build-target.yml` takes `profile` (`dev` | `release`), defaulting to `dev`.

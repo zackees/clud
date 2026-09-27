@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 from pathlib import Path
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
@@ -32,6 +33,8 @@ DIRECT_TARGETS = {
     "aarch64-apple-darwin": ("darwin", "aarch64", "clud"),
     "x86_64-unknown-linux-gnu": ("linux", "x86_64", "clud"),
     "aarch64-unknown-linux-gnu": ("linux", "aarch64", "clud"),
+    "x86_64-unknown-linux-musl": ("linux", "x86_64", "clud"),
+    "aarch64-unknown-linux-musl": ("linux", "aarch64", "clud"),
 }
 VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$")
 
@@ -60,12 +63,87 @@ def direct_target(name: str, version: str) -> tuple[str, str, str] | None:
     return DIRECT_TARGETS.get(name[len(prefix) :]) if name.startswith(prefix) else None
 
 
+def linux_variant(filename: str, os_name: str) -> tuple[dict, dict]:
+    """Describe the host requirement separately from the executable flavor."""
+    if os_name != "linux":
+        return {}, {}
+    if filename.endswith("-unknown-linux-musl"):
+        return {}, {"flavor": "static-musl"}
+    if filename.endswith("-unknown-linux-gnu") or filename.endswith(".whl"):
+        return {"libc": "glibc"}, {"flavor": "gnu"}
+    raise ValueError(f"unclassified Linux release asset: {filename}")
+
+
 def is_executable(data: bytes, executable: str) -> bool:
     return (
         data.startswith(b"MZ")
         if executable.endswith(".exe")
         else (data.startswith(b"\x7fELF") or data.startswith(b"\xcf\xfa\xed\xfe"))
     )
+
+
+def verify_static_musl_elf(data: bytes, arch: str) -> None:
+    """Reject truncated, wrong-architecture, or dynamically linked Linux assets."""
+    if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
+        raise ValueError("static musl asset must be a little-endian ELF64 executable")
+    if struct.unpack_from("<H", data, 16)[0] not in (2, 3):
+        raise ValueError("static musl asset is not an ELF executable")
+    machine = struct.unpack_from("<H", data, 18)[0]
+    if machine != {"x86_64": 62, "aarch64": 183}[arch]:
+        raise ValueError("static musl asset architecture mismatch")
+    phoff = struct.unpack_from("<Q", data, 32)[0]
+    phentsize, phnum = struct.unpack_from("<HH", data, 54)
+    if not phnum or phentsize < 56 or phoff + phentsize * phnum > len(data):
+        raise ValueError("static musl asset has an invalid program header table")
+    for index in range(phnum):
+        header = phoff + index * phentsize
+        kind = struct.unpack_from("<I", data, header)[0]
+        if kind == 3:  # PT_INTERP
+            raise ValueError("static musl asset has a PT_INTERP loader")
+        if kind != 2:  # PT_DYNAMIC
+            continue
+        offset = struct.unpack_from("<Q", data, header + 8)[0]
+        size = struct.unpack_from("<Q", data, header + 32)[0]
+        if offset + size > len(data) or size % 16:
+            raise ValueError("static musl asset has an invalid dynamic table")
+        for position in range(offset, offset + size, 16):
+            if struct.unpack_from("<q", data, position)[0] == 1:  # DT_NEEDED
+                raise ValueError("static musl asset has a DT_NEEDED dependency")
+
+
+def verify_direct_executable(data: bytes, os_name: str, arch: str, flavor: str | None) -> None:
+    """Check the advertised native format and machine before cataloging it."""
+    if os_name == "linux":
+        if flavor == "static-musl":
+            verify_static_musl_elf(data, arch)
+            return
+        if len(data) < 20 or data[:6] != b"\x7fELF\x02\x01":
+            raise ValueError("GNU asset is not a little-endian ELF64 executable")
+        if struct.unpack_from("<H", data, 18)[0] != {"x86_64": 62, "aarch64": 183}[arch]:
+            raise ValueError("GNU asset architecture mismatch")
+        return
+    if os_name == "windows":
+        if len(data) < 64 or data[:2] != b"MZ":
+            raise ValueError("invalid PE executable")
+        offset = struct.unpack_from("<I", data, 0x3C)[0]
+        if offset + 6 > len(data) or data[offset : offset + 4] != b"PE\0\0":
+            raise ValueError("invalid PE header")
+        if struct.unpack_from("<H", data, offset + 4)[0] != {
+            "x86_64": 0x8664,
+            "aarch64": 0xAA64,
+        }[arch]:
+            raise ValueError("PE architecture mismatch")
+        return
+    if os_name == "darwin":
+        if len(data) < 32 or data[:4] != b"\xcf\xfa\xed\xfe":
+            raise ValueError("invalid Mach-O executable")
+        if struct.unpack_from("<I", data, 4)[0] != {
+            "x86_64": 0x01000007,
+            "aarch64": 0x0100000C,
+        }[arch]:
+            raise ValueError("Mach-O architecture mismatch")
+        return
+    raise ValueError(f"unsupported release OS: {os_name}")
 
 
 def executable_member(wheel_bytes: bytes, executable: str) -> str:
@@ -85,7 +163,7 @@ def executable_member(wheel_bytes: bytes, executable: str) -> str:
 
 def _verified_catalog_assets(
     catalog: dict | None,
-) -> dict[tuple[str, str], tuple[tuple[str, str], dict]]:
+) -> dict[tuple[str, str], tuple[dict, dict, dict]]:
     if (
         not isinstance(catalog, dict)
         or catalog.get("kind") != "Catalog"
@@ -117,8 +195,7 @@ def _verified_catalog_assets(
                 and isinstance(asset.get("filename"), str)
             ):
                 verified[(release["version"], asset["filename"])] = (
-                    (platform["os"], platform["arch"]),
-                    asset,
+                    platform, item.get("variant", {}), asset
                 )
     return verified
 
@@ -144,20 +221,28 @@ def catalog_from_releases(
             if target is None:
                 continue
             os_name, arch, executable = target
-            if (os_name, arch) in seen:
+            platform_extra, variant = linux_variant(asset["name"], os_name)
+            key = (
+                os_name,
+                arch,
+                tuple(sorted(platform_extra.items())),
+                tuple(sorted(variant.items())),
+            )
+            if key in seen:
                 if direct:
-                    raise ValueError(f"duplicate direct target in {version}: {target}")
+                    raise ValueError(f"duplicate platform variant in {version}: {key}")
                 continue
-            seen.add((os_name, arch))
+            seen.add(key)
             filename = asset["name"]
             url = asset["browser_download_url"]
             api_digest = asset.get("digest")
             size = asset.get("size")
             cached = cached_assets.get((version, filename))
-            cached_platform, cached_asset = cached if cached else (None, None)
+            cached_platform, cached_variant, cached_asset = cached if cached else (None, None, None)
             media_type = "application/octet-stream" if direct else "application/zip"
             reused = (
-                cached_platform == (os_name, arch)
+                cached_platform == {"os": os_name, "arch": arch, **platform_extra}
+                and cached_variant == variant
                 and cached_asset.get("filename") == filename
                 and cached_asset.get("media_type") == media_type
                 and cached_asset.get("size_bytes") == size
@@ -177,26 +262,26 @@ def catalog_from_releases(
                 data = fetch_bytes(url)
                 digest = hashlib.sha256(data).hexdigest()
                 if api_digest != f"sha256:{digest}" or size != len(data):
-                    raise ValueError(f"published wheel digest/size mismatch: {filename}")
+                    raise ValueError(f"published asset digest/size mismatch: {filename}")
                 if direct:
-                    if not is_executable(data, executable):
-                        raise ValueError(f"published asset is not clud: {filename}")
+                    verify_direct_executable(data, os_name, arch, variant.get("flavor"))
                 else:
                     executable_member(data, executable)
                 print(f"verified release asset: {filename} ({len(data)} bytes)", flush=True)
-            platforms.append(
-                {
-                    "platform": {"os": os_name, "arch": arch},
-                    "asset": {
-                        "filename": filename,
-                        "media_type": media_type,
-                        "size_bytes": size,
-                        "sha256": digest,
-                        "urls": [url],
-                        "provides": ["clud"],
-                    },
-                }
-            )
+            entry = {
+                "platform": {"os": os_name, "arch": arch, **platform_extra},
+                "asset": {
+                    "filename": filename,
+                    "media_type": media_type,
+                    "size_bytes": size,
+                    "sha256": digest,
+                    "urls": [url],
+                    "provides": ["clud"],
+                },
+            }
+            if variant:
+                entry["variant"] = variant
+            platforms.append(entry)
         if platforms:
             entries.append(
                 {
@@ -204,14 +289,36 @@ def catalog_from_releases(
                     "published_at": release["published_at"],
                     "platforms": sorted(
                         platforms,
-                        key=lambda item: (item["platform"]["os"], item["platform"]["arch"]),
+                        key=lambda item: (
+                            item["platform"]["os"],
+                            item["platform"]["arch"],
+                            item.get("variant", {}).get("flavor", ""),
+                        ),
                     ),
                 }
             )
     entries.sort(key=lambda entry: version_key(entry["version"]), reverse=True)
-    stable = next((entry["version"] for entry in entries if "-" not in entry["version"]), None)
+    prereleases = {
+        release["tag_name"].removeprefix("v")
+        for release in releases
+        if release.get("prerelease")
+    }
+    required = {(os_name, arch) for os_name, arch, _ in TARGETS.values()}
+    stable = next(
+        (
+            entry["version"]
+            for entry in entries
+            if "-" not in entry["version"]
+            and entry["version"] not in prereleases
+            and {
+                (item["platform"]["os"], item["platform"]["arch"])
+                for item in entry["platforms"]
+            } == required
+        ),
+        None,
+    )
     if not stable:
-        raise ValueError("no installable stable release")
+        raise ValueError("no complete installable stable release")
     return {
         "$schema": SCHEMA,
         "kind": "Catalog",
