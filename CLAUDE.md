@@ -48,6 +48,7 @@ crates/                    → see crates/README.md
       command/             → see crates/clud-bin/src/command/README.md
       daemon/              → see crates/clud-bin/src/daemon/README.md
       dnd/                 → see crates/clud-bin/src/dnd/README.md
+      self_install/        → see crates/clud-bin/src/self_install/README.md
       test_runtime/        → see crates/clud-bin/src/test_runtime/README.md
       toast/               → see crates/clud-bin/src/toast/README.md
       voice/               → see crates/clud-bin/src/voice/README.md

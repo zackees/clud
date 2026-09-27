@@ -34,6 +34,8 @@ the integration tests.
   the `assets/server-settings.json` baked into the binary and refreshed from
   `main`, falling back section by section to the last valid value, plus a strict
   JSON parser. See `docs/architecture/server-settings.md`.
+- [self_install/](self_install/README.md) - native v1 Catalog parsing, host
+  variant resolution, and selected asset verification for the installer.
 - `openrouter_catalog.rs` - #1256's separate bounded catalog consumer: fixed
   GitHub origin, last-known-good daemon-state cache, baked-in fallback, and
   weighted pricing for eligible OpenRouter models. See

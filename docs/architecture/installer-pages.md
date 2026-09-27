@@ -16,6 +16,17 @@ rejects musl assets with an ELF interpreter or a needed shared library. The
 catalog retains every installable published version and puts semantic versions
 newest first; `latest-stable` is a channel pointer, not array position.
 
+The Rust reader in `crates/clud-bin/src/self_install/catalog.rs` accepts only a
+bounded v1 clud Catalog with unique JSON keys, exact known platform variants,
+matching release filenames and GitHub asset URLs, positive sizes, and SHA-256
+digests. It rejects an incomplete or prerelease `latest-stable` pointer and
+does not advertise incomplete historical releases. On Linux it selects a
+static musl asset before GNU regardless of catalog row order. GNU-only history
+requires an explicit host probe result proving a non-NixOS GNU loader and
+glibc 2.17 or newer. The selected asset's size and digest are checked before
+installation; a bad musl download is terminal rather than a reason to fall
+back to GNU.
+
 `installer/site.py` renders the exact Pages artifact paths: `index.html`,
 `install/index.html`, and `install/manifest.json`. The project root is a static
 client-side redirect to `/clud/install/index.html` with one hyperlink to the

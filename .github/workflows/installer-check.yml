@@ -96,6 +96,19 @@ jobs:
             tests/test_ci_xbuild.py \
             tests/test_release_gate.py
 
+  resolver-unit:
+    name: Native Rust catalog resolver unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-build
+        with:
+          target: x86_64-unknown-linux-gnu
+          strategy: soldr
+          profile: dev
+          soldr-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: soldr cargo test -p clud --lib self_install::catalog::tests -- --test-threads=1
+
   catalog-site:
     name: Published release to catalog and Pages
     runs-on: ubuntu-24.04
@@ -310,7 +323,7 @@ jobs:
 
   installer-acceptance:
     name: Installer acceptance aggregate
-    needs: [catalog-unit, catalog-site, native-linux-x64, native-linux-arm64, native-linux-arm64-execute, ape-core-tests, ape-host, linux-distro]
+    needs: [catalog-unit, resolver-unit, catalog-site, native-linux-x64, native-linux-arm64, native-linux-arm64-execute, ape-core-tests, ape-host, linux-distro]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -318,6 +331,7 @@ jobs:
         env:
           CATALOG: ${{ needs.catalog-site.result }}
           CATALOG_UNIT: ${{ needs.catalog-unit.result }}
+          RESOLVER_UNIT: ${{ needs.resolver-unit.result }}
           APE_CORE: ${{ needs.ape-core-tests.result }}
           APE_HOSTS: ${{ needs.ape-host.result }}
           LINUX_DISTROS: ${{ needs.linux-distro.result }}
@@ -328,6 +342,7 @@ jobs:
         run: |
           test "$CATALOG" = success
           test "$CATALOG_UNIT" = success
+          test "$RESOLVER_UNIT" = success
           test "$APE_CORE" = success
           test "$APE_HOSTS" = success
           test "$LINUX_DISTROS" = success
