@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from installer.site import published_paths
 from models.manifest import merge_manifest, should_publish, validate_manifest
 
 PAGES = "https://zackees.github.io/clud"
@@ -99,7 +100,7 @@ def stage_site(destination: Path, *, trigger: str, now: datetime) -> str:
         return "unchanged"
     # Pages deployment replaces the entire site. Preserve the already-verified
     # installer subtree byte for byte, and only then add the new model document.
-    for relative in ("index.html", "install/index.html", "install/manifest.json"):
+    for relative in published_paths():
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(fetch(f"{PAGES}/{relative}"))

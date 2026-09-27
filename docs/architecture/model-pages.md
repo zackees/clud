@@ -14,8 +14,8 @@ publication has reviewed GPT-6 Sol/Luna baseline IDs. The nightly
 workflow skips when a successful manual publication is less than 24 hours old;
 manual dispatch always checks. An unchanged selection does not redeploy. A
 failed installer-site fetch or invalid prior document also leaves Pages
-untouched. Its Pages artifact copies the three existing installer files
-byte-for-byte.
+untouched. Its Pages artifact copies the installer renderer's tested published
+file inventory byte-for-byte, including any future static assets.
 Conversely, installer publication copies the existing validated model document
 into its full-site artifact. The workflows use one deployment concurrency
 group, and a model-only change never triggers the expensive release-history
@@ -23,15 +23,20 @@ build. Both deployments smoke their own and the other public manifest.
 
 `codex_runtime.rs` fetches that document with a bounded request, parses it
 strictly, and checks each advertised ID against the installed Codex App
-Server's `model/list` result for local, visible low-effort availability. The
-last-good validated document lives in `~/.clud/cache/models/manifest.json`.
-The effective choice is immutable for a process. If the new document is not
-usable, the last-good document wins when locally usable; otherwise the
-built-in GPT-6 Sol/low fallback is visible. Explicit CLI and saved provider
+Server's paginated `model/list` result for local, visible low-effort
+availability. A row without valid low-effort metadata is ineligible without
+invalidating other rows. The raw published document is cached at
+`~/.clud/cache/models/manifest.json`; independently validated last-good Sol
+and Luna IDs live at `~/.clud/cache/models/last-good.json`. An older manifest
+cache seeds that per-family state during migration. The effective choice is
+immutable for a process. Each family independently prefers the published ID,
+then locally usable last-good, then the reviewed GPT-6 built-in fallback;
+an unavailable Luna cannot downgrade Sol. Explicit CLI and saved provider
 selections continue to outrank this default. The stable Claude discovery ID
 `clud-claude-codex-sol` maps to the current wire ID; the Claude argv remains
 synthetic while bridge requests and native Codex argv carry the real model.
-`--dry-run` includes `codex_model_source` for a dynamic Sol or Luna selection.
+`--dry-run` includes the selected family's actual `codex_model_source` for a
+dynamic Sol or Luna selection.
 
 For local verification, run `bosn run --task model-manifest-test`,
 `bosn run --task codex-all-lib-test`, and `bosn run --task act-model-pages`.

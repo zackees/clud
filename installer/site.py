@@ -8,6 +8,14 @@ from pathlib import Path
 
 from installer.catalog import write_catalog
 
+INSTALLER_SITE_FILES = ("index.html", "install/index.html", "install/manifest.json")
+STATIC_ASSETS: dict[str, bytes] = {}
+
+
+def published_paths() -> tuple[str, ...]:
+    """Every installer-owned Pages file that a model-only deploy must retain."""
+    return (*INSTALLER_SITE_FILES, *STATIC_ASSETS)
+
 ROOT = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="0;url=/clud/install/index.html">
@@ -58,6 +66,10 @@ def build_site(destination: Path, releases: list[dict], fetch_bytes) -> dict:
     (destination / "install" / "index.html").write_text(
         render_page(catalog, installer_available=installer_available), encoding="utf-8"
     )
+    for relative, body in STATIC_ASSETS.items():
+        asset = destination / relative
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_bytes(body)
     return catalog
 
 

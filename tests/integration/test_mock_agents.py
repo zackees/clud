@@ -482,10 +482,11 @@ class TestCodexBridgeForeground:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="fixture uses a POSIX executable script")
     @pytest.mark.parametrize(
-        ("available", "expected", "source"),
+        ("available", "expected", "source", "page_two"),
         [
-            (["gpt-7-sol", "gpt-7-luna"], "gpt-7-sol", "published"),
-            (["gpt-6-sol", "gpt-6-luna"], "gpt-6-sol", "built_in"),
+            (["gpt-7-sol", "gpt-7-luna"], "gpt-7-sol", "published", False),
+            (["gpt-6-sol", "gpt-6-luna"], "gpt-6-sol", "built_in", False),
+            (["gpt-7-sol", "gpt-6-luna"], "gpt-7-sol", "published", True),
         ],
     )
     def test_published_sol_or_fallback_reaches_billed_bridge_turn(
@@ -497,6 +498,7 @@ class TestCodexBridgeForeground:
         available: list[str],
         expected: str,
         source: str,
+        page_two: bool,
     ) -> None:
         """#1476: stable Claude argv, account-checked wire ID, and billed low effort."""
         document = {
@@ -521,8 +523,13 @@ class TestCodexBridgeForeground:
             "for line in sys.stdin:\n"
             "    frame = json.loads(line)\n"
             "    if frame.get('method') == 'model/list':\n"
-            f"        print(json.dumps({{'id': 1, 'result': {{'data': {rows!r}}}}}), flush=True)\n"
-            "        break\n"
+            f"        if {page_two!r} and frame.get('params', {{}}).get('cursor') != 'second':\n"
+            "            result = {'data': [], 'nextCursor': 'second'}\n"
+            "        else:\n"
+            f"            result = {{'data': {rows!r}, 'nextCursor': None}}\n"
+            "        print(json.dumps({'id': frame['id'], 'result': result}), flush=True)\n"
+            "        if result['nextCursor'] is None:\n"
+            "            break\n"
         )
         app_server.write_text(script, encoding="utf-8")
         app_server.chmod(0o755)
@@ -544,6 +551,13 @@ class TestCodexBridgeForeground:
             assert plan["model_selection"]["wire_model"] == expected
             assert plan["model_selection"]["effort"] == "low"
             assert plan["codex_model_source"] == source
+            native = _run(clud_binary, "--dry-run", "--codex", "-p", "hello", env=env)
+            assert native.returncode == 0, native.stderr
+            native_plan = json.loads(native.stdout)
+            assert native_plan["model_selection"]["wire_model"] == expected
+            assert native_plan["codex_model_source"] == source
+            assert native_plan["command"].count(expected) == 1
+            assert 'model_reasoning_effort="low"' in native_plan["command"]
             model_index = plan["command"].index("--model")
             assert plan["command"][model_index + 1] == "clud-claude-codex-sol"
 
