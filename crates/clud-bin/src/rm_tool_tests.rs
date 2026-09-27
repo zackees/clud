@@ -274,10 +274,13 @@ fn trash_by_default_keeps_paths_relative_to_their_root_with_a_manifest() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(entry.join(TRASH_MANIFEST)).unwrap()).unwrap();
     assert_eq!(manifest["command"], "safe-rm");
-    assert_eq!(
-        manifest["items"][0]["origin"],
-        w.root.join("build").display().to_string()
-    );
+    let expected_origin = w.root.join("build").display().to_string();
+    #[cfg(windows)]
+    let expected_origin = expected_origin
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&expected_origin)
+        .to_string();
+    assert_eq!(manifest["items"][0]["origin"], expected_origin);
     // safe-rm on a file, into a second entry.
     let (code, _, _) = w.run(Kind::File, &["notes.txt"]);
     assert_eq!(code, 0);

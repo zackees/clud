@@ -20,10 +20,9 @@ runs:
 
     - uses: astral-sh/setup-uv@v5
       with:
-        # On by default here (unlike build jobs): when the .venv cache misses,
-        # uv's own wheel cache still avoids re-downloading from PyPI over the
-        # slower macOS/Windows runner network.
-        enable-cache: true
+        # The separate .venv cache below covers warm exec jobs. uv's wheel
+        # cache post-job prune fails on Windows even after all tests pass.
+        enable-cache: false
 
     - name: Cache venv
       uses: actions/cache@v4
