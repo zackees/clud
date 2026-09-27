@@ -68,11 +68,52 @@ fn codex_config_values(p: &LaunchPlan) -> Vec<&str> {
         .collect()
 }
 
+/// Preserve the historical argv assertions while checking that the deletion
+/// policy is present exactly once and precedes any positional prompt.
+fn command_without_deletion_policy(p: &LaunchPlan) -> Vec<String> {
+    let mut command = p.command.clone();
+    if command[0] == "claude" {
+        let index = command
+            .iter()
+            .position(|arg| arg == "--append-system-prompt")
+            .unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(
+            command[index + 1],
+            crate::deletion_rules::generated().instructions
+        );
+        command.drain(index..index + 2);
+    } else if command[0] == "codex" {
+        for prefix in [
+            "hooks.PreToolUse=",
+            "hooks.state=",
+            "developer_instructions=",
+        ] {
+            let indexes: Vec<_> = command
+                .iter()
+                .enumerate()
+                .filter_map(|(i, arg)| arg.starts_with(prefix).then_some(i))
+                .collect();
+            assert_eq!(indexes.len(), 1, "missing or duplicate {prefix}");
+            let index = indexes[0];
+            assert_eq!(command[index - 1], "-c");
+            if let Some(exec_index) = command
+                .iter()
+                .position(|arg| arg == "exec" || arg == "resume")
+            {
+                assert!(index > exec_index, "hook config must follow subcommand");
+            }
+            command.drain(index - 1..index + 1);
+        }
+    }
+    command
+}
+
 #[test]
 fn test_prompt_with_yolo() {
     let p = plan(&["clud", "-p", "hello"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         vec!["claude", "--dangerously-skip-permissions", "-p", "hello"]
     );
     assert_eq!(p.iterations, 1);
@@ -742,7 +783,7 @@ fn test_plan_mode_suppression_notice_is_green_and_tty_only() {
 fn test_unattended_disallows_interactive_tools() {
     let p = plan(&["clud", "--unattended", "-p", "hello"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         vec![
             "claude",
             "--dangerously-skip-permissions",
@@ -837,7 +878,10 @@ fn test_bare_coauthor_does_not_eat_the_next_argument() {
 #[test]
 fn test_safe_mode_no_yolo() {
     let p = plan(&["clud", "--safe", "-p", "hello"]);
-    assert_eq!(p.command, vec!["claude", "-p", "hello"]);
+    assert_eq!(
+        command_without_deletion_policy(&p),
+        vec!["claude", "-p", "hello"]
+    );
 }
 
 #[test]
@@ -845,8 +889,12 @@ fn test_codex_prompt_goes_through_exec_subcommand() {
     // Codex's `-p` is `--profile`, not a prompt flag. Non-interactive
     // runs must use `codex exec <prompt>` with the prompt as positional.
     let p = plan(&["clud", "--codex", "-p", "hello"]);
+    assert!(!p
+        .command
+        .iter()
+        .any(|arg| arg == "--dangerously-bypass-hook-trust"));
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         [
             codex_prefix(),
             vec![
@@ -875,7 +923,7 @@ fn console_launch_mode() -> LaunchMode {
 fn test_codex_interactive_follows_console_rule() {
     let p = plan(&["clud", "--codex"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         [
             codex_prefix(),
             vec!["--dangerously-bypass-approvals-and-sandbox".to_string()],
@@ -939,7 +987,7 @@ fn test_codex_continue_uses_resume_last() {
     // `-c` on codex maps to `codex resume --last`, not `--continue`.
     let p = plan(&["clud", "--codex", "-c"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         [
             codex_prefix(),
             vec![
@@ -957,7 +1005,7 @@ fn test_codex_continue_uses_resume_last() {
 fn test_codex_resume_with_session_id() {
     let p = plan(&["clud", "--codex", "-r", "sess-123"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         [
             codex_prefix(),
             vec![
@@ -975,7 +1023,7 @@ fn test_codex_model_uses_short_m() {
     // Codex's model flag is `-m/--model`; Claude's is `--model`.
     let p = plan(&["clud", "--codex", "--model", "gpt-5"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         [
             codex_prefix(),
             vec![
@@ -1155,7 +1203,7 @@ fn unresolved_do_target_has_a_safe_interactive_plan_fallback() {
 fn test_model_flag() {
     let p = plan(&["clud", "--model", "opus", "-p", "hello"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         vec![
             "claude",
             "--dangerously-skip-permissions",
@@ -1171,7 +1219,7 @@ fn test_model_flag() {
 fn test_continue_session() {
     let p = plan(&["clud", "-c"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         vec!["claude", "--dangerously-skip-permissions", "--continue"]
     );
 }
@@ -1180,7 +1228,7 @@ fn test_continue_session() {
 fn test_message_flag() {
     let p = plan(&["clud", "-m", "fix bug"]);
     assert_eq!(
-        p.command,
+        command_without_deletion_policy(&p),
         vec!["claude", "--dangerously-skip-permissions", "-m", "fix bug"]
     );
 }

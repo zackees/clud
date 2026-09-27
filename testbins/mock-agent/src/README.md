@@ -13,6 +13,8 @@ before exiting with the test-requested code.
 - `serve.rs` — `mock-agent serve`: the scripted Anthropic Messages backend for
   the real-harness tier (see "Server mode" below and
   [testing-tiers.md](../../../docs/architecture/testing-tiers.md)).
+- `codex_app_server.rs` — `mock-agent app-server`: answers Codex startup
+  `initialize` and `model/list` requests promptly with an empty account list.
 - `main.rs` — Entire mock-agent implementation: arg filtering, stdin capture
   (timed + pipe modes, raw-mode on Unix TTYs), iteration counter for
   `clud loop` marker tests, helper-process tree spawning, terminal-size

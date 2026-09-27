@@ -53,11 +53,11 @@ pub const STDERR_NO_SESSION: &str = "clud python shim invoked outside a clud ses
 
 fn main() {
     let argv: Vec<_> = env::args_os().collect();
-    // `rm-file` / `rm-dir` (#1340): clud-controlled deletion for agents.
-    if let Some(kind) = argv
+    // `safe-rm` (#1461): clud-controlled deletion for agents.
+    if argv
         .first()
         .and_then(|a| std::path::Path::new(a).file_name())
-        .and_then(|name| clud::rm_tool::Kind::from_program_name(&name.to_string_lossy()))
+        .is_some_and(|name| clud::rm_tool::is_program_name(&name.to_string_lossy()))
     {
         let args: Option<Vec<String>> = argv
             .into_iter()
@@ -65,10 +65,10 @@ fn main() {
             .map(|a| a.into_string().ok())
             .collect();
         let Some(args) = args else {
-            eprintln!("{}: non-UTF8 arguments are not supported", kind.command());
+            eprintln!("safe-rm: non-UTF8 arguments are not supported");
             exit(2);
         };
-        exit(clud::rm_tool::run(kind, &args));
+        exit(clud::rm_tool::run(&args));
     }
     let is_rm = argv
         .first()
@@ -261,12 +261,29 @@ fn exec_real(path: &str, args: &[String]) -> io::Result<i32> {
 
 fn run_rm(args: &[String]) -> i32 {
     match clud::rm_guard::prepare(args) {
-        Ok(clud::rm_guard::Plan::Gated(approved, action)) => finish_rm(approved, action),
-        Ok(clud::rm_guard::Plan::InRoots(plan, dry_run)) => finish_in_roots(plan, dry_run),
-        Err(reason) => clud::rm_guard::deny(&reason),
+        Ok(plan) => {
+            let code = execute_handoff(&plan);
+            clud::rm_guard::audit(args, Some(&plan), code, None);
+            code
+        }
+        Err(reason) => {
+            let code = clud::rm_guard::deny(&reason);
+            clud::rm_guard::audit(args, None, code, Some(&reason));
+            code
+        }
     }
 }
 
+fn execute_handoff(plan: &clud::rm_guard::Plan) -> i32 {
+    let mut command = vec![plan.program.to_string_lossy().into_owned()];
+    command.extend(plan.argv.iter().cloned());
+    match clud::subprocess::ManagedSubprocess::start_inheriting_env(command, None, false, None) {
+        Ok(child) => child.wait(None).unwrap_or(2),
+        Err(error) => clud::rm_guard::deny(&format!("system handoff failed: {error}")),
+    }
+}
+
+#[cfg(any())]
 fn finish_in_roots(plan: clud::rm_guard::InRoots, dry_run: bool) -> i32 {
     #[cfg(not(test))]
     if !dry_run {
@@ -279,7 +296,7 @@ fn finish_in_roots(plan: clud::rm_guard::InRoots, dry_run: bool) -> i32 {
 /// Delete in process, as `rm` would: `-r` for directories, `-f` to ignore
 /// missing operands, `-v` to report. Every operand already passed the
 /// in-roots gate. One audit record per call, with role `child`.
-#[cfg(not(test))]
+#[cfg(any())]
 fn in_roots_execute(plan: clud::rm_guard::InRoots) -> i32 {
     let mut failed = false;
     let mut paths = Vec::new();
@@ -349,6 +366,7 @@ fn in_roots_execute(plan: clud::rm_guard::InRoots) -> i32 {
     code
 }
 
+#[cfg(any())]
 fn finish_rm(approved: clud::rm_guard::Approved, action: clud::rm_guard::Action) -> i32 {
     #[cfg(not(test))]
     if action == clud::rm_guard::Action::Execute {
@@ -357,7 +375,7 @@ fn finish_rm(approved: clud::rm_guard::Approved, action: clud::rm_guard::Action)
     clud::rm_guard::report_dry_run(approved, action)
 }
 
-#[cfg(test)]
+#[cfg(any())]
 #[test]
 fn rm_binary_unit_build_cannot_execute_even_with_both_gate_facts() {
     let temp = tempfile::tempdir().unwrap();
@@ -378,7 +396,7 @@ fn rm_binary_unit_build_cannot_execute_even_with_both_gate_facts() {
 
 /// The only removal implementation. Absent from unit-test builds, with no
 /// callback seam that could smuggle a removal into a unit test.
-#[cfg(not(test))]
+#[cfg(any())]
 fn real_execute(approved: clud::rm_guard::Approved) -> i32 {
     #[cfg(target_os = "linux")]
     {

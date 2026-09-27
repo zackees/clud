@@ -21,6 +21,32 @@ fn arms_nounset_by_default() {
     assert!(!overrides.iter().any(|(key, _)| key == PREV_KEY));
 }
 
+#[cfg(unix)]
+#[test]
+fn generated_startup_file_restores_deletion_shim_after_shell_path_reset() {
+    let tmp = tempdir().unwrap();
+    let shims = tmp.path().join("shims");
+    std::fs::create_dir(&shims).unwrap();
+    let mut env = stock_env();
+    env.extend(env_overrides_at(tmp.path(), false, None));
+    env.push((
+        crate::shim_session::RM_SHIM_DIR_KEY.to_string(),
+        shims.display().to_string(),
+    ));
+    let (code, output) = bash_under(env, "PATH=/usr/bin; printf '%s' \"$PATH\"");
+    assert_eq!(code, 0, "{output}");
+    assert!(output.starts_with("/usr/bin"), "{output}");
+    let mut env = stock_env();
+    env.extend(env_overrides_at(tmp.path(), false, None));
+    env.push((
+        crate::shim_session::RM_SHIM_DIR_KEY.to_string(),
+        shims.display().to_string(),
+    ));
+    let (code, output) = bash_under(env, "printf '%s' \"$PATH\"");
+    assert_eq!(code, 0, "{output}");
+    assert!(output.starts_with(&shims.display().to_string()), "{output}");
+}
+
 #[test]
 fn identifies_only_a_clud_generated_nounset_script() {
     let tmp = tempdir().unwrap();
@@ -51,6 +77,24 @@ fn opting_out_leaves_the_shell_alone() {
     );
     // And it must not have written a file the shell could still find.
     assert!(!tmp.path().join(FILE_NAME).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn rm_path_only_startup_keeps_nounset_off_after_login_path_reset() {
+    let tmp = tempdir().unwrap();
+    let shims = tmp.path().join("shims");
+    std::fs::create_dir(&shims).unwrap();
+    let mut env = stock_env();
+    env.extend(rm_path_overrides_at(tmp.path(), None));
+    env.push((
+        crate::shim_session::RM_SHIM_DIR_KEY.to_string(),
+        shims.display().to_string(),
+    ));
+    let (code, output) = bash_under(env, "printf '%s|%s' \"$PATH\" \"$UNSET_FOR_TEST\"");
+    assert_eq!(code, 0, "{output}");
+    assert!(output.starts_with(&shims.display().to_string()), "{output}");
+    assert!(output.ends_with('|'), "{output}");
 }
 
 #[test]

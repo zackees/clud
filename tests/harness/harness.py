@@ -7,8 +7,8 @@ installed Claude Code against ``mock-agent serve``:
   by ``clud install-assets`` so the test runs the skills, agents and workflow
   users get.
 * **repo** — a git checkout on ``main`` with a local bare ``origin``.
-* **bin** — first on PATH: a fake ``gh`` (``fake_gh.py``) and ``rm``,
-  ``rm-file`` and ``rm-dir``, copies of the built ``clud-shim`` as a clud
+* **bin** — first on PATH: a fake ``gh`` (``fake_gh.py``), ``rm``, and
+  ``safe-rm``, copies of the built ``clud-shim`` as a clud
   session installs them (``clud-cmd-scan``'s rm-identity check requires the
   first ``rm`` on PATH to be byte-identical to it). ``CLUD_RM_ROOTS`` is the
   repo and ``home/.clud/tmp``, as clud sets it for a session (#1340).
@@ -77,6 +77,7 @@ class RunResult:
     stdout: str
     requests: list[dict[str, Any]]
     hooks: list[dict[str, Any]]
+    stderr: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
     # One record per AskUserQuestion question the harness answered:
     # ``{"t": ms, "agent_type", "question", "header", "answer"}``.
@@ -177,7 +178,7 @@ class Harness:
         )
         gh.chmod(0o755)
         shim = self.clud.parent / f"clud-shim{EXE}"
-        for name in ("rm", "rm-file", "rm-dir"):
+        for name in ("rm", "safe-rm"):
             shutil.copyfile(shim, self.bin / f"{name}{EXE}")
             (self.bin / f"{name}{EXE}").chmod(0o755)
 
@@ -450,6 +451,7 @@ class Harness:
         return RunResult(
             returncode=result.returncode,
             stdout=result.stdout or "",
+            stderr=result.stderr or "",
             requests=_jsonl(self.logs / "requests.jsonl"),
             hooks=_jsonl(self.logs / "hooks.jsonl"),
             questions=_jsonl(self.logs / "questions.jsonl"),

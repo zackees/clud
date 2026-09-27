@@ -29,17 +29,11 @@ pub const SHIMS_SUBDIR: &str = ".clud/state/shims";
 pub fn alias_names() -> Vec<&'static str> {
     #[cfg(windows)]
     {
-        vec![
-            "python.exe",
-            "python3.exe",
-            "rm.exe",
-            "rm-file.exe",
-            "rm-dir.exe",
-        ]
+        vec!["python.exe", "python3.exe", "rm.exe", "safe-rm.exe"]
     }
     #[cfg(not(windows))]
     {
-        vec!["python", "python3", "rm", "rm-file", "rm-dir"]
+        vec!["python", "python3", "rm", "safe-rm"]
     }
 }
 
@@ -234,14 +228,33 @@ pub fn packaged_shim() -> std::io::Result<PathBuf> {
 }
 
 /// The deletion aliases session activation installs: the child `rm` shim
-/// and the agent-facing `rm-file` / `rm-dir` (#1340). All are byte copies of
+/// and the agent-facing `safe-rm` (#1461). All are byte copies of
 /// `clud-shim`, which dispatches on argv\[0\].
-pub fn rm_alias_names() -> [&'static str; 3] {
+pub fn rm_alias_names() -> Vec<String> {
+    let mut names = vec!["rm".to_string()];
+    names.extend(
+        crate::deletion_rules::generated()
+            .safe_aliases
+            .into_iter()
+            .map(str::to_string),
+    );
     if cfg!(windows) {
-        ["rm.exe", "rm-file.exe", "rm-dir.exe"]
-    } else {
-        ["rm", "rm-file", "rm-dir"]
+        names.iter_mut().for_each(|name| name.push_str(".exe"));
     }
+    names
+}
+
+fn purge_stale_aliases(dir: &Path, expected: &[String]) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !expected
+            .iter()
+            .any(|name| entry.file_name() == std::ffi::OsStr::new(name))
+        {
+            crate::rm_tool::remove_link_or_file(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Session activation installs only the deletion aliases, keeping unfinished
@@ -254,7 +267,9 @@ pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
     }
     let dir = home.join(".clud/state/rm-shim");
     std::fs::create_dir_all(&dir)?;
-    for name in rm_alias_names() {
+    let expected = rm_alias_names();
+    purge_stale_aliases(&dir, &expected)?;
+    for name in expected {
         let target = dir.join(name);
         // Replace the directory entry, never write through a replaced symlink.
         // NamedTempFile persists atomically and supports concurrent installers.
@@ -302,7 +317,7 @@ mod tests {
         let (_source_dir, source) = make_source(b"trusted");
         let dir = install_rm_at(home.path(), &source).unwrap();
         for name in rm_alias_names() {
-            let target = dir.join(name);
+            let target = dir.join(&name);
             fs::write(&target, b"replacement").unwrap();
             install_rm_at(home.path(), &source).unwrap();
             assert_eq!(fs::read(&target).unwrap(), b"trusted", "{name}");

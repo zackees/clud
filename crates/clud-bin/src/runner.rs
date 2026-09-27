@@ -152,6 +152,7 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
     keys.push(crate::shell::nounset::PREV_KEY);
     keys.push(crate::shell::cmd_gate::GATE_KEY);
     keys.push(crate::rm_tool::ROOTS_ENV);
+    keys.push(crate::shim_session::RM_SHIM_DIR_KEY);
     keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
     keys
 }
@@ -178,10 +179,10 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
 ///   empty. `push_or_replace` is what chains rather than duplicates: the
 ///   module has already stashed any inherited BASH_ENV under
 ///   CLUD_PREV_BASH_ENV, and the generated file sources it.
-/// - Issue #1340: `CLUD_RM_ROOTS`, where `rm-file` / `rm-dir` and the child
-///   `rm` shim may delete: the launch directory's git checkout and clud's
+/// - Issue #1461: `CLUD_RM_ROOTS`, where `safe-rm` may delete: the launch
+///   directory's git checkout and clud's
 ///   session temp dir. See rm_tool::session_roots_value.
-/// - Finally, activates the `rm` shim session (`rm`, `rm-file`, `rm-dir`).
+/// - Finally, activates the `rm` shim session (`rm`, `safe-rm`).
 ///
 /// This is now the ONE builder: [`child_env`] calls it with
 /// `std::env::vars()`, and `daemon::io_helpers::child_env_from` calls it
@@ -309,6 +310,19 @@ fn apply_child_env_policy_with_nounset_opt_out(
     }
 
     crate::shim_session::activate_rm(&mut env);
+    if nounset_opted_out
+        && env
+            .iter()
+            .any(|(key, _)| key == crate::shim_session::RM_SHIM_DIR_KEY)
+    {
+        let inherited = env
+            .iter()
+            .find(|(key, _)| key == crate::shell::nounset::BASH_ENV_KEY)
+            .map(|(_, value)| value.clone());
+        for (key, value) in crate::shell::nounset::rm_path_overrides(inherited) {
+            push_or_replace(&mut env, &key, &value);
+        }
+    }
     env
 }
 

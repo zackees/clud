@@ -1,110 +1,45 @@
-# rm protection
+# The child `rm` catastrophe floor
 
-Issue #1183 adds two complementary checks: the PreToolUse hook verifies the
-session's effective PATH, and the argv[0] `rm` shim checks actual operands after
-shell expansion. The source interpreter remains responsible for provenance,
-redirection, indirect deletion and malformed payloads.
+The session puts a `clud-shim` copy named `rm` first on the child's PATH. This
+shim is for commands run *by scripts*, including build tools and installers. It
+does not impose the agent's deletion policy: ordinary non-catastrophic operands
+are handed to the next `rm` on PATH even outside `CLUD_RM_ROOTS`. Agent-authored
+deletion is governed by the command-scan hook and `safe-rm`; see
+[rm-tools.md](rm-tools.md).
 
-Since #1340, an agent's own `rm` never reaches these layers: the hook
-redirects it to `rm-file` / `rm-dir`, and the child shim allows a script's
-`rm` inside the session's roots. Both are described in
-[rm-tools.md](rm-tools.md); this page covers what they share with the shim.
+The shim validates every operand before handing off any of them. It refuses
+filesystem roots, their immediate children, the session HOME and its ancestors,
+a whole-home glob, mount points, and a request to disable root preservation.
+It resolves symlinked parents and trailing-slash operands before checking.
+Mixed calls fail as a whole. Refusals exit 2 with a JSON decision and never
+invoke the next `rm`. A missing target with `-f` is not a refusal; the real
+`rm` decides its ordinary exit status and output.
 
-## Session installation and identity
+Handoff is to the first `rm` after the shim directory on PATH, without shell
+execution or recursion. GNU receives `--preserve-root=all` and
+`--one-file-system` once; BSD receives `-x`; BusyBox uses the shim's own mount
+checks. The shim propagates the real command's stdout, stderr, and exit status.
+It appends one child-role audit record per call under
+`~/.clud/state/logs/rm/`. No CI variable or Docker evidence is required.
 
-Foreground `runner::child_env` and daemon `io_helpers::child_env_from` activate
-the shim after assembling the child environment, including the client's PATH.
-`shim_install::packaged_shim` locates `clud-shim` beside the running executable;
-no environment variable chooses the trusted source. `install_rm_at` installs
-only the deletion aliases, `rm`, `rm-file` and `rm-dir` (`.exe` on Windows),
-in `~/.clud/state/rm-shim/`. This separate
-directory avoids activating the unfinished Python relays in the older alias
-installer. Every activation compares actual bytes and repairs replacements.
-PATH prepending moves a later entry to the front and removes duplicates.
+The mount check compares device IDs and, on Linux, exact mount paths in
+`/proc/self/mountinfo`. The latter catches same-device bind mounts. The
+`--one-file-system` handoff also protects mounted descendants during recursive
+removal. The shim checks for mounted descendants before handoff as well, so
+same-device bind mounts and BusyBox's lack of GNU guard flags cannot bypass
+the floor. A BusyBox applet symlink is invoked by its symlink name (`rm`),
+not by the resolved multicall executable path. The safety guarantee is a
+catastrophe floor, not a sandbox against a hostile same-user process or a
+replacement of the next PATH executable.
 
-Both hook binaries use `block_bad_cmd_rm_identity`. Before allowing shell
-commands they call the Rust `shim_resolve::which(name, path_env)` helper and
-compare the selected executable's bytes with the packaged sibling. Missing,
-unreadable, empty or replaced binaries deny with exit 2 and JSON. Relative or
-empty PATH entries deny because their meaning depends on shell cwd. The packaged `tap` wrapper is transparent only after its own bytes match the
-packaged sibling; its argv forwarding preserves the environment. Commands
-that visibly bypass or change resolution also deny; command text is never
-executed to investigate resolution. A backtick or `$(…)` the scanner cannot
-prove inert denies only when the command also runs rm or a nested shell
-(#1305): prose in an issue title or a grep pattern cannot change which rm
-runs.
+Foreground and daemon launch paths install and repair the shim, place it first
+on PATH, and expose the same `safe-rm` alias. The hook checks that this PATH
+entry resolves to the packaged shim and refuses agent attempts to change PATH
+or deletion-policy environment variables. Shell-local aliases, functions, and
+hash tables remain outside that byte-identity check.
 
-This is the owner's PATH identity contract. It does not authenticate shell-local
-hash tables, preexisting functions or aliases, nor prevent a hostile same-user
-process replacing files after verification. Those require an execution-boundary
-sandbox and are outside the enforceable guarantee of this PATH stub.
-
-## Actual operands and execution
-
-`rm_guard::decide` parses `--`, clustered `r/R/f/v` options and the supported
-long equivalents, `--preserve-root` and `--one-file-system`. Unsupported options
-and missing operands fail closed. It validates every operand before any removal.
-The normalized deletion-base policy is shared with source analysis; existing
-ancestors are canonicalized for nonexistent operands. Resolution errors,
-protected roots, home roots and mount boundaries deny. Final symlink operands
-are refused rather than changing unlink semantics into referent deletion. Execution is supported
-only on Linux; other platforms fail closed.
-
-`CLUD_RM_DRY_RUN=1` reports the decision without spawning. The real executor is
-under `#[cfg(not(test))]`; unit-test execution can only report dry-run verdicts,
-including when injected gate facts would otherwise authorize execution. No unit
-test callback can invoke a removal implementation.
-
-Real execution has two ways through:
-
-- **Inside the session's roots** (#1340): `CLUD_RM_ROOTS` is set and every
-  operand passes `rm_guard::decide_in_roots`, which applies
-  `rm_tool::resolve`'s checks (roots, `$HOME`, root-itself, symlinked
-  parents, mounts). The shim deletes in process on every platform and audits
-  the call with role `child`. See [rm-tools.md](rm-tools.md#scripts-the-child-rm-shim).
-- **CI in Docker**: a set environment-variable name containing uppercase `CI`
-  (its value is irrelevant) and Docker evidence from the running filesystem.
-  There is no enabling Docker override. Approved requests delegate
-  normalized, validated arguments to absolute `/bin/rm` through
-  running-process, with `--preserve-root=all` and `--one-file-system`; no PATH
-  lookup or shell is used.
-
-Removal that fits neither is denied.
-
-## Trusted Codex standalone updates
-
-On Linux, `clud codex-update` is the explicit update route. The same route is
-used when CLUD bootstraps a missing Codex backend. CLUD fetches the installer
-from the fixed OpenAI release URL, rejects redirects, caps its size, and checks
-the reviewed SHA-256 before running it. Its child environment contains only a
-canonical HOME, noninteractive mode, and a system-tool PATH (including the
-root-owned NixOS system profile when present). It retains the user's shell name
-and, only if already present on the original PATH, the HOME-based `~/.local/bin` entry after system
-tools. No other session PATH entry, installer-location override, or
-deletion-gate variable is inherited.
-
-This is a scoped installer operation, not an exception in `rm_guard`: callers
-cannot supply shell text, a script path, or deletion operands to the command.
-The usual shell pipeline to an installer still inherits the session shim and
-still fails closed. When OpenAI changes the installer body, CLUD refuses the
-new digest until the script is reviewed and the pin is updated. Neither the
-foreground nor daemon child environment changes its ordinary removal policy.
-
-## Retirement rationale
-
-No source protection is retired. The only code moved out of the interpreter is
-`unsafe_delete_base_reason` and its component-count helper, now owned by
-`deletion_policy.rs` and called from both layers. This removes the need to
-maintain a second copy of the policy without changing its corpus verdicts.
-Variable provenance disappears during expansion; an executable cannot replace
-the interpreter's proof of nonempty literal bases. Other programs and shell
-redirections do not enter the rm shim. The PreToolUse identity backstop remains
-mandatory even when source analysis finds a command benign.
-
-## Verification
-
-Rust tests cover PATH lookup/order, byte repair, PATH movement, argument parsing,
-canonical ancestors and the complete gate truth table. Python process tests use
-only dry-run for local rm invocations. See
-[the Docker harness](../../ci/docker/rm_protection/README.md) for inert JSON corpus
-checks and the separate disposable-file execution checks.
+Tests include Rust guard and handoff tests, process tests using a recording
+next-PATH stub for all refusal cases, and a bosn real bind mount on disposable
+tmpfs. The latter verifies that deleting a mount operand or its parent cannot
+remove the read-only mounted checkout content. All real deletion tests are
+confined to temporary paths or disposable containers.

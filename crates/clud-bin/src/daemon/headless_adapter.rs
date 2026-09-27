@@ -94,6 +94,30 @@ mod tests {
         }
     }
 
+    fn command_without_deletion_policy(plan: &LaunchPlan) -> Vec<String> {
+        let mut command = plan.command.clone();
+        if command[0] == "claude" {
+            assert_eq!(command[1], "--append-system-prompt");
+            assert_eq!(command[2], crate::deletion_rules::generated().instructions);
+            command.drain(1..3);
+        } else {
+            for prefix in [
+                "hooks.PreToolUse=",
+                "hooks.state=",
+                "developer_instructions=",
+            ] {
+                let index = command
+                    .iter()
+                    .position(|arg| arg.starts_with(prefix))
+                    .unwrap();
+                assert_eq!(command[index - 1], "-c");
+                assert!(index > command.iter().position(|arg| arg == "exec").unwrap());
+                command.drain(index - 1..index + 1);
+            }
+        }
+        command
+    }
+
     #[test]
     fn claude_initial_and_resume_use_stream_json_identity_argv() {
         let initial = build_turn_plan(
@@ -106,7 +130,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            initial.command,
+            command_without_deletion_policy(&initial),
             [
                 "claude",
                 "--model",
@@ -150,7 +174,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            initial.command,
+            command_without_deletion_policy(&initial),
             ["codex", "exec", "--json", "-m", "gpt-test", "hello"]
         );
         let resumed = build_turn_plan(
@@ -174,7 +198,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resumed.command,
+            command_without_deletion_policy(&resumed),
             ["codex", "exec", "resume", "--json", "thread-123", "hello"]
         );
     }

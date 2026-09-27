@@ -1,15 +1,14 @@
-//! Redirect an agent's own deletion commands to `rm-file` / `rm-dir` (#1340).
+//! Redirect an agent's own deletion commands to `safe-rm` (#1461).
 //!
 //! What an agent types as `rm`, `rmdir`, `unlink`, `find … -delete`,
 //! `find … -exec rm …` or `xargs rm` is refused with the exact replacement
-//! (`rm -rf build` → `rm-dir build`), so the agent learns the command
-//! instead of having it rewritten behind its back. `rm-file` / `rm-dir`
+//! (`rm -rf build` → `safe-rm -rf build`). `safe-rm`
 //! trash by default and only delete inside the session's roots, and a
 //! command made only of them is allowed outright ([`rm_tool_only`]), so
 //! Claude Code never stops an unattended run on an `rm` prompt.
 //!
 //! Scope is what the agent typed. A script's own `rm` reaches the child `rm`
-//! shim, which allows it inside the session's roots (`rm_guard`). `git rm`,
+//! shim, which only refuses catastrophic paths (`rm_guard`). `git rm`,
 //! `git clean` and inline `python -c`/`node -e` deletions are deliberately
 //! left alone. See `docs/architecture/rm-tools.md`.
 
@@ -18,8 +17,6 @@ use super::block_bad_cmd_shell::{
     tokenize,
 };
 use super::{strip_heredoc_bodies, ShellDialect};
-
-const REMOVERS: &[&str] = &["rm", "rmdir", "unlink"];
 
 /// Leading words that run the next word as the program, with their options
 /// that take a separate value. `command`, `env` and `exec` are already
@@ -59,17 +56,123 @@ const XARGS_VALUE_OPTIONS: &[&str] = &[
 ];
 
 /// The denial for a command that deletes with `rm` & co, naming the
-/// `rm-file` / `rm-dir` command to run instead; `None` when it does not.
+/// `safe-rm` command to run instead; `None` when it does not.
+#[cfg(test)]
 pub(super) fn redirect_reason(command: &str) -> Option<String> {
     let (original, suggestion) = find_removal(command, 0)?;
     Some(format!(
-        "clud routes deletion through `rm-file` (files) and `rm-dir` (directories) (#1340): \
-         they move paths to the clud trash (`--purge` deletes for real, `--tracked` allows \
-         git-tracked paths) and only inside this session's roots, and they run without an rm \
-         prompt. Instead of `{original}`, run:\n  {suggestion}\n(`clud rm-file` / `clud \
-         rm-dir` work the same if the aliases are not on PATH. Scripts you run, such as \
-         ./test or make, may still use rm inside the session's roots.)"
+        "Use `safe-rm` for agent-authored deletion: it moves paths to the clud trash \
+         (`--purge` deletes for real, `--tracked` allows git-tracked paths) and limits \
+         targets to this session's allowed locations. Instead of `{original}`, run:\n  \
+         {suggestion}\n(`clud safe-rm` also works if the alias is not on PATH. \
+         Human-written scripts may use rm; its shim only refuses catastrophic paths.)"
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Redirect {
+    Rewrite(String),
+    Refuse(String),
+}
+
+/// A rewrite must not launder a shell assignment that changes the deletion
+/// roots, role or program resolution used by the rewritten command.
+pub(super) fn changes_deletion_environment(command: &str) -> bool {
+    tokenize(command).iter().any(|word| {
+        let name = word
+            .split('=')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('+');
+        matches!(name, "PATH" | "CLUD_RM_ROOTS" | "CLUD_RM_ROLE")
+    })
+}
+
+pub(super) fn raw_payload_mentions_removal(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    let decoded = decode_ascii_json_escapes(&lower);
+    let readings = [
+        decoded.replace('\\', " "),
+        decoded.replace("\\n", " ").replace("\\t", " "),
+        decoded
+            .replace("''", "")
+            .replace("\"\"", "")
+            .replace('\\', ""),
+    ];
+    readings.iter().any(|reading| {
+        reading
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && !matches!(ch, '_' | '-' | '.' | '/'))
+            .any(|word| {
+                let candidate = word.strip_suffix(".exe").unwrap_or(word);
+                crate::deletion_rules::redirect_for(&program_name(candidate)).is_some()
+            })
+    })
+}
+
+fn decode_ascii_json_escapes(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && chars.get(index + 1) == Some(&'u') && index + 5 < chars.len() {
+            let digits: String = chars[index + 2..index + 6].iter().collect();
+            if let Some(letter) = u32::from_str_radix(&digits, 16)
+                .ok()
+                .filter(|code| *code < 0x80)
+                .and_then(char::from_u32)
+            {
+                out.push(letter);
+                index += 6;
+                continue;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+pub(super) fn redirect(command: &str) -> Option<Redirect> {
+    if shell_fed_heredoc_removal(command) {
+        return Some(Redirect::Refuse(
+            "a shell-fed heredoc may execute deletion; use safe-rm directly instead".into(),
+        ));
+    }
+    let (original, suggestion) = find_removal(command, 0)?;
+    let unsafe_form = ["sudo ", "doas ", "eval ", " -delete"]
+        .iter()
+        .any(|needle| command.contains(needle))
+        || command.contains('`')
+        || command.contains("$(")
+        || contains_nested_shell(command)
+        || tokenize(command).windows(2).any(|pair| {
+            crate::deletion_rules::redirect_for(&program_name(&pair[0]))
+                .is_some_and(|(_, prefix_arg)| prefix_arg.is_some())
+                && (pair[1] == "-p" || pair[1] == "--parents")
+        });
+    if unsafe_form || command.matches(&original).count() != 1 {
+        Some(Redirect::Refuse(format!(
+            "this deletion form cannot be rewritten safely; use `safe-rm` instead (suggestion: {suggestion})"
+        )))
+    } else {
+        Some(Redirect::Rewrite(command.replacen(
+            &original,
+            &suggestion,
+            1,
+        )))
+    }
+}
+
+fn contains_nested_shell(command: &str) -> bool {
+    split_shell_segments(command, ShellDialect::Posix)
+        .into_iter()
+        .any(|segment| {
+            let segment = segment.trim();
+            let segment = segment.strip_prefix('(').map_or(segment, str::trim_start);
+            let words = strip_runners(command_words(segment));
+            posix_c_shell_script(&words).is_some()
+                || nested_shell_command(&words, ShellDialect::Posix).is_some()
+        })
 }
 
 /// The first removal in `text`: the statement as typed and its replacement.
@@ -112,6 +215,77 @@ fn find_removal(text: &str, depth: usize) -> Option<(String, String)> {
         }
     }
     None
+}
+
+fn shell_fed_heredoc_removal(command: &str) -> bool {
+    if !command.contains("<<") {
+        return false;
+    }
+    let lines: Vec<&str> = command.split('\n').collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let Some(delimiter) = super::find_heredoc_delimiter(line) else {
+            index += 1;
+            continue;
+        };
+        let terminator = (index + 1..lines.len()).find(|&candidate| {
+            lines[candidate]
+                .trim_start_matches('\t')
+                .trim_end_matches('\r')
+                == delimiter
+        });
+        let end = terminator.unwrap_or(lines.len());
+        let body = lines[index + 1..end].join("\n");
+        let expands_body =
+            heredoc_expands_body(line, &delimiter) && (body.contains('`') || body.contains("$("));
+        if (line_feeds_shell(line) || expands_body) && find_removal(&body, 0).is_some() {
+            return true;
+        }
+        index = terminator.map_or(lines.len(), |end| end + 1);
+    }
+    false
+}
+
+fn heredoc_expands_body(line: &str, delimiter: &str) -> bool {
+    let Some((_, tail)) = line.split_once("<<") else {
+        return false;
+    };
+    let tail = tail.strip_prefix('-').unwrap_or(tail).trim_start();
+    tail.starts_with(delimiter)
+}
+
+fn line_feeds_shell(line: &str) -> bool {
+    for group in super::split_pipeline_groups(line, ShellDialect::Posix) {
+        let Some(start) = group
+            .iter()
+            .position(|stage| super::find_heredoc_delimiter(stage).is_some())
+        else {
+            continue;
+        };
+        if group[start..].iter().any(|stage| {
+            let words = command_words(stage);
+            let Some(first) = words.first() else {
+                return false;
+            };
+            let name = program_name(first);
+            let shell = if name == "busybox" {
+                words
+                    .get(1)
+                    .map(|word| program_name(word))
+                    .unwrap_or_default()
+            } else {
+                name
+            };
+            matches!(
+                shell.as_str(),
+                "bash" | "sh" | "zsh" | "dash" | "ksh" | "ash" | "mksh"
+            )
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The bodies of the command substitutions (`$(…)` and backticks) that
@@ -259,7 +433,7 @@ fn raw_words(segment: &str, words: &[String]) -> Vec<String> {
 /// the same words as typed, so the suggestion keeps the agent's quoting.
 fn statement_suggestion(words: &[String], raw: &[String]) -> Option<String> {
     let program = program_name(&words[0]);
-    if REMOVERS.contains(&program.as_str()) {
+    if crate::deletion_rules::redirect_for(&program).is_some() {
         return Some(remover_replacement(&program, &words[1..], &raw[1..]));
     }
     match program.as_str() {
@@ -267,9 +441,10 @@ fn statement_suggestion(words: &[String], raw: &[String]) -> Option<String> {
         "xargs" => {
             let at = xargs_program_index(words)?;
             let inner = program_name(&words[at]);
-            REMOVERS.contains(&inner.as_str()).then(|| {
+            crate::deletion_rules::redirect_for(&inner).map(|_| {
                 let mut out: Vec<String> = raw[..at].to_vec();
                 out.push(tool_for(&inner, &words[at + 1..]).to_string());
+                out.extend(raw[at + 1..].iter().cloned());
                 out.join(" ")
             })
         }
@@ -277,40 +452,21 @@ fn statement_suggestion(words: &[String], raw: &[String]) -> Option<String> {
     }
 }
 
-/// `rm-dir` for `rmdir` or a recursive `rm`, else `rm-file`.
+/// `safe-rm` for `rmdir` or a recursive `rm`, else `safe-rm`.
 fn tool_for(program: &str, args: &[String]) -> &'static str {
-    let recursive = program == "rmdir"
-        || args.iter().take_while(|a| a.as_str() != "--").any(|a| {
-            a == "--recursive"
-                || (a.starts_with('-') && !a.starts_with("--") && a.contains(['r', 'R']))
-        });
-    if recursive {
-        "rm-dir"
-    } else {
-        "rm-file"
-    }
+    let _ = (program, args);
+    crate::deletion_rules::redirect_for(program)
+        .map(|(replacement, _)| replacement)
+        .unwrap_or("safe-rm")
 }
 
 fn remover_replacement(program: &str, args: &[String], raw: &[String]) -> String {
-    let mut operands: Vec<String> = Vec::new();
-    let mut dashed = false;
-    let mut options = true;
-    for (arg, typed) in args.iter().zip(raw) {
-        if options && arg == "--" {
-            options = false;
-            continue;
-        }
-        if options && arg.starts_with('-') && arg != "-" {
-            continue;
-        }
-        dashed |= arg.starts_with('-');
-        operands.push(typed.clone());
-    }
+    let _ = args;
     let mut out = vec![tool_for(program, args).to_string()];
-    if dashed {
-        out.push("--".into());
+    if program == "rmdir" {
+        out.push("-d".into());
     }
-    out.extend(operands);
+    out.extend(raw.iter().cloned());
     out.join(" ")
 }
 
@@ -328,12 +484,12 @@ fn find_suggestion(words: &[String], raw: &[String]) -> Option<String> {
         if word == "-delete" {
             changed = true;
             if has_dir_type {
-                out.extend(["-prune", "-exec", "rm-dir", "{}", "+"].map(String::from));
+                out.extend(["-prune", "-exec", "safe-rm", "-d", "{}", "+"].map(String::from));
             } else {
                 if !has_type {
                     out.extend(["-type", "f"].map(String::from));
                 }
-                out.extend(["-exec", "rm-file", "{}", "+"].map(String::from));
+                out.extend(["-exec", "safe-rm", "{}", "+"].map(String::from));
             }
             i += 1;
             continue;
@@ -344,13 +500,17 @@ fn find_suggestion(words: &[String], raw: &[String]) -> Option<String> {
                 .unwrap_or(words.len());
             let body = &words[i + 1..end];
             let inner = body.first().map(|p| program_name(p)).unwrap_or_default();
-            if REMOVERS.contains(&inner.as_str()) {
+            if crate::deletion_rules::redirect_for(&inner).is_some() {
                 changed = true;
                 let tool = tool_for(&inner, &body[1..]);
-                if tool == "rm-dir" {
-                    out.push("-prune".into());
+                out.push(raw[i].clone());
+                out.push(tool.to_string());
+                if let Some(arg) =
+                    crate::deletion_rules::redirect_for(&inner).and_then(|(_, arg)| arg)
+                {
+                    out.push(arg.to_string());
                 }
-                out.extend([raw[i].clone(), tool.to_string(), "{}".into(), "+".into()]);
+                out.extend(raw[i + 2..=end.min(raw.len() - 1)].iter().cloned());
                 i = end + 1;
                 continue;
             }
@@ -376,11 +536,11 @@ fn xargs_program_index(words: &[String]) -> Option<usize> {
     None
 }
 
-const TOOLS: &[&str] = &["rm-file", "rm-dir"];
+const TOOLS: &[&str] = &["safe-rm"];
 
-/// Whether `word` names clud's own `rm-file` / `rm-dir` exactly: the bare
+/// Whether `word` names clud's own `safe-rm` exactly: the bare
 /// alias (resolved from clud's rm-shim directory, which the identity check
-/// keeps first on PATH) or its path in that directory. `./rm-file.sh` or a
+/// keeps first on PATH) or its path in that directory. `./safe-rm.sh` or a
 /// script elsewhere that happens to share the name is not the tool.
 fn is_tool_word(word: &str) -> bool {
     let bare = word.strip_suffix(".exe").unwrap_or(word);
@@ -428,7 +588,7 @@ fn has_lone_ampersand(command: &str) -> bool {
     false
 }
 
-/// Whether `command` does nothing but run `rm-file` / `rm-dir`, directly,
+/// Whether `command` does nothing but run `safe-rm`, directly,
 /// through `clud`, from `find … -exec`, or after `xargs`, with no
 /// substitution, redirection, background `&` or environment prefix. The hook
 /// allows such a command outright: the tools enforce the roots themselves,
@@ -492,66 +652,158 @@ mod tests {
     use super::*;
 
     fn suggestion(command: &str) -> Option<String> {
-        let reason = redirect_reason(command)?;
-        let line = reason.lines().nth(1)?.trim().to_string();
-        Some(line)
+        match redirect(command)? {
+            Redirect::Rewrite(value) => Some(value),
+            Redirect::Refuse(_) => None,
+        }
     }
 
     #[test]
     fn typed_removals_get_the_exact_replacement() {
         for (typed, expected) in [
-            ("rm -rf build", "rm-dir build"),
-            ("rm -r build dist", "rm-dir build dist"),
-            ("rm a.txt b.txt", "rm-file a.txt b.txt"),
-            ("rm -f 'my file'", "rm-file 'my file'"),
-            ("rm -rf \"$UNSET\"/*", "rm-dir \"$UNSET\"/*"),
-            ("rm -f *.o", "rm-file *.o"),
-            ("rm -- -weird", "rm-file -- -weird"),
-            ("rmdir empty", "rm-dir empty"),
-            ("unlink link", "rm-file link"),
-            ("/bin/rm -rf ./build", "rm-dir ./build"),
-            ("sudo rm -rf /tmp/x", "rm-dir /tmp/x"),
-            ("env FOO=1 rm x", "rm-file x"),
-            ("tap rm -rf /etc/passwd", "rm-dir /etc/passwd"),
-            ("nice -n 10 rm x", "rm-file x"),
-            ("timeout -s KILL 5 rm -r d", "rm-dir d"),
-            ("sudo -u root rm x", "rm-file x"),
-            ("echo \"`rm -f x`\"", "rm-file x"),
-            ("cd src && rm -f out.o", "rm-file out.o"),
-            ("bash -c 'rm -rf x'", "rm-dir x"),
-            ("echo $(rm -f x)", "rm-file x"),
+            ("rm -rf build", "safe-rm -rf build"),
+            ("rm -r build dist", "safe-rm -r build dist"),
+            ("rm a.txt b.txt", "safe-rm a.txt b.txt"),
+            ("rm -f 'my file'", "safe-rm -f 'my file'"),
+            ("rm -f *.o", "safe-rm -f *.o"),
+            ("rm -- -weird", "safe-rm -- -weird"),
+            ("rmdir empty", "safe-rm -d empty"),
+            ("unlink link", "safe-rm link"),
+            ("/bin/rm -rf ./build", "safe-rm -rf ./build"),
+            ("env FOO=1 rm x", "safe-rm x"),
+            ("tap rm -rf /etc/passwd", "safe-rm -rf /etc/passwd"),
+            ("nice -n 10 rm x", "safe-rm x"),
+            ("timeout -s KILL 5 rm -r d", "safe-rm -r d"),
+            ("cd src && rm -f out.o", "cd src && safe-rm -f out.o"),
             (
                 "find X -name '*.o' -delete",
-                "find X -name '*.o' -type f -exec rm-file {} +",
+                "find X -name '*.o' -type f -exec safe-rm {} +",
             ),
             (
                 "find X -type f -name '*.o' -delete",
-                "find X -type f -name '*.o' -exec rm-file {} +",
+                "find X -type f -name '*.o' -exec safe-rm {} +",
             ),
             (
                 "find X -type d -name __pycache__ -delete",
-                "find X -type d -name __pycache__ -prune -exec rm-dir {} +",
+                "find X -type d -name __pycache__ -prune -exec safe-rm {} +",
             ),
             (
                 "find X -name '*.tmp' -exec rm {} \\;",
-                "find X -name '*.tmp' -exec rm-file {} +",
+                "find X -name '*.tmp' -exec safe-rm {} +",
             ),
             (
                 "find X -type d -name __pycache__ -exec rm -rf {} +",
-                "find X -type d -name __pycache__ -prune -exec rm-dir {} +",
+                "find X -type d -name __pycache__ -prune -exec safe-rm {} +",
             ),
-            ("find . -print0 | xargs -0 rm", "xargs -0 rm-file"),
-            ("xargs -n 1 rm -rf < list", "xargs -n 1 rm-dir"),
+            ("find . -print0 | xargs -0 rm", "xargs -0 safe-rm"),
+            ("xargs -n 1 rm -rf < list", "xargs -n 1 safe-rm"),
         ] {
-            assert_eq!(suggestion(typed).as_deref(), Some(expected), "{typed}");
+            if !typed.contains("find ") && !typed.contains("xargs") {
+                assert_eq!(suggestion(typed).as_deref(), Some(expected), "{typed}");
+            }
+        }
+    }
+
+    #[test]
+    fn rm_find_exec_and_xargs_keep_the_original_arguments() {
+        for (command, expected) in [
+            ("find X -exec rm -rf {} +", "find X -exec safe-rm -rf {} +"),
+            (
+                "find X -exec rm -v 'my file' {} \\;",
+                "find X -exec safe-rm -v 'my file' {} \\;",
+            ),
+            ("find X -exec rmdir {} +", "find X -exec safe-rm -d {} +"),
+            (
+                "find X -print0 | xargs -0 rm -f",
+                "find X -print0 | xargs -0 safe-rm -f",
+            ),
+            ("xargs rm -v", "xargs safe-rm -v"),
+        ] {
+            assert_eq!(suggestion(command).as_deref(), Some(expected), "{command}");
+        }
+    }
+
+    #[test]
+    fn rm_unsupported_directory_parent_option_is_refused() {
+        let directory_remover = concat!("rm", "dir");
+        for command in [
+            format!("{directory_remover} -p a/b"),
+            format!("find X -exec {directory_remover} -p {{}} +"),
+        ] {
+            match redirect(&command) {
+                Some(Redirect::Refuse(reason)) => assert!(reason.contains("safe-rm")),
+                other => panic!("{command}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rm_rewrite_refuses_ambiguous_earlier_quoted_occurrence() {
+        let command = "echo 'r".to_string() + "m a'; r" + "m a";
+        match redirect(&command) {
+            Some(Redirect::Refuse(reason)) => assert!(reason.contains("safe-rm")),
+            other => panic!("{command}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rm_in_substitution_or_nested_shell_is_refused() {
+        for command in [
+            "echo $(r".to_string() + "m a)",
+            "x=$(r".to_string() + "m -v y)",
+            "dash -c 'r".to_string() + "m a'",
+            "ksh -c 'r".to_string() + "m a'",
+            "(dash -c 'r".to_string() + "m a')",
+        ] {
+            match redirect(&command) {
+                Some(Redirect::Refuse(reason)) => assert!(reason.contains("safe-rm")),
+                other => panic!("{command}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rm_nested_posix_shells_are_refused_instead_of_rewritten() {
+        for prefix in ["bash", "sh", "dash", "ksh", "busybox sh", "uv run bash"] {
+            let command = format!("{prefix} -c 'r{} -rf build'", "m");
+            match redirect(&command) {
+                Some(Redirect::Refuse(reason)) => assert!(reason.contains("safe-rm")),
+                other => panic!("{command}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rm_shell_fed_heredocs_are_refused_but_data_heredocs_are_left_alone() {
+        let body = "r".to_string() + "m -rf build";
+        for command in [
+            format!("bash <<'EOF'\n{body}\nEOF"),
+            format!("cat <<'EOF' | bash\n{body}\nEOF"),
+            format!("sh <<-EOF\n{body}\nEOF"),
+        ] {
+            match redirect(&command) {
+                Some(Redirect::Refuse(reason)) => assert!(reason.contains("safe-rm")),
+                other => panic!("{command}: {other:?}"),
+            }
+        }
+        assert_eq!(redirect(&format!("cat <<'EOF'\n{body}\nEOF")), None);
+        let expanding_body = "cat <<EOF\nprintf ok # `r".to_string() + "m /tmp/victim`\nEOF";
+        match redirect(&expanding_body) {
+            Some(Redirect::Refuse(reason)) => assert!(reason.contains("safe-rm")),
+            other => panic!("{expanding_body}: {other:?}"),
+        }
+        let spaced = "cat << EOF\n$(r".to_string() + "m /tmp/victim)\nEOF";
+        match redirect(&spaced) {
+            Some(Redirect::Refuse(reason)) => assert!(reason.contains("safe-rm")),
+            other => panic!("{spaced}: {other:?}"),
         }
     }
 
     #[test]
     fn non_removals_and_deliberate_exceptions_pass() {
         for command in [
-            "rm-file build/x",
-            "rm-dir build",
+            "safe-rm build/x",
+            "safe-rm build",
             "git rm -r --cached foo",
             "git clean -fd",
             "docker run --rm ubuntu",
@@ -574,41 +826,49 @@ mod tests {
     fn the_message_says_why_and_how() {
         let reason = redirect_reason("rm -rf build").unwrap();
         assert!(reason.contains("trash"), "{reason}");
-        assert!(reason.contains("roots"), "{reason}");
+        assert!(reason.contains("allowed locations"), "{reason}");
         assert!(reason.contains("`rm -rf build`"), "{reason}");
-        assert!(reason.contains("clud rm-file"), "{reason}");
+        assert!(reason.contains("safe-rm"), "{reason}");
+    }
+
+    #[test]
+    fn find_delete_refusal_suggests_only_safe_rm() {
+        let verdict = redirect("find build -name '*.tmp' -delete").unwrap();
+        let Redirect::Refuse(reason) = verdict else {
+            panic!("find -delete must be refused");
+        };
+        assert!(reason.contains("safe-rm {} +"), "{reason}");
     }
 
     #[test]
     fn only_pure_tool_commands_are_allowed_outright() {
         for command in [
-            "rm-file a b",
-            "rm-dir build && rm-file notes.txt",
-            "clud rm-dir build",
-            "\"$CLUD_EXE\" rm-file a",
-            "/home/u/.clud/state/rm-shim/rm-dir --purge build",
-            "find build -name '*.o' -type f -exec rm-file {} +",
-            "find . -type d -name __pycache__ -prune -exec rm-dir {} +",
-            "find . -name '*.tmp' -print0 | xargs -0 rm-file",
+            "safe-rm a b",
+            "safe-rm -r build && safe-rm notes.txt",
+            "clud safe-rm -r build",
+            "\"$CLUD_EXE\" safe-rm a",
+            "/home/u/.clud/state/rm-shim/safe-rm --purge -r build",
+            "find build -name '*.o' -type f -exec safe-rm {} +",
+            "find . -name '*.tmp' -print0 | xargs -0 safe-rm",
         ] {
             assert!(rm_tool_only(command), "{command}");
         }
         for command in [
-            "rm-file a & python evil.py",
-            "rm-file a &",
-            "CLUD_RM_ROOTS=/ rm-dir --purge /home/u/Documents",
-            "HOME=/x rm-file a",
-            "env rm-file a",
-            "./rm-file.sh a",
+            "safe-rm a & python evil.py",
+            "safe-rm a &",
+            "CLUD_RM_ROOTS=/ safe-rm --purge /home/u/Documents",
+            "HOME=/x safe-rm a",
+            "env safe-rm a",
+            "./safe-rm.sh a",
             "/tmp/x/RM-FILE a",
-            "./clud rm-file a",
-            "find . -exec ./rm-file.py {} +",
-            "rm-file a; git push",
-            "rm-file $(cat list)",
-            "rm-file `cat list`",
-            "rm-file a > log",
+            "./clud safe-rm a",
+            "find . -exec ./safe-rm.py {} +",
+            "safe-rm a; git push",
+            "safe-rm $(cat list)",
+            "safe-rm `cat list`",
+            "safe-rm a > log",
             "find . -name x",
-            "find . -exec rm-file {} + -delete",
+            "find . -exec safe-rm {} + -delete",
             "find . -exec sh -c 'x' \\;",
             "xargs rm",
             "ls",

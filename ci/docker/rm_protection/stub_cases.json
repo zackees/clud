@@ -1,14 +1,14 @@
 [
-  {"argv": ["-rf", "/"], "decision": "deny"},
-  {"argv": ["-rf", ""], "decision": "deny"},
-  {"argv": ["-rf", "/tmp"], "decision": "deny"},
-  {"argv": ["-rf", "//server/share"], "decision": "deny"},
-  {"argv": ["-rf", "C:/"], "decision": "deny"},
-  {"argv": ["-rf", "../escape"], "decision": "deny"},
-  {"argv": ["--no-preserve-root", "/"], "decision": "deny"},
-  {"argv": ["-z", "leaf"], "decision": "deny"},
-  {"argv": ["-rf", "leaf", "/"], "decision": "deny"},
-  {"argv": ["-rf", "/home/checker"], "decision": "deny"},
-  {"argv": ["-rf", "./missing"], "decision": "allow"},
-  {"argv": ["--recursive", "--force", "--", "-leaf"], "decision": "allow"}
+  {"id": "root", "argv": ["-rf", "/"], "decision": "deny"},
+  {"id": "empty-operand", "argv": ["-rf", ""], "decision": "allow"},
+  {"id": "top-level", "argv": ["-rf", "/tmp"], "decision": "deny"},
+  {"id": "posix-unc-spelling", "argv": ["-rf", "//server/share"], "decision": "allow"},
+  {"id": "posix-drive-spelling", "argv": ["-rf", "C:/"], "decision": "deny"},
+  {"id": "relative-parent", "argv": ["-rf", "../escape"], "decision": "allow"},
+  {"id": "disable-root-guard", "argv": ["--no-preserve-root", "/"], "decision": "deny"},
+  {"id": "unknown-native-flag", "argv": ["-z", "leaf"], "decision": "allow"},
+  {"id": "mixed-root", "argv": ["-rf", "leaf", "/"], "decision": "deny"},
+  {"id": "home", "argv": ["-rf", "$HOME"], "decision": "deny"},
+  {"id": "missing", "argv": ["-rf", "./missing"], "decision": "allow"},
+  {"id": "long-flags-and-dash-name", "argv": ["--recursive", "--force", "--", "-leaf"], "decision": "allow"}
 ]

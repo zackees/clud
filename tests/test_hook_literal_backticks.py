@@ -49,10 +49,10 @@ def test_pretool_hook_allows_literal_backticks_in_shell_arguments(tmp_path: Path
         f"perl -e 'print {tick}printf nested{tick}'",
         f"gh issue comment 1298 --editor --attach image.png --body 'literal {tick}text{tick}'",
         f"gh issue comment 1298 --web --body 'literal {tick}text{tick}'",
+        f"env bash -c 'printf ok {tick}printf nested{tick}'",
     ]
     denied_commands = [
         # A nested shell can run rm from the text the backticks hide.
-        f"env bash -c 'printf ok {tick}printf nested{tick}'",
         f"printf x\\ #{tick}rm /tmp/victim{tick}",
         f"printf $(echo x)#{tick}rm /tmp/victim{tick}",
         f"printf x\r#{tick}rm /tmp/victim{tick}",

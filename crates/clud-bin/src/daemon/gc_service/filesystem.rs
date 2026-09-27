@@ -74,7 +74,7 @@ pub(super) fn remove_entry_and_delete_row(
 }
 
 /// Remove registered trash rows. A `clud trash` quarantine entry goes as
-/// soon as it can be deleted; an `rm-file` / `rm-dir` entry (it carries
+/// soon as it can be deleted; an `safe-rm` entry (it carries
 /// [`crate::rm_tool::TRASH_MANIFEST`]) is kept for
 /// [`crate::rm_tool::TRASH_KEEP`] so it can be restored (#1340).
 pub(super) fn reap_trash_entries(registry: &Registry) -> Result<(usize, usize), String> {
@@ -110,7 +110,7 @@ pub(super) fn reap_trash_entries_at(
     Ok((removed, failed))
 }
 
-/// Remove expired `rm-file` / `rm-dir` trash entries under `trash_root` that
+/// Remove expired `safe-rm` trash entries under `trash_root` that
 /// never reached the registry (the call found no daemon to register with).
 /// Registered ones are removed by [`reap_trash_entries`] first.
 pub(super) fn reap_unregistered_rm_trash(trash_root: &Path, now: std::time::SystemTime) -> usize {

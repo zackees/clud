@@ -1,7 +1,7 @@
-//! `rm-file` / `rm-dir`: the one deletion path clud gives agents (#1340).
+//! `safe-rm`: the one deletion path clud gives agents (#1461).
 //!
-//! `rm-file <path…>` removes files (and symlinks, as links); `rm-dir <path…>`
-//! removes directories recursively. Both **trash by default**: every call
+//! `safe-rm` accepts familiar options, requiring recursion for nonempty
+//! directories and `-d` for empty directories. It **trashes by default**: every call
 //! moves its paths into one entry under `~/.clud/trash/`, recoverable until
 //! the daemon reaps it after [`TRASH_KEEP`]. `--purge` deletes for real,
 //! `--tracked` allows git-tracked paths (normally `git rm`'s job), and
@@ -18,8 +18,8 @@
 //!
 //! The binaries are argv\[0\] aliases of `clud-shim` (see
 //! `bin/clud_shim.rs`), installed next to the session's `rm` shim; `clud
-//! rm-file` / `clud rm-dir` are the same code. The child `rm` shim
-//! ([`crate::rm_guard`]) reuses [`resolve`] for its in-roots gate. See
+//! safe-rm` / `clud safe-rm` are the same code. The child `rm` shim
+//! ([`crate::rm_guard`]) enforces only the catastrophe floor. See
 //! [`docs/architecture/rm-tools.md`](../../../docs/architecture/rm-tools.md).
 
 use std::collections::BTreeMap;
@@ -33,63 +33,59 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const ROOTS_ENV: &str = "CLUD_RM_ROOTS";
 /// Optional caller role recorded in the audit log.
 pub const ROLE_ENV: &str = "CLUD_RM_ROLE";
-/// Marks a trash entry as written by `rm-file` / `rm-dir`, and records what
+/// Marks a trash entry as written by `safe-rm`, and records what
 /// it holds so it can be restored by hand.
 pub const TRASH_MANIFEST: &str = ".clud-rm.json";
 /// How long a trashed entry is kept before the daemon reaps it: the same 72
 /// hours as `~/.clud/tmp` (see `gc::session_tmp::STALE_THRESHOLD`).
 pub const TRASH_KEEP: Duration = crate::gc::session_tmp::STALE_THRESHOLD;
 
-/// Which command is running.
+pub const COMMAND: &str = "safe-rm";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    Safe,
     File,
     Dir,
 }
 
 impl Kind {
     pub fn command(self) -> &'static str {
-        match self {
-            Self::File => "rm-file",
-            Self::Dir => "rm-dir",
-        }
+        COMMAND
     }
-
-    /// The command an argv\[0\] basename selects (`rm-file`, `rm-dir.exe`).
     pub fn from_program_name(name: &str) -> Option<Self> {
-        let name = name.strip_suffix(".exe").unwrap_or(name);
-        match name {
-            "rm-file" => Some(Self::File),
-            "rm-dir" => Some(Self::Dir),
-            _ => None,
-        }
+        is_program_name(name).then_some(Self::Safe)
     }
+}
+
+pub fn is_program_name(name: &str) -> bool {
+    name.strip_suffix(".exe").unwrap_or(name) == COMMAND
 }
 
 /// Parsed command line.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Options {
+    pub recursive: bool,
+    pub force: bool,
+    pub verbose: bool,
+    pub dir: bool,
     pub purge: bool,
     pub tracked: bool,
     pub dry_run: bool,
     pub paths: Vec<String>,
 }
 
-fn usage(kind: Kind) -> String {
-    let what = match kind {
-        Kind::File => "files (a symlink is removed as a link)",
-        Kind::Dir => "directories, recursively",
-    };
+fn usage() -> String {
     format!(
-        "usage: {cmd} [--purge] [--tracked] [--dry-run] [--] <path>...\n\
-         Remove {what}. Paths go to the clud trash (~/.clud/trash, kept {keep}h)\n\
+        "usage: {COMMAND} [-rRfvd] [--purge] [--tracked] [--dry-run] [--] <path>...\n\
+         Remove files, or directories with -r/-R (empty directories with -d).\n\
+         Paths go to the clud trash (~/.clud/trash, kept {keep}h)\n\
          unless --purge is given, and must lie inside this session's roots\n\
          (${ROOTS_ENV}; outside a session, the current git checkout).\n\
          \n\
          \x20 --purge    delete for real instead of trashing\n\
          \x20 --tracked  allow git-tracked paths (otherwise use `git rm`)\n\
          \x20 --dry-run  report what would happen; change nothing",
-        cmd = kind.command(),
         keep = TRASH_KEEP.as_secs() / 3_600,
     )
 }
@@ -107,11 +103,24 @@ pub fn parse_args(args: &[String]) -> Result<Option<Options>, String> {
                 "--purge" => options.purge = true,
                 "--tracked" => options.tracked = true,
                 "--dry-run" | "-n" => options.dry_run = true,
+                "--recursive" => options.recursive = true,
+                "--force" => options.force = true,
+                "--verbose" => options.verbose = true,
                 "--help" | "-h" => return Ok(None),
+                other if !other.starts_with("--") => {
+                    for flag in other[1..].chars() {
+                        match flag {
+                            'r' | 'R' => options.recursive = true,
+                            'f' => options.force = true,
+                            'v' => options.verbose = true,
+                            'd' => options.dir = true,
+                            _ => return Err(format!("unknown option {other:?}")),
+                        }
+                    }
+                }
                 other => {
                     return Err(format!(
-                        "unknown option {other:?} (rm-file/rm-dir take only --purge, --tracked, \
-                         --dry-run; put `--` before a path that starts with `-`)"
+                        "unknown option {other:?}; put `--` before a path that starts with `-`"
                     ))
                 }
             }
@@ -120,8 +129,8 @@ pub fn parse_args(args: &[String]) -> Result<Option<Options>, String> {
         flags = false;
         options.paths.push(arg.clone());
     }
-    if options.paths.is_empty() {
-        return Err("no paths given".into());
+    if options.paths.is_empty() && !options.force {
+        return Err("missing operand".into());
     }
     Ok(Some(options))
 }
@@ -285,10 +294,14 @@ pub fn resolve(
     if matches!(last, Some("." | "..")) {
         return Err("does not name a file or directory (`.` or `..`); name it directly".into());
     }
-    let absolute = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
+    #[cfg(windows)]
+    let native = msys_drive_path(raw).unwrap_or_else(|| raw.to_owned());
+    #[cfg(not(windows))]
+    let native = raw.to_owned();
+    let absolute = if Path::new(&native).is_absolute() {
+        PathBuf::from(&native)
     } else {
-        cwd.join(raw)
+        cwd.join(&native)
     };
     let Some(Component::Normal(name)) = absolute.components().next_back() else {
         return Err(
@@ -315,6 +328,12 @@ pub fn resolve(
         Err(error) => return Err(format!("cannot resolve its directory: {error}")),
     };
     let path = parent.join(&name);
+    if path
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
+    {
+        return Err("is git metadata".into());
+    }
     if let Some(home) = home.and_then(|h| std::fs::canonicalize(h).ok()) {
         if home.starts_with(&path) {
             return Err("is your home directory or one of its ancestors".into());
@@ -358,6 +377,26 @@ fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+#[cfg(any(test, windows))]
+pub(crate) fn msys_drive_path(raw: &str) -> Option<String> {
+    let normalized = crate::path_norm::slash_separators(raw);
+    let bytes = normalized.as_bytes();
+    if bytes.len() < 2
+        || bytes[0] != b'/'
+        || !bytes[1].is_ascii_alphabetic()
+        || (bytes.len() > 2 && bytes[2] != b'/')
+    {
+        return None;
+    }
+    let drive = (bytes[1] as char).to_ascii_uppercase();
+    let suffix = if bytes.len() == 2 {
+        "/"
+    } else {
+        &normalized[2..]
+    };
+    Some(format!("{drive}:{suffix}"))
+}
+
 #[cfg(target_os = "linux")]
 fn reject_mounts(target: &Path) -> Result<(), String> {
     let Ok(mounts) = std::fs::read_to_string("/proc/self/mountinfo") else {
@@ -379,7 +418,15 @@ fn reject_mounts(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn reject_mounts(target: &Path) -> Result<(), String> {
+    if crate::rm_guard::windows_reparse_tree(target)? {
+        return Err("contains a junction or other reparse point".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn reject_mounts(_: &Path) -> Result<(), String> {
     Ok(())
 }
@@ -461,29 +508,29 @@ pub struct Outcome {
     pub trash_path: Option<PathBuf>,
 }
 
-/// `rm-file` / `rm-dir` from the process environment. Returns the exit code.
-pub fn run(kind: Kind, args: &[String]) -> i32 {
+/// `safe-rm` from the process environment. Returns the exit code.
+pub fn run(args: &[String]) -> i32 {
     let options = match parse_args(args) {
         Ok(Some(options)) => options,
         Ok(None) => {
-            println!("{}", usage(kind));
+            println!("{}", usage());
             return 0;
         }
         Err(error) => {
-            eprintln!("{}: {error}\n{}", kind.command(), usage(kind));
-            return 2;
+            eprintln!("{COMMAND}: {error}\n{}", usage());
+            return if error == "missing operand" { 1 } else { 2 };
         }
     };
     let (ctx, mut roots) = match Context::from_env() {
         Ok(found) => found,
         Err(error) => {
-            eprintln!("{}: {error}", kind.command());
+            eprintln!("{COMMAND}: {error}");
             return 1;
         }
     };
     let mut out = std::io::stdout().lock();
     let mut err = std::io::stderr().lock();
-    run_with(kind, &options, &ctx, &mut roots, &mut out, &mut err)
+    run_with(Kind::Safe, &options, &ctx, &mut roots, &mut out, &mut err)
 }
 
 /// The testable core of [`run`].
@@ -495,7 +542,7 @@ pub fn run_with(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    let cmd = kind.command();
+    let cmd = COMMAND;
     let mut outcomes: Vec<Outcome> = Vec::new();
     let mut accepted: Vec<Target> = Vec::new();
     for raw in &options.paths {
@@ -508,7 +555,7 @@ pub fn run_with(
         let target = match resolve(raw, &ctx.cwd, ctx.home.as_deref(), roots) {
             Ok(Resolved::Present(target)) => target,
             Ok(Resolved::Missing(path)) => {
-                // `find … -exec rm-dir {} +` can list a path whose ancestor
+                // `find … -exec safe-rm {} +` can list a path whose ancestor
                 // this same call already took: that is not an error.
                 if accepted.iter().any(|t| path.starts_with(&t.path)) {
                     outcomes.push(Outcome {
@@ -517,8 +564,15 @@ pub fn run_with(
                         reason: Some("already inside a removed directory".into()),
                         trash_path: None,
                     });
-                } else {
+                } else if !options.force {
                     outcomes.push(refuse("no such file or directory".into()));
+                } else {
+                    outcomes.push(Outcome {
+                        path: raw.clone(),
+                        action: "skipped",
+                        reason: Some("missing with -f".into()),
+                        trash_path: None,
+                    });
                 }
                 continue;
             }
@@ -536,20 +590,19 @@ pub fn run_with(
             });
             continue;
         }
-        match kind {
-            Kind::File if target.is_dir => {
-                outcomes.push(refuse("is a directory; use rm-dir".into()));
+        let recursive = options.recursive || kind == Kind::Dir;
+        if target.is_dir && !recursive {
+            if !options.dir {
+                outcomes.push(refuse("is a directory".into()));
                 continue;
             }
-            Kind::Dir if !target.is_dir => {
-                outcomes.push(refuse(if target.is_symlink {
-                    "is a symlink; use rm-file to remove the link".into()
-                } else {
-                    "is not a directory; use rm-file".into()
-                }));
+            if std::fs::read_dir(&target.path).is_ok_and(|mut entries| entries.next().is_some()) {
+                outcomes.push(refuse("directory not empty".into()));
                 continue;
             }
-            _ => {}
+        } else if kind == Kind::Dir && !target.is_dir {
+            outcomes.push(refuse("is not a directory".into()));
+            continue;
         }
         if !options.tracked && is_tracked(&target) {
             outcomes.push(refuse(if target.is_dir {
@@ -580,6 +633,8 @@ pub fn run_with(
     let mut moved: Vec<(String, PathBuf)> = Vec::new();
     for target in &accepted {
         let shown = target.path.display().to_string();
+        #[cfg(windows)]
+        let shown = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string();
         let outcome = if options.dry_run {
             Outcome {
                 path: shown.clone(),
@@ -641,7 +696,7 @@ pub fn run_with(
     if let Some(dir) = &entry {
         if moved.is_empty() {
             let _ = std::fs::remove_dir_all(dir);
-        } else if write_manifest(dir, kind, ctx, &moved) {
+        } else if write_manifest(dir, ctx, &moved) {
             if ctx.register {
                 register_entry(dir, &moved[0].0, ctx.now);
             }
@@ -671,18 +726,10 @@ pub fn run_with(
                     outcome.reason.as_deref().unwrap_or("")
                 );
             }
-            "trashed" => {
-                let _ = writeln!(
-                    out,
-                    "trashed {} -> {}",
-                    outcome.path,
-                    outcome
-                        .trash_path
-                        .as_deref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default()
-                );
+            "trashed" if options.verbose => {
+                let _ = writeln!(out, "removed '{}'", outcome.path);
             }
+            "trashed" => {}
             "skipped" => {}
             action => {
                 let _ = writeln!(out, "{action} {}", outcome.path);
@@ -691,7 +738,7 @@ pub fn run_with(
     }
     let code = i32::from(failed);
     if let Some(dir) = &ctx.audit_dir {
-        audit(dir, kind, options, ctx, roots, &outcomes, code);
+        audit(dir, options, ctx, roots, &outcomes, code);
     }
     code
 }
@@ -826,14 +873,14 @@ fn copy_nofollow(source: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::copy(source, dest).map(|_| ())
 }
 
-fn write_manifest(dir: &Path, kind: Kind, ctx: &Context, moved: &[(String, PathBuf)]) -> bool {
+fn write_manifest(dir: &Path, ctx: &Context, moved: &[(String, PathBuf)]) -> bool {
     let items: Vec<_> = moved
         .iter()
         .map(|(origin, trashed)| serde_json::json!({"origin": origin, "trashed": trashed}))
         .collect();
     let manifest = serde_json::json!({
         "version": 1,
-        "command": kind.command(),
+        "command": COMMAND,
         "ts_unix": unix_secs(ctx.now),
         "cwd": ctx.cwd,
         "session_id": ctx.session_id,
@@ -861,7 +908,7 @@ fn register_entry(dir: &Path, origin: &str, now: SystemTime) {
     let _ = crate::daemon::gc_client_insert(&state_dir, &input);
 }
 
-/// Whether a trash entry written by `rm-file` / `rm-dir` must still be kept
+/// Whether a trash entry written by `safe-rm` must still be kept
 /// at `now`. Entries without the manifest (`clud trash` quarantine) are
 /// never kept by this rule.
 pub fn keep_trash_entry(dir: &Path, now: SystemTime) -> bool {
@@ -874,7 +921,7 @@ pub fn keep_trash_entry(dir: &Path, now: SystemTime) -> bool {
         .is_none_or(|age| age < TRASH_KEEP)
 }
 
-/// Trash entries written by `rm-file` / `rm-dir` that are due for removal:
+/// Trash entries written by `safe-rm` that are due for removal:
 /// manifest-bearing directories under `trash_root` older than
 /// [`TRASH_KEEP`]. The daemon reaps these even when registration failed.
 pub fn expired_trash_entries(trash_root: &Path, now: SystemTime) -> Vec<PathBuf> {
@@ -898,7 +945,6 @@ fn unix_secs(t: SystemTime) -> i64 {
 /// Best effort: auditing never changes the outcome.
 fn audit(
     dir: &Path,
-    kind: Kind,
     options: &Options,
     ctx: &Context,
     roots: &Roots,
@@ -918,7 +964,7 @@ fn audit(
         .collect();
     let record = serde_json::json!({
         "ts_unix": unix_secs(ctx.now),
-        "command": kind.command(),
+        "command": COMMAND,
         "session_id": ctx.session_id,
         "role": ctx.role,
         "cwd": ctx.cwd,

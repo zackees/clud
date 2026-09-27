@@ -154,9 +154,9 @@ def test_menu_scrolls_and_restores_terminal_with_crlf_output(tmp_path: Path) -> 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows ConPTY")
 def test_menu_scrolls_and_restores_terminal_through_windows_conpty() -> None:
+    executable = installer_executable()
     from winpty import PtyProcess
 
-    executable = installer_executable()
     versions = available_versions(executable)
     assert len(versions) > 8, "the live version catalog must contain scrollable history"
     selected_version = versions[8]

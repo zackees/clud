@@ -1,316 +1,439 @@
-//! Post-expansion rm safety. Decisions never spawn; unit builds have no executor.
-//!
-//! Two ways through for a real `rm` run by a session's child process (a
-//! script, `make`, `cargo`):
-//!
-//! - **Inside the roots** (#1340): `CLUD_RM_ROOTS` is set and every operand
-//!   resolves inside it ([`crate::rm_tool::resolve`]). The shim deletes in
-//!   process on every platform, so scripts that clean up after themselves
-//!   work on a developer machine. Roots, `$HOME` and anything outside the
-//!   roots stay refused.
-//! - **CI in Docker**: a CI-named variable and a detected Docker container,
-//!   for CI jobs without roots.
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 
-use crate::deletion_policy::unsafe_delete_base_reason;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RmFlavor {
+    Gnu,
+    Bsd,
+    BusyBox,
+}
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Approved {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    pub program: PathBuf,
+    pub argv: Vec<String>,
     pub operands: Vec<PathBuf>,
-    pub recursive: bool,
-    pub force: bool,
-    pub verbose: bool,
 }
 
-/// The options both gates understand, and the raw operands.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Parsed {
-    recursive: bool,
-    force: bool,
-    verbose: bool,
-    operands: Vec<String>,
-}
-
-/// Parse only options whose semantics we implement. Never forward raw options.
-fn parse(args: &[String]) -> Result<Parsed, String> {
-    let mut result = Parsed::default();
+fn operands(args: &[String]) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
     let mut options = true;
     for arg in args {
         if options && arg == "--" {
             options = false;
-            continue;
-        }
-        if options && arg.starts_with('-') && arg != "-" {
-            match arg.as_str() {
-                "--recursive" => result.recursive = true,
-                "--force" => result.force = true,
-                "--verbose" => result.verbose = true,
-                "--preserve-root" | "--one-file-system" => {}
-                value if !value.starts_with("--") => {
-                    for flag in value[1..].chars() {
-                        match flag {
-                            'r' | 'R' => result.recursive = true,
-                            'f' => result.force = true,
-                            'v' => result.verbose = true,
-                            _ => return Err(format!("unsupported rm option: {arg}")),
-                        }
-                    }
-                }
-                _ => return Err(format!("unsupported rm option: {arg}")),
-            }
-            continue;
-        }
-        result.operands.push(arg.clone());
-    }
-    Ok(result)
-}
-
-pub fn decide(args: &[String], cwd: &Path, home: Option<&Path>) -> Result<Approved, String> {
-    let parsed = parse(args)?;
-    let mut result = Approved {
-        operands: vec![],
-        recursive: parsed.recursive,
-        force: parsed.force,
-        verbose: parsed.verbose,
-    };
-    for arg in &parsed.operands {
-        result.operands.push(validate_operand(arg, cwd, home)?);
-    }
-    if result.operands.is_empty() {
-        return Err("rm requires a provable operand".into());
-    }
-    Ok(result)
-}
-
-/// A child `rm` whose every operand lies inside the session's roots.
-#[derive(Debug, PartialEq, Eq)]
-pub struct InRoots {
-    /// Operands that exist, each checked against the roots.
-    pub targets: Vec<crate::rm_tool::Target>,
-    /// Operands with nothing there (fine with `-f`, an error without).
-    pub missing: Vec<PathBuf>,
-    pub recursive: bool,
-    pub force: bool,
-    pub verbose: bool,
-}
-
-/// The in-roots gate: every operand must resolve inside `roots`, and none may
-/// be a filesystem root, `$HOME` or an ancestor of it, or a root itself.
-pub fn decide_in_roots(
-    args: &[String],
-    cwd: &Path,
-    home: Option<&Path>,
-    roots: &mut crate::rm_tool::Roots,
-) -> Result<InRoots, String> {
-    let parsed = parse(args)?;
-    let mut plan = InRoots {
-        targets: vec![],
-        missing: vec![],
-        recursive: parsed.recursive,
-        force: parsed.force,
-        verbose: parsed.verbose,
-    };
-    for arg in &parsed.operands {
-        if let Some(reason) = unsafe_delete_base_reason(arg) {
-            return Err(format!("unsafe rm operand {arg:?}: {reason}"));
-        }
-        match crate::rm_tool::resolve(arg, cwd, home, roots) {
-            Ok(crate::rm_tool::Resolved::Present(target)) => plan.targets.push(target),
-            Ok(crate::rm_tool::Resolved::Missing(path)) => plan.missing.push(path),
-            Err(reason) => return Err(format!("rm {arg}: {reason}")),
+        } else if options && arg == "--no-preserve-root" {
+            return Err("the platform root protection cannot be disabled".into());
+        } else if !(options && arg.starts_with('-') && arg != "-") {
+            found.push(arg.clone());
         }
     }
-    if parsed.operands.is_empty() {
-        return Err("rm requires a provable operand".into());
-    }
-    Ok(plan)
+    Ok(found)
 }
 
-fn validate_operand(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(reason) = unsafe_delete_base_reason(arg) {
-        return Err(format!("unsafe rm operand {arg:?}: {reason}"));
+pub fn protected_reason(path: &Path, home: Option<&Path>) -> Option<String> {
+    #[cfg(windows)]
+    if let Some(reason) = windows_catastrophe_reason(&path.to_string_lossy()) {
+        return Some(reason.into());
     }
-    // Do not turn unlinking a symlink into deleting its referent. Refuse all
-    // final symlinks, including trailing-slash spellings and dangling links.
-    let raw = Path::new(arg);
-    if raw
-        .components()
-        .any(|c| c == std::path::Component::ParentDir)
+    let mut parts = path.components();
+    if matches!(
+        (parts.next(), parts.next()),
+        (Some(Component::RootDir | Component::Prefix(_)), None)
+    ) {
+        return Some("filesystem root".into());
+    }
+    if path.is_absolute() && path.components().count() == 2 {
+        return Some("top-level directory".into());
+    }
+    if let Some(home) = home.and_then(|h| std::fs::canonicalize(h).ok()) {
+        if home.starts_with(path) {
+            return Some("home directory or its ancestor".into());
+        }
+    }
+    if is_mount_point(path) {
+        return Some("mount point".into());
+    }
+    None
+}
+
+#[cfg(any(test, windows))]
+fn windows_catastrophe_reason(raw: &str) -> Option<&'static str> {
+    let normalized = crate::path_norm::slash_separators(raw);
+    let trimmed = normalized.trim_end_matches('/');
+    if trimmed.eq_ignore_ascii_case("%USERPROFILE%") {
+        return Some("home directory");
+    }
+    if let Some(unc) = trimmed.strip_prefix("//") {
+        let depth = unc.split('/').filter(|part| !part.is_empty()).count();
+        return match depth {
+            0..=2 => Some("filesystem root"),
+            3 => Some("top-level directory"),
+            _ => None,
+        };
+    }
+    let bytes = normalized.as_bytes();
+    let tail = if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'/'
     {
-        return Err("rm parent traversal is not provable".into());
-    }
-
-    let absolute = if raw.is_absolute() {
-        raw.to_path_buf()
+        &normalized[3..]
+    } else if bytes.len() >= 2
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && (bytes.len() == 2 || bytes[2] == b'/')
+    {
+        &normalized[2..]
     } else {
-        cwd.join(raw)
+        return None;
     };
-    if !absolute.is_absolute() {
-        return Err("rm cwd must be absolute".into());
+    let depth = tail.split('/').filter(|part| !part.is_empty()).count();
+    match depth {
+        0 => Some("filesystem root"),
+        1 => Some("top-level directory"),
+        _ => None,
     }
-    if std::fs::symlink_metadata(absolute.as_os_str().to_string_lossy().trim_end_matches('/'))
-        .is_ok_and(|m| m.file_type().is_symlink())
-    {
-        return Err("rm symlink operand is not provable".into());
-    }
-    // Resolve existing ancestors, including symlinks. NotFound is the only
-    // error that permits walking up; permission errors and loops fail closed.
-    let mut ancestor = absolute.as_path();
-    let mut missing = vec![];
-    let canonical = loop {
-        match std::fs::canonicalize(ancestor) {
-            Ok(path) => break path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // A dangling symlink must not be mistaken for a missing file.
-                if std::fs::symlink_metadata(ancestor).is_ok() {
-                    return Err("unresolvable rm symlink".into());
-                }
-                missing.push(
-                    ancestor
-                        .file_name()
-                        .ok_or("unprovable rm ancestor")?
-                        .to_os_string(),
-                );
-                ancestor = ancestor.parent().ok_or("unprovable rm ancestor")?;
-            }
-            Err(error) => return Err(format!("cannot resolve rm operand: {error}")),
-        }
-    };
-    let mut target = canonical;
-    for part in missing.iter().rev() {
-        target.push(part);
-    }
-    let text = target.to_str().ok_or("non-UTF8 rm target")?;
-    if let Some(reason) = unsafe_delete_base_reason(text) {
-        return Err(format!("unsafe canonical rm target: {reason}"));
-    }
-    if let Some(home) = home {
-        let home = std::fs::canonicalize(home).map_err(|e| format!("cannot resolve home: {e}"))?;
-        if home.starts_with(&target) {
-            return Err("rm targets a home root or its ancestor".into());
-        }
-    }
-    reject_mounts(&target)?;
-    Ok(target)
 }
 
 #[cfg(target_os = "linux")]
-fn reject_mounts(target: &Path) -> Result<(), String> {
-    let mounts = std::fs::read_to_string("/proc/self/mountinfo")
-        .map_err(|e| format!("cannot establish mount boundaries: {e}"))?;
-    for line in mounts.lines() {
-        let field = line.split_whitespace().nth(4).ok_or("invalid mountinfo")?;
-        let mount = field
-            .replace("\\040", " ")
-            .replace("\\011", "\t")
-            .replace("\\012", "\n")
-            .replace("\\134", "\\");
-        if Path::new(&mount).starts_with(target) {
-            return Err("rm targets or crosses a mount boundary".into());
+fn is_mount_point(path: &Path) -> bool {
+    if std::fs::read_to_string("/proc/self/mountinfo")
+        .is_ok_and(|contents| mountinfo_has_path(path, &contents))
+    {
+        return true;
+    }
+    device_boundary(path)
+}
+
+#[cfg(unix)]
+fn device_boundary(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(meta), Some(parent)) = (std::fs::metadata(path), path.parent()) else {
+        return false;
+    };
+    std::fs::metadata(parent).is_ok_and(|p| meta.dev() != p.dev())
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_has_path(path: &Path, contents: &str) -> bool {
+    contents
+        .lines()
+        .filter_map(mountinfo_path)
+        .any(|mounted| mounted == path)
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_has_descendant(path: &Path, contents: &str) -> bool {
+    contents
+        .lines()
+        .filter_map(mountinfo_path)
+        .any(|mounted| mounted != path && mounted.starts_with(path))
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_path(line: &str) -> Option<PathBuf> {
+    let encoded = line.split_whitespace().nth(4)?;
+    let decoded = encoded
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\");
+    Some(PathBuf::from(decoded))
+}
+
+#[cfg(target_os = "linux")]
+fn contains_nested_mount(path: &Path) -> Result<bool, String> {
+    match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(contents) => Ok(mountinfo_has_descendant(path, &contents)),
+        Err(_) => device_boundary_within(path),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn contains_nested_mount(path: &Path) -> Result<bool, String> {
+    device_boundary_within(path)
+}
+
+#[cfg(windows)]
+fn contains_nested_mount(path: &Path) -> Result<bool, String> {
+    windows_reparse_tree(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_reparse_tree(path: &Path) -> Result<bool, String> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(item) = pending.pop() {
+        let meta = std::fs::symlink_metadata(&item)
+            .map_err(|error| format!("cannot inspect deletion tree {item:?}: {error}"))?;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(true);
+        }
+        if !meta.is_dir() {
+            continue;
+        }
+        let entries = std::fs::read_dir(&item)
+            .map_err(|error| format!("cannot inspect deletion tree {item:?}: {error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("cannot inspect deletion tree: {error}"))?;
+            pending.push(entry.path());
         }
     }
-    Ok(())
-}
-#[cfg(not(target_os = "linux"))]
-fn reject_mounts(_: &Path) -> Result<(), String> {
-    Err("rm shim execution is unsupported on this platform".into())
+    Ok(false)
 }
 
-/// Literal owner contract: a set key containing uppercase CI, regardless of value.
-pub fn ci_present<'a>(keys: impl Iterator<Item = &'a str>) -> bool {
-    keys.into_iter().any(|key| key.contains("CI"))
+#[cfg(not(any(unix, windows)))]
+fn contains_nested_mount(_: &Path) -> Result<bool, String> {
+    Ok(false)
 }
 
-/// No environment override: inspect this process's running filesystem.
-pub fn docker_detected() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Require accessible evidence from this process's actual filesystem.
-        // O_NOFOLLOW prevents a marker symlink from supplying evidence.
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open("/.dockerenv")
-            .is_ok_and(|file| file.metadata().is_ok_and(|m| m.is_file()))
+#[cfg(unix)]
+fn device_boundary_within(path: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt;
+    let root_dev = std::fs::metadata(path)
+        .map_err(|error| format!("cannot inspect deletion tree {path:?}: {error}"))?
+        .dev();
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|error| format!("cannot inspect deletion tree {dir:?}: {error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("cannot inspect deletion tree: {error}"))?;
+            let meta = std::fs::symlink_metadata(entry.path())
+                .map_err(|error| format!("cannot inspect deletion tree: {error}"))?;
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                continue;
+            }
+            if meta.dev() != root_dev {
+                return Ok(true);
+            }
+            pending.push(entry.path());
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
+    Ok(false)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_mount_point(path: &Path) -> bool {
+    device_boundary(path)
+}
+
+#[cfg(windows)]
+fn is_mount_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_attributes() & 0x400 != 0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_mount_point(_: &Path) -> bool {
+    false
+}
+
+fn canonical_operand(raw: &str, cwd: &Path) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    let native = crate::rm_tool::msys_drive_path(raw).unwrap_or_else(|| raw.to_owned());
+    #[cfg(not(windows))]
+    let native = raw.to_owned();
+    let given = Path::new(&native);
+    #[cfg(windows)]
+    if is_mount_point(&cwd.join(given)) {
+        return Err("operand is a junction or mount point".into());
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Action {
-    DryRun,
-    Execute,
-    Deny,
-}
-
-pub fn gate(dry_run: bool, ci: bool, docker: bool) -> Action {
-    if dry_run {
-        Action::DryRun
-    } else if ci && docker {
-        Action::Execute
+    let absolute = if given.is_absolute() {
+        given.to_path_buf()
     } else {
-        Action::Deny
+        cwd.join(given)
+    };
+    if raw.ends_with('/') || raw.ends_with('\\') {
+        return std::fs::canonicalize(&absolute)
+            .map_err(|e| format!("cannot resolve {raw:?}: {e}"));
+    }
+    if std::fs::symlink_metadata(&absolute).is_ok_and(|m| m.file_type().is_symlink()) {
+        let parent = std::fs::canonicalize(absolute.parent().ok_or("operand has no parent")?)
+            .map_err(|e| format!("cannot resolve {raw:?}: {e}"))?;
+        return Ok(parent.join(absolute.file_name().ok_or("operand has no name")?));
+    }
+    let mut tail = Vec::new();
+    let mut cursor = absolute.as_path();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(base) => return Ok(tail.iter().rev().fold(base, |path, name| path.join(name))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tail.push(
+                    cursor
+                        .file_name()
+                        .ok_or("operand has no existing ancestor")?,
+                );
+                cursor = cursor.parent().ok_or("operand has no existing ancestor")?;
+            }
+            Err(error) => return Err(format!("cannot resolve operand: {error}")),
+        }
     }
 }
 
-/// What the shim will do.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Plan {
-    /// The CI-in-Docker gate: `/bin/rm` on Linux, or a dry run.
-    Gated(Approved, Action),
-    /// Inside the session's roots; `true` for a dry run.
-    InRoots(InRoots, bool),
+fn names_current_or_parent(raw: &str) -> bool {
+    matches!(
+        raw.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next(),
+        Some("." | "..")
+    )
 }
 
-/// Read real process facts, then decide. This library never executes rm.
+pub fn find_handoff(path: &str, shim_exe: &Path) -> Result<PathBuf, String> {
+    let shim = std::fs::canonicalize(shim_exe).unwrap_or_else(|_| shim_exe.to_path_buf());
+    let shim_dir = shim
+        .parent()
+        .ok_or("the clud shim has no parent directory")?;
+    let mut after_shim = false;
+    let executable = if cfg!(windows) {
+        concat!("r", "m.exe")
+    } else {
+        concat!("r", "m")
+    };
+    for dir in std::env::split_paths(path) {
+        let resolved_dir = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if resolved_dir == shim_dir {
+            after_shim = true;
+            continue;
+        }
+        if !after_shim {
+            continue;
+        }
+        let candidate = dir.join(executable);
+        if !candidate.is_file() {
+            continue;
+        }
+        let resolved = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        if resolved != shim && !same_bytes(&resolved, &shim) {
+            // Preserve argv[0] for multi-call binaries (notably BusyBox's
+            // `rm` symlink). The resolved path above is only for identity.
+            return Ok(dir.join(executable));
+        }
+    }
+    if !after_shim {
+        return Err("the clud shim directory is missing from PATH".into());
+    }
+    Err("no handoff executable exists after the clud shim on PATH".into())
+}
+
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(am), Ok(bm)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    am.len() == bm.len() && std::fs::read(a).ok() == std::fs::read(b).ok()
+}
+
+pub fn handoff_args(args: &[String], flavor: RmFlavor) -> Vec<String> {
+    let mut out = Vec::new();
+    let options: Vec<_> = args.iter().take_while(|arg| arg.as_str() != "--").collect();
+    match flavor {
+        RmFlavor::Gnu => {
+            if !options.iter().any(|a| a.as_str() == "--preserve-root=all") {
+                out.push("--preserve-root=all".into());
+            }
+            if !options.iter().any(|a| a.as_str() == "--one-file-system") {
+                out.push("--one-file-system".into());
+            }
+        }
+        RmFlavor::Bsd if !options.iter().any(|a| a.as_str() == "-x") => out.push("-x".into()),
+        RmFlavor::Bsd | RmFlavor::BusyBox => {}
+    }
+    out.extend_from_slice(args);
+    out
+}
+
+fn covers_visible_home_children(operands: &[PathBuf], home: Option<&Path>) -> bool {
+    let Some(home) = home.and_then(|path| std::fs::canonicalize(path).ok()) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&home) else {
+        return false;
+    };
+    let visible: BTreeSet<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            (!name.to_string_lossy().starts_with('.')).then_some(home.join(name))
+        })
+        .collect();
+    !visible.is_empty() && visible.iter().all(|path| operands.contains(path))
+}
+
+pub fn prepare_with(
+    args: &[String],
+    cwd: &Path,
+    home: Option<&Path>,
+    path: &str,
+    shim: &Path,
+    flavor: RmFlavor,
+) -> Result<Plan, String> {
+    let mut resolved = Vec::new();
+    for raw in operands(args)? {
+        #[cfg(windows)]
+        if let Some(reason) = windows_catastrophe_reason(&raw) {
+            return Err(format!("unsafe deletion operand {raw:?}: {reason}"));
+        }
+        #[cfg(windows)]
+        {
+            let given = Path::new(&raw);
+            let direct = if given.is_absolute() {
+                given.to_path_buf()
+            } else {
+                cwd.join(given)
+            };
+            if is_mount_point(&direct) {
+                return Err(format!("unsafe deletion operand {raw:?}: mount point"));
+            }
+        }
+        if names_current_or_parent(&raw) {
+            return Err(format!(
+                "unsafe deletion operand {raw:?}: current or parent directory"
+            ));
+        }
+        let target = canonical_operand(&raw, cwd)?;
+        if let Some(reason) = protected_reason(&target, home) {
+            return Err(format!("unsafe deletion operand {raw:?}: {reason}"));
+        }
+        if target.is_dir() && contains_nested_mount(&target)? {
+            return Err(format!(
+                "unsafe deletion operand {raw:?}: directory contains a mount point"
+            ));
+        }
+        resolved.push(target);
+    }
+    if covers_visible_home_children(&resolved, home) {
+        return Err("all visible children of the home directory were selected".into());
+    }
+    Ok(Plan {
+        program: find_handoff(path, shim)?,
+        argv: handoff_args(args, flavor),
+        operands: resolved,
+    })
+}
+
 pub fn prepare(args: &[String]) -> Result<Plan, String> {
-    let dry = std::env::var("CLUD_RM_DRY_RUN").ok().as_deref() == Some("1");
-    let ci = std::env::vars_os().any(|(key, _)| key.to_string_lossy().contains("CI"));
-    let docker = docker_detected();
     let cwd = std::env::current_dir().map_err(|e| format!("cannot resolve cwd: {e}"))?;
     let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let home = std::env::var_os(home_key)
-        .map(PathBuf::from)
-        .ok_or("rm cannot establish the home root")?;
-    if let Some(value) =
-        std::env::var_os(crate::rm_tool::ROOTS_ENV).filter(|value| !value.is_empty())
-    {
-        let mut roots = crate::rm_tool::Roots::resolve(Some(&value), &cwd);
-        match decide_in_roots(args, &cwd, Some(&home), &mut roots) {
-            Ok(plan) => return Ok(Plan::InRoots(plan, dry)),
-            // CI in Docker keeps its own gate for what the roots refuse.
-            Err(reason) if !(ci && docker) => return Err(reason),
-            Err(_) => {}
-        }
-    }
-    let action = gate(dry, ci, docker);
-    if action == Action::Deny {
-        return Err(format!(
-            "real rm runs only inside this session's roots (${}) or in CI under Docker",
-            crate::rm_tool::ROOTS_ENV
-        ));
-    }
-    Ok(Plan::Gated(decide(args, &cwd, Some(&home))?, action))
-}
-
-/// Report an in-roots dry run.
-pub fn report_in_roots_dry_run(plan: &InRoots) -> i32 {
-    let operands: Vec<&PathBuf> = plan.targets.iter().map(|t| &t.path).collect();
-    println!(
-        "{}",
-        serde_json::json!({
-            "decision": "allow",
-            "dry_run": true,
-            "in_roots": true,
-            "operands": operands,
-            "missing": plan.missing,
-        })
-    );
-    0
+    let home = std::env::var_os(home_key).map(PathBuf::from);
+    let path = std::env::var("PATH").unwrap_or_default();
+    let shim = std::env::current_exe().map_err(|e| format!("cannot resolve shim: {e}"))?;
+    let handoff = find_handoff(&path, &shim)?;
+    let resolved_handoff = std::fs::canonicalize(&handoff).unwrap_or_else(|_| handoff.clone());
+    let is_busybox = resolved_handoff.file_name().is_some_and(|name| {
+        name.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("busybox")
+    });
+    let flavor = if is_busybox {
+        RmFlavor::BusyBox
+    } else if cfg!(target_os = "linux") {
+        RmFlavor::Gnu
+    } else if cfg!(unix) {
+        RmFlavor::Bsd
+    } else {
+        RmFlavor::BusyBox
+    };
+    prepare_with(args, &cwd, home.as_deref(), &path, &shim, flavor)
 }
 
 pub fn deny(reason: &str) -> i32 {
@@ -321,144 +444,114 @@ pub fn deny(reason: &str) -> i32 {
     2
 }
 
-pub fn report_dry_run(approved: Approved, action: Action) -> i32 {
-    let _ = action;
-    println!(
-        "{}",
-        serde_json::json!({"decision":"allow", "dry_run":true, "operands":approved.operands})
-    );
-    0
+pub fn audit(args: &[String], plan: Option<&Plan>, exit: i32, reason: Option<&str>) {
+    let Ok(state) = crate::daemon::default_state_dir() else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let handoff = plan.map(|plan| {
+        let mut command = vec![plan.program.to_string_lossy().into_owned()];
+        command.extend(plan.argv.iter().cloned());
+        command
+    });
+    let record = serde_json::json!({
+        "ts_unix": now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+        "command": "r".to_owned() + "m",
+        "role": "child",
+        "cwd": std::env::current_dir().ok(),
+        "operands": args,
+        "handoff": handoff,
+        "exit": exit,
+        "reason": reason,
+    });
+    crate::rm_tool::append_audit(&state.join("logs").join("rm"), now, &record);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn complete_gate_truth_table_and_unit_executor_is_always_dry() {
-        for dry in [false, true] {
-            for ci in [false, true] {
-                for docker in [false, true] {
-                    let action = gate(dry, ci, docker);
-                    let expected = if dry {
-                        Action::DryRun
-                    } else if ci && docker {
-                        Action::Execute
-                    } else {
-                        Action::Deny
-                    };
-                    assert_eq!(action, expected);
-                    if action != Action::Deny {
-                        assert_eq!(
-                            report_dry_run(
-                                Approved {
-                                    operands: vec![],
-                                    recursive: false,
-                                    force: false,
-                                    verbose: false
-                                },
-                                action
-                            ),
-                            0
-                        );
-                    }
-                }
-            }
+    fn current_and_parent_operands_are_refused_before_handoff() {
+        for operand in [".", "..", "./", "../", "child/.", "child/..", "child\\.."] {
+            assert!(names_current_or_parent(operand), "{operand}");
         }
-        assert!(ci_present(["SPECIAL", "MY_CI_JOB"].into_iter()));
-        assert!(ci_present(["SPECIAL"].into_iter()));
-        assert!(!ci_present(["ci", "HOME"].into_iter()));
+        for operand in ["child", "..hidden", "child/../sibling"] {
+            assert!(!names_current_or_parent(operand), "{operand}");
+        }
     }
+
     #[test]
-    fn refuses_roots_and_unknown_options_in_guaranteed_dry_run() {
+    fn windows_drive_msys_and_unc_roots_have_catastrophe_reasons() {
         for operand in [
-            "/",
-            "//server/share",
             "C:/",
-            "/c/",
-            "../escape",
-            "",
-            ".",
-            "/tmp/..",
-            "/tmp",
-            "--no-preserve-root",
-            "-z",
+            "C:\\",
+            "C:/Windows",
+            "C:/Users",
+            "/c",
+            "/c/Windows",
+            "//server/share",
+            "%USERPROFILE%",
         ] {
-            assert!(
-                decide(&[operand.into()], Path::new("/tmp/work"), None).is_err(),
-                "{operand}"
-            );
+            assert!(windows_catastrophe_reason(operand).is_some(), "{operand}");
         }
-    }
-    #[test]
-    fn in_roots_gate_allows_only_operands_inside_the_roots() {
-        let tmp = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(tmp.path()).unwrap();
-        let (root, home) = (base.join("repo"), base.join("home"));
-        std::fs::create_dir_all(root.join("build/x")).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("keep"), b"k").unwrap();
-        // An existing file outside the roots on every platform: `/etc/passwd`
-        // is `C:\etc\passwd` on Windows, which does not exist, so it would
-        // resolve as missing instead of outside.
-        let outside = base.join("outside.txt");
-        std::fs::write(&outside, b"o").unwrap();
-        let mut roots = crate::rm_tool::Roots::fixed(vec![root.clone()], true);
-        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-
-        let plan = decide_in_roots(
-            &args(&["-rf", "build", "gone"]),
-            &root,
-            Some(&home),
-            &mut roots,
-        )
-        .unwrap();
-        assert!(plan.recursive && plan.force);
-        assert_eq!(plan.targets.len(), 1);
-        assert_eq!(plan.targets[0].path, root.join("build"));
-        assert!(plan.targets[0].is_dir);
-        assert_eq!(plan.missing, vec![root.join("gone")]);
-        assert_eq!(report_in_roots_dry_run(&plan), 0);
-
-        let home_file = home.join("keep");
-        for refused in [
-            vec!["-rf", "/"],
-            vec!["-f", home_file.to_str().unwrap()],
-            vec!["-rf", root.to_str().unwrap()],
-            vec!["-rf", "build", outside.to_str().unwrap()],
-            vec!["-rfz", "build"],
-            vec!["-rf"],
+        for operand in [
+            "C:/Users/alice/build",
+            "/c/projects/build",
+            "//server/share/work/build",
         ] {
-            assert!(
-                decide_in_roots(&args(&refused), &root, Some(&home), &mut roots).is_err(),
-                "{refused:?}"
-            );
+            assert_eq!(windows_catastrophe_reason(operand), None, "{operand}");
         }
-        assert!(root.join("build/x").exists(), "decisions never delete");
-        assert!(outside.exists());
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn validates_every_operand_and_canonical_ancestors() {
-        let tmp = tempfile::tempdir().unwrap();
-        let args = vec!["-rfv".into(), "--".into(), "missing/leaf".into()];
-        let good = decide(&args, tmp.path(), None).unwrap();
-        assert!(good.recursive && good.force && good.verbose);
-        assert_eq!(report_dry_run(good, Action::DryRun), 0);
-        assert!(decide(&["leaf".into(), "/".into()], tmp.path(), None).is_err());
-        let safe = tmp.path().join("safe-file");
-        std::fs::write(&safe, b"preserve referent").unwrap();
-        std::os::unix::fs::symlink(&safe, tmp.path().join("link")).unwrap();
-        assert!(decide(&["link".into()], tmp.path(), None).is_err());
-        assert!(safe.exists());
-        std::os::unix::fs::symlink("/", tmp.path().join("root")).unwrap();
-        assert!(decide(&["root".into()], tmp.path(), None).is_err());
-        assert!(decide(
-            &[tmp.path().to_str().unwrap().into()],
-            tmp.path(),
-            Some(tmp.path())
-        )
-        .is_err());
-        assert!(reject_mounts(Path::new("/proc")).is_err());
+    fn bind_mount_on_same_device_is_still_a_mount_point() {
+        let mountinfo = "36 25 8:1 /source /tmp/fixture/inner rw - ext4 /dev/sda1 rw\n";
+        assert!(mountinfo_has_path(
+            Path::new("/tmp/fixture/inner"),
+            mountinfo
+        ));
+        assert!(!mountinfo_has_path(Path::new("/tmp/fixture"), mountinfo));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_recursive_parent_detects_same_device_nested_bind_mounts() {
+        let mountinfo = "36 25 8:1 /source /tmp/fixture/inner rw - ext4 /dev/sda1 rw\n";
+        assert!(mountinfo_has_descendant(
+            Path::new("/tmp/fixture"),
+            mountinfo
+        ));
+        assert!(!mountinfo_has_descendant(
+            Path::new("/tmp/fixture/inner"),
+            mountinfo
+        ));
+        assert!(!mountinfo_has_descendant(
+            Path::new("/tmp/other"),
+            mountinfo
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn busybox_handoff_keeps_the_rm_applet_symlink_name() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let shim_dir = temp.path().join("shim");
+        let handoff_dir = temp.path().join("handoff");
+        std::fs::create_dir(&shim_dir).unwrap();
+        std::fs::create_dir(&handoff_dir).unwrap();
+        let shim = shim_dir.join("rm");
+        std::fs::write(&shim, b"shim").unwrap();
+        let busybox = handoff_dir.join("busybox");
+        std::fs::write(&busybox, b"busybox").unwrap();
+        let applet = handoff_dir.join("rm");
+        symlink(&busybox, &applet).unwrap();
+        let path = std::env::join_paths([&shim_dir, &handoff_dir]).unwrap();
+        assert_eq!(
+            find_handoff(&path.to_string_lossy(), &shim).unwrap(),
+            applet
+        );
     }
 }

@@ -1,9 +1,8 @@
 name: RM protection (Docker)
 
-# Inert JSON corpus + dry-run operands + disposable-file execution gate.
-# Hazardous shell command text is never evaluated. The only execution check
-# removes its own disposable file, with both CI and actual Docker evidence.
-# Manual/reusable; the source corpus also runs in every PR's Rust unit lane.
+# Recording-stub corpus plus a real GNU bind-mount probe. Hazardous corpus
+# operands never reach a real removal executable; only disposable fixture
+# paths are ever handed to /bin/rm.
 
 on:
   workflow_dispatch: {}
@@ -18,7 +17,7 @@ env:
 
 jobs:
   rm-protection:
-    name: rm -rf $VAR guard
+    name: child removal floor
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -30,21 +29,27 @@ jobs:
           strategy: native
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build only the two binaries this check needs; the full workspace is
-      # unnecessary here. Soldr owns compile admission for these builds.
-      - name: Build the hook and shim binaries
-        run: soldr cargo build -p clud --bin clud-block-bad-cmd --bin clud-shim
+      - name: Ensure the native linker is installed
+        run: |
+          if ! command -v clang >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y clang
+          fi
 
-      - name: Locate the hook binary
+      - name: Build the command-scan hook and deletion binaries
+        run: soldr cargo build -p clud --bin clud --bin clud-cmd-scan --bin clud-shim
+
+      - name: Locate the binaries
         id: binary
         run: |
           set -euo pipefail
           for candidate in \
-            target/debug/clud-block-bad-cmd \
-            target/x86_64-unknown-linux-gnu/debug/clud-block-bad-cmd; do
+            target/debug/clud-cmd-scan \
+            target/x86_64-unknown-linux-gnu/debug/clud-cmd-scan; do
             if [ -x "$candidate" ]; then
-              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              echo "hook=$candidate" >> "$GITHUB_OUTPUT"
               echo "shim=$(dirname "$candidate")/clud-shim" >> "$GITHUB_OUTPUT"
+              echo "clud=$(dirname "$candidate")/clud" >> "$GITHUB_OUTPUT"
               echo "using $candidate"
               exit 0
             fi
@@ -52,25 +57,22 @@ jobs:
           echo "hook binary not found after compile" >&2
           exit 1
 
-      # The base image tracks the runner's libc, because the binary is copied
-      # in rather than rebuilt. A mismatch shows up unmistakably as exit 127
-      # on every case rather than as a silent pass.
-      - name: Build the check image
+      - name: Name the disposable image
+        id: image
+        run: echo "tag=clud-rm-protection:$(hostname)" >> "$GITHUB_OUTPUT"
+
+      - name: Build the disposable check image
         run: >
           docker build
           -f ci/docker/rm_protection/Dockerfile
           --build-arg BASE=ubuntu:24.04
-          --build-arg BINARY=${{ steps.binary.outputs.path }}
+          --build-arg CLUD_BINARY=${{ steps.binary.outputs.clud }}
+          --build-arg HOOK_BINARY=${{ steps.binary.outputs.hook }}
           --build-arg SHIM_BINARY=${{ steps.binary.outputs.shim }}
-          -t clud-rm-protection:ci
+          -t ${{ steps.image.outputs.tag }}
           .
 
-      # No network, read-only root, unprivileged, all capabilities dropped,
-      # and disposable tmpfs paths. /work permits fixture executables; no host
-      # directory is writable. Nothing of the checkout is
-      # mounted, so the container has nothing to lose even in the failure mode
-      # this check exists to prevent.
-      - name: Verify every rm shape is refused
+      - name: Verify the legacy corpus through a recording handoff stub
         run: >
           docker run --rm
           --network none
@@ -78,6 +80,31 @@ jobs:
           --cap-drop ALL
           --security-opt no-new-privileges
           --tmpfs /tmp:rw,exec,nosuid,mode=1777
-          --tmpfs /work:rw,exec,nosuid,uid=10001,gid=10001,mode=0700
           --tmpfs /home/checker:rw,noexec,nosuid,uid=10001,gid=10001,mode=0700
-          clud-rm-protection:ci
+          ${{ steps.image.outputs.tag }}
+
+      - name: Verify real GNU removal cannot cross a bind mount
+        run: |
+          set -euo pipefail
+          probe_volume="$(docker volume create)"
+          trap 'docker volume rm "$probe_volume" >/dev/null' EXIT
+          docker run --rm --user 0:0 \
+            --mount "type=volume,source=$probe_volume,target=/seed" \
+            --entrypoint /usr/bin/touch ${{ steps.image.outputs.tag }} /seed/CLAUDE.md
+          probe_source="$(docker volume inspect --format '{{ .Mountpoint }}' "$probe_volume")"
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,exec,nosuid,mode=1777 \
+            --tmpfs /home/checker:rw,noexec,nosuid,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /mount-probe:rw,exec,nosuid,uid=10001,gid=10001,mode=0700 \
+            -e RM_REQUIRE_MOUNT_PROBE=1 \
+            --mount "type=bind,source=$probe_source,target=/mount-probe/parent/mounted,readonly" \
+            ${{ steps.image.outputs.tag }} \
+            python -m pytest -p no:cacheprovider -q tests/test_mount_floor.py
+
+      - name: Discard the disposable image
+        if: always() && steps.image.outputs.tag != ''
+        run: docker rmi "${{ steps.image.outputs.tag }}"

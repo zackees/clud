@@ -148,7 +148,7 @@ fn merging_concatenates_per_event_rather_than_replacing() {
 fn merging_preserves_unrelated_keys_and_events() {
     let mut base = json!({
         "model": "some-model",
-        "permissions": {"deny": ["Bash(rm *)"]},
+        "permissions": {"deny": ["Bash(false *)"]},
         "hooks": {"SessionStart": [{"hooks":[{"command":"theirs"}]}]}
     });
     let overlay =
@@ -158,7 +158,7 @@ fn merging_preserves_unrelated_keys_and_events() {
     merge_hook_settings(&mut base, &overlay).expect("merges");
 
     assert_eq!(base["model"], "some-model");
-    assert_eq!(base["permissions"]["deny"][0], "Bash(rm *)");
+    assert_eq!(base["permissions"]["deny"][0], "Bash(false *)");
     assert_eq!(commands_for(&base, "SessionStart"), vec!["theirs"]);
     assert_eq!(
         commands_for(&base, "Stop"),

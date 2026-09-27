@@ -128,27 +128,18 @@ def test_the_gate_denies_even_a_harmless_unwrapped_command(tmp_path: Path) -> No
     )
 
 
-def test_the_wrapped_removal_the_hook_allows_is_denied_at_tap(tmp_path: Path) -> None:
-    """Door two: what the hook has no grounds to object to, `tap` still stops.
-
-    `tap rm -rf /etc/passwd` is a literal path with no variable in it, so the
-    hook's variable interpreter has nothing to prove and lets it through
-    (verified below, not assumed). Only `tap` -- which knows the session root
-    -- can refuse it.
-
-    That asymmetry is the reason the wrapper exists: the hook reasons about
-    text and cannot know where the session is allowed to write."""
+def test_the_wrapped_removal_rewrites_and_tap_still_denies_outside_paths(tmp_path: Path) -> None:
+    """Agent deletion rewrites to the profile tool; tap independently rejects outside paths."""
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    # Since #1340 the hook no longer passes an agent's own `rm` at all: it
-    # redirects it to `rm-dir`, which enforces the session's roots itself.
-    # `tap` is still the guard for what it wraps, checked below directly.
+    # The agent hook rewrites direct deletion to the profile-scoped tool.
+    # `tap` remains a separate guard for scripts that explicitly call it.
     hook = _hook(tmp_path, repo, "tap rm -rf /etc/passwd")
-    assert hook.returncode == 2, (
-        f"the hook redirects an agent's rm: rc={hook.returncode} stderr={hook.stderr}"
-    )
-    assert "rm-dir /etc/passwd" in hook.stderr, hook.stderr
+    assert hook.returncode == 0, hook
+    output = json.loads(hook.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "allow"
+    assert output["updatedInput"]["command"] == "safe-rm -rf /etc/passwd"
 
     tap = _require("tap")
     env = os.environ.copy()
@@ -196,32 +187,17 @@ def test_the_expanded_root_removal_is_refused_by_tap(tmp_path: Path) -> None:
     assert refused.stdout == "", refused.stdout
 
 
-def test_the_wrapped_unset_variable_is_also_caught_by_the_hook(tmp_path: Path) -> None:
-    """Both guards fire on the wrapped `$VAR/` form, and that is worth pinning.
-
-    I expected the hook to pass `tap rm -rf "$SP"/` through on the strength of
-    its prefix and leave the catch to `tap`. It does not: `block_bad_cmd_rm_vars`
-    refuses it first, because it cannot prove `$SP` holds one nonempty literal
-    path. That is stronger than #1067's criterion asks for -- the criterion
-    says "at the hook (unwrapped) **or** at `tap` (wrapped)" -- and it is
-    defence in depth rather than redundancy, since the two guards fail for
-    unrelated reasons.
-
-    Pinned so that if the interpreter is ever relaxed, this says so instead of
-    the coverage quietly moving to `tap` alone.
-
-    Since #1340 the hook refuses it earlier still: an agent's own `rm`, wrapped
-    or not, is redirected to `rm-dir`, which refuses anything outside the
-    session's roots at run time."""
+def test_the_wrapped_unset_variable_is_rewritten_by_the_hook(tmp_path: Path) -> None:
+    """The hook rewrites the agent command; operand safety is checked later."""
     repo = tmp_path / "repo"
     repo.mkdir()
 
     result = _hook(tmp_path, repo, f"tap {UNSET_VARIABLE_REMOVAL}")
 
-    assert result.returncode == 2, (
-        f"an agent's rm is refused even when wrapped: rc={result.returncode} stderr={result.stderr}"
-    )
-    assert "rm-dir" in result.stderr, result.stderr
+    assert result.returncode == 0, result
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "allow"
+    assert output["updatedInput"]["command"] == 'safe-rm -rf "$SP"/'
 
 
 def test_the_gate_is_off_unless_the_session_enables_it(tmp_path: Path) -> None:

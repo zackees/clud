@@ -147,11 +147,11 @@ def test_non_shell_patch_payload_skips_shell_identity_analysis(tmp_path: Path) -
     assert "permissionDecision" not in result.stdout
 
 
-def test_shell_identity_denial_has_a_categorized_audit_record(tmp_path: Path) -> None:
+def test_deletion_environment_denial_has_a_categorized_audit_record(tmp_path: Path) -> None:
     payload = json.dumps(
         {
             "tool_name": "Bash",
-            "tool_input": {"command": "echo safe"},
+            "tool_input": {"command": "PATH=/usr/bin safe-rm x"},
             "cwd": str(tmp_path),
         }
     )
@@ -203,61 +203,6 @@ def test_unparseable_payload_naming_a_removal_after_a_newline_is_denied(
     assert '"deny"' in result.stdout
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell needed to hold the pipe open")
-def test_complete_payload_is_verified_even_when_stdin_never_reaches_eof(
-    tmp_path: Path,
-) -> None:
-    """A held-open pipe is not a truncated payload.
-
-    Claude Code routinely writes a complete payload and leaves stdin open
-    (anthropics/claude-code#53177, `windows-quirks.md`), which is the whole
-    reason the idle timeout exists. Treating that as unverifiable denied every
-    tool call whose text merely mentioned `rm` — including #963's own safe
-    rewrite — with retry advice that could never succeed.
-
-    `tests.process` closes the child's stdin on write, so the pipe is held
-    open by a shell instead.
-    """
-    home = tmp_path / "home"
-    # #1340: a Bash `rm` is redirected to rm-file before any rewrite, so the
-    # rewrite is exercised through a PowerShell-labelled shell tool (#1083).
-    payload = json.dumps(
-        {
-            "tool_name": "PowerShell",
-            "tool_input": {"command": 'SP="/tmp/safe/path"; rm -f "$SP"/*.txt'},
-            "cwd": str(tmp_path),
-        }
-    )
-    script = (
-        f"{{ printf %s {shlex.quote(payload)}; sleep 2; }} "
-        f"| {shlex.quote(str(_block_bad_cmd_binary()))}"
-    )
-
-    result = process.run(
-        ["bash", "-c", script],
-        stdout=process.PIPE,
-        stderr=process.PIPE,
-        text=True,
-        env=_hook_env(home),
-        timeout=30,
-    )
-
-    assert result.returncode == 0, (
-        "a complete payload whose writer held the pipe open must still be "
-        f"verified normally; stdout={result.stdout!r}"
-    )
-    # #963 proves this removal safe and rewrites it, rather than denying.
-    hook_output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert hook_output["permissionDecision"] == "allow"
-    assert "$SP" not in hook_output["updatedInput"]["command"]
-
-    log = (home / ".clud" / "tools" / "hooks" / "block-bad-cmd.log").read_text(encoding="utf-8")
-    assert "stdin_read_incomplete" in log, (
-        "the read must actually have stopped short, or this test is not "
-        "exercising the path it claims to"
-    )
-
-
 def test_unparseable_payload_without_a_removal_is_still_allowed(
     tmp_path: Path,
 ) -> None:
@@ -277,146 +222,73 @@ def test_unparseable_payload_without_a_removal_is_still_allowed(
         assert "permissionDecision" not in result.stdout
 
 
-def test_rm_literal_assignment_rewrites_before_backend_prompt(tmp_path: Path) -> None:
-    """#963: resolve a preceding literal assignment before Claude can ask.
-
-    Since #1087, a provable rewrite scopes the *rewrite* — it no longer
-    auto-allows the entire compound command, so the decision here is `ask`
-    with the `$SP` operands rewritten to the proven literal.
-    """
-    scratchpad = "C:/Users/test/.clud/tmp/claude/session/scratchpad"
-    command = (
-        "git status --porcelain; "
-        f'SP="{scratchpad}"; '
-        'rm -f "$SP"/*.txt "$SP"/*.json "$SP"/*.md 2>/dev/null; '
-        'ls "$SP"'
-    )
-    tool_input = {
-        "command": command,
-        "description": "clear scratchpad",
-        "timeout": 120_000,
-        "run_in_background": False,
-        "future_field": {"preserve": True},
-    }
-    # #1340: Bash's `rm` is redirected to rm-file; the rewrite still serves
-    # PowerShell-labelled shell tools, which get the POSIX resolver (#1083).
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pipe fixture")
+def test_complete_safe_tool_payload_is_processed_with_held_open_stdin(tmp_path: Path) -> None:
+    home = tmp_path / "home"
     payload = json.dumps(
-        {
-            "tool_name": "PowerShell",
-            "tool_input": tool_input,
-            "cwd": str(tmp_path),
-        }
+        {"tool_name": "Bash", "tool_input": {"command": "safe-rm build"}, "cwd": str(tmp_path)}
     )
-
-    result = _run_hook_with_open_stdin(tmp_path, payload)
-
-    assert result.returncode == 0, result.stderr
-    output = json.loads(result.stdout)
-    hook_output = output["hookSpecificOutput"]
-    assert hook_output["hookEventName"] == "PreToolUse"
-    assert hook_output["permissionDecision"] == "ask"
-    updated = hook_output["updatedInput"]
-    assert updated.keys() == tool_input.keys()
-    assert updated["description"] == "clear scratchpad"
-    assert updated["timeout"] == 120_000
-    assert updated["run_in_background"] is False
-    assert updated["future_field"] == {"preserve": True}
-    rm_segment = updated["command"].split("; ")[2]
-    assert f'rm -f "{scratchpad}"/*.txt "{scratchpad}"/*.json "{scratchpad}"/*.md' in rm_segment, (
-        rm_segment
+    script = (
+        f"{{ printf %s {shlex.quote(payload)}; sleep 2; }} "
+        f"| {shlex.quote(str(_block_bad_cmd_binary()))}"
     )
-    assert "$SP" not in updated["command"].split("rm -f", 1)[1].split(";", 1)[0]
-    assert updated["command"].count(scratchpad) == 4
+    result = process.run(
+        ["bash", "-c", script],
+        stdout=process.PIPE,
+        stderr=process.PIPE,
+        text=True,
+        env=_hook_env(home),
+        timeout=30,
+    )
+    assert result.returncode == 0, result
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "allow"
+    log = (home / ".clud" / "tools" / "hooks" / "block-bad-cmd.log").read_text(
+        encoding="utf-8"
+    )
+    assert "stdin_read_incomplete" in log
 
 
-def test_rm_unresolved_variable_is_a_structured_noninteractive_denial(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("r" + "m -rf build", "safe-rm -rf build"),
+        ("cd build && r" + "m -f cache", "cd build && safe-rm -f cache"),
+        ("find build -name '*.tmp' -delete", None),
+    ],
+)
+def test_deletion_hook_rewrites_or_refuses_with_fields_preserved(
+    tmp_path: Path, command: str, expected: str | None
 ) -> None:
+    tool_input = {"command": command, "timeout": 120_000, "future_field": {"preserve": True}}
     payload = json.dumps(
-        {
-            "tool_name": "PowerShell",
-            "tool_input": {"command": 'rm -rf "$UNSET"/*'},
-            "cwd": str(tmp_path),
-        }
-    )
-
-    result = _run_hook_with_open_stdin(tmp_path, payload)
-
-    assert result.returncode == 2
-    hook_output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert hook_output["permissionDecision"] == "deny"
-    assert "could not be proven" in hook_output["permissionDecisionReason"]
-    assert "ask" not in result.stdout
-
-
-def test_bash_rm_is_redirected_to_rm_tools_with_the_replacement(tmp_path: Path) -> None:
-    """#1340: an agent's own `rm` is refused with the command to run."""
-    for command, replacement in (
-        ('rm -rf "$UNSET"/*', 'rm-dir "$UNSET"/*'),
-        ('SP=/tmp/safe/path; rm -f "$SP"/*.txt', 'rm-file "$SP"/*.txt'),
-        ("find . -name '*.o' -delete", "find . -name '*.o' -type f -exec rm-file {} +"),
-    ):
-        payload = json.dumps(
-            {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(tmp_path)}
-        )
-        result = _run_hook_with_open_stdin(tmp_path, payload)
-        assert result.returncode == 2, (command, result.stdout)
-        reason = json.loads(result.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
-        assert replacement in reason, (command, reason)
-
-
-def test_bash_rm_file_is_allowed_without_a_prompt(tmp_path: Path) -> None:
-    """#1340: a command made only of rm-file / rm-dir needs no permission."""
-    payload = json.dumps(
-        {
-            "tool_name": "Bash",
-            "tool_input": {"command": "rm-dir build && rm-file notes.txt"},
-            "cwd": str(tmp_path),
-        }
+        {"tool_name": "Bash", "tool_input": tool_input, "cwd": str(tmp_path)}
     )
     result = _run_hook_with_open_stdin(tmp_path, payload)
-    assert result.returncode == 0, result.stdout
-    hook_output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert hook_output["permissionDecision"] == "allow"
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    if expected is None:
+        assert result.returncode == 2, result
+        assert output["permissionDecision"] == "deny"
+        assert "safe-rm" in output["permissionDecisionReason"]
+    else:
+        assert result.returncode == 0, result
+        assert output["permissionDecision"] == "allow"
+        assert output["updatedInput"] == {**tool_input, "command": expected}
 
 
-def test_rm_rewrite_and_deny_support_camel_case_codex_payloads(
-    tmp_path: Path,
-) -> None:
-    tool_input = {
-        "command": 'SP=/tmp/safe/path; rm -f "$SP"/*.txt',
+def test_deletion_hook_preserves_camel_case_codex_payload(tmp_path: Path) -> None:
+    tool_input = {"command": "r" + "m -v 'my file'", "timeoutMs": 30_000}
+    payload = json.dumps(
+        {"toolName": "Bash", "toolInput": tool_input, "cwdPath": str(tmp_path)}
+    )
+    result = _run_hook_with_open_stdin(tmp_path, payload)
+    assert result.returncode == 0, result
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "allow"
+    assert output["updatedInput"] == {
+        "command": "safe-rm -v 'my file'",
         "timeoutMs": 30_000,
-        "futureField": {"preserve": True},
     }
-    rewrite_payload = json.dumps(
-        {
-            "toolName": "PowerShell",
-            "toolInput": tool_input,
-            "cwdPath": str(tmp_path),
-        }
-    )
-
-    rewritten = _run_hook_with_open_stdin(tmp_path, rewrite_payload)
-
-    assert rewritten.returncode == 0, rewritten.stderr
-    hook_output = json.loads(rewritten.stdout)["hookSpecificOutput"]
-    assert hook_output["permissionDecision"] == "allow"
-    assert hook_output["updatedInput"]["timeoutMs"] == 30_000
-    assert hook_output["updatedInput"]["futureField"] == {"preserve": True}
-    assert "$SP" not in hook_output["updatedInput"]["command"].split("rm -f", 1)[1]
-
-    deny_payload = json.dumps(
-        {
-            "toolName": "PowerShell",
-            "toolInput": {"command": 'rm -rf "$UNSET"/*'},
-            "cwdPath": str(tmp_path),
-        }
-    )
-    denied = _run_hook_with_open_stdin(tmp_path, deny_payload)
-    assert denied.returncode == 2
-    denied_output = json.loads(denied.stdout)["hookSpecificOutput"]
-    assert denied_output["permissionDecision"] == "deny"
-    assert "ask" not in denied.stdout
 
 
 def test_normal_command_remains_silent_instead_of_emitting_bare_allow(

@@ -33,6 +33,21 @@ def test_unmarked_std_command_remains_banned() -> None:
     assert not is_allowed("let mut command = Command::new(program);")
 
 
+def test_files_without_command_builders_skip_expensive_rust_token_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ci.banned_imports as lint_module
+
+    source = tmp_path / "ordinary.rs"
+    source.write_text("fn ordinary() {}\n", encoding="utf-8")
+
+    def unexpected_scan(_content: str) -> str:
+        raise AssertionError("token scan is unnecessary without a command builder")
+
+    monkeypatch.setattr(lint_module, "_rust_code_only", unexpected_scan)
+    assert scan_file(source) == []
+
+
 @pytest.mark.parametrize("method", ["spawn", "status", "output"])
 def test_scan_rejects_multiline_raw_execution(tmp_path: Path, method: str) -> None:
     source = tmp_path / "raw.rs"
