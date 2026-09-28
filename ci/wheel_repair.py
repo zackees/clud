@@ -127,6 +127,14 @@ def _rewrite_record(root: Path, record_path: PurePosixPath) -> None:
 
 
 def _write_wheel(root: Path, destination: Path) -> None:
+    # ZipFile.extractall never restores Unix modes, so a wheel that was
+    # extracted and repacked would ship its scripts as 0644 and pip would
+    # install a non-executable `clud`. Scripts are always executable.
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
-            archive.write(file_path, file_path.relative_to(root).as_posix())
+            name = file_path.relative_to(root).as_posix()
+            info = zipfile.ZipInfo.from_file(file_path, name)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            mode = 0o755 if ".data/scripts/" in name else 0o644
+            info.external_attr = (0o100000 | mode) << 16
+            archive.writestr(info, file_path.read_bytes())
