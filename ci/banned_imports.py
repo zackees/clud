@@ -308,7 +308,7 @@ def main() -> int:
     #
     # clud_shim.rs is exempt — the shim's entire purpose is to `execvp`
     # (Unix) or `CreateProcess` (Windows) and replace itself with the
-    # resolved Python interpreter. running-process's NativeProcess
+    # resolved Python interpreter or the real gh / pinned watcher. running-process's NativeProcess
     # always spawns under containment, which is precisely the wrong
     # semantics for a relay binary. See #406 / #409.
     #

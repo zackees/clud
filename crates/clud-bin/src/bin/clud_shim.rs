@@ -53,6 +53,13 @@ pub const STDERR_NO_SESSION: &str = "clud python shim invoked outside a clud ses
 
 fn main() {
     let argv: Vec<_> = env::args_os().collect();
+    if argv
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_name())
+        .is_some_and(|name| name == "gh" || name == "gh.exe")
+    {
+        exit(gh_shim::run(&argv[1..]));
+    }
     // `safe-rm` (#1461): clud-controlled deletion for agents.
     if argv
         .first()
@@ -694,5 +701,268 @@ mod tests {
             "python"
         );
         assert_eq!(current_exe_basename(&[]), "python");
+    }
+}
+
+mod gh_shim {
+    //! Session-local `gh` relay. Only `pr checks --watch` changes behavior.
+
+    use std::ffi::OsString;
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const TARGET: &str = "CLUD_GH_SHIM_TARGET";
+
+    pub fn run(args: &[OsString]) -> i32 {
+        let target = match std::env::var_os(TARGET) {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => {
+                eprintln!("clud gh shim: {TARGET} is unset; run gh inside a clud session");
+                return 127;
+            }
+        };
+        if !target.is_absolute() || !target.is_file() || recursive_target(&target) {
+            eprintln!("clud gh shim: invalid real gh target: {}", target.display());
+            return 126;
+        }
+        if std::env::var("CLUD_GH_SHIM_FAIL_FAST").as_deref() != Ok("0") {
+            match watch_words(args) {
+                Ok(Some(words)) => return watch(&target, &words),
+                Ok(None) => {}
+                Err(code) => return code,
+            }
+        }
+        exec(&target, args)
+    }
+
+    fn watch_words(args: &[OsString]) -> Result<Option<Vec<&str>>, i32> {
+        let words: Option<Vec<&str>> = args.iter().map(|arg| arg.to_str()).collect();
+        if let Some(words) = words {
+            return Ok(is_watch(&words).then_some(words));
+        }
+        let lossy: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        let words: Vec<_> = lossy.iter().map(|word| word.as_ref()).collect();
+        if is_watch(&words) {
+            eprintln!("clud gh shim: non-UTF8 PR-watch arguments are ambiguous");
+            Err(2)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn recursive_target(target: &Path) -> bool {
+        let Ok(current) = std::env::current_exe() else {
+            return false;
+        };
+        if target == current
+            || std::fs::canonicalize(target)
+                .ok()
+                .is_some_and(|resolved| std::fs::canonicalize(current).ok() == Some(resolved))
+        {
+            return true;
+        }
+        std::env::var_os("CLUD_RM_SHIM_DIR")
+            .is_some_and(|dir| target.starts_with(PathBuf::from(dir)))
+    }
+
+    fn is_watch(words: &[&str]) -> bool {
+        if !words
+            .iter()
+            .any(|w| *w == "--watch" || w.starts_with("--watch="))
+        {
+            return false;
+        }
+        let mut positionals = Vec::new();
+        let mut skip_value = false;
+        for word in words {
+            if skip_value {
+                skip_value = false;
+            } else if matches!(*word, "--repo" | "-R" | "--interval" | "-i" | "--hostname") {
+                skip_value = true;
+            } else if !word.starts_with('-') {
+                positionals.push(*word);
+            }
+        }
+        positionals.starts_with(&["pr", "checks"])
+    }
+
+    fn watch(target: &Path, words: &[&str]) -> i32 {
+        let mut selector: Option<&str> = None;
+        let mut repo: Option<&str> = None;
+        let mut interval: Option<&str> = None;
+        let mut watch_seen = false;
+        let mut command = Vec::new();
+        let mut i = 0;
+        while i < words.len() {
+            let word = words[i];
+            match word {
+                "pr" if command.is_empty() => command.push(word),
+                "checks" if command == ["pr"] => command.push(word),
+                "--watch" => watch_seen = true,
+                "--fail-fast" => {}
+                "--repo" | "-R" | "--interval" | "-i" => {
+                    i += 1;
+                    let Some(value) = words.get(i).copied() else {
+                        return invalid(word);
+                    };
+                    if value.is_empty() || value.starts_with('-') {
+                        return invalid(word);
+                    }
+                    if word == "--repo" || word == "-R" {
+                        repo = Some(value)
+                    } else {
+                        interval = Some(value)
+                    }
+                }
+                _ if word.starts_with("--repo=") && word.len() > 7 => repo = Some(&word[7..]),
+                _ if word.starts_with("-R") && word.len() > 2 => repo = Some(&word[2..]),
+                _ if word.starts_with("--interval=") && word.len() > 11 => {
+                    interval = Some(&word[11..])
+                }
+                _ if word.starts_with("-i") && word.len() > 2 => interval = Some(&word[2..]),
+                _ if word.starts_with('-') => return invalid(word),
+                _ if selector.is_none() => selector = Some(word),
+                _ => return invalid(word),
+            }
+            i += 1;
+        }
+        if command != ["pr", "checks"] || !watch_seen {
+            return invalid("ambiguous gh command");
+        }
+        let number =
+            if selector.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) {
+                selector.unwrap().to_string()
+            } else {
+                let mut lookup = Command::new(target);
+                lookup.arg("pr").arg("view");
+                if let Some(value) = selector {
+                    lookup.arg(value);
+                }
+                lookup.args(["--json", "number", "--jq", ".number"]);
+                if let Some(value) = repo {
+                    lookup.args(["--repo", value]);
+                }
+                let mut child = match lookup
+                    .stderr(Stdio::inherit())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => child,
+                    Err(error) => {
+                        eprintln!("clud gh shim: cannot resolve PR: {error}");
+                        return 126;
+                    }
+                };
+                let Some(stdout) = child.stdout.take() else {
+                    eprintln!("clud gh shim: cannot capture PR number");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return 126;
+                };
+                let (sender, receiver) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let mut bytes = Vec::new();
+                    let _ = sender.send(stdout.take(129).read_to_end(&mut bytes).map(|_| bytes));
+                });
+                let deadline = Instant::now() + Duration::from_secs(15);
+                let status = loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break status,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Ok(None) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            eprintln!("clud gh shim: PR lookup timed out");
+                            return 124;
+                        }
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            eprintln!("clud gh shim: PR lookup failed: {error}");
+                            return 126;
+                        }
+                    }
+                };
+                if !status.success() {
+                    return status.code().unwrap_or(1);
+                }
+                let bytes = match receiver.recv_timeout(Duration::from_secs(2)) {
+                    Ok(Ok(bytes)) if bytes.len() <= 128 => bytes,
+                    _ => {
+                        eprintln!("clud gh shim: PR lookup output was too large or did not close");
+                        return 2;
+                    }
+                };
+                let value = String::from_utf8_lossy(&bytes).trim().to_string();
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    eprintln!("clud gh shim: gh pr view did not return a PR number");
+                    return 2;
+                }
+                value
+            };
+        let Some(clud) = std::env::var_os("CLUD_EXE") else {
+            eprintln!("clud gh shim: CLUD_EXE is unset");
+            return 127;
+        };
+        let clud = PathBuf::from(clud);
+        if !clud.is_absolute() || !clud.is_file() {
+            eprintln!("clud gh shim: invalid CLUD_EXE: {}", clud.display());
+            return 126;
+        }
+        let mut args: Vec<OsString> = ["tool", "run", "github/pr_merge_watch.py"]
+            .map(OsString::from)
+            .to_vec();
+        args.push(number.into());
+        if let Some(value) = repo {
+            args.extend([OsString::from("--repo"), value.into()]);
+        }
+        if let Some(value) = interval {
+            args.extend([OsString::from("--interval"), value.into()]);
+        }
+        exec(&clud, &args)
+    }
+
+    fn invalid(value: &str) -> i32 {
+        eprintln!("clud gh shim: unsupported or ambiguous pr checks --watch argument: {value}");
+        2
+    }
+
+    fn exec(path: &Path, args: &[OsString]) -> i32 {
+        let mut command = Command::new(path);
+        command.args(args);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let error = command.exec();
+            eprintln!("clud gh shim: failed to exec {}: {error}", path.display());
+            126
+        }
+        #[cfg(not(unix))]
+        {
+            match command.status() {
+                Ok(status) => status.code().unwrap_or(1),
+                Err(error) => {
+                    eprintln!("clud gh shim: failed to exec {}: {error}", path.display());
+                    126
+                }
+            }
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    #[test]
+    fn non_utf8_watch_selector_fails_closed() {
+        use std::os::unix::ffi::OsStringExt;
+        let args = [
+            OsString::from("pr"),
+            OsString::from("checks"),
+            OsString::from_vec(b"branch-\xff".to_vec()),
+            OsString::from("--watch"),
+        ];
+        assert_eq!(watch_words(&args), Err(2));
     }
 }

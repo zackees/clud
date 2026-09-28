@@ -1545,7 +1545,8 @@ fn evaluate_command_into(
     }
 
     if context.pr_wait_fail_fast_enabled {
-        if let Some(reason) = blocking_pr_wait_reason(command_text, dialect) {
+        let shim_active = std::env::var("CLUD_GH_SHIM_ACTIVE").as_deref() == Ok("1");
+        if let Some(reason) = blocking_pr_wait_reason(command_text, dialect, shim_active) {
             evaluation.reason = Some(reason);
             return;
         }
@@ -1680,7 +1681,11 @@ fn evaluate_command_into(
     }
 }
 
-fn blocking_pr_wait_reason(command_text: &str, dialect: ShellDialect) -> Option<String> {
+fn blocking_pr_wait_reason(
+    command_text: &str,
+    dialect: ShellDialect,
+    shim_active: bool,
+) -> Option<String> {
     // Heredoc bodies are data, not commands. The depth-0 caller already
     // strips them, but this function is also reached recursively with
     // substitution-inner text that still carries its heredoc (a commit
@@ -1696,9 +1701,14 @@ fn blocking_pr_wait_reason(command_text: &str, dialect: ShellDialect) -> Option<
         if words.len() > 1 && program_name(&words[0]) == gate_prefix.as_str() {
             words.remove(0);
         }
-        if native_gh_waiter(&words) {
+        let canonical_shimmed_watch = shim_active
+            && gh_positionals(words.get(1..).unwrap_or(&[])).starts_with(&["pr", "checks"])
+            && words
+                .iter()
+                .any(|word| word == "--watch" || word.starts_with("--watch="));
+        if native_gh_waiter(&words) && !canonical_shimmed_watch {
             return Some(format!(
-                "GitHub CLI watch commands wait locally and do not cancel the remaining matrix on first required failure. Use `{PR_WATCH_REPLACEMENT}` instead."
+                "Use the canonical gh PR checks watcher inside a clud shim session. Run-id watch and unshimmed native watch cannot cancel the matrix on first required failure. Fallback: `{PR_WATCH_REPLACEMENT}`."
             ));
         }
     }
@@ -3971,6 +3981,20 @@ mod tests {
             .reason
             .expect("gate on should deny the raw watch command");
         assert!(reason.contains("pr_merge_watch.py"));
+    }
+
+    #[test]
+    fn active_gh_shim_allows_canonical_watch_but_not_run_id() {
+        let dialect = ShellDialect::Posix;
+        assert!(blocking_pr_wait_reason("gh pr checks 528 --watch", dialect, true).is_none());
+        assert!(
+            blocking_pr_wait_reason("gh -R zackees/clud pr checks --watch", dialect, true)
+                .is_none()
+        );
+        let denied = blocking_pr_wait_reason("gh run watch 123456", dialect, true)
+            .expect("run-id watch should remain denied");
+        assert!(denied.contains("canonical"), "{denied}");
+        assert!(blocking_pr_wait_reason("gh pr checks --watch", dialect, false).is_some());
     }
 
     #[test]

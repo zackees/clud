@@ -375,9 +375,9 @@ which test tier a change belongs in — lives in
   `block-bad-cmd`; `clud-block-bad-cmd` still ships as a compat binary, see
   `block_bad_cmd_rollout.rs`). Enforces three things per Bash command:
   hardcoded Rust-toolchain rules (`RUST_TOOLS` → `soldr <tool>`); GitHub PR
-  waiter rules (`gh ... --watch`, polling loops; `gh pr merge --auto` is allowed, DD-094 →
-  `github/pr_merge_watch.py`), gated behind the `git.pr_wait_fail_fast`
-  toggle (on by default, DD-065, see `settings_tui.rs`; the guard sees
+  waiter rules (run-id watches and polling loops; the canonical PR-check
+  watch is allowed with the session alias, DD-116), gated behind the
+  `git.pr_wait_fail_fast` toggle (on by default, see `settings_tui.rs`; the guard sees
   through the `tap` gate prefix); and the config-driven `bad_commands`/`bad_pipelines`
   engine from `repo_clud_config.rs` (DD-016/DD-017). Also eager-GC-tracks
   `git clone`/`git worktree add` destinations and guards clones outside
@@ -816,3 +816,5 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
   interpretation and the shim.
 - `block_bad_cmd_rm_identity.rs` — effective-PATH byte identity and source
   resolution checks, shared by both hook entrypoints.
+- `bin/clud_shim.rs` also owns the session-local GitHub CLI relay and PR-watch translation;
+  see [gh-watch-shim.md](../../../docs/architecture/gh-watch-shim.md).

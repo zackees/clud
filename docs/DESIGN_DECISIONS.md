@@ -3064,6 +3064,9 @@ in the dispatch matrix).
 
 **Status:** Accepted
 
+**Amendment:** DD-116 adds a session alias for the canonical PR-check watch;
+the bundled watcher remains the single wait implementation.
+
 **Context:** Agents waiting on PR checks kept waiting for *all* matrix lanes —
 the Mac builds being the long pole — even after a fast Linux lane had already
 gone red, jamming the pipeline for the length of the slowest runner. Raw
@@ -4264,6 +4267,9 @@ translation bridge.
 
 **Status:** Accepted (amends DD-065)
 
+**Amendment:** DD-116 permits the canonical PR-check watch when the session
+alias is active; run-id watches remain denied.
+
 **Context:** DD-065 put `gh pr merge --auto` on the `git.pr_wait_fail_fast`
 deny list next to `gh pr checks --watch`. But `--auto` does not wait locally:
 it enqueues the merge with GitHub and returns at once, so it never ties up an
@@ -4908,3 +4914,25 @@ with its own exit 4 and cancellation behavior.
 
 **Consequences:** Callers must inspect 124 and the terminal JSON before
 retrying; they cannot interpret a wrapper timeout as a successful verdict.
+
+## DD-116: The session GitHub CLI alias upgrades PR-check watches
+
+**Status:** Accepted (amends DD-065 and DD-094).
+
+**Context:** The previous guard rejected the GitHub CLI's familiar PR-check
+watch syntax and required agents to remember a separate clud command. That
+kept waits fail-fast but made the supported path less discoverable.
+
+**Decision:** Install a session-scoped `gh` alias using the existing
+`clud-shim` binary. Resolve and pin the real executable before rewriting
+PATH. Relay all ordinary calls unchanged; translate only the canonical
+PR-check watch into the bundled fail-fast watcher. Resolve omitted, branch,
+and URL selectors with the real executable, and reject incompatible or
+unrecognized watch flags. The command guard permits this one watch only when
+the alias is active. It continues to deny run-id watches and hand-written
+polling; without the alias, it retains the prior denial.
+
+**Consequences:** Agents can use familiar syntax without losing immediate
+failure/review cancellation or the watcher's NO_CHECKS behavior. Existing
+scripts that do not watch are unaffected. A missing or replaced target is a
+visible error, never a recursive or native-watch fallback.

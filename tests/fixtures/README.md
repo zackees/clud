@@ -15,3 +15,8 @@ staging, symlink, cleanup, and replacement paths remain upstream code. A
 or another network source. The installer is piped to a non-interactive `sh`
 from a fake Codex backend launched through clud's foreground and daemon child
 environments. All resulting paths are under a temporary home inside bosn.
+
+`gh_watch_harness.py` is the offline child invoked through the session `gh`
+alias by `tests/test_gh_shim.py`. It runs the actual bundled PR watcher with
+network edges replaced by deterministic failure, review, and no-checks
+snapshots, recording scoped cancellation under the test's temporary directory.
