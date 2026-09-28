@@ -529,9 +529,8 @@ against the uploaded binary provenance and fails on a skipped or missing
 lane. A fixture-only Cargo feature supplies a local copy of the candidate
 catalog and asset bytes through the normal parser and transaction verifier;
 release and default builds omit that feature. The fixture includes the
-published 2.8.13 wheel row to exercise older-version selection. The APE jobs
-remain for the release workflow call while PR acceptance uses native
-candidates.
+published 2.8.13 wheel row to exercise older-version selection. Both PR and
+release acceptance now exercise the native installer.
 
 The PR gate also runs the exact uploaded x64 musl candidate in clean Arch,
 Fedora, and Alpine containers. Arch uses fish as the user's default shell;
@@ -563,6 +562,9 @@ input. A called workflow inherits the tag push as `github.event_name`, so an
 event-name check for `workflow_call` would skip every public lane. Explicit
 always-run caller gates reject a skipped candidate or released matrix; the
 released gate stays red even when rollback restores the previous pointer.
+After the first native candidate and stable public gates passed, APE build,
+publication, and acceptance jobs were retired. Existing release assets remain
+available from their historical tags.
 
 Native Linux downloads use two additional release-profile jobs, one for each
 `*-unknown-linux-musl` architecture. Both build on x64 Ubuntu because soldr's

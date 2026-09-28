@@ -66,7 +66,7 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "needs: [preflight, full-ci-gate, release-matrix]" in text
     publish_needs = (
         "needs: [preflight, full-ci-gate, snapshot-public, build, "
-        "build-static-musl, verify-static-musl-arm64, build-installer]"
+        "build-static-musl, verify-static-musl-arm64]"
     )
     assert publish_needs in text
     assert "name: Publish final bytes as public prerelease" in text
@@ -94,7 +94,12 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "if: always() && github.event_name == 'pull_request' &&" in installer
     assert "contains(github.event.pull_request.labels.*.name, 'ci-full')" in installer
     assert "contains(github.event.pull_request.labels.*.name, 'ci:full')" in installer
-    assert "name: Build universal APE installer" in text
+    assert "build-installer:" not in text
+    assert "clud-installer-ape" not in text
+    assert "build-ape:" not in installer
+    assert "ape-host:" not in installer
+    assert "ape-core-tests:" not in installer
+    assert "linux-distro:" not in installer
     assert "source_ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "ref: ${{ needs.preflight.outputs.candidate_sha }}" in text
     assert "branches: [main]" not in text  # A main version bump cannot start a release.
