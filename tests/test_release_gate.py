@@ -104,6 +104,19 @@ def test_candidate_proof_is_bound_to_dispatch_title() -> None:
     assert "format('CI full {0}', inputs.candidate_sha)" in text
 
 
+def test_tag_push_runs_public_reusable_jobs_and_fails_if_they_skip() -> None:
+    installer = (WORKFLOWS / "installer-check.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
+    # Reusable jobs inherit the caller's event (a tag push), so event_name
+    # cannot identify a workflow_call inside the called workflow.
+    assert "github.event_name == 'workflow_call'" not in installer
+    assert "github.event_name != 'workflow_call'" not in installer
+    assert "candidate-acceptance-gate:" in release
+    assert "released-acceptance-gate:" in release
+    assert "needs.verify-candidate-installer.result" in release
+    assert "needs.verify-published-installer.result" in release
+
+
 def test_api_lookup_requires_a_complete_matching_run(monkeypatch) -> None:
     sha = "a" * 40
     unrelated = {**full_run("b" * 40), "id": 1}
