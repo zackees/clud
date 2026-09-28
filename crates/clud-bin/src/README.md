@@ -39,7 +39,9 @@ the integration tests.
   asset verification, and the consented binary transaction.
 - `openrouter_catalog.rs` - #1256's separate bounded catalog consumer: fixed
   GitHub origin, last-known-good daemon-state cache, baked-in fallback, and
-  weighted pricing for eligible OpenRouter models. See
+  weighted pricing for eligible OpenRouter models, plus
+  `catalog_cached_or_embedded()` (no-fetch read for the launch path) and
+  `model_by_id()` for #1528's `supports_reasoning_effort` lookup. See
   `docs/architecture/server-settings.md`.
 - [session_history/](session_history/README.md) - `clud -c` / `--last` (#922):
   per-cwd index of Claude-harness sessions kept by the hidden `session-hook`,

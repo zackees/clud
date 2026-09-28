@@ -17,11 +17,14 @@ def _row(
     *,
     tools: bool = True,
     context: int = 32_000,
+    extra_parameters: tuple[str, ...] = (),
+    reasoning: object | None = None,
 ) -> dict:
     pricing = {"prompt": input_price, "completion": output_price}
     if cached_price is not None:
         pricing["input_cache_read"] = cached_price
-    return {
+    parameters = ["tools", "tool_choice", "reasoning"] if tools else []
+    row = {
         "id": model_id,
         "name": model_id,
         "context_length": context,
@@ -30,8 +33,11 @@ def _row(
             "input_modalities": ["text", "image"],
             "output_modalities": ["text"],
         },
-        "supported_parameters": ["tools", "tool_choice", "reasoning"] if tools else [],
+        "supported_parameters": [*parameters, *extra_parameters],
     }
+    if reasoning is not None:
+        row["reasoning"] = reasoning
+    return row
 
 
 def test_eligibility_and_weighted_ranking_differ_from_input_only() -> None:
@@ -63,6 +69,93 @@ def test_free_models_can_be_eligible() -> None:
     result = producer.normalize([_row("provider/free-coder", "0", "0", None)])
     assert result["models"][0]["eligible_for_coding"] is True
     assert result["cheapest_programming"][0]["weighted_usd_per_million_tokens"] == 0
+
+
+def test_row_without_the_reasoning_effort_token_publishes_an_all_null_object() -> None:
+    """#1528: the two new fields are additive, so a row OpenRouter never tags
+    still normalizes -- with the gate off and one shape-stable null object."""
+    result = producer.normalize([_row("provider/plain", "0.1", "0.2", None)])
+    model = result["models"][0]
+    assert model["supports_reasoning_effort"] is False
+    assert model["reasoning"] == {
+        "supported_efforts": None,
+        "default_effort": None,
+        "default_enabled": None,
+        "mandatory": None,
+    }
+    assert result["schema_version"] == 1
+
+
+def test_reasoning_effort_gate_and_object_keep_openrouters_own_names() -> None:
+    """#1528: the published gate is OpenRouter's `reasoning_effort` token, and
+    the nested object carries its four keys verbatim."""
+    result = producer.normalize(
+        [
+            _row(
+                "deepseek/deepseek-v4.1-flash",
+                "0.1",
+                "0.2",
+                None,
+                extra_parameters=("reasoning_effort",),
+                reasoning={
+                    "mandatory": False,
+                    "default_enabled": True,
+                    "supported_efforts": ["max", "high", "low"],
+                    "default_effort": "high",
+                },
+            ),
+            _row(
+                "xiaomi/mimo-v2.6-flash",
+                "0.1",
+                "0.2",
+                None,
+                reasoning={"mandatory": False},
+            ),
+        ],
+        generated_at="2026-09-27T00:00:00Z",
+    )
+    by_id = {row["id"]: row for row in result["models"]}
+
+    admitted = by_id["deepseek/deepseek-v4.1-flash"]
+    assert admitted["supports_reasoning_effort"] is True
+    assert admitted["reasoning"] == {
+        "supported_efforts": ["max", "high", "low"],
+        "default_effort": "high",
+        "default_enabled": True,
+        "mandatory": False,
+    }
+
+    # Live row from the issue: no `reasoning_effort` token, and a `reasoning`
+    # object that publishes only `mandatory`. The gate excludes it.
+    excluded = by_id["xiaomi/mimo-v2.6-flash"]
+    assert excluded["supports_reasoning_effort"] is False
+    assert excluded["reasoning"] == {
+        "supported_efforts": None,
+        "default_effort": None,
+        "default_enabled": None,
+        "mandatory": False,
+    }
+    assert result["schema_version"] == 1
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        "mandatory",
+        ["mandatory"],
+        7,
+        {"supported_efforts": "high"},
+        {"supported_efforts": ["high", 3]},
+        {"default_effort": True},
+        {"default_enabled": "true"},
+        {"mandatory": 0},
+    ],
+)
+def test_malformed_reasoning_objects_fail_the_whole_catalog(reasoning: object) -> None:
+    with pytest.raises(producer.RefreshError):
+        producer.normalize(
+            [_row("provider/bad-reasoning", "0.1", "0.2", None, reasoning=reasoning)]
+        )
 
 
 def test_negative_upstream_price_sentinel_is_preserved_as_unrankable() -> None:

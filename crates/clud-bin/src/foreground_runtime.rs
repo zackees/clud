@@ -1081,6 +1081,55 @@ fn image_capability_notice(plan: &LaunchPlan) -> Option<String> {
     ))
 }
 
+/// Maps an OpenRouter published capability to Claude Code's own capability
+/// vocabulary (#1528). `Some("<wire>=per_turn_effort")` is the value the
+/// harness expects in `CLAUDE_CODE_MODEL_CAPABILITIES`; `None` means inject
+/// nothing, which is also the answer for a row OpenRouter never tagged with
+/// `reasoning_effort` and for the shipped-dark flip.
+///
+/// Pure and catalog-injected so a test can drive any row and either flip state
+/// without a release, a network read, or a live endpoint.
+pub(crate) fn per_turn_effort_capability(
+    catalog: &crate::openrouter_catalog::Catalog,
+    wire_model: &str,
+    enabled: bool,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let row = catalog.model_by_id(wire_model)?;
+    row.supports_reasoning_effort
+        .then(|| format!("{wire_model}=per_turn_effort"))
+}
+
+/// The OpenRouter-descriptor arm of the per-turn-effort injection (#1528).
+///
+/// OpenRouter's descriptor route is the only one clud reaches that carries
+/// this capability claim: Kimi's and DeepSeek's direct descriptors point at
+/// their own vendor endpoints, which never see this message shape, so they
+/// must not be told the harness may send it. `apply_anthropic_compat_overlay`
+/// itself is only on the direct Anthropic-compat route (its production caller
+/// is the `is_anthropic_compat_via_claude` arm of `start_with_secret_store`);
+/// unified mode builds its own gateway env and never reaches this or that
+/// function, so the unified path is untouched.
+///
+/// `catalog` is a closure so the descriptor and flip gates run before the
+/// catalog is resolved: a shipped-dark or non-OpenRouter launch reads nothing.
+fn inject_per_turn_effort(
+    env: &mut Vec<(String, String)>,
+    descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
+    wire_model: &str,
+    enabled: bool,
+    catalog: impl FnOnce() -> crate::openrouter_catalog::Catalog,
+) {
+    if descriptor.provider != ModelProvider::OpenRouter || !enabled {
+        return;
+    }
+    if let Some(capability) = per_turn_effort_capability(&catalog(), wire_model, enabled) {
+        push_default(env, "CLAUDE_CODE_MODEL_CAPABILITIES", &capability);
+    }
+}
+
 /// Provider-neutral child-env overlay for any Anthropic-compatible API-key
 /// provider (#936/#937 Phase 2, replacing the DeepSeek-only
 /// `apply_deepseek_overlay`). `descriptor` supplies the base URL and the
@@ -1242,6 +1291,40 @@ fn apply_anthropic_compat_overlay(
     if let Some(window) = crate::server_settings::effective_context_window(model) {
         push_default(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS", &window.to_string());
     }
+    // #1528: Claude Code keeps the prompt cache across a mid-session effort
+    // change only when its client-side `per_turn_effort` capability is on for
+    // the launched wire ID. There is no wire field, header, or discovery row
+    // for it: the harness resolves it from its baked catalog, gateway-served
+    // capability metadata, or this env var. OpenRouter publishes the *gate*
+    // under its own name -- `supports_reasoning_effort`, derived from its
+    // `reasoning_effort` token -- while the injected token is Claude Code's
+    // vocabulary, which clud does not get to rename. This overlay owns that
+    // mapping.
+    //
+    // OpenRouter publishes nothing about per-turn *delivery*, so the gate says
+    // only "this model accepts an effort setting", not "a mid-session change
+    // keeps the cache". That claim is a property of OpenRouter's Messages
+    // endpoint and ships dark behind the `per_turn_effort` server setting
+    // (`crates/clud-bin/assets/server-settings.json`) until a recorded live
+    // endpoint check confirms both acceptance and the honored level.
+    //
+    // The read stays lazy and offline (#1528): the helper short-circuits on
+    // the descriptor and the flip before the catalog closure runs, and
+    // `catalog_cached_or_embedded` resolves the daemon-state cache and the
+    // always-present embedded copy without a fetch -- so this adds neither
+    // egress nor a launch delay.
+    //
+    // `push_default`, so an ambient `CLAUDE_CODE_MODEL_CAPABILITIES` the user
+    // already sets is preserved rather than overwritten -- the same precedence
+    // this overlay gives `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. That key is
+    // deliberately NOT in `ANTHROPIC_COMPAT_CONFLICTING`, which would scrub it.
+    inject_per_turn_effort(
+        env,
+        descriptor,
+        model,
+        crate::server_settings::per_turn_effort_enabled(),
+        crate::openrouter_catalog::catalog_cached_or_embedded,
+    );
     // #1263: the direct route is the one launch shape where clud is *not* in
     // the request path -- Claude Code talks to the provider itself, so clud
     // can neither see the model stream nor time it out. The only lever here is
@@ -3620,6 +3703,167 @@ mod tests {
         );
         // An explicit user-set window is never clobbered (DD-059's spirit).
         assert_eq!(lookup(&env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("4242"));
+    }
+
+    /// A synthetic one-row catalog for the #1528 injection tests, so the
+    /// decision is driven by an artifact shape rather than the real 458-row
+    /// embedded copy or a network read.
+    fn per_turn_effort_catalog(wire_model: &str, supports_reasoning_effort: bool) -> String {
+        serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-09-27T00:00:00Z",
+            "source": "https://openrouter.ai/api/v1/models",
+            "models": [{
+                "id": wire_model,
+                "name": "Fixture Row",
+                "provider": wire_model.split('/').next().unwrap(),
+                "context_length": 131_072,
+                "input_price_per_token": 1e-7,
+                "output_price_per_token": 1e-6,
+                "cached_input_price_per_token": 1e-7,
+                "supports_tools": true,
+                "supports_text_input": true,
+                "supports_text_output": true,
+                "supports_reasoning": true,
+                "supports_reasoning_effort": supports_reasoning_effort,
+                "reasoning": {
+                    "supported_efforts": ["max", "high", "low"],
+                    "default_effort": "high",
+                    "default_enabled": true,
+                    "mandatory": false
+                },
+                "supports_vision": false,
+                "eligible_for_coding": true,
+                "ineligibility_reasons": []
+            }]
+        })
+        .to_string()
+    }
+
+    fn catalog_from(json: &str) -> crate::openrouter_catalog::Catalog {
+        crate::openrouter_catalog::Catalog::parse(json.as_bytes()).expect("fixture catalog parses")
+    }
+
+    #[test]
+    fn per_turn_effort_capability_maps_the_openrouter_gate_to_the_harness_name() {
+        let wire = "deepseek/deepseek-v4.1-flash";
+        let gated = catalog_from(&per_turn_effort_catalog(wire, true));
+        assert_eq!(
+            per_turn_effort_capability(&gated, wire, true),
+            Some(format!("{wire}=per_turn_effort"))
+        );
+        // The flip is off: the ship-dark state injects nothing even for a row
+        // OpenRouter admits.
+        assert_eq!(per_turn_effort_capability(&gated, wire, false), None);
+        // A row without the `reasoning_effort` token is never advertised.
+        let ungated = catalog_from(&per_turn_effort_catalog(wire, false));
+        assert_eq!(per_turn_effort_capability(&ungated, wire, true), None);
+        // Exact wire-ID match: no same-family fallback, no `[1m]` stripping.
+        assert_eq!(
+            per_turn_effort_capability(&gated, &format!("{wire}[1m]"), true),
+            None
+        );
+        assert_eq!(
+            per_turn_effort_capability(&gated, "other/model", true),
+            None
+        );
+    }
+
+    #[test]
+    fn per_turn_effort_injection_respects_the_flip_and_the_descriptor() {
+        let wire = "deepseek/deepseek-v4.1-flash";
+        let gated = per_turn_effort_catalog(wire, true);
+
+        let mut enabled_env = Vec::new();
+        inject_per_turn_effort(
+            &mut enabled_env,
+            openrouter_descriptor(),
+            wire,
+            true,
+            || catalog_from(&gated),
+        );
+        assert_eq!(
+            lookup(&enabled_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
+            Some(format!("{wire}=per_turn_effort").as_str())
+        );
+
+        let mut disabled_env = Vec::new();
+        inject_per_turn_effort(
+            &mut disabled_env,
+            openrouter_descriptor(),
+            wire,
+            false,
+            || catalog_from(&gated),
+        );
+        assert_eq!(
+            lookup(&disabled_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
+            None
+        );
+
+        // Kimi and DeepSeek direct routes hit vendor endpoints, not
+        // OpenRouter's Messages API, so the claim must never reach them --
+        // not even with the flip on and an admitting row.
+        for descriptor in [deepseek_descriptor(), kimi_descriptor()] {
+            let mut vendor_env = Vec::new();
+            inject_per_turn_effort(&mut vendor_env, descriptor, wire, true, || {
+                catalog_from(&gated)
+            });
+            assert_eq!(
+                lookup(&vendor_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
+                None,
+                "{}",
+                descriptor.display_name
+            );
+        }
+    }
+
+    #[test]
+    fn per_turn_effort_injection_preserves_an_ambient_user_value() {
+        let wire = "deepseek/deepseek-v4.1-flash";
+        let mut env = vec![(
+            "CLAUDE_CODE_MODEL_CAPABILITIES".to_string(),
+            "user/chosen-model=per_turn_effort".to_string(),
+        )];
+        inject_per_turn_effort(&mut env, openrouter_descriptor(), wire, true, || {
+            catalog_from(&per_turn_effort_catalog(wire, true))
+        });
+        // `push_default`, not overwrite: the user's own claim survives.
+        assert_eq!(
+            lookup(&env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
+            Some("user/chosen-model=per_turn_effort")
+        );
+        // And with nothing admitting the row, an ambient value is untouched.
+        let mut ungated = vec![(
+            "CLAUDE_CODE_MODEL_CAPABILITIES".to_string(),
+            "user/chosen-model=per_turn_effort".to_string(),
+        )];
+        inject_per_turn_effort(&mut ungated, openrouter_descriptor(), wire, true, || {
+            catalog_from(&per_turn_effort_catalog(wire, false))
+        });
+        assert_eq!(
+            lookup(&ungated, "CLAUDE_CODE_MODEL_CAPABILITIES"),
+            Some("user/chosen-model=per_turn_effort")
+        );
+    }
+
+    /// The overlay itself is dark today (the built-in flip is `false`), and it
+    /// must not have started emitting the key on any route.
+    #[test]
+    fn anthropic_compat_overlay_emits_no_capabilities_while_the_flip_ships_dark() {
+        for descriptor in [
+            openrouter_descriptor(),
+            deepseek_descriptor(),
+            kimi_descriptor(),
+        ] {
+            let mut env = Vec::new();
+            apply_anthropic_compat_overlay(&mut env, "secret", descriptor, None, &[]);
+            assert_eq!(
+                lookup(&env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
+                None,
+                "{}",
+                descriptor.display_name
+            );
+        }
     }
 
     #[test]
