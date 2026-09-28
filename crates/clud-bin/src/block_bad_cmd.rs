@@ -1522,13 +1522,13 @@ fn evaluate_command_into(
         return;
     }
 
-    let command_text_owned;
-    let command_text = if depth == 0 {
-        command_text_owned = strip_heredoc_bodies(command_text);
-        command_text_owned.as_str()
-    } else {
-        command_text
-    };
+    // Heredoc bodies are data, not commands, at every recursion depth: a
+    // heredoc nested inside a `$(...)`/backtick/`<(...)` substitution is
+    // extracted verbatim by scan_command_substitutions below and recurses
+    // here with its heredoc still attached, so a depth-0-only strip would
+    // miss it (zackees/clud#1540).
+    let command_text_owned = strip_heredoc_bodies(command_text);
+    let command_text = command_text_owned.as_str();
 
     for inner in scan_command_substitutions(command_text) {
         evaluate_command_into(&inner, context, dialect, depth + 1, evaluation);
@@ -3815,6 +3815,70 @@ mod tests {
         assert!(allows(&format!(
             "echo before && soldr {TOOL_RS_COMPILER} --version"
         )));
+    }
+
+    /// zackees/clud#1540: a heredoc body is data, not command text, at
+    /// every recursion depth — not just depth 0. Before the fix, a heredoc
+    /// nested inside a `$(...)` substitution (the common way an agent
+    /// authors a multi-line PR/commit body, e.g.
+    /// `gh pr create --body "$(cat <<'EOF' ... EOF)"`) survived to depth 1
+    /// unstripped, so a body line naming `cargo` tripped the bare-cargo
+    /// `RUST_TOOLS` rule even though no `cargo` binary runs. The outer
+    /// `"` around `$(...)` is left unclosed on its own line, which is what
+    /// hides the heredoc opener from the depth-0 scan in the first place
+    /// (`generic_rule_quoted_double_angle_is_not_a_heredoc`) and forces the
+    /// strip to happen on the *extracted* substitution span instead.
+    #[test]
+    fn heredoc_body_inside_dollar_paren_substitution_is_not_scanned() {
+        let command = "gh pr create --title \"x\" --body \"$(cat <<'EOF'\ncargo build\nEOF\n)\"";
+        assert!(
+            allows(command),
+            "heredoc body naming cargo, nested in $(...), must not deny: {command:?}"
+        );
+    }
+
+    /// The exact repro from the issue: a markdown-bulleted PR body. Each
+    /// bullet is its own shell segment once it reaches the RUST_TOOLS
+    /// check, so its first word is `-`, not `cargo` — this is kept as a
+    /// realistic regression case alongside the unambiguous one above,
+    /// rather than relied on alone to prove the recursion-depth bug.
+    #[test]
+    fn heredoc_pr_body_bullets_naming_cargo_are_not_scanned() {
+        let command = "gh pr create --title \"x\" --body \"$(cat <<'EOF'\nValidated locally:\n- cargo fmt --check\n- cargo clippy --workspace --all-targets -- -D warnings\nEOF\n)\"";
+        assert!(
+            allows(command),
+            "heredoc PR-body bullets naming cargo, nested in $(...), must not deny: {command:?}"
+        );
+    }
+
+    /// Same shape via backtick command substitution. Wrapped in an outer
+    /// `"..."` (unusual but irrelevant to the scanner under test) so the
+    /// heredoc opener is likewise hidden from the depth-0 scan and the
+    /// depth-1 strip is what actually has to catch it.
+    #[test]
+    fn heredoc_body_inside_backtick_substitution_is_not_scanned() {
+        let command = "gh pr create --title \"x\" --body \"`cat <<'EOF'\ncargo build\nEOF\n`\"";
+        assert!(
+            allows(command),
+            "heredoc body naming cargo, nested in backticks, must not deny: {command:?}"
+        );
+    }
+
+    /// Same shape via `<(...)` process substitution.
+    #[test]
+    fn heredoc_body_inside_process_substitution_is_not_scanned() {
+        let command = "diff \"<(cat <<'EOF'\ncargo build\nEOF\n)\" other.txt";
+        assert!(
+            allows(command),
+            "heredoc body naming cargo, nested in <(...), must not deny: {command:?}"
+        );
+    }
+
+    /// This bug must not become a bypass: a real bare `cargo` invocation
+    /// nested inside a `$(...)` substitution still denies.
+    #[test]
+    fn bare_cargo_inside_dollar_paren_substitution_still_denies() {
+        assert!(denies(r#"echo "$(cargo build)""#));
     }
 
     #[test]
