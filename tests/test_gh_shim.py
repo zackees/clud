@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests import process
+from tests.shim_env import session_env, session_key_names
 
 
 def _binary(name: str) -> Path:
@@ -23,6 +24,23 @@ def _binary(name: str) -> Path:
     )
     assert candidate.is_file(), candidate
     return candidate
+
+
+def _alias(tmp_path: Path, name: str = "gh") -> Path:
+    """A session alias in its own directory, as `activate_rm` installs it.
+
+    The real gh must live elsewhere: a target inside the alias directory is a
+    stale session by contract (#1546) and passes through.
+    """
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir(exist_ok=True)
+    alias = shim_dir / name
+    shutil.copy2(_binary("clud-shim"), alias)
+    return alias
+
+
+def _session(alias: Path) -> dict[str, str]:
+    return session_env(_binary("clud-shim"), alias.parent)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
@@ -47,6 +65,7 @@ def test_pr_checks_watch_routes_to_bundled_watcher_and_preserves_exit(tmp_path: 
     )
     fake_clud.chmod(0o755)
     env = os.environ.copy()
+    env.update(_session(shim))
     env.update(
         CLUD_GH_SHIM_TARGET=str(real_gh),
         CLUD_EXE=str(fake_clud),
@@ -77,12 +96,11 @@ def test_pr_checks_watch_routes_to_bundled_watcher_and_preserves_exit(tmp_path: 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
 def test_non_watch_gh_relays_arguments_and_exit(tmp_path: Path) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
+    alias = _alias(tmp_path)
     real_gh = tmp_path / "real-gh"
     real_gh.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\nexit 37\n', encoding="utf-8")
     real_gh.chmod(0o755)
-    env = os.environ.copy()
+    env = os.environ.copy() | _session(alias)
     env["CLUD_GH_SHIM_TARGET"] = str(real_gh)
     result = process.run(
         [str(alias), "api", "repos/zackees/clud", "--method", "GET"],
@@ -97,8 +115,7 @@ def test_non_watch_gh_relays_arguments_and_exit(tmp_path: Path) -> None:
     "selector", ["", "my-branch", "pr", "checks", "https://github.com/zackees/clud/pull/9"],
 )
 def test_watch_resolves_non_numeric_selector(tmp_path: Path, selector: str) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
+    alias = _alias(tmp_path)
     lookup_log = tmp_path / "lookup-args"
     real_gh = tmp_path / "real-gh"
     real_gh.write_text(
@@ -113,7 +130,7 @@ def test_watch_resolves_non_numeric_selector(tmp_path: Path, selector: str) -> N
         encoding="utf-8",
     )
     fake_clud.chmod(0o755)
-    env = os.environ.copy()
+    env = os.environ.copy() | _session(alias)
     env.update(
         CLUD_GH_SHIM_TARGET=str(real_gh), CLUD_EXE=str(fake_clud),
         LOOKUP_LOG=str(lookup_log), WATCHER_LOG=str(watcher_log),
@@ -139,13 +156,12 @@ def test_watch_resolves_non_numeric_selector(tmp_path: Path, selector: str) -> N
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
 @pytest.mark.parametrize("flag", ["--json", "--jq", "--template", "--web", "--required"])
 def test_incompatible_watch_flags_fail_closed(tmp_path: Path, flag: str) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
+    alias = _alias(tmp_path)
     real_gh = tmp_path / "real-gh"
     real_gh.write_text("#!/bin/sh\nexit 93\n", encoding="utf-8")
     real_gh.chmod(0o755)
-    env = os.environ.copy()
-    env["CLUD_GH_SHIM_TARGET"] = str(real_gh)
+    env = os.environ.copy() | _session(alias)
+    env.update(CLUD_GH_SHIM_TARGET=str(real_gh), CLUD_EXE=str(real_gh))
     result = process.run(
         [str(alias), "pr", "checks", "123", "--watch", flag],
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
@@ -154,29 +170,76 @@ def test_incompatible_watch_flags_fail_closed(tmp_path: Path, flag: str) -> None
     assert "unsupported or ambiguous" in result.stderr
 
 
+def _recording_gh(directory: Path) -> Path:
+    directory.mkdir(exist_ok=True)
+    real = directory / "gh"
+    real.write_text('#!/bin/sh\nprintf "real %s\\n" "$*"\nexit 41\n', encoding="utf-8")
+    real.chmod(0o755)
+    return real
+
+
+def _no_session(env: dict[str, str]) -> dict[str, str]:
+    names = session_key_names(_binary("clud-shim"))
+    return {key: value for key, value in env.items() if key not in names}
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
-def test_missing_target_is_not_recursive_fallback(tmp_path: Path) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
-    env = os.environ.copy()
-    env.pop("CLUD_GH_SHIM_TARGET", None)
+def test_missing_target_passes_through_to_the_next_real_gh(tmp_path: Path) -> None:
+    """#1546: the alias outside a session is the real gh, never exit 127."""
+    alias = _alias(tmp_path)
+    real = _recording_gh(tmp_path / "real")
+    env = _no_session(os.environ.copy())
+    env["PATH"] = os.pathsep.join((str(alias.parent), str(real.parent)))
     result = process.run(
         [str(alias), "pr", "checks", "123", "--watch"],
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
     )
-    assert result.returncode == 127
-    assert "CLUD_GH_SHIM_TARGET" in result.stderr
+    assert result.returncode == 41, result
+    assert result.stdout == "real pr checks 123 --watch\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
+def test_missing_target_without_a_real_gh_is_command_not_found(tmp_path: Path) -> None:
+    alias = _alias(tmp_path)
+    env = _no_session(os.environ.copy())
+    env["PATH"] = str(alias.parent)
+    result = process.run(
+        [str(alias), "auth", "git-credential", "get"],
+        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 127, result
+    assert result.stderr.strip() == "gh: command not found"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX executable modes")
-def test_unexecutable_target_reports_exec_failure(tmp_path: Path) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
-    real_gh = tmp_path / "real-gh"
-    real_gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    real_gh.chmod(0o644)
-    env = os.environ.copy()
-    env["CLUD_GH_SHIM_TARGET"] = str(real_gh)
+def test_unexecutable_target_is_stale_and_passes_through(tmp_path: Path) -> None:
+    alias = _alias(tmp_path)
+    stale = tmp_path / "stale-gh"
+    stale.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stale.chmod(0o644)
+    real = _recording_gh(tmp_path / "real")
+    env = os.environ.copy() | _session(alias)
+    env.update(
+        CLUD_GH_SHIM_TARGET=str(stale),
+        PATH=os.pathsep.join((str(alias.parent), str(real.parent))),
+    )
+    result = process.run(
+        [str(alias), "pr", "view", "123"],
+        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 41, result
+    assert result.stdout == "real pr view 123\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shebang semantics")
+def test_valid_target_that_cannot_exec_reports_exec_failure(tmp_path: Path) -> None:
+    alias = _alias(tmp_path)
+    broken = tmp_path / "broken-gh"
+    broken.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
+    broken.chmod(0o755)
+    env = os.environ.copy() | _session(alias)
+    env["CLUD_GH_SHIM_TARGET"] = str(broken)
     result = process.run(
         [str(alias), "pr", "view", "123"],
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
@@ -187,13 +250,12 @@ def test_unexecutable_target_reports_exec_failure(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
 def test_pr_lookup_output_is_bounded(tmp_path: Path) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
+    alias = _alias(tmp_path)
     real_gh = tmp_path / "real-gh"
     real_gh.write_text("#!/bin/sh\nprintf '%0200d\\n' 1\n", encoding="utf-8")
     real_gh.chmod(0o755)
-    env = os.environ.copy()
-    env["CLUD_GH_SHIM_TARGET"] = str(real_gh)
+    env = os.environ.copy() | _session(alias)
+    env.update(CLUD_GH_SHIM_TARGET=str(real_gh), CLUD_EXE=str(real_gh))
     result = process.run(
         [str(alias), "pr", "checks", "--watch"],
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
@@ -204,8 +266,7 @@ def test_pr_lookup_output_is_bounded(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell fixture")
 def test_shim_reaches_real_bundled_watcher(tmp_path: Path) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
+    alias = _alias(tmp_path)
     real_gh = tmp_path / "real-gh"
     real_gh.write_text("#!/bin/sh\nexit 93\n", encoding="utf-8")
     real_gh.chmod(0o755)
@@ -220,7 +281,7 @@ def test_shim_reaches_real_bundled_watcher(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     fake_clud.chmod(0o755)
-    env = os.environ.copy()
+    env = os.environ.copy() | _session(alias)
     env.update(
         CLUD_GH_SHIM_TARGET=str(real_gh), CLUD_EXE=str(fake_clud),
         CLUD_PR_MERGE_WATCH_DRY_RUN="1",
@@ -241,8 +302,7 @@ def test_shim_reaches_real_bundled_watcher(tmp_path: Path) -> None:
 def test_shim_preserves_real_watcher_outcomes(
     tmp_path: Path, scenario: str, exit_code: int, should_cancel: bool
 ) -> None:
-    alias = tmp_path / "gh"
-    shutil.copy2(_binary("clud-shim"), alias)
+    alias = _alias(tmp_path)
     real_gh = tmp_path / "real-gh"
     real_gh.write_text("#!/bin/sh\nexit 93\n", encoding="utf-8")
     real_gh.chmod(0o755)
@@ -255,7 +315,7 @@ def test_shim_preserves_real_watcher_outcomes(
     )
     fake_clud.chmod(0o755)
     cancel_log = tmp_path / "cancel.txt"
-    env = os.environ.copy()
+    env = os.environ.copy() | _session(alias)
     env.update(
         CLUD_GH_SHIM_TARGET=str(real_gh), CLUD_EXE=str(fake_clud),
         GH_WATCH_SCENARIO=scenario, GH_WATCH_CANCEL_LOG=str(cancel_log),
@@ -272,12 +332,11 @@ def test_shim_preserves_real_watcher_outcomes(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-native alias dispatch")
 def test_windows_gh_alias_dispatches_watch_and_relay(tmp_path: Path) -> None:
-    shim = tmp_path / "gh.exe"
-    shutil.copy2(_binary("clud-shim"), shim)
+    shim = _alias(tmp_path, "gh.exe")
     recorder = tmp_path / "real-gh.exe"
     shutil.copy2(Path(os.environ["CLUD_TEST_MOCK_AGENT_BINARY"]), recorder)
     recorded = tmp_path / "argv.json"
-    env = os.environ.copy()
+    env = os.environ.copy() | _session(shim)
     env.update(CLUD_GH_SHIM_TARGET=str(recorder), MOCK_RM_STUB_LOG=str(recorded))
     plain = process.run(
         [str(shim), "pr", "view", "123"], env=env, cwd=tmp_path,

@@ -1,63 +1,31 @@
-//! Session-launch env injection for the Python shim. Slice 5 of #406 /
-//! #413.
+//! Session-launch env for the `clud-shim` aliases.
 //!
-//! When clud spawns a backend / agent / tool child, this module's
-//! [`inject_shim_env`] mutates the child's env vec in-place to:
-//!
-//! 1. Prepend `~/.clud/state/shims/` to `PATH` so `python` /
-//!    `python3` resolve to the shim binaries the slice 4 (#412)
-//!    installer materialized there.
-//! 2. Set `CLUD_DAEMON_SOCKET=<path>` so the shim can connect back to
-//!    the daemon and call the slice 2 (#410) `ResolveInterpreter`
-//!    handler.
-//!
-//! Existing env vars are preserved; only `PATH` is rewritten and only
-//! `CLUD_DAEMON_SOCKET` is added (or replaced if a prior set existed).
-//! Slice 5 is conservative — no other env mutation. Skipping injection
-//! is the deliberate fallback when the shims dir or daemon socket
-//! isn't available (CI / minimal containers).
+//! [`activate_rm`] is the one child-env layer that installs the session
+//! aliases, puts their directory first on PATH, and exports the session keys
+//! the shims validate. The key names and alias list come from
+//! [`crate::shim_registry`]; the out-of-session contract (fail open to the
+//! next real binary) is in `docs/architecture/shim-dispatch.md`.
 
 use std::path::Path;
 
-/// Env var the shim reads to find the daemon socket. Mirrors the
-/// constant defined in `clud_shim.rs` so the two stay in sync if one
-/// is renamed.
-pub const SHIM_DAEMON_SOCKET_VAR: &str = "CLUD_DAEMON_SOCKET";
+use crate::shim_registry;
 
 /// Env var name for `PATH`. Same on Unix and Windows (Windows is
 /// case-insensitive but uppercase is conventional).
 pub const PATH_ENV_VAR: &str = "PATH";
 /// Read by the generated BASH_ENV file after a login shell resets PATH.
-pub const RM_SHIM_DIR_KEY: &str = "CLUD_RM_SHIM_DIR";
-pub const GH_SHIM_TARGET_KEY: &str = "CLUD_GH_SHIM_TARGET";
-pub const GH_SHIM_ACTIVE_KEY: &str = "CLUD_GH_SHIM_ACTIVE";
-pub const GH_SHIM_FAIL_FAST_KEY: &str = "CLUD_GH_SHIM_FAIL_FAST";
-
-/// Mutate `env` in place: prepend `shims_dir` to PATH and set
-/// `CLUD_DAEMON_SOCKET` to `daemon_socket`. Returns `(path_prepended,
-/// socket_set)` so callers can log what actually changed.
-///
-/// Pass `None` for either argument to skip that part of the injection
-/// — useful when one or the other isn't available in the current
-/// session.
-pub fn inject_shim_env(
-    env: &mut Vec<(String, String)>,
-    shims_dir: Option<&Path>,
-    daemon_socket: Option<&str>,
-) -> (bool, bool) {
-    let path_prepended = if let Some(dir) = shims_dir {
-        prepend_to_path(env, dir)
-    } else {
-        false
-    };
-    let socket_set = if let Some(sock) = daemon_socket {
-        set_env(env, SHIM_DAEMON_SOCKET_VAR, sock);
-        true
-    } else {
-        false
-    };
-    (path_prepended, socket_set)
-}
+pub const RM_SHIM_DIR_KEY: &str = shim_registry::SESSION_DIR_KEY;
+pub const GH_SHIM_TARGET_KEY: &str = shim_registry::GH_TARGET_KEY;
+pub const GH_SHIM_ACTIVE_KEY: &str = shim_registry::GH_ACTIVE_KEY;
+pub const GH_SHIM_FAIL_FAST_KEY: &str = shim_registry::GH_FAIL_FAST_KEY;
+/// Git's terminal-prompt switch. An agent cannot answer a terminal prompt, so
+/// a credential failure must error instead of waiting (#1546).
+pub const GIT_TERMINAL_PROMPT_KEY: &str = "GIT_TERMINAL_PROMPT";
+/// Set to empty when the caller did not choose one. Git then skips askpass
+/// instead of falling back to `SSH_ASKPASS`, whose GUI dialog blocked agent
+/// pushes when the credential helper failed (#1546). `SSH_ASKPASS` itself is
+/// left alone for ssh's own key unlock.
+pub const GIT_ASKPASS_KEY: &str = "GIT_ASKPASS";
 
 /// Prepend `dir` to the PATH entry in `env` (or create a new entry if
 /// PATH isn't set). Idempotent: re-injection doesn't duplicate the
@@ -116,6 +84,13 @@ fn path_sep() -> char {
 /// Both foreground and daemon call this after assembling the effective child env.
 /// Installation errors remain visible and the mandatory hook identity check denies.
 pub fn activate_rm(env: &mut Vec<(String, String)>) {
+    set_env(env, GIT_TERMINAL_PROMPT_KEY, "0");
+    if !env
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case(GIT_ASKPASS_KEY))
+    {
+        set_env(env, GIT_ASKPASS_KEY, "");
+    }
     let fail_fast = crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true);
     set_env(
         env,
@@ -143,7 +118,11 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
         });
     match result {
         Ok(dir) => {
-            let target = resolve_gh_target(&original_path, inherited_target, &dir);
+            let home = env
+                .iter()
+                .find(|(k, _)| k == home_key)
+                .map(|(_, home)| std::path::PathBuf::from(home));
+            let target = resolve_gh_target(&original_path, inherited_target, &dir, home.as_deref());
             if let Some(target) = target {
                 let target = target.canonicalize().unwrap_or(target);
                 set_env(env, GH_SHIM_TARGET_KEY, &target.to_string_lossy());
@@ -153,6 +132,7 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
             }
             prepend_to_path(env, &dir);
             set_env(env, RM_SHIM_DIR_KEY, &dir.to_string_lossy());
+            set_env(env, shim_registry::ABI_KEY, shim_registry::SHIM_ABI);
         }
         Err(error) => {
             eprintln!("[clud rm shim] installation failed; shell identity guard will deny: {error}")
@@ -160,37 +140,35 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
     }
 }
 
+/// The real `gh`: an inherited target that is still valid, else the first
+/// `gh` on the PATH the session had before the alias directory was
+/// prepended. Copies of the packaged shim and every shim directory are
+/// skipped, so a nested launch cannot select an alias.
 fn resolve_gh_target(
     original_path: &str,
     inherited_target: Option<std::path::PathBuf>,
     shim_dir: &Path,
+    home: Option<&Path>,
 ) -> Option<std::path::PathBuf> {
+    let shim = crate::shim_install::packaged_shim().unwrap_or_else(|_| shim_dir.join("gh"));
+    let mut dirs = shim_registry::shim_dirs(&shim, Some(shim_dir), home);
+    // The packaged shim's own directory holds `clud` itself, not aliases.
+    if let Some(own) = std::fs::canonicalize(&shim)
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        dirs.retain(|dir| *dir != own);
+    }
     inherited_target
-        .filter(|path| path.is_absolute() && executable(path) && !path.starts_with(shim_dir))
+        .filter(|path| shim_registry::valid_target(path, &shim, &dirs))
         .or_else(|| {
-            std::env::split_paths(original_path)
-                .filter(|path| path != shim_dir)
-                .map(|path| path.join(if cfg!(windows) { "gh.exe" } else { "gh" }))
-                .find(|path| executable(path))
+            shim_registry::first_on_path(
+                &shim_registry::file_name("gh"),
+                std::ffi::OsStr::new(original_path),
+                &shim,
+                &dirs,
+            )
         })
-}
-
-fn executable(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
 }
 
 #[cfg(test)]
@@ -225,12 +203,17 @@ mod tests {
         let path = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
         let path = path.to_string_lossy();
         assert_eq!(
-            resolve_gh_target(&path, None, &shim_dir),
+            resolve_gh_target(&path, None, &shim_dir, None),
             Some(real.clone())
         );
         assert_eq!(
-            resolve_gh_target(&path, Some(real.clone()), &shim_dir),
-            Some(real)
+            resolve_gh_target(&path, Some(real.clone()), &shim_dir, None),
+            Some(real.clone())
+        );
+        assert_eq!(
+            resolve_gh_target(&path, Some(shim_dir.join(name)), &shim_dir, None),
+            Some(real),
+            "an inherited target inside the alias directory is re-resolved"
         );
     }
 
@@ -274,68 +257,19 @@ mod tests {
 
     #[test]
     fn set_env_replaces_existing_value() {
-        let mut e = env(&[("CLUD_DAEMON_SOCKET", "/old/sock")]);
-        set_env(&mut e, "CLUD_DAEMON_SOCKET", "/new/sock");
-        let v = &e.iter().find(|(k, _)| k == "CLUD_DAEMON_SOCKET").unwrap().1;
+        let mut e = env(&[("CLUD_EXAMPLE_KEY", "/old/sock")]);
+        set_env(&mut e, "CLUD_EXAMPLE_KEY", "/new/sock");
+        let v = &e.iter().find(|(k, _)| k == "CLUD_EXAMPLE_KEY").unwrap().1;
         assert_eq!(v, "/new/sock");
     }
 
     #[test]
     fn set_env_creates_when_absent() {
         let mut e = env(&[("OTHER", "x")]);
-        set_env(&mut e, "CLUD_DAEMON_SOCKET", "/sock");
+        set_env(&mut e, "CLUD_EXAMPLE_KEY", "/sock");
         assert!(e
             .iter()
-            .any(|(k, v)| k == "CLUD_DAEMON_SOCKET" && v == "/sock"));
-    }
-
-    #[test]
-    fn inject_shim_env_does_both_paths() {
-        let mut e = env(&[("PATH", "/usr/bin")]);
-        let (path_done, socket_done) =
-            inject_shim_env(&mut e, Some(Path::new("/shims")), Some("/daemon.sock"));
-        assert!(path_done);
-        assert!(socket_done);
-        let path = &e.iter().find(|(k, _)| k == "PATH").unwrap().1;
-        assert!(path.starts_with("/shims"));
-        let sock = &e.iter().find(|(k, _)| k == "CLUD_DAEMON_SOCKET").unwrap().1;
-        assert_eq!(sock, "/daemon.sock");
-    }
-
-    #[test]
-    fn inject_shim_env_skips_when_none() {
-        let mut e = env(&[("PATH", "/usr/bin")]);
-        let (path_done, socket_done) = inject_shim_env(&mut e, None, None);
-        assert!(!path_done);
-        assert!(!socket_done);
-        // PATH unchanged, no CLUD_DAEMON_SOCKET added.
-        assert_eq!(
-            e.iter().find(|(k, _)| k == "PATH").unwrap().1,
-            "/usr/bin".to_string()
-        );
-        assert!(e.iter().all(|(k, _)| k != "CLUD_DAEMON_SOCKET"));
-    }
-
-    #[test]
-    fn inject_shim_env_partial_path_only() {
-        let mut e = env(&[("PATH", "/usr/bin")]);
-        let (path_done, socket_done) = inject_shim_env(&mut e, Some(Path::new("/shims")), None);
-        assert!(path_done);
-        assert!(!socket_done);
-        assert!(e.iter().all(|(k, _)| k != "CLUD_DAEMON_SOCKET"));
-    }
-
-    #[test]
-    fn inject_shim_env_partial_socket_only() {
-        let mut e = env(&[("PATH", "/usr/bin")]);
-        let (path_done, socket_done) = inject_shim_env(&mut e, None, Some("/sock"));
-        assert!(!path_done);
-        assert!(socket_done);
-        // PATH untouched.
-        assert_eq!(
-            e.iter().find(|(k, _)| k == "PATH").unwrap().1,
-            "/usr/bin".to_string()
-        );
+            .any(|(k, v)| k == "CLUD_EXAMPLE_KEY" && v == "/sock"));
     }
 
     #[test]

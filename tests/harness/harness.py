@@ -8,10 +8,10 @@ installed Claude Code against ``mock-agent serve``:
   users get.
 * **repo** — a git checkout on ``main`` with a local bare ``origin``.
 * **bin** — first on PATH: a fake ``gh`` (``fake_gh.py``), ``rm``, and
-  ``safe-rm``, copies of the built ``clud-shim`` as a clud
-  session installs them (``clud-cmd-scan``'s rm-identity check requires the
-  first ``rm`` on PATH to be byte-identical to it). ``CLUD_RM_ROOTS`` is the
-  repo and ``home/.clud/tmp``, as clud sets it for a session (#1340).
+  ``safe-rm``, copies of the built ``clud-shim`` as a clud session installs
+  them. The env stamps a clud session with ``bin`` as its alias directory, so
+  ``rm`` enforces its in-session floor (#1546). ``CLUD_RM_ROOTS`` is the repo
+  and ``home/.clud/tmp``, as clud sets it for a session (#1340).
 * **logs** — the backend's request log, the hook recorder's log and, with
   ``run(answers=...)``, the answered-questions log.
 
@@ -23,9 +23,9 @@ registers the PreToolUse hook ``answer_hook.py``, which answers each call via
 ``answers`` (``{"*": label}`` for a default); see :meth:`Harness.answer_args`.
 
 PATH never contains clud's own shim directories (``~/.clud/state/shims``,
-``~/.clud/state/rm-shim``): clud's ``python`` shim refuses to run outside a
-clud session, so a hook that says ``python`` would die. Scripts and hooks here
-run under the test's own interpreter.
+``~/.clud/state/rm-shim``): a developer's installed aliases would otherwise
+stand in for the build under test. Scripts and hooks here run under the
+test's own interpreter.
 
 Opt-in: these tests need an installed Claude Code and run only with
 ``CLUD_REAL_CLAUDE_TESTS=1``. See ``docs/architecture/testing-tiers.md``.
@@ -46,8 +46,9 @@ from pathlib import Path
 from typing import Any
 
 from tests import process
+from tests.shim_env import session_env
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT =Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 EXE = ".exe" if os.name == "nt" else ""
 ENABLED = os.environ.get("CLUD_REAL_CLAUDE_TESTS") == "1"
@@ -293,6 +294,7 @@ class Harness:
                     [str(self.repo), str(self.home / ".clud" / "tmp")]
                 ),
                 "GIT_TERMINAL_PROMPT": "0",
+                **session_env(self.clud.parent / f"clud-shim{EXE}", self.bin),
             }
         )
         env.update(extra or {})

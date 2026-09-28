@@ -99,6 +99,7 @@ pub mod session_registry;
 pub mod settings_tui;
 pub mod shell;
 pub mod shim_install;
+pub mod shim_registry;
 pub mod shim_resolve;
 pub mod shim_session;
 pub mod shim_uv;

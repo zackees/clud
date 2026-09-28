@@ -1,7 +1,9 @@
 # The child `rm` catastrophe floor
 
 The session puts a `clud-shim` copy named `rm` first on the child's PATH. This
-shim is for commands run *by scripts*, including build tools and installers. It
+shim is for commands run *by scripts*, including build tools and installers.
+The floor applies only inside a valid clud session; outside one the alias is
+the next real `rm`, unmodified ([shim-dispatch.md](shim-dispatch.md)). It
 does not impose the agent's deletion policy: ordinary non-catastrophic operands
 are handed to the next `rm` on PATH even outside `CLUD_RM_ROOTS`. Agent-authored
 deletion is governed by the command-scan hook and `safe-rm`; see

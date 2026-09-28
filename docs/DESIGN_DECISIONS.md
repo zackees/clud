@@ -5021,3 +5021,43 @@ route, with the existing wheel and script distribution paths independent.
 APE acceptance lanes. Public native candidate and released checks remain
 required before and after stable promotion. Historical APE assets stay on
 their original releases for existing users.
+
+---
+
+## DD-119: Every clud-shim alias fails open outside a valid session, through one dispatch path
+
+**Status:** Accepted (amends DD-116's missing-target consequence).
+
+**Context:** #1546. The alias directories are per user and shared by every
+live session of every installed clud version. clud 2.8.20 added a `gh` alias
+to `~/.clud/state/rm-shim`. Sessions started by 2.8.14 had that directory on
+PATH but no `CLUD_GH_SHIM_*` keys, so their `gh` exited 127. That broke
+`git`'s `!gh auth git-credential` helper, and pushes fell back to a desktop
+askpass dialog. Each shim had decided its own out-of-session behavior:
+`gh` and `python` failed closed, and `rm` ran its floor regardless.
+
+**Decision:** One registry (`shim_registry::SHIMS`) lists every alias, and
+the binary has one dispatch path. That path alone detects the session,
+resolves targets, and passes through to the next real binary on PATH when
+the session is missing or stale. Handlers get a validated session. A
+`CLUD_SHIM_ABI` stamp marks the env a clud version built; any other value
+passes through. The `rm` floor is session-only by owner decision. The child
+env also sets `GIT_TERMINAL_PROMPT=0` and, when the caller chose none, an
+empty `GIT_ASKPASS`.
+
+**Rationale:** Outside a session, the alias shadowing a real binary is the
+bug, so matching that binary is the only safe default. A versioned or
+content-addressed alias directory would also isolate versions. But the
+aliases are about 30 MB each, and every rebuild would leave a new directory
+that no process could safely delete while a session used it. The stamp gets
+the same isolation at no disk cost. An empty `GIT_ASKPASS` stops git from
+falling back to `SSH_ASKPASS` without disabling ssh's own use of it.
+
+**Consequences:** A new alias is one registry row plus one handler arm. A
+guard test refuses session keys, `exit` or `127` in handlers, and hardcoded
+alias names in dispatch or the installers. An env built by an older clud
+loses in-session behavior, including the `rm` floor, instead of failing.
+Tests that exercise in-session behavior must stamp a session
+(`tests/shim_env.py`). The daemon-socket interpreter protocol, stubbed since
+slice 1 of #406, is removed. See
+[architecture/shim-dispatch.md](architecture/shim-dispatch.md).

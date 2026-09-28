@@ -13,6 +13,7 @@ import pytest
 
 from tests import process
 from tests.integration import test_mock_agents as responses_fixture
+from tests.shim_env import session_env
 
 
 @pytest.fixture(autouse=True)
@@ -225,6 +226,7 @@ def test_scripted_custom_tool_call_reaches_disposable_repo(
             BASH_ENV=str(shell_env),
             PATH=os.pathsep.join((str(shim_dir), str(build_dir), env["PATH"])),
         )
+        env.update(session_env(build_dir / ("clud-shim" + suffix), shim_dir))
         result = process.run(
             [
                 cli,

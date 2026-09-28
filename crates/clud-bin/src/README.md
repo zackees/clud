@@ -811,12 +811,16 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `rm_tool.rs` — `safe-rm` (#1340): flags, `Roots` from `CLUD_RM_ROOTS` or the checkout (plus its worktrees), `resolve`'s refusals, trash entries with `.clud-rm.json`, `--purge`, the per-call audit log, and `session_roots_value` for the child env; tests in `rm_tool_tests.rs`.
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
 - `rm_guard.rs` — catastrophe-floor decisions, canonical operands, and mount
-  protection; it contains no removal implementation. `bin/clud_shim.rs`
-  hands accepted requests to the next real `rm` on PATH and dispatches the
-  `rm` and `safe-rm` aliases.
+  protection; it contains no removal implementation. In a session,
+  `bin/clud_shim.rs` hands accepted requests to the next real `rm` on PATH.
 - `deletion_policy.rs` — normalized deletion-base semantics shared by source
   interpretation and the shim.
 - `block_bad_cmd_rm_identity.rs` — effective-PATH byte identity and source
   resolution checks, shared by both hook entrypoints.
 - `bin/clud_shim.rs` also owns the session-local GitHub CLI relay and PR-watch translation;
   see [gh-watch-shim.md](../../../docs/architecture/gh-watch-shim.md).
+- `shim_registry.rs` — `SHIMS`, the one list of `clud-shim` aliases, plus the
+  session key names, ABI stamp and the PATH resolver every alias shares.
+  `bin/clud_shim/dispatch.rs` is the binary's single entry path: session
+  checks, target resolution and fail-open passthrough (#1546); see
+  [shim-dispatch.md](../../../docs/architecture/shim-dispatch.md).
