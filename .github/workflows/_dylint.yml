@@ -19,7 +19,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  ZCCACHE_DISABLE: "1"
   # Ignore stale developer/runner PATH installs and select Soldr's blessed
   # precompiled cargo-dylint, dylint-link, and matching driver as one unit.
   SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS: "1"
@@ -51,7 +50,9 @@ jobs:
           dylint: true
           cargo-dylint-version: 6.0.3
           dylint-link-version: 6.0.3
-          cache-key-suffix: dylint
+          # zccache keeps each target's nightly check-mode dependency units
+          # (saved from main only). Warm passes check just workspace crates.
+          cache-key-suffix: dylint-zccache
           prebuild-deps: none
           linker: platform-default
           cache-payload-warn-bytes: 2GiB

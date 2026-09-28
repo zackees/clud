@@ -117,6 +117,19 @@ def test_dylint_workflow_runs_one_plain_invocation_per_target() -> None:
         )
 
 
+def test_dylint_dependency_checks_stay_cached() -> None:
+    """Dylint re-checks the whole dependency graph per target unless zccache runs.
+
+    Measured on this workflow: warm zccache took the host/Windows/macOS passes
+    from 2m45s/2m41s/1m21s to 28s/49s/69s at a 100% hit rate. A kill-switch
+    here makes every pass cold again while setup-soldr still reports the layer.
+    """
+    workflow = _workflow_text()
+    assert "ZCCACHE_DISABLE" not in workflow
+    assert "soldr --no-cache cargo dylint" not in workflow
+    assert "cache: true" in workflow
+
+
 def test_dylint_driver_builder_is_gone() -> None:
     """The hand-built-driver script was retired with the workaround."""
     assert not (ROOT / "ci" / "build_dylint_driver.py").exists()

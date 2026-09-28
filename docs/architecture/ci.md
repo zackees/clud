@@ -765,7 +765,14 @@ checked target, so the host pass never reaches `cfg(windows)` or
 with `--target x86_64-pc-windows-msvc` and `--target aarch64-apple-darwin`.
 `soldr dylint prepare --target` installs the pinned nightly's `rust-std` for
 each target; Soldr's verified 6.0.3 tools and nightly driver stay prebuilt, so
-no pass builds a toolchain. One triple per OS is enough for the same reason
+no pass builds a toolchain. Dylint lints only workspace crates, but each pass
+must first type-check every dependency with that nightly, which the stable
+build caches cannot supply. zccache caches those check units per target in the
+`dylint-zccache` build-cache entry, saved from `main` only: measured warm, the
+host/Windows/macOS passes took 28s/49s/69s at a 100% hit rate, against
+2m45s/2m41s/1m21s with `ZCCACHE_DISABLE` set. The rest of a warm cross pass
+downloads that target's `rust-std` and cross sysroot (LLVM, MSVC or Apple SDK)
+each run. One triple per OS is enough for the same reason
 Clippy needs only two: this workspace gates by OS, not architecture. The
 `CI OK` gate requires the Dylint result even on an unlabeled PR, and
 `ci/release_gate.py` pins the check name `Dylint / Dylint`.
