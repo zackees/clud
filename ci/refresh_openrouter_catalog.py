@@ -1,4 +1,21 @@
-"""Build the deterministic OpenRouter pricing catalog used by clud (#1256)."""
+"""Build the deterministic OpenRouter pricing catalog used by clud (#1256).
+
+Besides pricing and the derived ``supports_*`` capability booleans, each row
+publishes OpenRouter's own reasoning vocabulary (#1528):
+
+- ``supports_reasoning_effort`` -- true when OpenRouter's
+  ``supported_parameters`` carries the ``reasoning_effort`` token, i.e. the
+  model accepts a per-request effort setting at all.
+- ``reasoning`` -- OpenRouter's ``reasoning`` object, reduced to the four keys
+  clud consumes (``supported_efforts``, ``default_effort``,
+  ``default_enabled``, ``mandatory``), each ``null`` when upstream publishes
+  nothing. The object is always emitted so the document shape is stable.
+
+OpenRouter publishes no per-turn *delivery* field: whether a mid-session
+effort change keeps the prompt cache is a property of its Messages endpoint,
+checked live rather than read from this artifact. See
+``docs/architecture/server-settings.md``.
+"""
 
 from __future__ import annotations
 
@@ -48,6 +65,49 @@ def _number(value: Any, model_id: str, field: str) -> float | None:
     # OpenRouter's automatic router uses -1 as an "unknown cost" sentinel.
     # Preserve that fact as null; never rank it as a free or negative price.
     return None if number < 0 else number
+
+
+REASONING_KEYS = ("supported_efforts", "default_effort", "default_enabled", "mandatory")
+
+
+def _reasoning(row: Any, model_id: str) -> dict[str, Any]:
+    """Reduce OpenRouter's `reasoning` object to the four keys clud consumes.
+
+    Always returns the object with every key present, using `null` for a value
+    OpenRouter does not publish, so the published document keeps one shape.
+    A published value of the wrong type fails the whole refresh: the field is
+    a capability claim clud may act on, so a silent coercion would be worse
+    than no catalog at all.
+    """
+    empty = dict.fromkeys(REASONING_KEYS)
+    if row is None:
+        return empty
+    if not isinstance(row, dict):
+        raise RefreshError(f"{model_id}: reasoning must be an object, got {row!r}")
+    supported_efforts = row.get("supported_efforts")
+    if supported_efforts is not None and not (
+        isinstance(supported_efforts, list)
+        and all(isinstance(item, str) for item in supported_efforts)
+    ):
+        raise RefreshError(
+            f"{model_id}: reasoning.supported_efforts must be a list of strings: "
+            f"{supported_efforts!r}"
+        )
+    default_effort = row.get("default_effort")
+    if default_effort is not None and not isinstance(default_effort, str):
+        raise RefreshError(
+            f"{model_id}: reasoning.default_effort must be a string: {default_effort!r}"
+        )
+    for key in ("default_enabled", "mandatory"):
+        value = row.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise RefreshError(f"{model_id}: reasoning.{key} must be a boolean: {value!r}")
+    return {
+        "supported_efforts": supported_efforts,
+        "default_effort": default_effort,
+        "default_enabled": row.get("default_enabled"),
+        "mandatory": row.get("mandatory"),
+    }
 
 
 def normalize_row(row: Any, index: int) -> dict[str, Any]:
@@ -124,6 +184,8 @@ def normalize_row(row: Any, index: int) -> dict[str, Any]:
         "supports_text_input": "text" in modalities,
         "supports_text_output": "text" in output_modalities,
         "supports_reasoning": "reasoning" in parameters or "include_reasoning" in parameters,
+        "supports_reasoning_effort": "reasoning_effort" in parameters,
+        "reasoning": _reasoning(row.get("reasoning"), model_id),
         "supports_vision": "image" in modalities,
         "eligible_for_coding": eligible,
         "ineligibility_reasons": reasons,

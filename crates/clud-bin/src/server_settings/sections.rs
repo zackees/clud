@@ -18,6 +18,7 @@ use crate::provider_catalog;
 pub(crate) const SECTIONS: &[SectionSpec] = &[
     SectionSpec::of::<DeepSeekSettings>(),
     SectionSpec::of::<ModelContexts>(),
+    SectionSpec::of::<PerTurnEffort>(),
 ];
 
 /// DeepSeek model names. DeepSeek renames API slugs in place
@@ -162,6 +163,46 @@ fn dynamic_codex_context_window(
         return None;
     };
     provider_catalog::model_by_cli_id(cli_id).and_then(|entry| entry.claude_max_context_tokens)
+}
+
+/// The flip for the direct-route per-turn-effort injection (#1528).
+///
+/// Claude Code keeps its prompt cache across a mid-session effort change only
+/// when its client-side `per_turn_effort` capability is on for the launched
+/// wire ID. clud can supply that through `CLAUDE_CODE_MODEL_CAPABILITIES`, but
+/// the artifact's `supports_reasoning_effort` gate only says the model accepts
+/// an effort setting -- OpenRouter publishes nothing about per-turn *delivery*,
+/// so the claim is unverified until a live check of its `/api/v1/messages`
+/// endpoint records both acceptance and the honored level (issue #1528, open
+/// items 1 and 2). This section is that switch, so the follow-up flip lands
+/// without a clud release. It ships `false`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PerTurnEffort {
+    /// Inject `CLAUDE_CODE_MODEL_CAPABILITIES=<wire>=per_turn_effort` on a
+    /// direct OpenRouter Anthropic-compat launch.
+    pub enabled: bool,
+}
+
+impl Section for PerTurnEffort {
+    const KEY: &'static str = "per_turn_effort";
+
+    fn validate(&self) -> Result<(), String> {
+        // Data-only and fully typed: the decode is the whole contract, and a
+        // `true` here only re-enables a harness capability clud already
+        // forwards. There is nothing semantic left to check.
+        Ok(())
+    }
+}
+
+/// The per-turn-effort flip for this process (#1528).
+pub fn per_turn_effort() -> &'static PerTurnEffort {
+    static SETTINGS: OnceLock<PerTurnEffort> = OnceLock::new();
+    SETTINGS.get_or_init(|| super::snapshot().section())
+}
+
+/// Whether the direct-route per-turn-effort injection is enabled (#1528).
+pub fn per_turn_effort_enabled() -> bool {
+    per_turn_effort().enabled
 }
 
 #[cfg(test)]
@@ -346,6 +387,23 @@ mod tests {
             let windows = serde_json::json!({"xiaomi/mimo-v2.6-flash": bad_value});
             assert!(model_contexts_section(windows).is_err());
         }
+    }
+
+    /// #1528: the injection ships dark. `true` here would turn on an
+    /// unverified cache-preservation claim, so the built-in value must be
+    /// flipped deliberately, not by accident.
+    #[test]
+    fn built_in_per_turn_effort_ships_disabled() {
+        assert!(!built_in::<PerTurnEffort>().enabled);
+    }
+
+    #[test]
+    fn per_turn_effort_section_is_a_plain_boolean_switch() {
+        let section = serde_json::from_value::<PerTurnEffort>(serde_json::json!({"enabled": true}))
+            .expect("a boolean switch decodes");
+        assert!(section.enabled);
+        assert_eq!(section.validate(), Ok(()));
+        assert_eq!(PerTurnEffort::KEY, "per_turn_effort");
     }
 
     #[test]

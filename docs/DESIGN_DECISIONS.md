@@ -4936,3 +4936,62 @@ polling; without the alias, it retains the prior denial.
 failure/review cancellation or the watcher's NO_CHECKS behavior. Existing
 scripts that do not watch are unaffected. A missing or replaced target is a
 visible error, never a recursive or native-watch fallback.
+
+---
+
+## DD-117: The per-turn-effort flip is a served section, and the injection is OpenRouter-descriptor-only
+
+**Status:** Accepted. Ships dark: `per_turn_effort.enabled` is `false` until the
+live endpoint check in #1528 is recorded.
+
+**Context:** Claude Code keeps its prompt cache across a mid-session effort
+change only when its client-side `per_turn_effort` capability is on for the
+launched wire ID. On the direct `--openrouter` route clud is not in the request
+path at all, so the only lever is the child environment:
+`CLAUDE_CODE_MODEL_CAPABILITIES=<wire>=per_turn_effort`. OpenRouter publishes
+the *gate* under its own name (`supported_parameters` carrying
+`reasoning_effort`) but publishes nothing about per-turn *delivery*, and nobody
+has yet recorded a live check that its `/api/v1/messages` endpoint accepts the
+per-turn control **and** honors the level it carries.
+
+**Decision:** Two separable pieces.
+
+1. The gate is published, not curated: `ci/refresh_openrouter_catalog.py`
+   derives `supports_reasoning_effort` from OpenRouter's `reasoning_effort`
+   token and mirrors its `reasoning` object under OpenRouter's own names, so
+   the artifact keeps one source of truth with the scheduled job.
+2. Whether clud *acts* on that gate is a `per_turn_effort` section in
+   `assets/server-settings.json`, read once per process and shipping
+   `{ "enabled": false }`. The injection itself is gated on
+   `descriptor.provider == OpenRouter` and uses `push_default`, so an ambient
+   `CLAUDE_CODE_MODEL_CAPABILITIES` survives.
+
+**Rationale:**
+- The delivery claim is unverified, so the code must ship in a state that
+  cannot act on it. A served section makes the flip land in ~20 minutes with no
+  release, and makes the "not validated" state visible in one JSON key.
+- Deriving the gate from the scheduled artifact means it tracks OpenRouter's
+  inventory automatically; a hand-maintained list would drift within a day and
+  could only ever cover wire IDs somebody had already validated by hand.
+- The capability is a property of OpenRouter's Messages endpoint, not of the
+  wire ID. Kimi and DeepSeek direct descriptors point at vendor endpoints that
+  never see this message shape, and unified mode builds its own gateway env and
+  never reaches `apply_anthropic_compat_overlay`. Naming the one provider in
+  the gate keeps the claim where it was verified.
+- The read is `catalog_cached_or_embedded()`, which never fetches: a launch
+  must not pay egress or a delay for a capability the harness may ignore.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| A compiled-in constant | The claim is unverified; a constant would force a release to correct it, and a later `false` would be indistinguishable from an intentional revert. |
+| A hand-curated `model_capabilities` section (the first draft of #1528) | Hand-maintained, one wire ID at a time, and duplicate of what the scheduled job already publishes — it would drift against `assets/openrouter-catalog.json`. |
+| Gate on every Anthropic-compat descriptor (Kimi, DeepSeek too) | The claim was verified against OpenRouter's Messages API only; vendor endpoints do not implement the message shape. |
+| Enable on merge and rely on refusal recovery | A silently-ignored effort level returns `200`, so nothing would refuse; the failure mode is a wrong answer, not an error. |
+
+**Consequences:** `supports_reasoning_effort` being `true` for a row is not
+sufficient for the injection — the served flip must also be on. Flipping the
+section is a deliberate, reviewable act that asserts the endpoint check has
+been recorded, and the section's built-in value is pinned by a guard test so it
+cannot turn on by accident.

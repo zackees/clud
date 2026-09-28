@@ -23,19 +23,22 @@ and the reasoning in
   `ureq` fetch.
 - `sections.rs` - the `SECTIONS` registry and the section types:
   `DeepSeekSettings`, with `deepseek()`, `provider_default_model()`, and
-  `provider_subagent_model()`; and `ModelContexts` (#1258), with
+  `provider_subagent_model()`; `ModelContexts` (#1258), with
   `model_contexts()` and `effective_context_window()`, the exact context
   window for a wire ID (catalog `claude_max_context_tokens` wins, then the
-  served OpenRouter datasheet row).
+  served OpenRouter datasheet row); and `PerTurnEffort` (#1528), with
+  `per_turn_effort()` and `per_turn_effort_enabled()`, the ship-dark flip for
+  the direct-route `CLAUDE_CODE_MODEL_CAPABILITIES` injection.
 
 ## Callers
 
 - `main.rs` calls `provider_default_model` for a direct launch when neither the
   CLI nor saved settings name a model.
-- `foreground_runtime.rs` calls `provider_subagent_model` and
-  `effective_context_window` when it builds the child environment for an
-  Anthropic-compatible provider — the latter teaching the harness an
-  uncataloged wire ID's exact context window (#1258).
+- `foreground_runtime.rs` calls `provider_subagent_model`,
+  `effective_context_window`, and `per_turn_effort_enabled` when it builds the
+  child environment for an Anthropic-compatible provider — the latter two
+  teaching the harness an uncataloged wire ID's exact context window (#1258)
+  and enabling the per-turn-effort capability (#1528).
 
 ## Adding a section
 

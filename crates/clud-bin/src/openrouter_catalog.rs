@@ -48,9 +48,35 @@ pub struct Model {
     pub supports_text_input: bool,
     pub supports_text_output: bool,
     pub supports_reasoning: bool,
+    /// OpenRouter's `reasoning_effort` token in `supported_parameters`:
+    /// whether this row accepts a per-request effort setting at all (#1528).
+    /// `#[serde(default)]` keeps the field optional, so a clud build older
+    /// than the artifact (and an artifact older than this field) still parses.
+    #[serde(default)]
+    pub supports_reasoning_effort: bool,
+    /// OpenRouter's own `reasoning` object, reduced to the four keys clud
+    /// consumes (#1528). `None` for an artifact that predates the field.
+    #[serde(default)]
+    pub reasoning: Option<ReasoningDetail>,
     pub supports_vision: bool,
     pub eligible_for_coding: bool,
     pub ineligibility_reasons: Vec<String>,
+}
+
+/// OpenRouter's published reasoning vocabulary for one model (#1528), under
+/// OpenRouter's own names. Every field is optional because OpenRouter omits
+/// what it does not publish; the producer normalizes an absent object to four
+/// explicit nulls so the artifact's shape is stable.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
+pub struct ReasoningDetail {
+    #[serde(default)]
+    pub supported_efforts: Option<Vec<String>>,
+    #[serde(default)]
+    pub default_effort: Option<String>,
+    #[serde(default)]
+    pub default_enabled: Option<bool>,
+    #[serde(default)]
+    pub mandatory: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -100,6 +126,16 @@ impl Catalog {
 
     pub fn models(&self) -> &[Model] {
         &self.models
+    }
+
+    /// The row for an exact wire ID, or `None` (#1528).
+    ///
+    /// Deliberately exact, with no `[1m]` suffix stripping: the sibling
+    /// `server_settings::effective_context_window` lookup is exact too, and a
+    /// capability claim must name the row OpenRouter actually publishes rather
+    /// than a same-family neighbor's.
+    pub fn model_by_id(&self, id: &str) -> Option<&Model> {
+        self.models.iter().find(|model| model.id == id)
     }
 
     /// Rank eligible rows using the fixed documented token mix. This is a
@@ -206,6 +242,22 @@ pub fn catalog() -> Catalog {
         .ok()
         .map(|dir| dir.join("cache").join(CACHE_FILE));
     catalog_at(cache_path.as_deref(), SystemTime::now(), fetch)
+}
+
+/// The catalog as a launch can see it, with **no network access** (#1528).
+///
+/// [`catalog`] refreshes a stale cache with a bounded fetch, which is right for
+/// `clud models cheapest` and wrong for the direct-launch overlay: that route
+/// is the one shape where clud is not in the request path, so it must not add
+/// egress or a launch delay. This resolves the last-known-good daemon-state
+/// cache when it parses and the always-present embedded copy otherwise.
+pub fn catalog_cached_or_embedded() -> Catalog {
+    let cache_path = crate::daemon::default_state_dir()
+        .ok()
+        .map(|dir| dir.join("cache").join(CACHE_FILE));
+    catalog_at(cache_path.as_deref(), SystemTime::now(), || {
+        Err("the launch path never refreshes the catalog".to_string())
+    })
 }
 
 fn catalog_at(
@@ -388,5 +440,93 @@ mod tests {
         let fallback = catalog_at(None, SystemTime::now(), || Err("offline".into()));
         assert_eq!(fallback, built_in());
         assert!(!fallback.cheapest_programming().is_empty());
+    }
+
+    /// #1528: the artifact's published reasoning vocabulary decodes, and a row
+    /// that omits it entirely keeps today's shape through `#[serde(default)]`.
+    #[test]
+    fn reasoning_effort_fields_decode_and_absent_fields_default() {
+        let catalog = Catalog::parse(&fixture()).unwrap();
+
+        let published = catalog.model_by_id("provider/weighted-cheap").unwrap();
+        assert!(published.supports_reasoning_effort);
+        assert_eq!(
+            published.reasoning,
+            Some(ReasoningDetail {
+                supported_efforts: Some(vec![
+                    "max".to_string(),
+                    "high".to_string(),
+                    "low".to_string()
+                ]),
+                default_effort: Some("high".to_string()),
+                default_enabled: Some(true),
+                mandatory: Some(false),
+            })
+        );
+
+        // The producer's all-null shape for a row OpenRouter describes only
+        // partially still decodes, and its gate stays off.
+        let normalized_empty = catalog.model_by_id("provider/not-eligible").unwrap();
+        assert!(!normalized_empty.supports_reasoning_effort);
+        assert_eq!(normalized_empty.reasoning, Some(ReasoningDetail::default()));
+
+        // A row that predates the field at all: the artifact clud was built
+        // with, and any older published document, still parses.
+        let omitted = catalog.model_by_id("provider/input-cheap").unwrap();
+        assert!(!omitted.supports_reasoning_effort);
+        assert_eq!(omitted.reasoning, None);
+
+        assert_eq!(catalog.model_by_id("provider/does-not-exist"), None);
+    }
+
+    /// #1528: a whole document written before the field existed must parse.
+    #[test]
+    fn an_artifact_without_the_reasoning_fields_still_parses() {
+        let mut json: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        for row in json["models"].as_array_mut().unwrap() {
+            let row = row.as_object_mut().unwrap();
+            row.remove("supports_reasoning_effort");
+            row.remove("reasoning");
+        }
+        let catalog = Catalog::parse(json.to_string().as_bytes()).unwrap();
+        assert_eq!(catalog.models().len(), 3);
+        assert!(catalog
+            .model_by_id("provider/weighted-cheap")
+            .unwrap()
+            .reasoning
+            .is_none());
+    }
+
+    /// #1528: the launch path must never reach the network. A fresh cache
+    /// short-circuits before the refresh closure runs, and the closure
+    /// `catalog_cached_or_embedded` supplies can only ever return an error, so
+    /// a stale or absent cache still resolves without a request.
+    #[test]
+    fn launch_catalog_never_refreshes_a_stale_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = cache_path(temp.path());
+        let loaded = catalog_at(Some(&cache), SystemTime::now(), || Ok(fixture()));
+        assert_eq!(loaded.models().len(), 3);
+
+        // A fresh cache never calls the refresh closure: it panics rather than
+        // returning an error, so a request here would fail the test outright.
+        let fresh = catalog_at(Some(&cache), SystemTime::now(), || {
+            panic!("the launch path must not fetch")
+        });
+        assert_eq!(fresh, loaded);
+
+        // Stale or absent: the launch accessor's closure is an error, so the
+        // last-known-good cache (and then the embedded copy) still answers.
+        let old = SystemTime::now() - CACHE_FRESHNESS - Duration::from_secs(1);
+        filetime::set_file_mtime(&cache, filetime::FileTime::from_system_time(old)).unwrap();
+        let stale = catalog_at(Some(&cache), SystemTime::now(), || {
+            Err("the launch path never refreshes the catalog".to_string())
+        });
+        assert_eq!(stale, loaded);
+        let absent = catalog_at(None, SystemTime::now(), || {
+            Err("the launch path never refreshes the catalog".to_string())
+        });
+        assert_eq!(absent, built_in());
+        assert!(!absent.models().is_empty());
     }
 }

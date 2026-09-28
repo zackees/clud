@@ -464,6 +464,9 @@
       "~x-ai/grok-latest": 500000,
       "~z-ai/glm-flash-latest": 1310720,
       "~z-ai/glm-latest": 1310720
+    },
+    "per_turn_effort": {
+      "enabled": false
     }
   }
 }
