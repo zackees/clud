@@ -421,6 +421,12 @@ cmd = "ACT_WORKFLOW=installer-check.yml sh /workspace/ci/act_ci.sh catalog-unit"
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=installer-check.yml ACT_CI_FULL=1 sh /workspace/ci/act_ci.sh resolver-unit"
 
+# Runs the current pyproject.toml version's published candidate on Linux x64.
+# The task fails if Act skips pytest or the host emits no matching evidence.
+[task.act-installer-public-linux-x64]
+stack = "clud_act"
+cmd = "ACT_WORKFLOW=installer-check.yml ACT_EVENT=workflow_call ACT_PUBLIC_X64=1 sh /workspace/ci/act_ci.sh public-host"
+
 [task.act-model-pages]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=model-pages.yml sh /workspace/ci/act_ci.sh build-site"

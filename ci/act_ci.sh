@@ -15,6 +15,7 @@ CHECKOUT="/tmp/$RUN/checkout"
 IMAGE="${ACT_IMAGE:-catthehacker/ubuntu:act-24.04}"
 REPO="${ACT_REPO:-zackees/clud}"
 WORKFLOW="${ACT_WORKFLOW:-ci.yml}"
+EVENT="${ACT_EVENT:-pull_request}"
 # Both live in machine-scoped bosn volumes (bosn.toml `clud_act`), so they
 # outlive this container: action checkouts, and the Actions cache server that
 # backs actions/cache, setup-uv and setup-soldr's caches.
@@ -111,19 +112,42 @@ set --
 if [ -n "${GITHUB_TOKEN:-}" ]; then
     set -- -s GITHUB_TOKEN
 fi
+if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
+    TAG="${ACT_RELEASE_TAG:-$(sed -n 's/^version = "\([0-9][^"]*\)"/\1/p' "$SRC/pyproject.toml" | head -n 1)}"
+    [ -n "$TAG" ] || { echo "No release tag in pyproject.toml" >&2; exit 1; }
+    set -- "$@" --input "release_tag=$TAG" --input mode=candidate \
+        --env PYTEST_ADDOPTS=-s \
+        --matrix target:x86_64-unknown-linux-musl
+fi
 
 # --cache-server-path: act's default is ~/.cache/actcache, but pinning it to
 # the volume makes the reuse explicit. Without a persistent path every run
 # restored nothing: a cold venv, and 0 zccache hits in the Rust build.
 # --pull=false: reuse the local runner image (a missing one is still pulled).
 # --init: reap detached daemon children so strict shutdown tests see exited PIDs.
-act pull_request -W ".github/workflows/$WORKFLOW" -j "$JOB" \
-    -e "/tmp/$RUN/event.json" \
-    --local-repository "actions/checkout@v4=$CHECKOUT" \
-    -P "ubuntu-24.04=$IMAGE" \
-    --pull=false \
-    --rm \
-    --container-options "--init --label clud.act-run=$RUN" \
-    --artifact-server-path "/tmp/$RUN/artifacts" \
-    --action-cache-path "$ACTION_CACHE" \
-    --cache-server-path "$SERVER_CACHE" "$@"
+run_act() {
+    act "$EVENT" -W ".github/workflows/$WORKFLOW" -j "$JOB" \
+        -e "/tmp/$RUN/event.json" \
+        --local-repository "actions/checkout@v4=$CHECKOUT" \
+        -P "ubuntu-24.04=$IMAGE" \
+        --pull=false \
+        --rm \
+        --container-options "--init --label clud.act-run=$RUN" \
+        --artifact-server-path "/tmp/$RUN/artifacts" \
+        --action-cache-path "$ACTION_CACHE" \
+        --cache-server-path "$SERVER_CACHE" "$@"
+}
+
+if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
+    LOG="/tmp/$RUN/act.log"
+    run_act "$@" 2>&1 | tee "$LOG"
+    # Act may exit successfully after a skipped job; require the actual pytest
+    # result and the host's emitted evidence for this exact release and arch.
+    grep -F 'Job succeeded' "$LOG" >/dev/null
+    grep -E '(^|[^0-9])1 passed([[:space:]]|$)' "$LOG" >/dev/null
+    grep -F 'PUBLIC_EVIDENCE ' "$LOG" \
+        | grep -F "\"tag\": \"$TAG\"" \
+        | grep -F '"arch": "x86_64"' >/dev/null
+else
+    run_act "$@"
+fi
