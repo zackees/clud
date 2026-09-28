@@ -333,7 +333,7 @@ jobs:
 
   public-host:
     name: Public ${{ inputs.mode }} native install on ${{ matrix.runner }}
-    if: github.event_name == 'workflow_call'
+    if: inputs.release_tag != ''
     strategy:
       fail-fast: false
       matrix:
@@ -378,7 +378,7 @@ jobs:
 
   public-nixos:
     name: Public ${{ inputs.mode }} NixOS VM ${{ matrix.target }}
-    if: github.event_name == 'workflow_call'
+    if: inputs.release_tag != ''
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -438,7 +438,7 @@ jobs:
 
   public-distros:
     name: Public ${{ inputs.mode }} on ${{ matrix.distro }}
-    if: github.event_name == 'workflow_call'
+    if: inputs.release_tag != ''
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -488,7 +488,7 @@ jobs:
 
   catalog-unit:
     name: Native catalog and release wiring unit tests
-    if: github.event_name == 'workflow_call' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full')))
+    if: inputs.release_tag != '' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full')))
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -515,7 +515,7 @@ jobs:
 
   resolver-unit:
     name: Native Rust self-installer unit tests
-    if: github.event_name == 'workflow_call' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full')))
+    if: inputs.release_tag != '' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full')))
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -532,7 +532,7 @@ jobs:
 
   catalog-site:
     name: Published release to catalog and Pages
-    if: github.event_name == 'workflow_call' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full')))
+    if: inputs.release_tag != '' || (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full')))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -558,20 +558,20 @@ jobs:
 
   build-ape:
     name: Obtain installer APE
-    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
+    if: inputs.release_tag != '' && inputs.mode == 'released'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name != 'workflow_call'
+        if: inputs.release_tag == ''
       - uses: astral-sh/setup-uv@v5
-        if: github.event_name != 'workflow_call'
+        if: inputs.release_tag == ''
         with:
           version: "0.12.19"
       - name: Compile installer APE for pull request validation
-        if: github.event_name != 'workflow_call'
+        if: inputs.release_tag == ''
         run: bash installer/build_ape.sh
       - name: Download the released installer APE
-        if: github.event_name == 'workflow_call'
+        if: inputs.release_tag != ''
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
@@ -587,7 +587,7 @@ jobs:
 
   ape-host:
     name: Install and verify on ${{ matrix.runner }}
-    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
+    if: inputs.release_tag != '' && inputs.mode == 'released'
     needs: build-ape
     strategy:
       fail-fast: false
@@ -698,7 +698,7 @@ jobs:
 
   ape-core-tests:
     name: APE catalog and terminal unit tests
-    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
+    if: inputs.release_tag != '' && inputs.mode == 'released'
     needs: build-ape
     runs-on: ubuntu-24.04
     steps:
@@ -724,7 +724,7 @@ jobs:
 
   linux-distro:
     name: Install on ${{ matrix.image }} container
-    if: github.event_name == 'workflow_call' && inputs.mode == 'released'
+    if: inputs.release_tag != '' && inputs.mode == 'released'
     needs: build-ape
     runs-on: ubuntu-24.04
     strategy:
@@ -755,7 +755,7 @@ jobs:
   installer-acceptance:
     name: Installer acceptance aggregate
     needs: [catalog-unit, resolver-unit, catalog-site, public-host, public-nixos, public-distros, ape-core-tests, ape-host, linux-distro]
-    if: always() && github.event_name == 'workflow_call'
+    if: always() && inputs.release_tag != ''
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

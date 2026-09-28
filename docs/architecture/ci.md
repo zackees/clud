@@ -543,6 +543,11 @@ test the canonical `latest-stable` path. If the post-promotion path fails,
 the rollback job demotes the release and redeploys the previous pointer.
 The release and both Pages workflows share a serialized queue; each release
 rechecks public state before mutation.
+Reusable installer jobs select release mode from the required `release_tag`
+input. A called workflow inherits the tag push as `github.event_name`, so an
+event-name check for `workflow_call` would skip every public lane. Explicit
+always-run caller gates reject a skipped candidate or released matrix; the
+released gate stays red even when rollback restores the previous pointer.
 
 Native Linux downloads use two additional release-profile jobs, one for each
 `*-unknown-linux-musl` architecture. Both build on x64 Ubuntu because soldr's
