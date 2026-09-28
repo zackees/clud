@@ -11,12 +11,6 @@ lives in [CI architecture](../docs/architecture/ci.md#release-profile-containmen
 `candidate_catalog.py` attaches a separate versioned catalog to a public
 prerelease while keeping the canonical stable pointer unchanged.
 
-The compact APE uses the operating system's `curl` command for HTTPS downloads.
-macOS and supported Windows versions provide it; minimal Linux installations
-may need to install `curl` first (for example, `sudo pacman -S curl` on Arch).
-The installer reports this requirement if it cannot fetch the catalog or the
-selected release asset.
-
 The repository root `install` file and the existing `install.sh` and
 `install.ps1` are separate developer and shell installation routes; this
 directory does not replace them.

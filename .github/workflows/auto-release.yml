@@ -211,25 +211,6 @@ jobs:
       wheel-artifact: ${{ matrix.artifact }}
       include-sdist: ${{ matrix['include-sdist'] }}
 
-  build-installer:
-    name: Build universal APE installer
-    needs: [preflight, full-ci-gate]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.preflight.outputs.candidate_sha }}
-      - uses: astral-sh/setup-uv@v5
-        with:
-          version: "0.12.19"
-      - name: Compile and verify APE format
-        run: bash installer/build_ape.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: clud-installer-ape
-          path: clud-installer.exe
-          if-no-files-found: error
-
   build-static-musl:
     name: Build static musl clud
     needs: [preflight, full-ci-gate, release-matrix]
@@ -294,7 +275,7 @@ jobs:
 
   publish-release:
     name: Publish final bytes as public prerelease
-    needs: [preflight, full-ci-gate, snapshot-public, build, build-static-musl, verify-static-musl-arm64, build-installer]
+    needs: [preflight, full-ci-gate, snapshot-public, build, build-static-musl, verify-static-musl-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -308,11 +289,6 @@ jobs:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: clud-installer-ape
-          path: dist
 
       - uses: actions/download-artifact@v4
         with:

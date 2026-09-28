@@ -4995,3 +4995,29 @@ sufficient for the injection — the served flip must also be on. Flipping the
 section is a deliberate, reviewable act that asserts the endpoint check has
 been recorded, and the section's built-in value is pinned by a guard test so it
 cannot turn on by accident.
+
+---
+
+## DD-118: Retire the separate APE installer after native public release validation
+
+**Status:** Accepted.
+
+**Context:** The native `clud` executable now installs itself. Release 2.8.20
+published six native executables and passed the public candidate and released
+installer aggregates on Windows x64/ARM64, macOS x64/ARM64, Linux x64/ARM64,
+the tested Linux distributions, and both clean NixOS VMs. The released catalog
+at `/install/manifest.json` names 2.8.20 as `latest-stable`. The evidence is
+[auto-release run 36412101247](https://github.com/zackees/clud/actions/runs/36412101247)
+(successful attempt 2). GitHub Pages deployment initially rejected the release
+tag under the `github-pages` environment's main-only policy; the environment
+now also allows version tags matching `*.*.*`, and the rerun passed.
+
+**Decision:** Stop building, publishing, and advertising the separate APE
+installer in future releases. Keep historical release assets untouched. The
+versioned native executable and its verified catalog remain the installation
+route, with the existing wheel and script distribution paths independent.
+
+**Consequences:** The release workflow no longer requires an APE artifact or
+APE acceptance lanes. Public native candidate and released checks remain
+required before and after stable promotion. Historical APE assets stay on
+their original releases for existing users.
