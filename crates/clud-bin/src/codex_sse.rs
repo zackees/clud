@@ -22,7 +22,10 @@
 
 use std::collections::HashMap;
 
+use sha2::{Digest, Sha256};
+
 use crate::cache_health::TokenUsage;
+use crate::codex_translate;
 
 /// One decoded SSE frame. `event` is absent when the producer sent only data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -843,24 +846,58 @@ fn message_item_text(item: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// Anthropic clients enforce `^[a-zA-Z0-9_-]+$` on `tool_use.id`; upstream
-/// call ids do not always satisfy it.
+/// True for a byte legal in a client `tool_use.id`.
+///
+/// clud's own Anthropic-facing routes accept `^[a-zA-Z0-9_-]+$` for this
+/// field; that is the invariant enforced here and by the tests in this
+/// module, not a claim about every downstream Anthropic client.
+fn is_legal_tool_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
+/// Rewrite an upstream `call_id` into a client-legal `tool_use.id`.
+///
+/// Must be injective (distinct upstream ids never collapse onto one id --
+/// see #1535, where two ids differing only in punctuation both sanitized to
+/// `a_b`) and idempotent (a client echoes this id back on a later turn as
+/// part of the tool_use/tool_result pair, and the request direction passes
+/// it straight through rather than re-encoding, so re-running this function
+/// on its own output must be a no-op).
+///
+/// An id already legal and within the length cap passes through unchanged
+/// (mod `shorten_identifier`), which keeps the common case byte-identical
+/// and is what makes the second application above a no-op. An id with
+/// illegal bytes, or an empty id, is masked byte-for-byte (illegal -> `_`)
+/// for readability and then disambiguated with a hash of the *original*
+/// bytes, since the mask alone is not injective (`a.b`, `a/b`, and `a:b`
+/// all mask to `a_b`). The masked-and-hashed form is itself always legal
+/// and within the length cap, so it takes the fast path -- and is therefore
+/// a fixed point -- on any later application.
 fn sanitize_tool_id(id: &str) -> String {
-    let sanitized: String = id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
-                character
+    if !id.is_empty() && id.bytes().all(is_legal_tool_id_byte) {
+        return codex_translate::shorten_identifier(id);
+    }
+    let masked: String = id
+        .bytes()
+        .map(|byte| {
+            if is_legal_tool_id_byte(byte) {
+                byte as char
             } else {
                 '_'
             }
         })
         .collect();
-    if sanitized.is_empty() {
-        "tool_call".to_string()
-    } else {
-        sanitized
-    }
+    let digest = Sha256::digest(id.as_bytes());
+    let suffix: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // `masked` is pure ASCII (every byte maps to an ASCII char above), so
+    // byte and char boundaries coincide and this slice never panics.
+    let keep = codex_translate::MAX_IDENTIFIER_LEN.saturating_sub(suffix.len() + 1);
+    let boundary = keep.min(masked.len());
+    format!("{}_{}", &masked[..boundary], suffix)
 }
 
 fn map_stop_reason(kind: &str, value: &serde_json::Value, saw_tool_call: bool) -> String {

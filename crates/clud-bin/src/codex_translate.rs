@@ -72,7 +72,7 @@ pub fn pending_input_items_as_values(
 }
 
 /// Responses rejects identifiers longer than this.
-const MAX_IDENTIFIER_LEN: usize = 64;
+pub(crate) const MAX_IDENTIFIER_LEN: usize = 64;
 
 /// Claude Code tags one system block for billing attribution. It is transport
 /// metadata, not instruction text, and forwarding it upstream pollutes the
@@ -590,9 +590,13 @@ pub fn shorten_identifier(id: &str) -> String {
         return id.to_string();
     }
     let digest = Sha256::digest(id.as_bytes());
+    // 8 bytes (64 bits) rather than the 4 (32 bits) this used to keep: once
+    // `sanitize_tool_id` (codex_sse.rs) stopped colliding distinct ids by
+    // construction, this truncation became the only residual collision
+    // surface for identifiers over 64 chars, so it gets the wider margin.
     let suffix: String = digest
         .iter()
-        .take(4)
+        .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let keep = MAX_IDENTIFIER_LEN - suffix.len() - 1;

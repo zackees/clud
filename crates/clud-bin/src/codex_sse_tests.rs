@@ -907,3 +907,147 @@ fn emitted_frames_are_well_formed_sse() {
         serde_json::from_str::<serde_json::Value>(data).expect("JSON body");
     }
 }
+
+// ---------------------------------------------------------------------------
+// sanitize_tool_id (#1535: tool_use id mangling was not injective)
+// ---------------------------------------------------------------------------
+
+fn is_legal_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= codex_translate::MAX_IDENTIFIER_LEN
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// Already-legal, already-short ids pass through byte-identical.
+#[test]
+fn sanitize_tool_id_is_identity_on_legal_ids() {
+    for id in ["call_a", "call-123", "abcXYZ_09", "a"] {
+        assert_eq!(sanitize_tool_id(id), id);
+    }
+}
+
+/// Distinct upstream ids that differ only in punctuation must not collapse
+/// onto one client-visible id (the bug this issue fixes: `a.b`, `a/b`, and
+/// `a:b` all used to sanitize to `a_b`).
+#[test]
+fn distinct_punctuation_does_not_collide() {
+    let ids = ["a.b", "a/b", "a:b", "a_b"];
+    let sanitized: Vec<String> = ids.iter().map(|id| sanitize_tool_id(id)).collect();
+    for (left_index, left) in sanitized.iter().enumerate() {
+        for (right_index, right) in sanitized.iter().enumerate() {
+            assert!(
+                left_index == right_index || left != right,
+                "{:?} and {:?} both sanitized to {left:?}",
+                ids[left_index],
+                ids[right_index]
+            );
+        }
+        assert!(is_legal_id(left), "{left:?} is not a legal tool_use id");
+    }
+}
+
+/// Two long ids that differ only in punctuation after the truncation point
+/// must still diverge -- the hash disambiguates the raw id, not the masked
+/// shape, so truncation alone cannot reintroduce the collision.
+#[test]
+fn distinct_punctuation_stays_distinct_past_the_truncation_point() {
+    let base = "x".repeat(80);
+    let left = format!("{base}.left");
+    let right = format!("{base}:right");
+    assert_ne!(sanitize_tool_id(&left), sanitize_tool_id(&right));
+}
+
+/// No pure function of the id can separate two calls that both carry an
+/// empty `call_id`, since there is only one empty string to sanitize (see
+/// the issue's note on this); what the fix must avoid is reintroducing the
+/// old bug where *other* distinct ids also collapsed onto the empty-id
+/// fallback. Confirm the fallback string is not reachable by any non-empty
+/// input, and that empty itself still sanitizes to a legal id.
+#[test]
+fn empty_id_gets_a_legal_id_no_other_input_can_reach() {
+    let empty = sanitize_tool_id("");
+    assert!(is_legal_id(&empty));
+    for id in ["...", ":::", "///", "a.b", "a/b"] {
+        assert_ne!(sanitize_tool_id(id), empty);
+    }
+}
+
+/// The transform is idempotent: re-sanitizing an already-minted id (what
+/// happens when the request direction, which must not re-encode, is fed a
+/// value that happens to flow through this function again) is a no-op.
+#[test]
+fn sanitizing_an_already_minted_id_is_a_no_op() {
+    let raw_ids = [
+        "call_abc",
+        "a.b",
+        "",
+        &"legal_".repeat(20),
+        &format!("{}.tail", "x".repeat(80)),
+    ];
+    for raw in raw_ids {
+        let minted = sanitize_tool_id(raw);
+        assert_eq!(
+            sanitize_tool_id(&minted),
+            minted,
+            "sanitize_tool_id({minted:?}) was not a fixed point (raw = {raw:?})"
+        );
+    }
+}
+
+/// Every output satisfies the client's charset and length contract,
+/// regardless of what the upstream id looked like.
+#[test]
+fn every_output_is_legal_and_bounded() {
+    for id in [
+        "call_a",
+        "",
+        "....",
+        "a.b/c:d",
+        &"x".repeat(200),
+        &"日本語.call".repeat(10),
+    ] {
+        assert!(is_legal_id(&sanitize_tool_id(id)), "input {id:?}");
+    }
+}
+
+/// End-to-end: two parallel tool calls whose upstream `call_id`s differ
+/// only in punctuation must reach the client with distinct `tool_use.id`s,
+/// so a later `tool_result` unambiguously identifies which call it answers.
+#[test]
+fn parallel_calls_with_punctuation_only_difference_get_distinct_client_ids() {
+    let stream = [
+        upstream("response.created", json!({})),
+        upstream(
+            "response.output_item.added",
+            json!({"output_index": 0, "item": {
+                    "type": "function_call", "call_id": "a.b", "name": "one"}}),
+        ),
+        upstream(
+            "response.output_item.added",
+            json!({"output_index": 1, "item": {
+                    "type": "function_call", "call_id": "a:b", "name": "two"}}),
+        ),
+        upstream(
+            "response.output_item.done",
+            json!({"output_index": 0, "item": {
+                    "type": "function_call", "call_id": "a.b", "name": "one"}}),
+        ),
+        upstream(
+            "response.output_item.done",
+            json!({"output_index": 1, "item": {
+                    "type": "function_call", "call_id": "a:b", "name": "two"}}),
+        ),
+        upstream("response.completed", json!({})),
+    ]
+    .concat();
+
+    let frames = run(&stream, 4096);
+    let bodies = bodies(&frames);
+    let first_id = bodies[1]["content_block"]["id"].as_str().unwrap();
+    let second_id = bodies[2]["content_block"]["id"].as_str().unwrap();
+    assert_ne!(first_id, second_id);
+    assert!(is_legal_id(first_id));
+    assert!(is_legal_id(second_id));
+}
