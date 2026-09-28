@@ -573,17 +573,7 @@ mod posix {
             let code = process
                 .wait(Some(Duration::from_secs(1)))
                 .map_err(|error| error.to_string())?;
-            let lines: Vec<_> = String::from_utf8_lossy(&output)
-                .lines()
-                .map(str::to_owned)
-                .collect();
-            let actual = lines
-                .iter()
-                .rev()
-                .nth(1)
-                .map(String::as_str)
-                .unwrap_or_default();
-            let found_version = lines.last().map(String::as_str).unwrap_or_default();
+            let (actual, found_version) = parse_shell_probe(&output);
             if code != 0
                 || actual != plan.destination.to_string_lossy()
                 || found_version != expected
@@ -592,5 +582,28 @@ mod posix {
             }
         }
         Ok(())
+    }
+
+    fn parse_shell_probe(output: &[u8]) -> (String, String) {
+        let lines: Vec<_> = String::from_utf8_lossy(output)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let actual = lines.iter().rev().nth(1).cloned().unwrap_or_default();
+        let version = lines.last().cloned().unwrap_or_default();
+        (actual, version)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::parse_shell_probe;
+
+        #[test]
+        fn fresh_shell_probe_ignores_interactive_warnings() {
+            let output = b"bash: no job control in this shell\n__CLUD_INSTALL_PATH__/tmp/bin/clud\nbash: warning after path\n__CLUD_INSTALL_VERSION__clud 2.8.16\n";
+            let (path, version) = parse_shell_probe(output);
+            assert_eq!(path, "/tmp/bin/clud");
+            assert_eq!(version, "clud 2.8.16");
+        }
     }
 }
