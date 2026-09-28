@@ -1,6 +1,7 @@
 name: Dylint
 
-# One Linux Dylint pass is called from ci.yml under its concurrency group.
+# One Linux Dylint job is called from ci.yml under its concurrency group. It
+# lints the host, then cross-checks Windows MSVC and macOS arm64 from Linux.
 
 on:
   workflow_call:
@@ -66,3 +67,15 @@ jobs:
         run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
       - name: Run dylint over workspace
         run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
+      # Late lints only see code that compiles for the checked target, so the
+      # host pass never reaches `cfg(windows)` / `cfg(target_os = "macos")`
+      # code. These check-only passes cover it from Linux with the same
+      # prebuilt driver; soldr installs the nightly's target `rust-std`.
+      - name: Run dylint for x86_64-pc-windows-msvc
+        run: |
+          env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target x86_64-pc-windows-msvc
+          env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target x86_64-pc-windows-msvc
+      - name: Run dylint for aarch64-apple-darwin
+        run: |
+          env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target aarch64-apple-darwin
+          env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets --target aarch64-apple-darwin

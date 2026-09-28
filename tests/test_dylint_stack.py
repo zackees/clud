@@ -20,6 +20,8 @@ DYLINT_VERSION = "6.0.3"
 DYLINT_NIGHTLY = "nightly-2026-05-28"
 LINT_DIR = ROOT / "dylints" / "ban_manual_slash_normalize"
 WORKFLOW = ROOT / ".github" / "workflows" / "_dylint.yml"
+# One triple per OS family: the workspace gates by OS, not architecture.
+DYLINT_CROSS_TARGETS = ("x86_64-pc-windows-msvc", "aarch64-apple-darwin")
 
 
 def _toml(path: Path) -> dict:
@@ -74,17 +76,28 @@ def test_dylint_lockfile_matches_the_pinned_version() -> None:
     assert f'name = "dylint_linting"\nversion = "{DYLINT_VERSION}"' in lock
 
 
-def test_dylint_workflow_runs_one_plain_invocation() -> None:
-    """No retry, no alias reconstruction, no hand-built driver (issue #911)."""
+def test_dylint_workflow_runs_one_plain_invocation_per_target() -> None:
+    """One pass per checked target; no retry, alias reconstruction, or hand-built driver (#911)."""
     workflow = _workflow_text()
 
-    # Exactly one managed workspace pass — the recovery path ran it twice.
-    managed_invocations = re.findall(
-        r"(?m)^\s*(?:run:\s*)?env -u RUSTUP_TOOLCHAIN soldr dylint --all\b",
+    # Exactly one managed workspace pass per target — the recovery path ran the
+    # host pass twice. A late lint only sees code compiled for the checked
+    # target, so the cross passes are what reach cfg(windows)/macOS modules.
+    target_suffixes = re.findall(
+        r"(?m)^\s*(?:run:\s*)?env -u RUSTUP_TOOLCHAIN soldr dylint --all\b(.*)$",
         workflow,
     )
-    assert len(managed_invocations) == 1
+    expected = ["-- --workspace --all-targets"] + [
+        f"-- --workspace --all-targets --target {target}" for target in DYLINT_CROSS_TARGETS
+    ]
+    assert sorted(suffix.strip() for suffix in target_suffixes) == sorted(expected)
     assert "cargo install cargo-dylint" not in workflow
+
+    # Target std comes from the nightly's prebuilt rust-std, never a std build.
+    for target in DYLINT_CROSS_TARGETS:
+        assert f"env -u RUSTUP_TOOLCHAIN soldr dylint prepare --target {target}" in workflow
+    assert "build-std" not in workflow
+    assert "rustup target add" not in workflow
 
     # The specific scaffolding that was removed. Each of these appearing again
     # means someone restored the workaround instead of moving the version pin.
