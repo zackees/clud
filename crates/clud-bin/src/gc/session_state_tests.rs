@@ -213,8 +213,11 @@ fn sweeping_writes_a_pre_deletion_audit_line() {
     let ours = body
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .find(|v| v["site"] == "gc.session-state")
-        .expect("a gc.session-state line must exist");
+        .find(|v| {
+            v["site"] == "gc.session-state"
+                && v["path"].as_str().is_some_and(|p| p.ends_with("1__1"))
+        })
+        .expect("a gc.session-state line for this test's session must exist");
     assert_eq!(ours["rule"], "session-state ambient stale>48h");
     assert!(
         ours["path"].as_str().unwrap().ends_with("1__1"),
@@ -248,7 +251,10 @@ fn the_audit_rule_distinguishes_the_two_retention_windows() {
     let ours = log
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .find(|v| v["site"] == "gc.session-state")
-        .expect("a gc.session-state line must exist");
+        .find(|v| {
+            v["site"] == "gc.session-state"
+                && v["path"].as_str().is_some_and(|p| p.ends_with("2__2"))
+        })
+        .expect("a gc.session-state line for this test's session must exist");
     assert_eq!(ours["rule"], "session-state notable stale>30d");
 }
