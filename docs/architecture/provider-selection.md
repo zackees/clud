@@ -267,6 +267,23 @@ do not resolve against the gateway's advertised rows, so a synthetic
 advisor) even on a healthy session. That is upstream behaviour clud does not
 own from the gateway.
 
+### `/advisor` is unavailable on non-Claude routes
+
+The advisor is an Anthropic *server* tool: Claude Code declares it as a
+`tools[]` entry (`type: advisor_20260301`) paired with the
+`anthropic-beta: advisor-tool-2026-03-01` value, and the server terminating
+`/v1/messages` runs the advisor pass. OpenRouter, DeepSeek and Kimi run no such
+loop, and every accepted advisor pairing is Claude-only. Claude Code's gateway
+contract treats the two halves as one capability: a split pair hard-fails with
+a `400`, which Claude Code answers by disabling `/advisor` until it exits. So
+the unified gateway strips **both** halves together on every Anthropic-compat,
+non-Claude route (`strip_advisor_capability` in
+`crates/clud-bin/src/codex_bridge.rs`) and the feature turns off quietly. The advisor loop is server-to-server inside Anthropic's API, so clud
+deliberately does not emulate it (no MCP tool, no proxy-side sub-call loop):
+such hacks burn a second model's tokens on every consult for little gain, and
+the transcript would claim a Claude advisor that never ran. See
+[#1529](https://github.com/zackees/clud/issues/1529).
+
 Because the merge also means Claude Code can send IDs the gateway never
 advertised, the Codex discovery route refuses any model it cannot resolve
 instead of forwarding it, and it distinguishes the two reasons: an ID clud has
