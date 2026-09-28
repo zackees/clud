@@ -19,6 +19,23 @@ from tests.process import run as run_process
 from tests.test_installer_native_entry import installer_target  # noqa: F401
 
 
+@pytest.mark.parametrize("os_name", ["darwin", "windows"])
+def test_public_executable_flavor_accepts_catalog_rows_without_variant(os_name: str) -> None:
+    row = {
+        "platform": {"os": os_name},
+        "asset": {"media_type": "application/octet-stream"},
+    }
+    assert public_executable_flavor(row) is None
+
+
+def test_public_executable_flavor_preserves_linux_static_musl() -> None:
+    assert public_executable_flavor({"variant": {"flavor": "static-musl"}}) == "static-musl"
+
+
+def public_executable_flavor(row: dict) -> str | None:
+    return row.get("variant", {}).get("flavor")
+
+
 def public_bytes(url: str, limit: int = 200 * 1024 * 1024) -> bytes:
     if not url.startswith("https://"):
         raise ValueError("public installer URL must use HTTPS")
@@ -125,7 +142,7 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
     digest = hashlib.sha256(payload).hexdigest()
     assert len(payload) == asset["size_bytes"]
     assert digest == asset["sha256"]
-    verify_direct_executable(payload, os_name, arch, matches[0]["variant"].get("flavor"))
+    verify_direct_executable(payload, os_name, arch, public_executable_flavor(matches[0]))
     binary = tmp_path / asset["filename"]
     binary.write_bytes(payload)
     binary.chmod(0o755)
