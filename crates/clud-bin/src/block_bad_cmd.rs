@@ -1522,13 +1522,13 @@ fn evaluate_command_into(
         return;
     }
 
-    let command_text_owned;
-    let command_text = if depth == 0 {
-        command_text_owned = strip_heredoc_bodies(command_text);
-        command_text_owned.as_str()
-    } else {
-        command_text
-    };
+    // Heredoc bodies are data, not commands, at every recursion depth: a
+    // heredoc nested inside a `$(...)`/backtick/`<(...)` substitution is
+    // extracted verbatim by scan_command_substitutions below and recurses
+    // here with its heredoc still attached, so a depth-0-only strip would
+    // miss it (zackees/clud#1540).
+    let command_text_owned = strip_heredoc_bodies(command_text);
+    let command_text = command_text_owned.as_str();
 
     for inner in scan_command_substitutions(command_text) {
         evaluate_command_into(&inner, context, dialect, depth + 1, evaluation);
