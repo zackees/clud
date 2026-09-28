@@ -7971,6 +7971,192 @@ Connection: close
         drop(upstream.join().unwrap());
     }
 
+    /// The SSE a compat upstream sends for one `Bash` tool call whose
+    /// arguments arrive as several `input_json_delta` fragments (#1532). The
+    /// command carries a multi-byte character so a byte-level split can land
+    /// inside it.
+    fn fragmented_tool_use_sse() -> (String, &'static str) {
+        let full_input = r#"{"command":"echo héllo && ls -la","description":"list files"}"#;
+        let fragments = [
+            "",
+            r#"{"comm"#,
+            r#"and":"echo h"#,
+            "é",
+            r#"llo && ls -la","desc"#,
+            r#"ription":"list files"}"#,
+        ];
+        let mut sse = String::from(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"m\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n\
+             event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"Bash\",\"input\":{}}}\n\n",
+        );
+        for fragment in fragments {
+            let data = serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": fragment},
+            });
+            sse.push_str(&format!("event: content_block_delta\ndata: {data}\n\n"));
+        }
+        sse.push_str(
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+             event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n\
+             event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        (sse, full_input)
+    }
+
+    /// An upstream that answers every request with `body`, written in
+    /// `piece`-byte writes with a pause between them, so the bridge's reads
+    /// land mid-frame, mid-JSON and mid-UTF-8.
+    fn dribbling_sse_upstream(
+        body: String,
+        piece: usize,
+        connections: usize,
+    ) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_nodelay(true).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(500)))
+                    .unwrap();
+                let mut request = [0_u8; 16384];
+                let _ = stream.read(&mut request);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                for segment in body.as_bytes().chunks(piece) {
+                    stream.write_all(segment).unwrap();
+                    stream.flush().unwrap();
+                    thread::sleep(Duration::from_millis(2));
+                }
+                let _ = stream.shutdown(Shutdown::Write);
+            }
+        });
+        (url, handle)
+    }
+
+    /// Byte-level chunked decode: the relayed chunks may split a UTF-8
+    /// sequence, so the response cannot be read as a `String` first.
+    fn decode_chunked_bytes(raw: &[u8]) -> Vec<u8> {
+        let split = raw
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("header terminator");
+        let headers = String::from_utf8_lossy(&raw[..split]);
+        assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+        assert!(headers.contains("Transfer-Encoding: chunked"), "{headers}");
+        let mut rest = &raw[split + 4..];
+        let mut body = Vec::new();
+        loop {
+            let line_end = rest
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .expect("chunk size line");
+            let size =
+                usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).unwrap().trim(), 16)
+                    .expect("hex chunk size");
+            rest = &rest[line_end + 2..];
+            if size == 0 {
+                return body;
+            }
+            body.extend_from_slice(&rest[..size]);
+            assert_eq!(
+                &rest[size..size + 2],
+                b"\r\n",
+                "chunk must be CRLF terminated"
+            );
+            rest = &rest[size + 2..];
+        }
+    }
+
+    /// What a client rebuilds from the stream: the concatenated
+    /// `partial_json` of every `input_json_delta` for block 0.
+    fn reassembled_tool_input(sse: &str) -> String {
+        sse.split("\n\n")
+            .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .filter(|event| event["delta"]["type"] == "input_json_delta")
+            .map(|event| event["delta"]["partial_json"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// #1532: a streamed `tool_use` whose arguments arrive as fragmented
+    /// `input_json_delta` frames -- delivered in 1-, 5- and 7-byte writes, so
+    /// every frame, JSON string and multi-byte character straddles a read
+    /// boundary -- reaches the client byte-for-byte on the OpenRouter,
+    /// DeepSeek and Kimi compat routes. The relay forwards response bytes
+    /// verbatim and never re-frames SSE, so an empty tool call seen on a
+    /// compat route did not originate in the bridge.
+    #[test]
+    fn compat_routes_relay_fragmented_tool_use_input_intact() {
+        let (sse, full_input) = fragmented_tool_use_sse();
+        assert_eq!(reassembled_tool_input(&sse), full_input, "fixture sanity");
+        for piece in [1_usize, 5, 7] {
+            for route in ["openrouter", "deepseek", "kimi"] {
+                let (url, upstream) = dribbling_sse_upstream(sse.clone(), piece, 1);
+                let unused = FakeResponses::start();
+                let (gateway, model) = match route {
+                    "openrouter" => (
+                        UnifiedGatewayConfig::new(None, false)
+                            .with_openrouter(Some("openrouter-key".to_string()))
+                            .with_upstreams(unused.base_url.clone(), String::new())
+                            .with_openrouter_upstream(url),
+                        "clud-claude-openrouter-sonnet",
+                    ),
+                    "deepseek" => (
+                        UnifiedGatewayConfig::new(Some("deepseek-key".to_string()), false)
+                            .with_upstreams(unused.base_url.clone(), url),
+                        "clud-claude-deepseek-flash",
+                    ),
+                    _ => (
+                        UnifiedGatewayConfig::new(Some("deepseek-key".to_string()), false)
+                            .with_upstreams(unused.base_url.clone(), unused.base_url.clone())
+                            .with_route_upstream(ModelProvider::Kimi, url)
+                            .with_route(ModelProvider::Kimi, Some("kimi-key".to_string())),
+                        "clud-claude-kimi-k3",
+                    ),
+                };
+                let mut bridge =
+                    BridgeHandle::start(BridgeConfig::default().with_unified_gateway(gateway))
+                        .unwrap();
+                let mut client = TcpStream::connect(bridge.socket_addr()).unwrap();
+                client.set_read_timeout(Some(CLIENT_READ_TIMEOUT)).unwrap();
+                client
+                    .write_all(
+                        unified_message_request(&bridge, model, "tool-session", "native-oauth")
+                            .as_bytes(),
+                    )
+                    .unwrap();
+                client.shutdown(Shutdown::Write).unwrap();
+                let mut raw = Vec::new();
+                client.read_to_end(&mut raw).unwrap();
+                let body = decode_chunked_bytes(&raw);
+                assert_eq!(
+                    body,
+                    sse.as_bytes(),
+                    "{route} ({piece}-byte upstream writes): relayed SSE must be byte-identical"
+                );
+                let relayed = String::from_utf8(body).unwrap();
+                assert_eq!(
+                    reassembled_tool_input(&relayed),
+                    full_input,
+                    "{route} ({piece}-byte upstream writes): tool_use input lost"
+                );
+                assert!(
+                    unused.requests().is_empty(),
+                    "{route}: the turn must stay on its own route"
+                );
+                bridge.shutdown().unwrap();
+                upstream.join().unwrap();
+            }
+        }
+    }
+
     #[test]
     fn first_frame_timeout_returns_a_pre_commit_gateway_error() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
