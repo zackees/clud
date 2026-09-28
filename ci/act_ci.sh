@@ -126,8 +126,12 @@ fi
 # --pull=false: reuse the local runner image (a missing one is still pulled).
 # --init: reap detached daemon children so strict shutdown tests see exited PIDs.
 run_act() {
+    # Act treats the synthetic PR payload as a pull_request event even when
+    # workflow_call is requested. Use its generated call event for that lane.
+    if [ "$EVENT" = pull_request ]; then
+        set -- -e "/tmp/$RUN/event.json" "$@"
+    fi
     act "$EVENT" -W ".github/workflows/$WORKFLOW" -j "$JOB" \
-        -e "/tmp/$RUN/event.json" \
         --local-repository "actions/checkout@v4=$CHECKOUT" \
         -P "ubuntu-24.04=$IMAGE" \
         --pull=false \
