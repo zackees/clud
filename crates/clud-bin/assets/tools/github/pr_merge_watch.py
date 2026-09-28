@@ -448,6 +448,9 @@ class CheckJudgment:
     required: bool
     workflow_broken: bool = False  # startup_failure: the workflow, not the code
     cancelled: bool = False  # the failure is derived from a cancellation
+    # The owning run's attempt and status when judged: a cancel re-checks them.
+    run_attempt: int | None = None
+    run_status: str = ""
 
     def as_check_row(self) -> CheckRow:
         bucket = {"pass": "pass", "superseded": "pass", "pending": "pending"}.get(
@@ -503,6 +506,20 @@ def _is_skipped(check: dict) -> bool:
     return _lower(check.get("status")) == "completed" and _lower(check.get("conclusion")) == (
         "skipped"
     )
+
+
+def _from_older_attempt(check: dict, run: dict | None) -> bool:
+    """The check finished before its run's current attempt started (#1449).
+
+    `gh run rerun --failed` keeps the run id and head SHA, and the old
+    attempt's failed check stays effective until the new attempt registers
+    its own check run.
+    """
+    if run is None or (_as_int(run.get("run_attempt")) or 1) < 2:
+        return False
+    completed = _parse_iso(check.get("completed_at"))
+    started = _parse_iso(run.get("run_started_at"))
+    return completed is not None and started is not None and completed < started
 
 
 def _effective(entries: list[tuple[dict, dict | None]]) -> tuple[dict, dict | None]:
@@ -636,6 +653,8 @@ def judge_check_runs(
                 state = "pending"
             else:
                 state = "superseded"
+        elif _from_older_attempt(check, run):
+            state = "pending"  # a re-run attempt has not reported this check yet
         else:
             state = "fail"
             # An `if: always()` gate fails because its run was cancelled; a
@@ -662,6 +681,8 @@ def judge_check_runs(
                 required=is_required(name),
                 workflow_broken=conclusion == "startup_failure",
                 cancelled=cancelled,
+                run_attempt=_as_int(run.get("run_attempt")) if run is not None else None,
+                run_status=_lower(run.get("status")) if run is not None else "",
             )
         )
 
@@ -2292,6 +2313,13 @@ def _act_on_verdict(
                 log.emit("head_moved", old=snapshot.head_sha, new=moved_to)
             return True
 
+    rerun = _rerun_since_verdict(verdict, repo_for_reports)
+    if rerun is not None:
+        print(f"NOTE  run {rerun} was re-run since the verdict; not cancelling it", file=sys.stderr)
+        if log:
+            log.emit("cancel_skipped", reason="rerun_since_verdict", run_id=rerun)
+        return False
+
     first = verdict.failing[0]
     if log:
         log.emit(
@@ -2330,6 +2358,28 @@ def _act_on_verdict(
         )
     _finish_exit(EXIT_REQUIRED_FAIL, "fail", log)
     return False
+
+
+def _rerun_since_verdict(verdict: Verdict, repo: str | None) -> int | None:
+    """A failing run whose attempt or status changed since the verdict (#1449).
+
+    Its run id now names a newer attempt than the failing check, so cancelling
+    it would kill the re-run. Returns that run id, or None.
+    """
+    if not repo:
+        return None
+    for j in verdict.failing:
+        if j.run_id is None or j.run_attempt is None:
+            continue
+        run = gh_json("api", f"repos/{repo}/actions/runs/{j.run_id}")
+        if not isinstance(run, dict):
+            continue
+        attempt = _as_int(run.get("run_attempt"))
+        if (attempt is not None and attempt != j.run_attempt) or (
+            _lower(run.get("status")) != j.run_status
+        ):
+            return j.run_id
+    return None
 
 
 def _is_required(
