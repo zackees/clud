@@ -374,7 +374,7 @@ jobs:
         with:
           name: public-evidence-${{ inputs.mode }}-${{ matrix.target }}
           path: public-evidence/*.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   public-nixos:
     name: Public ${{ inputs.mode }} NixOS VM ${{ matrix.target }}

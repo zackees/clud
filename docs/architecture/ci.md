@@ -53,6 +53,21 @@ bosn run --task act-ci-static      # formatting, ruff, and static checks
 bosn run --task act-ci-linux       # Linux clippy, build, and unit suite
 ```
 
+For installer changes, use the focused jobs first:
+
+```bash
+bosn run --task act-installer-resolver          # native self-installer Rust tests
+bosn run --task act-installer-catalog           # catalog and release wiring tests
+bosn run --task act-installer-public-linux-x64  # published candidate on Ubuntu x64
+```
+
+The public job uses the version in `pyproject.toml`, so run it after that
+candidate is published. It requires a passed pytest and matching public
+evidence; a skipped test fails the local task. The `clud_act` stack mounts
+machine-scoped `act-cache` and `act-server-cache` volumes, so repeated runs
+reuse actions and the Actions cache server. The public release workflow still
+checks every required host and guest before promotion.
+
 For a focused test, run it in an applicable `act` job, or use a temporary
 local-only act workflow step and remove that step before committing. Do not
 switch to `bosn run --task focused-test`, direct `bash test`/`bash lint`, or a
