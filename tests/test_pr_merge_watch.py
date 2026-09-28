@@ -1228,6 +1228,14 @@ def run_watch(watcher, tmp_path, monkeypatch, polls: list[dict], required, *, re
         return head_gate(watcher, polls[index])
 
     monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
+
+    def run_refetch(*args):
+        # The pre-cancel re-read of a failing run (#1449): the latest poll's copy.
+        run_id = int(args[-1].rsplit("/", 1)[-1])
+        latest = polls[min(seen["polls"], len(polls)) - 1]["workflow_runs"]
+        return next((r for r in latest if r.get("id") == run_id), None)
+
+    monkeypatch.setattr(watcher, "gh_json", run_refetch)
     cancels: list[dict] = []
     monkeypatch.setattr(
         watcher,
@@ -1631,3 +1639,100 @@ def test_a14_cancel_scope_is_the_failing_workflow_at_or_below_the_run(
     assert verdict.failing_run_ids == {CI_YML: 200}
     # 201 is newer than the failing run; 300 is another workflow.
     assert scoped_cancel(watcher, monkeypatch, case, verdict.failing_run_ids) == [198, 200]
+
+
+# ---- #1449 regression ----
+
+
+def _rerun_poll(*, attempt: int, status: str, check: dict) -> dict:
+    run = {
+        "id": 36235999882,
+        "name": "CI",
+        "path": CI_YML,
+        "workflow_id": 1,
+        "run_attempt": attempt,
+        "run_started_at": "2026-09-26T10:59:22Z",
+        "event": "pull_request",
+        "head_branch": "feat",
+        "head_sha": "48e7b20",
+        "status": status,
+        "conclusion": None if status != "completed" else "success",
+        "check_suite_id": 7,
+    }
+    return {"head_sha": "48e7b20", "check_runs": [check], "workflow_runs": [run]}
+
+
+def _ci_ok(check_id: int, conclusion: str, completed_at: str) -> dict:
+    return {
+        "id": check_id,
+        "name": "CI OK",
+        "head_sha": "48e7b20",
+        "status": "completed",
+        "conclusion": conclusion,
+        "completed_at": completed_at,
+        "details_url": f"https://github.com/zackees/clud/actions/runs/36235999882/job/{check_id}",
+        "check_suite": {"id": 7},
+    }
+
+
+def test_1449_stale_failed_check_during_rerun_is_pending_not_cancelled(
+    watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = _rerun_poll(
+        attempt=2,
+        status="in_progress",
+        check=_ci_ok(108391482097, "failure", "2026-09-26T10:40:00Z"),
+    )
+    verdict = watcher.judge_check_runs(
+        stale["check_runs"], stale["workflow_runs"], "48e7b20", {"CI OK"}
+    )
+    assert verdict.state == "pending"
+    assert verdict.failing == []
+    green = _rerun_poll(
+        attempt=2,
+        status="completed",
+        check=_ci_ok(108391700000, "success", "2026-09-26T11:20:00Z"),
+    )
+    code, polls, cancels = run_watch(watcher, tmp_path, monkeypatch, [stale, green], {"CI OK"})
+    assert cancels == []
+    assert polls == 2
+    assert code == watcher.EXIT_GREEN
+
+
+def test_1449_failure_in_the_current_attempt_still_fails(watcher) -> None:
+    poll = _rerun_poll(
+        attempt=2,
+        status="completed",
+        check=_ci_ok(108391700000, "failure", "2026-09-26T11:20:00Z"),
+    )
+    verdict = watcher.judge_check_runs(
+        poll["check_runs"], poll["workflow_runs"], "48e7b20", {"CI OK"}
+    )
+    assert verdict.state == "fail"
+
+
+def test_1449_no_cancel_when_the_run_was_rerun_after_the_verdict(
+    watcher, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failed = _rerun_poll(
+        attempt=1,
+        status="completed",
+        check=_ci_ok(108391482097, "failure", "2026-09-26T10:40:00Z"),
+    )
+    failed["workflow_runs"][0]["conclusion"] = "failure"
+    verdict = watcher.judge_check_runs(
+        failed["check_runs"], failed["workflow_runs"], "48e7b20", {"CI OK"}
+    )
+    assert verdict.state == "fail"
+    rerun = {**failed["workflow_runs"][0], "run_attempt": 2, "status": "queued"}
+    monkeypatch.setattr(watcher, "gh_json", lambda *args: rerun)
+    cancels: list = []
+    monkeypatch.setattr(watcher, "cancel_pr_runs", lambda *a, **k: cancels.append(a) or 1)
+    log = watcher.WatchLog.create(1447, "zackees/clud", root=tmp_path)
+    snapshot = watcher.PRSnapshot(1447, "OPEN", "MERGEABLE", "48e7b20", "main")
+    opts = watcher.CancelOptions({"fail"}, "runs", 30, False, False, True, False)
+    acted = watcher._act_on_verdict(
+        verdict, 1447, "zackees/clud", "zackees/clud", snapshot, opts, log
+    )
+    assert acted is False
+    assert cancels == []
