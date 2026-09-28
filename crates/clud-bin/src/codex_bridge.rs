@@ -2031,6 +2031,15 @@ fn serve_unified_anthropic_proxy(
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "unknown".to_string());
+    // #1529: the advisor is an Anthropic server tool that no compat upstream
+    // runs. Its two halves travel together or not at all.
+    let stripped;
+    let (body, headers) = if route == ConversationRoute::Claude {
+        (body, headers)
+    } else {
+        stripped = strip_advisor_capability(body, headers);
+        (stripped.0.as_slice(), stripped.1.as_slice())
+    };
     let mut outcome = ProxyOutcome::local(500);
     let routed = conversations.with_history(&conversation_key.id, |history| {
         // Crossing a provider boundary starts a new route epoch, which is
@@ -2072,6 +2081,67 @@ fn serve_unified_anthropic_proxy(
         return ProxyOutcome::local(500);
     }
     outcome
+}
+
+/// Tool type of Anthropic's server-side advisor (#1529).
+const ADVISOR_TOOL_TYPE_PREFIX: &str = "advisor_";
+/// `anthropic-beta` token that pairs with the advisor tool entry (#1529).
+const ADVISOR_BETA_PREFIX: &str = "advisor-tool-";
+
+/// Remove the advisor capability from a request bound for an
+/// Anthropic-compatible, non-Claude upstream (#1529).
+///
+/// The capability is paired: an `advisor_*` entry in `tools[]` plus an
+/// `advisor-tool-*` value in `anthropic-beta`. Claude Code's gateway contract
+/// says the feature only turns off quietly when both halves are absent
+/// together; forwarding either half alone to OpenRouter/DeepSeek/Kimi yields a
+/// hard 400 and disables `/advisor` for the session. No compat upstream runs
+/// the advisor loop, so both halves are always stripped together. A body that
+/// does not parse is forwarded untouched (the upstream owns that error), and
+/// the header half is still dropped because it can never be honoured here.
+fn strip_advisor_capability(
+    body: &[u8],
+    headers: &[(String, String)],
+) -> (Vec<u8>, Vec<(String, String)>) {
+    let mut body_out = body.to_vec();
+    if let Ok(mut request) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(tools) = request
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            let before = tools.len();
+            tools.retain(|tool| {
+                !tool
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| kind.starts_with(ADVISOR_TOOL_TYPE_PREFIX))
+            });
+            if tools.len() != before {
+                if tools.is_empty() {
+                    if let Some(object) = request.as_object_mut() {
+                        object.remove("tools");
+                        object.remove("tool_choice");
+                    }
+                }
+                body_out = serde_json::to_vec(&request).unwrap_or(body_out);
+            }
+        }
+    }
+    let headers_out = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            if !name.eq_ignore_ascii_case("anthropic-beta") {
+                return Some((name.clone(), value.clone()));
+            }
+            let kept: Vec<&str> = value
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty() && !token.starts_with(ADVISOR_BETA_PREFIX))
+                .collect();
+            (!kept.is_empty()).then(|| (name.clone(), kept.join(",")))
+        })
+        .collect();
+    (body_out, headers_out)
 }
 
 /// Unified token counting has one Anthropic-compatible contract: ordinary
@@ -9895,5 +9965,65 @@ Connection: close
             upstream.requests().is_empty(),
             "a rejected selection must not reach upstream"
         );
+    }
+
+    /// #1529: the advisor capability is paired (tools[] entry + anthropic-beta
+    /// value). On a compat route both halves must leave together, and nothing
+    /// else in the request may change.
+    #[test]
+    fn advisor_capability_halves_are_stripped_together() {
+        let body = serde_json::json!({
+            "model": "deepseek/deepseek-v4.1-flash",
+            "tools": [
+                {"name": "Read", "input_schema": {"type": "object"}},
+                {"type": "advisor_20260301", "name": "advisor", "model": "claude-opus-4-8"}
+            ],
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let headers = vec![
+            ("x-api-key".to_string(), "k".to_string()),
+            (
+                "anthropic-beta".to_string(),
+                "oauth-2025-04-20, advisor-tool-2026-03-01,fixture-capability".to_string(),
+            ),
+        ];
+        let (out_body, out_headers) =
+            super::strip_advisor_capability(&serde_json::to_vec(&body).unwrap(), &headers);
+        let out: serde_json::Value = serde_json::from_slice(&out_body).unwrap();
+        let tools = out["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "Read");
+        assert_eq!(out["messages"], body["messages"]);
+        assert_eq!(
+            out_headers,
+            vec![
+                ("x-api-key".to_string(), "k".to_string()),
+                (
+                    "anthropic-beta".to_string(),
+                    "oauth-2025-04-20,fixture-capability".to_string()
+                ),
+            ]
+        );
+
+        // Advisor-only tools and beta: both vanish entirely, never half.
+        let body = serde_json::json!({
+            "tools": [{"type": "advisor_20260301", "name": "advisor"}],
+            "tool_choice": {"type": "auto"}
+        });
+        let headers = vec![(
+            "anthropic-beta".to_string(),
+            "advisor-tool-2026-03-01".to_string(),
+        )];
+        let (out_body, out_headers) =
+            super::strip_advisor_capability(&serde_json::to_vec(&body).unwrap(), &headers);
+        let out: serde_json::Value = serde_json::from_slice(&out_body).unwrap();
+        assert!(out.get("tools").is_none());
+        assert!(out.get("tool_choice").is_none());
+        assert!(out_headers.is_empty());
+
+        // A request without the advisor is forwarded byte-identical.
+        let raw = br#"{"model":"m","tools":[{"name":"Read"}]}"#;
+        let (out_body, _) = super::strip_advisor_capability(raw, &[]);
+        assert_eq!(out_body, raw.to_vec());
     }
 }
