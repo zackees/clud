@@ -427,7 +427,7 @@ jobs:
             --argstr mode "$MODE")
           mkdir -p "$RUNNER_TEMP/public-nixos-result"
           "$driver/bin/nixos-test-driver" -o "$RUNNER_TEMP/public-nixos-result" 2>&1 | tee public-nixos.log
-          rg -m1 'PUBLIC_NIXOS_EVIDENCE ' public-nixos.log > public-nixos-evidence.txt
+          grep -m1 'PUBLIC_NIXOS_EVIDENCE ' public-nixos.log > public-nixos-evidence.txt
       - name: Retain public NixOS guest evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -477,7 +477,7 @@ jobs:
             --mount "type=bind,src=$PWD/ci/installer_public_distro_guest.sh,dst=/guest.sh,readonly" \
             '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$MODE" "$RELEASE_TAG" "$PUBLIC_VERSION" "$PUBLIC_SHA256" \
             2>&1 | tee public-distro.log
-          rg -m1 'PUBLIC_DISTRO_EVIDENCE ' public-distro.log > public-distro-evidence.txt
+          grep -m1 'PUBLIC_DISTRO_EVIDENCE ' public-distro.log > public-distro-evidence.txt
       - name: Retain public distribution guest evidence
         if: always()
         uses: actions/upload-artifact@v4

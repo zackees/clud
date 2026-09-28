@@ -127,6 +127,21 @@ def test_tag_push_runs_public_reusable_jobs_and_fails_if_they_skip() -> None:
         assert "run: test \"$RESULT\" = success" in block
 
 
+def test_public_guest_evidence_capture_uses_runner_tools() -> None:
+    installer = (WORKFLOWS / "installer-check.yml").read_text(encoding="utf-8")
+    # The Ubuntu Actions runners for these guests do not include ripgrep.
+    assert "rg -m1 'PUBLIC_NIXOS_EVIDENCE '" not in installer
+    assert "rg -m1 'PUBLIC_DISTRO_EVIDENCE '" not in installer
+    assert (
+        "grep -m1 'PUBLIC_NIXOS_EVIDENCE ' public-nixos.log "
+        "> public-nixos-evidence.txt" in installer
+    )
+    assert (
+        "grep -m1 'PUBLIC_DISTRO_EVIDENCE ' public-distro.log "
+        "> public-distro-evidence.txt" in installer
+    )
+
+
 def test_api_lookup_requires_a_complete_matching_run(monkeypatch) -> None:
     sha = "a" * 40
     unrelated = {**full_run("b" * 40), "id": 1}
