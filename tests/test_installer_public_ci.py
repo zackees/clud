@@ -7,7 +7,7 @@ import json
 import os
 import platform
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.request import Request, urlopen
 
 import pytest
@@ -32,8 +32,27 @@ def test_public_executable_flavor_preserves_linux_static_musl() -> None:
     assert public_executable_flavor({"variant": {"flavor": "static-musl"}}) == "static-musl"
 
 
+def test_public_windows_lookup_accepts_mixed_path_separators() -> None:
+    destination = PureWindowsPath(r"C:\Users\runneradmin\AppData\Local\Programs\clud\bin\clud.exe")
+    found = r"C:\Users\runneradmin\AppData\Local\Programs/clud/bin\clud.exe"
+    assert_public_lookup([found, "clud 2.8.19"], destination, "2.8.19", "windows")
+    with pytest.raises(AssertionError):
+        assert_public_lookup([found, "clud 2.8.18"], destination, "2.8.19", "windows")
+
+
 def public_executable_flavor(row: dict) -> str | None:
     return row.get("variant", {}).get("flavor")
+
+
+def assert_public_lookup(
+    lines: list[str], destination: Path | PureWindowsPath, version: str, os_name: str
+) -> None:
+    assert len(lines) == 2, lines
+    if os_name == "windows":
+        assert PureWindowsPath(lines[0]) == PureWindowsPath(destination)
+    else:
+        assert Path(lines[0]) == destination
+    assert lines[1] == f"clud {version}"
 
 
 def public_bytes(url: str, limit: int = 200 * 1024 * 1024) -> bytes:
@@ -197,7 +216,7 @@ def test_public_release_installs_by_name(installer_target, tmp_path: Path) -> No
         )
     assert lookup.returncode == 0, lookup.stderr.decode(errors="replace")
     lines = lookup.stdout.decode(errors="replace").strip().splitlines()
-    assert lines == [str(destination), f"clud {version}"]
+    assert_public_lookup(lines, destination, version, os_name)
     evidence = {
         "mode": mode,
         "tag": tag,
