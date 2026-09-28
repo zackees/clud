@@ -460,3 +460,35 @@ fn a_stock_startup_file_that_tests_an_unset_variable_still_works() {
     );
     assert_eq!(output, "[batch]", "{output}");
 }
+
+/// #1457: a script file bash runs for another program (git's
+/// `git-submodule` sourcing `git-sh-i18n`) must not be armed, while the
+/// agent's own `-c` command line, and a nested `bash -c`, still are.
+#[test]
+#[cfg(unix)]
+fn nounset_guards_command_strings_but_not_nested_script_files() {
+    let tmp = tempdir().unwrap();
+    let script = tmp.path().join("git-sh-i18n");
+    std::fs::write(
+        &script,
+        "# like git-sh-i18n line 10\nif test -z \"$GIT_TEXTDOMAINDIR\"; then echo \"i18n-ok\"; fi\n",
+    )
+    .unwrap();
+    let mut armed = stock_env();
+    armed.extend(env_overrides_at(tmp.path(), false, None));
+
+    let (code, output) = bash_under(armed.clone(), r#"echo "[${UNSET_VAR}]""#);
+    assert_ne!(
+        code, 0,
+        "the agent's command line must stay armed: {output}"
+    );
+    assert!(output.contains("UNSET_VAR"), "{output}");
+
+    let (code, output) = bash_under(armed.clone(), r#"bash -c 'echo "[${UNSET_VAR}]"'"#);
+    assert_ne!(code, 0, "a nested bash -c must stay armed: {output}");
+
+    let cmd = format!("bash '{}'", script.display());
+    let (code, output) = bash_under(armed, &cmd);
+    assert_eq!(code, 0, "a nested script file must run unarmed: {output}");
+    assert!(output.contains("i18n-ok"), "{output}");
+}

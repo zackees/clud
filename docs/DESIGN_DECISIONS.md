@@ -3215,9 +3215,14 @@ session, which is why it ships alone with its own revert story. A tool call
 that relied on an unset variable expanding to nothing now fails loudly; that
 is the point, but it will surface latent sloppiness in existing scripts as new
 errors. clud ships no bash of its own for this to break — its hooks are Python
-— but a user's bash-implemented skill or tool script is also sourced under the
-same policy, since non-interactive bash reads `BASH_ENV` for script files too,
-not only for `-c`. The generated file is written atomically and only when its
+— and since #1457 script files are not armed at all: non-interactive bash
+reads `BASH_ENV` for script files too, which put third-party scripts such as
+git's `git-sh-i18n` under nounset and broke `git submodule`. The generated
+file now runs `set -u` only when `BASH_EXECUTION_STRING` is set, i.e. for a
+`-c` command string, which is how the harness runs every Bash tool call. A
+nested `bash -c` is still armed; a script file run by any program is not.
+Unsetting `BASH_ENV` after arming was rejected because it would also disarm
+the agent's own nested `bash -c` calls. The generated file is written atomically and only when its
 content differs, so concurrent launches cannot hand a shell a half-written
 file and leave it silently unarmed.
 

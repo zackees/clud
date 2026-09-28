@@ -39,6 +39,9 @@
 //! The tool-call shell is also a direct child of the harness process, so it
 //! inherits the session environment this module contributes to.
 //!
+//! Only `-c` command strings are armed; script files bash runs for other
+//! programs are not (#1457, see [`script_body`]).
+//!
 //! # Chaining rather than clobbering
 //!
 //! A user who already has `BASH_ENV` set is not overridden into silence: the
@@ -117,6 +120,17 @@ fn is_truthy(raw: &str) -> bool {
 /// active on that line yet: it costs nothing, and it stays correct if the
 /// user's file (or a future edit) turns nounset on above it. The readability
 /// test keeps a stale path from failing every tool call.
+///
+/// Nounset is armed only when bash is running a `-c` command string (#1457).
+/// The harness runs every Bash tool call as `bash -c '<command line>'`, so the
+/// agent's own command lines stay guarded. A script file that bash runs on
+/// behalf of another program (git's `git-submodule` sourcing `git-sh-i18n`,
+/// Nix store wrappers) was never written for nounset and must not be armed.
+/// `BASH_EXECUTION_STRING` is set by bash only for `-c`, before `BASH_ENV` is
+/// read, and is never exported, so a script started from an armed command
+/// line does not inherit it. `$-` would carry the same `c` bit, but the named
+/// variable says what is tested. Unsetting `BASH_ENV` after arming was
+/// rejected: it would also disarm the agent's own nested `bash -c` calls.
 pub fn script_body() -> String {
     format!(
         "{GENERATED_MARKER} Sourced by every non-interactive bash\n\
@@ -134,9 +148,13 @@ pub fn script_body() -> String {
          \x20       *) PATH=\"${{{SHIM_DIR_KEY}}}:${{PATH:-}}\"; export PATH ;;\n\
          \x20   esac\n\
          fi\n\
-         set -u\n"
+         {ARM_LINE}"
     )
 }
+
+/// The final line of [`script_body`]: arm nounset for `-c` command strings
+/// only (#1457). [`rm_path_overrides_at`] strips it to build the unarmed file.
+const ARM_LINE: &str = "if [ -n \"${BASH_EXECUTION_STRING+x}\" ]; then set -u; fi\n";
 
 /// Write the startup file under `state_dir` and return its path.
 ///
@@ -223,8 +241,8 @@ pub fn env_overrides_at(
 /// explicitly disabled. This deliberately does not enable `set -u`.
 pub fn rm_path_overrides_at(state_dir: &Path, inherited: Option<String>) -> Vec<(String, String)> {
     let body = script_body()
-        .strip_suffix("set -u\n")
-        .expect("generated nounset script ends with set -u")
+        .strip_suffix(ARM_LINE)
+        .expect("generated nounset script ends with its arm line")
         .to_string();
     let Ok(path) = ensure_script_with(state_dir, RM_PATH_FILE_NAME, &body) else {
         return Vec::new();
