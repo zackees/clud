@@ -142,6 +142,14 @@ def test_public_guest_evidence_capture_uses_runner_tools() -> None:
     )
 
 
+def test_public_host_evidence_is_required() -> None:
+    installer = (WORKFLOWS / "installer-check.yml").read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^  public-host:\n(.*?)(?=^  public-nixos:\n)", installer)
+    assert match is not None
+    upload = match.group(1).split("- name: Retain public host evidence\n", 1)[1]
+    assert "if-no-files-found: error" in upload
+
+
 def test_api_lookup_requires_a_complete_matching_run(monkeypatch) -> None:
     sha = "a" * 40
     unrelated = {**full_run("b" * 40), "id": 1}
