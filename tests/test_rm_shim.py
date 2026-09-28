@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests import process
+from tests.shim_env import session_env
 
 
 def binary(name: str) -> Path:
@@ -55,6 +56,8 @@ def world(tmp_path: Path) -> tuple[Path, Path, dict[str, str], Path]:
         RM_STUB_LOG=str(log),
         CLUD_RM_ROOTS=str(tmp_path / "nonexistent-root"),
     )
+    # The floor is session-only (#1546): these cases run inside a session.
+    env.update(session_env(binary("clud-shim"), shim_dir))
     return shim, home, env, log
 
 
@@ -398,6 +401,38 @@ def test_each_call_writes_one_child_audit_record(world) -> None:
     assert records[0]["exit"] == 0
     assert records[1]["exit"] == 2
     assert records[1]["handoff"] is None
+
+
+def _without_session(env: dict[str, str]) -> dict[str, str]:
+    from tests.shim_env import session_key_names
+
+    names = session_key_names(binary("clud-shim"))
+    return {key: value for key, value in env.items() if key not in names}
+
+
+def test_outside_a_session_rm_passes_through_without_floor_or_audit(world) -> None:
+    """#1546: with no valid session the alias is the next `rm`, unmodified.
+
+    PATH holds only the shim and the recording stub, so the refused-in-session
+    operand below can reach nothing but the recorder.
+    """
+    shim, home, env, log = world
+    env = _without_session(env)
+    env["PATH"] = os.pathsep.join((str(shim.parent), str(log.parent / "stub")))
+    result = run(shim, env, "-rf", str(home))
+    assert result.returncode == 0, result
+    assert result.stdout == "", "no JSON decision outside a session"
+    assert json.loads(log.read_text(encoding="utf-8")) == ["-rf", str(home)]
+    assert not (home / ".clud" / "state" / "logs" / ("r" + "m")).exists()
+
+
+def test_stale_session_alias_dir_passes_through(world, tmp_path: Path) -> None:
+    shim, home, env, log = world
+    env["PATH"] = os.pathsep.join((str(shim.parent), str(log.parent / "stub")))
+    env["CLUD_RM_SHIM_DIR"] = str(tmp_path / "gone")
+    result = run(shim, env, "-rf", str(home / "missing"))
+    assert result.returncode == 0, result
+    assert json.loads(log.read_text(encoding="utf-8")) == ["-rf", str(home / "missing")]
 
 
 _OLD_CORPUS = json.loads(

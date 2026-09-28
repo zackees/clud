@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests import process
+from tests.shim_env import session_env
 
 
 def test_bind_mount_is_not_deleted() -> None:
@@ -34,6 +35,7 @@ def test_bind_mount_is_not_deleted() -> None:
     home.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update(HOME=str(home), USERPROFILE=str(home), PATH=f"{shim_dir}:/usr/bin:/bin")
+    env.update(session_env(Path("/build/target/debug/clud-shim"), shim_dir))
 
     stub_dir = root / "stub"
     stub_dir.mkdir(exist_ok=True)

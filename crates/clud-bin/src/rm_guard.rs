@@ -279,48 +279,27 @@ fn names_current_or_parent(raw: &str) -> bool {
     )
 }
 
+/// The first `rm` after the shim's directory on PATH, via the resolver every
+/// shim shares ([`crate::shim_registry::next_on_path`]), in strict mode: the
+/// in-session floor refuses rather than guess when its own directory is
+/// missing from PATH.
 pub fn find_handoff(path: &str, shim_exe: &Path) -> Result<PathBuf, String> {
-    let shim = std::fs::canonicalize(shim_exe).unwrap_or_else(|_| shim_exe.to_path_buf());
-    let shim_dir = shim
-        .parent()
-        .ok_or("the clud shim has no parent directory")?;
-    let mut after_shim = false;
-    let executable = if cfg!(windows) {
-        concat!("r", "m.exe")
-    } else {
-        concat!("r", "m")
-    };
-    for dir in std::env::split_paths(path) {
-        let resolved_dir = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-        if resolved_dir == shim_dir {
-            after_shim = true;
-            continue;
+    use crate::shim_registry::{self as registry, NextOnPathError};
+    let executable = registry::file_name(concat!("r", "m"));
+    let dirs = registry::shim_dirs(shim_exe, None, None);
+    registry::next_on_path(
+        &executable,
+        std::ffi::OsStr::new(path),
+        shim_exe,
+        &dirs,
+        true,
+    )
+    .map_err(|error| match error {
+        NextOnPathError::ShimDirMissing => "the clud shim directory is missing from PATH".into(),
+        NextOnPathError::NotFound => {
+            "no handoff executable exists after the clud shim on PATH".into()
         }
-        if !after_shim {
-            continue;
-        }
-        let candidate = dir.join(executable);
-        if !candidate.is_file() {
-            continue;
-        }
-        let resolved = std::fs::canonicalize(&candidate).unwrap_or(candidate);
-        if resolved != shim && !same_bytes(&resolved, &shim) {
-            // Preserve argv[0] for multi-call binaries (notably BusyBox's
-            // `rm` symlink). The resolved path above is only for identity.
-            return Ok(dir.join(executable));
-        }
-    }
-    if !after_shim {
-        return Err("the clud shim directory is missing from PATH".into());
-    }
-    Err("no handoff executable exists after the clud shim on PATH".into())
-}
-
-fn same_bytes(a: &Path, b: &Path) -> bool {
-    let (Ok(am), Ok(bm)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
-        return false;
-    };
-    am.len() == bm.len() && std::fs::read(a).ok() == std::fs::read(b).ok()
+    })
 }
 
 pub fn handoff_args(args: &[String], flavor: RmFlavor) -> Vec<String> {
@@ -546,6 +525,8 @@ mod tests {
         std::fs::write(&shim, b"shim").unwrap();
         let busybox = handoff_dir.join("busybox");
         std::fs::write(&busybox, b"busybox").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&busybox, std::fs::Permissions::from_mode(0o755)).unwrap();
         let applet = handoff_dir.join("rm");
         symlink(&busybox, &applet).unwrap();
         let path = std::env::join_paths([&shim_dir, &handoff_dir]).unwrap();

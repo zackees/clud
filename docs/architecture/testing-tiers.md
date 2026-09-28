@@ -67,14 +67,14 @@ pinned in `.github/workflows/_run-tests.yml`.
    self-describing.
 2. **Project `.claude/settings.json` hooks don't fire under an isolated
    `CLAUDE_CONFIG_DIR`.** The fixture passes hooks with `--settings`.
-3. **Say `python`, and keep clud's session shims off PATH.** Outside a clud
-   session, clud's `python` shim exits 127. The fixture strips
-   `~/.clud/state/shims` and `~/.clud/state/rm-shim`, and runs its own scripts
-   with the test's interpreter.
-4. **`clud-cmd-scan`'s rm-identity check** requires the first `rm` on PATH to
-   be byte-identical to the `clud-shim` beside the hook, or it denies every
-   shell call. The fixture puts a copy of the built `clud-shim` first on PATH,
-   named `rm`.
+3. **Say `python`, and keep clud's session shims off PATH.** The fixture
+   strips `~/.clud/state/shims` and `~/.clud/state/rm-shim` so a developer's
+   installed aliases cannot stand in for the build under test, and runs its
+   own scripts with the test's interpreter.
+4. **The fixture's `rm` is in a session.** A copy of the built `clud-shim`
+   named `rm` is first on PATH, and the env carries the ABI stamp and alias
+   directory (`tests/shim_env.py`), because the floor is session-only
+   ([shim-dispatch.md](shim-dispatch.md)).
 5. **Streaming is the default**, so the backend must speak SSE, including
    `input_json_delta` for tool input.
 

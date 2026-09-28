@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests import process
+from tests.shim_env import session_env
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only shim cases")
 
@@ -34,6 +35,7 @@ def test_catastrophe_floor_never_reaches_the_recording_handoff(tmp_path: Path) -
         PATH=os.pathsep.join([str(shim_dir), str(stub_dir), env["PATH"]]),
         MOCK_RM_STUB_LOG=str(recorded),
     )
+    env.update(session_env(binary.with_name("clud-shim.exe"), shim_dir))
     protected = [
         "C:/",
         "C:\\",

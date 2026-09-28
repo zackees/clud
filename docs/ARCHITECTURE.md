@@ -30,7 +30,8 @@ re-explaining.
 | [architecture/crash-reports.md](architecture/crash-reports.md) | ~110 | Panic-hook + native crash handler + `clud symbols` verifier: JSON schema, embed-line-tables-everywhere choice, opportunistic-verify model (#374) |
 | [architecture/process-reaping.md](architecture/process-reaping.md) | ~200 | The two disjoint reapers, the `(pid, creation_time)` keyspace and its single purge sweep, daemon-sparing by OS signal (marker second, whitelist last), the cooperative-marker caveat, and which test tier a reaper change belongs in |
 | [architecture/rm-tools.md](architecture/rm-tools.md) | ~170 | `safe-rm` (#1461): trash, profile roots, audit, hook rewrite, and the child catastrophe floor |
-| [architecture/gh-watch-shim.md](architecture/gh-watch-shim.md) | ~30 | Session `gh` alias, PR-watch translation, target resolution, and fail-closed fallback |
+| [architecture/shim-dispatch.md](architecture/shim-dispatch.md) | ~90 | `clud-shim`'s alias registry, single dispatch path, session ABI stamp, and fail-open passthrough outside a session (#1546) |
+| [architecture/gh-watch-shim.md](architecture/gh-watch-shim.md) | ~30 | Session `gh` alias, PR-watch translation, and target resolution |
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
 | [architecture/installer-pages.md](architecture/installer-pages.md) | ~30 | Published release assets to validated v1 Catalog, exact Pages paths, and unauthenticated deployment smoke |
 | [architecture/native-installer.md](architecture/native-installer.md) | ~40 | Early installer CLI, selector, exact release choice, consented binary transaction, and pending PATH activation |
@@ -78,4 +79,5 @@ Release-manager evidence for the optional cross-route is tracked separately in
 [release-codex-via-claude.md](release-codex-via-claude.md).
 
 - **rm safety and shim identity** -> [rm-protection.md](architecture/rm-protection.md)
+- **"Why does `gh`/`python`/`rm` behave normally outside a clud session?"** -> [shim-dispatch.md](architecture/shim-dispatch.md)
 - **"How does an agent delete files, and where do they go?"** -> [rm-tools.md](architecture/rm-tools.md)

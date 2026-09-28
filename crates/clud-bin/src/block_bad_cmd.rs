@@ -1545,7 +1545,7 @@ fn evaluate_command_into(
     }
 
     if context.pr_wait_fail_fast_enabled {
-        let shim_active = std::env::var("CLUD_GH_SHIM_ACTIVE").as_deref() == Ok("1");
+        let shim_active = std::env::var(crate::shim_registry::GH_ACTIVE_KEY).as_deref() == Ok("1");
         if let Some(reason) = blocking_pr_wait_reason(command_text, dialect, shim_active) {
             evaluation.reason = Some(reason);
             return;

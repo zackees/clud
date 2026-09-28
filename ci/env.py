@@ -276,7 +276,8 @@ _TEST_HARNESS_CLUD_NAMES = frozenset(
         "CLUD_PUBLIC_RELEASE_TAG",
         "CLUD_PUBLIC_EVIDENCE",
         # Plumbing, not behavior: a clud session puts its `python` shim on
-        # PATH, and the shim exits 127 without its target (#1423).
+        # PATH (#1423). Without its target and ABI stamp the shim now passes
+        # through to the next real python (#1546), so this is belt and braces.
         "CLUD_PYTHON_SHIM_TARGET",
     }
 )

@@ -16,25 +16,17 @@
 
 use std::path::{Path, PathBuf};
 
-pub const SHIM_TARGET_ENV_VAR: &str = "CLUD_PYTHON_SHIM_TARGET";
+use crate::shim_registry::{self, ShimDir, ShimKind};
 
-/// Subdirectory under the user's `~/.clud/state/` where shim aliases
-/// live. Joined to the resolved state root by [`shims_dir`].
-pub const SHIMS_SUBDIR: &str = ".clud/state/shims";
+/// Subdirectory under the user's home where the interpreter aliases live.
+/// Joined to the resolved home by [`shims_dir`].
+pub const SHIMS_SUBDIR: &str = shim_registry::INTERPRETER_SUBDIR;
 
-/// Alias filenames to install under [`SHIMS_SUBDIR`]. Each alias is a
-/// copy of the same `clud-shim` binary; the shim's `current_exe_basename`
-/// logic uses argv\[0\] to decide which interpreter family the caller
-/// wanted.
-pub fn alias_names() -> Vec<&'static str> {
-    #[cfg(windows)]
-    {
-        vec!["python.exe", "python3.exe", "rm.exe", "safe-rm.exe"]
-    }
-    #[cfg(not(windows))]
-    {
-        vec!["python", "python3", "rm", "safe-rm"]
-    }
+/// Alias filenames to install under [`SHIMS_SUBDIR`], derived from
+/// [`shim_registry::SHIMS`]. Each alias is a copy of the same `clud-shim`
+/// binary, which dispatches on argv\[0\].
+pub fn alias_names() -> Vec<String> {
+    shim_registry::file_names_in(ShimDir::Interpreter)
 }
 
 /// `~/.clud/state/shims/`. Returns `None` when the user's home dir
@@ -62,7 +54,7 @@ pub fn extract_shims_at(home_root: &Path, shim_source: &Path) -> std::io::Result
     let source_hash = blake3_short(&source_bytes);
     let mut installed = 0;
     for alias in alias_names() {
-        let target = shims_dir.join(alias);
+        let target = shims_dir.join(&alias);
         if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink())
             || needs_refresh(&target, &source_hash)
             || std::fs::read(&target).ok().as_deref() != Some(source_bytes.as_slice())
@@ -100,7 +92,7 @@ pub fn prepare_session_shims_at(
     }
     let inherited_target = env
         .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(SHIM_TARGET_ENV_VAR))
+        .find(|(key, _)| key.eq_ignore_ascii_case(shim_registry::PYTHON_TARGET_KEY))
         .map(|(_, value)| PathBuf::from(value))
         .filter(|path| path.is_file());
     let target = match inherited_target {
@@ -111,7 +103,11 @@ pub fn prepare_session_shims_at(
                 .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
                 .map(|(_, value)| value.as_str())
                 .unwrap_or("");
-            let Some(path) = crate::shim_resolve::which_python_default("python", path) else {
+            let python = shim_registry::SHIMS
+                .iter()
+                .find(|spec| spec.kind == ShimKind::Python)
+                .map_or_else(String::new, |spec| spec.name.to_string());
+            let Some(path) = crate::shim_resolve::which_python_default(&python, path) else {
                 return Ok(false);
             };
             path
@@ -121,7 +117,12 @@ pub fn prepare_session_shims_at(
     extract_shims_at(home_root, &source)?;
     let installed = home_root.join(SHIMS_SUBDIR);
     crate::shim_session::prepend_to_path(env, &installed);
-    crate::shim_session::set_env(env, SHIM_TARGET_ENV_VAR, &target.to_string_lossy());
+    crate::shim_session::set_env(
+        env,
+        shim_registry::PYTHON_TARGET_KEY,
+        &target.to_string_lossy(),
+    );
+    crate::shim_session::set_env(env, shim_registry::ABI_KEY, shim_registry::SHIM_ABI);
     Ok(true)
 }
 
@@ -138,9 +139,13 @@ pub fn prepare_current_session() -> std::io::Result<bool> {
     if !prepare_session_shims_at(&home, &current_exe, &mut env)? {
         return Ok(false);
     }
-    for key in ["PATH", SHIM_TARGET_ENV_VAR] {
+    for key in [
+        "PATH",
+        shim_registry::PYTHON_TARGET_KEY,
+        shim_registry::ABI_KEY,
+    ] {
         if let Some((_, value)) = env.iter().find(|(candidate, _)| candidate == key) {
-            // SAFETY: startup-only write to PATH/SHIM_TARGET, before the backend
+            // SAFETY: startup-only write to the shim session keys, before the backend
             // is spawned and before any thread that reads the environment runs.
             unsafe { std::env::set_var(key, value) };
         }
@@ -227,31 +232,21 @@ pub fn packaged_shim() -> std::io::Result<PathBuf> {
     }))
 }
 
-/// The session aliases: `rm`, `safe-rm` (#1461), and `gh` (#1518).
-/// All are byte copies of
+/// The session aliases, derived from [`shim_registry::SHIMS`]: `rm`,
+/// `safe-rm` (#1461) and `gh` (#1518) today. All are byte copies of
 /// `clud-shim`, which dispatches on argv\[0\].
 pub fn rm_alias_names() -> Vec<String> {
-    let mut names = vec!["rm".to_string(), "gh".to_string()];
-    names.extend(
-        crate::deletion_rules::generated()
-            .safe_aliases
-            .into_iter()
-            .map(str::to_string),
-    );
-    if cfg!(windows) {
-        names.iter_mut().for_each(|name| name.push_str(".exe"));
-    }
-    names
+    shim_registry::file_names_in(ShimDir::Session)
 }
 
 fn purge_stale_aliases(dir: &Path, expected: &[String]) -> std::io::Result<()> {
     // Only known legacy aliases are ours to remove. In particular, do not
     // delete another concurrent installer's NamedTempFile before it persists.
     for alias in alias_names() {
-        if expected.iter().any(|name| name == alias) {
+        if expected.contains(&alias) {
             continue;
         }
-        let target = dir.join(alias);
+        let target = dir.join(&alias);
         if std::fs::symlink_metadata(&target).is_ok() {
             if let Err(error) = crate::rm_tool::remove_link_or_file(&target) {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -288,7 +283,7 @@ pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
     if bytes.is_empty() {
         return Err(std::io::Error::other("packaged shim is empty"));
     }
-    let dir = home.join(".clud/state/rm-shim");
+    let dir = home.join(shim_registry::SESSION_SUBDIR);
     std::fs::create_dir_all(&dir)?;
     let expected = rm_alias_names();
     purge_stale_aliases(&dir, &expected)?;
@@ -328,7 +323,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let (_source_dir, source) = make_source(b"trusted");
         extract_shims_at(home.path(), &source).unwrap();
-        let target = home.path().join(SHIMS_SUBDIR).join(alias_names()[0]);
+        let target = home.path().join(SHIMS_SUBDIR).join(&alias_names()[0]);
         fs::write(&target, b"replaced").unwrap();
         assert_eq!(extract_shims_at(home.path(), &source).unwrap(), 1);
         assert_eq!(fs::read(target).unwrap(), b"trusted");
@@ -360,7 +355,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let (_source_dir, source) = make_source(b"trusted");
         let dir = install_rm_at(home.path(), &source).unwrap();
-        let gh = dir.join(if cfg!(windows) { "gh.exe" } else { "gh" });
+        let gh = dir.join(shim_registry::file_name("gh"));
         fs::write(&gh, b"replacement").unwrap();
         std::thread::scope(|scope| {
             let workers: Vec<_> = (0..8)
@@ -391,7 +386,7 @@ mod tests {
         assert_eq!(count, alias_names().len());
         let shims = home.path().join(SHIMS_SUBDIR);
         for alias in alias_names() {
-            assert!(shims.join(alias).is_file(), "missing alias {alias}");
+            assert!(shims.join(&alias).is_file(), "missing alias {alias}");
         }
         assert!(shims.join(".shim-hash").is_file());
     }
@@ -424,7 +419,7 @@ mod tests {
         );
         // Confirm new bytes landed.
         let shims = home.path().join(SHIMS_SUBDIR);
-        let first_alias = shims.join(alias_names()[0]);
+        let first_alias = shims.join(&alias_names()[0]);
         assert_eq!(fs::read(&first_alias).unwrap(), b"v2-different");
         let _ = src_dir; // keep tmpdir alive
     }
@@ -481,7 +476,7 @@ mod tests {
         assert!(prepared);
         let installed = home.path().join(SHIMS_SUBDIR);
         for alias in alias_names() {
-            assert!(installed.join(alias).is_file(), "missing {alias}");
+            assert!(installed.join(&alias).is_file(), "missing {alias}");
         }
         let path = env
             .iter()
@@ -495,15 +490,21 @@ mod tests {
         );
         assert_eq!(
             env.iter()
-                .find(|(key, _)| key == SHIM_TARGET_ENV_VAR)
+                .find(|(key, _)| key == shim_registry::PYTHON_TARGET_KEY)
                 .map(|(_, value)| value.as_str()),
             Some(python.to_string_lossy().as_ref())
+        );
+        assert!(
+            env.iter()
+                .any(|(key, value)| key == shim_registry::ABI_KEY
+                    && value == shim_registry::SHIM_ABI),
+            "the prepared session carries the shim ABI stamp"
         );
 
         assert!(prepare_session_shims_at(home.path(), &current_exe, &mut env).unwrap());
         assert_eq!(
             env.iter()
-                .find(|(key, _)| key == SHIM_TARGET_ENV_VAR)
+                .find(|(key, _)| key == shim_registry::PYTHON_TARGET_KEY)
                 .map(|(_, value)| value.as_str()),
             Some(python.to_string_lossy().as_ref()),
             "a nested clud launch must not resolve the alias back to itself"
