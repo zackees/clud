@@ -51,6 +51,15 @@ pub fn audit_log_path() -> Option<PathBuf> {
 /// - `path` — the exact directory about to be removed.
 /// - `rule` — why it was selected (e.g. `target-sweep stale>14d`).
 pub fn record(site: &str, path: &Path, rule: &str) {
+    // Under `cfg(test)` a write goes only to the log of the `StateDirGuard`
+    // held by *this* thread (#1450). An unguarded test's deletion is dropped
+    // instead of landing in a sibling test's log (the env var is
+    // process-global) or in the developer's real state dir.
+    #[cfg(test)]
+    let Some(log_path) = TEST_AUDIT_LOG.with(|cell| cell.borrow().clone()) else {
+        return;
+    };
+    #[cfg(not(test))]
     let Some(log_path) = audit_log_path() else {
         return;
     };
@@ -95,11 +104,19 @@ fn home_dir() -> Option<PathBuf> {
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The audit log [`record`] writes to in tests; set only by
+    /// [`StateDirGuard`] on the thread that holds it (#1450).
+    static TEST_AUDIT_LOG: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Shared test helper: swap [`ENV_STATE_DIR`] for the duration of a test so
 /// sweeps can be pointed at an injectable audit log. `std::env` is
-/// process-global, so all users serialize through one mutex — tests asserting
-/// on the injected file must tolerate unrelated concurrent deletions landing
-/// there too (assert on a *matching* line, not an exact count).
+/// process-global, so all users serialize through one mutex. [`record`] in
+/// tests writes only for the thread holding a guard, so an unguarded test's
+/// deletion never lands in the guarded test's log (#1450).
 #[cfg(test)]
 pub(crate) struct StateDirGuard {
     prior: Option<std::ffi::OsString>,
@@ -116,6 +133,7 @@ impl StateDirGuard {
             .unwrap_or_else(|p| p.into_inner());
         let prior = std::env::var_os(ENV_STATE_DIR);
         std::env::set_var(ENV_STATE_DIR, dir);
+        TEST_AUDIT_LOG.with(|cell| *cell.borrow_mut() = Some(dir.join(AUDIT_LOG_FILE)));
         Self { prior, _lock: lock }
     }
 }
@@ -123,6 +141,7 @@ impl StateDirGuard {
 #[cfg(test)]
 impl Drop for StateDirGuard {
     fn drop(&mut self) {
+        TEST_AUDIT_LOG.with(|cell| *cell.borrow_mut() = None);
         match self.prior.take() {
             Some(v) => std::env::set_var(ENV_STATE_DIR, v),
             None => std::env::remove_var(ENV_STATE_DIR),
@@ -188,5 +207,25 @@ mod tests {
             "same state dir convention as the daemon"
         );
         assert!(resolved.starts_with(tmp.path()));
+    }
+
+    /// #1450: in tests, `record` writes only while this thread holds a guard,
+    /// so an unguarded test can neither pollute a guarded sibling's log nor
+    /// the developer's real state dir.
+    #[test]
+    fn record_in_tests_writes_only_under_this_threads_guard() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let _guard = StateDirGuard::set(tmp.path());
+            let tmp2 = tmp.path().to_path_buf();
+            std::thread::spawn(move || record("t", &tmp2.join("other"), "unguarded"))
+                .join()
+                .unwrap();
+            record("t", &tmp.path().join("mine"), "guarded");
+        }
+        record("t", &tmp.path().join("after"), "after-drop");
+        let body = fs::read_to_string(tmp.path().join(AUDIT_LOG_FILE)).unwrap();
+        assert_eq!(body.lines().count(), 1, "{body}");
+        assert!(body.contains("\"guarded\""), "{body}");
     }
 }
