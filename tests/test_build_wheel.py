@@ -152,6 +152,68 @@ def test_windows_wheel_ships_the_cmd_scan_binary() -> None:
     assert "clud-cmd-scan" in build_wheel.REQUIRED_SCRIPTS
 
 
+def _zip_modes(wheel) -> dict[str, int]:
+    """Unix permission bits per entry, as pip reads them from external_attr."""
+    with zipfile.ZipFile(wheel) as archive:
+        return {i.filename: (i.external_attr >> 16) & 0o7777 for i in archive.infolist()}
+
+
+def _write_exec_script(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
+    info = zipfile.ZipInfo(name)
+    info.external_attr = (0o100000 | 0o755) << 16
+    archive.writestr(info, data)
+
+
+def test_write_wheel_marks_only_data_scripts_executable(tmp_path) -> None:
+    """#1544: repacked wheels stored scripts as 0644, so pip installed a
+    non-executable `clud`."""
+    from ci.wheel_repair import _write_wheel
+
+    root = tmp_path / "root"
+    files = {
+        "clud-2.8.7.data/scripts/clud": b"bin",
+        "clud-2.8.7.data/scripts/clud-cmd-scan": b"bin",
+        "clud-2.8.7.dist-info/METADATA": b"meta",
+        "clud-2.8.7.dist-info/RECORD": b"",
+        "clud/__init__.py": b"",
+    }
+    for name, data in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o600)
+    wheel = tmp_path / "out.whl"
+    _write_wheel(root, wheel)
+
+    modes = _zip_modes(wheel)
+    assert set(modes) == set(files)
+    for name, mode in modes.items():
+        expected = 0o755 if ".data/scripts/" in name else 0o644
+        assert mode == expected, (name, oct(mode))
+    with zipfile.ZipFile(wheel) as archive:
+        assert archive.read("clud-2.8.7.data/scripts/clud") == b"bin"
+
+
+def test_prune_preserves_script_exec_bits_from_0755_input(tmp_path) -> None:
+    """#1544 end to end: extractall drops modes, so prune must restore them."""
+    wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in (*build_wheel.REQUIRED_SCRIPTS, "clud-ctrlc-probe"):
+            _write_exec_script(archive, f"clud-2.8.7.data/scripts/{name}", b"binary")
+        archive.writestr("clud-2.8.7.dist-info/RECORD", "clud-2.8.7.dist-info/RECORD,,\n")
+    assert all(
+        mode == 0o755 for name, mode in _zip_modes(wheel).items() if ".data/scripts/" in name
+    )
+
+    assert build_wheel.prune_nonproduction_scripts(wheel)
+
+    modes = _zip_modes(wheel)
+    scripts = {n: m for n, m in modes.items() if ".data/scripts/" in n}
+    assert set(scripts) == {f"clud-2.8.7.data/scripts/{n}" for n in build_wheel.REQUIRED_SCRIPTS}
+    assert all(mode == 0o755 for mode in scripts.values()), scripts
+    assert modes["clud-2.8.7.dist-info/RECORD"] == 0o644
+
+
 def test_maturin_wheel_prunes_the_test_only_ctrlc_probe(tmp_path) -> None:
     wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
@@ -162,6 +224,11 @@ def test_maturin_wheel_prunes_the_test_only_ctrlc_probe(tmp_path) -> None:
     assert build_wheel.prune_nonproduction_scripts(wheel)
     with zipfile.ZipFile(wheel) as archive:
         assert "clud-2.8.7.data/scripts/clud-ctrlc-probe" not in archive.namelist()
+        # pip derives the installed mode from external_attr; 0644 here shipped
+        # a non-executable `clud` from `pip install -U clud`.
+        for info in archive.infolist():
+            if ".data/scripts/" in info.filename:
+                assert (info.external_attr >> 16) & 0o111, info.filename
     assert build_wheel.verify_wheel_scripts(wheel) == 0
 
 
@@ -169,7 +236,7 @@ def test_release_wheel_removes_elf_debug_gdb_metadata(monkeypatch, tmp_path) -> 
     wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
     script = "clud-2.8.7.data/scripts/clud"
     with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr(script, b"\x7fELFdebug-gdb")
+        _write_exec_script(archive, script, b"\x7fELFdebug-gdb")
         archive.writestr("clud-2.8.7.dist-info/RECORD", "clud-2.8.7.dist-info/RECORD,,\n")
 
     class Result:
@@ -192,6 +259,8 @@ def test_release_wheel_removes_elf_debug_gdb_metadata(monkeypatch, tmp_path) -> 
     assert build_wheel.remove_elf_debug_metadata(wheel)
     assert calls
     assert calls[0][:2] == ["llvm-objcopy", "--remove-section=.debug_gdb_scripts"]
+    # #1544: the repack must keep the script executable.
+    assert _zip_modes(wheel)[script] == 0o755
 
 
 def test_release_wheel_uses_target_prefixed_objcopy_when_llvm_is_absent(
