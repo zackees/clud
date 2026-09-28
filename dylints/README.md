@@ -14,6 +14,11 @@ env -u RUSTUP_TOOLCHAIN soldr dylint prepare
 env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
 ```
 
+A late lint only sees code compiled for the checked target, so CI also runs a
+check-only pass per OS from Linux (`--target x86_64-pc-windows-msvc` and
+`--target aarch64-apple-darwin`). `soldr dylint prepare --target <triple>`
+installs that target's nightly `rust-std` first.
+
 Soldr 0.9.23's verified 6.0.3 Dylint lane supplies precompiled `cargo-dylint`,
 `dylint-link`, and the matching nightly driver for each supported host. Keep `dylint_linting` at
 **6.0.3** with those tools, and keep the nightly above matched to
