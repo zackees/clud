@@ -132,6 +132,14 @@ def test_public_guest_evidence_capture_uses_runner_tools() -> None:
     # The Ubuntu Actions runners for these guests do not include ripgrep.
     assert "rg -m1 'PUBLIC_NIXOS_EVIDENCE '" not in installer
     assert "rg -m1 'PUBLIC_DISTRO_EVIDENCE '" not in installer
+    assert (
+        "grep -m1 'PUBLIC_NIXOS_EVIDENCE ' public-nixos.log "
+        "> public-nixos-evidence.txt" in installer
+    )
+    assert (
+        "grep -m1 'PUBLIC_DISTRO_EVIDENCE ' public-distro.log "
+        "> public-distro-evidence.txt" in installer
+    )
 
 
 def test_api_lookup_requires_a_complete_matching_run(monkeypatch) -> None:
