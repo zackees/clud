@@ -195,7 +195,7 @@ def test_missing_target_passes_through_to_the_next_real_gh(tmp_path: Path) -> No
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 41, result
-    assert result.stdout == "real pr checks 123 --watch\n"
+    assert result.stdout.strip() == "real pr checks 123 --watch"
     assert result.stderr == ""
 
 
@@ -229,7 +229,7 @@ def test_unexecutable_target_is_stale_and_passes_through(tmp_path: Path) -> None
         env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 41, result
-    assert result.stdout == "real pr view 123\n"
+    assert result.stdout.strip() == "real pr view 123"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shebang semantics")

@@ -379,36 +379,33 @@ mod tests {
         }
     }
 
-    /// Session key names are spelled once, here. Every other module goes
-    /// through the constants, so the guard in `bin/clud_shim.rs` can find
-    /// each reader by name.
+    /// Session key names are spelled once, here. Every module that produces
+    /// or reads shim session state goes through the constants, so the guard in
+    /// `bin/clud_shim.rs` can find each reader by name. The sources are
+    /// compiled in: CI runs this test from a bundle with no source tree.
     #[test]
     fn session_key_literals_live_only_in_the_registry() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut pending = vec![src];
-        while let Some(dir) = pending.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    pending.push(path);
-                    continue;
-                }
-                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                if !name.ends_with(".rs")
-                    || name == "shim_registry.rs"
-                    || name.ends_with("_tests.rs")
-                {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&path).unwrap();
-                let production = text.split("#[cfg(test)]").next().unwrap();
-                for key in SESSION_KEYS {
-                    assert!(
-                        !production.contains(&format!("\"{key}\"")),
-                        "{} spells {key}; use crate::shim_registry",
-                        path.display()
-                    );
-                }
+        let sources = [
+            ("shim_session.rs", include_str!("shim_session.rs")),
+            ("shim_install.rs", include_str!("shim_install.rs")),
+            ("runner.rs", include_str!("runner.rs")),
+            ("shell/nounset.rs", include_str!("shell/nounset.rs")),
+            ("block_bad_cmd.rs", include_str!("block_bad_cmd.rs")),
+            ("rm_guard.rs", include_str!("rm_guard.rs")),
+            ("rm_tool.rs", include_str!("rm_tool.rs")),
+            ("bin/clud_shim.rs", include_str!("bin/clud_shim.rs")),
+            (
+                "bin/clud_shim/dispatch.rs",
+                include_str!("bin/clud_shim/dispatch.rs"),
+            ),
+        ];
+        for (file, text) in sources {
+            let production = text.split("#[cfg(test)]").next().unwrap();
+            for key in SESSION_KEYS {
+                assert!(
+                    !production.contains(&format!("\"{key}\"")),
+                    "{file} spells {key}; use crate::shim_registry"
+                );
             }
         }
     }
