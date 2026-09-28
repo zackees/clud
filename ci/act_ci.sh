@@ -148,7 +148,7 @@ if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
     # Act may exit successfully after a skipped job; require the actual pytest
     # result and the host's emitted evidence for this exact release and arch.
     grep -F 'Job succeeded' "$LOG" >/dev/null
-    grep -E '(^|[^0-9])1 passed([[:space:]]|$)' "$LOG" >/dev/null
+    grep -E '(^|[^0-9])1 passed([,[:space:]]|$)' "$LOG" >/dev/null
     grep -F 'PUBLIC_EVIDENCE ' "$LOG" \
         | grep -F "\"tag\": \"$TAG\"" \
         | grep -F '"arch": "x86_64"' >/dev/null
