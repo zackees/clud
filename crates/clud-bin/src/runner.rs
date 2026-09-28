@@ -153,6 +153,9 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
     keys.push(crate::shell::cmd_gate::GATE_KEY);
     keys.push(crate::rm_tool::ROOTS_ENV);
     keys.push(crate::shim_session::RM_SHIM_DIR_KEY);
+    keys.push(crate::shim_session::GH_SHIM_TARGET_KEY);
+    keys.push(crate::shim_session::GH_SHIM_ACTIVE_KEY);
+    keys.push(crate::shim_session::GH_SHIM_FAIL_FAST_KEY);
     keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
     keys
 }

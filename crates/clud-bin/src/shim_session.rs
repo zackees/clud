@@ -29,6 +29,9 @@ pub const SHIM_DAEMON_SOCKET_VAR: &str = "CLUD_DAEMON_SOCKET";
 pub const PATH_ENV_VAR: &str = "PATH";
 /// Read by the generated BASH_ENV file after a login shell resets PATH.
 pub const RM_SHIM_DIR_KEY: &str = "CLUD_RM_SHIM_DIR";
+pub const GH_SHIM_TARGET_KEY: &str = "CLUD_GH_SHIM_TARGET";
+pub const GH_SHIM_ACTIVE_KEY: &str = "CLUD_GH_SHIM_ACTIVE";
+pub const GH_SHIM_FAIL_FAST_KEY: &str = "CLUD_GH_SHIM_FAIL_FAST";
 
 /// Mutate `env` in place: prepend `shims_dir` to PATH and set
 /// `CLUD_DAEMON_SOCKET` to `daemon_socket`. Returns `(path_prepended,
@@ -113,6 +116,22 @@ fn path_sep() -> char {
 /// Both foreground and daemon call this after assembling the effective child env.
 /// Installation errors remain visible and the mandatory hook identity check denies.
 pub fn activate_rm(env: &mut Vec<(String, String)>) {
+    let fail_fast = crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true);
+    set_env(
+        env,
+        GH_SHIM_FAIL_FAST_KEY,
+        if fail_fast { "1" } else { "0" },
+    );
+    set_env(env, GH_SHIM_ACTIVE_KEY, "0");
+    let original_path = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(PATH_ENV_VAR))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let inherited_target = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(GH_SHIM_TARGET_KEY))
+        .map(|(_, value)| std::path::PathBuf::from(value));
     let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     let result = env
         .iter()
@@ -124,6 +143,14 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
         });
     match result {
         Ok(dir) => {
+            let target = resolve_gh_target(&original_path, inherited_target, &dir);
+            if let Some(target) = target {
+                let target = target.canonicalize().unwrap_or(target);
+                set_env(env, GH_SHIM_TARGET_KEY, &target.to_string_lossy());
+                set_env(env, GH_SHIM_ACTIVE_KEY, "1");
+            } else {
+                set_env(env, GH_SHIM_ACTIVE_KEY, "0");
+            }
             prepend_to_path(env, &dir);
             set_env(env, RM_SHIM_DIR_KEY, &dir.to_string_lossy());
         }
@@ -133,16 +160,78 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
     }
 }
 
+fn resolve_gh_target(
+    original_path: &str,
+    inherited_target: Option<std::path::PathBuf>,
+    shim_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    inherited_target
+        .filter(|path| path.is_absolute() && executable(path) && !path.starts_with(shim_dir))
+        .or_else(|| {
+            std::env::split_paths(original_path)
+                .filter(|path| path != shim_dir)
+                .map(|path| path.join(if cfg!(windows) { "gh.exe" } else { "gh" }))
+                .find(|path| executable(path))
+        })
+}
+
+fn executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn gh_target_resolution_skips_the_alias_before_path_prepend() {
+        let temp = TempDir::new().unwrap();
+        let shim_dir = temp.path().join("shim");
+        let real_dir = temp.path().join("real");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let name = if cfg!(windows) { "gh.exe" } else { "gh" };
+        std::fs::write(shim_dir.join(name), b"shim").unwrap();
+        let real = real_dir.join(name);
+        std::fs::write(&real, b"real").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
+        let path = path.to_string_lossy();
+        assert_eq!(
+            resolve_gh_target(&path, None, &shim_dir),
+            Some(real.clone())
+        );
+        assert_eq!(
+            resolve_gh_target(&path, Some(real.clone()), &shim_dir),
+            Some(real)
+        );
     }
 
     #[test]

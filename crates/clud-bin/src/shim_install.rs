@@ -227,11 +227,11 @@ pub fn packaged_shim() -> std::io::Result<PathBuf> {
     }))
 }
 
-/// The deletion aliases session activation installs: the child `rm` shim
-/// and the agent-facing `safe-rm` (#1461). All are byte copies of
+/// The session aliases: `rm`, `safe-rm` (#1461), and `gh` (#1518).
+/// All are byte copies of
 /// `clud-shim`, which dispatches on argv\[0\].
 pub fn rm_alias_names() -> Vec<String> {
-    let mut names = vec!["rm".to_string()];
+    let mut names = vec!["rm".to_string(), "gh".to_string()];
     names.extend(
         crate::deletion_rules::generated()
             .safe_aliases
@@ -245,19 +245,25 @@ pub fn rm_alias_names() -> Vec<String> {
 }
 
 fn purge_stale_aliases(dir: &Path, expected: &[String]) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if !expected
-            .iter()
-            .any(|name| entry.file_name() == std::ffi::OsStr::new(name))
-        {
-            crate::rm_tool::remove_link_or_file(&entry.path())?;
+    // Only known legacy aliases are ours to remove. In particular, do not
+    // delete another concurrent installer's NamedTempFile before it persists.
+    for alias in alias_names() {
+        if expected.iter().any(|name| name == alias) {
+            continue;
+        }
+        let target = dir.join(alias);
+        if std::fs::symlink_metadata(&target).is_ok() {
+            if let Err(error) = crate::rm_tool::remove_link_or_file(&target) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(error);
+                }
+            }
         }
     }
     Ok(())
 }
 
-/// Session activation installs only the deletion aliases, keeping unfinished
+/// Session activation installs only the active aliases, keeping unfinished
 /// Python relays off PATH. A separate directory also avoids activating
 /// previously extracted Python aliases.
 pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
@@ -312,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn session_installs_only_the_deletion_aliases_and_repairs_replacement() {
+    fn session_installs_only_active_aliases_and_repairs_replacement() {
         let home = TempDir::new().unwrap();
         let (_source_dir, source) = make_source(b"trusted");
         let dir = install_rm_at(home.path(), &source).unwrap();
@@ -330,6 +336,24 @@ mod tests {
         let mut expected: Vec<String> = rm_alias_names().iter().map(|s| s.to_string()).collect();
         expected.sort();
         assert_eq!(names, expected, "no Python relay is activated");
+    }
+
+    #[test]
+    fn concurrent_session_installs_repair_gh_without_deleting_staging_files() {
+        let home = TempDir::new().unwrap();
+        let (_source_dir, source) = make_source(b"trusted");
+        let dir = install_rm_at(home.path(), &source).unwrap();
+        let gh = dir.join(if cfg!(windows) { "gh.exe" } else { "gh" });
+        fs::write(&gh, b"replacement").unwrap();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| install_rm_at(home.path(), &source)))
+                .collect();
+            for worker in workers {
+                worker.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(fs::read(gh).unwrap(), b"trusted");
     }
 
     #[test]

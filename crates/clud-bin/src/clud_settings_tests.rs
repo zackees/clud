@@ -52,7 +52,7 @@ fn saves_pr_wait_fail_fast_sticky_opt_in_and_reset() {
     assert!(json["git"]["pr_wait_fail_fast_note"]
         .as_str()
         .unwrap()
-        .contains("gh pr checks --watch"));
+        .contains("session gh PR-check watches"));
 }
 
 #[test]
