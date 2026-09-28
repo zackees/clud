@@ -144,7 +144,13 @@ run_act() {
 
 if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
     LOG="/tmp/$RUN/act.log"
-    run_act "$@" 2>&1 | tee "$LOG"
+    if run_act "$@" >"$LOG" 2>&1; then
+        cat "$LOG"
+    else
+        status=$?
+        cat "$LOG"
+        exit "$status"
+    fi
     # Act may exit successfully after a skipped job; require the actual pytest
     # result and the host's emitted evidence for this exact release and arch.
     grep -F 'Job succeeded' "$LOG" >/dev/null
