@@ -216,7 +216,7 @@ def test_shim_reaches_real_bundled_watcher(tmp_path: Path) -> None:
     fake_clud = tmp_path / "fake-clud"
     fake_clud.write_text(
         '#!/bin/sh\n[ "$1" = tool ] && [ "$2" = run ] || exit 98\n'
-        f'shift 3\nexec python "{watcher}" "$@"\n',
+        f'shift 3\nexec "{sys.executable}" "{watcher}" "$@"\n',
         encoding="utf-8",
     )
     fake_clud.chmod(0o755)
@@ -250,7 +250,7 @@ def test_shim_preserves_real_watcher_outcomes(
     fake_clud = tmp_path / "fake-clud"
     fake_clud.write_text(
         '#!/bin/sh\n[ "$1" = tool ] && [ "$2" = run ] || exit 98\n'
-        f'shift 3\nexec python "{harness}" "$@"\n',
+        f'shift 3\nexec "{sys.executable}" "{harness}" "$@"\n',
         encoding="utf-8",
     )
     fake_clud.chmod(0o755)

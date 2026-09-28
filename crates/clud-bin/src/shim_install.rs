@@ -267,6 +267,23 @@ fn purge_stale_aliases(dir: &Path, expected: &[String]) -> std::io::Result<()> {
 /// Python relays off PATH. A separate directory also avoids activating
 /// previously extracted Python aliases.
 pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
+    use fs4::fs_std::FileExt;
+    use std::fs::OpenOptions;
+    use std::sync::Mutex;
+
+    static LOCAL_INSTALL_LOCK: Mutex<()> = Mutex::new(());
+    let _local_guard = LOCAL_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let state = home.join(".clud/state");
+    std::fs::create_dir_all(&state)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(state.join(".rm-shim.lock"))?;
+    FileExt::lock_exclusive(&lock)?;
     let bytes = std::fs::read(source)?;
     if bytes.is_empty() {
         return Err(std::io::Error::other("packaged shim is empty"));
