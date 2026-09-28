@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -73,7 +74,7 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "make_latest: false" in text
     pypi_needs = (
         "needs: [preflight, full-ci-gate, build, "
-        "verify-candidate-installer, verify-prior-public]"
+        "candidate-acceptance-gate, verify-prior-public]"
     )
     assert pypi_needs in text
     assert "needs: [preflight, publish-pypi, verify-prior-public]" in text
@@ -115,6 +116,15 @@ def test_tag_push_runs_public_reusable_jobs_and_fails_if_they_skip() -> None:
     assert "released-acceptance-gate:" in release
     assert "needs.verify-candidate-installer.result" in release
     assert "needs.verify-published-installer.result" in release
+    for job in ("candidate-acceptance-gate", "released-acceptance-gate"):
+        match = re.search(
+            rf"(?ms)^  {job}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
+            release,
+        )
+        assert match is not None
+        block = match.group(1)
+        assert "if: always()" in block
+        assert "run: test \"$RESULT\" = success" in block
 
 
 def test_api_lookup_requires_a_complete_matching_run(monkeypatch) -> None:

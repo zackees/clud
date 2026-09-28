@@ -270,7 +270,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [preflight, full-ci-gate, build, verify-candidate-installer, verify-prior-public]
+    needs: [preflight, full-ci-gate, build, candidate-acceptance-gate, verify-prior-public]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -481,9 +481,20 @@ jobs:
       release_tag: ${{ needs.preflight.outputs.release_tag }}
       mode: candidate
 
+  candidate-acceptance-gate:
+    name: Require executed public candidate acceptance
+    if: always()
+    needs: verify-candidate-installer
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject a failed or skipped reusable matrix
+        env:
+          RESULT: ${{ needs.verify-candidate-installer.result }}
+        run: test "$RESULT" = success
+
   verify-prior-public:
     name: Prove failed candidate cannot move previous stable
-    needs: [preflight, verify-candidate-installer]
+    needs: [preflight, candidate-acceptance-gate]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -617,10 +628,21 @@ jobs:
       release_tag: ${{ needs.preflight.outputs.release_tag }}
       mode: released
 
+  released-acceptance-gate:
+    name: Require executed public released acceptance
+    if: always()
+    needs: verify-published-installer
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject a failed or skipped reusable matrix
+        env:
+          RESULT: ${{ needs.verify-published-installer.result }}
+        run: test "$RESULT" = success
+
   rollback-public:
     name: Restore previous public stable after post-promotion failure
-    if: always() && needs.publish-pypi.result == 'success' && needs.verify-published-installer.result != 'success'
-    needs: [preflight, publish-pypi, promote-release, deploy-install-site, verify-promoted-public, verify-published-installer]
+    if: always() && needs.publish-pypi.result == 'success' && needs.released-acceptance-gate.result != 'success'
+    needs: [preflight, publish-pypi, promote-release, deploy-install-site, verify-promoted-public, verify-published-installer, released-acceptance-gate]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
