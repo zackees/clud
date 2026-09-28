@@ -150,6 +150,20 @@ After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, 
 
 The only narrowly permitted Rust exception is a test that must use raw `std::process::Command` because `running_process::NativeProcess` would change the behavior under test. Such a test requires a documented, filename-specific exemption in `ci/banned_imports.py`; do not add an exemption for ordinary tests or production code.
 
+### One binary: `clud` is multicall
+
+clud ships exactly one executable, `clud`, so installation stays trivial. At
+launch it installs itself under every name it serves (`clud-cmd-scan`,
+`clud-shim`, `python`, `pip`, `rm`, `gh`, …): hardlink first, then symlink,
+then a plain copy, so the setup never fails because a link could not be made.
+It dispatches on argv[0] before any other startup work. Do not add a new
+`[[bin]]`, a separately packaged helper, or a new entry in the wheel's script
+list. A new function gets a dispatch name in `clud` instead. Test-only
+binaries that never ship (such as `clud-ctrlc-probe`, pruned from the wheel)
+are exempt. Migration from
+the current separate binaries is tracked in
+[#1551](https://github.com/zackees/clud/issues/1551).
+
 ### Interpreter name: `python`, never the versioned name
 
 Write `python` in hooks, scripts, shebangs, tests and docs. clud's shim
