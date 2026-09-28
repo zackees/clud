@@ -45,6 +45,8 @@ jobs:
       - uses: zackees/setup-soldr@v0
         with:
           cache: true
+          # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
+          save-cache: ${{ env.ACT && 'true' || 'auto' }}
           toolchain: 1.95.0
           dylint-toolchain: nightly-2026-05-28
           dylint: true
