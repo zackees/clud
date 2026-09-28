@@ -544,7 +544,7 @@ mod posix {
             let command = vec![
                 plan.shell.to_string_lossy().to_string(),
                 mode.into(),
-                "command -v clud; clud --version".into(),
+                "printf '__CLUD_INSTALL_PATH__'; command -v clud; printf '__CLUD_INSTALL_VERSION__'; clud --version".into(),
             ];
             let process =
                 crate::subprocess::ManagedSubprocess::start(command, None, env, true, None)?;
@@ -585,12 +585,16 @@ mod posix {
     }
 
     fn parse_shell_probe(output: &[u8]) -> (String, String) {
-        let lines: Vec<_> = String::from_utf8_lossy(output)
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        let actual = lines.iter().rev().nth(1).cloned().unwrap_or_default();
-        let version = lines.last().cloned().unwrap_or_default();
+        let mut actual = String::new();
+        let mut version = String::new();
+        for line in String::from_utf8_lossy(output).lines() {
+            if let Some(value) = line.strip_prefix("__CLUD_INSTALL_PATH__") {
+                actual = value.to_owned();
+            }
+            if let Some(value) = line.strip_prefix("__CLUD_INSTALL_VERSION__") {
+                version = value.to_owned();
+            }
+        }
         (actual, version)
     }
 
