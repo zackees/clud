@@ -82,6 +82,8 @@ runs:
       with:
         toolchain: ${{ inputs.toolchain }}
         cache: true
+        # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
+        save-cache: ${{ env.ACT && 'true' || 'auto' }}
         build-cache-mode: thin
         shims: true
         linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
