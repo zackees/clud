@@ -10,7 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WATCHER = ROOT / "crates/clud-bin/assets/tools/github/pr_merge_watch.py"
 spec = importlib.util.spec_from_file_location("gh_watch_harness_watcher", WATCHER)
-assert spec is not None and spec.loader is not None
+assert spec is not None
+assert spec.loader is not None
 watcher = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = watcher
 spec.loader.exec_module(watcher)
