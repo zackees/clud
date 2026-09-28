@@ -544,7 +544,7 @@ mod posix {
             let command = vec![
                 plan.shell.to_string_lossy().to_string(),
                 mode.into(),
-                "command -v clud; clud --version".into(),
+                "printf '__CLUD_INSTALL_PATH__'; command -v clud; printf '__CLUD_INSTALL_VERSION__'; clud --version".into(),
             ];
             let process =
                 crate::subprocess::ManagedSubprocess::start(command, None, env, true, None)?;
@@ -573,17 +573,7 @@ mod posix {
             let code = process
                 .wait(Some(Duration::from_secs(1)))
                 .map_err(|error| error.to_string())?;
-            let lines: Vec<_> = String::from_utf8_lossy(&output)
-                .lines()
-                .map(str::to_owned)
-                .collect();
-            let actual = lines
-                .iter()
-                .rev()
-                .nth(1)
-                .map(String::as_str)
-                .unwrap_or_default();
-            let found_version = lines.last().map(String::as_str).unwrap_or_default();
+            let (actual, found_version) = parse_shell_probe(&output);
             if code != 0
                 || actual != plan.destination.to_string_lossy()
                 || found_version != expected
@@ -592,5 +582,32 @@ mod posix {
             }
         }
         Ok(())
+    }
+
+    fn parse_shell_probe(output: &[u8]) -> (String, String) {
+        let mut actual = String::new();
+        let mut version = String::new();
+        for line in String::from_utf8_lossy(output).lines() {
+            if let Some(value) = line.strip_prefix("__CLUD_INSTALL_PATH__") {
+                actual = value.to_owned();
+            }
+            if let Some(value) = line.strip_prefix("__CLUD_INSTALL_VERSION__") {
+                version = value.to_owned();
+            }
+        }
+        (actual, version)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::parse_shell_probe;
+
+        #[test]
+        fn fresh_shell_probe_ignores_interactive_warnings() {
+            let output = b"bash: no job control in this shell\n__CLUD_INSTALL_PATH__/tmp/bin/clud\nbash: warning after path\n__CLUD_INSTALL_VERSION__clud 2.8.16\n";
+            let (path, version) = parse_shell_probe(output);
+            assert_eq!(path, "/tmp/bin/clud");
+            assert_eq!(version, "clud 2.8.16");
+        }
     }
 }
