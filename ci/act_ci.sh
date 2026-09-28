@@ -63,8 +63,12 @@ JOB="${1:?usage: act_ci.sh <job-id> | --list}"
 # ci.yml checks out `pull_request.head.repo.full_name` at `head.sha`, then
 # verifies HEAD == head.sha. The event names this repo and the snapshot commit.
 SHA="$(git rev-parse HEAD)"
+LABELS='[]'
+if [ "${ACT_CI_FULL:-0}" = 1 ]; then
+    LABELS='[{"name":"ci-full"}]'
+fi
 cat > "/tmp/$RUN/event.json" <<EOF
-{"pull_request": {"number": 0, "labels": [],
+{"pull_request": {"number": 0, "labels": $LABELS,
   "head": {"sha": "$SHA", "ref": "act-local", "repo": {"full_name": "$REPO"}},
   "base": {"ref": "main", "repo": {"full_name": "$REPO"}}},
  "repository": {"full_name": "$REPO", "default_branch": "main"}}
