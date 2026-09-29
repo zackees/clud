@@ -46,6 +46,8 @@ Exit codes:
      polls in a row, or no repository could be resolved; the final event
      carries gh's stderr
  11  QUEUED: a run waited longer than `--max-queued` to start (off by default)
+ 64  USAGE: a bad flag or argument (argparse's own error). The caller's mistake,
+     never a verdict: fix the command and run it again (#1331)
  124  the tool runner's watchdog stopped a resumable watch before the tool
       completed; re-invoke with the same args (`status: in-progress`)
  130/143  killed by SIGINT/SIGTERM: a final `EXIT` event with reason `killed`,
@@ -98,7 +100,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import NoReturn, TextIO
 
 from running_process import PIPE, RunningProcess, TimeoutExpired
 
@@ -114,6 +116,9 @@ EXIT_NO_CHECKS = 8
 EXIT_CONFLICT = 9
 EXIT_GITHUB_UNREACHABLE = 10
 EXIT_QUEUED = 11
+# sysexits EX_USAGE. argparse exits 2 on a usage error, which is also this
+# tool's "new review activity" verdict, so a bad flag read as a review (#1331).
+EXIT_USAGE = 64
 
 DEFAULT_TIMEOUT_SEC = 3600
 DEFAULT_NO_CHECKS_GRACE_SEC = 60
@@ -2431,8 +2436,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+class _UsageParser(argparse.ArgumentParser):
+    """argparse, but a usage error exits 64, not 2 (2 is "review activity")."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = _UsageParser(
         prog="pr_merge_watch",
         description="Fail-fast PR-check waiter for clud (issue #408).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2441,6 +2454,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "3 PR closed, 4 timeout, 5 approval required, 6 required check never "
             "reported, 7 stale (re-run needed), 8 no checks will ever report, "
             "9 merge conflict, 10 GitHub unreachable, 11 queued too long, "
+            "64 usage error (fix the command; not a verdict), "
             "124 clud watchdog stopped the watch (retry), 130/143 killed\n\n"
             "supersession rule (#1330): checks on the PR's current head commit are "
             "grouped by (workflow file, check name) and ordered by check-run id. A "
