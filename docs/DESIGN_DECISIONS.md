@@ -644,6 +644,8 @@ regression guard for that churn.
 
 ## DD-020: The soldr build backend is pinned exactly, and CI's toolchain pin is asserted to match it
 
+**Status:** Superseded by [DD-120](#dd-120-soldr-follows-rolling-latest-everywhere-superseding-dd-020). The body below is kept as history.
+
 **Context:** `pyproject.toml` declared `requires = ["soldr>=0.8.27"]` with
 `build-backend = "soldr"`. That line resolves the *build backend* from PyPI
 independently, at build time — it is a different resolution from
@@ -5066,3 +5068,29 @@ Tests that exercise in-session behavior must stamp a session
 (`tests/shim_env.py`). The daemon-socket interpreter protocol, stubbed since
 slice 1 of #406, is removed. See
 [architecture/shim-dispatch.md](architecture/shim-dispatch.md).
+
+## DD-120: soldr follows rolling latest everywhere, superseding DD-020
+
+**Context:** DD-020 pinned soldr exactly in the build backend, CI's
+`setup-soldr` steps and `./install`. The pin then fossilized: clud sat on
+soldr 0.8.44, whose catalogue client requested the retired
+`catalogue.v1.json` endpoint, so the GNU and Apple preparation lanes failed
+even though the live v2 catalogue carried their assets. Bumping to 0.9.9
+exposed a compile-session relay bug fixed only in 0.9.10 — each fix arrived
+by publication, and each pin had to be chased by hand (#1025, #1026).
+
+**Decision:** Follow the latest soldr release everywhere (commit 856b24c2):
+`pyproject.toml` requires plain `soldr`, `setup-soldr` steps pass no
+`version:`, `./install` defaults to `latest` (resolved via the
+`releases/latest` redirect), and the bundled Docker helper uses
+`ARG SOLDR_VERSION=latest`, still asserted by a literal in
+`crates/clud-bin/src/tools.rs`.
+`test_packaging_metadata.py::test_soldr_release_policy_moves_in_lockstep`
+now asserts every path is rolling, so no single path can drift back onto an
+old protocol.
+
+**Consequences:** DD-020's risk returns — a broken soldr release can redden
+`main` without a clud change — traded for never running a stale soldr against
+a moving catalogue. Every `setup-soldr` job resolves "latest" with a GitHub
+API release lookup; anonymous local `act` runs share the 60 req/hr limit and
+can hit 403 until it resets.

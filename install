@@ -8,10 +8,9 @@
 
 set -euo pipefail
 
-# Keep in lockstep with pyproject.toml's `build-system.requires` and the
-# `setup-soldr` versions under .github/ — a developer whose
-# local soldr trails CI's cannot reproduce a CI failure. All three are one
-# decision; `tests/test_packaging_metadata.py` asserts they agree. See DD-020.
+# Rolling latest, like pyproject.toml's `build-system.requires` and the
+# `setup-soldr` steps under .github/, so a developer's soldr matches CI's.
+# `tests/test_packaging_metadata.py` asserts they agree. See DD-120.
 VERSION="${SOLDR_VERSION:-latest}"
 GLOBAL=0
 
