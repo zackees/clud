@@ -1,5 +1,6 @@
-//! Rollout helpers for the native `cmd-scan` hook binary (formerly
-//! `block-bad-cmd`).
+//! Rollout helpers for the native `cmd-scan` hook (formerly `block-bad-cmd`).
+//! Since #1551 `clud-cmd-scan` is not a binary of its own but an argv[0] alias
+//! of `clud` ([`crate::multicall`]), materialized in a helper-only directory.
 //!
 //! #489/#490 moved the command-guard policy into a native helper, but older
 //! installs and hook configs can still route through
@@ -41,8 +42,10 @@ const PINNED_PYTHON_SHIM_COMMAND_EXIT: &str =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallProbe {
+    /// The running `clud`, which serves the `clud-cmd-scan` name.
     HelperPresent { path: PathBuf },
-    MissingFromInstalledLayout { expected: PathBuf },
+    /// The running program is not `clud` (a test harness), so nothing is
+    /// exposed or migrated.
     NotInstalledLayout,
 }
 
@@ -73,15 +76,6 @@ pub fn run_startup_checks(auto_fix_hooks: bool) {
     ensure_helper_on_session_path();
     let sibling_helper_present =
         matches!(probe_current_install(), InstallProbe::HelperPresent { .. });
-    if !sibling_helper_present {
-        if let InstallProbe::MissingFromInstalledLayout { expected } = probe_current_install() {
-            eprintln!(
-                "[clud] warning: native hook helper `{}` is missing at {}; run `uv tool install --force clud` to repair this install",
-                native_helper_name(),
-                expected.display()
-            );
-        }
-    }
 
     if !auto_fix_hooks {
         return;
@@ -127,40 +121,19 @@ pub fn probe_current_install() -> InstallProbe {
 }
 
 pub fn probe_install_at(current_exe: &Path) -> InstallProbe {
-    let Some(parent) = current_exe.parent() else {
-        return InstallProbe::NotInstalledLayout;
-    };
-    let helper = parent.join(native_helper_name());
-    if helper.is_file() {
-        return InstallProbe::HelperPresent { path: helper };
-    }
-
-    let shim = parent.join(native_binary_name("clud-shim"));
-    if shim.is_file() {
-        return InstallProbe::MissingFromInstalledLayout { expected: helper };
-    }
-
-    InstallProbe::NotInstalledLayout
-}
-
-pub fn native_helper_name() -> &'static str {
-    native_binary_name("clud-cmd-scan")
-}
-
-fn native_binary_name(name: &'static str) -> &'static str {
-    #[cfg(windows)]
-    {
-        match name {
-            "clud" => "clud.exe",
-            "clud-cmd-scan" => "clud-cmd-scan.exe",
-            "clud-shim" => "clud-shim.exe",
-            _ => name,
+    let is_clud = crate::shim_registry::invoked_name(current_exe.as_os_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("clud"));
+    if is_clud && current_exe.is_file() {
+        InstallProbe::HelperPresent {
+            path: current_exe.to_path_buf(),
         }
+    } else {
+        InstallProbe::NotInstalledLayout
     }
-    #[cfg(not(windows))]
-    {
-        name
-    }
+}
+
+pub fn native_helper_name() -> String {
+    crate::shim_registry::file_name(crate::multicall::CMD_SCAN)
 }
 
 pub fn migrate_hook_configs_at(
@@ -421,7 +394,7 @@ pub fn dangling_hook_program_warnings(repo_root: &Path, home: Option<&Path>) -> 
 /// The helper-only directory contains exactly one program.
 pub fn ensure_helper_on_session_path() {
     let path_env = std::env::var("PATH").unwrap_or_default();
-    if crate::shim_resolve::which(native_helper_name(), &path_env).is_some() {
+    if crate::shim_resolve::which(&native_helper_name(), &path_env).is_some() {
         return;
     }
     let InstallProbe::HelperPresent { path } = probe_current_install() else {
@@ -454,45 +427,27 @@ fn helper_home() -> Option<PathBuf> {
     }
 }
 
-/// Place `helper` (hardlink, falling back to a copy) alone in the
-/// helper-only directory under `home` and return that directory. An
-/// up-to-date entry is left untouched; a stale one is replaced through a
-/// temp file and rename. If the replacement fails (on Windows a running
-/// helper cannot be replaced) an existing entry is still used.
-fn expose_helper_at(home: &Path, helper: &Path) -> io::Result<PathBuf> {
+/// Place the scanner names alone in the helper-only directory under `home`
+/// as aliases of `clud` (hardlink, then symlink, then copy; see
+/// [`crate::alias_link`]) and return that directory. An up-to-date entry is
+/// left untouched; a stale one (after an upgrade) is replaced through a temp
+/// file and rename. If the replacement fails (on Windows a running helper
+/// cannot be replaced) an existing entry is still used.
+fn expose_helper_at(home: &Path, clud: &Path) -> io::Result<PathBuf> {
     let dir = home.join(HELPER_BIN_SUBDIR);
     std::fs::create_dir_all(&dir)?;
-    let name = helper
-        .file_name()
-        .ok_or_else(|| io::Error::other("helper path has no file name"))?;
-    let target = dir.join(name);
-    if same_contents(helper, &target) {
-        return Ok(dir);
-    }
-    let staging = dir.join(format!(
-        ".{}.{}.tmp",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&staging);
-    let placed = std::fs::hard_link(helper, &staging)
-        .or_else(|_| std::fs::copy(helper, &staging).map(|_| ()))
-        .and_then(|()| std::fs::rename(&staging, &target));
-    if let Err(error) = placed {
-        let _ = std::fs::remove_file(&staging);
-        if !target.is_file() {
-            return Err(error);
+    for name in [
+        crate::multicall::CMD_SCAN,
+        crate::multicall::LEGACY_CMD_SCAN,
+    ] {
+        let target = dir.join(crate::shim_registry::file_name(name));
+        if let Err(error) = crate::alias_link::install_alias(clud, &target) {
+            if !target.is_file() {
+                return Err(error);
+            }
         }
     }
     Ok(dir)
-}
-
-fn same_contents(a: &Path, b: &Path) -> bool {
-    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
-        return false;
-    };
-    meta_a.len() == meta_b.len()
-        && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 fn path_with_appended(path_env: &str, dir: &Path) -> Option<String> {
@@ -526,37 +481,31 @@ mod tests {
     }
 
     #[test]
-    fn installed_layout_probe_detects_missing_helper() {
+    fn the_running_clud_is_the_helper() {
         let tmp = tempdir().unwrap();
-        let bin = tmp.path();
-        let clud = bin.join(native_binary_name("clud"));
-        let shim = bin.join(native_binary_name("clud-shim"));
+        let clud = tmp.path().join(crate::shim_registry::file_name("clud"));
         write(&clud, "");
-        write(&shim, "");
 
         assert_eq!(
             probe_install_at(&clud),
-            InstallProbe::MissingFromInstalledLayout {
-                expected: bin.join(native_helper_name())
-            }
-        );
-
-        write(&bin.join(native_helper_name()), "");
-        assert_eq!(
-            probe_install_at(&clud),
-            InstallProbe::HelperPresent {
-                path: bin.join(native_helper_name())
-            }
+            InstallProbe::HelperPresent { path: clud }
         );
     }
 
     #[test]
-    fn copied_test_binary_without_shim_is_not_installed_layout() {
+    fn a_test_harness_is_not_the_installed_layout() {
         let tmp = tempdir().unwrap();
-        let clud = tmp.path().join(native_binary_name("clud"));
-        write(&clud, "");
+        let harness = tmp
+            .path()
+            .join(crate::shim_registry::file_name("clud-3f9a1c"));
+        write(&harness, "");
 
-        assert_eq!(probe_install_at(&clud), InstallProbe::NotInstalledLayout);
+        assert_eq!(probe_install_at(&harness), InstallProbe::NotInstalledLayout);
+        assert_eq!(
+            probe_install_at(&tmp.path().join("clud")),
+            InstallProbe::NotInstalledLayout,
+            "a missing file is not an install"
+        );
     }
 
     #[test]
@@ -796,33 +745,33 @@ mod tests {
     fn helper_is_exposed_alone_not_its_install_directory() {
         let tmp = tempdir().unwrap();
         let install = tmp.path().join("install");
-        let helper = install.join(native_helper_name());
-        write(&helper, "helper-v1");
+        let clud = install.join(crate::shim_registry::file_name("clud"));
+        write(&clud, "clud-v1");
         write(&install.join("soldr"), "must not be exposed");
         let home = tmp.path().join("home");
 
-        let dir = expose_helper_at(&home, &helper).unwrap();
+        let dir = expose_helper_at(&home, &clud).unwrap();
 
         assert_ne!(dir, install);
-        let entries: Vec<_> = std::fs::read_dir(&dir)
+        let mut entries: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
-            .map(|entry| entry.unwrap().file_name())
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(
-            entries,
-            vec![std::ffi::OsString::from(native_helper_name())]
-        );
+        entries.sort();
+        let mut expected = vec![
+            crate::shim_registry::file_name(crate::multicall::CMD_SCAN),
+            crate::shim_registry::file_name(crate::multicall::LEGACY_CMD_SCAN),
+        ];
+        expected.sort();
+        assert_eq!(entries, expected);
         let exposed = dir.join(native_helper_name());
-        assert_eq!(std::fs::read_to_string(&exposed).unwrap(), "helper-v1");
+        assert_eq!(std::fs::read_to_string(&exposed).unwrap(), "clud-v1");
 
-        // A rebuilt helper (new file, as a build writes it) replaces the stale entry.
-        std::fs::remove_file(&helper).unwrap();
-        write(&helper, "helper-v2-longer");
-        assert_eq!(expose_helper_at(&home, &helper).unwrap(), dir);
-        assert_eq!(
-            std::fs::read_to_string(&exposed).unwrap(),
-            "helper-v2-longer"
-        );
+        // An upgraded clud (new file, as an installer writes it) replaces the stale entry.
+        std::fs::remove_file(&clud).unwrap();
+        write(&clud, "clud-v2-longer");
+        assert_eq!(expose_helper_at(&home, &clud).unwrap(), dir);
+        assert_eq!(std::fs::read_to_string(&exposed).unwrap(), "clud-v2-longer");
     }
 
     #[test]

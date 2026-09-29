@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from ci import process, tracked_files
+from ci.aliases import materialize as materialize_aliases
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -107,20 +108,19 @@ def _prepare_pytest_binaries(
     prefer_installed_clud: bool,
 ) -> dict[str, str] | None:
     installed_clud = _installed_script("clud") if prefer_installed_clud else None
-    installed_block_guard = (
-        _installed_script("clud-block-bad-cmd") if prefer_installed_clud else None
-    )
     packages = (
-        ["mock-agent"]
-        if installed_clud is not None and installed_block_guard is not None
-        else ["clud", "mock-agent", "daemon-stub"]
+        ["mock-agent"] if installed_clud is not None else ["clud", "mock-agent", "daemon-stub"]
     )
     cmd = _cargo(["build", *[arg for package in packages for arg in ("-p", package)]], env=env)
     if run(cmd, env=env) != 0:
         return None
 
     clud_binary = installed_clud or _find_target_binary("clud", env)
-    block_guard_binary = installed_block_guard or _find_target_binary("clud-block-bad-cmd", env)
+    # #1551: `clud-block-bad-cmd` is an argv[0] alias of `clud`, not a binary
+    # of its own; link it beside the `clud` under test.
+    block_guard_binary = (
+        materialize_aliases(clud_binary).get("clud-block-bad-cmd") if clud_binary else None
+    )
     mock_agent_binary = _find_target_binary("mock-agent", env)
     if clud_binary is None or block_guard_binary is None or mock_agent_binary is None:
         missing = [

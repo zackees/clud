@@ -2,7 +2,7 @@ use clud::{
     args, auth, backend, backend_bootstrap, claude_files, clud_settings, codex_auth, command,
     config, console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, failover,
     gc, graphics, grind, harness_picker, hook_health, job_orphan_reaper, kitty_term,
-    large_file_guard, launch_log, launch_setup, log_event, loop_artifacts, loop_spec,
+    large_file_guard, launch_log, launch_setup, log_event, loop_artifacts, loop_spec, multicall,
     openrouter_catalog, optimize, orphan_reaper, provider_auth, runner, runtime_cache,
     self_install, settings_tui, skills, soldr_activate, stage_trace, startup, symbols,
     test_runtime, toast, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
@@ -12,6 +12,14 @@ use clud::{
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
+    // #1551: `clud` is the only executable clud ships. A helper name in
+    // argv[0] (`clud-cmd-scan`, `rm`, `gh`, ...) selects its function here,
+    // before the console, clap or any other startup work, so a hook or shim
+    // call costs what the old dedicated binaries did.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(code) = multicall::maybe_run(&argv) {
+        std::process::exit(code);
+    }
     // #1374: before anything can write an escape sequence (clap's help, a
     // colored notice, a selector, a PTY session), so every launch path gets
     // VT output processing on a Windows console, not only those that happen

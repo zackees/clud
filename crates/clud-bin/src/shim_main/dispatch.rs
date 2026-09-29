@@ -12,16 +12,16 @@
 //!    failure is the shell's own `127 command not found`, when no real binary
 //!    exists.
 //!
-//! Handlers in `clud_shim.rs` receive a [`Session`] and never read a session
+//! Handlers in `shim_main.rs` receive a [`Session`] and never read a session
 //! key, so none of them can fail closed for a session reason. The guard test
-//! in `clud_shim.rs` enforces that split.
+//! in `shim_main.rs` enforces that split.
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use clud::shim_registry::{self as registry, Fallback, ShimKind};
+use crate::shim_registry::{self as registry, Fallback, ShimKind};
 
-/// The binary's own name; `clud-shim --registry` prints the registry.
+/// The personality's own name; `clud-shim --registry` prints the registry.
 const SELF_NAME: &str = "clud-shim";
 
 pub struct GhSession {
@@ -50,7 +50,10 @@ pub fn run(argv: &[OsString]) -> i32 {
     let argv0 = argv.first().cloned().unwrap_or_default();
     let args = argv.get(1..).unwrap_or(&[]);
     let name = registry::invoked_name(&argv0);
-    if name.as_deref() == Some(SELF_NAME) && args == [OsString::from("--registry")] {
+    let is_self_name = name
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(SELF_NAME));
+    if is_self_name && args == [OsString::from("--registry")] {
         println!("{}", registry_json());
         return 0;
     }

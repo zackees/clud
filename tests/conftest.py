@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ci import tracked_files
+from ci import aliases, tracked_files
 from ci.env import scrub_clud_session_env
 
 # A clud session exports state such as CLUD_SKIP_RM_IDENTITY (auto-on in
@@ -19,6 +19,21 @@ from ci.env import scrub_clud_session_env
 scrub_clud_session_env(os.environ)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Link `clud`'s argv[0] aliases beside the `clud` under test (#1551).
+
+    `clud-cmd-scan`, `clud-block-bad-cmd` and `clud-shim` are names of the one
+    `clud` binary, not build outputs, and the suites resolve them as siblings
+    of `clud`. Linking here covers direct `pytest` runs; CI harnesses link
+    them themselves before the run. Missing or read-only builds are skipped.
+    """
+    suffix = ".exe" if sys.platform == "win32" else ""
+    value = os.environ.get("CLUD_TEST_BINARY")
+    clud = Path(value) if value else _REPO_ROOT / "target" / "debug" / f"clud{suffix}"
+    if clud.is_file():
+        aliases.materialize(clud)
 
 
 @pytest.fixture(scope="session", autouse=True)

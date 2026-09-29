@@ -8,11 +8,13 @@
 # managed-by: clud
 """Compatibility shim for the native PreToolUse command guard.
 
-The hot path is the sibling Rust executable `clud-cmd-scan`.
-This Python file remains managed for one release so existing hand-written
-hook configs that still invoke `"$CLUD_EXE" tool run hooks/block-bad-cmd.py`
-continue to work. New hook wiring invokes the sibling `clud-cmd-scan`
-directly to avoid launching Python or uv.
+The hot path is the `clud-cmd-scan` personality of the one `clud` binary
+(#1551), which this shim reaches as `"$CLUD_EXE" __cmd-scan`.
+This Python file remains managed so existing hand-written hook configs that
+still invoke `"$CLUD_EXE" tool run hooks/block-bad-cmd.py` continue to work
+(Compatibility). New hook wiring invokes `clud-cmd-scan` directly to avoid
+launching Python or uv; the pre-#532 `clud-block-bad-cmd` name is an alias of
+the same binary.
 """
 
 from __future__ import annotations
@@ -25,32 +27,26 @@ from running_process import PIPE, RunningProcess
 
 
 def _native_path() -> Path | None:
+    """The launching `clud`, which serves `__cmd-scan`; never a PATH lookup."""
     launching_exe = os.environ.get("CLUD_EXE")
     if not launching_exe or not Path(launching_exe).is_absolute():
         return None
-    sibling = Path(launching_exe).with_name(
-        "clud-cmd-scan.exe" if os.name == "nt" else "clud-cmd-scan"
-    )
-    if sibling.is_file():
-        return sibling
-    old_sibling = Path(launching_exe).with_name(
-        "clud-block-bad-cmd.exe" if os.name == "nt" else "clud-block-bad-cmd"
-    )
-    return old_sibling if old_sibling.is_file() else None
+    clud = Path(launching_exe)
+    return clud if clud.is_file() else None
 
 
 def main() -> int:
     native = _native_path()
     if native is None:
         print(
-            "[block-bad-cmd hook] no native helper beside CLUD_EXE; "
+            "[block-bad-cmd hook] CLUD_EXE is not a clud executable; "
             "reinstall or upgrade clud.",
             file=sys.stderr,
         )
         return 1
     try:
         completed = RunningProcess.run(
-            [str(native)],
+            [str(native), "__cmd-scan"],
             input=sys.stdin.buffer.read(),
             stdout=PIPE,
             stderr=PIPE,
@@ -59,7 +55,7 @@ def main() -> int:
         )
     except FileNotFoundError:
         print(
-            "[block-bad-cmd hook] sibling native helper disappeared; "
+            "[block-bad-cmd hook] the launching clud disappeared; "
             "reinstall or upgrade clud.",
             file=sys.stderr,
         )

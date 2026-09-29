@@ -22,7 +22,7 @@ dylint_linting::declare_late_lint! {
     ///
     /// `std::path::Path` parses using the host OS rules. A Windows path string
     /// such as `C:\Tools\python.exe` is one filename on Unix, which caused
-    /// `clud-shim` to derive the wrong executable name in Linux/macOS CI. Keep
+    /// the `clud-shim` personality to derive the wrong executable name in Linux/macOS CI. Keep
     /// this policy centralized so future fixes do not grow ad hoc separator
     /// rewrites.
     pub BAN_MANUAL_SLASH_NORMALIZE,

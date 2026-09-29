@@ -4,6 +4,7 @@
 //! modules from this library rather than declaring its own `mod ...` copies,
 //! so there is exactly one instance of each module in the build.
 
+pub mod alias_link;
 pub mod anthropic_usage;
 pub mod args;
 pub mod attribution;
@@ -70,6 +71,7 @@ pub mod log_event;
 pub mod loop_artifacts;
 pub mod loop_check;
 pub mod loop_spec;
+pub mod multicall;
 pub mod openrouter_catalog;
 pub mod optimize;
 pub mod orphan_reaper;
@@ -99,6 +101,7 @@ pub mod session_registry;
 pub mod settings_tui;
 pub mod shell;
 pub mod shim_install;
+pub mod shim_main;
 pub mod shim_registry;
 pub mod shim_resolve;
 pub mod shim_session;

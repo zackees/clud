@@ -36,8 +36,15 @@ jobs:
             sudo apt-get install -y clang
           fi
 
-      - name: Build the command-scan hook and deletion binaries
-        run: soldr cargo build -p clud --bin clud --bin clud-cmd-scan --bin clud-shim
+      - name: Build clud and link its argv[0] aliases (#1551)
+        run: |
+          set -euo pipefail
+          soldr cargo build -p clud --bin clud
+          for dir in target/debug target/x86_64-unknown-linux-gnu/debug; do
+            if [ -x "$dir/clud" ]; then
+              "$dir/clud" __link-aliases "$dir"
+            fi
+          done
 
       - name: Locate the binaries
         id: binary

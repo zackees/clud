@@ -1,9 +1,11 @@
 # `clud-shim` dispatch: one registry, one entry path, fail open
 
-`clud-shim` is the single binary behind every PATH alias clud installs:
-`python` and `python3` in `~/.clud/state/shims`, and `rm`, `gh` and `safe-rm` <!-- python-name-lint: allow -->
-in `~/.clud/state/rm-shim`. Each alias is a byte copy that dispatches on
-argv\[0\]. This doc owns the contract every alias shares (#1546). What an
+`clud-shim` is the personality of the one `clud` binary behind every PATH alias
+clud installs: `python` and `python3` in `~/.clud/state/shims`, and `rm`, `gh` <!-- python-name-lint: allow -->
+and `safe-rm` in `~/.clud/state/rm-shim`. Each alias is a hardlink, symlink or copy of `clud`
+(hardlink first; [DD-121](../DESIGN_DECISIONS.md#dd-121-helper-executables-are-argv0-aliases-of-the-one-clud-binary))
+that `multicall::maybe_run` routes here by argv\[0\] before any other startup
+work. The code is `shim_main.rs` and `shim_main/dispatch.rs`. This doc owns the contract every alias shares (#1546). What an
 alias does *inside* a session is owned elsewhere:
 [rm-protection.md](rm-protection.md) for `rm`, [rm-tools.md](rm-tools.md) for
 `safe-rm`, and [gh-watch-shim.md](gh-watch-shim.md) for `gh`.
@@ -17,7 +19,7 @@ Everything else derives from it:
 
 | Consumer | Derived from the registry |
 | --- | --- |
-| `bin/clud_shim/dispatch.rs` | name lookup, session keys, passthrough |
+| `shim_main/dispatch.rs` | name lookup, session keys, passthrough |
 | `shim_install::alias_names` / `rm_alias_names` | the files installed per directory |
 | `shim_session::activate_rm` | the alias dir, the ABI stamp, the `gh` target |
 | `shell/nounset.rs` | the key the BASH_ENV re-prepend reads |
@@ -50,7 +52,7 @@ A `Native` alias (`safe-rm`) is a clud command, not a relay. It runs its own
 out-of-session mode: roots fall back to the git checkout or the cwd.
 
 Handlers receive a validated `Session` and never read a session key. The
-`session_contract_is_owned_by_dispatch` test in `bin/clud_shim.rs` fails if a
+`session_contract_is_owned_by_dispatch` test in `shim_main.rs` fails if a
 handler names a session key or `CLUD_EXE`, calls `exit`, returns `127`, or
 re-grows an argv\[0\] chain. It also fails if dispatch or the installers
 hardcode an alias name. `shim_registry`'s own tests keep the key literals in

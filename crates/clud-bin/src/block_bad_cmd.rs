@@ -1,6 +1,7 @@
 //! Native `block-bad-cmd` PreToolUse hook.
 //!
-//! The hot path is a dedicated Rust binary (`clud-block-bad-cmd`) so hook
+//! The hot path is the `clud-cmd-scan` personality of the one `clud` binary
+//! (argv[0] dispatch, #1551; formerly `clud-block-bad-cmd`) so hook
 //! fires do not launch Python or uv.
 
 use crate::repo_clud_config::{
@@ -238,7 +239,13 @@ struct StdinRead {
 }
 
 pub fn run() -> i32 {
-    run_for_event(&hook_event_from_args(std::env::args().skip(1)))
+    run_with_args(std::env::args().skip(1))
+}
+
+/// [`run`] with explicit arguments (argv without argv\[0\]), for the
+/// multicall entry that forwards `clud __cmd-scan ...` (#1551).
+pub fn run_with_args<I: IntoIterator<Item = String>>(args: I) -> i32 {
+    run_for_event(&hook_event_from_args(args))
 }
 
 /// Which hook event this invocation serves, and whether it said so.
@@ -326,7 +333,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
 
     // Owner kill switch, same shape as `CLUD_UV_RUST_ALLOW_ALL`: every
     // command check below is skipped. It exists because a stale rm shim
-    // (e.g. after rebuilding `target/debug/clud-shim`) makes the identity
+    // (e.g. after rebuilding `target/debug/clud`) makes the identity
     // check deny *every* shell call, which leaves the session unable to run
     // the one command that would repair it.
     if allow_all_cmds(std::env::var(ALLOW_ALL_CMDS_ENV).ok().as_deref()) {

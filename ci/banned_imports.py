@@ -306,7 +306,8 @@ def main() -> int:
     # children, and injection targets. running-process containment would mask
     # exactly the primitives under measurement.
     #
-    # clud_shim.rs is exempt — the shim's entire purpose is to `execvp`
+    # shim_main.rs (the `clud-shim` personality of `clud`, #1551) is exempt —
+    # its entire purpose is to `execvp`
     # (Unix) or `CreateProcess` (Windows) and replace itself with the
     # resolved Python interpreter or the real gh / pinned watcher. running-process's NativeProcess
     # always spawns under containment, which is precisely the wrong
@@ -367,7 +368,7 @@ def main() -> int:
         "reaper_orphan_sweep_survival.rs",
         "process_tree.rs",
         "win32_hooking_probe.rs",
-        "clud_shim.rs",
+        "shim_main.rs",
         "ctrlc_signal_kinds.rs",
         "ctrlc_windows_events.rs",
         "cpu_banner.rs",

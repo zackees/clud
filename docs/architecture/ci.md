@@ -496,8 +496,9 @@ only by *target triple*, which is the minimum possible:
 ```
 bundle/
   manifest.json         # triple, profile, git sha, test-binary list
-  bin/                  # clud, clud-shim, clud-block-bad-cmd, clud-cmd-scan,
-                        # clud-ctrlc-probe, mock-agent, probe-*, scan_zombies
+  bin/                  # clud, clud-ctrlc-probe, mock-agent, probe-*, scan_zombies
+                        # (`clud-cmd-scan`, `clud-shim` are argv[0] aliases of
+                        # `clud`, linked on the exec side by ci/aliases.py)
   tests/                # every `cargo test --no-run` harness binary
   dist/                 # the dev wheel (test_trampoline.py needs it)
 ```

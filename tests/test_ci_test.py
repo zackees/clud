@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ci import env as ci_env
 from ci import test as ci_test
 
@@ -62,12 +64,10 @@ def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) ->
     mock_agent.write_text("", encoding="utf-8")
     installed_clud = tmp_path / ci_test._binary_name("clud")
     installed_clud.write_text("", encoding="utf-8")
-    installed_block_guard = tmp_path / ci_test._binary_name("clud-block-bad-cmd")
-    installed_block_guard.write_text("", encoding="utf-8")
     captured: list[list[str]] = []
 
     def fake_installed_script(name: str):
-        return {"clud": installed_clud, "clud-block-bad-cmd": installed_block_guard}.get(name)
+        return {"clud": installed_clud}.get(name)
 
     monkeypatch.setattr(ci_test, "_installed_script", fake_installed_script)
     monkeypatch.setattr(ci_test, "ROOT", tmp_path)
@@ -86,7 +86,12 @@ def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) ->
 
     assert env is not None
     assert env["CLUD_TEST_BINARY"] == str(installed_clud)
-    assert env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] == str(installed_block_guard)
+    # #1551: `clud-block-bad-cmd` is an alias of `clud`, linked beside it.
+    guard = Path(env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"])
+    assert guard.resolve() == installed_clud.with_name(
+        ci_test._binary_name("clud-block-bad-cmd")
+    ).resolve()
+    assert guard.samefile(installed_clud)
     assert env["CLUD_TEST_MOCK_AGENT_BINARY"] == str(mock_agent)
     assert captured == [["cargo", "build", "-p", "mock-agent"]]
 
@@ -98,10 +103,8 @@ def test_prepare_pytest_binaries_builds_clud_without_installed_script(
     target_dir = tmp_path / "target" / "debug"
     target_dir.mkdir(parents=True)
     clud = target_dir / ci_test._binary_name("clud")
-    block_guard = target_dir / ci_test._binary_name("clud-block-bad-cmd")
     mock_agent = target_dir / ci_test._binary_name("mock-agent")
     clud.write_text("", encoding="utf-8")
-    block_guard.write_text("", encoding="utf-8")
     mock_agent.write_text("", encoding="utf-8")
     captured: list[list[str]] = []
 
@@ -119,6 +122,9 @@ def test_prepare_pytest_binaries_builds_clud_without_installed_script(
 
     assert env is not None
     assert env["CLUD_TEST_BINARY"] == str(clud)
-    assert env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] == str(block_guard)
+    guard = Path(env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"])
+    assert guard.parent.resolve() == target_dir.resolve()
+    assert guard.name == ci_test._binary_name("clud-block-bad-cmd")
+    assert guard.samefile(clud)
     assert env["CLUD_TEST_MOCK_AGENT_BINARY"] == str(mock_agent)
     assert captured == [["cargo", "build", "-p", "clud", "-p", "mock-agent", "-p", "daemon-stub"]]

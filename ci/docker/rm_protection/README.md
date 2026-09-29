@@ -1,7 +1,8 @@
 # RM protection container checks
 
 The manual/reusable `rm-protection-docker.yml` workflow builds the current
-`clud`, `clud-cmd-scan`, and `clud-shim` binaries and copies them into a
+`clud` binary, links its `clud-cmd-scan` and `clud-shim` aliases
+(`clud __link-aliases`) and copies them into a
 disposable Ubuntu image. It runs two checks:
 
 1. `tests/test_rm_shim.py::test_old_stub_corpus_maps_to_new_floor_and_hook`
