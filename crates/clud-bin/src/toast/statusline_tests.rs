@@ -6,6 +6,12 @@ use serde_json::json;
 use super::*;
 use crate::toast::{Severity, Toast, ToastEvent};
 
+/// Shadows the production `render_into` so no test reads the host's real
+/// `CLAUDE_EFFORT` (set whenever the suite runs under Claude Code).
+fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64) {
+    render_into_with_effort_env(out, args, stdin, now_ms, None);
+}
+
 fn writer_in(dir: &Path, pid: u32) -> StatusStateWriter {
     StatusStateWriter::new(state_path(dir, pid))
 }
@@ -57,6 +63,7 @@ fn an_orphaned_live_toast_goes_stale() {
             expires_ms: None,
         }),
         usage: None,
+        efforts: Vec::new(),
     };
     std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
     let stale = u64::try_from(STALE_AFTER.as_millis()).unwrap();
@@ -951,4 +958,89 @@ fn unchanged_callback_does_not_rewrite_cursor_state() {
         std::fs::metadata(&cursor).unwrap().modified().unwrap(),
         before
     );
+}
+
+fn effort_args(dir: &Path, pid: u32) -> RunArgs {
+    RunArgs {
+        session_pid: pid,
+        state_dir: dir.to_path_buf(),
+        chain_b64: None,
+    }
+}
+
+#[test]
+fn claude_effort_env_appends_a_highlighted_effort_segment_after_the_user_line() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let args = RunArgs {
+        chain_b64: Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("echo user-line")),
+        ..effort_args(dir.path(), 301)
+    };
+    let mut out = Vec::new();
+    render_into_with_effort_env(&mut out, &args, b"{}", now_ms(), Some("high"));
+    let text = String::from_utf8(out).unwrap();
+    let user = text.find("user-line").expect("user line printed");
+    let effort = text.find("effort: high").expect("effort segment");
+    assert!(user < effort, "{text}");
+    assert!(text.contains("\x1b[1;38;5;214meffort: high"), "{text}");
+}
+
+#[test]
+fn stdin_effort_level_wins_over_claude_effort_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = effort_args(dir.path(), 302);
+    let stdin = br#"{"model":{"id":"claude-opus-5"},"effort":{"level":"medium"}}"#;
+    let mut out = Vec::new();
+    render_into_with_effort_env(&mut out, &args, stdin, now_ms(), Some("max"));
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("\x1b[38;5;75meffort: medium\x1b[0m"),
+        "{text}"
+    );
+    assert!(!text.contains("max"), "{text}");
+}
+
+#[test]
+fn no_effort_source_leaves_the_output_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = effort_args(dir.path(), 303);
+    let stdin = br#"{"model":{"id":"claude-opus-5"}}"#;
+    let mut out = Vec::new();
+    render_into_with_effort_env(&mut out, &args, stdin, now_ms(), None);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "\x1b[38;5;75mclaude-opus-5\x1b[0m\n"
+    );
+}
+
+#[test]
+fn gateway_agent_requests_above_the_session_effort_are_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = writer_in(dir.path(), 304);
+    writer.record_effort("medium", false);
+    for _ in 0..3 {
+        writer.record_effort("high", true);
+    }
+    writer.record_effort("low", true);
+    let args = effort_args(dir.path(), 304);
+    let mut out = Vec::new();
+    render_into_with_effort_env(&mut out, &args, b"{}", now_ms(), None);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("effort: medium"), "{text}");
+    assert!(text.contains("agents: 3\u{d7}high"), "{text}");
+    assert!(!text.contains("low"), "{text}");
+}
+
+#[test]
+fn effort_events_outside_the_window_are_ignored() {
+    let events = vec![EffortEvent {
+        ms: 1_000,
+        level: "max".into(),
+        agent: true,
+    }];
+    let window = u64::try_from(EFFORT_WINDOW.as_millis()).unwrap();
+    assert!(render_effort(b"{}", None, &events, 1_000 + window + 1).is_none());
+    assert!(render_effort(b"{}", None, &events, 1_000 + window)
+        .unwrap()
+        .contains("agents: 1\u{d7}max"));
 }

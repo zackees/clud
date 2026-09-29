@@ -189,6 +189,19 @@ released on the next idle poll.
   callback withholds the cumulative triple and renders only the model. A
   partial trailing record waits for its newline. Native Codex
   without the Claude status-line callback requires bridge-observed usage.
+- **Effort segment (#1464).** After the user's line and the usage line,
+  `clud statusline` prints `effort: <level>`, bold orange for `high`,
+  `xhigh` and `max`. The main session's level comes from, in order: the
+  stdin JSON's `effort.level` (Claude Code's documented field, live across
+  `/effort`, absent when the model has no effort parameter), then
+  `CLAUDE_EFFORT`, then the most recent main-session request the gateway saw.
+  `modelSettings.<model>.effortLevel` is not read. With no source the line is
+  unchanged. **Per-agent counts need clud's gateway or bridge in the path**:
+  each `POST /v1/messages` records its `output_config.effort` (and whether it
+  carried `x-claude-code-agent-id`) in the state file's `efforts` list, kept
+  to the last 10 minutes and 256 entries. Subagent requests ranked above the
+  session's level render as `effort: medium · agents: 3×high`. A plain Claude
+  backend without the gateway shows only the main-session level.
 
 `clud statusline` is dispatched first thing in `main.rs`, before any daemon,
 runtime-cache or launch work, because Claude runs it every couple of seconds.
