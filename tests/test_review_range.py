@@ -121,6 +121,6 @@ def test_cli_exits_3_for_oversize_and_prints_json(rr, rebased_branch, monkeypatc
 
 def test_clud_review_diffs_only_through_the_resolver() -> None:
     text = " ".join(SKILL.read_text(encoding="utf-8").split())
-    assert "clud tool run git/review_range.py" in text
+    assert '"$CLUD_EXE" tool run git/review_range.py' in text
     assert "Never use `@{upstream}` or `@{u}`." in text
     assert "If it exits `3`" in text

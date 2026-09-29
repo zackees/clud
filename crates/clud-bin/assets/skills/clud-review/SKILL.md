@@ -62,7 +62,7 @@ or the normal findings/no-rules verdict followed by `review agents launched: 1`.
 ## Input
 
 - **Bare** `/clud-review` — review the range pinned by
-  `clud tool run git/review_range.py` (the merge-base of `HEAD` with the
+  `"$CLUD_EXE" tool run git/review_range.py` (the merge-base of `HEAD` with the
   freshly fetched default branch; never `@{upstream}` and never a stale
   `origin/main`) from the current working directory. The intended
   invocation point: the parent agent invokes this as the last step before
@@ -241,7 +241,7 @@ DO NOT scan:
 
 ## File classification and one-reviewer prompt assembly
 
-Resolve the range once, first: `clud tool run git/review_range.py` (add
+Resolve the range once, first: `"$CLUD_EXE" tool run git/review_range.py` (add
 `--pr <N>` when reviewing a PR). It prints JSON; use its `range`
 (`<merge_base>...<head>`, pinned SHAs) as `<base>...HEAD` for the inventory
 and every bucket diff below. If it exits `3` (`oversize`: over 50 files or
