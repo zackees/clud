@@ -164,36 +164,6 @@ def _write_exec_script(archive: zipfile.ZipFile, name: str, data: bytes) -> None
     archive.writestr(info, data)
 
 
-def test_write_wheel_marks_only_data_scripts_executable(tmp_path) -> None:
-    """#1544: repacked wheels stored scripts as 0644, so pip installed a
-    non-executable `clud`."""
-    from ci.wheel_repair import _write_wheel
-
-    root = tmp_path / "root"
-    files = {
-        "clud-2.8.7.data/scripts/clud": b"bin",
-        "clud-2.8.7.data/scripts/clud-cmd-scan": b"bin",
-        "clud-2.8.7.dist-info/METADATA": b"meta",
-        "clud-2.8.7.dist-info/RECORD": b"",
-        "clud/__init__.py": b"",
-    }
-    for name, data in files.items():
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        path.chmod(0o600)
-    wheel = tmp_path / "out.whl"
-    _write_wheel(root, wheel)
-
-    modes = _zip_modes(wheel)
-    assert set(modes) == set(files)
-    for name, mode in modes.items():
-        expected = 0o755 if ".data/scripts/" in name else 0o644
-        assert mode == expected, (name, oct(mode))
-    with zipfile.ZipFile(wheel) as archive:
-        assert archive.read("clud-2.8.7.data/scripts/clud") == b"bin"
-
-
 def test_prune_preserves_script_exec_bits_from_0755_input(tmp_path) -> None:
     """#1544 end to end: extractall drops modes, so prune must restore them."""
     wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
@@ -211,14 +181,16 @@ def test_prune_preserves_script_exec_bits_from_0755_input(tmp_path) -> None:
     scripts = {n: m for n, m in modes.items() if ".data/scripts/" in n}
     assert set(scripts) == {f"clud-2.8.7.data/scripts/{n}" for n in build_wheel.REQUIRED_SCRIPTS}
     assert all(mode == 0o755 for mode in scripts.values()), scripts
-    assert modes["clud-2.8.7.dist-info/RECORD"] == 0o644
+    # #1545: rewrite_wheel keeps each entry's original mode, RECORD included.
+    assert modes["clud-2.8.7.dist-info/RECORD"] == 0o600
 
 
 def test_maturin_wheel_prunes_the_test_only_ctrlc_probe(tmp_path) -> None:
     wheel = tmp_path / "clud-2.8.7-py3-none-manylinux_2_17_x86_64.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for name in (*build_wheel.REQUIRED_SCRIPTS, "clud-ctrlc-probe"):
-            archive.writestr(f"clud-2.8.7.data/scripts/{name}", b"binary")
+            # maturin stores scripts 0755; the prune must keep that.
+            _write_exec_script(archive, f"clud-2.8.7.data/scripts/{name}", b"binary")
         archive.writestr("clud-2.8.7.dist-info/RECORD", "clud-2.8.7.dist-info/RECORD,,\n")
 
     assert build_wheel.prune_nonproduction_scripts(wheel)

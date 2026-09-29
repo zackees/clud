@@ -65,7 +65,7 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "needs: [preflight, full-ci-gate]" in text
     assert "needs: [preflight, full-ci-gate, release-matrix]" in text
     publish_needs = (
-        "needs: [preflight, full-ci-gate, snapshot-public, build, "
+        "needs: [preflight, full-ci-gate, snapshot-public, build, wheel-smoke, "
         "build-static-musl, verify-static-musl-arm64]"
     )
     assert publish_needs in text
@@ -73,10 +73,15 @@ def test_release_workflow_gates_every_publish_path() -> None:
     assert "prerelease: true" in text
     assert "make_latest: false" in text
     pypi_needs = (
-        "needs: [preflight, full-ci-gate, build, "
+        "needs: [preflight, full-ci-gate, build, wheel-smoke, "
         "candidate-acceptance-gate, verify-prior-public]"
     )
     assert pypi_needs in text
+    # #1545: the release wheel is pip-installed and run before either publish.
+    smoke = text.split("  wheel-smoke:\n", 1)[1].split("\n\n", 1)[0]
+    assert "needs: [preflight, release-matrix, build]" in smoke
+    assert "uses: ./.github/workflows/_run-tests.yml" in smoke
+    assert "suite: wheel-smoke" in smoke
     assert "needs: [preflight, publish-pypi, verify-prior-public]" in text
     assert "needs: [preflight, promote-release]" in text
     assert "mode: candidate" in text

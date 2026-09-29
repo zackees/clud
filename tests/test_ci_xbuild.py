@@ -231,7 +231,7 @@ def test_release_wheel_stripping_receives_the_explicit_cross_target(monkeypatch,
     monkeypatch.setattr(xbuild, "build_env", lambda *_args: {})
     monkeypatch.setattr(xbuild, "run", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(build_wheel, "built_wheels", lambda: [wheel])
-    monkeypatch.setattr(build_wheel, "prune_nonproduction_scripts", lambda _wheel: False)
+    monkeypatch.setattr(build_wheel, "prune_nonproduction_scripts", lambda _wheel, **_kw: False)
     monkeypatch.setattr(
         build_wheel,
         "remove_elf_debug_metadata",
@@ -239,6 +239,7 @@ def test_release_wheel_stripping_receives_the_explicit_cross_target(monkeypatch,
     )
     monkeypatch.setattr(build_wheel, "verify_no_elf_debug_sections", lambda _wheel: None)
     monkeypatch.setattr(build_wheel, "verify_wheel_scripts", lambda _wheel: 0)
+    monkeypatch.setattr(xbuild, "verify_wheel_modes", lambda _wheel: 0)
     monkeypatch.setattr(wheel_repair, "repair_windows_gnu_wheel", lambda _wheel: None)
     monkeypatch.setattr(xbuild, "collect_debuginfo", lambda *_args: None)
 
@@ -265,6 +266,7 @@ def test_windows_wheel_resolves_cargo_target_dir_for_binaries_and_companion(
 
     monkeypatch.setattr(build_wheel, "build_windows_wheel_from_binaries", fake_build)
     monkeypatch.setattr(build_wheel, "verify_wheel_scripts", lambda _wheel: 0)
+    monkeypatch.setattr(xbuild, "verify_wheel_modes", lambda _wheel: 0)
     from ci import webterm_wheel
 
     monkeypatch.setattr(

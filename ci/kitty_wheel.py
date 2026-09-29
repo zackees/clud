@@ -7,15 +7,14 @@ an independently installed WezTerm on ``PATH``.
 
 from __future__ import annotations
 
-import base64
 import csv
-import hashlib
 import io
 import os
 import struct
-import tempfile
 import zipfile
 from pathlib import Path
+
+from ci.wheel_rewrite import new_entry, record_line, rewrite_wheel, wheel_dist_info_dir
 
 # Mirrors the runtime portion of the fork's Windows portable release. PDBs are
 # deliberately excluded; license notices and source provenance are mandatory.
@@ -105,7 +104,7 @@ def check_kitty_wheel(wheel: Path) -> list[str]:
                 else:
                     if machine != KITTY_PE_MACHINE:
                         errors.append(f"{wheel.name}: non-x64 PE for {member}: 0x{machine:04x}")
-            expected = _record_line(member, data).split(",", 1)[1].split(",")
+            expected = record_line(member, data).split(",", 1)[1].split(",")
             if rows.get(member) != expected:
                 errors.append(f"{wheel.name}: invalid RECORD for {member}")
         source = prefix + "SOURCE_REVISION"
@@ -114,11 +113,6 @@ def check_kitty_wheel(wheel: Path) -> list[str]:
             if archive.read(source).decode().strip() != expected_revision:
                 errors.append(f"{wheel.name}: wrong SOURCE_REVISION")
     return errors
-
-
-def _record_line(name: str, data: bytes) -> str:
-    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
-    return f"{name},sha256={digest},{len(data)}"
 
 
 def resolve_kitty_bundle() -> Path:
@@ -191,47 +185,19 @@ def add_kitty_bundle(
         raise RuntimeError(f"Kitty GUI config is missing: {config}")
     helper_data = read_kitty_paste_helper(paste_helper)
 
-    with zipfile.ZipFile(wheel) as source:
-        entries = [
-            (info, source.read(info.filename))
-            for info in source.infolist()
-            if not info.filename.endswith(".dist-info/RECORD")
-            and ".data/data/clud-kittyterm/" not in info.filename
-            and ".data/scripts/clud-kittyterm/" not in info.filename
-        ]
-    dist_info = next(
-        (
-            info.filename.split("/", 1)[0]
-            for info, _ in entries
-            if info.filename.endswith(".dist-info/WHEEL")
-        ),
-        None,
-    )
-    if dist_info is None:
-        raise RuntimeError(f"wheel has no dist-info/WHEEL entry: {wheel}")
+    dist_info = wheel_dist_info_dir(wheel)
     prefix = f"{dist_info.removesuffix('.dist-info')}.data/data/clud-kittyterm/"
+    added = [
+        new_entry(prefix + name, (bundle / name).read_bytes(), 0o644)
+        for name in KITTY_BUNDLE_FILES
+    ]
+    added.append(new_entry(prefix + "clud-kittyterm.lua", config.read_bytes(), 0o644))
+    added.append(new_entry(prefix + KITTY_PASTE_HELPER, helper_data, 0o644))
 
-    for name in KITTY_BUNDLE_FILES:
-        info = zipfile.ZipInfo(prefix + name)
-        info.compress_type = zipfile.ZIP_DEFLATED
-        entries.append((info, (bundle / name).read_bytes()))
-    info = zipfile.ZipInfo(prefix + "clud-kittyterm.lua")
-    info.compress_type = zipfile.ZIP_DEFLATED
-    entries.append((info, config.read_bytes()))
-    info = zipfile.ZipInfo(prefix + KITTY_PASTE_HELPER)
-    info.compress_type = zipfile.ZIP_DEFLATED
-    entries.append((info, helper_data))
+    def drop_stale_bundle(info: zipfile.ZipInfo, data: bytes) -> bytes | None:
+        name = info.filename
+        if ".data/data/clud-kittyterm/" in name or ".data/scripts/clud-kittyterm/" in name:
+            return None
+        return data
 
-    record_name = f"{dist_info}/RECORD"
-    record_lines = [_record_line(info.filename, data) for info, data in entries]
-    record = "\n".join([*record_lines, f"{record_name},,"]) + "\n"
-    with tempfile.NamedTemporaryFile(dir=wheel.parent, suffix=".whl", delete=False) as handle:
-        temporary = Path(handle.name)
-    try:
-        with zipfile.ZipFile(temporary, "w") as output:
-            for info, data in entries:
-                output.writestr(info, data)
-            output.writestr(record_name, record)
-        temporary.replace(wheel)
-    finally:
-        temporary.unlink(missing_ok=True)
+    rewrite_wheel(wheel, drop_stale_bundle, add=added)

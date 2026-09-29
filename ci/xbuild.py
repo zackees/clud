@@ -478,6 +478,10 @@ def _project_version() -> str:
 #: there fails the upload, which is the exact blocker split-debuginfo fixes.
 DEBUGINFO_DIR = ROOT / "dist-debuginfo"
 
+#: Deflate level for dev (CI-only) wheels: speed over size. Release wheels
+#: keep maturin's and zipfile's defaults.
+DEV_WHEEL_COMPRESSLEVEL = 1
+
 
 def collect_debuginfo(target: str, profile: str) -> list[Path]:
     """Stage this triple's sidecar debug info for the release job.
@@ -539,6 +543,18 @@ def collect_debuginfo(target: str, profile: str) -> list[Path]:
     return staged
 
 
+def verify_wheel_modes(wheel: Path) -> int:
+    """#1545: fail a local or CI wheel build whose scripts lost their exec bits."""
+    from ci.check_wheel_modes import check_wheel
+
+    errors = check_wheel(wheel)
+    for error in errors:
+        print(f"error: {error}", file=sys.stderr, flush=True)
+    if not errors:
+        print(f"script modes ok: {wheel.name}", flush=True)
+    return 1 if errors else 0
+
+
 def cmd_wheel(args: argparse.Namespace) -> int:
     """Build the wheel into dist/ for this triple.
 
@@ -586,7 +602,7 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             print(error, file=sys.stderr)
             return 1
         add_companion(wheel, companion, args.target)
-        if verify_wheel_scripts(wheel) != 0:
+        if verify_wheel_scripts(wheel) != 0 or verify_wheel_modes(wheel) != 0:
             return 1
         print(f"packaged soldr-built Windows wheel: {wheel}")
         collect_debuginfo(args.target, profile)
@@ -601,7 +617,10 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         str(ROOT / "dist"),
     ]
     if args.profile == "dev":
-        subcommand += ["--profile", "dev"]
+        # Dev wheels are CI artifacts that ci.bundle re-compresses anyway;
+        # deflate level 1 packs the ~hundreds-of-MB debug binaries far faster.
+        # Same entries and modes, only the zip compression level differs.
+        subcommand += ["--profile", "dev", "--compression-level", str(DEV_WHEEL_COMPRESSLEVEL)]
         if args.target.endswith("-unknown-linux-gnu"):
             # Dev wheels are CI artifacts, not distributables, and must not be
             # audited for manylinux compliance. maturin audits by default on
@@ -641,14 +660,16 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         print("build completed but produced no wheel", file=sys.stderr)
         return 1
     for wheel in wheels:
-        prune_nonproduction_scripts(wheel)
+        prune_nonproduction_scripts(
+            wheel, compresslevel=DEV_WHEEL_COMPRESSLEVEL if args.profile == "dev" else None
+        )
         if args.profile == "release":
             remove_elf_debug_metadata(wheel, target=args.target)
             verify_no_elf_debug_sections(wheel)
         if desktop_target(args.target):
             add_companion(wheel, companion, args.target)
         repair_windows_gnu_wheel(wheel)
-        if verify_wheel_scripts(wheel) != 0:
+        if verify_wheel_scripts(wheel) != 0 or verify_wheel_modes(wheel) != 0:
             return 1
     collect_debuginfo(args.target, profile)
     return 0

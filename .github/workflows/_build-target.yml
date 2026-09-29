@@ -227,6 +227,13 @@ jobs:
           "$VENV_PY" -m ci.check_wheel_size --dist-dir dist/
           ${{ inputs.profile == 'release' && inputs.target == 'x86_64-unknown-linux-gnu' && '--max-mb 20' || inputs.profile == 'release' && '--max-mb 90' || '' }}
 
+      # #1544/#1545: pip installs `.data/scripts/*` with the zip entry's mode,
+      # and 2.8.14/2.8.20 shipped them 0644. Same condition as the size check,
+      # so the release (`wheel-artifact`) path is gated too.
+      - name: Check wheel script modes
+        if: ${{ inputs.bundle || inputs.wheel-artifact != '' }}
+        run: '"$VENV_PY" -m ci.check_wheel_modes --dist-dir dist/'
+
       - name: Build sdist
         if: ${{ inputs.include-sdist }}
         run: '"$VENV_PY" -m maturin sdist --out dist'
