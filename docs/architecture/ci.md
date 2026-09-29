@@ -106,6 +106,26 @@ Caches persist across runs in two machine-scoped Bosn volumes:
   solo Rust toolchain and soldr's zccache build cache. Before that volume
   existed, the server lived in the container and every run started cold.
 
+**Live, durable act logs (#1548).** bosn buffers a task's output until it
+exits and removes the container on a timeout or Ctrl-C, so `ci/act_ci.sh` also
+writes act's output to `.clud/act-logs/<run>-<job>.log` on the host (the
+`clud_act` stack binds that directory at `/act-logs`; it is tracked only as an
+empty directory whose own `.gitignore` ignores the logs). The path is printed
+first, before act starts:
+
+```
+tail -f .clud/act-logs/<run>-<job>.log      # follow a running job
+```
+
+The log is a live follow of act's stream (POSIX sh has no `pipefail`, so act's
+own exit status is kept and the evidence greps read the same file), lines carry
+a job-id prefix so parallel jobs stay readable, and the file survives a
+timeout, Ctrl-C and container removal. Files are owned by the host user, mode
+`0600`, in a `0700` directory. `ACT_JSON=1` runs act with `--json` and also
+writes `<run>-<job>.jsonl` (act's JSON replaces its text stream, so the `.log`
+then holds the same JSON). Once bosn streams logs itself (zackees/bosn#305)
+this tee is deleted.
+
 **Native bosn and the GitHub API proxy.** These tasks need native Rust bosn
 (0.1.4+, with zackees/bosn#312), which provides `bosn run --task` and refuses
 tag-only Dockerfile `FROM` lines, so every `bosn/*Dockerfile` pins its base

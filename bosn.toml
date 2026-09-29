@@ -235,6 +235,14 @@ readonly = true
 source = "/var/run/docker.sock"
 destination = "/var/run/docker.sock"
 
+# Host-visible act logs (#1548): ci/act_ci.sh tees act's output here, so it
+# can be followed with `tail -f .clud/act-logs/<run>-<job>.log` while a job
+# runs and survives a timeout, Ctrl-C or container removal. `.clud/*` is
+# gitignored, and the script keeps the directory user-only.
+[stack.clud_act.mounts.act-logs]
+source = ".clud/act-logs"
+destination = "/act-logs"
+
 [stack.clud_act.volumes.act-cache]
 scope = "machine"
 destination = "/root/.cache/act"

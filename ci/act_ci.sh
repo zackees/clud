@@ -39,7 +39,7 @@ mkdir -p "$WORK" "$CHECKOUT"
 # --no-same-owner: the copy is owned by root, not the host uid, so git doesn't
 # refuse it as "dubious ownership".
 tar -C "$SRC" --exclude=./target --exclude=./.venv --exclude=./dist \
-    --exclude=./.git -cf - . | tar -C "$WORK" --no-same-owner -xf -
+    --exclude=./.git --exclude=./.clud/act-logs -cf - . | tar -C "$WORK" --no-same-owner -xf -
 
 # act names job containers from the workflow and job names only
 # (act-<workflow>-<job>-<hash>), so two concurrent runs of ci.yml on one host,
@@ -146,15 +146,54 @@ run_act() {
         --cache-server-path "$SERVER_CACHE" "$@"
 }
 
+# Live, durable logs (#1548). bosn buffers a task's output until it exits and
+# removes the container on a timeout or Ctrl-C, so act's output also goes to a
+# file on the host: the `clud_act` stack binds `.clud/act-logs` at /act-logs.
+# The paths are printed first, so `tail -f` works while the job runs, and the
+# file survives a timeout, Ctrl-C or container removal. Without the mount the
+# log falls back to /tmp and does not survive the container.
+LOG_DIR="${ACT_LOG_DIR:-/act-logs}"
+if ! mkdir -p "$LOG_DIR" 2>/dev/null || [ ! -w "$LOG_DIR" ]; then
+    LOG_DIR=/tmp/act-logs
+    mkdir -p "$LOG_DIR"
+    echo "act_ci: /act-logs is not mounted; logging to $LOG_DIR (lost with the container)" >&2
+fi
+# Logs are user-only: act masks secrets, but a log is still not for others.
+chmod 700 "$LOG_DIR" 2>/dev/null || true
+umask 077
+LOG="$LOG_DIR/$RUN-$JOB.log"
+: >"$LOG"
+# The container runs as root; hand the log to the host user who owns the
+# directory, so `tail -f` on the host can read it.
+OWNER="$(stat -c %u:%g "$LOG_DIR" 2>/dev/null || true)"
+[ -z "$OWNER" ] || chown "$OWNER" "$LOG" 2>/dev/null || true
+echo "act_ci: log   $LOG" >&2
+# ACT_JSON=1 asks act for one JSON object per line (act --json replaces the
+# text stream, so the .log then holds JSON, teed to a .jsonl of its own).
+if [ "${ACT_JSON:-0}" = 1 ]; then
+    JSONL="$LOG_DIR/$RUN-$JOB.jsonl"
+    : >"$JSONL"
+    [ -z "$OWNER" ] || chown "$OWNER" "$JSONL" 2>/dev/null || true
+    echo "act_ci: jsonl $JSONL" >&2
+    set -- --json "$@"
+else
+    # One prefix per job so parallel jobs do not interleave unreadably.
+    set -- --log-prefix-job-id "$@"
+fi
+
+# Follow the log so bosn's stream shows output as it appears. This is a tee
+# in POSIX sh, which has no pipefail or PIPESTATUS: act's own status is kept.
+tail -n +1 -f "$LOG" &
+TAIL_PID=$!
+status=0
+run_act "$@" >>"$LOG" 2>&1 || status=$?
+sleep 1
+kill "$TAIL_PID" 2>/dev/null || true
+wait "$TAIL_PID" 2>/dev/null || true
+[ -z "${JSONL:-}" ] || cp "$LOG" "$JSONL"
+[ "$status" -eq 0 ] || exit "$status"
+
 if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
-    LOG="/tmp/$RUN/act.log"
-    if run_act "$@" >"$LOG" 2>&1; then
-        cat "$LOG"
-    else
-        status=$?
-        cat "$LOG"
-        exit "$status"
-    fi
     # Act may exit successfully after a skipped job; require the actual pytest
     # result and the host's emitted evidence for this exact release and arch.
     grep -F 'Job succeeded' "$LOG" >/dev/null
@@ -162,6 +201,4 @@ if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
     grep -F 'PUBLIC_EVIDENCE ' "$LOG" \
         | grep -F "\"tag\": \"$TAG\"" \
         | grep -F '"arch": "x86_64"' >/dev/null
-else
-    run_act "$@"
 fi

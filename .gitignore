@@ -60,6 +60,9 @@ coverage-*.xml
 .clud/*
 !.clud/
 !.clud/settings.json
+# #1548: bosn binds this directory into the act container, so it must exist in
+# every checkout; its own .gitignore keeps the logs out of git.
+!.clud/act-logs/
 .clud/settings.local.json
 
 # Claude Code: ignore ephemeral subdirectories by default, but keep files at
