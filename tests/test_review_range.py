@@ -97,7 +97,9 @@ def test_resolver_ignores_the_stale_tracking_ref(rr, rebased_branch, monkeypatch
     assert out["merge_base"] == _git(rebased_branch, "rev-parse", "main")
 
 
-def test_oversize_range_that_is_not_the_prs_own_diffstat_is_flagged(rr, rebased_branch, monkeypatch):
+def test_oversize_range_that_is_not_the_prs_own_diffstat_is_flagged(
+    rr, rebased_branch, monkeypatch
+):
     monkeypatch.chdir(rebased_branch)
     # Force a wrong, huge range: the original main (before the 60 commits) is not
     # what HEAD sits on, so diff HEAD against the root commit.
