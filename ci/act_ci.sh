@@ -105,9 +105,9 @@ runs:
 EOF
 
 # setup-soldr authenticates its release lookups with SOLDR_GITHUB_TOKEN, which
-# ci.yml fills from secrets.GITHUB_TOKEN. `bosn run` forwards no host
-# environment and a token is never written to a file, so runs are anonymous
-# unless GITHUB_TOKEN is already set inside this container.
+# ci.yml fills from secrets.GITHUB_TOKEN. The act tasks in bosn.toml declare
+# `secrets = ["github_token"]`, so bosn injects the stored read-only token as
+# GITHUB_TOKEN; without one, runs are anonymous (60 API calls/hour per IP).
 set --
 if [ -n "${GITHUB_TOKEN:-}" ]; then
     set -- -s GITHUB_TOKEN

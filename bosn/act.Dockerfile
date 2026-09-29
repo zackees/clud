@@ -1,6 +1,6 @@
-FROM docker:27-cli AS docker-cli
+FROM docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c AS docker-cli
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 # Bosn derives a managed image identity from this Dockerfile. Keep this
 # project-specific label so an unrelated registry cannot claim the same tag.
