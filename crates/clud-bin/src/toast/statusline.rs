@@ -70,6 +70,26 @@ pub struct StatusState {
     /// session state, not an alert competing for the one toast slot.
     #[serde(default)]
     pub usage: Option<StatusUsage>,
+    /// Efforts of recent gateway/bridge requests (#1464), pruned to
+    /// [`EFFORT_WINDOW`]. Only present when clud's gateway is in the path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<EffortEvent>,
+}
+
+/// How far back the per-agent effort mix looks.
+pub const EFFORT_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Upper bound on retained effort events, keeping the state file small.
+const EFFORT_EVENT_CAP: usize = 256;
+
+/// One request's `output_config.effort`, as the gateway saw it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffortEvent {
+    pub ms: u64,
+    pub level: String,
+    /// Sent by a subagent (`x-claude-code-agent-id`) rather than the main
+    /// session.
+    #[serde(default)]
+    pub agent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +130,7 @@ pub struct StatusStateWriter {
     provider_label: String,
     board: Mutex<ToastBoard>,
     usage: Mutex<Option<StatusUsage>>,
+    efforts: Mutex<Vec<EffortEvent>>,
 }
 
 impl StatusStateWriter {
@@ -138,6 +159,7 @@ impl StatusStateWriter {
             provider_label: provider.to_string(),
             board: Mutex::new(ToastBoard::default()),
             usage: Mutex::new(None),
+            efforts: Mutex::new(Vec::new()),
         };
         let _ = writer.write(None, Instant::now());
         writer
@@ -199,6 +221,31 @@ impl StatusStateWriter {
         let _ = self.write(visible.as_ref(), now);
     }
 
+    /// Record one gateway request's effort (#1464) and refresh the file.
+    pub fn record_effort(&self, level: &str, agent: bool) {
+        let level: String = level.chars().filter(|c| !c.is_control()).take(16).collect();
+        if level.is_empty() {
+            return;
+        }
+        let wall = now_ms();
+        {
+            let mut efforts = self.efforts.lock().unwrap_or_else(|e| e.into_inner());
+            efforts.push(EffortEvent {
+                ms: wall,
+                level,
+                agent,
+            });
+            prune_efforts(&mut efforts, wall);
+        }
+        let now = Instant::now();
+        let visible = {
+            let mut board = self.board.lock().unwrap_or_else(|e| e.into_inner());
+            board.expire(now);
+            board.visible(now).cloned()
+        };
+        let _ = self.write(visible.as_ref(), now);
+    }
+
     fn write(&self, visible: Option<&Toast>, now: Instant) -> io::Result<()> {
         let wall = now_ms();
         let state = StatusState {
@@ -217,6 +264,11 @@ impl StatusStateWriter {
                 }),
             }),
             usage: self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            efforts: {
+                let mut efforts = self.efforts.lock().unwrap_or_else(|e| e.into_inner());
+                prune_efforts(&mut efforts, wall);
+                efforts.clone()
+            },
         };
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -225,6 +277,114 @@ impl StatusStateWriter {
         std::fs::write(&tmp, serde_json::to_vec(&state).map_err(io::Error::other)?)?;
         std::fs::rename(&tmp, &self.path)
     }
+}
+
+fn prune_efforts(efforts: &mut Vec<EffortEvent>, now_ms: u64) {
+    let window = u64::try_from(EFFORT_WINDOW.as_millis()).unwrap_or(u64::MAX);
+    efforts.retain(|event| now_ms.saturating_sub(event.ms) <= window);
+    if efforts.len() > EFFORT_EVENT_CAP {
+        let excess = efforts.len() - EFFORT_EVENT_CAP;
+        efforts.drain(..excess);
+    }
+}
+
+/// Ordinal of a named effort level; `None` for anything else (for example a
+/// numeric token budget), which is shown but never ranked.
+fn effort_rank(level: &str) -> Option<u8> {
+    match level {
+        "minimal" => Some(0),
+        "low" => Some(1),
+        "medium" => Some(2),
+        "high" => Some(3),
+        "xhigh" => Some(4),
+        "max" => Some(5),
+        _ => None,
+    }
+}
+
+fn effort_is_high(level: &str) -> bool {
+    effort_rank(level).is_some_and(|rank| rank >= 3)
+}
+
+/// The main session's effort from Claude Code's statusline stdin
+/// (`effort.level`, documented since Claude Code added it to the schema).
+fn stdin_effort(stdin: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(stdin).ok()?;
+    let effort = value.get("effort")?;
+    effort
+        .get("level")
+        .or(Some(effort))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|level| !level.is_empty())
+        .map(safe_label)
+}
+
+/// The `effort: <level> · agents: N×<level>` segment, or `None` when no
+/// source knows the effort and no agent ran above it.
+pub fn render_effort(
+    stdin: &[u8],
+    env_effort: Option<&str>,
+    events: &[EffortEvent],
+    now_ms: u64,
+) -> Option<String> {
+    let window = u64::try_from(EFFORT_WINDOW.as_millis()).unwrap_or(u64::MAX);
+    let recent = || {
+        events
+            .iter()
+            .filter(move |event| now_ms.saturating_sub(event.ms) <= window)
+    };
+    let session = stdin_effort(stdin)
+        .or_else(|| {
+            env_effort
+                .map(str::trim)
+                .filter(|level| !level.is_empty())
+                .map(safe_label)
+        })
+        .or_else(|| {
+            recent()
+                .rfind(|event| !event.agent)
+                .map(|event| safe_label(&event.level))
+        });
+    let session_rank = session.as_deref().and_then(effort_rank);
+    let mut agents: Vec<(String, u64)> = Vec::new();
+    for event in recent().filter(|event| event.agent) {
+        let Some(rank) = effort_rank(&event.level) else {
+            continue;
+        };
+        if session_rank.is_some_and(|session| rank <= session) {
+            continue;
+        }
+        match agents.iter_mut().find(|(level, _)| *level == event.level) {
+            Some((_, count)) => *count += 1,
+            None => agents.push((event.level.clone(), 1)),
+        }
+    }
+    if session.is_none() && agents.is_empty() {
+        return None;
+    }
+    agents.sort_by_key(|(level, _)| std::cmp::Reverse(effort_rank(level)));
+    let colour = |level: &str| {
+        if effort_is_high(level) {
+            "\x1b[1;38;5;214m"
+        } else {
+            "\x1b[38;5;75m"
+        }
+    };
+    let mut parts = Vec::new();
+    if let Some(level) = session.as_deref() {
+        parts.push(format!("{}effort: {level}\x1b[0m", colour(level)));
+    }
+    if !agents.is_empty() {
+        let mix = agents
+            .iter()
+            .map(|(level, count)| format!("{count}\u{d7}{level}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let top = agents[0].0.as_str();
+        parts.push(format!("{}agents: {mix}\x1b[0m", colour(top)));
+    }
+    Some(parts.join(" \u{b7} "))
 }
 
 impl Drop for StatusStateWriter {
@@ -488,6 +648,19 @@ pub fn run(args: &RunArgs) -> i32 {
 
 /// Everything `run` prints, separated from stdio for tests.
 pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64) {
+    let env_effort = std::env::var("CLAUDE_EFFORT").ok();
+    render_into_with_effort_env(out, args, stdin, now_ms, env_effort.as_deref());
+}
+
+/// [`render_into`] with `CLAUDE_EFFORT` injected, so tests never mutate the
+/// process environment.
+pub fn render_into_with_effort_env(
+    out: &mut Vec<u8>,
+    args: &RunArgs,
+    stdin: &[u8],
+    now_ms: u64,
+    env_effort: Option<&str>,
+) {
     if let Some(chain) = args.chain_b64.as_deref().and_then(decode_chain) {
         render_chain(out, chain_spec(&chain), stdin);
     }
@@ -519,6 +692,15 @@ pub fn render_into(out: &mut Vec<u8>, args: &RunArgs, stdin: &[u8], now_ms: u64)
         out.push(b'\n');
     } else if let Some(model) = claude_status_model(stdin) {
         out.extend_from_slice(format!("\x1b[38;5;75m{}\x1b[0m", safe_label(&model)).as_bytes());
+        out.push(b'\n');
+    }
+    let events = state
+        .as_ref()
+        .filter(|state| state_owner_live(state, now_ms))
+        .map(|state| state.efforts.as_slice())
+        .unwrap_or_default();
+    if let Some(effort) = render_effort(stdin, env_effort, events, now_ms) {
+        out.extend_from_slice(effort.as_bytes());
         out.push(b'\n');
     }
     if let Some(toast) = read_live_toast(&path, now_ms) {

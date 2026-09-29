@@ -1148,6 +1148,7 @@ fn handle_connection(
                     return;
                 }
             };
+            record_request_effort(&config.status_usage, &json, parsed.agent_id.is_some());
             let streaming = json.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
             if matches!(config.gateway_mode, GatewayMode::Unified(_)) {
                 serve_unified_messages(
@@ -3189,6 +3190,25 @@ fn lock_cache_health(health: &SharedCacheHealth) -> std::sync::MutexGuard<'_, Ca
 /// feeding a provider-specific cache-health state machine. The wire bytes have
 /// already been forwarded unchanged; this is an independent, launch-wide
 /// display ledger.
+/// Feed the request's `output_config.effort` to the status line (#1464).
+/// The gateway is the only layer that sees subagents' actual effort.
+fn record_request_effort(status_usage: &SharedStatusUsage, json: &serde_json::Value, agent: bool) {
+    let Some(effort) = json
+        .pointer("/output_config/effort")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let writer = status_usage
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .writer
+        .clone();
+    if let Some(writer) = writer {
+        writer.record_effort(effort, agent);
+    }
+}
+
 fn publish_status_usage(
     status_usage: &SharedStatusUsage,
     provider: AnthropicUsageProvider,
@@ -4598,6 +4618,56 @@ Connection: close
         // The last post-clear turn is cold, while the counters retain every
         // main and agent terminal report from this bridge lifetime.
         assert_eq!(usage.cache_health, "cold");
+    }
+
+    #[test]
+    fn subagent_high_effort_request_is_counted_and_shown_on_the_statusline() {
+        let upstream = FakeResponses::start_with_response(Some(large_uncached_response()));
+        let directory = tempfile::tempdir().unwrap();
+        let writer = std::sync::Arc::new(crate::toast::statusline::StatusStateWriter::new(
+            crate::toast::statusline::state_path(directory.path(), 79),
+        ));
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        bridge.set_status_usage_writer(std::sync::Arc::clone(&writer));
+        for (agent, effort) in [(None, "medium"), (Some("effort-agent"), "high")] {
+            let body = serde_json::json!({
+                "model": "gpt-6-sol",
+                "messages": [{"role": "user", "content": "effort fixture"}],
+                "output_config": {"effort": effort},
+                "stream": false,
+            })
+            .to_string();
+            let mut headers = vec![("X-Claude-Code-Session-Id", "effort-session")];
+            if let Some(agent) = agent {
+                headers.push(("x-claude-code-agent-id", agent));
+            }
+            let _ = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    bridge.bearer_token(),
+                    &body,
+                    &headers,
+                ),
+            );
+        }
+        let args = crate::toast::statusline::RunArgs {
+            session_pid: 79,
+            state_dir: directory.path().to_path_buf(),
+            chain_b64: None,
+        };
+        let mut out = Vec::new();
+        crate::toast::statusline::render_into_with_effort_env(
+            &mut out,
+            &args,
+            b"{}",
+            crate::toast::statusline::now_ms(),
+            None,
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("effort: medium"), "{text}");
+        assert!(text.contains("agents: 1\u{d7}high"), "{text}");
     }
 
     #[test]
