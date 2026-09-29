@@ -609,9 +609,11 @@ Skills and hooks:
   behind `clud --fix-hooks`.
 - `block_bad_cmd_rollout.rs` - startup health/migration for the native
   `clud-block-bad-cmd` helper: stale install warning plus exact old hook
-  command rewrites when the helper is available. User-scoped configs are
-  pinned to the launching install; project-scoped (usually committed) ones
-  only ever get the portable bare `clud-cmd-scan` (#1426).
+  command rewrites when the helper is available. Every scope only ever gets
+  the portable bare `clud-cmd-scan`, never an absolute path (#1426, #1334);
+  the session appends the helper's directory to PATH when it is not already
+  resolvable, and launch warns about hooks whose program does not exist.
+  `ci/banned_hook_paths.py` keeps committed hook configs portable.
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).
