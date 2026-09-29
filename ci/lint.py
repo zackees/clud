@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     activate()
 
     from ci.banned_cross_tools import main as check_banned_cross_tools
+    from ci.banned_hook_paths import main as check_banned_hook_paths
     from ci.banned_imports import main as check_banned_imports
     from ci.banned_legacy_deletion import main as check_banned_legacy_deletion
     from ci.banned_python3 import main as check_banned_python3
@@ -160,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
     # The interpreter is `python` everywhere; clud's shim makes that name work
     # on Linux, macOS and Windows; the versioned name does not exist on Windows.
     if check_banned_python3() != 0:
+        return 1
+    # #1334: committed hook configs must resolve clud's helpers from PATH,
+    # never a machine-local binary or a `target/` build output.
+    if check_banned_hook_paths() != 0:
         return 1
     # setup-soldr's cargo shim can otherwise omit repository discovery for
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the

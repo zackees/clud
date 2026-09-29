@@ -57,6 +57,7 @@ pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport 
     warnings.extend(broken_git_rev_parse_warnings(repo_root, home));
     warnings.extend(pwd_walk_root_warnings(repo_root, home));
     warnings.extend(double_declared_hook_warnings(repo_root, home));
+    warnings.extend(crate::block_bad_cmd_rollout::dangling_hook_program_warnings(repo_root, home));
     HookHealthReport {
         repo_root: repo_root.to_path_buf(),
         home: home.map(Path::to_path_buf),

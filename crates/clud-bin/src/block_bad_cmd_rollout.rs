@@ -16,9 +16,13 @@
 //! never pinned to the launching executable's absolute path: that path exists
 //! on one machine only, and writing it dirtied tracked files every time a dev
 //! build or the test suite launched clud inside a checkout (#1333, #1426).
-//! There, only the legacy command shapes are rewritten, to the portable bare
-//! `clud-cmd-scan`. User-scoped configs under the hook home keep #1279's
-//! pinning.
+//! Only the legacy command shapes are rewritten, to the portable bare
+//! `clud-cmd-scan`, and #1334 extended that to user configs too: an absolute
+//! helper path pinned there dangles as soon as that build (a worktree, a
+//! `uvx` copy) disappears. A user config still carrying such a dangling pin
+//! returns to the bare name. The bare name resolves at run time through PATH;
+//! `ensure_helper_on_session_path` makes that hold for a clud session whose
+//! install directory is not on PATH.
 
 use serde_json::Value;
 use std::io;
@@ -66,6 +70,7 @@ struct FileMigration {
 }
 
 pub fn run_startup_checks(auto_fix_hooks: bool) {
+    ensure_helper_on_session_path();
     let sibling_helper_present =
         matches!(probe_current_install(), InstallProbe::HelperPresent { .. });
     if !sibling_helper_present {
@@ -89,7 +94,7 @@ pub fn run_startup_checks(auto_fix_hooks: bool) {
         Ok(report) => {
             if report.commands_changed > 0 {
                 if !sibling_helper_present {
-                    eprintln!("[clud] migrated legacy hook command to pinned CLUD_EXE shim");
+                    eprintln!("[clud] migrated legacy hook command to the CLUD_EXE shim");
                 } else {
                     eprintln!(
                     "\x1b[32m[clud] migrated {count} block-bad-cmd hook command{plural} to native `{helper}`\x1b[0m",
@@ -308,31 +313,13 @@ fn replacement_command_for(
     helper_available: bool,
     scope: ConfigScope,
 ) -> Option<String> {
-    if helper_available && scope == ConfigScope::Project {
-        // Portable only: never write this machine's helper path into a
-        // (usually committed) project file (#1333, #1426).
-        return replacement_command(command, scope).map(str::to_string);
-    }
     if helper_available {
-        let parent = std::env::current_exe().ok()?.parent()?.to_path_buf();
-        let helper = parent.join(native_helper_name());
-        let helper = helper.to_str()?;
-        return match command {
-            LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND | NEW_COMMAND => {
-                if cfg!(windows) {
-                    Some(format!("& '{}'", helper.replace('\'', "''")))
-                } else {
-                    Some(format!("'{}'", helper.replace('\'', "'\\''")))
-                }
-            }
-            LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT | NEW_COMMAND_EXIT => {
-                Some(format!(
-                    "& '{}'; exit $LASTEXITCODE",
-                    helper.replace('\'', "''")
-                ))
-            }
-            _ => None,
-        };
+        // Portable only, in every scope: an absolute helper path is
+        // machine-specific and short-lived (dev builds, worktrees, `uvx`
+        // copies), and dangles the moment that binary goes away (#1334).
+        // The session resolves the bare name through PATH instead
+        // (`ensure_helper_on_session_path`).
+        return replacement_command(command, scope).map(str::to_string);
     }
     match command {
         LEGACY_PYTHON_SHIM_COMMAND => Some(PINNED_PYTHON_SHIM_COMMAND.to_string()),
@@ -342,19 +329,116 @@ fn replacement_command_for(
 }
 
 /// The portable command a stale one migrates to, or `None` when `command` is
-/// current. The bare helper is current in a project file (it must stay
-/// portable) but stale in a user file, where it gets pinned (#1279).
+/// current. The bare helper is always current. In a user file, a helper
+/// pinned to an absolute path that no longer exists (the old #1279 pinning)
+/// is stale too and returns to the bare name (#1334).
 fn replacement_command(command: &str, scope: ConfigScope) -> Option<&'static str> {
-    if scope == ConfigScope::Project && matches!(command, NEW_COMMAND | NEW_COMMAND_EXIT) {
-        return None;
-    }
     match command {
-        LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND | NEW_COMMAND => Some(NEW_COMMAND),
-        LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT | NEW_COMMAND_EXIT => {
-            Some(NEW_COMMAND_EXIT)
-        }
+        LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND => Some(NEW_COMMAND),
+        LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT => Some(NEW_COMMAND_EXIT),
+        _ if scope == ConfigScope::User => dangling_pinned_helper_replacement(command),
         _ => None,
     }
+}
+
+/// The bare replacement for a command that is exactly a pinned helper
+/// (`'<abs>/clud-cmd-scan'` or `& '<abs>\clud-cmd-scan.exe'`, optionally
+/// followed by `; exit $LASTEXITCODE`) whose program no longer exists.
+fn dangling_pinned_helper_replacement(command: &str) -> Option<&'static str> {
+    const EXIT_SUFFIX: &str = "; exit $LASTEXITCODE";
+    let trimmed = command.trim();
+    let (body, replacement) = match trimmed.strip_suffix(EXIT_SUFFIX) {
+        Some(body) => (body.trim_end(), NEW_COMMAND_EXIT),
+        None => (trimmed, NEW_COMMAND),
+    };
+    let quoted = body.strip_prefix("& ").unwrap_or(body);
+    let program = hook_program(quoted)?;
+    // Only a command that is the quoted program and nothing else; any other
+    // shape is a user variant we must not touch.
+    let exact =
+        quoted.len() == program.len() + 2 && (quoted.starts_with('\'') || quoted.starts_with('"'));
+    let path = Path::new(&program);
+    let is_helper = path
+        .file_stem()
+        .is_some_and(|stem| stem == NEW_COMMAND || stem == LEGACY_NATIVE_COMMAND);
+    (exact && is_helper && path.is_absolute() && !path.exists()).then_some(replacement)
+}
+
+/// The program a hook command runs: its first word, with a leading
+/// PowerShell `& ` and surrounding quotes removed.
+pub fn hook_program(command: &str) -> Option<String> {
+    let rest = command.trim_start();
+    let rest = rest.strip_prefix("& ").unwrap_or(rest).trim_start();
+    let first = rest.chars().next()?;
+    if first == '\'' || first == '"' {
+        let end = rest[1..].find(first)?;
+        return Some(rest[1..1 + end].to_string());
+    }
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == ';')
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+/// Warnings for hook commands whose program is an absolute path that does
+/// not exist. Such a hook fails open on every tool call with only a
+/// non-blocking error line, so the command guard silently stops running
+/// (#1334).
+pub fn dangling_hook_program_warnings(repo_root: &Path, home: Option<&Path>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for hook in crate::block_bad_cmd::frontend_hook_commands(repo_root, home) {
+        let Some(program) = hook_program(&hook.command) else {
+            continue;
+        };
+        let path = Path::new(&program);
+        if path.is_absolute() && !path.exists() {
+            seen.insert((hook.source.display().to_string(), program));
+        }
+    }
+    seen.into_iter()
+        .map(|(source, program)| {
+            format!(
+                "Hook command in {source} runs `{program}`, which does not exist, so the hook \
+                 fails open on every tool call. Replace it with the portable `{NEW_COMMAND}` \
+                 (resolved from PATH) or a program that exists on this machine."
+            )
+        })
+        .collect()
+}
+
+/// Make the bare `clud-cmd-scan` hook command resolve for this session: when
+/// it is not already on PATH but sits next to the running clud, append that
+/// directory to PATH so every backend child inherits it. Appended, not
+/// prepended, so it never shadows an installed helper or the session shims.
+pub fn ensure_helper_on_session_path() {
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    if crate::shim_resolve::which(native_helper_name(), &path_env).is_some() {
+        return;
+    }
+    let InstallProbe::HelperPresent { path } = probe_current_install() else {
+        return;
+    };
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if let Some(updated) = path_with_appended(&path_env, dir) {
+        // SAFETY: startup-only write, before the backend is spawned and
+        // before any thread that reads the environment runs.
+        unsafe { std::env::set_var("PATH", updated) };
+    }
+}
+
+fn path_with_appended(path_env: &str, dir: &Path) -> Option<String> {
+    let mut entries: Vec<PathBuf> = std::env::split_paths(path_env)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .collect();
+    if entries.iter().any(|entry| entry == dir) {
+        return None;
+    }
+    entries.push(dir.to_path_buf());
+    std::env::join_paths(entries)
+        .ok()
+        .and_then(|joined| joined.into_string().ok())
 }
 
 fn hook_home_dir() -> Option<PathBuf> {
@@ -372,11 +456,6 @@ mod tests {
     fn write(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
-    }
-
-    /// What a user-scoped command is pinned to by this test binary.
-    fn pinned(command: &str) -> String {
-        replacement_command_for(command, true, ConfigScope::User).unwrap()
     }
 
     #[test]
@@ -440,11 +519,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            pinned(LEGACY_PYTHON_SHIM_COMMAND)
+            NEW_COMMAND
         );
         assert_eq!(
             codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            pinned(LEGACY_PYTHON_SHIM_COMMAND_EXIT)
+            NEW_COMMAND_EXIT
         );
 
         let second = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
@@ -482,11 +561,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             claude["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            pinned(LEGACY_NATIVE_COMMAND)
+            NEW_COMMAND
         );
         assert_eq!(
             codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            pinned(LEGACY_NATIVE_COMMAND_EXIT)
+            NEW_COMMAND_EXIT
         );
     }
 
@@ -512,18 +591,184 @@ mod tests {
     }
 
     #[test]
-    fn already_migrated_bare_helper_is_pinned_to_launching_install() {
+    fn user_bare_helper_is_left_byte_for_byte_unchanged() {
+        // #1334: the bare helper resolves from PATH at run time; pinning it
+        // to the launching binary is what left dangling hooks behind.
         let tmp = tempdir().unwrap();
         let repo = tmp.path().join("repo");
         let home = tmp.path().join("home");
+        let body = r#"{"hooks":[{"command":"clud-cmd-scan"},{"command":"clud-cmd-scan; exit $LASTEXITCODE"}]}"#;
+        let claude = home.join(".claude/settings.json");
+        let codex = home.join(".codex/hooks.json");
+        write(&claude, body);
+        write(&codex, body);
+
+        for helper_available in [true, false] {
+            let report = migrate_hook_configs_at(&repo, Some(&home), helper_available).unwrap();
+            assert_eq!(report, MigrationReport::default());
+        }
+        assert_eq!(fs::read_to_string(claude).unwrap(), body);
+        assert_eq!(fs::read_to_string(codex).unwrap(), body);
+    }
+
+    #[test]
+    fn migration_never_writes_an_absolute_path_in_any_scope() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let legacy = r#"{"hooks":[{"command":"clud tool run hooks/block-bad-cmd.py"},{"command":"clud tool run hooks/block-bad-cmd.py; exit $LASTEXITCODE"},{"command":"clud-block-bad-cmd"}]}"#;
+        for path in [
+            repo.join(".claude/settings.json"),
+            repo.join(".codex/hooks.json"),
+            home.join(".claude/settings.json"),
+            home.join(".codex/hooks.json"),
+        ] {
+            write(&path, legacy);
+        }
+
+        migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
+
+        let exe_dir = std::env::current_exe().unwrap();
+        let exe_dir = exe_dir.parent().unwrap().to_string_lossy().into_owned();
+        for path in [
+            repo.join(".claude/settings.json"),
+            repo.join(".codex/hooks.json"),
+            home.join(".claude/settings.json"),
+            home.join(".codex/hooks.json"),
+        ] {
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(!text.contains(&exe_dir), "{}: {text}", path.display());
+            let config: Value = serde_json::from_str(&text).unwrap();
+            let mut commands = Vec::new();
+            collect_commands(&config, &mut commands);
+            assert_eq!(
+                commands,
+                vec![NEW_COMMAND, NEW_COMMAND_EXIT, NEW_COMMAND],
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn user_dangling_pinned_helper_returns_to_the_bare_name() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let gone = tmp.path().join("gone/target/debug/clud-cmd-scan");
+        let gone = gone.to_string_lossy();
+        let pinned = serde_json::json!({"hooks": [
+            {"command": format!("'{gone}'")},
+            {"command": format!("& '{gone}'; exit $LASTEXITCODE")},
+        ]});
         let path = home.join(".claude/settings.json");
-        write(&path, r#"{"hooks":[{"command":"clud-cmd-scan"}]}"#);
+        write(&path, &pinned.to_string());
 
         let report = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
 
-        assert_eq!(report.commands_changed, 1);
+        assert_eq!(report.commands_changed, 2);
         let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(config["hooks"][0]["command"], pinned(NEW_COMMAND));
+        assert_eq!(config["hooks"][0]["command"], NEW_COMMAND);
+        assert_eq!(config["hooks"][1]["command"], NEW_COMMAND_EXIT);
+    }
+
+    #[test]
+    fn existing_pins_and_project_pins_are_not_rewritten() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let live = tmp.path().join("bin").join(native_helper_name());
+        write(&live, "");
+        let gone = tmp.path().join("gone/clud-cmd-scan");
+        let user = serde_json::json!({"hooks": [{"command": format!("'{}'", live.display())}]})
+            .to_string();
+        let project = serde_json::json!({"hooks": [{"command": format!("'{}'", gone.display())}]})
+            .to_string();
+        write(&home.join(".claude/settings.json"), &user);
+        write(&repo.join(".claude/settings.json"), &project);
+
+        let report = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
+
+        assert_eq!(report, MigrationReport::default());
+        assert_eq!(
+            fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
+            user
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join(".claude/settings.json")).unwrap(),
+            project
+        );
+    }
+
+    #[test]
+    fn hook_program_extracts_the_first_word() {
+        assert_eq!(
+            hook_program("clud-cmd-scan").as_deref(),
+            Some("clud-cmd-scan")
+        );
+        assert_eq!(
+            hook_program("clud-cmd-scan; exit $LASTEXITCODE").as_deref(),
+            Some("clud-cmd-scan")
+        );
+        assert_eq!(
+            hook_program("'/a b/clud-cmd-scan'").as_deref(),
+            Some("/a b/clud-cmd-scan")
+        );
+        assert_eq!(
+            hook_program("& 'C:\\x\\clud-cmd-scan.exe'; exit $LASTEXITCODE").as_deref(),
+            Some("C:\\x\\clud-cmd-scan.exe")
+        );
+        assert_eq!(
+            hook_program("python .codex/hooks/check-soldr.py").as_deref(),
+            Some("python")
+        );
+        assert_eq!(hook_program("   "), None);
+    }
+
+    #[test]
+    fn dangling_hook_program_produces_a_warning_naming_file_and_fix() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let gone = tmp.path().join("gone/target/debug/clud-cmd-scan");
+        let body = serde_json::json!({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": format!("'{}'", gone.display())},
+            {"type": "command", "command": "clud-cmd-scan"},
+        ]}]}})
+        .to_string();
+        let settings = repo.join(".claude/settings.json");
+        write(&settings, &body);
+
+        let warnings = dangling_hook_program_warnings(&repo, None);
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let warning = &warnings[0];
+        assert!(
+            warning.contains(&settings.display().to_string()),
+            "{warning}"
+        );
+        assert!(warning.contains(&gone.display().to_string()), "{warning}");
+        assert!(warning.contains("does not exist"), "{warning}");
+        assert!(warning.contains(NEW_COMMAND), "{warning}");
+        // The launch hook-health report carries it.
+        let report = crate::hook_health::inspect_paths(&repo, None);
+        assert!(
+            report.warnings.iter().any(|w| w == warning),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn helper_dir_is_appended_to_path_once() {
+        let tmp = tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let dir = tmp.path().join("helper");
+        let base = std::env::join_paths([&a]).unwrap().into_string().unwrap();
+        let updated = path_with_appended(&base, &dir).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+        assert_eq!(entries, vec![a, dir.clone()]);
+        assert_eq!(path_with_appended(&updated, &dir), None);
+        assert_eq!(path_with_appended("", &dir).unwrap(), dir.to_string_lossy());
     }
 
     #[test]
