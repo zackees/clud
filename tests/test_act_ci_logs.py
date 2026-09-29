@@ -24,5 +24,6 @@ def test_log_dir_is_mounted_tracked_empty_and_user_only() -> None:
     ).read_text(encoding="utf-8")
     ignore = (ROOT / ".clud/act-logs/.gitignore").read_text(encoding="utf-8")
     assert ignore.split() == ["*", "!.gitignore"]
-    assert "chmod 700" in SCRIPT and "umask 077" in SCRIPT
+    assert "chmod 700" in SCRIPT
+    assert "umask 077" in SCRIPT
     assert "--exclude=./.clud/act-logs" in SCRIPT
