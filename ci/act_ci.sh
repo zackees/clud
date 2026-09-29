@@ -104,13 +104,17 @@ runs:
       shell: bash
 EOF
 
-# setup-soldr authenticates its release lookups with SOLDR_GITHUB_TOKEN, which
-# ci.yml fills from secrets.GITHUB_TOKEN. The act tasks in bosn.toml declare
-# `secrets = ["github_token"]`, so bosn injects the stored read-only token as
-# GITHUB_TOKEN; without one, runs are anonymous (60 API calls/hour per IP).
+# GitHub API reads go through bosn's read-only proxy: the act tasks in bosn.toml
+# declare `github_api = "proxy"`, so bosn sets GITHUB_API_URL to a per-run
+# loopback URL whose host side adds the credential and refuses writes. act's job
+# containers use host networking and reach it directly; the token never enters
+# a container. act needs the value spelled out (a bare `--env NAME` passes "").
 set --
+if [ -n "${GITHUB_API_URL:-}" ]; then
+    set -- --env "GITHUB_API_URL=$GITHUB_API_URL"
+fi
 if [ -n "${GITHUB_TOKEN:-}" ]; then
-    set -- -s GITHUB_TOKEN
+    set -- "$@" -s GITHUB_TOKEN
 fi
 if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
     TAG="${ACT_RELEASE_TAG:-$(sed -n 's/^version = "\([0-9][^"]*\)"/\1/p' "$SRC/pyproject.toml" | head -n 1)}"
