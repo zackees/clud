@@ -1738,7 +1738,7 @@ def test_1449_no_cancel_when_the_run_was_rerun_after_the_verdict(
     assert cancels == []
 
 
-def test_usage_error_exits_64_not_the_review_verdict_code(capsys) -> None:
+def test_usage_error_exits_64_not_the_review_verdict_code(watcher, capsys) -> None:
     """#1331: argparse's exit 2 is also "new review activity"; a bad flag must not read as one."""
     assert watcher.EXIT_USAGE == 64
     assert watcher.EXIT_USAGE != watcher.EXIT_REVIEW_ACTIVITY
