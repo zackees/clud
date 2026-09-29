@@ -152,7 +152,7 @@ def test_grind_only_adds_remote_ci() -> None:
     assert "This choice is local-only. Remote CI always runs" in router
     land = " ".join((ASSETS / "skills/grind-land/SKILL.md").read_text(encoding="utf-8").split())
     assert "grind never merges an unvalidated head" in land
-    assert "Not empty, and the rollup stayed empty: never merge." in land
+    assert "Not empty and the rollup stayed empty: never merge." in land
     assert "git ls-tree -r --name-only origin/<base> -- .github/workflows" in land
     integrate = " ".join(
         (ASSETS / "skills/grind-integrate/SKILL.md").read_text(encoding="utf-8").split()
