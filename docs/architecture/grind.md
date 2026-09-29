@@ -515,6 +515,13 @@ The rationale is in
   returns the checkout to a detached `origin/<base>`. If the checkout is
   still dirty afterwards, every later goal in the run is blocked. Finish
   keeps and reports park branches.
+- **Detached HEAD (#1382).** Parking leaves the shared checkout detached on
+  `origin/<base>` between goals, so preflight treats a detached start as a
+  fault: reachable from `origin/<main>` means `git switch <main>` and
+  fast-forward; otherwise the run stops and reports the commits that exist
+  only there. Finish returns with `git switch <branch>`, never
+  `git checkout origin/<main>`, and lists `grind/*` and `wip/grind-*`
+  branches not merged into `origin/<main>`.
 - **Dependents.** `depends_on` is known only after planning, so a goal
   whose dependency already settled unmerged stops right after its plan,
   before any worker writes, with `blocked: dependency X was rejected` (or

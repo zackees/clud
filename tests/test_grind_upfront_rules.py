@@ -133,3 +133,14 @@ def test_no_grind_agent_is_offered_ask_user_question() -> None:
             if line.startswith("tools:")
         )
         assert "AskUserQuestion" not in tools, agent.name
+
+
+def test_preflight_recovers_a_detached_head_and_finish_lists_leftovers() -> None:
+    """#1382: a detached checkout is never built on, and unlanded branches are reported."""
+    preflight = " ".join(_section(_router(), "1c. Repo-state preflight").split())
+    assert "merge-base --is-ancestor HEAD origin/<main>" in preflight
+    assert "`git switch <main>`" in preflight
+    assert "never `git checkout origin/<main>`" in preflight
+    assert "git log --oneline origin/<main>..HEAD" in preflight
+    router = " ".join(_router().split())
+    assert "git branch --list 'grind/*' 'wip/grind-*' --no-merged origin/<main>" in router

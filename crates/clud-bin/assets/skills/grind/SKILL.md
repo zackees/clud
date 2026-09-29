@@ -133,6 +133,16 @@ Pick the run id now (4 lowercase hex characters); every later
 - `git fetch origin`, then
   `git rev-list --left-right --count origin/<main>...HEAD` (behind, ahead).
 
+**Detached HEAD.** If the starting branch is `HEAD`, the checkout is
+detached (a park, or an earlier failed run, left it there). Never build on
+it. If `git merge-base --is-ancestor HEAD origin/<main>` succeeds, every
+commit is already on `origin/<main>`: `git switch <main>`, then
+`git pull --ff-only origin <main>`, and record `<main>` as the starting
+branch. Otherwise stop, create nothing, and report the commits that exist
+only here (`git log --oneline origin/<main>..HEAD`) so the user can branch
+them. Return to a branch with `git switch <main>`, never
+`git checkout origin/<main>`, which detaches again.
+
 `.clud/grind/` holds the run's own files (`plan.json` and the
 feature worktree), never the user's changes: every preflight command here
 excludes it with that pathspec, so it is never reported, stashed or
@@ -481,6 +491,11 @@ two), whether or not every goal merged:
    - `carry`: nothing to restore; the changes are the feature branch's
      first commit. Report that.
    - `none`: nothing beyond the switch.
+
+   Then list what the run left behind so it does not go stale unnoticed:
+   `git branch --list 'grind/*' 'wip/grind-*' --no-merged origin/<main>`
+   (salvage, park and unlanded branches, with their tips). Report them;
+   never delete one.
 5. **Report what you could not clean or restore**, and why. Never delete
    work the run did not create to get a clean status, and never ask about
    repo state here; report it instead.
