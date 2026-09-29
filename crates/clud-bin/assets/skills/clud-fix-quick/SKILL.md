@@ -102,9 +102,12 @@ or infer from `git remote get-url origin` for bare-number inputs.
 7. **Never `--no-verify`, never skip hooks.** Hook failures are real
    signals; fix them, don't bypass them.
 
-8. **No force-push.** If the local branch has diverged from the
-   remote, surface the divergence and stop. Speed mode doesn't mean
-   destructive.
+8. **No force-push, ever.** A clean non-fast-forward push race is
+   recovered with the Push-Race Recovery procedure below (fetch,
+   normal rebase, cheap re-check, one normal retry); anything beyond
+   that clean case — a rebase conflict, unexpected local changes, or
+   a second rejection — is surfaced and stops. Speed mode doesn't
+   mean destructive.
 
 ## Target Classification
 
@@ -157,10 +160,37 @@ for review purposes; run the source gates.
    fall back to the PR path: `gh pr create --base
    <default-branch>` then `gh pr merge <num> --admin --squash
    --delete-branch` immediately. Do NOT use `--auto` and do NOT wait
-   for CI — the local gates already validated.
+   for CI — the local gates already validated. On a plain
+   `non-fast-forward` / `fetch first` rejection of an unprotected
+   branch, run the Push-Race Recovery procedure below instead.
 10. **Surface result.** One-line summary: commit SHA on the target
     branch, push mode (`direct` or `pr-admin-merged-<pr-num>`), and
-    any non-default test/lint/review notes.
+    any non-default test/lint/review notes. A recovered push race is
+    reported as a note (`push: direct after rebase onto <sha>`), not
+    as a blocker.
+
+## Push-Race Recovery
+
+This skill owns this procedure. An unrelated commit landing on the
+remote between your commit and your push is routine, not a blocker.
+On a non-fast-forward rejection:
+
+1. `git fetch origin <branch>` and inspect the incoming commits:
+   `git log --oneline HEAD..origin/<branch>` and
+   `git diff --name-only HEAD...origin/<branch>`.
+2. Require a clean worktree (`git status --porcelain` empty). Any
+   unexpected local change: stop and surface it; do not stash it.
+3. `git rebase origin/<branch>` (normal rebase, no `--force` options).
+   On any conflict: `git rebase --abort`, surface the conflicting
+   files, and stop.
+4. If the incoming commits touch any file your commit touches, re-run
+   the cheap gates for that change class (lint + targeted test, or the
+   `skills::` guardrails for SKILL.md). Otherwise skip re-verification.
+5. Retry a normal `git push origin <branch>` exactly once. A second
+   rejection: stop and surface it; do not loop.
+
+Never force-push (`--force`, `--force-with-lease`, `+refspec`) at any
+step.
 
 For code changes specifically, the targeted-test step IS the
 RED -> GREEN signal: identify or write the smallest test that
@@ -180,9 +210,10 @@ breadth for iteration speed.
   guardrails.** A SKILL.md edit IS a guardrail-tested change — run
   `soldr cargo test -p clud --lib skills::`.
 - **Force-pushing the current branch to win a race with another
-  contributor.** If your push is rejected for non-fast-forward
-  reasons unrelated to branch protection, that's a real conflict;
-  stop and surface it.
+  contributor.** Recover a clean race with Push-Race Recovery; stop
+  on a conflict or a second rejection.
+- **Reporting a recovered push race as blocked.** If the rebase was
+  clean and the retry pushed, the task is delivered.
 - **Admin-merging a PR with failing local gates.** The PR-fallback
   path only fires when direct push is rejected for protection
   reasons; lint / test / review must already be green.

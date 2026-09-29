@@ -421,6 +421,35 @@ fn clud_git_teardown_requires_process_audit() {
     }
 }
 
+/// #1481: a clean non-fast-forward push race is recovered (fetch, normal
+/// rebase, one retry) instead of blocking, and force-push stays forbidden.
+#[test]
+fn clud_fix_quick_recovers_push_races_without_force() {
+    let skill = BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == "clud-fix-quick")
+        .expect("clud-fix-quick must be bundled")
+        .skill_md;
+
+    for required in [
+        "## Push-Race Recovery",
+        "`git rebase origin/<branch>`",
+        "`git rebase --abort`",
+        "exactly once. A second\n   rejection: stop",
+        "No force-push, ever.",
+        "Never force-push (`--force`, `--force-with-lease`, `+refspec`)",
+    ] {
+        assert!(
+            skill.contains(required),
+            "clud-fix-quick missing push-race recovery guidance: {required}"
+        );
+    }
+    assert!(
+        !skill.contains("surface the divergence and stop"),
+        "clud-fix-quick must not block on a clean push race"
+    );
+}
+
 #[test]
 fn retired_skills_are_not_also_bundled() {
     // A name in both lists would install and then immediately purge on
