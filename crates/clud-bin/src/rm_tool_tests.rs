@@ -431,3 +431,82 @@ fn cross_volume_copy_keeps_symlinks_as_links() {
         .file_type()
         .is_symlink());
 }
+
+/// A repo at `w.root` with one commit, and a sibling worktree `wt-x` outside
+/// the roots, holding a read-only build tree (#1573).
+fn world_with_worktree() -> (World, PathBuf) {
+    let w = world();
+    let git = |a: &[&str]| crate::worktrees::run_git(&w.root, a).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(w.root.join("a.txt"), b"a").unwrap();
+    git(&["add", "a.txt"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@localhost",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+    let wt = w.root.parent().unwrap().join("wt-x");
+    git(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wt-x"]);
+    let target = wt.join("target/debug");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact"), b"sealed").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in [&target, &wt.join("target")] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+    }
+    (w, std::fs::canonicalize(wt).unwrap())
+}
+
+#[test]
+fn a_registered_worktree_of_an_allowed_repo_is_trashed_even_when_sealed() {
+    let (w, wt) = world_with_worktree();
+    let (code, _, err) = w.run(Kind::Dir, &["../wt-x"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!wt.exists(), "the worktree directory is gone");
+    let moved = w.entries();
+    assert_eq!(moved.len(), 1, "one trash entry: {moved:?}");
+}
+
+#[test]
+fn a_half_removed_worktree_is_still_trashable() {
+    let (w, wt) = world_with_worktree();
+    // Git dropped it from `git worktree list` but the directory stayed.
+    let meta = w.root.join(".git/worktrees/wt-x");
+    assert!(meta.is_dir(), "{}", meta.display());
+    std::fs::remove_dir_all(&meta).unwrap();
+    let (code, _, err) = w.run(Kind::Dir, &["../wt-x"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!wt.exists());
+}
+
+#[test]
+fn a_directory_git_did_not_create_for_the_repo_is_still_refused() {
+    let (w, _wt) = world_with_worktree();
+    let other = w.root.parent().unwrap().join("unrelated");
+    std::fs::create_dir_all(&other).unwrap();
+    let (code, _, err) = w.run(Kind::Dir, &["../unrelated"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("outside the allowed roots"), "{err}");
+    assert!(other.exists());
+    // A `.git` file naming some other repo's metadata does not count.
+    std::fs::write(other.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
+    let (code, _, err) = w.run(Kind::Dir, &["../unrelated"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(other.exists());
+}
+
+#[test]
+fn a_sealed_tree_is_purged_too() {
+    let (w, wt) = world_with_worktree();
+    let (code, _, err) = w.run(Kind::Dir, &["--purge", "../wt-x"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!wt.exists());
+}

@@ -144,6 +144,8 @@ pub struct Roots {
     pub from_env: bool,
     /// Linked worktrees of the roots' repositories, found on first need.
     worktrees: Option<Vec<PathBuf>>,
+    /// The `.git` directories (common dirs) of the roots that are checkouts.
+    git_dirs: Option<Vec<PathBuf>>,
 }
 
 impl Roots {
@@ -185,6 +187,7 @@ impl Roots {
             roots,
             from_env,
             worktrees: None,
+            git_dirs: None,
         }
     }
 
@@ -196,8 +199,22 @@ impl Roots {
         if let Some(root) = deepest_containing(self.worktrees(), path) {
             return Ok(root);
         }
-        if self.roots.iter().any(|r| r == path) || self.worktrees().iter().any(|r| r == path) {
+        if self.roots.iter().any(|r| r == path) {
             return Err("is an allowed root itself".into());
+        }
+        // A linked worktree of an allowed repo may itself be deleted (#1573):
+        // git created it for that repo. It stays refused while it is a root.
+        if self.worktrees().iter().any(|r| r == path) {
+            return path
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| "is an allowed root itself".to_string());
+        }
+        // So may one git already dropped from `git worktree list` (a removal
+        // that failed partway leaves the directory): its `.git` file still
+        // names the allowed repo's worktree metadata.
+        if let Some(dir) = self.half_removed_worktree(path) {
+            return Ok(dir.parent().map_or(dir.clone(), Path::to_path_buf));
         }
         let shown: Vec<String> = self.roots.iter().map(|r| r.display().to_string()).collect();
         Err(format!(
@@ -208,6 +225,66 @@ impl Roots {
                 shown.join(", ")
             }
         ))
+    }
+
+    /// The `.git` directories of the roots that are themselves checkouts.
+    fn git_dirs(&mut self) -> &[PathBuf] {
+        if self.git_dirs.is_none() {
+            let mut found: Vec<PathBuf> = Vec::new();
+            for root in &self.roots {
+                let is_checkout = crate::block_bad_cmd::nearest_repo_root_public(root)
+                    .and_then(|r| std::fs::canonicalize(r).ok())
+                    .is_some_and(|r| &r == root);
+                if !is_checkout {
+                    continue;
+                }
+                let Ok(text) = crate::worktrees::run_git(root, &["rev-parse", "--git-common-dir"])
+                else {
+                    continue;
+                };
+                let dir = root.join(text.trim());
+                if let Ok(dir) = std::fs::canonicalize(dir) {
+                    if !found.contains(&dir) {
+                        found.push(dir);
+                    }
+                }
+            }
+            self.git_dirs = Some(found);
+        }
+        self.git_dirs.as_deref().unwrap_or_default()
+    }
+
+    /// The worktree directory containing (or equal to) `path` whose `.git`
+    /// file points into an allowed repo's `.git/worktrees/`, or `None`.
+    fn half_removed_worktree(&mut self, path: &Path) -> Option<PathBuf> {
+        let git_dirs = self.git_dirs().to_vec();
+        if git_dirs.is_empty() {
+            return None;
+        }
+        path.ancestors()
+            .take_while(|dir| !self.roots.iter().any(|r| r == dir))
+            .find(|dir| {
+                let Ok(text) = std::fs::read_to_string(dir.join(".git")) else {
+                    return false;
+                };
+                let Some(target) = text.trim().strip_prefix("gitdir:") else {
+                    return false;
+                };
+                let target = dir.join(target.trim());
+                let Some(name) = target.file_name() else {
+                    return false;
+                };
+                let Some(metadata_dir) = target.parent() else {
+                    return false;
+                };
+                let metadata_dir = std::fs::canonicalize(metadata_dir)
+                    .unwrap_or_else(|_| metadata_dir.to_path_buf());
+                !name.is_empty()
+                    && git_dirs
+                        .iter()
+                        .any(|git_dir| metadata_dir == git_dir.join("worktrees"))
+            })
+            .map(Path::to_path_buf)
     }
 
     fn worktrees(&mut self) -> &[PathBuf] {
@@ -670,6 +747,9 @@ pub fn run_with(
                         .strip_prefix(&target.root)
                         .unwrap_or(&target.path),
                 );
+                if target.is_dir {
+                    make_writable(&target.path);
+                }
                 move_into_trash(&target.path, &dest).map(|()| dest)
             });
             match result {
@@ -743,7 +823,43 @@ pub fn run_with(
     code
 }
 
+/// Make every directory under `path` (and `path` itself) writable, and on
+/// Windows every file. A sealed build output (read-only `target/` trees)
+/// otherwise fails a move to the trash, or a purge, halfway (#1573). Symlinks
+/// are never followed.
+fn make_writable(path: &Path) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.file_type().is_symlink() {
+        return;
+    }
+    let mut permissions = meta.permissions();
+    if meta.is_dir() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(permissions.mode() | 0o700);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        let _ = std::fs::set_permissions(path, permissions);
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                make_writable(&entry.path());
+            }
+        }
+    } else if cfg!(windows) && permissions.readonly() {
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
+}
+
 fn purge(target: &Target) -> Result<(), String> {
+    if target.is_dir {
+        make_writable(&target.path);
+    }
     let result = if target.is_dir {
         std::fs::remove_dir_all(&target.path)
     } else {

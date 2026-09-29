@@ -14,7 +14,14 @@ the same implementation.
 `CLUD_RM_ROOTS` is a path list supplied to the child session: the launch
 checkout (or launch directory) and clud's session scratch directory. Outside a
 session, `safe-rm` uses the current checkout or current directory. A checkout
-root also covers its linked worktrees. The command refuses a root itself,
+root also covers its linked worktrees, and a linked worktree directory of an
+allowed checkout may itself be removed, including one git already dropped from
+`git worktree list` after a partly failed `git worktree remove` (its `.git`
+file still names the allowed repo's `.git/worktrees/` metadata; #1573). Before a
+move to the trash or a purge, directories in the tree are made writable, so
+sealed read-only build outputs do not abort the removal halfway. A clone is not
+recognized: only what git registered for an allowed repo. The command refuses
+a root itself,
 anything outside these locations, HOME and its ancestors, filesystem roots,
 `.git` components, and directory trees containing mounts. Symlinked parents
 are resolved before authorization; a final symlink is moved as a link.
