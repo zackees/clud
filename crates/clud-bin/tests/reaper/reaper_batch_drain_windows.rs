@@ -82,12 +82,18 @@ fn a_process_burst_shares_one_host_scan_per_batch() {
 
     // Let the listener finish draining. It blocks in 200 ms slices, so give it
     // several, and stop early once the tracked count has settled.
+    //
+    // The report is empty until the listener has tracked its first process: on
+    // a slow runner (windows-arm) the backlog may not have been touched by the
+    // first poll. That is "not settled yet", not a missing measurement, so keep
+    // waiting; the strict parse below still requires the fields to appear.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut last_tracked = u64::MAX;
+    let mut last_tracked = None;
     loop {
         std::thread::sleep(Duration::from_millis(300));
-        let tracked = field(&tracker.finish_and_report(true), "host_scans");
-        if tracked == last_tracked || Instant::now() >= deadline {
+        let lines = tracker.finish_and_report(true);
+        let tracked = (!lines.is_empty()).then(|| field(&lines, "host_scans"));
+        if (tracked.is_some() && tracked == last_tracked) || Instant::now() >= deadline {
             break;
         }
         last_tracked = tracked;
