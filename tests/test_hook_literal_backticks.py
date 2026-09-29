@@ -50,6 +50,20 @@ def test_pretool_hook_allows_literal_backticks_in_shell_arguments(tmp_path: Path
         f"gh issue comment 1298 --editor --attach image.png --body 'literal {tick}text{tick}'",
         f"gh issue comment 1298 --web --body 'literal {tick}text{tick}'",
         f"env bash -c 'printf ok {tick}printf nested{tick}'",
+        # #1305, the four commands the hook refused in one session (each must
+        # be allowed; none runs a removal program).
+        # 1. Backslash-escaped backticks inside double quotes are text.
+        "gh issue create --title "
+        f'"feat(openrouter): \\{tick}clud --openrouter <KEY>\\{tick} saves" '
+        "--body-file x.md",
+        # 2. `$(...)` capture plus `${A##*/}` expansion, then a `gh api` loop.
+        f"A={dollar}(gh issue create --title t --body b); N={dollar}{{A##*/}}; "
+        f"for i in 1 2; do gh api repos/zackees/clud/issues/{dollar}N > /dev/null; done",
+        # 3. The same capture pattern chained with `&&`.
+        f"u={dollar}(gh issue create --title t --body b) && n={dollar}(basename {dollar}u) && "
+        f"id={dollar}(gh api repos/zackees/clud/issues/{dollar}n --jq .id)",
+        # 4. A backtick inside single quotes is plain data.
+        f"grep -rn '\\\\{tick}' src",
     ]
     denied_commands = [
         # A nested shell can run rm from the text the backticks hide.
