@@ -473,7 +473,7 @@ just type it in front of the command.
 `CLUD_ALLOW_ALL_CMDS=1` skips every `clud-cmd-scan` check, built-in ones
 included (the rm-shim identity check, the `cd` pin, `bad_commands`,
 `bad_pipelines`, and the `/grind` role caps). It is the escape hatch for when
-the guard itself is wedged — for example, a rebuilt `clud-shim` that no longer
+the guard itself is wedged — for example, a rebuilt `clud` that no longer
 matches the installed rm shim, which makes the guard deny every shell call.
 
 ```bash
@@ -493,7 +493,7 @@ identity check; every other check, including the `/grind` role caps, still
 runs. clud sets it automatically when launched inside clud's own repo
 (detected by `crates/clud-bin/Cargo.toml` naming the `clud` package) and
 prints a yellow startup warning, because `bash build` replaces
-`target/debug/clud-shim` and would otherwise wedge every shell call. Unlike
+`target/debug/clud` and would otherwise wedge every shell call. Unlike
 `CLUD_ALLOW_ALL_CMDS`, writing it into a command has no effect.
 
 ### Keep the agent from wandering out of the repo

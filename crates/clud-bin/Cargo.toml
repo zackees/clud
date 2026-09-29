@@ -270,29 +270,11 @@ name = "clud-bench-gate-replay"
 path = "src/bin/clud_bench_gate_replay.rs"
 required-features = ["bench"]
 
-# Slice 1 of #406 / #409: tiny PATH-resolved relay that lives at
-# `~/.clud/state/shims/python` etc. so any `python` invocation inside a
-# clud session goes through the daemon's ResolveInterpreter RPC.
-# Currently shares clud-bin's dep tree; the size-budget enforcement +
-# release-shim profile lands in slice 4 (#412) when the binary is
-# bundled into wheels.
-[[bin]]
-name = "clud-shim"
-path = "src/bin/clud_shim.rs"
-
-[[bin]]
-name = "clud-block-bad-cmd"
-path = "src/bin/clud_block_bad_cmd.rs"
-
-# zackees/clud#532: `cmd-scan` is the new canonical name for the
-# `block-bad-cmd` native hook now that it also does eager GC tracking
-# of `git clone`/`git worktree add`, not just command blocking.
-# `clud-block-bad-cmd` above ships unchanged for one release so already
-# -wired hook configs keep working; `block_bad_cmd_rollout.rs` migrates
-# them to this binary once it is resolvable on PATH.
-[[bin]]
-name = "clud-cmd-scan"
-path = "src/bin/clud_cmd_scan.rs"
+# #1551: `clud` is the only executable clud ships. `clud-cmd-scan`,
+# `clud-block-bad-cmd`, `clud-shim` and every shim alias (`python`, `rm`,
+# `gh`, ...) are argv[0] names of that one binary; see `src/multicall.rs`.
+# Do not add a `[[bin]]` for a new helper: give it a dispatch name instead.
+# `tests/test_build_wheel.py` fails if a second shipped script appears.
 
 # Issue #517: test-only probe binary. Installs the real production
 # `startup::install_ctrl_c_flag` handler and reports which

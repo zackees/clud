@@ -1,8 +1,9 @@
 //! The one list of `clud-shim` aliases, and the session contract they share
 //! (#1546).
 //!
-//! Every alias name `clud-shim` answers to is one [`ShimSpec`] row in
-//! [`SHIMS`]. The binary's single dispatch path (`bin/clud_shim.rs`, module
+//! Every alias name the `clud-shim` personality of `clud` answers to
+//! ([`crate::multicall`], #1551) is one [`ShimSpec`] row in
+//! [`SHIMS`]. The single dispatch path (`shim_main.rs`, module
 //! `dispatch`), the alias installers ([`crate::shim_install`]) and the child
 //! env policy ([`crate::shim_session::activate_rm`]) all derive from it, so a
 //! new shim is one row here plus one handler arm, which the compiler forces
@@ -41,8 +42,8 @@ pub const GH_FAIL_FAST_KEY: &str = "CLUD_GH_SHIM_FAIL_FAST";
 /// The clud executable the `gh` watch upgrade runs the bundled watcher with.
 pub const CLUD_EXE_KEY: &str = "CLUD_EXE";
 
-/// Every session key a shim reads. The guard test in `bin/clud_shim.rs`
-/// refuses these names anywhere in the binary outside its `dispatch` module.
+/// Every session key a shim reads. The guard test in `shim_main.rs`
+/// refuses these names anywhere in the shim personality outside its `dispatch` module.
 pub const SESSION_KEYS: &[&str] = &[
     ABI_KEY,
     SESSION_DIR_KEY,
@@ -138,11 +139,14 @@ pub const SHIMS: &[ShimSpec] = &[
     },
 ];
 
-/// The row for an invoked name: argv\[0\]'s file name, with `.exe` ignored
-/// (case-insensitively) so Windows and POSIX spell a shim the same way.
+/// The row for an invoked name: argv\[0\]'s file name, with `.exe` and case
+/// ignored so Windows and POSIX spell a shim the same way (NTFS is
+/// case-insensitive, so `RM.EXE` must reach the `rm` row).
 pub fn lookup(argv0: &OsStr) -> Option<&'static ShimSpec> {
     let name = invoked_name(argv0)?;
-    SHIMS.iter().find(|spec| spec.name == name)
+    SHIMS
+        .iter()
+        .find(|spec| spec.name.eq_ignore_ascii_case(&name))
 }
 
 /// argv\[0\]'s file name without a trailing `.exe`, split on either
@@ -182,8 +186,13 @@ pub fn file_names_in(dir: ShimDir) -> Vec<String> {
 /// directories under `home`.
 pub fn shim_dirs(self_exe: &Path, session_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(parent) = canonical(self_exe).parent() {
-        dirs.push(parent.to_path_buf());
+    // `clud` itself lives beside unrelated programs (a venv's `python`), so
+    // its directory is never an alias directory. An alias that is a hardlink
+    // or copy has its own name, and its directory is one.
+    if !is_clud_name(self_exe) {
+        if let Some(parent) = canonical(self_exe).parent() {
+            dirs.push(parent.to_path_buf());
+        }
     }
     dirs.extend(session_dir.map(canonical));
     if let Some(home) = home {
@@ -236,11 +245,16 @@ pub fn next_on_path(
     shim_dirs: &[PathBuf],
     strict: bool,
 ) -> Result<PathBuf, NextOnPathError> {
-    let own_dir = canonical(self_exe).parent().map(Path::to_path_buf);
+    let own_dir = (!is_clud_name(self_exe))
+        .then(|| canonical(self_exe).parent().map(Path::to_path_buf))
+        .flatten();
     let entries: Vec<PathBuf> = std::env::split_paths(path_env).collect();
-    let start = entries
-        .iter()
-        .position(|dir| own_dir.as_deref() == Some(canonical(dir).as_path()));
+    // A symlink alias runs as `clud` (its own directory is not the alias
+    // directory), so the first shim directory on PATH also marks the start.
+    let start = entries.iter().position(|dir| {
+        let dir = canonical(dir);
+        own_dir.as_deref() == Some(dir.as_path()) || shim_dirs.contains(&dir)
+    });
     let start = match (start, strict) {
         (Some(index), _) => index + 1,
         (None, true) => return Err(NextOnPathError::ShimDirMissing),
@@ -289,7 +303,13 @@ fn canonical(path: &Path) -> PathBuf {
 
 fn is_self(resolved: &Path, self_exe: &Path) -> bool {
     let me = canonical(self_exe);
-    resolved == me || same_bytes(resolved, &me)
+    resolved == me || crate::alias_link::is_alias_of(&me, resolved) || same_bytes(resolved, &me)
+}
+
+/// Whether the running executable is `clud` itself rather than one of its
+/// aliases, judged by file name (`clud`, `clud.exe`, any case).
+fn is_clud_name(exe: &Path) -> bool {
+    invoked_name(exe.as_os_str()).is_some_and(|name| name.eq_ignore_ascii_case("clud"))
 }
 
 fn same_bytes(a: &Path, b: &Path) -> bool {
@@ -357,6 +377,11 @@ mod tests {
             }
         }
         assert!(lookup(OsStr::new("clud-shim")).is_none());
+        assert_eq!(
+            lookup(OsStr::new("RM.EXE")).map(|s| s.name),
+            Some("rm"),
+            "NTFS is case-insensitive"
+        );
     }
 
     #[test]
@@ -381,7 +406,7 @@ mod tests {
 
     /// Session key names are spelled once, here. Every module that produces
     /// or reads shim session state goes through the constants, so the guard in
-    /// `bin/clud_shim.rs` can find each reader by name. The sources are
+    /// `shim_main.rs` can find each reader by name. The sources are
     /// compiled in: CI runs this test from a bundle with no source tree.
     #[test]
     fn session_key_literals_live_only_in_the_registry() {
@@ -393,10 +418,10 @@ mod tests {
             ("block_bad_cmd.rs", include_str!("block_bad_cmd.rs")),
             ("rm_guard.rs", include_str!("rm_guard.rs")),
             ("rm_tool.rs", include_str!("rm_tool.rs")),
-            ("bin/clud_shim.rs", include_str!("bin/clud_shim.rs")),
+            ("shim_main.rs", include_str!("shim_main.rs")),
             (
-                "bin/clud_shim/dispatch.rs",
-                include_str!("bin/clud_shim/dispatch.rs"),
+                "shim_main/dispatch.rs",
+                include_str!("shim_main/dispatch.rs"),
             ),
         ];
         for (file, text) in sources {

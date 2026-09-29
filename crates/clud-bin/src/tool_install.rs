@@ -40,7 +40,7 @@ const TOOLS_ROOT: &str = ".clud/tools";
 ///
 /// Keep this list empty until a compatibility window has closed. For example,
 /// `hooks/block-bad-cmd.py` remains bundled as a one-release shim while hook
-/// configs migrate to the native `clud-block-bad-cmd` helper.
+/// configs migrate to the native `clud-cmd-scan` alias of `clud`.
 pub struct PurgedTool {
     pub rel_path: &'static str,
     pub reason: &'static str,

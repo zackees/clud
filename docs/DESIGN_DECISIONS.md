@@ -5094,3 +5094,73 @@ old protocol.
 a moving catalogue. Every `setup-soldr` job resolves "latest" with a GitHub
 API release lookup; anonymous local `act` runs share the 60 req/hr limit and
 can hit 403 until it resets.
+
+## DD-121: helper executables are argv[0] aliases of the one clud binary
+
+**Context:** The wheel shipped four Rust executables — `clud`, `clud-shim`,
+`clud-block-bad-cmd` and `clud-cmd-scan` — each linked separately and
+statically carrying its own copy of the dependency tree (about 14 MB of
+duplication, three extra link steps per build). The last two were the same
+one-line program (`block_bad_cmd::run()`); `clud-shim` already dispatched on
+argv[0]. Each extra file was another way to break a release: #1544 (binaries
+shipped non-executable) and #862 (the Windows wheel missing `clud-cmd-scan`).
+#406 kept the shim separate because a 30 MB image seemed too slow to start;
+measured on Linux it costs about 0.5 ms (3.3 ms vs 2.8 ms) provided dispatch
+runs before any startup work. No DD recorded the split.
+
+**Decision:** `clud` is multicall and the only executable clud ships
+(#1551). `multicall::maybe_run` runs first in `main`, before the console,
+clap, tracing or the runtime, and keys on **argv[0]**, never `current_exe()`
+(which resolves a symlink to `clud` on Linux, and on Windows argv[0] is
+whatever the caller typed). Matching is case-insensitive, `.exe`-insensitive
+and separator-agnostic:
+
+| argv[0] stem | entry point |
+| --- | --- |
+| `clud-cmd-scan`, `clud-block-bad-cmd` | `block_bad_cmd::run` |
+| `clud-shim`, `python`, `python3`, `gh`, `rm`, `safe-rm` (`shim_registry::SHIMS`) | `shim_main::run` | <!-- python-name-lint: allow -->
+| anything else | the normal CLI |
+
+`clud __cmd-scan [args]`, `clud __shim <name> [args]` and
+`clud __link-aliases <dir>` reach the same entry points without an alias, for
+hook configs, packaging smoke tests and test harnesses. They are handled
+before clap, so they are not `Command` variants and need no registry entry.
+
+Aliases are created at launch by `alias_link::install_alias`, in one fixed
+order on every OS: **hardlink**, then **symlink**, then **copy**. Each is
+staged under a unique name and renamed over the target. A failed hardlink
+(`EXDEV`, FAT, network share) or symlink (Windows without Developer Mode) is
+a fallback, never an error; only a failed copy is one, so a launch never fails
+because a link could not be made. Aliases live in clud-owned directories under
+`~/.clud/state/` (`shims`, `rm-shim`, `helper-bin`), never in the pip scripts
+dir, which is not reliably writable (system Python, Nix, a root-owned install).
+An alias is *fresh* when it is the same file as `clud`, a symlink resolving to
+it, or a copy with its size and mtime; an upgrade replaces `clud`, so every
+hardlink and copy goes stale together and the next launch relinks it.
+
+The wheel's `REQUIRED_SCRIPTS` is `("clud",)`. `tests/test_build_wheel.py`
+fails if `Cargo.toml` gains a second shipped `[[bin]]` or a wheel carries a
+second script (the `clud-webterm` GUI companion on Windows and macOS is built
+outside this workspace and exempt). A new helper gets a dispatch name, not a
+binary.
+
+**Amends DD-074:** the packaged shim identity is now `clud` itself, and any
+file that is a hardlink of `clud` named `rm` is trusted — equivalent to the
+old byte copy. One consequence: writing *through* a hardlinked alias modifies
+`clud`, where a copy would have been isolated. Anything that can write the
+alias directory can already write the user's `clud`, so this widens no trust
+boundary, but tools must replace an alias (unlink then create), as
+`alias_link` does, rather than write it in place.
+
+**Supersedes** the #412 and #532 `Cargo.toml` rationale for separate
+binaries. `clud-block-bad-cmd` remains a recognized name so a hook config the
+rollout has not rewritten yet keeps working; `block_bad_cmd_rollout.rs`
+still rewrites it to the bare `clud-cmd-scan`, which resolves through the
+helper-only directory the launcher appends to PATH.
+
+**Consequences:** Every `python`, `rm` and `gh` call in a session maps the
+`clud` image instead of a 2.8 MB shim (no extra disk with hardlinks; a copy
+fallback costs the full size per alias). Windows cold start of a 30 MB PE
+under Defender is not yet measured; `ci-windows` must record it. On Windows
+a hardlink keeps `clud.exe`'s data alive and locked while an alias runs, so
+the self-install transaction (DD-109) relinks after replacing it.

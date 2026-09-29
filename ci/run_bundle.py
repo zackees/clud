@@ -35,6 +35,7 @@ from pathlib import Path
 from running_process import PseudoTerminalProcess, RunningProcess
 
 from ci import process
+from ci.aliases import materialize as materialize_aliases
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -146,9 +147,12 @@ def bundle_env(bundle: Path, manifest: dict) -> dict[str, str]:
     env["CARGO_TARGET_DIR"] = str((bundle / "target").resolve())
     env["CLUD_TEST_BIN_DIR"] = str(bin_dir.resolve())
     env["CLUD_TEST_BINARY"] = str((bin_dir / _exe("clud", manifest)).resolve())
-    env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] = str(
-        (bin_dir / _exe("clud-block-bad-cmd", manifest)).resolve()
-    )
+    # #1551: the helper names are aliases of `clud`, made here so the suites
+    # can resolve `clud-cmd-scan` / `clud-shim` as siblings of it.
+    aliases = materialize_aliases(bin_dir / _exe("clud", manifest))
+    guard = aliases.get("clud-block-bad-cmd")
+    if guard is not None:
+        env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] = str(guard)
     env["CLUD_TEST_MOCK_AGENT_BINARY"] = str((bin_dir / _exe("mock-agent", manifest)).resolve())
     return env
 
@@ -484,13 +488,12 @@ def main(argv: list[str] | None = None) -> int:
     # (`prefer_installed_clud`) so integration exercises the packaged
     # trampoline path rather than a bare target/ binary. mock-agent is not
     # part of the wheel, so it keeps pointing into the bundle.
-    for name, var in (
-        ("clud", "CLUD_TEST_BINARY"),
-        ("clud-block-bad-cmd", "CLUD_TEST_BLOCK_BAD_CMD_BINARY"),
-    ):
-        installed = Path(sys.executable).parent / _exe(name, manifest)
-        if installed.is_file():
-            env[var] = str(installed)
+    installed = Path(sys.executable).parent / _exe("clud", manifest)
+    if installed.is_file():
+        env["CLUD_TEST_BINARY"] = str(installed)
+        guard = materialize_aliases(installed).get("clud-block-bad-cmd")
+        if guard is not None:
+            env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] = str(guard)
     env["CLUD_INTEGRATION_TESTS"] = "1"
     # See ci/test.py:154-159 (#37): the Windows exe-unlock rename+copy+GC dance
     # keeps stdout/stderr pipe handles alive on Windows CI and wedges

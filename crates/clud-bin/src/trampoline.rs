@@ -50,7 +50,7 @@ use crate::runtime_cache;
 /// with `CLUD_USE_RUNTIME_CACHE=1` on Windows and recorded in #333.
 ///
 /// A relay must add nothing. This is the same reasoning that exempts
-/// `bin/clud_shim.rs`, and it is why both files sit in `ci/banned_imports.py`'s
+/// `shim_main.rs`, and it is why both files sit in `ci/banned_imports.py`'s
 /// exempt set rather than routing through `running_process`.
 ///
 /// Covered by `tests/diagnostics/runtime_cache_hop_windows.rs`.

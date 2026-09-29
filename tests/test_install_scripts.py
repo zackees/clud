@@ -58,7 +58,8 @@ def test_sh_installs_via_uv_tool_with_force() -> None:
 
 def test_sh_verifies_native_helper_after_install() -> None:
     assert "verify_clud_install" in SH
-    assert "clud-block-bad-cmd" in SH
+    assert "__cmd-scan" in SH
+    assert "clud-block-bad-cmd" not in SH, "the helper is an alias of clud (#1551)"
     assert "permissionDecision" in SH
     assert 'deny_command="bad"' in SH
 
@@ -100,7 +101,8 @@ def test_ps1_installs_via_uv_tool_with_force() -> None:
 
 def test_ps1_verifies_native_helper_after_install() -> None:
     assert "Verify-CludInstall" in PS1
-    assert "clud-block-bad-cmd.exe" in PS1
+    assert "__cmd-scan" in PS1
+    assert "clud-block-bad-cmd" not in PS1, "the helper is an alias of clud (#1551)"
     assert "permissionDecision" in PS1
     assert "$denyCommand = 'bad'" in PS1
 
