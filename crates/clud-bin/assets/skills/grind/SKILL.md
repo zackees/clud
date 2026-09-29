@@ -217,7 +217,10 @@ after it, by the main session or anyone else.
     "No .github/workflows/ci.yml; local GitHub Actions run skipped" and set CI off.
 
   The question: run the relevant `ci.yml` job locally under `act` before
-  each push?
+  each push? This choice is local-only. Remote CI always runs: grind only
+  adds testing, so a user's "skip CI" means skip local validation, never a
+  `[skip ci]` marker, a removed CI-lane label or a disabled workflow (the
+  hook refuses those for every grind role, #1429).
 - **Scripts**, asked once per run and only when the `clud grind-scripts`
   report above found a `./lint` or `./test`: "Found `./lint` and `./test`.
   Run them before each push?" (name only what was found). Options: lint and

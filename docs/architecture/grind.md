@@ -95,7 +95,13 @@ everything first:
 - **Local CI**: offered only when `docker info` succeeds and
   `.github/workflows/ci.yml` exists. Otherwise the router prints why
   ("Docker/github actions disabled due to no docker running", or that
-  `ci.yml` is missing) and CI is off.
+  `ci.yml` is missing) and CI is off. The choice is local-only (`act` on
+  this machine): remote CI always runs, and grind only adds testing (#1429).
+  `block_bad_cmd_grind_caps.rs` refuses, for every grind role, a skip marker
+  (`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`,
+  `skip-checks: true`) in a commit, PR or merge message, `gh pr edit
+  --remove-label` of a CI-lane label, and `gh workflow disable`; adding a
+  lane label stays allowed.
 
 These are part of the single up-front round described in
 [Preflight and the single question round](#preflight-and-the-single-question-round).
@@ -550,8 +556,10 @@ The rationale is in
   `4` timeout, `5` approval required (fork `action_required`; report, no
   retry), `6` never reported (required check never ran; blocked), `7` stale
   (older than 14 days; re-run once), `8` no checks (no workflows, a
-  `[skip ci]` marker, or nothing registered within the grace period; merge
-  when `mergeStateStatus` is `CLEAN`), `9` conflict (back to the integrator),
+  `[skip ci]` marker, or nothing registered within the grace period; the
+  lander merges only when the base branch has no workflows and
+  `mergeStateStatus` is `CLEAN`, and otherwise returns `needs_fix`, never
+  `merged`, #1429), `9` conflict (back to the integrator),
   `10` GitHub unreachable (never reported as closed), `11` queued too long
   (opt-in `--max-queued`). A `clud tool run` resumable watchdog stop exits
   `124` with `status: in-progress`; the lander watches again and never merges
