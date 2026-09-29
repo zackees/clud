@@ -44,10 +44,23 @@ server and merge.
    - `7` (stale: a check is older than 14 days): re-run its workflow once,
      e.g. `gh run rerun <id>`, then watch again; a second `7` is `gave_up`.
    - `8` (NO_CHECKS: no workflows, a `[skip ci]`-style marker on the head
-     commit, or no check registered within the grace period): read the
-     final line's `mergeStateStatus`. `CLEAN` means merge now, as for `0`.
-     Anything else (`BLOCKED`, `BEHIND`, ...): report it and return
-     `status=gave_up`.
+     commit, or no check registered within the grace period): grind never
+     merges an unvalidated head. First list the base branch's workflows:
+     `git ls-tree -r --name-only origin/<base> -- .github/workflows`.
+     - Empty (the repo has no workflows at all): read the final line's
+       `mergeStateStatus`. `CLEAN` means merge now, as for `0`. Anything
+       else (`BLOCKED`, `BEHIND`, ...): report it and return
+       `status=gave_up`.
+     - Not empty, and the head commit or PR carries a skip marker
+       (`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`,
+       `[actions skip]`, `skip-checks: true`): never merge. Return
+       `status=needs_fix` asking the integrator to reword the message
+       without the marker and push again.
+     - Not empty and the rollup stayed empty: never merge. Return
+       `status=needs_fix` (push again to trigger CI) on the first `8`, and
+       `status=gave_up` on a second.
+     Remote CI is never skipped: the run's Local CI choice controls `act`
+     on this machine only (#1429).
    - `9` (conflict): when the final reason is `conflict`
      (`mergeable=CONFLICTING` / `mergeStateStatus=DIRTY`), return
      `status=needs_fix` asking the integrator to rebase onto the base branch.

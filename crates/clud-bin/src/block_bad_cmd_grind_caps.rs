@@ -336,6 +336,92 @@ pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<
         .find_map(|words| statement_reason(role, words, run))
 }
 
+/// Markers in a commit message, PR title or body that make GitHub skip every
+/// workflow for the commit (compared case-insensitively).
+const SKIP_CI_MARKERS: &[&str] = &[
+    "[skip ci]",
+    "[ci skip]",
+    "[no ci]",
+    "[skip actions]",
+    "[actions skip]",
+    "skip-checks: true",
+    "skip-checks:true",
+];
+
+/// Labels that add a CI lane; removing one would reduce remote testing.
+const CI_LANE_LABELS: &[&str] = &["ci-test", "ci-full", "ci:full", "ci-windows"];
+
+/// Grind only ever adds remote testing (#1429): a command that would
+/// suppress remote CI is refused for every grind role. The "skip CI" choice
+/// in a run controls local `act` only, so a marker in a commit or PR text, a
+/// removed CI-lane label or a disabled workflow is always the model
+/// misreading it. Adding a lane label stays allowed.
+fn remote_ci_reason(role: &str, words: &[String]) -> Option<String> {
+    let program = program_name(&words[0]);
+    let lower: Vec<String> = words.iter().map(|w| w.to_ascii_lowercase()).collect();
+    let has = |word: &str| lower.iter().skip(1).any(|w| w == word);
+    let marker = lower
+        .iter()
+        .skip(1)
+        .find_map(|w| SKIP_CI_MARKERS.iter().find(|m| w.contains(**m)));
+    let rule = |what: &str| {
+        Some(format!(
+            "{role} may not {what}: grind only adds remote CI, never removes or skips it. \
+             The run's CI choice controls local `act` only (#1429)"
+        ))
+    };
+    match program.as_str() {
+        "git" => {
+            let rewrites = [
+                "commit",
+                "rebase",
+                "merge",
+                "tag",
+                "revert",
+                "cherry-pick",
+                "notes",
+            ]
+            .iter()
+            .any(|sub| has(sub));
+            match marker {
+                Some(m) if rewrites => rule(&format!("put `{m}` in a git message")),
+                _ => None,
+            }
+        }
+        "gh" => {
+            let pr = |sub: &str| has("pr") && has(sub);
+            if let Some(m) = marker {
+                if pr("create") || pr("edit") || pr("merge") {
+                    return rule(&format!("put `{m}` in a PR title, body or merge message"));
+                }
+            }
+            if pr("edit") {
+                let removed = lower.iter().enumerate().any(|(i, w)| {
+                    let value = if let Some(v) = w.strip_prefix("--remove-label=") {
+                        Some(v)
+                    } else if w == "--remove-label" {
+                        lower.get(i + 1).map(String::as_str)
+                    } else {
+                        None
+                    };
+                    value.is_some_and(|v| {
+                        v.split(',')
+                            .any(|label| CI_LANE_LABELS.contains(&label.trim()))
+                    })
+                });
+                if removed {
+                    return rule("remove a CI-lane label");
+                }
+            }
+            if has("workflow") && has("disable") {
+                return rule("disable a workflow");
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Whether a command is a shell loop that runs the repo's lint or test script
 /// (`for i in 1 2 3; do bash test; done`, `until ./test; do :; done`), which
 /// reruns a deterministic failure instead of reading it (#1425). The flat
@@ -399,6 +485,9 @@ fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<Stri
              them (#1393)"
                 .to_string(),
         );
+    }
+    if let Some(reason) = remote_ci_reason(role, words) {
+        return Some(reason);
     }
     match role {
         PLANNER => {
@@ -1480,6 +1569,53 @@ mod tests {
 
     fn allowed(role: &str, command: &str, facts: &RunFacts) -> bool {
         shell_reason(role, command, facts).is_none()
+    }
+
+    /// #1429: grind only adds remote CI. Markers, removed lane labels and
+    /// disabled workflows are refused for every role; adding a lane is not.
+    #[test]
+    fn grind_roles_may_never_suppress_remote_ci() {
+        let facts = run(true, true);
+        let refused = [
+            r#"git commit -m "feat: x [skip ci]""#,
+            r#"git commit --amend -m "feat: x [CI SKIP]""#,
+            r#"git commit -m "feat: x" -m "skip-checks: true""#,
+            r#"git commit -m "x [no ci]""#,
+            r#"git commit -m "x [skip actions]""#,
+            r#"git commit -m "x [actions skip]""#,
+            r#"gh pr create --title "feat: y [ci skip]" --body b"#,
+            r#"gh pr edit 12 --title "y [skip ci]""#,
+            r#"gh pr merge 12 --squash --subject "y [skip ci]""#,
+            "gh pr edit 12 --remove-label ci-full",
+            "gh pr edit 12 --remove-label=ci-test",
+            "gh pr edit 12 --remove-label bug,ci:full",
+            "gh pr edit 12 --remove-label CI-Windows",
+            "gh workflow disable ci.yml",
+        ];
+        for role in [PLANNER, WORKER, REVIEWER, INTEGRATOR, LANDER, PREWORK] {
+            for command in refused {
+                let reason = shell_reason(role, command, &facts)
+                    .unwrap_or_else(|| panic!("{role} allowed `{command}`"));
+                assert!(
+                    reason.contains("grind only adds remote CI"),
+                    "{role} `{command}`: {reason}"
+                );
+            }
+        }
+        for command in [
+            "gh pr edit 12 --add-label ci-full",
+            "gh pr edit 12 --remove-label bug",
+            r#"git commit -m "feat: x""#,
+            r#"gh pr create --title "feat: y" --body b"#,
+            "gh workflow list",
+            r#"git log --grep "[skip ci]""#,
+        ] {
+            let reason = shell_reason(INTEGRATOR, command, &facts);
+            assert!(
+                reason.as_deref().is_none_or(|r| !r.contains("remote CI")),
+                "`{command}`: {reason:?}"
+            );
+        }
     }
 
     /// #1425: a retry loop around the repo's lint/test scripts is refused;

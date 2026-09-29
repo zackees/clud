@@ -144,3 +144,17 @@ def test_preflight_recovers_a_detached_head_and_finish_lists_leftovers() -> None
     assert "git log --oneline origin/<main>..HEAD" in preflight
     router = " ".join(_router().split())
     assert "git branch --list 'grind/*' 'wip/grind-*' --no-merged origin/<main>" in router
+
+
+def test_grind_only_adds_remote_ci() -> None:
+    """#1429: the CI choice is local-only, and the lander never merges an unvalidated head."""
+    router = " ".join(_router().split())
+    assert "This choice is local-only. Remote CI always runs" in router
+    land = " ".join((ASSETS / "skills/grind-land/SKILL.md").read_text(encoding="utf-8").split())
+    assert "grind never merges an unvalidated head" in land
+    assert "Not empty and the rollup stayed empty: never merge." in land
+    assert "git ls-tree -r --name-only origin/<base> -- .github/workflows" in land
+    integrate = " ".join(
+        (ASSETS / "skills/grind-integrate/SKILL.md").read_text(encoding="utf-8").split()
+    )
+    assert "never put `[skip ci]`" in integrate

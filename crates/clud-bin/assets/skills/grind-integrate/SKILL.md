@@ -63,7 +63,9 @@ You hold the run's build lock, so nothing else builds while you do.
      fixed 540–600 s sleep blocks.
 5. **Local CI**, only when on: run the named `ci.yml` job with
    `act -W .github/workflows/ci.yml -j <job> --pull=false`. Do not wrap it
-   in `bosn` or start containers yourself.
+   in `bosn` or start containers yourself. This is the only CI a "skip CI"
+   choice skips: never put `[skip ci]` (or any skip marker) in a commit or
+   PR text, and never remove a CI-lane label; remote CI always runs.
 6. **Review gate.** Run `/clud-review` on source-code changes.
 7. **Push and PR.** `git push -u origin <branch>`, then `gh pr create` with
    `Closes #<id>` for an issue goal only when the PR's base is the
