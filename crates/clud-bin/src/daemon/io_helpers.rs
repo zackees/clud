@@ -132,19 +132,45 @@ pub(super) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> io::Resul
         .parent()
         .ok_or_else(|| io::Error::other("missing parent"))?;
     fs::create_dir_all(parent)?;
-    let temp_path = path.with_extension("tmp");
-    fs::write(
-        &temp_path,
-        serde_json::to_vec_pretty(value)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?,
-    )?;
-    match fs::rename(&temp_path, path) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let _ = fs::remove_file(path);
-            fs::rename(&temp_path, path)
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    // The temp name is unique per write. A fixed `<name>.tmp` was shared by
+    // every writer of the file: the session worker and the daemon's Ctrl+C
+    // thread both rewrite `sessions/<id>.json`. One writer's `O_TRUNC` open
+    // of the shared temp could land after the other had filled it but before
+    // it renamed it, so the rename published the just-truncated inode. When
+    // the truncating writer was a worker the Ctrl+C fast path then killed,
+    // the session file stayed empty for good.
+    let temp_path = unique_temp_path(path);
+    let result = (|| {
+        let mut file = fs::File::create(&temp_path)?;
+        io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        drop(file);
+        match fs::rename(&temp_path, path) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let _ = fs::remove_file(path);
+                fs::rename(&temp_path, path)
+            }
         }
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
     }
+    result
+}
+
+/// `<file name>.<pid>.<seq>.tmp` beside `path`: distinct across processes and
+/// across concurrent writes within one process.
+fn unique_temp_path(path: &Path) -> std::path::PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{name}.{}.{seq}.tmp", std::process::id()))
 }
 
 pub(super) fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<T> {
@@ -236,6 +262,53 @@ pub(super) fn parse_byte_size(raw: &str) -> Option<usize> {
 mod tests {
     //! Issue #25: configurable attach-replay backlog cap.
     use super::*;
+
+    /// Concurrent writers of one JSON state file must never publish an empty
+    /// or partial file. A shared `<name>.tmp` let one writer's truncating
+    /// open race the other's rename (session snapshots written by both the
+    /// worker and the daemon's Ctrl+C thread).
+    #[test]
+    fn concurrent_write_json_file_never_publishes_partial_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sessions").join("s.json");
+        let payload: Vec<u64> = (0..2048).collect();
+        write_json_file(&path, &payload).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let payload = payload.clone();
+                let stop = std::sync::Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        // A failed replace (Windows sharing violation) is
+                        // tolerated; a corrupt published file is not.
+                        let _ = write_json_file(&path, &payload);
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..500 {
+            if let Ok(bytes) = fs::read(&path) {
+                let parsed: Vec<u64> = serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|e| panic!("partial JSON ({} bytes): {e}", bytes.len()));
+                assert_eq!(parsed, payload);
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        for w in writers {
+            w.join().unwrap();
+        }
+        let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path() != path)
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
 
     /// Issue #753: the daemon builds its own child env and historically
     /// drifted from `runner::child_env`. Assert the completion suppression
