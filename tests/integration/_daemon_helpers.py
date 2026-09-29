@@ -723,6 +723,7 @@ def launch_detached(
     *args: str,
     cwd: Path | None = None,
 ) -> tuple[process.Popen[str], str]:
+    env, trace_path = _with_exit_trace(env)
     proc = process.Popen(
         [str(clud_binary), "--detach", *args],
         stdout=process.PIPE,
@@ -731,8 +732,32 @@ def launch_detached(
         env=env,
         cwd=cwd,
     )
+    _EXIT_TRACES[id(proc)] = trace_path
     session_id = read_session_id(proc)
     return proc, session_id
+
+
+# `wait_for_exit` budgets start *after* `read_session_id` saw the id, i.e.
+# after the launcher already printed its detach hint and returned from the
+# daemon round trip. A timeout there is therefore a teardown stall (#594),
+# and without the stage trace it names nothing. Keyed by `id(proc)` because
+# the Windows conftest wraps `Popen` in a subclass we should not decorate.
+_EXIT_TRACES: dict[int, str] = {}
+
+
+def _with_exit_trace(env: dict[str, str]) -> tuple[dict[str, str], str]:
+    env = dict(env)
+    trace_fd, trace_path = tempfile.mkstemp(prefix="clud-exit-stage-", suffix=".log")
+    os.close(trace_fd)
+    env["CLUD_EXIT_TIMING_FILE"] = trace_path
+    return env, trace_path
+
+
+def _discard_exit_trace(proc: process.Popen[str]) -> None:
+    trace_path = _EXIT_TRACES.pop(id(proc), None)
+    if trace_path:
+        with contextlib.suppress(OSError):
+            os.unlink(trace_path)
 
 
 def wait_for_exit(proc: process.Popen[str], timeout: float = 10.0) -> int:
@@ -749,7 +774,9 @@ def wait_for_exit(proc: process.Popen[str], timeout: float = 10.0) -> int:
     """
     started = time.monotonic()
     try:
-        return proc.wait(timeout=timeout)
+        code = proc.wait(timeout=timeout)
+        _discard_exit_trace(proc)
+        return code
     except process.TimeoutExpired as expired:
         elapsed = time.monotonic() - started
         proc.kill()
@@ -757,10 +784,13 @@ def wait_for_exit(proc: process.Popen[str], timeout: float = 10.0) -> int:
             stdout, stderr = proc.communicate(timeout=5)
         except process.TimeoutExpired:
             stdout, stderr = "<pipes unreadable after kill>", ""
+        trace_path = _EXIT_TRACES.get(id(proc))
+        stages = _read_exit_stages(trace_path) if trace_path else "<not traced>"
         raise AssertionError(
             f"process did not exit within {timeout}s (waited {elapsed:.1f}s)\n"
             f"--- partial stdout ---\n{stdout}\n"
-            f"--- partial stderr ---\n{stderr}"
+            f"--- partial stderr ---\n{stderr}\n"
+            f"--- exit stages ---\n{stages}"
         ) from expired
 
 
