@@ -1736,3 +1736,16 @@ def test_1449_no_cancel_when_the_run_was_rerun_after_the_verdict(
     )
     assert acted is False
     assert cancels == []
+
+
+def test_usage_error_exits_64_not_the_review_verdict_code(watcher, capsys) -> None:
+    """#1331: argparse's exit 2 is also "new review activity"; a bad flag must not read as one."""
+    assert watcher.EXIT_USAGE == 64
+    assert watcher.EXIT_USAGE != watcher.EXIT_REVIEW_ACTIVITY
+    with pytest.raises(SystemExit) as raised:
+        watcher.parse_args(["--pr", "527"])
+    assert raised.value.code == 64
+    assert "unrecognized arguments" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as raised:
+        watcher.parse_args([])
+    assert raised.value.code == 64

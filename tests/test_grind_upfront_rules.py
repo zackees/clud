@@ -158,3 +158,10 @@ def test_grind_only_adds_remote_ci() -> None:
         (ASSETS / "skills/grind-integrate/SKILL.md").read_text(encoding="utf-8").split()
     )
     assert "never put `[skip ci]`" in integrate
+
+
+def test_lander_never_spends_a_fix_round_on_its_own_usage_error() -> None:
+    """#1331: the watcher's usage exit (64) is the lander's mistake, not a verdict."""
+    land = " ".join((ASSETS / "skills/grind-land/SKILL.md").read_text(encoding="utf-8").split())
+    assert "`64` (usage error" in land
+    assert "never counts as `needs_fix`" in land

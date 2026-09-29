@@ -71,6 +71,10 @@ server and merge.
      with the stderr. Never report it as closed.
    - `11` (queued too long; only with `--max-queued`): report the queued
      jobs and runner labels. Return `status=gave_up`.
+   - `64` (usage error: a bad flag, e.g. `--pr`; the PR number is
+     positional): your own mistake, never a verdict. Fix the command and
+     run it again in this round; it never counts as `needs_fix` or spends a
+     fix round (#1331). Likewise `command not found` and a wrong tool path.
    - A cancelled check superseded by a newer run of the same workflow is
      ignored, so concurrency cancellations are not failures.
 3. **Feature stage.** A goal PR in the feature stage has the feature branch
