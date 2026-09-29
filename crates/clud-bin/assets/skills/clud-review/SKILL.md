@@ -61,9 +61,12 @@ or the normal findings/no-rules verdict followed by `review agents launched: 1`.
 
 ## Input
 
-- **Bare** `/clud-review` — review `git diff origin/main...HEAD` from
-  the current working directory. The intended invocation point: the
-  parent agent invokes this as the last step before `gh pr create`.
+- **Bare** `/clud-review` — review the range pinned by
+  `clud tool run git/review_range.py` (the merge-base of `HEAD` with the
+  freshly fetched default branch; never `@{upstream}` and never a stale
+  `origin/main`) from the current working directory. The intended
+  invocation point: the parent agent invokes this as the last step before
+  `gh pr create`.
 - **`/clud-review <commit-range>`** — review the specified range
   (e.g. `HEAD~3..HEAD`).
 - **`/clud-review --issue <N>`** — explicit issue number for the
@@ -237,6 +240,14 @@ DO NOT scan:
 - `target/`, `node_modules/`, `dist/`, or any other build artifact.
 
 ## File classification and one-reviewer prompt assembly
+
+Resolve the range once, first: `clud tool run git/review_range.py` (add
+`--pr <N>` when reviewing a PR). It prints JSON; use its `range`
+(`<merge_base>...<head>`, pinned SHAs) as `<base>...HEAD` for the inventory
+and every bucket diff below. If it exits `3` (`oversize`: over 50 files or
+3000 lines and not the PR's own diffstat), stop before reading any
+content and report both diffstats: the range is almost certainly wrong (a
+stale tracking ref after a rebase). Never use `@{upstream}` or `@{u}`.
 
 `/clud-review` inventories the changed files via
 `git diff --name-status <base>...HEAD` (fallback:

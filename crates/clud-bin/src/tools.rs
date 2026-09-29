@@ -133,6 +133,16 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "git/review_range.py",
+        body: include_str!("../assets/tools/git/review_range.py"),
+        // Read-only git/gh query (#1301): pins the diff range a review reads.
+        // Killing it loses no work — `Resumable`.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "git/clud-git-diff.py",
         body: include_str!("../assets/tools/git/clud-git-diff.py"),
         // Native OS webview diff viewer (pywebview). The world (git
@@ -422,6 +432,19 @@ mod tests {
 
     /// Issue #489: the old Python command guard stays in BUNDLED_TOOLS only
     /// as a compatibility shim. The native binary owns the policy logic.
+    #[test]
+    fn bundled_includes_review_range() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "git/review_range.py")
+            .expect("review_range.py must stay bundled: /clud-review pins its range with it");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(
+            !tool.body.contains("@{upstream}...") && !tool.body.contains("@{u}..."),
+            "the resolver must never diff against the tracking ref"
+        );
+    }
+
     #[test]
     fn bundled_includes_block_bad_cmd_compat_shim() {
         let tool = BUNDLED_TOOLS
