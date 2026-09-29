@@ -250,22 +250,22 @@ destination = "/root/.cache/actcache"
 [task.act-ci-list]
 stack = "clud_act"
 cmd = "sh /workspace/ci/act_ci.sh --list"
-secrets = ["github_token"]
+github_api = "proxy"
 
 [task.act-ci-static]
 stack = "clud_act"
 cmd = "sh /workspace/ci/act_ci.sh static"
-secrets = ["github_token"]
+github_api = "proxy"
 
 [task.act-ci-linux]
 stack = "clud_act"
 cmd = "sh /workspace/ci/act_ci.sh test-linux-x64-unit"
-secrets = ["github_token"]
+github_api = "proxy"
 
 [task.act-rm-protection]
 stack = "clud_act"
 cmd = "sed 's@act pull_request -W .github/workflows/ci.yml -j@act workflow_dispatch -W .github/workflows/rm-protection-docker.yml -j@' /workspace/ci/act_ci.sh | sh -s rm-protection"
-secrets = ["github_token"]
+github_api = "proxy"
 
 # A real musl/BusyBox lane for #1461. Build output and toolchain state remain
 # in bosn-managed volumes; source and bind-mount probe are read-only.
@@ -408,26 +408,26 @@ cmd = "cd /workspace && soldr cargo build -p clud -p mock-agent --bins && (uv sy
 [task.act-installer-pages]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=install-pages.yml sh /workspace/ci/act_ci.sh build-site"
-secrets = ["github_token"]
+github_api = "proxy"
 
 [task.act-installer-catalog]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=installer-check.yml ACT_CI_FULL=1 sh /workspace/ci/act_ci.sh catalog-unit"
-secrets = ["github_token"]
+github_api = "proxy"
 
 [task.act-installer-resolver]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=installer-check.yml ACT_CI_FULL=1 sh /workspace/ci/act_ci.sh resolver-unit"
-secrets = ["github_token"]
+github_api = "proxy"
 
 # Runs the current pyproject.toml version's published candidate on Linux x64.
 # The task fails if Act skips pytest or the host emits no matching evidence.
 [task.act-installer-public-linux-x64]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=installer-check.yml ACT_EVENT=workflow_call ACT_PUBLIC_X64=1 sh /workspace/ci/act_ci.sh public-host"
-secrets = ["github_token"]
+github_api = "proxy"
 
 [task.act-model-pages]
 stack = "clud_act"
 cmd = "ACT_WORKFLOW=model-pages.yml sh /workspace/ci/act_ci.sh build-site"
-secrets = ["github_token"]
+github_api = "proxy"

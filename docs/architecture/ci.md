@@ -106,17 +106,18 @@ Caches persist across runs in two machine-scoped Bosn volumes:
   solo Rust toolchain and soldr's zccache build cache. Before that volume
   existed, the server lived in the container and every run started cold.
 
-**Native bosn and the GitHub token.** These tasks need the native Rust bosn
-(0.1.4+), which provides `bosn run --task` and refuses tag-only Dockerfile
-`FROM` lines, so every `bosn/*Dockerfile` pins its base image by digest. Every
-`act-*` task declares `secrets = ["github_token"]`: bosn injects the stored
-token as `GITHUB_TOKEN` (never on argv, masked in output) and `ci/act_ci.sh`
-hands it to act with `-s GITHUB_TOKEN`. Without it, setup-soldr's release
-lookups run anonymously and exhaust GitHub's 60 requests/hour per-IP quota
-after about five runs. Store a fine-grained token with **no permissions**
-("Public repositories (read-only)"): act exposes it to every simulated
-workflow step, so it must not carry repo rights. Run
-`bosn secret set github_token` and paste it on stdin; never put a token in
+**Native bosn and the GitHub API proxy.** These tasks need native Rust bosn
+(0.1.4+, with zackees/bosn#312), which provides `bosn run --task` and refuses
+tag-only Dockerfile `FROM` lines, so every `bosn/*Dockerfile` pins its base
+image by digest. Every `act-*` task declares `github_api = "proxy"`: for each
+run, bosn starts a loopback GitHub API proxy on the host that forwards only
+allowlisted `GET`/`HEAD` reads, adds the credential itself (the host's
+`gh auth token`, else a stored `github_token` secret, else anonymous), caches
+by ETag, and hands the task `GITHUB_API_URL`. `ci/act_ci.sh` passes that to
+act, whose host-networked job containers reach it directly. No token enters a
+container and nothing needs minting. setup-soldr's default path makes no REST
+calls at all (it installs its built-in soldr version, zackees/setup-soldr#542),
+and its remaining calls honour `GITHUB_API_URL`. Never put a token in
 `bosn.toml`, which is tracked.
 
 The runner image is reused (`--pull=false`). Job containers carry a
