@@ -190,7 +190,7 @@ def unpack(archive_dir: Path, dest: Path) -> int:
         # `filter="data"` is the Python 3.12+ safe-extraction default; passing it
         # explicitly keeps 3.11 from emitting a DeprecationWarning and keeps the
         # behaviour identical across interpreter versions.
-        tar.extractall(dest, filter="data")
+        tar.extractall(dest, filter="data")  # wheel-write-lint: allow (tar bundle, not a wheel)
     manifest = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
     print(f"unpacked bundle for {manifest['target']} ({len(manifest['harnesses'])} harnesses)")
     return 0

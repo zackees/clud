@@ -179,6 +179,26 @@ def release_matrix() -> dict[str, list[dict[str, object]]]:
     }
 
 
+def wheel_smoke_matrix() -> dict[str, list[dict[str, str]]]:
+    """Release-wheel install smoke (#1545): each native Linux/macOS exec runner.
+
+    Pairs every non-Windows release artifact with the runner that executes its
+    triple, so the bytes PyPI receives are pip-installed and run before
+    publish. Windows wheels skip the exec-bit contract (no Unix modes).
+    """
+    return {
+        "include": [
+            {
+                "target": target.triple,
+                "runs-on": target.exec_runs_on,
+                "artifact": target.artifact,
+            }
+            for target in TARGETS
+            if "windows" not in target.triple
+        ]
+    }
+
+
 def static_musl_matrix() -> dict[str, list[dict[str, str]]]:
     """Native Linux downloads built apart from the six PyPI wheel targets."""
     return {
@@ -229,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         emit({
             "build": json.dumps(release_matrix(), separators=(",", ":")),
             "static_musl": json.dumps(static_musl_matrix(), separators=(",", ":")),
+            "smoke": json.dumps(wheel_smoke_matrix(), separators=(",", ":")),
         })
         return 0
 

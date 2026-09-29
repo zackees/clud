@@ -729,6 +729,29 @@ in which case `cross_toolchain_preflight` names the missing cross compiler at
 entry rather than letting `ring`'s build script discover it minutes later.
 Wheel sizes are then checked by `python -m ci.check_wheel_size --dist-dir dist/`.
 
+### Wheel script modes and the release-wheel smoke (#1545)
+
+pip installs each `.data/scripts/*` entry with the Unix mode in its zip
+`external_attr`; 2.8.14 and 2.8.20 shipped them 0644 (#1544). Three guards:
+
+- **One writer.** `ci/wheel_rewrite.py` (`rewrite_wheel` / `write_wheel`) is
+  the only code in `ci/` that writes a zip. Kept entries reuse their original
+  ZipInfo; added entries state a mode (`.data/scripts/*` defaults to 0755);
+  RECORD is regenerated once. prune, the release ELF strip, the windows-gnu
+  repair, the Kitty bundle and the webterm companion all go through it.
+  `ci/banned_wheel_writes.py` fails `bash lint` on `extractall(` or a
+  write-mode `ZipFile` anywhere else in `ci/`.
+- **Static gate.** `python -m ci.check_wheel_modes --dist-dir dist/` (stdlib
+  only, copyable to other maturin repos) fails a non-Windows wheel whose
+  scripts are not executable regular files. `_build-target.yml` runs it after
+  "Check wheel size" for bundle and release builds; `xbuild wheel` runs it too.
+- **Release install smoke.** `auto-release.yml`'s `wheel-smoke` job calls
+  `_run-tests.yml` with `suite: wheel-smoke` on each native Linux/macOS exec
+  runner (`ci_matrix.wheel_smoke_matrix`). `ci/wheel_smoke.py` pip-installs
+  the exact release wheel into a fresh venv and runs
+  `verify_installed_scripts` (exec bits via `os.access`, `clud --version`, hook
+  smokes). Both publish jobs `need` it.
+
 ## Deduplicated checks
 
 | Check | Before | After |

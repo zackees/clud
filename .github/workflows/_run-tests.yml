@@ -21,9 +21,16 @@ on:
         required: true
         type: string
       suite:
-        description: 'unit | integration | harness'
+        description: 'unit | integration | harness | wheel-smoke'
         required: true
         type: string
+      wheel-artifact:
+        description: >-
+          wheel-smoke only: artifact holding the release wheel to pip-install
+          into a fresh venv and smoke (#1545). No bundle is downloaded.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   test:
@@ -47,7 +54,20 @@ jobs:
 
       - uses: ./.github/actions/setup-exec
         with:
-          bundle-name: bundle-${{ inputs.target }}
+          bundle-name: ${{ inputs.suite != 'wheel-smoke' && format('bundle-{0}', inputs.target) || '' }}
+
+      - name: Download release wheel
+        if: inputs.suite == 'wheel-smoke'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.wheel-artifact }}
+          path: release-wheel
+
+      # Real pip in a fresh venv, on the exact bytes that publish (#1545).
+      - name: Install-smoke release wheel
+        if: inputs.suite == 'wheel-smoke'
+        shell: bash
+        run: '"$VENV_PY" -m ci.wheel_smoke --wheel-dir release-wheel'
 
       # ci/run_bundle.py reconstructs the layout the existing tests already
       # expect rather than making the tests learn a new one:
@@ -90,6 +110,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Kitty GUI smoke failed with exit $LASTEXITCODE" }
 
       - name: Run ${{ inputs.suite }} suite
+        if: inputs.suite != 'wheel-smoke'
         shell: bash
         run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'
 

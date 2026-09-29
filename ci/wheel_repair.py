@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import base64
-import csv
-import hashlib
 import os
-import shutil
-import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
+
+from ci.wheel_rewrite import new_entry, rewrite_wheel
 
 _LIBSTDCPP = "libstdc++-6.dll"
 _LIBGCC_CANDIDATES = (
@@ -30,25 +27,18 @@ def repair_windows_gnu_wheel(wheel: Path) -> bool:
 
     with zipfile.ZipFile(wheel) as archive:
         members = archive.namelist()
-        script_dir = _find_scripts_dir(members)
-        record_path = _find_record_path(members)
-        if script_dir is None or record_path is None:
-            return False
+    script_dir = _find_scripts_dir(members)
+    record_path = _find_record_path(members)
+    if script_dir is None or record_path is None:
+        return False
 
-        with tempfile.TemporaryDirectory(prefix="clud-wheel-repair-") as temp_dir:
-            root = Path(temp_dir)
-            archive.extractall(root)
-
-            target_dir = root / Path(*script_dir.parts)
-            target_dir.mkdir(parents=True, exist_ok=True)
-            for dll in runtime_dlls:
-                shutil.copy2(dll, target_dir / dll.name)
-
-            _rewrite_record(root, record_path)
-            repaired = wheel.with_suffix(".repaired.whl")
-            _write_wheel(root, repaired)
-
-    repaired.replace(wheel)
+    rewrite_wheel(
+        wheel,
+        add=[
+            new_entry(f"{script_dir.as_posix()}/{dll.name}", dll.read_bytes())
+            for dll in runtime_dlls
+        ],
+    )
     return True
 
 
@@ -104,37 +94,3 @@ def _find_record_path(members: list[str]) -> PurePosixPath | None:
         if path.name == "RECORD" and len(path.parts) >= 2 and path.parts[-2].endswith(".dist-info"):
             return path
     return None
-
-
-def _rewrite_record(root: Path, record_path: PurePosixPath) -> None:
-    record_file = root / Path(*record_path.parts)
-    rows: list[tuple[str, str, str]] = []
-    for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
-        relative = file_path.relative_to(root).as_posix()
-        if relative == record_path.as_posix():
-            continue
-        data = file_path.read_bytes()
-        digest = (
-            base64.urlsafe_b64encode(hashlib.sha256(data).digest())
-            .rstrip(b"=")
-            .decode("ascii")
-        )
-        rows.append((relative, f"sha256={digest}", str(len(data))))
-    rows.append((record_path.as_posix(), "", ""))
-    with record_file.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle, lineterminator="\n")
-        writer.writerows(rows)
-
-
-def _write_wheel(root: Path, destination: Path) -> None:
-    # ZipFile.extractall never restores Unix modes, so a wheel that was
-    # extracted and repacked would ship its scripts as 0644 and pip would
-    # install a non-executable `clud`. Scripts are always executable.
-    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
-            name = file_path.relative_to(root).as_posix()
-            info = zipfile.ZipInfo.from_file(file_path, name)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            mode = 0o755 if ".data/scripts/" in name else 0o644
-            info.external_attr = (0o100000 | mode) << 16
-            archive.writestr(info, file_path.read_bytes())

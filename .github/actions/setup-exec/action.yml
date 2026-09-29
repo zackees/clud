@@ -8,8 +8,11 @@ description: >
 
 inputs:
   bundle-name:
-    description: Artifact name of the build bundle to download.
-    required: true
+    description: >-
+      Artifact name of the build bundle to download. Empty for the release
+      wheel smoke (#1545), which needs no bundle.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -62,12 +65,14 @@ runs:
         fi
 
     - name: Download bundle
+      if: inputs.bundle-name != ''
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.bundle-name }}
         path: bundle-archive
 
     - name: Unpack bundle
+      if: inputs.bundle-name != ''
       shell: bash
       run: '"$VENV_PY" -m ci.bundle unpack --archive-dir bundle-archive --dest bundle'
 

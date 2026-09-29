@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
-import hashlib
 import json
 import os
 import platform
@@ -28,6 +26,7 @@ from ci.kitty_wheel import (
 )
 from ci.webterm_wheel import add_companion, companion_name, desktop_target
 from ci.wheel_repair import repair_windows_gnu_wheel
+from ci.wheel_rewrite import rewrite_wheel, write_wheel
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
@@ -44,7 +43,7 @@ BuildMode = Literal["dev", "release"]
 REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd", "clud-cmd-scan")
 
 
-def prune_nonproduction_scripts(wheel: Path) -> bool:
+def prune_nonproduction_scripts(wheel: Path, *, compresslevel: int | None = None) -> bool:
     """Remove maturin's test-only executables from a binary wheel.
 
     Maturin's ``bindings = "bin"`` packages every enabled Cargo ``[[bin]]``.
@@ -55,26 +54,20 @@ def prune_nonproduction_scripts(wheel: Path) -> bool:
     """
     with zipfile.ZipFile(wheel) as archive:
         members = archive.namelist()
-        stale = [
-            name
-            for name in members
-            if ".data/scripts/clud-" in name
-            and Path(name).name.removesuffix(".exe") not in REQUIRED_SCRIPTS
-        ]
-        record = next((name for name in members if name.endswith(".dist-info/RECORD")), None)
-        if not stale or record is None:
-            return False
-        with tempfile.TemporaryDirectory(prefix="clud-wheel-prune-") as temp_dir:
-            root = Path(temp_dir)
-            archive.extractall(root)
-            for name in stale:
-                (root / name).unlink()
-            from ci.wheel_repair import _rewrite_record, _write_wheel
-
-            _rewrite_record(root, Path(record))
-            replacement = wheel.with_suffix(".pruned.whl")
-            _write_wheel(root, replacement)
-    replacement.replace(wheel)
+    stale = {
+        name
+        for name in members
+        if ".data/scripts/clud-" in name
+        and Path(name).name.removesuffix(".exe") not in REQUIRED_SCRIPTS
+    }
+    record = next((name for name in members if name.endswith(".dist-info/RECORD")), None)
+    if not stale or record is None:
+        return False
+    rewrite_wheel(
+        wheel,
+        lambda info, data: None if info.filename in stale else data,
+        compresslevel=compresslevel,
+    )
     return True
 
 
@@ -164,62 +157,62 @@ def remove_elf_debug_metadata(wheel: Path, *, target: str | None = None) -> bool
     """
     with zipfile.ZipFile(wheel) as archive:
         members = archive.namelist()
-        scripts = [name for name in members if ".data/scripts/" in name]
         record = next((name for name in members if name.endswith(".dist-info/RECORD")), None)
-        if record is None:
-            return False
-        with tempfile.TemporaryDirectory(prefix="clud-wheel-strip-") as temp_dir:
-            root = Path(temp_dir)
-            archive.extractall(root)
-            elf_scripts = [
-                root / name for name in scripts if (root / name).read_bytes()[:4] == b"\x7fELF"
-            ]
-            if not elf_scripts:
-                return False
-            for script in elf_scripts:
-                original = script.read_bytes()
-                failures: list[str] = []
-                for objcopy in elf_objcopy_candidates(target):
-                    result = process.run(
-                        [objcopy, "--remove-section=.debug_gdb_scripts", str(script)],
-                        check=False,
-                    )
-                    if result.returncode == 0:
-                        break
-                    failures.append(objcopy)
-                    script.write_bytes(original)
-                else:
-                    tried = ", ".join(failures) or "no objcopy candidates"
-                    raise RuntimeError(
-                        f"failed to remove debug metadata from {script}; tried {tried}"
-                    )
-            from ci.wheel_repair import _rewrite_record, _write_wheel
+        has_elf = any(
+            ".data/scripts/" in info.filename and archive.read(info)[:4] == b"\x7fELF"
+            for info in archive.infolist()
+        )
+    if record is None or not has_elf:
+        return False
+    candidates = elf_objcopy_candidates(target)
 
-            _rewrite_record(root, Path(record))
-            replacement = wheel.with_suffix(".stripped.whl")
-            _write_wheel(root, replacement)
-    replacement.replace(wheel)
+    def strip(info: zipfile.ZipInfo, data: bytes) -> bytes:
+        if ".data/scripts/" not in info.filename or data[:4] != b"\x7fELF":
+            return data
+        # objcopy edits a file, so round-trip through a temp copy; the bytes
+        # go back under the entry's original ZipInfo, keeping its mode.
+        with tempfile.TemporaryDirectory(prefix="clud-wheel-strip-") as temp_dir:
+            script = Path(temp_dir) / Path(info.filename).name
+            failures: list[str] = []
+            for objcopy in candidates:
+                script.write_bytes(data)
+                result = process.run(
+                    [objcopy, "--remove-section=.debug_gdb_scripts", str(script)],
+                    check=False,
+                )
+                if result.returncode == 0:
+                    return script.read_bytes()
+                failures.append(objcopy)
+            tried = ", ".join(failures) or "no objcopy candidates"
+            raise RuntimeError(
+                f"failed to remove debug metadata from {info.filename}; tried {tried}"
+            )
+
+    rewrite_wheel(wheel, strip)
     return True
 
 
 def verify_no_elf_debug_sections(wheel: Path) -> None:
     """Fail a release build if any shipped ELF script has `.debug_*` data."""
-    with zipfile.ZipFile(wheel) as archive:
-        scripts = [name for name in archive.namelist() if ".data/scripts/" in name]
-        with tempfile.TemporaryDirectory(prefix="clud-wheel-verify-") as temp_dir:
-            root = Path(temp_dir)
-            archive.extractall(root)
-            for name in scripts:
-                script = root / name
-                if script.read_bytes()[:4] != b"\x7fELF":
-                    continue
-                result = process.run(
-                    ["readelf", "-SW", str(script)], capture_output=True, text=True, check=False
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"readelf failed for shipped script {name}")
-                if ".debug_" in result.stdout:
-                    raise RuntimeError(f"shipped script retains debug sections: {name}")
+    with zipfile.ZipFile(wheel) as archive, tempfile.TemporaryDirectory(
+        prefix="clud-wheel-verify-"
+    ) as temp_dir:
+        for info in archive.infolist():
+            if ".data/scripts/" not in info.filename:
+                continue
+            data = archive.read(info)
+            if data[:4] != b"\x7fELF":
+                continue
+            script = Path(temp_dir) / Path(info.filename).name
+            script.write_bytes(data)
+            name = info.filename
+            result = process.run(
+                ["readelf", "-SW", str(script)], capture_output=True, text=True, check=False
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"readelf failed for shipped script {name}")
+            if ".debug_" in result.stdout:
+                raise RuntimeError(f"shipped script retains debug sections: {name}")
 
 
 def local_webterm_target() -> str | None:
@@ -354,21 +347,13 @@ def build_windows_wheel_from_binaries(
     ).encode()
     package_source = ROOT / "src" / "clud" / "__init__.py"
     members = [
-        ("clud/__init__.py", package_source.read_bytes()),
-        *scripts,
-        (f"{distribution}.dist-info/METADATA", metadata),
-        (f"{distribution}.dist-info/WHEEL", wheel_metadata),
+        ("clud/__init__.py", package_source.read_bytes(), 0o644),
+        *((name, data, None) for name, data in scripts),
+        (f"{distribution}.dist-info/METADATA", metadata, 0o644),
+        (f"{distribution}.dist-info/WHEEL", wheel_metadata, 0o644),
     ]
-    records = [
-        f"{name},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}"
-        for name, data in members
-    ]
-    records.append(f"{distribution}.dist-info/RECORD,,")
     dist_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for name, data in members:
-            archive.writestr(name, data)
-        archive.writestr(f"{distribution}.dist-info/RECORD", "\n".join(records) + "\n")
+    write_wheel(wheel, members)
     if kitty_bundle is not None:
         add_kitty_bundle(
             wheel,
@@ -435,11 +420,26 @@ def _wheel_script_name(wheel: Path, name: str) -> str:
     return f"{name}.exe" if is_windows else name
 
 
+#: Where `_installed_script` looks. Defaults to the running interpreter's
+#: scripts dir; `verify_installed_scripts(scripts_dir=...)` points it at a
+#: fresh venv for the release-wheel smoke (#1545).
+_SCRIPTS_DIR: Path | None = None
+
+
 def _installed_script(name: str) -> Path:
-    return Path(sys.executable).parent / _script_name(name)
+    return (_SCRIPTS_DIR or Path(sys.executable).parent) / _script_name(name)
 
 
-def verify_installed_scripts(*, env: dict[str, str]) -> int:
+def verify_installed_scripts(*, env: dict[str, str], scripts_dir: Path | None = None) -> int:
+    global _SCRIPTS_DIR
+    previous, _SCRIPTS_DIR = _SCRIPTS_DIR, scripts_dir
+    try:
+        return _verify_installed_scripts(env=env)
+    finally:
+        _SCRIPTS_DIR = previous
+
+
+def _verify_installed_scripts(*, env: dict[str, str]) -> int:
     required = list(REQUIRED_SCRIPTS)
     target = local_webterm_target()
     if target is not None:
@@ -452,6 +452,36 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
             flush=True,
         )
         return 1
+    # #1544/#1545: `.is_file()` passed a pip-installed 0644 `clud`. What the
+    # user needs is a script the OS will execute.
+    if os.name != "nt":
+        not_executable = [
+            name for name in required if not os.access(_installed_script(name), os.X_OK)
+        ]
+        if not_executable:
+            print(
+                "installed wheel scripts are not executable: " + ", ".join(not_executable),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+    version = process.run(
+        [str(_installed_script("clud")), "--version"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=env,
+    )
+    if version.returncode != 0:
+        print(
+            "installed clud --version smoke failed: "
+            f"rc={version.returncode} stdout={version.stdout!r} stderr={version.stderr!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    print(f"installed {version.stdout.strip()}", flush=True)
     if platform.system() == "Windows" and platform.machine().lower() in {"amd64", "x86_64"}:
         kitty_dir = _installed_script("clud").parent.parent / "clud-kittyterm"
         kitty_missing = [

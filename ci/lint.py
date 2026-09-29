@@ -138,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     from ci.banned_legacy_deletion import main as check_banned_legacy_deletion
     from ci.banned_python3 import main as check_banned_python3
     from ci.banned_skill_sources import main as check_banned_skill_sources
+    from ci.banned_wheel_writes import main as check_banned_wheel_writes
 
     # Ordered cheapest-first so the common failure reds out soonest: ruff is a
     # pure-Python scan (~1s), the two banned-* scans are source greps, and only
@@ -165,6 +166,10 @@ def main(argv: list[str] | None = None) -> int:
     # #1334: committed hook configs must resolve clud's helpers from PATH,
     # never a machine-local binary or a `target/` build output.
     if check_banned_hook_paths() != 0:
+        return 1
+    # #1545: ci/wheel_rewrite.py is the only wheel writer, so no rewriter can
+    # drop the scripts' exec bits again.
+    if check_banned_wheel_writes() != 0:
         return 1
     # setup-soldr's cargo shim can otherwise omit repository discovery for
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the

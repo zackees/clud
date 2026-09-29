@@ -179,6 +179,7 @@ jobs:
     outputs:
       build: ${{ steps.matrix.outputs.build }}
       static_musl: ${{ steps.matrix.outputs.static_musl }}
+      smoke: ${{ steps.matrix.outputs.smoke }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -210,6 +211,24 @@ jobs:
       clippy: false
       wheel-artifact: ${{ matrix.artifact }}
       include-sdist: ${{ matrix['include-sdist'] }}
+
+  # #1545: pip-install the exact release wheel into a fresh venv on each native
+  # Linux/macOS exec runner and run it before anything publishes. 2.8.14 and
+  # 2.8.20 shipped a non-executable `clud` because nothing ever installed the
+  # release-profile wheel (only the PR lane's dev wheel).
+  wheel-smoke:
+    name: Install-smoke release wheels
+    needs: [preflight, release-matrix, build]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-matrix.outputs.smoke) }}
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      source_ref: ${{ needs.preflight.outputs.candidate_sha }}
+      target: ${{ matrix.target }}
+      runs-on: ${{ matrix.runs-on }}
+      suite: wheel-smoke
+      wheel-artifact: ${{ matrix.artifact }}
 
   build-static-musl:
     name: Build static musl clud
@@ -251,7 +270,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [preflight, full-ci-gate, build, candidate-acceptance-gate, verify-prior-public]
+    needs: [preflight, full-ci-gate, build, wheel-smoke, candidate-acceptance-gate, verify-prior-public]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -275,7 +294,7 @@ jobs:
 
   publish-release:
     name: Publish final bytes as public prerelease
-    needs: [preflight, full-ci-gate, snapshot-public, build, build-static-musl, verify-static-musl-arm64]
+    needs: [preflight, full-ci-gate, snapshot-public, build, wheel-smoke, build-static-musl, verify-static-musl-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
