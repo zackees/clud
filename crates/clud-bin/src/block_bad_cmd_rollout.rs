@@ -729,13 +729,20 @@ mod tests {
     fn dangling_hook_program_produces_a_warning_naming_file_and_fix() {
         let tmp = tempdir().unwrap();
         let repo = tmp.path().join("repo");
-        let gone = tmp.path().join("gone/target/debug/clud-cmd-scan");
+        // Build paths component-wise so they display with native separators,
+        // matching the settings path the scanner reports on Windows.
+        let gone = tmp
+            .path()
+            .join("gone")
+            .join("target")
+            .join("debug")
+            .join("clud-cmd-scan");
         let body = serde_json::json!({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": format!("'{}'", gone.display())},
             {"type": "command", "command": "clud-cmd-scan"},
         ]}]}})
         .to_string();
-        let settings = repo.join(".claude/settings.json");
+        let settings = repo.join(".claude").join("settings.json");
         write(&settings, &body);
 
         let warnings = dangling_hook_program_warnings(&repo, None);
