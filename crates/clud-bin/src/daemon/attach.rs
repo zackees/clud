@@ -324,8 +324,7 @@ pub(super) fn attach_to_session(
             // shutdown), so the kernel answers with RST. Retry within the
             // window instead of failing the whole session.
             Err(err)
-                if is_transient_attach_error(&err)
-                    && started.elapsed() < attach_retry_window =>
+                if is_transient_attach_error(&err) && started.elapsed() < attach_retry_window =>
             {
                 thread::sleep(Duration::from_millis(100));
                 continue;
