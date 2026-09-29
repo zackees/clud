@@ -5094,3 +5094,51 @@ old protocol.
 a moving catalogue. Every `setup-soldr` job resolves "latest" with a GitHub
 API release lookup; anonymous local `act` runs share the 60 req/hr limit and
 can hit 403 until it resets.
+
+## DD-121: Helper executables are argv[0] aliases of the one clud binary
+
+**Context:** clud shipped `clud-shim`, `clud-cmd-scan` and
+`clud-block-bad-cmd` as separate `[[bin]]` targets beside `clud`. Each had
+to be packaged, bundled, smoke-tested and found on PATH, and a layout missing
+one produced a stale-install warning. #406/#412 split the shim into its own
+binary; #532 planned to ship `clud-block-bad-cmd` for one release. #1551
+collapses all of them into `clud`.
+
+**Decision:** `crates/clud-bin/src/multicall.rs::dispatch(argv)` runs first
+in `main`, before any startup work, and keys on argv\[0\]'s stem (either path
+separator, `.exe` dropped, case-insensitive on Windows):
+
+| argv\[0\] stem | Runs |
+| --- | --- |
+| `clud-cmd-scan`, `clud-block-bad-cmd` | `block_bad_cmd::run_with_args` |
+| `clud-shim`, or any `shim_registry::SHIMS` name (`python`, `python3`, `rm`, `safe-rm`, `gh`) | `clud_shim::run` |
+| anything else | normal `clud` |
+
+`clud __cmd-scan ...` and `clud __shim <name> ...` reach the same handlers
+explicitly. It keys on argv\[0\], not `current_exe`: Linux `current_exe`
+resolves symlinks and would report `clud` for every symlinked alias.
+
+Aliases live only in clud-owned `~/.clud/state/` directories
+(`shims`, `rm-shim`, `helper-bin`), never the pip scripts directory, which
+may be read-only. `place_alias` tries a hardlink, then a symlink, then a
+copy; only a failed copy is an error. For a symlink alias the shim derives
+its own path from argv\[0\], not `current_exe`, so shim-directory exclusion
+during passthrough uses the alias's directory. `alias_is_current` treats an
+alias as fresh when it shares clud's inode (POSIX), or has the same size and
+an mtime no older than clud's; an upgraded clud therefore refreshes every
+alias on its next launch without hashing a ~30 MB binary (the FNV
+`.shim-hash` sentinel is gone).
+
+**Consequences:** The wheel ships one script (`REQUIRED_SCRIPTS = ("clud",)`),
+and `tests/test_build_wheel.py::test_clud_is_the_only_shipped_crate_binary`
+fails on a second shipped `[[bin]]`. Measured Linux cost of the up-front
+dispatch is +0.5 ms per start (3.3 ms vs 2.8 ms); Windows cold start is still
+to be measured on `ci-windows`. On Windows a hardlink keeps the old binary's
+bytes alive after an upgrade replaces `clud`, until the freshness check
+relinks it. Writing through a hardlinked alias would edit clud itself, so
+installers always replace the directory entry (stage, then rename) and never
+write into an existing alias.
+
+Supersedes the separate-shim-binary rationale of #406/#412 and the #532 plan
+to ship `clud-block-bad-cmd` for one release. Amends
+[DD-074](#dd-074-rm-uses-a-path-identity-backstop-and-a-post-expansion-shim): the packaged shim identity is now the `clud` binary itself.

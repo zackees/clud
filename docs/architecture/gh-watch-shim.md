@@ -6,7 +6,7 @@ real executable from the incoming PATH *before* prepending that directory,
 then exports its absolute path as `CLUD_GH_SHIM_TARGET`. Foreground and daemon
 launches share this path through `runner::apply_child_env_policy`.
 
-`clud-shim` dispatches by invoked filename through its single dispatch path;
+`clud` (via `multicall.rs`) dispatches by invoked filename through its single dispatch path;
 without a valid session the alias is the next real `gh` on PATH (see
 [shim-dispatch.md](shim-dispatch.md)). In a session, for ordinary commands it
 executes the real executable with the original arguments and inherited stdio.

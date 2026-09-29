@@ -64,8 +64,8 @@ soldr cargo test -p clud-bin     # crate-level Rust tests only
 
 Packaged as a Python wheel via maturin (`[tool.maturin] bindings = "bin"`,
 `manifest-path = "crates/clud-bin/Cargo.toml"` in the root `pyproject.toml`).
-The wheel installs the native `clud`, `clud-shim`, and `clud-block-bad-cmd`
-commands onto the user's `PATH` — no Python runtime code ships beyond a thin
+The wheel installs exactly one native command, the multicall `clud` (#1551),
+onto the user's `PATH` — no Python runtime code ships beyond a thin
 version shim and compatibility hook shims.
 
 CI builds across 6 platforms: Linux x86 + ARM, Windows x86 + ARM, macOS

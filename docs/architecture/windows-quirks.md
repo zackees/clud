@@ -493,10 +493,10 @@ the codebase stays portable.
   path ends in `Git\bin\bash.exe`. Avoid `git-bash.exe` because that is the
   MinTTY launcher, not the non-MinTTY Bash executable Claude Code needs for
   this workaround. clud's own managed hooks also avoid unbounded stdin reads:
-  the native `clud-block-bad-cmd` hook binary uses bounded pipe reads, and
+  the native `clud-cmd-scan` hook (an alias of `clud`) uses bounded pipe reads, and
   `telemetry.py` uses the same timeout-safe pattern so an open hook stdin pipe
   cannot wedge the hook. The managed `block-bad-cmd.py` file is only a
-  compatibility shim that execs the native binary.
+  compatibility shim that runs `$CLUD_EXE __cmd-scan`.
 
 - **File**: `crates/clud-bin/src/hook_health/inspect.rs`
   (`warn_on_claude_windows_stdin_bug`);

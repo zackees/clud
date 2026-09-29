@@ -7,9 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
 
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir pytest==9.0.3 running-process==4.10.1 # python-name-lint: allow
 
+# #1551: `clud` is multicall; the hook and shim are copies of it under their
+# argv[0] names.
 ARG CLUD_BINARY=target/debug/clud
-ARG HOOK_BINARY=target/debug/clud-cmd-scan
-ARG SHIM_BINARY=target/debug/clud-shim
+ARG HOOK_BINARY=target/debug/clud
+ARG SHIM_BINARY=target/debug/clud
 COPY ${CLUD_BINARY} /usr/local/bin/clud
 COPY ${HOOK_BINARY} /usr/local/bin/clud-cmd-scan
 COPY ${SHIM_BINARY} /usr/local/bin/clud-shim

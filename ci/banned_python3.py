@@ -3,7 +3,7 @@
 clud normalizes the interpreter name. On Linux and macOS the system usually
 ships only `python3`; on Windows the installer ships only `python` (with a
 `python3` that is often the Microsoft Store stub, which opens the Store instead
-of running anything). clud's shim (`clud-shim`, installed as `python` *and*
+of running anything). clud's shim (the multicall `clud`, installed as `python` *and*
 `python3` in `~/.clud/state/shims/` for every session) resolves both names to
 the same interpreter, so inside clud `python` works on every platform.
 
@@ -47,7 +47,7 @@ NEXT_LINE_MARKER = "python-name-lint: allow-next-line"
 EXEMPT_FILES = frozenset(
     {
         "crates/clud-bin/src/shim_resolve.rs",
-        "crates/clud-bin/src/bin/clud_shim.rs",
+        "crates/clud-bin/src/clud_shim.rs",
         "crates/clud-bin/src/shim_install.rs",
         "crates/clud-bin/src/shim_session.rs",
         "crates/clud-bin/src/shim_uv.rs",

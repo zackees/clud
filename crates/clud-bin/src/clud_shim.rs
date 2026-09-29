@@ -1,8 +1,8 @@
-//! `clud-shim` — the one binary behind every clud PATH alias: `python`,
+//! The shim applet of the multicall `clud` (#1551), behind every clud PATH alias: `python`,
 //! `python3`, `gh`, `rm` and `safe-rm` (#406, #1461, #1518, #1546).
 //!
-//! `main` hands argv to [`dispatch::run`], the single entry path. Dispatch
-//! looks the invoked name up in `clud::shim_registry::SHIMS`, validates the
+//! [`run`] hands argv to [`dispatch::run`], the single entry path. Dispatch
+//! looks the invoked name up in `crate::shim_registry::SHIMS`, validates the
 //! session, and either runs one of the handlers below with a validated
 //! [`dispatch::Session`] or execs the next real binary on PATH. Outside a
 //! valid clud session every alias behaves like the binary it shadows; see
@@ -11,16 +11,16 @@
 //! Handlers never read a session key and never decide a no-session exit;
 //! `session_contract_is_owned_by_dispatch` below enforces that.
 
-#[path = "clud_shim/dispatch.rs"]
-mod dispatch;
+pub mod dispatch;
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::exit;
 
-fn main() {
-    let argv: Vec<OsString> = std::env::args_os().collect();
-    exit(dispatch::run(&argv));
+/// The shim applet of the multicall `clud` binary (#1551): `main.rs`
+/// calls this before any other startup work when argv\[0\] names a shim
+/// alias, and exits with the returned code.
+pub fn run(argv: &[OsString]) -> i32 {
+    dispatch::run(argv)
 }
 
 /// Replace this process with `path` (Unix `exec`), or run it and return its
@@ -77,7 +77,7 @@ mod safe_rm {
             eprintln!("safe-rm: non-UTF8 arguments are not supported");
             return 2;
         };
-        clud::rm_tool::run(&args)
+        crate::rm_tool::run(&args)
     }
 }
 
@@ -90,29 +90,29 @@ mod rm_shim {
     pub fn run(args: &[OsString]) -> i32 {
         let args: Option<Vec<String>> = args.iter().map(|a| a.clone().into_string().ok()).collect();
         let Some(args) = args else {
-            return clud::rm_guard::deny("non-UTF8 rm arguments");
+            return crate::rm_guard::deny("non-UTF8 rm arguments");
         };
-        match clud::rm_guard::prepare(&args) {
+        match crate::rm_guard::prepare(&args) {
             Ok(plan) => {
                 let code = execute_handoff(&plan);
-                clud::rm_guard::audit(&args, Some(&plan), code, None);
+                crate::rm_guard::audit(&args, Some(&plan), code, None);
                 code
             }
             Err(reason) => {
-                let code = clud::rm_guard::deny(&reason);
-                clud::rm_guard::audit(&args, None, code, Some(&reason));
+                let code = crate::rm_guard::deny(&reason);
+                crate::rm_guard::audit(&args, None, code, Some(&reason));
                 code
             }
         }
     }
 
-    fn execute_handoff(plan: &clud::rm_guard::Plan) -> i32 {
+    fn execute_handoff(plan: &crate::rm_guard::Plan) -> i32 {
         let mut command = vec![plan.program.to_string_lossy().into_owned()];
         command.extend(plan.argv.iter().cloned());
-        match clud::subprocess::ManagedSubprocess::start_inheriting_env(command, None, false, None)
+        match crate::subprocess::ManagedSubprocess::start_inheriting_env(command, None, false, None)
         {
             Ok(child) => child.wait(None).unwrap_or(2),
-            Err(error) => clud::rm_guard::deny(&format!("system handoff failed: {error}")),
+            Err(error) => crate::rm_guard::deny(&format!("system handoff failed: {error}")),
         }
     }
 }
@@ -332,15 +332,15 @@ mod gh_shim {
 #[cfg(test)]
 #[test]
 fn session_contract_is_owned_by_dispatch() {
-    use clud::shim_registry::{self as registry, SHIMS};
+    use crate::shim_registry::{self as registry, SHIMS};
 
     fn production(source: &str) -> &str {
         source.split("#[cfg(test)]").next().unwrap()
     }
     let handlers = production(include_str!("clud_shim.rs"));
     let libs = [
-        ("rm_guard.rs", production(include_str!("../rm_guard.rs"))),
-        ("rm_tool.rs", production(include_str!("../rm_tool.rs"))),
+        ("rm_guard.rs", production(include_str!("rm_guard.rs"))),
+        ("rm_tool.rs", production(include_str!("rm_tool.rs"))),
     ];
     let key_idents = [
         "ABI_KEY",
@@ -372,17 +372,17 @@ fn session_contract_is_owned_by_dispatch() {
     }
     assert_eq!(
         handlers.matches("exit(").count(),
-        1,
-        "only main may exit; handlers return codes"
+        0,
+        "only clud's main may exit; handlers return codes"
     );
-    assert!(handlers.contains("exit(dispatch::run(&argv))"));
+    assert!(handlers.contains("dispatch::run(argv)"));
     assert!(
         !handlers.contains("127"),
         "command-not-found belongs to dispatch's passthrough"
     );
     // Shim names reach dispatch and the installers only through the registry.
     let dispatch = production(include_str!("clud_shim/dispatch.rs"));
-    let install = production(include_str!("../shim_install.rs"));
+    let install = production(include_str!("shim_install.rs"));
     for spec in SHIMS {
         for spelling in [spec.name.to_string(), format!("{}.exe", spec.name)] {
             let literal = format!("\"{spelling}\"");

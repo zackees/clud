@@ -62,12 +62,12 @@ def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) ->
     mock_agent.write_text("", encoding="utf-8")
     installed_clud = tmp_path / ci_test._binary_name("clud")
     installed_clud.write_text("", encoding="utf-8")
+    # #1551: the hook helper is an alias materialized beside `clud`.
     installed_block_guard = tmp_path / ci_test._binary_name("clud-block-bad-cmd")
-    installed_block_guard.write_text("", encoding="utf-8")
     captured: list[list[str]] = []
 
     def fake_installed_script(name: str):
-        return {"clud": installed_clud, "clud-block-bad-cmd": installed_block_guard}.get(name)
+        return {"clud": installed_clud}.get(name)
 
     monkeypatch.setattr(ci_test, "_installed_script", fake_installed_script)
     monkeypatch.setattr(ci_test, "ROOT", tmp_path)
@@ -101,7 +101,6 @@ def test_prepare_pytest_binaries_builds_clud_without_installed_script(
     block_guard = target_dir / ci_test._binary_name("clud-block-bad-cmd")
     mock_agent = target_dir / ci_test._binary_name("mock-agent")
     clud.write_text("", encoding="utf-8")
-    block_guard.write_text("", encoding="utf-8")
     mock_agent.write_text("", encoding="utf-8")
     captured: list[list[str]] = []
 

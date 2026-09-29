@@ -150,8 +150,8 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         body: include_str!("../assets/tools/hooks/block-bad-cmd.py"),
         // Compatibility shim for hand-written hook configs that still call
         // `clud tool run hooks/block-bad-cmd.py`. The normal hot path is
-        // the PyPI-shipped native `clud-block-bad-cmd` executable. The
-        // shim execs that binary, so the decision IS still the work;
+        // the native scanner inside the multicall `clud` (#1551). The
+        // shim runs `$CLUD_EXE __cmd-scan`, so the decision IS still the work;
         // killing mid-run loses the verdict — `Killable`.
         kill_semantics: KillSemantics::Killable,
         command_timeout: Duration::from_secs(30),
@@ -429,8 +429,8 @@ mod tests {
             .find(|t| t.rel_path == "hooks/block-bad-cmd.py")
             .expect("compatibility shim must remain for existing hook configs");
         assert!(
-            tool.body.contains("clud-block-bad-cmd"),
-            "block-bad-cmd.py must delegate to the native binary",
+            tool.body.contains("__cmd-scan"),
+            "block-bad-cmd.py must delegate to the native scanner",
         );
         assert!(
             tool.body.contains("Compatibility"),

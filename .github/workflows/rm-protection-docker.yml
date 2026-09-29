@@ -36,25 +36,26 @@ jobs:
             sudo apt-get install -y clang
           fi
 
-      - name: Build the command-scan hook and deletion binaries
-        run: soldr cargo build -p clud --bin clud --bin clud-cmd-scan --bin clud-shim
+      # #1551: `clud` is multicall; the hook and shim are argv[0] aliases.
+      - name: Build the multicall clud binary
+        run: soldr cargo build -p clud --bin clud
 
       - name: Locate the binaries
         id: binary
         run: |
           set -euo pipefail
           for candidate in \
-            target/debug/clud-cmd-scan \
-            target/x86_64-unknown-linux-gnu/debug/clud-cmd-scan; do
+            target/debug/clud \
+            target/x86_64-unknown-linux-gnu/debug/clud; do
             if [ -x "$candidate" ]; then
               echo "hook=$candidate" >> "$GITHUB_OUTPUT"
-              echo "shim=$(dirname "$candidate")/clud-shim" >> "$GITHUB_OUTPUT"
-              echo "clud=$(dirname "$candidate")/clud" >> "$GITHUB_OUTPUT"
+              echo "shim=$candidate" >> "$GITHUB_OUTPUT"
+              echo "clud=$candidate" >> "$GITHUB_OUTPUT"
               echo "using $candidate"
               exit 0
             fi
           done
-          echo "hook binary not found after compile" >&2
+          echo "clud binary not found after compile" >&2
           exit 1
 
       - name: Name the disposable image

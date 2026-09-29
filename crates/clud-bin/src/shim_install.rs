@@ -1,18 +1,17 @@
 //! Per-user shim extraction. Slice 4 of #406 / #412.
 //!
-//! Materializes the `clud-shim` binary into `~/.clud/state/shims/` under
-//! the alias names downstream tooling will invoke (`python`,
-//! `python3`, `python.exe`, `python3.exe`). The shim dir is **per-user**,
-//! shared across all sessions and concurrent clud processes for that
-//! user — extracted once, hash-gated for drift detection at upgrade.
+//! Materializes the multicall `clud` binary (#1551) into
+//! `~/.clud/state/shims/` under the alias names downstream tooling will
+//! invoke (`python`, `python3`, `python.exe`, `python3.exe`); argv\[0\]
+//! dispatch in [`crate::multicall`] turns each alias into the shim. The shim
+//! dir is **per-user**, shared across all sessions and concurrent clud
+//! processes for that user.
 //!
-//! The installed wheel places `clud-shim` beside `clud`; startup copies it to
-//! the alias directory, resolves the real Python before rewriting PATH, and
-//! exports that target for the shim to execute without recursive lookup.
-//!
-//! Mirrors the bundled-skill installer pattern in `skills.rs`:
-//! managed copies carry the `# managed-by: clud` marker so user-edited
-//! files are preserved across upgrades.
+//! Each alias is placed by [`crate::multicall::place_alias`] (hardlink, else
+//! copy) and refreshed when [`crate::multicall::alias_is_current`] says the
+//! running `clud` changed. Startup resolves the real Python before rewriting
+//! PATH and exports that target for the shim to execute without recursive
+//! lookup.
 
 use std::path::{Path, PathBuf};
 
@@ -23,8 +22,8 @@ use crate::shim_registry::{self, ShimDir, ShimKind};
 pub const SHIMS_SUBDIR: &str = shim_registry::INTERPRETER_SUBDIR;
 
 /// Alias filenames to install under [`SHIMS_SUBDIR`], derived from
-/// [`shim_registry::SHIMS`]. Each alias is a copy of the same `clud-shim`
-/// binary, which dispatches on argv\[0\].
+/// [`shim_registry::SHIMS`]. Each alias is a link to (or copy of) the
+/// multicall `clud`, which dispatches on argv\[0\].
 pub fn alias_names() -> Vec<String> {
     shim_registry::file_names_in(ShimDir::Interpreter)
 }
@@ -50,23 +49,18 @@ pub fn extract_shims_at(home_root: &Path, shim_source: &Path) -> std::io::Result
     if !shim_source.is_file() {
         return Ok(0);
     }
-    let source_bytes = std::fs::read(shim_source)?;
-    let source_hash = blake3_short(&source_bytes);
     let mut installed = 0;
     for alias in alias_names() {
         let target = shims_dir.join(&alias);
-        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink())
-            || needs_refresh(&target, &source_hash)
-            || std::fs::read(&target).ok().as_deref() != Some(source_bytes.as_slice())
-        {
-            write_alias(&shims_dir, &target, &source_bytes)?;
+        if !crate::multicall::alias_is_current(shim_source, &target) {
+            crate::multicall::place_alias(shim_source, &target)?;
             installed += 1;
         }
     }
-    write_hash_sentinel(&shims_dir, &source_hash)?;
     Ok(installed)
 }
 
+#[cfg(test)]
 fn native_binary_name(name: &str) -> String {
     if cfg!(windows) {
         format!("{name}.exe")
@@ -83,10 +77,8 @@ pub fn prepare_session_shims_at(
     current_exe: &Path,
     env: &mut Vec<(String, String)>,
 ) -> std::io::Result<bool> {
-    let Some(bin_dir) = current_exe.parent() else {
-        return Ok(false);
-    };
-    let source = bin_dir.join(native_binary_name("clud-shim"));
+    // The multicall `clud` is its own shim source (#1551).
+    let source = current_exe.to_path_buf();
     if !source.is_file() {
         return Ok(false);
     }
@@ -153,47 +145,6 @@ pub fn prepare_current_session() -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Reuse the daemon's existing BLAKE3 wrapper from `sha2` is overkill;
-/// for drift detection we just hash with the standard library's
-/// SipHash via a stable byte digest. Surfaced as its own function so
-/// tests can verify the sentinel format without depending on a hash
-/// crate that might churn.
-fn blake3_short(bytes: &[u8]) -> String {
-    // Hand-rolled FNV-1a — deterministic, no deps, sufficient for
-    // drift detection (we only compare exact equality). Skip
-    // cryptographic strength; an attacker who controls the bundled
-    // binary controls everything already.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("{h:016x}")
-}
-
-fn write_hash_sentinel(shims_dir: &Path, hash: &str) -> std::io::Result<()> {
-    let sentinel = shims_dir.join(".shim-hash");
-    std::fs::write(sentinel, hash)
-}
-
-fn read_hash_sentinel(shims_dir: &Path) -> Option<String> {
-    let sentinel = shims_dir.join(".shim-hash");
-    std::fs::read_to_string(sentinel).ok()
-}
-
-fn needs_refresh(target: &Path, source_hash: &str) -> bool {
-    if !target.is_file() {
-        return true;
-    }
-    let Some(parent) = target.parent() else {
-        return true;
-    };
-    let Some(installed) = read_hash_sentinel(parent) else {
-        return true;
-    };
-    installed != source_hash
-}
-
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -205,36 +156,15 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
-fn write_alias(dir: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-    temp.write_all(bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o755))?;
-    }
-    temp.persist(target).map_err(|e| e.error)?;
-    Ok(())
-}
-
-/// Trusted packaged sibling, never resolved through PATH or an env override.
+/// The trusted shim source: the running multicall `clud` itself (#1551),
+/// never resolved through PATH or an env override.
 pub fn packaged_shim() -> std::io::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| std::io::Error::other("executable has no parent"))?;
-    Ok(dir.join(if cfg!(windows) {
-        "clud-shim.exe"
-    } else {
-        "clud-shim"
-    }))
+    std::env::current_exe()
 }
 
 /// The session aliases, derived from [`shim_registry::SHIMS`]: `rm`,
-/// `safe-rm` (#1461) and `gh` (#1518) today. All are byte copies of
-/// `clud-shim`, which dispatches on argv\[0\].
+/// `safe-rm` (#1461) and `gh` (#1518) today. All are links to (or copies
+/// of) the multicall `clud`, which dispatches on argv\[0\].
 pub fn rm_alias_names() -> Vec<String> {
     shim_registry::file_names_in(ShimDir::Session)
 }
@@ -279,8 +209,7 @@ pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
         .truncate(false)
         .open(state.join(".rm-shim.lock"))?;
     FileExt::lock_exclusive(&lock)?;
-    let bytes = std::fs::read(source)?;
-    if bytes.is_empty() {
+    if std::fs::metadata(source)?.len() == 0 {
         return Err(std::io::Error::other("packaged shim is empty"));
     }
     let dir = home.join(shim_registry::SESSION_SUBDIR);
@@ -289,17 +218,12 @@ pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
     purge_stale_aliases(&dir, &expected)?;
     for name in expected {
         let target = dir.join(name);
-        // Replace the directory entry, never write through a replaced symlink.
-        // NamedTempFile persists atomically and supports concurrent installers.
-        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink())
-            || std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice())
-        {
-            write_alias(&dir, &target, &bytes)?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))?;
+        // Replace the directory entry, never write through a replaced symlink
+        // (a link to anything but `source` is stale). place_alias renames a
+        // per-process staging file into place, so it is atomic and safe for
+        // concurrent installers.
+        if !crate::multicall::alias_is_current(source, &target) {
+            crate::multicall::place_alias(source, &target)?;
         }
     }
     Ok(dir)
@@ -313,17 +237,19 @@ mod tests {
 
     fn make_source(content: &[u8]) -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
-        let src = tmp.path().join("clud-shim");
+        let src = tmp.path().join("clud");
         fs::write(&src, content).unwrap();
         (tmp, src)
     }
 
     #[test]
-    fn repairs_replaced_bytes_even_with_matching_sentinel() {
+    fn repairs_a_replaced_alias() {
         let home = TempDir::new().unwrap();
         let (_source_dir, source) = make_source(b"trusted");
         extract_shims_at(home.path(), &source).unwrap();
         let target = home.path().join(SHIMS_SUBDIR).join(&alias_names()[0]);
+        // Replace the entry (writing through a hardlink would edit clud).
+        fs::remove_file(&target).unwrap();
         fs::write(&target, b"replaced").unwrap();
         assert_eq!(extract_shims_at(home.path(), &source).unwrap(), 1);
         assert_eq!(fs::read(target).unwrap(), b"trusted");
@@ -336,6 +262,7 @@ mod tests {
         let dir = install_rm_at(home.path(), &source).unwrap();
         for name in rm_alias_names() {
             let target = dir.join(&name);
+            fs::remove_file(&target).unwrap();
             fs::write(&target, b"replacement").unwrap();
             install_rm_at(home.path(), &source).unwrap();
             assert_eq!(fs::read(&target).unwrap(), b"trusted", "{name}");
@@ -356,6 +283,7 @@ mod tests {
         let (_source_dir, source) = make_source(b"trusted");
         let dir = install_rm_at(home.path(), &source).unwrap();
         let gh = dir.join(shim_registry::file_name("gh"));
+        fs::remove_file(&gh).unwrap();
         fs::write(&gh, b"replacement").unwrap();
         std::thread::scope(|scope| {
             let workers: Vec<_> = (0..8)
@@ -379,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_creates_aliases_and_sentinel() {
+    fn extract_creates_aliases() {
         let home = TempDir::new().unwrap();
         let (_src_dir, src) = make_source(b"#!fake shim binary\n");
         let count = extract_shims_at(home.path(), &src).unwrap();
@@ -388,11 +316,10 @@ mod tests {
         for alias in alias_names() {
             assert!(shims.join(&alias).is_file(), "missing alias {alias}");
         }
-        assert!(shims.join(".shim-hash").is_file());
     }
 
     #[test]
-    fn extract_is_noop_when_hash_matches() {
+    fn extract_is_noop_when_aliases_are_current() {
         let home = TempDir::new().unwrap();
         let (_src_dir, src) = make_source(b"fake shim v1");
         // First pass: writes all aliases.
@@ -409,7 +336,8 @@ mod tests {
         let home = TempDir::new().unwrap();
         let (src_dir, src) = make_source(b"v1");
         extract_shims_at(home.path(), &src).unwrap();
-        // Rewrite the source with new content.
+        // An upgrade writes a new file in place of the old one.
+        fs::remove_file(&src).unwrap();
         fs::write(&src, b"v2-different").unwrap();
         let count = extract_shims_at(home.path(), &src).unwrap();
         assert_eq!(
@@ -436,14 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn blake3_short_is_stable_across_calls() {
-        let a = blake3_short(b"hello");
-        let b = blake3_short(b"hello");
-        assert_eq!(a, b);
-        assert_ne!(blake3_short(b"hello"), blake3_short(b"goodbye"));
-    }
-
-    #[test]
     fn shims_dir_resolves_under_home() {
         let resolved = shims_dir();
         // Best-effort: if home exists, the path should end with the suffix.
@@ -459,10 +379,8 @@ mod tests {
         let bin = home.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let current_exe = bin.join(native_binary_name("clud"));
-        let shim = bin.join(native_binary_name("clud-shim"));
         let python = bin.join(native_binary_name("python3"));
         fs::write(&current_exe, b"clud").unwrap();
-        fs::write(&shim, b"shim").unwrap();
         fs::write(&python, b"python").unwrap();
         #[cfg(unix)]
         {

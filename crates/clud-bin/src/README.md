@@ -373,9 +373,9 @@ which test tier a change belongs in — lives in
   non-serialized `RuleSource` (file, layer, `/bad_commands/<index>` slot) so a
   denial can cite exactly which rule fired and where it came from (#525);
   provenance survives merge/dedupe, so a shadowing rule keeps its own origin.
-- `block_bad_cmd.rs` - native `cmd-scan` PreToolUse hook binary (formerly
-  `block-bad-cmd`; `clud-block-bad-cmd` still ships as a compat binary, see
-  `block_bad_cmd_rollout.rs`). Enforces three things per Bash command:
+- `block_bad_cmd.rs` - native `cmd-scan` PreToolUse hook, reached when `clud`
+  runs as its `clud-cmd-scan` (or legacy `clud-block-bad-cmd`) alias or as
+  `clud __cmd-scan` (see `multicall.rs`). Enforces three things per Bash command:
   hardcoded Rust-toolchain rules (`RUST_TOOLS` → `soldr <tool>`); GitHub PR
   waiter rules (run-id watches and polling loops; the canonical PR-check
   watch is allowed with the session alias, DD-116), gated behind the
@@ -608,8 +608,8 @@ Skills and hooks:
   codex sessions (#967 Phase 4), and the `add_codex_project_trust` repair
   behind `clud --fix-hooks`.
 - `block_bad_cmd_rollout.rs` - startup health/migration for the native
-  `clud-block-bad-cmd` helper: stale install warning plus exact old hook
-  command rewrites when the helper is available. Every scope only ever gets
+  `clud-cmd-scan` hook: the running `clud` is the helper, and exact old hook
+  commands (including legacy `clud-block-bad-cmd`) are rewritten. Every scope only ever gets
   the portable bare `clud-cmd-scan`, never an absolute path (#1426, #1334);
   when the helper is not already resolvable, the session links it alone into
   `~/.clud/state/helper-bin` and appends that directory to PATH (never the
@@ -816,15 +816,22 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
 - `rm_guard.rs` — catastrophe-floor decisions, canonical operands, and mount
   protection; it contains no removal implementation. In a session,
-  `bin/clud_shim.rs` hands accepted requests to the next real `rm` on PATH.
+  `clud_shim.rs` hands accepted requests to the next real `rm` on PATH.
 - `deletion_policy.rs` — normalized deletion-base semantics shared by source
   interpretation and the shim.
 - `block_bad_cmd_rm_identity.rs` — effective-PATH byte identity and source
   resolution checks, shared by both hook entrypoints.
-- `bin/clud_shim.rs` also owns the session-local GitHub CLI relay and PR-watch translation;
+- `clud_shim.rs` (library module, run when `clud` is invoked under a shim
+  alias name; formerly the `src/bin/clud_shim.rs` binary) also owns the session-local GitHub CLI relay and PR-watch translation;
   see [gh-watch-shim.md](../../../docs/architecture/gh-watch-shim.md).
-- `shim_registry.rs` — `SHIMS`, the one list of `clud-shim` aliases, plus the
+- `shim_registry.rs` — `SHIMS`, the one list of shim alias names `clud` answers to, plus the
   session key names, ABI stamp and the PATH resolver every alias shares.
-  `bin/clud_shim/dispatch.rs` is the binary's single entry path: session
+  `clud_shim/dispatch.rs` is the shim's single entry path: session
   checks, target resolution and fail-open passthrough (#1546); see
   [shim-dispatch.md](../../../docs/architecture/shim-dispatch.md).
+- `multicall.rs` — `dispatch(argv)`, the first thing `main` runs: keys on
+  argv[0]'s stem (`clud-cmd-scan`/`clud-block-bad-cmd` → `block_bad_cmd`,
+  `clud-shim` or any `SHIMS` name → `clud_shim`) plus explicit
+  `clud __cmd-scan` / `clud __shim <name>`. `place_alias` (hardlink →
+  symlink → copy) and `alias_is_current` (inode, or size + mtime) keep
+  aliases fresh. See [DD-121](../../../docs/DESIGN_DECISIONS.md#dd-121-helper-executables-are-argv0-aliases-of-the-one-clud-binary).

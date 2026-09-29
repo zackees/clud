@@ -191,7 +191,7 @@ cmd = "cd /workspace && soldr cargo build -p clud && (uv sync --frozen --group d
 
 [task.mount-probe]
 stack = "clud_1044_final_retry"
-cmd = "cd /workspace && soldr cargo build -p clud --bin clud-shim && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && RM_REQUIRE_MOUNT_PROBE=1 .venv/bin/python -m pytest -p no:cacheprovider -v tests/test_mount_floor.py"
+cmd = "cd /workspace && soldr cargo build -p clud --bin clud && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && RM_REQUIRE_MOUNT_PROBE=1 .venv/bin/python -m pytest -p no:cacheprovider -v tests/test_mount_floor.py"
 
 [task.migration-process]
 stack = "clud_1044_final_retry"
@@ -309,7 +309,7 @@ GIT_CONFIG_VALUE_0 = "/workspace"
 
 [task.rm-busybox]
 stack = "clud_rm_alpine"
-cmd = "cd /workspace && soldr cargo build -p clud --bin clud-shim && sh ci/docker/rm_protection/busybox_check.sh"
+cmd = "cd /workspace && soldr cargo build -p clud --bin clud && sh ci/docker/rm_protection/busybox_check.sh"
 
 [task.rm-unit-alpine]
 stack = "clud_rm_alpine"
@@ -317,7 +317,7 @@ cmd = "cd /workspace && soldr cargo test -p clud --lib rm_guard && soldr cargo t
 
 [task.rm-corpus-alpine]
 stack = "clud_rm_alpine"
-cmd = "cd /workspace && soldr cargo build -p clud --bin clud --bin clud-shim --bin clud-cmd-scan && pip install --break-system-packages patchelf && pip install --break-system-packages pytest running-process==4.10.1 && CLUD_TEST_BINARY=/build/target/debug/clud python -m pytest -p no:cacheprovider -v tests/test_rm_shim.py::test_old_stub_corpus_maps_to_new_floor_and_hook tests/test_rm_shim.py::test_current_and_parent_are_refused_without_handoff tests/test_safe_rm.py tests/test_safe_rm_windows.py"
+cmd = "cd /workspace && soldr cargo build -p clud --bin clud && pip install --break-system-packages patchelf && pip install --break-system-packages pytest running-process==4.10.1 && CLUD_TEST_BINARY=/build/target/debug/clud python -m pytest -p no:cacheprovider -v tests/test_rm_shim.py::test_old_stub_corpus_maps_to_new_floor_and_hook tests/test_rm_shim.py::test_current_and_parent_are_refused_without_handoff tests/test_safe_rm.py tests/test_safe_rm_windows.py"
 
 [task.rm-lint-alpine]
 stack = "clud_rm_alpine"
@@ -325,7 +325,7 @@ cmd = "cd /workspace && pip install --break-system-packages patchelf && pip inst
 
 [task.rm-hook-latency-verify]
 stack = "clud_rm_verify"
-cmd = "cd /workspace && soldr cargo build -p clud --bin clud-cmd-scan && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && RM_HOOK_BENCH=1 CLUD_TEST_BINARY=/build/target/debug/clud /workspace/.venv/bin/python -m pytest -p no:cacheprovider -v tests/test_hook_latency.py"
+cmd = "cd /workspace && soldr cargo build -p clud --bin clud && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && RM_HOOK_BENCH=1 CLUD_TEST_BINARY=/build/target/debug/clud /workspace/.venv/bin/python -m pytest -p no:cacheprovider -v tests/test_hook_latency.py"
 
 [task.rm-windows-clippy-alpine]
 stack = "clud_rm_alpine"

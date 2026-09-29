@@ -1,6 +1,6 @@
 //! Working on clud inside clud's own repo.
 //!
-//! `bash build` replaces `target/debug/clud-shim`, after which the command
+//! `bash build` replaces `target/debug/clud`, after which the command
 //! hook's rm identity check stops matching the installed rm shim and denies
 //! every shell call, including the ones that would repair it. Inside this
 //! repo clud therefore sets [`SKIP_RM_IDENTITY_ENV`] for the session (the

@@ -17,7 +17,7 @@ Layout produced under `--dest` after `unpack`:
     bundle/
       manifest.json                     triple, profile, sha, harness list
       target/<profile-dir>/             CARGO_TARGET_DIR points here, so
-        clud, clud-shim, ...            crates/clud-bin/tests/common/mod.rs:33
+        clud, mock-agent, ...           crates/clud-bin/tests/common/mod.rs:33
         mock-agent                      resolves mock_agent_path() with no
                                         source change
       tests/                            cargo test harness binaries
@@ -46,11 +46,10 @@ CI_SCRATCH = ROOT / ".ci-build"
 
 #: Workspace binaries the test suites resolve by name. `mock-agent`,
 #: `daemon-stub` and the probe binaries come from testbins/.
+#: `clud` is multicall (#1551): its helper names are aliases that
+#: `ci.run_bundle` materializes beside it on the exec runner.
 WORKSPACE_BINARIES = (
     "clud",
-    "clud-shim",
-    "clud-block-bad-cmd",
-    "clud-cmd-scan",
     "clud-ctrlc-probe",
     "daemon-stub",
     "mock-agent",

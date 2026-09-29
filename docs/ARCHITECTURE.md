@@ -30,7 +30,7 @@ re-explaining.
 | [architecture/crash-reports.md](architecture/crash-reports.md) | ~110 | Panic-hook + native crash handler + `clud symbols` verifier: JSON schema, embed-line-tables-everywhere choice, opportunistic-verify model (#374) |
 | [architecture/process-reaping.md](architecture/process-reaping.md) | ~200 | The two disjoint reapers, the `(pid, creation_time)` keyspace and its single purge sweep, daemon-sparing by OS signal (marker second, whitelist last), the cooperative-marker caveat, and which test tier a reaper change belongs in |
 | [architecture/rm-tools.md](architecture/rm-tools.md) | ~170 | `safe-rm` (#1461): trash, profile roots, audit, hook rewrite, and the child catastrophe floor |
-| [architecture/shim-dispatch.md](architecture/shim-dispatch.md) | ~90 | `clud-shim`'s alias registry, single dispatch path, session ABI stamp, and fail-open passthrough outside a session (#1546) |
+| [architecture/shim-dispatch.md](architecture/shim-dispatch.md) | ~90 | The shim aliases' registry (argv[0] names of the one `clud` binary), single dispatch path, session ABI stamp, and fail-open passthrough outside a session (#1546) |
 | [architecture/gh-watch-shim.md](architecture/gh-watch-shim.md) | ~30 | Session `gh` alias, PR-watch translation, and target resolution |
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
 | [architecture/installer-pages.md](architecture/installer-pages.md) | ~30 | Published release assets to validated v1 Catalog, exact Pages paths, and unauthenticated deployment smoke |

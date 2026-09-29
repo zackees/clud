@@ -32,15 +32,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 BuildMode = Literal["dev", "release"]
-# Every binary a shipped wheel must carry. This tuple is the single list the
-# Windows wheel packer, the wheel verifier, and the installed-scripts verifier
-# all iterate — extending the crate's `[[bin]]` set without extending this
-# ships a wheel missing the new binary ON WINDOWS ONLY, because the manylinux
-# wheels are maturin-built (all bins) while Windows wheels are hand-packed
-# from exactly this list. That is how 2.5.5 shipped a hook rollout pointing
-# configs at `clud-cmd-scan` while the win_amd64 wheel didn't contain it
-# (#862). `test_hook_rollout_target_is_a_shipped_script` pins the invariant.
-REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd", "clud-cmd-scan")
+# Every binary a shipped wheel must carry: exactly one. `clud` is multicall
+# (#1551): `clud-cmd-scan`, `clud-block-bad-cmd`, `clud-shim` and the shim
+# aliases are argv[0] names a launch materializes under `~/.clud/state/`, so
+# no per-helper script can go missing (#862) or lose its exec bit (#1544).
+# `test_wheel_ships_exactly_one_script` pins this.
+REQUIRED_SCRIPTS = ("clud",)
 
 
 def prune_nonproduction_scripts(wheel: Path, *, compresslevel: int | None = None) -> bool:
@@ -500,14 +497,15 @@ def _verify_installed_scripts(*, env: dict[str, str]) -> int:
     # Never invoke this alias: the only payloads below are inert hook JSON.
     with tempfile.TemporaryDirectory(prefix="clud-wheel-rm-") as directory:
         alias = Path(directory) / _script_name("rm")
-        shutil.copyfile(_installed_script("clud-shim"), alias)
+        shutil.copyfile(_installed_script("clud"), alias)
         alias.chmod(0o755)
         smoke_env = env | {"PATH": directory + os.pathsep + env.get("PATH", "")}
         return _verify_installed_smokes(env=smoke_env, target=target)
 
 
 def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
-    guard = _installed_script("clud-block-bad-cmd")
+    # #1551: the scanner is `clud __cmd-scan` (also aliased `clud-cmd-scan`).
+    guard = _installed_script("clud")
     deny_payload = json.dumps(
         {
             "tool_name": "Bash",
@@ -515,7 +513,7 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
         }
     )
     deny = process.run(
-        [str(guard)],
+        [str(guard), "__cmd-scan"],
         input=deny_payload,
         text=True,
         capture_output=True,
@@ -525,7 +523,7 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
     )
     if deny.returncode != 2 or "permissionDecision" not in deny.stdout or "deny" not in deny.stdout:
         print(
-            "installed clud-block-bad-cmd deny smoke failed: "
+            "installed clud __cmd-scan deny smoke failed: "
             f"rc={deny.returncode} stdout={deny.stdout!r} stderr={deny.stderr!r}",
             file=sys.stderr,
             flush=True,
@@ -539,7 +537,7 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
         }
     )
     allow = process.run(
-        [str(guard)],
+        [str(guard), "__cmd-scan"],
         input=allow_payload,
         text=True,
         capture_output=True,
@@ -549,7 +547,7 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
     )
     if allow.returncode != 0:
         print(
-            "installed clud-block-bad-cmd allow smoke failed: "
+            "installed clud __cmd-scan allow smoke failed: "
             f"rc={allow.returncode} stdout={allow.stdout!r} stderr={allow.stderr!r}",
             file=sys.stderr,
             flush=True,

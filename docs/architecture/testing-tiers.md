@@ -71,7 +71,7 @@ pinned in `.github/workflows/_run-tests.yml`.
    strips `~/.clud/state/shims` and `~/.clud/state/rm-shim` so a developer's
    installed aliases cannot stand in for the build under test, and runs its
    own scripts with the test's interpreter.
-4. **The fixture's `rm` is in a session.** A copy of the built `clud-shim`
+4. **The fixture's `rm` is in a session.** A link of the built `clud`
    named `rm` is first on PATH, and the env carries the ABI stamp and alias
    directory (`tests/shim_env.py`), because the floor is session-only
    ([shim-dispatch.md](shim-dispatch.md)).

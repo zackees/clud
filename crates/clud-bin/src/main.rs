@@ -12,6 +12,15 @@ use clud::{
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
+    // #1551: `clud` is multicall. An alias (`clud-cmd-scan`, `rm`, `python`,
+    // ...) runs its applet before any clud startup work, so hooks and shims
+    // pay only for their own code.
+    {
+        let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        if let Some(code) = clud::multicall::dispatch(&argv) {
+            std::process::exit(code);
+        }
+    }
     // #1374: before anything can write an escape sequence (clap's help, a
     // colored notice, a selector, a PTY session), so every launch path gets
     // VT output processing on a Windows console, not only those that happen

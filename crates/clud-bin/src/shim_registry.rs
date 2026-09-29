@@ -1,8 +1,8 @@
-//! The one list of `clud-shim` aliases, and the session contract they share
+//! The one list of shim aliases, and the session contract they share
 //! (#1546).
 //!
-//! Every alias name `clud-shim` answers to is one [`ShimSpec`] row in
-//! [`SHIMS`]. The binary's single dispatch path (`bin/clud_shim.rs`, module
+//! Every shim alias name the multicall `clud` answers to is one [`ShimSpec`] row in
+//! [`SHIMS`]. The binary's single dispatch path (`clud_shim.rs`, module
 //! `dispatch`), the alias installers ([`crate::shim_install`]) and the child
 //! env policy ([`crate::shim_session::activate_rm`]) all derive from it, so a
 //! new shim is one row here plus one handler arm, which the compiler forces
@@ -41,7 +41,7 @@ pub const GH_FAIL_FAST_KEY: &str = "CLUD_GH_SHIM_FAIL_FAST";
 /// The clud executable the `gh` watch upgrade runs the bundled watcher with.
 pub const CLUD_EXE_KEY: &str = "CLUD_EXE";
 
-/// Every session key a shim reads. The guard test in `bin/clud_shim.rs`
+/// Every session key a shim reads. The guard test in `clud_shim.rs`
 /// refuses these names anywhere in the binary outside its `dispatch` module.
 pub const SESSION_KEYS: &[&str] = &[
     ABI_KEY,
@@ -182,8 +182,8 @@ pub fn file_names_in(dir: ShimDir) -> Vec<String> {
 /// directories under `home`.
 pub fn shim_dirs(self_exe: &Path, session_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(parent) = canonical(self_exe).parent() {
-        dirs.push(parent.to_path_buf());
+    if let Some(parent) = own_dir(self_exe) {
+        dirs.push(parent);
     }
     dirs.extend(session_dir.map(canonical));
     if let Some(home) = home {
@@ -236,7 +236,7 @@ pub fn next_on_path(
     shim_dirs: &[PathBuf],
     strict: bool,
 ) -> Result<PathBuf, NextOnPathError> {
-    let own_dir = canonical(self_exe).parent().map(Path::to_path_buf);
+    let own_dir = own_dir(self_exe);
     let entries: Vec<PathBuf> = std::env::split_paths(path_env).collect();
     let start = entries
         .iter()
@@ -281,6 +281,16 @@ fn scan(
         }
     }
     None
+}
+
+/// The directory the shim was invoked from. The directory is canonicalized,
+/// never the file: a symlinked alias (#1551) resolves to `clud` in its
+/// install directory, which is not a shim directory.
+fn own_dir(self_exe: &Path) -> Option<PathBuf> {
+    self_exe
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(canonical)
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -381,7 +391,7 @@ mod tests {
 
     /// Session key names are spelled once, here. Every module that produces
     /// or reads shim session state goes through the constants, so the guard in
-    /// `bin/clud_shim.rs` can find each reader by name. The sources are
+    /// `clud_shim.rs` can find each reader by name. The sources are
     /// compiled in: CI runs this test from a bundle with no source tree.
     #[test]
     fn session_key_literals_live_only_in_the_registry() {
@@ -393,10 +403,10 @@ mod tests {
             ("block_bad_cmd.rs", include_str!("block_bad_cmd.rs")),
             ("rm_guard.rs", include_str!("rm_guard.rs")),
             ("rm_tool.rs", include_str!("rm_tool.rs")),
-            ("bin/clud_shim.rs", include_str!("bin/clud_shim.rs")),
+            ("clud_shim.rs", include_str!("clud_shim.rs")),
             (
-                "bin/clud_shim/dispatch.rs",
-                include_str!("bin/clud_shim/dispatch.rs"),
+                "clud_shim/dispatch.rs",
+                include_str!("clud_shim/dispatch.rs"),
             ),
         ];
         for (file, text) in sources {

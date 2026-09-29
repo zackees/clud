@@ -39,10 +39,12 @@ const PINNED_PYTHON_SHIM_COMMAND: &str = "\"$CLUD_EXE\" tool run hooks/block-bad
 const PINNED_PYTHON_SHIM_COMMAND_EXIT: &str =
     "& $env:CLUD_EXE tool run hooks/block-bad-cmd.py; exit $LASTEXITCODE";
 
+/// Whether the running executable can serve the hook helper. Since #1551
+/// `clud` is multicall: it answers to `clud-cmd-scan` itself, so the helper
+/// is present whenever clud's own file is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallProbe {
     HelperPresent { path: PathBuf },
-    MissingFromInstalledLayout { expected: PathBuf },
     NotInstalledLayout,
 }
 
@@ -73,15 +75,6 @@ pub fn run_startup_checks(auto_fix_hooks: bool) {
     ensure_helper_on_session_path();
     let sibling_helper_present =
         matches!(probe_current_install(), InstallProbe::HelperPresent { .. });
-    if !sibling_helper_present {
-        if let InstallProbe::MissingFromInstalledLayout { expected } = probe_current_install() {
-            eprintln!(
-                "[clud] warning: native hook helper `{}` is missing at {}; run `uv tool install --force clud` to repair this install",
-                native_helper_name(),
-                expected.display()
-            );
-        }
-    }
 
     if !auto_fix_hooks {
         return;
@@ -127,20 +120,13 @@ pub fn probe_current_install() -> InstallProbe {
 }
 
 pub fn probe_install_at(current_exe: &Path) -> InstallProbe {
-    let Some(parent) = current_exe.parent() else {
-        return InstallProbe::NotInstalledLayout;
-    };
-    let helper = parent.join(native_helper_name());
-    if helper.is_file() {
-        return InstallProbe::HelperPresent { path: helper };
+    if current_exe.is_file() {
+        InstallProbe::HelperPresent {
+            path: current_exe.to_path_buf(),
+        }
+    } else {
+        InstallProbe::NotInstalledLayout
     }
-
-    let shim = parent.join(native_binary_name("clud-shim"));
-    if shim.is_file() {
-        return InstallProbe::MissingFromInstalledLayout { expected: helper };
-    }
-
-    InstallProbe::NotInstalledLayout
 }
 
 pub fn native_helper_name() -> &'static str {
@@ -153,7 +139,6 @@ fn native_binary_name(name: &'static str) -> &'static str {
         match name {
             "clud" => "clud.exe",
             "clud-cmd-scan" => "clud-cmd-scan.exe",
-            "clud-shim" => "clud-shim.exe",
             _ => name,
         }
     }
@@ -454,45 +439,25 @@ fn helper_home() -> Option<PathBuf> {
     }
 }
 
-/// Place `helper` (hardlink, falling back to a copy) alone in the
-/// helper-only directory under `home` and return that directory. An
-/// up-to-date entry is left untouched; a stale one is replaced through a
-/// temp file and rename. If the replacement fails (on Windows a running
+/// Place `helper` (the multicall `clud`) alone in the helper-only
+/// directory under `home`, named [`native_helper_name`] so argv\[0\]
+/// dispatch runs the scanner, and return that directory. A current entry is
+/// left untouched; a stale one is replaced by [`crate::multicall::place_alias`]
+/// (hardlink, else copy). If the replacement fails (on Windows a running
 /// helper cannot be replaced) an existing entry is still used.
 fn expose_helper_at(home: &Path, helper: &Path) -> io::Result<PathBuf> {
     let dir = home.join(HELPER_BIN_SUBDIR);
     std::fs::create_dir_all(&dir)?;
-    let name = helper
-        .file_name()
-        .ok_or_else(|| io::Error::other("helper path has no file name"))?;
-    let target = dir.join(name);
-    if same_contents(helper, &target) {
+    let target = dir.join(native_helper_name());
+    if crate::multicall::alias_is_current(helper, &target) {
         return Ok(dir);
     }
-    let staging = dir.join(format!(
-        ".{}.{}.tmp",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&staging);
-    let placed = std::fs::hard_link(helper, &staging)
-        .or_else(|_| std::fs::copy(helper, &staging).map(|_| ()))
-        .and_then(|()| std::fs::rename(&staging, &target));
-    if let Err(error) = placed {
-        let _ = std::fs::remove_file(&staging);
+    if let Err(error) = crate::multicall::place_alias(helper, &target) {
         if !target.is_file() {
             return Err(error);
         }
     }
     Ok(dir)
-}
-
-fn same_contents(a: &Path, b: &Path) -> bool {
-    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
-        return false;
-    };
-    meta_a.len() == meta_b.len()
-        && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 fn path_with_appended(path_env: &str, dir: &Path) -> Option<String> {
@@ -526,37 +491,15 @@ mod tests {
     }
 
     #[test]
-    fn installed_layout_probe_detects_missing_helper() {
-        let tmp = tempdir().unwrap();
-        let bin = tmp.path();
-        let clud = bin.join(native_binary_name("clud"));
-        let shim = bin.join(native_binary_name("clud-shim"));
-        write(&clud, "");
-        write(&shim, "");
-
-        assert_eq!(
-            probe_install_at(&clud),
-            InstallProbe::MissingFromInstalledLayout {
-                expected: bin.join(native_helper_name())
-            }
-        );
-
-        write(&bin.join(native_helper_name()), "");
-        assert_eq!(
-            probe_install_at(&clud),
-            InstallProbe::HelperPresent {
-                path: bin.join(native_helper_name())
-            }
-        );
-    }
-
-    #[test]
-    fn copied_test_binary_without_shim_is_not_installed_layout() {
+    fn the_running_clud_is_the_helper() {
         let tmp = tempdir().unwrap();
         let clud = tmp.path().join(native_binary_name("clud"));
-        write(&clud, "");
-
         assert_eq!(probe_install_at(&clud), InstallProbe::NotInstalledLayout);
+        write(&clud, "");
+        assert_eq!(
+            probe_install_at(&clud),
+            InstallProbe::HelperPresent { path: clud.clone() }
+        );
     }
 
     #[test]
@@ -796,7 +739,7 @@ mod tests {
     fn helper_is_exposed_alone_not_its_install_directory() {
         let tmp = tempdir().unwrap();
         let install = tmp.path().join("install");
-        let helper = install.join(native_helper_name());
+        let helper = install.join(native_binary_name("clud"));
         write(&helper, "helper-v1");
         write(&install.join("soldr"), "must not be exposed");
         let home = tmp.path().join("home");

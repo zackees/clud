@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ci import tracked_files
+from ci import multicall_aliases, tracked_files
 from ci.env import scrub_clud_session_env
 
 # A clud session exports state such as CLUD_SKIP_RM_IDENTITY (auto-on in
@@ -19,6 +19,31 @@ from ci.env import scrub_clud_session_env
 scrub_clud_session_env(os.environ)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _materialize_multicall_aliases() -> None:
+    """#1551: `clud` is multicall, so `clud-shim`, `clud-cmd-scan` and
+    `clud-block-bad-cmd` are argv[0] aliases, not build outputs. Tests invoke
+    them by path beside the `clud` under test; put them there once."""
+    exe = ".exe" if sys.platform == "win32" else ""
+    candidates = [
+        os.environ.get("CLUD_TEST_BINARY"),
+        _REPO_ROOT / "target" / "debug" / f"clud{exe}",
+        Path("/build/target/debug") / f"clud{exe}",
+    ]
+    hook = os.environ.get("CLUD_TEST_BLOCK_BAD_CMD_BINARY")
+    if hook:
+        candidates.append(Path(hook).with_name(f"clud{exe}"))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            try:
+                multicall_aliases.materialize(Path(candidate))
+            except OSError:
+                # A read-only install dir: tests that need the alias say so.
+                pass
+
+
+_materialize_multicall_aliases()
 
 
 @pytest.fixture(scope="session", autouse=True)

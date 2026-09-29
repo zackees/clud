@@ -1,4 +1,4 @@
-//! Session-launch env for the `clud-shim` aliases.
+//! Session-launch env for the shim aliases of the multicall `clud`.
 //!
 //! [`activate_rm`] is the one child-env layer that installs the session
 //! aliases, puts their directory first on PATH, and exports the session keys

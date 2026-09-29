@@ -144,12 +144,11 @@ def test_windows_arm64_wheel_does_not_require_or_ship_x64_gui(monkeypatch, tmp_p
         assert not any("clud-kittyterm/" in name for name in archive.namelist())
 
 
-def test_windows_wheel_ships_the_cmd_scan_binary() -> None:
-    """#862: 2.5.5 shipped the hook rollout pointing configs at
-    `clud-cmd-scan` while the hand-packed win_amd64 wheel didn't contain the
-    binary — every Bash PreToolUse call on Windows errored `command not
-    found`, and the scan protection was silently off."""
-    assert "clud-cmd-scan" in build_wheel.REQUIRED_SCRIPTS
+def test_wheel_ships_exactly_one_script() -> None:
+    """#1551: `clud` is multicall. One shipped script means no per-helper
+    packaging bug (#862: missing `clud-cmd-scan` on Windows; #1544: lost exec
+    bits) can recur."""
+    assert build_wheel.REQUIRED_SCRIPTS == ("clud",)
 
 
 def _zip_modes(wheel) -> dict[str, int]:
@@ -525,34 +524,53 @@ def test_local_windows_build_rejects_paste_helper_before_maturin(monkeypatch, tm
     assert not build_wheel.DIST.exists()
 
 
-def test_hook_rollout_target_is_a_shipped_script() -> None:
-    """Whatever binary the rollout migrates hook configs to MUST be in the
-    wheel. Reads NEW_COMMAND from the rollout source so a future rename
-    (bad-cmd -> cmd-scan -> ...) cannot repeat #862: the rename lands, this
-    fails until REQUIRED_SCRIPTS is extended too."""
+def test_hook_rollout_target_is_a_multicall_alias() -> None:
+    """Whatever name the rollout migrates hook configs to MUST be one the
+    multicall `clud` dispatches and the launcher materializes (#1551, and
+    #862 before it). Reads NEW_COMMAND from the rollout source and the alias
+    constants from `multicall.rs`, so a future rename fails here."""
     import re
 
-    source = (
-        build_wheel.ROOT / "crates" / "clud-bin" / "src" / "block_bad_cmd_rollout.rs"
-    ).read_text(encoding="utf-8")
-    match = re.search(r'const NEW_COMMAND: &str = "([^"]+)"', source)
+    src = build_wheel.ROOT / "crates" / "clud-bin" / "src"
+    rollout = (src / "block_bad_cmd_rollout.rs").read_text(encoding="utf-8")
+    match = re.search(r'const NEW_COMMAND: &str = "([^"]+)"', rollout)
     assert match, "NEW_COMMAND not found in block_bad_cmd_rollout.rs"
-    assert match.group(1) in build_wheel.REQUIRED_SCRIPTS, (
-        f"hook rollout targets `{match.group(1)}` but the wheel does not ship it"
+    multicall = (src / "multicall.rs").read_text(encoding="utf-8")
+    assert f'pub const CMD_SCAN: &str = "{match.group(1)}";' in multicall, (
+        f"hook rollout targets `{match.group(1)}` but clud does not dispatch it"
     )
+    # The launcher exposes the scanner under exactly that name.
+    assert 'native_binary_name("clud-cmd-scan")' in rollout
 
 
-def test_required_scripts_are_declared_crate_binaries() -> None:
-    """Every shipped script must be a real `[[bin]]` — a typo here would make
-    the Windows packer fail at release time instead of test time."""
+# Crate binaries that never ship: test probes, bench tools, and the Windows
+# Kitty paste helper (packed as a data file, not a script).
+_NON_SHIPPED_BINS = {
+    "clud-kittyterm-paste",
+    "clud-bench-proc-sampler",
+    "clud-bench-gate-replay",
+    "clud-ctrlc-probe",
+}
+
+
+def test_clud_is_the_only_shipped_crate_binary() -> None:
+    """#1551 guard: a second shipped `[[bin]]` fails here. A new helper gets
+    a dispatch name in `src/multicall.rs`, not a new executable."""
+    import re
+
     cargo = (build_wheel.ROOT / "crates" / "clud-bin" / "Cargo.toml").read_text(
         encoding="utf-8"
     )
-    import re
-
-    declared = set(re.findall(r'^name = "(clud[^"]*)"', cargo, re.MULTILINE))
-    for name in build_wheel.REQUIRED_SCRIPTS:
-        assert name in declared, f"{name} is not a declared [[bin]] in clud-bin"
+    declared = set(
+        re.findall(r'^\[\[bin\]\]\s*\nname = "([^"]+)"', cargo, re.MULTILINE)
+    )
+    assert "clud" in declared
+    shipped = declared - _NON_SHIPPED_BINS
+    assert shipped == {"clud"}, (
+        f"extra shipped [[bin]]s {sorted(shipped - {'clud'})}: add an argv[0] "
+        "alias in crates/clud-bin/src/multicall.rs instead (#1551)"
+    )
+    assert set(build_wheel.REQUIRED_SCRIPTS) == shipped
 
 
 def test_verify_windows_wheel_scripts_uses_target_not_host(monkeypatch, tmp_path):
@@ -613,12 +631,13 @@ def test_verify_macos_wheel_scripts_requires_the_webterm_companion(monkeypatch, 
     assert build_wheel.verify_wheel_scripts(wheel) == 1
 
 
-def test_verify_windows_wheel_scripts_rejects_missing_native_helper(monkeypatch, tmp_path):
+def test_verify_wheel_scripts_rejects_a_retired_helper_script(monkeypatch, tmp_path):
+    """#1551: a wheel still carrying a separate helper executable is wrong."""
     monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
-    wheel = tmp_path / "clud-2.3.0-py3-none-win_amd64.whl"
+    wheel = tmp_path / "clud-2.3.0-py3-none-manylinux_2_17_x86_64.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("clud-2.3.0.data/scripts/clud.exe", b"")
-        archive.writestr("clud-2.3.0.data/scripts/clud-shim.exe", b"")
+        archive.writestr("clud-2.3.0.data/scripts/clud", b"")
+        archive.writestr("clud-2.3.0.data/scripts/clud-shim", b"")
 
     assert build_wheel.verify_wheel_scripts(wheel) == 1
 

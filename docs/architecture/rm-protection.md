@@ -1,6 +1,6 @@
 # The child `rm` catastrophe floor
 
-The session puts a `clud-shim` copy named `rm` first on the child's PATH. This
+The session puts a `clud` alias (hardlink, symlink or copy) named `rm` first on the child's PATH. This
 shim is for commands run *by scripts*, including build tools and installers.
 The floor applies only inside a valid clud session; outside one the alias is
 the next real `rm`, unmodified ([shim-dispatch.md](shim-dispatch.md)). It

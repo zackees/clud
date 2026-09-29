@@ -20,7 +20,11 @@ def _load_shim():
     return module
 
 
-def test_legacy_shim_prefers_sibling_helper_over_path_stub(tmp_path: Path, monkeypatch) -> None:
+def test_legacy_shim_runs_the_launching_clud_not_a_path_stub(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1551: the scanner lives inside the multicall `clud`; the shim runs
+    `$CLUD_EXE __cmd-scan` and never a same-named program found on PATH."""
     shim = _load_shim()
     install = tmp_path / "install"
     poison = tmp_path / "poison"
@@ -28,23 +32,20 @@ def test_legacy_shim_prefers_sibling_helper_over_path_stub(tmp_path: Path, monke
     poison.mkdir()
     launching = install / ("clud.exe" if os.name == "nt" else "clud")
     launching.touch()
-    sibling = install / ("clud-cmd-scan.exe" if os.name == "nt" else "clud-cmd-scan")
-    sibling.touch()
-    (poison / sibling.name).touch()
+    (poison / ("clud-cmd-scan.exe" if os.name == "nt" else "clud-cmd-scan")).touch()
     monkeypatch.setenv("CLUD_EXE", str(launching))
     monkeypatch.setenv("PATH", str(poison))
 
-    assert shim._native_path() == sibling
+    assert shim._native_path() == launching
 
 
 def test_legacy_shim_never_falls_back_to_path(tmp_path: Path, monkeypatch) -> None:
     shim = _load_shim()
-    launching = tmp_path / ("clud.exe" if os.name == "nt" else "clud")
-    launching.touch()
+    missing = tmp_path / ("clud.exe" if os.name == "nt" else "clud")
     poison = tmp_path / "poison"
     poison.mkdir()
     (poison / ("clud-cmd-scan.exe" if os.name == "nt" else "clud-cmd-scan")).touch()
-    monkeypatch.setenv("CLUD_EXE", str(launching))
+    monkeypatch.setenv("CLUD_EXE", str(missing))
     monkeypatch.setenv("PATH", str(poison))
 
     assert shim._native_path() is None

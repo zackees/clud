@@ -567,7 +567,7 @@ The rationale is in
 | `grind-lander` | Read, Grep, Glob, Bash, Skill | `gh pr view\|checks\|diff\|list\|merge`, `gh pr ready` on the feature PR under `feature_merge: auto` only, `gh run view\|list`, read-only git, plain `git push`, `pr_merge_watch` |
 
 Claude Code enforces the tool lists. Shell commands are enforced by clud's
-native PreToolUse hook (`clud-block-bad-cmd`): the harness puts the calling
+native PreToolUse hook (`clud-cmd-scan`, an argv[0] alias of `clud`): the harness puts the calling
 subagent's `agent_type` in the payload, and
 `block_bad_cmd_grind_caps.rs` applies that role's policy. Commands it cannot
 decompose (command substitution, subshells) are refused for capped roles, as

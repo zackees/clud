@@ -341,8 +341,11 @@ past unchecked (zackees/clud#1084). `"*"` scans every tool call; the hook
 self-selects the shell dialect internally, so a non-shell tool call is a cheap
 no-op.
 
-If you ever see `clud-cmd-scan: command not found`, the guard isn't installed
-and is doing nothing — run `uv tool install --force clud`. (If you have an old
+`clud-cmd-scan` is not a separate program: it is a name for the one `clud`
+binary, which clud links onto the session PATH at launch. Outside a session,
+`clud __cmd-scan` runs the same guard. If you ever see
+`clud-cmd-scan: command not found`, the guard isn't reachable and is doing
+nothing — run `uv tool install --force clud` and launch `clud` once. (If you have an old
 config that calls `block-bad-cmd`, clud quietly upgrades it to `clud-cmd-scan`
 the next time it launches.)
 
@@ -473,8 +476,8 @@ just type it in front of the command.
 `CLUD_ALLOW_ALL_CMDS=1` skips every `clud-cmd-scan` check, built-in ones
 included (the rm-shim identity check, the `cd` pin, `bad_commands`,
 `bad_pipelines`, and the `/grind` role caps). It is the escape hatch for when
-the guard itself is wedged — for example, a rebuilt `clud-shim` that no longer
-matches the installed rm shim, which makes the guard deny every shell call.
+the guard itself is wedged — for example, a rebuilt `clud` that no longer
+matches the installed rm shim alias, which makes the guard deny every shell call.
 
 ```bash
 export CLUD_ALLOW_ALL_CMDS=1        # the whole session
@@ -493,7 +496,7 @@ identity check; every other check, including the `/grind` role caps, still
 runs. clud sets it automatically when launched inside clud's own repo
 (detected by `crates/clud-bin/Cargo.toml` naming the `clud` package) and
 prints a yellow startup warning, because `bash build` replaces
-`target/debug/clud-shim` and would otherwise wedge every shell call. Unlike
+`target/debug/clud` (which every shim alias is) and would otherwise wedge every shell call. Unlike
 `CLUD_ALLOW_ALL_CMDS`, writing it into a command has no effect.
 
 ### Keep the agent from wandering out of the repo

@@ -6,9 +6,8 @@
 # What this does:
 #   1. Ensures `uv` (https://docs.astral.sh/uv) is installed (idempotent;
 #      bootstraps it via Astral's official one-line installer if missing).
-#   2. Runs `uv tool install clud[==VERSION]`, which drops `clud` and
-#      helper executables such as `clud-block-bad-cmd` into uv's tool bin
-#      directory.
+#   2. Runs `uv tool install clud[==VERSION]`, which drops the one
+#      multicall `clud` executable into uv's tool bin directory.
 #   3. Calls `uv tool update-shell` so the bin directory lands on PATH for
 #      future shells.
 #   4. Prints the explicit PATH line if your current shell needs reloading.
@@ -78,34 +77,30 @@ verify_clud_install() {
         err "could not determine uv tool bin dir after install"
     fi
     clud_bin="$tool_bin/clud"
-    guard_bin="$tool_bin/clud-block-bad-cmd"
     if [ ! -x "$clud_bin" ]; then
         err "installed clud is missing or not executable at $clud_bin"
-    fi
-    if [ ! -x "$guard_bin" ]; then
-        err "installed clud is missing native helper at $guard_bin; try re-running this installer"
     fi
 
     deny_command="bad"
     deny_command="$deny_command cmd"
     deny_payload="{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$deny_command\"}}"
     set +e
-    deny_out=$(printf '%s' "$deny_payload" | "$guard_bin" 2>/dev/null)
+    deny_out=$(printf '%s' "$deny_payload" | "$clud_bin" __cmd-scan 2>/dev/null)
     deny_rc=$?
     set -e
     if [ "$deny_rc" -ne 2 ] \
         || ! printf '%s' "$deny_out" | grep -q 'permissionDecision' \
         || ! printf '%s' "$deny_out" | grep -q 'deny'; then
-        err "native clud-block-bad-cmd deny smoke failed (exit $deny_rc)"
+        err "native clud __cmd-scan deny smoke failed (exit $deny_rc)"
     fi
 
     allow_payload='{"tool_name":"Bash","tool_input":{"command":"echo ok"}}'
     set +e
-    printf '%s' "$allow_payload" | "$guard_bin" >/dev/null 2>&1
+    printf '%s' "$allow_payload" | "$clud_bin" __cmd-scan >/dev/null 2>&1
     allow_rc=$?
     set -e
     if [ "$allow_rc" -ne 0 ]; then
-        err "native clud-block-bad-cmd allow smoke failed (exit $allow_rc)"
+        err "native clud __cmd-scan allow smoke failed (exit $allow_rc)"
     fi
 }
 

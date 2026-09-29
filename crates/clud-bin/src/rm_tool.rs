@@ -16,8 +16,8 @@
 //! symlinked parent that leaves the roots are always refused. Each call
 //! writes one JSONL audit record under `~/.clud/state/logs/rm/`.
 //!
-//! The binaries are argv\[0\] aliases of `clud-shim` (see
-//! `bin/clud_shim.rs`), installed next to the session's `rm` shim; `clud
+//! The binaries are argv\[0\] aliases of the multicall `clud` (see
+//! `clud_shim.rs`), installed next to the session's `rm` shim; `clud
 //! safe-rm` / `clud safe-rm` are the same code. The child `rm` shim
 //! ([`crate::rm_guard`]) enforces only the catastrophe floor. See
 //! [`docs/architecture/rm-tools.md`](../../../docs/architecture/rm-tools.md).

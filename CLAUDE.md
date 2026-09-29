@@ -160,9 +160,11 @@ It dispatches on argv[0] before any other startup work. Do not add a new
 `[[bin]]`, a separately packaged helper, or a new entry in the wheel's script
 list. A new function gets a dispatch name in `clud` instead. Test-only
 binaries that never ship (such as `clud-ctrlc-probe`, pruned from the wheel)
-are exempt. Migration from
-the current separate binaries is tracked in
-[#1551](https://github.com/zackees/clud/issues/1551).
+are exempt. The migration is done (#1551): dispatch lives in
+`crates/clud-bin/src/multicall.rs`, and
+`tests/test_build_wheel.py::test_clud_is_the_only_shipped_crate_binary`
+fails on a second shipped `[[bin]]`
+([DD-121](docs/DESIGN_DECISIONS.md#dd-121-helper-executables-are-argv0-aliases-of-the-one-clud-binary)).
 
 ### Interpreter name: `python`, never the versioned name
 

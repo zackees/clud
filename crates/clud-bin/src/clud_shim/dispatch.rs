@@ -1,4 +1,4 @@
-//! The one entry path for every `clud-shim` alias (#1546).
+//! The one entry path for every shim alias of the multicall `clud` (#1546, #1551).
 //!
 //! This module alone owns the three decisions every shim shares:
 //!
@@ -19,10 +19,10 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use clud::shim_registry::{self as registry, Fallback, ShimKind};
+use crate::shim_registry::{self as registry, Fallback, ShimKind};
 
 /// The binary's own name; `clud-shim --registry` prints the registry.
-const SELF_NAME: &str = "clud-shim";
+const SELF_NAME: &str = crate::multicall::SHIM;
 
 pub struct GhSession {
     pub target: PathBuf,
@@ -56,9 +56,10 @@ pub fn run(argv: &[OsString]) -> i32 {
     }
     let var = |key: &str| std::env::var_os(key);
     let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let path = std::env::var_os("PATH").unwrap_or_default();
     let facts = Facts {
-        self_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from(&argv0)),
-        path: std::env::var_os("PATH").unwrap_or_default(),
+        self_exe: self_exe(&argv0, &path),
+        path,
         home: std::env::var_os(home_key).map(PathBuf::from),
         var: &var,
     };
@@ -73,6 +74,36 @@ pub fn run(argv: &[OsString]) -> i32 {
             }
         },
     }
+}
+
+/// This process's own path: the alias it was started through when that
+/// resolves to the running executable, else `current_exe()`.
+fn self_exe(argv0: &OsString, path: &OsString) -> PathBuf {
+    let current = std::env::current_exe().ok();
+    let resolve = |p: &PathBuf| std::fs::canonicalize(p).ok();
+    match (invoked_path(argv0, path), &current) {
+        (Some(invoked), Some(current)) if resolve(&invoked) == resolve(current) => invoked,
+        (_, Some(current)) => current.clone(),
+        (Some(invoked), None) => invoked,
+        (None, None) => PathBuf::from(argv0),
+    }
+}
+
+/// The alias path this process was started through, from argv\[0\]: as
+/// given when it names a directory, else the first match on PATH (what the
+/// shell ran). Not `current_exe()`, which on Linux resolves a symlinked
+/// alias to `clud` itself (#1551).
+fn invoked_path(argv0: &OsString, path: &OsString) -> Option<PathBuf> {
+    let given = PathBuf::from(argv0);
+    if given.components().count() > 1 {
+        let absolute = if given.is_absolute() {
+            given
+        } else {
+            std::env::current_dir().ok()?.join(given)
+        };
+        return absolute.is_file().then_some(absolute);
+    }
+    crate::shim_resolve::which(argv0.to_str()?, path.to_str()?)
 }
 
 pub enum Decision {
