@@ -611,8 +611,10 @@ Skills and hooks:
   `clud-block-bad-cmd` helper: stale install warning plus exact old hook
   command rewrites when the helper is available. Every scope only ever gets
   the portable bare `clud-cmd-scan`, never an absolute path (#1426, #1334);
-  the session appends the helper's directory to PATH when it is not already
-  resolvable, and launch warns about hooks whose program does not exist.
+  when the helper is not already resolvable, the session links it alone into
+  `~/.clud/state/helper-bin` and appends that directory to PATH (never the
+  install directory, whose other programs would leak into descendants), and
+  launch warns about hooks whose program does not exist.
   `ci/banned_hook_paths.py` keeps committed hook configs portable.
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`

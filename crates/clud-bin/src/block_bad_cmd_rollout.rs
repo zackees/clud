@@ -407,9 +407,18 @@ pub fn dangling_hook_program_warnings(repo_root: &Path, home: Option<&Path>) -> 
 }
 
 /// Make the bare `clud-cmd-scan` hook command resolve for this session: when
-/// it is not already on PATH but sits next to the running clud, append that
-/// directory to PATH so every backend child inherits it. Appended, not
-/// prepended, so it never shadows an installed helper or the session shims.
+/// it is not already on PATH but sits next to the running clud, expose it
+/// through a helper-only directory appended to PATH, so every backend child
+/// inherits it. Appended, not prepended, so it never shadows an installed
+/// helper or the session shims.
+///
+/// The install directory itself is never put on PATH: it holds every other
+/// program installed beside clud (a venv's `python`/`pip`/`soldr`, a `uv
+/// tool` dir's companions), and exposing them changes what the session and
+/// every descendant resolve by name (a venv's `soldr`, for instance, turns on
+/// `.clud/settings.json` soldr routing in daemon workers). Appending the
+/// install directory broke the Windows daemon integration tests after #1560.
+/// The helper-only directory contains exactly one program.
 pub fn ensure_helper_on_session_path() {
     let path_env = std::env::var("PATH").unwrap_or_default();
     if crate::shim_resolve::which(native_helper_name(), &path_env).is_some() {
@@ -418,14 +427,72 @@ pub fn ensure_helper_on_session_path() {
     let InstallProbe::HelperPresent { path } = probe_current_install() else {
         return;
     };
-    let Some(dir) = path.parent() else {
+    let Some(home) = helper_home() else {
         return;
     };
-    if let Some(updated) = path_with_appended(&path_env, dir) {
+    let Ok(dir) = expose_helper_at(&home, &path) else {
+        return;
+    };
+    if let Some(updated) = path_with_appended(&path_env, &dir) {
         // SAFETY: startup-only write, before the backend is spawned and
         // before any thread that reads the environment runs.
         unsafe { std::env::set_var("PATH", updated) };
     }
+}
+
+/// Under the user's home: the helper-only PATH directory.
+const HELPER_BIN_SUBDIR: &str = ".clud/state/helper-bin";
+
+fn helper_home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+/// Place `helper` (hardlink, falling back to a copy) alone in the
+/// helper-only directory under `home` and return that directory. An
+/// up-to-date entry is left untouched; a stale one is replaced through a
+/// temp file and rename. If the replacement fails (on Windows a running
+/// helper cannot be replaced) an existing entry is still used.
+fn expose_helper_at(home: &Path, helper: &Path) -> io::Result<PathBuf> {
+    let dir = home.join(HELPER_BIN_SUBDIR);
+    std::fs::create_dir_all(&dir)?;
+    let name = helper
+        .file_name()
+        .ok_or_else(|| io::Error::other("helper path has no file name"))?;
+    let target = dir.join(name);
+    if same_contents(helper, &target) {
+        return Ok(dir);
+    }
+    let staging = dir.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&staging);
+    let placed = std::fs::hard_link(helper, &staging)
+        .or_else(|_| std::fs::copy(helper, &staging).map(|_| ()))
+        .and_then(|()| std::fs::rename(&staging, &target));
+    if let Err(error) = placed {
+        let _ = std::fs::remove_file(&staging);
+        if !target.is_file() {
+            return Err(error);
+        }
+    }
+    Ok(dir)
+}
+
+fn same_contents(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    meta_a.len() == meta_b.len()
+        && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 fn path_with_appended(path_env: &str, dir: &Path) -> Option<String> {
@@ -723,6 +790,39 @@ mod tests {
             Some("python")
         );
         assert_eq!(hook_program("   "), None);
+    }
+
+    #[test]
+    fn helper_is_exposed_alone_not_its_install_directory() {
+        let tmp = tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let helper = install.join(native_helper_name());
+        write(&helper, "helper-v1");
+        write(&install.join("soldr"), "must not be exposed");
+        let home = tmp.path().join("home");
+
+        let dir = expose_helper_at(&home, &helper).unwrap();
+
+        assert_ne!(dir, install);
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from(native_helper_name())]
+        );
+        let exposed = dir.join(native_helper_name());
+        assert_eq!(std::fs::read_to_string(&exposed).unwrap(), "helper-v1");
+
+        // A rebuilt helper (new file, as a build writes it) replaces the stale entry.
+        std::fs::remove_file(&helper).unwrap();
+        write(&helper, "helper-v2-longer");
+        assert_eq!(expose_helper_at(&home, &helper).unwrap(), dir);
+        assert_eq!(
+            std::fs::read_to_string(&exposed).unwrap(),
+            "helper-v2-longer"
+        );
     }
 
     #[test]
