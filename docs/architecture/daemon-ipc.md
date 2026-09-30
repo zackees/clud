@@ -48,7 +48,9 @@ The daemon is lazy rather than permanently resident. New settings seed
 `daemon.idle_timeout_secs` to 900 seconds; a user may select another positive duration or set
 it to `0` to leave automatic retirement disabled. Idle retirement is prevented by daemon workers,
 foreground client leases, live dashboard/top polling, active RPC connections (including the broker
-frame lane), and pending maintenance. `ensure_daemon` transparently starts a replacement on the
+frame lane), and pending maintenance. Every launch that starts the daemon early takes the
+foreground lease, centralized ones included: their session holds the daemon only after `Create`,
+and without the lease a slow startup let it retire first (#1637). `ensure_daemon` transparently starts a replacement on the
 next normal invocation after an idle exit.
 
 The daemon owns its HTTP telemetry endpoint only while it is live. An inherited telemetry URL is
