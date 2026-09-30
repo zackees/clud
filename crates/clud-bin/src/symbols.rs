@@ -1089,10 +1089,15 @@ mod tests {
         let code = install_with(&[report], &|url| net.fetch(url), &cache);
 
         assert_eq!(code, 0);
-        let installed = cache.join(BUILD_ID).join(sidecar_asset_name(LINUX).unwrap());
+        let installed = cache
+            .join(BUILD_ID)
+            .join(sidecar_asset_name(LINUX).unwrap());
         assert!(installed.is_file(), "sidecar was not cached");
         assert_eq!(fs::read(&installed).unwrap(), b"dwarf package bytes");
-        assert!(!cache.join("2.8.0").exists(), "the cache is keyed by build-id, not version");
+        assert!(
+            !cache.join("2.8.0").exists(),
+            "the cache is keyed by build-id, not version"
+        );
         let seen = net.seen.borrow();
         assert_eq!(seen[0], build_ids_url("2.8.0"), "pairing is checked first");
         assert_eq!(seen[1], checksum_manifest_url("2.8.0"));
@@ -1112,7 +1117,10 @@ mod tests {
 
         assert_eq!(code, 0, "a local build is not an error");
         assert!(!net.requested_the_sidecar(), "{:?}", net.seen.borrow());
-        assert!(!cache.exists(), "nothing may be cached for an unpaired build");
+        assert!(
+            !cache.exists(),
+            "nothing may be cached for an unpaired build"
+        );
     }
 
     /// No entry for the triple: same skip.
@@ -1385,7 +1393,10 @@ mod tests {
 
         assert!(!dirs[0].exists(), "the legacy version dir is least recent");
         assert!(dirs[1].exists());
-        assert!(dirs[2].exists(), "newest by mtime must survive a lexical sort");
+        assert!(
+            dirs[2].exists(),
+            "newest by mtime must survive a lexical sort"
+        );
     }
 
     #[test]
