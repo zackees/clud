@@ -31,6 +31,15 @@ jobs:
       # architecture/ci.md, "Never use uv run in a workflow step").
       - name: Refresh model_contexts from the OpenRouter datasheet
         run: python -m ci.refresh_model_contexts
+      # Gate (#1635, DD-127): this job pushes straight to main, so run the
+      # producer tests that read the regenerated file before committing it.
+      # A failure fails the job and nothing is pushed. pytest-timeout is
+      # needed because pyproject.toml sets `timeout`; running-process because
+      # tests/conftest.py imports ci.process.
+      - name: Test the refreshed file before committing
+        run: |
+          python -m pip install --quiet pytest pytest-timeout running-process
+          python -m pytest -q -p no:cacheprovider tests/test_refresh_model_contexts.py
       - name: Commit the refreshed section
         run: |
           if git diff --quiet -- crates/clud-bin/assets/server-settings.json; then
