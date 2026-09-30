@@ -782,8 +782,54 @@ pub fn list_live_sessions_under_lock() -> Result<Vec<LiveSession>, RegistryError
 /// lock, then close the redb file. Best-effort: if anything fails we
 /// return the error but the next startup's GC pass will clean the row.
 pub fn run_shutdown_under_lock() -> Result<(), RegistryError> {
-    let _lock = acquire_lock()?;
-    let registry = SessionRegistry::open_default()?;
+    let (lock_path, db_path) = shutdown_paths()?;
+    run_shutdown_under_lock_at(&lock_path, &db_path)
+}
+
+/// How long process exit may wait on the best-effort row removal.
+///
+/// Issue #1660: `clud fix` finished its payload on the Windows lane and then
+/// sat in `session_guard_drop` until the harness killed it 39 s later. That
+/// stage blocks on `lock_exclusive` (no timeout), then opens redb and commits
+/// with a sync. None of it is needed for correctness: the next startup's GC
+/// removes the row of a dead PID. So exit waits this long and then leaves.
+pub const SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `run_shutdown_under_lock`, but returns after `budget` even if the lock or
+/// the redb write is still pending. The work continues on a detached thread
+/// and dies with the process; the OS drops the advisory lock, redb recovers
+/// an interrupted commit on the next open, and the next startup's GC reaps
+/// the row. Paths are resolved before the thread starts so an abandoned
+/// worker never re-reads the environment after the caller moved on.
+pub fn run_shutdown_under_lock_bounded(budget: std::time::Duration) -> Result<(), RegistryError> {
+    let (lock_path, db_path) = shutdown_paths()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("clud-session-unregister".into())
+        .spawn(move || {
+            let _ = tx.send(run_shutdown_under_lock_at(&lock_path, &db_path));
+        })
+        .map_err(|e| RegistryError::Io(format!("spawn unregister thread: {e}")))?;
+    match rx.recv_timeout(budget) {
+        Ok(result) => result,
+        Err(_) => Err(RegistryError::Io(format!(
+            "session unregister exceeded {budget:?}; leaving the row for the next GC"
+        ))),
+    }
+}
+
+fn shutdown_paths() -> Result<(PathBuf, PathBuf), RegistryError> {
+    let lock_path = default_lock_path()?;
+    let db_path = match std::env::var_os(ENV_SESSION_DB) {
+        Some(v) => PathBuf::from(v),
+        None => default_db_path()?,
+    };
+    Ok((lock_path, db_path))
+}
+
+fn run_shutdown_under_lock_at(lock_path: &Path, db_path: &Path) -> Result<(), RegistryError> {
+    let _lock = acquire_lock_at(lock_path)?;
+    let registry = SessionRegistry::open_at(db_path)?;
     registry.unregister()?;
     drop(registry);
     drop(_lock);

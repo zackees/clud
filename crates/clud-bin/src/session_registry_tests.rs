@@ -530,6 +530,76 @@ fn run_startup_under_lock_releases_redb_after_return() {
     }
 }
 
+/// **Issue #1660**: exit must not wait on a held registry lock. Another
+/// holder keeps the lock; the bounded shutdown gives up after its budget and
+/// reports it, instead of blocking the process in `session_guard_drop`.
+#[test]
+fn bounded_shutdown_returns_when_lock_is_held() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("bounded.redb");
+    let lock = dir.path().join("bounded.lock");
+    // SAFETY: serialized via ENV_LOCK.
+    unsafe {
+        std::env::set_var(ENV_SESSION_DB, &db);
+        std::env::set_var(ENV_SESSION_LOCK, &lock);
+    }
+    let held = acquire_lock_at(&lock).expect("hold lock");
+    let budget = std::time::Duration::from_millis(200);
+    let started = std::time::Instant::now();
+    let result = run_shutdown_under_lock_bounded(budget);
+    let elapsed = started.elapsed();
+    unsafe {
+        std::env::remove_var(ENV_SESSION_DB);
+        std::env::remove_var(ENV_SESSION_LOCK);
+    }
+    assert!(result.is_err(), "held lock must surface as a timeout");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "bounded shutdown blocked for {elapsed:?} behind a held lock"
+    );
+    // Releasing lets the detached worker finish against the tempdir paths it
+    // captured, not whatever the environment says now.
+    drop(held);
+}
+
+/// **Issue #1660**: uncontended, the bounded shutdown still removes the row.
+#[test]
+fn bounded_shutdown_removes_row_when_uncontended() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("bounded-ok.redb");
+    let lock = dir.path().join("bounded-ok.lock");
+    // SAFETY: serialized via ENV_LOCK.
+    unsafe {
+        std::env::set_var(ENV_SESSION_DB, &db);
+        std::env::set_var(ENV_SESSION_LOCK, &lock);
+        std::env::set_var(ENV_MAX_INSTANCES, "0");
+    }
+    let info = SessionInfo {
+        pid: std::process::id(),
+        started_unix: 1,
+        backend: None,
+        launch_mode: None,
+        cwd: None,
+    };
+    let cfg = SessionRegistry::cap_config_from_env();
+    assert!(
+        run_startup_under_lock(&cfg, info)
+            .expect("startup")
+            .registered
+    );
+    run_shutdown_under_lock_bounded(SHUTDOWN_BUDGET).expect("bounded shutdown");
+    let after = SessionRegistry::open_default().expect("reopen");
+    assert_eq!(after.count_live().unwrap(), 0);
+    drop(after);
+    unsafe {
+        std::env::remove_var(ENV_SESSION_DB);
+        std::env::remove_var(ENV_SESSION_LOCK);
+        std::env::remove_var(ENV_MAX_INSTANCES);
+    }
+}
+
 /// **Issue #138 regression test**: `default_lock_path` derives from
 /// the DB path's parent dir when `CLUD_SESSION_LOCK` is unset.
 /// `CLUD_SESSION_LOCK` wins when both are set.
