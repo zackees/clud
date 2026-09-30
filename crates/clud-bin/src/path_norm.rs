@@ -334,17 +334,11 @@ mod tests {
             strip_verbatim(Path::new(r"\\?\UNC\srv\share\d")),
             PathBuf::from(r"\\srv\share\d")
         );
-        assert_eq!(
-            strip_verbatim(Path::new(r"\\?\C:")),
-            PathBuf::from(r"C:")
-        );
+        assert_eq!(strip_verbatim(Path::new(r"\\?\C:")), PathBuf::from(r"C:"));
         // No ordinary spelling exists: left alone.
         let volume = r"\\?\Volume{0b1c}\x";
         assert_eq!(strip_verbatim(Path::new(volume)), PathBuf::from(volume));
-        assert_eq!(
-            strip_verbatim(Path::new("/tmp/x")),
-            PathBuf::from("/tmp/x")
-        );
+        assert_eq!(strip_verbatim(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
     }
 
     #[test]
