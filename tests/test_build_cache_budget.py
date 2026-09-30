@@ -50,3 +50,4 @@ def test_the_store_size_is_reported_before_the_post_step_decides() -> None:
     assert "always()" in step
     assert "ZCCACHE_CACHE_DIR" in step
     assert "du -sb" in step
+    assert "--max-depth" in step  # composition, to see what a growing store is made of

@@ -321,7 +321,12 @@ jobs:
         shell: bash
         run: |
           [ -d "${ZCCACHE_CACHE_DIR:-}" ] || exit 0
-          du -sb "$ZCCACHE_CACHE_DIR" | awk '{ printf "build-cache store: %.2f GB before compression (setup-soldr cap 6 GiB, zccache budget %s)\n", $1 / 1e9, ENVIRON["ZCCACHE_CACHE_SIZE_BYTES"] == "" ? "default" : ENVIRON["ZCCACHE_CACHE_SIZE_BYTES"] }' || true
+          apparent=$(du -sb "$ZCCACHE_CACHE_DIR" | cut -f1)
+          allocated=$(du -s --block-size=1 "$ZCCACHE_CACHE_DIR" | cut -f1)
+          echo "build-cache store: apparent $(awk -v b="$apparent" 'BEGIN{printf "%.2f", b/1e9}') GB, allocated $(awk -v b="$allocated" 'BEGIN{printf "%.2f", b/1e9}') GB before compression (setup-soldr cap 6 GiB, zccache budget ${ZCCACHE_CACHE_SIZE_BYTES:-default})"
+          echo "::group::build-cache store composition (apparent bytes, depth 4)"
+          du -b --max-depth=4 "$ZCCACHE_CACHE_DIR" | sort -rn | head -25
+          echo "::endgroup::"
 
       - name: Diagnose Linux build failure
         if: ${{ failure() && runner.os == 'Linux' }}
