@@ -1162,7 +1162,82 @@ def _connection_truncated(connection: object, *, from_end: bool = False) -> bool
     return not isinstance(value, bool) or value
 
 
+_ROLLUP_PAGE_QUERY = """
+query($owner:String!,$name:String!,$oid:GitObjectID!,$after:String!){
+  repository(owner:$owner,name:$name){
+    object(oid:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$after){nodes{
+      __typename
+      ... on CheckRun{name status conclusion detailsUrl}
+      ... on StatusContext{context state targetUrl}
+    } pageInfo{hasNextPage endCursor}}}}}
+  }
+}
+"""
+
+# Bounds the page walk: 50 pages is 5000 contexts, far beyond any real PR.
+_MAX_ROLLUP_PAGES = 50
+
+
+def _all_rollup_contexts(
+    owner: str, name: str, head_sha: str, contexts: object
+) -> list[dict] | None:
+    """Return every rollup context, following `contexts` pagination (#1604).
+
+    Later pages are pinned to `head_sha`, the commit the first page came
+    from, so a push mid-walk cannot splice two commits' checks together.
+    Any failed, malformed or unbounded page yields None: a partial rollup is
+    never reported as the whole one.
+    """
+    collected: list[dict] = []
+    for _ in range(_MAX_ROLLUP_PAGES):
+        if not isinstance(contexts, dict):
+            return None
+        nodes = contexts.get("nodes")
+        page_info = contexts.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            return None
+        collected.extend(node for node in nodes if isinstance(node, dict))
+        has_next = page_info.get("hasNextPage")
+        if has_next is False:
+            return collected
+        cursor = page_info.get("endCursor")
+        if has_next is not True or not isinstance(cursor, str) or not cursor or not head_sha:
+            return None
+        data = gh_json(
+            "api",
+            "graphql",
+            "-f",
+            f"query={_ROLLUP_PAGE_QUERY}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-f",
+            f"oid={head_sha}",
+            "-f",
+            f"after={cursor}",
+        )
+        repository = (
+            ((data or {}).get("data") or {}).get("repository") if isinstance(data, dict) else None
+        )
+        commit = repository.get("object") if isinstance(repository, dict) else None
+        rollup = commit.get("statusCheckRollup") if isinstance(commit, dict) else None
+        contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
+    return None
+
+
+LAST_SNAPSHOT_FAILURE = ""
+
+
+def _snapshot_gap(reason: str) -> None:
+    """Record why no snapshot was produced, so logs name the real cause."""
+    global LAST_SNAPSHOT_FAILURE
+    LAST_SNAPSHOT_FAILURE = reason
+    return None
+
+
 def fetch_gate_snapshot(repo: str, pr: int, *, include_coderabbit: bool) -> GateSnapshot | None:
+    _snapshot_gap("GraphQL call failed or returned no pull request")
     owner, separator, name = repo.partition("/")
     if not separator or not owner or not name:
         return None
@@ -1185,7 +1260,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
         __typename
         ... on CheckRun{name status conclusion detailsUrl}
         ... on StatusContext{context state targetUrl}
-      } pageInfo{hasNextPage}}}}}}
+      } pageInfo{hasNextPage endCursor}}}}}}
     }
     recent:pullRequests(first:5,states:MERGED,orderBy:{field:UPDATED_AT,direction:DESC})
       @include(if:$includeCoderabbit){
@@ -1217,7 +1292,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
 
     reviews_connection = pull.get("reviews")
     if _connection_truncated(reviews_connection):
-        return None
+        return _snapshot_gap("reviews connection truncated (more than 100 reviews)")
 
     commit_nodes = (pull.get("commits") or {}).get("nodes") or []
     rollup_nodes: list[dict] = []
@@ -1229,13 +1304,12 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
         if rollup is not None:
             if not isinstance(rollup, dict):
                 return None
-            contexts = rollup.get("contexts")
-            if _connection_truncated(contexts):
-                return None
-            candidate_nodes = contexts.get("nodes")
-            if not isinstance(candidate_nodes, list):
-                return None
-            rollup_nodes = [node for node in candidate_nodes if isinstance(node, dict)]
+            paged = _all_rollup_contexts(
+                owner, name, str(pull.get("headRefOid") or ""), rollup.get("contexts")
+            )
+            if paged is None:
+                return _snapshot_gap("check-context pagination failed or was malformed")
+            rollup_nodes = paged
     else:
         return None
     checks = [row for node in rollup_nodes if (row := _rollup_check(node)) is not None]
@@ -1272,7 +1346,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
         if _connection_truncated(threads_connection) or _connection_truncated(
             comments_connection, from_end=True
         ):
-            return None
+            return _snapshot_gap("review threads or comments truncated (more than 100)")
         recent = repository.get("recent")
         recent_nodes = (recent.get("nodes") or []) if isinstance(recent, dict) else None
         sampled = 0
@@ -1284,7 +1358,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
                 sampled += 1
                 recent_reviews = recent.get("reviews")
                 if _connection_truncated(recent_reviews):
-                    return None
+                    return _snapshot_gap("recent PR reviews truncated (more than 100)")
                 reviews = recent_reviews.get("nodes") or []
                 if isinstance(reviews, list) and any(
                     isinstance(review, dict)
@@ -1306,7 +1380,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
                 or _connection_truncated(thread.get("comments"))
                 for thread in threads
             ):
-                return None
+                return _snapshot_gap("review thread comments truncated (more than 20)")
             normalized_comments = [
                 {"user": comment.get("author") or {}, "body": comment.get("body", "")}
                 for comment in comments
@@ -2089,16 +2163,23 @@ def watch(
         )
         if gate is None:
             api_failures += 1
-            print("NOTE  gate snapshot unavailable; retrying", file=sys.stderr, flush=True)
+            print(
+                f"NOTE  gate snapshot unavailable ({LAST_SNAPSHOT_FAILURE}); retrying",
+                file=sys.stderr,
+                flush=True,
+            )
             if log:
                 log.emit(
                     "api_degraded",
                     source="gate_snapshot",
                     reason="fetch_failed",
+                    detail=LAST_SNAPSHOT_FAILURE,
                     consecutive=api_failures,
                 )
             if api_failures >= MAX_CONSECUTIVE_API_FAILURES:
-                _exit_unreachable(f"{api_failures} consecutive failed polls", log)
+                _exit_unreachable(
+                    f"{api_failures} consecutive failed polls ({LAST_SNAPSHOT_FAILURE})", log
+                )
             _sleep_remaining_interval(poll_started, interval)
             continue
         api_failures = 0
