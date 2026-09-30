@@ -228,6 +228,12 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
     }
 }
 
+/// Errors a worker's early close surfaces on the client as, rather than EOF.
+fn is_transient_attach_error(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+    matches!(err.kind(), ConnectionReset | ConnectionAborted | BrokenPipe)
+}
+
 pub(super) fn attach_to_session(
     state_dir: &Path,
     session: &SessionSnapshot,
@@ -272,6 +278,10 @@ pub(super) fn attach_to_session(
             },
             format,
         ) {
+            if is_transient_attach_error(&err) && started.elapsed() < attach_retry_window {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
             eprintln!("[clud] failed to attach to session {}: {}", session.id, err);
             return 1;
         }
@@ -308,6 +318,17 @@ pub(super) fn attach_to_session(
                 return 1;
             }
             Ok(_) => {}
+            // A reset while waiting for the handshake is the same transient
+            // as an EOF: the worker closed the socket with our Attach still
+            // unread (a short-lived session, or the accept racing its own
+            // shutdown), so the kernel answers with RST. Retry within the
+            // window instead of failing the whole session.
+            Err(err)
+                if is_transient_attach_error(&err) && started.elapsed() < attach_retry_window =>
+            {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
             Err(err) => {
                 eprintln!("[clud] failed to attach to session {}: {}", session.id, err);
                 return 1;
@@ -868,6 +889,21 @@ fn render_background_prompt(remaining: u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reset_during_the_handshake_is_transient_but_a_refusal_is_not() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+        ] {
+            assert!(is_transient_attach_error(&Error::from(kind)), "{kind:?}");
+        }
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::InvalidData] {
+            assert!(!is_transient_attach_error(&Error::from(kind)), "{kind:?}");
+        }
+    }
+
     use super::*;
 
     /// #1448 test double: plays a script of input polls, and can record the
