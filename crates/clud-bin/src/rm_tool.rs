@@ -366,7 +366,8 @@ impl Roots {
                 for line in text.lines() {
                     if let Some(path) = line.strip_prefix("worktree ") {
                         if let Ok(path) = crate::path_norm::canonicalize_plain(path.trim()) {
-                            let home = home_dir().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
+                            let home = home_dir()
+                                .and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
                             if home.as_ref().is_some_and(|home| home.starts_with(&path)) {
                                 continue;
                             }
