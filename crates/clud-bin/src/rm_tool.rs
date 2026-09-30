@@ -163,12 +163,12 @@ impl Roots {
     /// [`Roots::resolve`] with an explicit home: `$HOME` and its ancestors
     /// are never roots, whatever launched the session there.
     pub fn resolve_with_home(env_value: Option<&OsStr>, cwd: &Path, home: Option<&Path>) -> Self {
-        let home = home.and_then(|h| std::fs::canonicalize(h).ok());
+        let home = home.and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
         let usable = |root: &PathBuf| home.as_ref().is_none_or(|home| !home.starts_with(root));
         if let Some(value) = env_value.filter(|v| !v.is_empty()) {
             let mut roots: Vec<PathBuf> = std::env::split_paths(value)
                 .filter(|p| p.is_absolute())
-                .filter_map(|p| std::fs::canonicalize(p).ok())
+                .filter_map(|p| crate::path_norm::canonicalize_plain(p).ok())
                 .filter(usable)
                 .collect();
             roots.dedup();
@@ -177,7 +177,7 @@ impl Roots {
         let base = crate::block_bad_cmd::nearest_repo_root_public(cwd)
             .unwrap_or_else(|| cwd.to_path_buf());
         Self::fixed(
-            std::fs::canonicalize(base)
+            crate::path_norm::canonicalize_plain(base)
                 .into_iter()
                 .filter(usable)
                 .collect(),
@@ -246,7 +246,7 @@ impl Roots {
     /// Whether `root` is itself the top of a git checkout.
     fn is_checkout(root: &Path) -> bool {
         crate::block_bad_cmd::nearest_repo_root_public(root)
-            .and_then(|r| std::fs::canonicalize(r).ok())
+            .and_then(|r| crate::path_norm::canonicalize_plain(r).ok())
             .is_some_and(|r| r == root)
     }
 
@@ -283,7 +283,7 @@ impl Roots {
         if !std::fs::symlink_metadata(dir.join(".git")).is_ok_and(|m| m.is_dir()) {
             return None;
         }
-        let home = home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+        let home = home_dir().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
         if home.as_ref().is_some_and(|home| home.starts_with(&dir)) {
             return None;
         }
@@ -307,7 +307,7 @@ impl Roots {
                     continue;
                 };
                 let dir = root.join(text.trim());
-                if let Ok(dir) = std::fs::canonicalize(dir) {
+                if let Ok(dir) = crate::path_norm::canonicalize_plain(dir) {
                     if !found.contains(&dir) {
                         found.push(dir);
                     }
@@ -341,7 +341,7 @@ impl Roots {
                 let Some(metadata_dir) = target.parent() else {
                     return false;
                 };
-                let metadata_dir = std::fs::canonicalize(metadata_dir)
+                let metadata_dir = crate::path_norm::canonicalize_plain(metadata_dir)
                     .unwrap_or_else(|_| metadata_dir.to_path_buf());
                 !name.is_empty()
                     && git_dirs
@@ -365,8 +365,8 @@ impl Roots {
                 };
                 for line in text.lines() {
                     if let Some(path) = line.strip_prefix("worktree ") {
-                        if let Ok(path) = std::fs::canonicalize(path.trim()) {
-                            let home = home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+                        if let Ok(path) = crate::path_norm::canonicalize_plain(path.trim()) {
+                            let home = home_dir().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
                             if home.as_ref().is_some_and(|home| home.starts_with(&path)) {
                                 continue;
                             }
@@ -451,7 +451,7 @@ pub fn resolve(
         return Err("is git metadata".into());
     }
     let parent = absolute.parent().ok_or("has no parent directory")?;
-    let parent = match std::fs::canonicalize(parent) {
+    let parent = match crate::path_norm::canonicalize_plain(parent) {
         Ok(parent) => parent,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // Still hold a missing path to the roots: on Windows `/etc/x`
@@ -469,7 +469,7 @@ pub fn resolve(
     {
         return Err("is git metadata".into());
     }
-    if let Some(home) = home.and_then(|h| std::fs::canonicalize(h).ok()) {
+    if let Some(home) = home.and_then(|h| crate::path_norm::canonicalize_plain(h).ok()) {
         if home.starts_with(&path) {
             return Err("is your home directory or one of its ancestors".into());
         }
@@ -501,7 +501,7 @@ fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
     let mut tail = Vec::new();
     let mut ancestor = path;
     loop {
-        match std::fs::canonicalize(ancestor) {
+        match crate::path_norm::canonicalize_plain(ancestor) {
             Ok(base) => return Ok(tail.iter().rev().fold(base, |acc, part| acc.join(part))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 tail.push(ancestor.file_name().ok_or("has no existing ancestor")?);
@@ -1182,12 +1182,12 @@ pub fn session_roots_value(cwd: &Path) -> Option<String> {
     if let Some(tmp) = crate::gc::session_tmp::session_tmp_dir() {
         roots.push(tmp);
     }
-    let home = home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+    let home = home_dir().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
     let roots: Vec<PathBuf> = roots
         .into_iter()
         .filter(|p| p.is_absolute() && p.is_dir())
         .filter(|p| {
-            let canonical = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+            let canonical = crate::path_norm::canonicalize_plain(p).unwrap_or_else(|_| p.clone());
             home.as_ref()
                 .is_none_or(|home| !home.starts_with(&canonical))
         })

@@ -229,7 +229,7 @@ pub fn strip_verbatim(path: &Path) -> PathBuf {
 /// `std::fs::canonicalize` without the Windows verbatim prefix; see
 /// [`strip_verbatim`]. Use it whenever the result may be handed to git or
 /// another process.
-pub fn canonicalize_plain(path: &Path) -> std::io::Result<PathBuf> {
+pub fn canonicalize_plain(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path).map(|p| strip_verbatim(&p))
 }
 
