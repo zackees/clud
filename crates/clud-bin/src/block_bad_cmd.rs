@@ -475,6 +475,18 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         }
     }
 
+    // #1301: a review that diffs against a stale `@{upstream}` (after a rebase)
+    // reads the whole rebase delta. Any caller, not only grind roles: the
+    // built-in `/code-review` hardcodes that range and clud does not own it.
+    if event == PRE_TOOL_USE_EVENT && block_bad_cmd_gate::gates_tool(&payload.tool_name) {
+        if let Some(reason) = block_bad_cmd_stale_upstream::reason(&payload.command, &payload.cwd) {
+            append_log(&format!("STALE-UPSTREAM-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud] {reason}");
+            return 2;
+        }
+    }
+
     // #1086: a shell-shaped tool whose command could not be extracted (an
     // unrecognized command key, or a non-string/non-array shape) yields an
     // empty command that would otherwise sail through as a silent allow. Route
@@ -3201,6 +3213,9 @@ mod block_bad_cmd_cwd_changed;
 
 #[path = "block_bad_cmd_grind_caps.rs"]
 mod block_bad_cmd_grind_caps;
+
+#[path = "block_bad_cmd_stale_upstream.rs"]
+mod block_bad_cmd_stale_upstream;
 
 /// The `/grind` role-cap denial for this call, if its agent is a capped role,
 /// or the feature-branch-mode router caps for any other caller while
