@@ -1530,7 +1530,11 @@ def test_a3_newer_skip_does_not_hide_older_failure(watcher) -> None:
 
 
 def test_a4_newer_skip_replaces_older_cancellation(watcher) -> None:
-    assert judge(watcher, load_case("review", "A4")).state == "pass"
+    verdict = judge(watcher, load_case("review", "A4"))
+    # The skip still replaces the cancellation (no failure), but a skip alone
+    # is no green verdict (#1639).
+    assert verdict.failing == []
+    assert verdict.state == "pending"
 
 
 def test_a5_cancelled_run_on_old_head_restarts_on_new_head(
