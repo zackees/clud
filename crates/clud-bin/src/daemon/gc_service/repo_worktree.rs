@@ -3,7 +3,7 @@
 //!
 //! This repo squash-merges, so a merged branch's tip is never an ancestor of
 //! the default branch: `git branch --merged` and `merge-base --is-ancestor`
-//! both answer "not merged" forever (DD-125). The verdict below instead
+//! both answer "not merged" forever (DD-122). The verdict below instead
 //! accepts only *positive* evidence that the work landed — a merged PR whose
 //! head covers the local tip, or a patch-equivalent commit on the default
 //! branch — and spares on every doubt.
@@ -126,8 +126,56 @@ impl RepoWorktreeVerdict {
 /// | no PR, no patch match                      | pinned      | `no PR`                    |
 /// | lookup unavailable, no patch match         | pinned      | `unverifiable`             |
 pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVerdict {
-    let _ = facts;
-    RepoWorktreeVerdict::pinned("unimplemented")
+    if !facts.evaluated {
+        return RepoWorktreeVerdict::pinned("no verdict yet");
+    }
+    if !facts.path_exists {
+        return RepoWorktreeVerdict {
+            state: RepoWorktreeState::Dangling,
+            reason: "path missing".to_string(),
+        };
+    }
+    if facts.is_main_checkout {
+        return RepoWorktreeVerdict::pinned("main checkout");
+    }
+    if facts.locked_live_pid {
+        return RepoWorktreeVerdict::pinned("locked by live pid");
+    }
+    if facts.process_inside {
+        return RepoWorktreeVerdict::pinned("process inside");
+    }
+    if facts.detached {
+        return RepoWorktreeVerdict::pinned("detached");
+    }
+    let (Some(dirty), Some(untracked)) = (facts.dirty, facts.untracked) else {
+        return RepoWorktreeVerdict::pinned("unverifiable");
+    };
+    if dirty {
+        return RepoWorktreeVerdict::pinned("dirty");
+    }
+    if untracked {
+        return RepoWorktreeVerdict::pinned("untracked");
+    }
+    let patch_landed = facts.patch_landed == Some(true);
+    match facts.pr {
+        PrFact::Open { number } => RepoWorktreeVerdict::pinned(format!("open PR #{number}")),
+        PrFact::Merged {
+            number,
+            tip_covered: Some(true),
+        } => RepoWorktreeVerdict::reclaimable(format!("merged via PR #{number}")),
+        PrFact::Merged {
+            tip_covered: Some(false),
+            ..
+        } => RepoWorktreeVerdict::pinned("commits after merge"),
+        PrFact::Merged {
+            tip_covered: None, ..
+        } => RepoWorktreeVerdict::pinned("unverifiable"),
+        PrFact::NoPr | PrFact::Unavailable if patch_landed => {
+            RepoWorktreeVerdict::reclaimable("landed by patch match")
+        }
+        PrFact::NoPr => RepoWorktreeVerdict::pinned("no PR"),
+        PrFact::Unavailable => RepoWorktreeVerdict::pinned("unverifiable"),
+    }
 }
 
 #[cfg(test)]

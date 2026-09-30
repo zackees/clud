@@ -238,6 +238,41 @@ is **an error**, not a fallback — there is no read-only path in v1
 Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the daemon
 (`crates/clud-bin/src/gc/cli.rs`).
 
+## Repo worktrees: squash-aware verdict (#1591)
+
+Sibling worktrees such as `~/dev/clud2-wt-<issue>` match none of the tracked
+kinds, and in a squash-merging repo their branch tips are never ancestors of
+the default branch, so ancestry-based checks call them live work forever
+([DD-122](../DESIGN_DECISIONS.md#dd-122-worktree-landed-verdicts-need-pr-or-patch-evidence-not-ancestry)).
+
+- **Discovery.** Worktrees of repos already in the registry's repo-visit
+  table (`record_repo_visit`), via `git worktree list --porcelain`; no
+  filesystem crawl. Repos sharing a git common dir are probed once.
+- **Where it runs.** The worker reads the visit list and hands it to a
+  `clud-gc-repo-worktree-probe` thread (`spawn_repo_worktree_probe`), which
+  sends a complete snapshot back as `RegistryMsg::RepoWorktreeVerdicts`, the
+  same off-worker pattern as the extern-repo probe (#946). One probe at a
+  time; primed at startup, refreshed each tick. `CLUD_GC_REPO_WORKTREES=0`
+  disables it. All git/`gh` calls are bounded `running-process` spawns.
+- **Verdict.** `repo_worktree_verdict` (`daemon/gc_service/repo_worktree.rs`)
+  is a pure function over `RepoWorktreeFacts`; its doc table is the
+  precedence. Reclaimable only on positive evidence: a merged PR (one
+  `gh pr list --state all` per repo per tick) whose `headRefOid` is the local
+  tip or has it as an ancestor, or, with no PR or no `gh`, the branch's
+  cumulative `-U0` diff appearing verbatim as one default-branch commit.
+  Spared, with a reason: `no verdict yet`, `main checkout`,
+  `locked by live pid` (a lock with no parseable pid counts as live),
+  `process inside` (a live session cwd), `detached`, `dirty`, `untracked`,
+  `open PR #N`, `commits after merge`, `no PR`, `unverifiable`.
+- **Surfacing.** `clud gc list [--json]` appends `kind: repo-worktree` rows
+  (`id: 0`, since no redb row backs them) with `state`, `reason`,
+  `reclaimable` and `evaluated_unix`. A path the registry already tracks keeps
+  its own row. A live session cwd inside pins the row at list time even if
+  the snapshot is older.
+- **Not yet.** Nothing deletes on this verdict. Removal (`git worktree
+  remove` → `git branch -D` → `git worktree prune`, re-verified on the purge
+  pool) is a follow-up; see the issue linked from #1591.
+
 ## Filesystem sweeps (non-registry)
 
 Alongside the redb-tracked kinds, the daemon's periodic tick

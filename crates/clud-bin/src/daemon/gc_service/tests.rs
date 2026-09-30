@@ -252,7 +252,7 @@ fn drain_purge_completions(
             Ok(RegistryMsg::WatchRescan(_)) => {
                 // Watch notifications are irrelevant to periodic-purge tests.
             }
-            Ok(RegistryMsg::ExternVerdicts(_)) => {
+            Ok(RegistryMsg::ExternVerdicts(_) | RegistryMsg::RepoWorktreeVerdicts(_)) => {
                 // Issue #946: the off-worker probe publishes here. These
                 // tests drive the tick directly and assert on the registry,
                 // not on cached verdicts, so the snapshot is ignored.
@@ -1397,3 +1397,59 @@ fn list_filter_by_kind() {
 
 #[path = "tests/delete_and_pool.rs"]
 mod delete_and_pool;
+
+/// Issue #1591: `gc list` surfaces the cached repo-worktree snapshot with
+/// state, reason, reclaimable and evaluated_unix; a registry-tracked path
+/// keeps its own row; and a live session cwd pins a row the (up to one tick
+/// old) snapshot called reclaimable.
+#[test]
+fn repo_worktree_rows_surface_in_gc_list_shape() {
+    use super::repo_worktree::{RepoWorktreeState, RepoWorktreeVerdict};
+    let tmp = tempfile::tempdir().unwrap();
+    let landed = tmp.path().join("landed");
+    let busy = tmp.path().join("busy");
+    let tracked = tmp.path().join("tracked");
+    for p in [&landed, &busy, &tracked] {
+        fs::create_dir_all(p).unwrap();
+    }
+    let row = |p: &Path, reason: &str| RepoWorktreeRow {
+        path: p.to_string_lossy().to_string(),
+        repo_root: "/repo".to_string(),
+        branch: Some("feat".to_string()),
+        mtime_unix: 5,
+        verdict: RepoWorktreeVerdict {
+            state: RepoWorktreeState::Reclaimable,
+            reason: reason.to_string(),
+        },
+    };
+    let mut cache = SpareReasons::new();
+    assert!(cache.begin_repo_probe());
+    assert!(!cache.begin_repo_probe(), "one probe at a time");
+    cache.replace_repo_worktrees(
+        vec![
+            row(&landed, "merged via PR #1"),
+            row(&busy, "merged via PR #2"),
+            row(&tracked, "merged via PR #3"),
+        ],
+        1234,
+    );
+    assert!(cache.begin_repo_probe(), "a snapshot frees the slot");
+
+    let tracked_paths: HashSet<String> = [tracked.to_string_lossy().to_string()].into();
+    let live = canonicalize_live_cwds(vec![busy.clone()]);
+    let rows = repo_worktree_list_rows(&cache, &tracked_paths, &live);
+    assert_eq!(rows.len(), 2, "tracked path must not be listed twice");
+
+    let landed_row = &rows[0];
+    assert_eq!(landed_row.kind, REPO_WORKTREE_KIND);
+    assert_eq!(landed_row.id, 0, "no redb row backs it");
+    assert_eq!(landed_row.state, "reclaimable");
+    assert!(landed_row.reclaimable);
+    assert_eq!(landed_row.reason.as_deref(), Some("merged via PR #1"));
+    assert_eq!(landed_row.evaluated_unix, Some(1234));
+
+    let busy_row = &rows[1];
+    assert_eq!(busy_row.state, "pinned");
+    assert!(!busy_row.reclaimable);
+    assert_eq!(busy_row.reason.as_deref(), Some("process inside"));
+}
