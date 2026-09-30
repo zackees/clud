@@ -520,6 +520,15 @@ only by *target triple*, which is the minimum possible:
   keeps it for exec jobs (six OSes).
 - Full runs refresh every triple's cache; ordinary `main` pushes refresh only
   Linux x64. PR jobs restore compatible entries via `restore-keys`.
+- The Linux x64 build job gives zccache a 4 GiB store budget
+  (`ZCCACHE_CACHE_SIZE_BYTES`, `_build-target.yml`). zccache's default budget is
+  5% of the disk (40-200 GiB), so on a CI runner nothing is evicted and the
+  restored-extended-saved store grows past setup-soldr's 6 GiB payload cap
+  (`cache-payload-max-bytes`); the cap's default action is to *skip* the save,
+  which froze the Linux x64 cache on 2026-09-28 (6.19 GB before compression) while
+  every job stayed green. With a budget the daemon evicts least-recently-used
+  entries to 70-80% of it, and the job logs the store size
+  (`Report build-cache store size`) so a creeping store is visible.
 
 ## Bundles: what crosses the wire
 

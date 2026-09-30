@@ -84,6 +84,20 @@ jobs:
       # See zackees/soldr#1879. Set at job level so every step, including the
       # composite's setup-soldr and the maturin-spawned cargo, sees it.
       SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # zccache's artifact store is LRU-bounded by a budget that defaults to 5%
+      # of the filesystem (40-200 GiB), so on a CI runner nothing is ever
+      # evicted and the restored-extended-saved store grows until it crosses
+      # setup-soldr's 6 GiB payload cap (`cache-payload-max-bytes`). From then
+      # on every main push logs "exceeding cache-payload-max-bytes ... skipping
+      # cache save" and stays green: the Linux x64 build cache froze on
+      # 2026-09-28 at 6.19 GB before compression, so every PR recompiles each
+      # first-party crate changed since. A 4 GiB budget keeps the daemon's
+      # startup/5-minute pressure passes evicting least-recently-used entries
+      # (to 70-80% of the budget) so the store stays well under the cap and its
+      # save resumes. Linux x64 compile jobs only: the clippy job is
+      # restore-only, and the other targets' stores have not been measured.
+      # An empty value is ignored by soldr, so the expression is safe elsewhere.
+      ZCCACHE_CACHE_SIZE_BYTES: ${{ inputs.compile && inputs.target == 'x86_64-unknown-linux-gnu' && '4294967296' || '' }}
       # whisper-rs-sys vendors `std::filesystem::path`, which requires macOS
       # 10.15+. Rust on stable defaults to 10.12, which fails the vendored C++
       # build. No-op off darwin. (Issue #13 follow-up.)
@@ -298,6 +312,16 @@ jobs:
           name: debuginfo-${{ inputs.target }}
           path: dist-debuginfo/*
           if-no-files-found: ignore
+
+      # Makes the store size visible before setup-soldr's post step decides
+      # whether it fits under the payload cap; until now the only signal was a
+      # warning buried in the post-step log (and none at all on PRs).
+      - name: Report build-cache store size
+        if: ${{ always() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          [ -d "${ZCCACHE_CACHE_DIR:-}" ] || exit 0
+          du -sb "$ZCCACHE_CACHE_DIR" | awk '{ printf "build-cache store: %.2f GB before compression (setup-soldr cap 6 GiB, zccache budget %s)\n", $1 / 1e9, ENVIRON["ZCCACHE_CACHE_SIZE_BYTES"] == "" ? "default" : ENVIRON["ZCCACHE_CACHE_SIZE_BYTES"] }' || true
 
       - name: Diagnose Linux build failure
         if: ${{ failure() && runner.os == 'Linux' }}
