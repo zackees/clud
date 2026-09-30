@@ -7,7 +7,8 @@
 //! injected all-clear process table.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::super::{
     decide_action, execute_candidate, plan_in, run_git, run_in, Action, CleanEnv, CleanOptions,
@@ -352,11 +353,29 @@ fn all_clear() -> ProcessCwdSnapshot {
 fn with_env<T>(f: impl FnOnce(&CleanEnv<'_>) -> T) -> T {
     let liveness = MockLivenessProbe::with_alive([]);
     let env = CleanEnv {
-        lookup_prs: &no_prs,
-        procs: &all_clear,
+        lookup_prs: Arc::new(no_prs),
+        procs: Arc::new(all_clear),
         wt_root: None,
         liveness: &liveness,
         locked_hard_age: days(7),
+        verdict_deadline: Duration::from_secs(60),
+    };
+    f(&env)
+}
+
+/// #1648: a verdict source that never answers in time.
+fn with_slow_env<T>(deadline: Duration, f: impl FnOnce(&CleanEnv<'_>) -> T) -> T {
+    let liveness = MockLivenessProbe::with_alive([]);
+    let env = CleanEnv {
+        lookup_prs: Arc::new(no_prs),
+        procs: Arc::new(|| {
+            std::thread::sleep(Duration::from_secs(30));
+            all_clear()
+        }),
+        wt_root: None,
+        liveness: &liveness,
+        locked_hard_age: days(7),
+        verdict_deadline: deadline,
     };
     f(&env)
 }
@@ -409,6 +428,50 @@ fn dry_run_previews_the_verdict_and_reason_the_real_run_acts_on() {
     assert_eq!(with_env(|env| run_in(&fx.repo, &o, env)), 0);
     for dir in [&fx.merged, &fx.dirty, &fx.unmerged] {
         assert!(dir.exists(), "--dry-run touched {}", dir.display());
+    }
+}
+
+/// #1648: the verdict phase honors its overall deadline, and a worktree
+/// whose verdict did not arrive is spared with `verdict timed out` — a
+/// missing verdict never makes anything removable.
+#[test]
+fn a_slow_verdict_source_is_cut_off_at_the_deadline_and_spares() {
+    let fx = fixture();
+    let started = Instant::now();
+    let (_, plan) =
+        with_slow_env(Duration::from_millis(500), |env| plan_in(&fx.repo, &opts(false), env))
+            .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "plan took {elapsed:?} against a 500 ms verdict deadline"
+    );
+    assert!(plan.candidates.is_empty(), "{plan:?}");
+    let merged = plan
+        .skipped
+        .iter()
+        .find(|s| same(&s.entry.path, &fx.merged))
+        .expect("merged worktree listed as skipped");
+    assert_eq!(merged.reason, "verdict timed out");
+    let dirty = plan
+        .skipped
+        .iter()
+        .find(|s| same(&s.entry.path, &fx.dirty))
+        .expect("dirty worktree listed as skipped");
+    assert_eq!(
+        dirty.reason,
+        "dirty (use --force to remove); verdict timed out"
+    );
+
+    // A real run against the same slow source removes nothing.
+    let started = Instant::now();
+    assert_eq!(
+        with_slow_env(Duration::from_millis(500), |env| run_in(&fx.repo, &opts(false), env)),
+        0
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    for dir in [&fx.merged, &fx.dirty, &fx.unmerged] {
+        assert!(dir.exists(), "a timed-out verdict removed {}", dir.display());
     }
 }
 

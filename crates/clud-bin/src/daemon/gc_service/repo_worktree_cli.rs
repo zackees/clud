@@ -22,6 +22,11 @@ pub(crate) fn live_process_cwds() -> ProcessCwdSnapshot {
     collect_process_cwds()
 }
 
+/// The repo's PRs for the interactive CLI (#1648).
+pub(crate) fn lookup_prs_for_cli(main_repo: &Path) -> Option<Vec<PrRecord>> {
+    lookup_prs(main_repo)
+}
+
 /// Verdict rows for every worktree of `main_repo`. The CLI has no session
 /// registry, so it relies on the process table alone for "process inside".
 pub(crate) fn probe_for_cli(

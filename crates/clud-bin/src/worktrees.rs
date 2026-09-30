@@ -21,6 +21,7 @@
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
@@ -135,11 +136,12 @@ pub fn run(opts: &CleanOptions) -> i32 {
         }
     };
     let env = CleanEnv {
-        lookup_prs: &repo_worktree_cli::lookup_prs,
-        procs: &repo_worktree_cli::live_process_cwds,
+        lookup_prs: Arc::new(repo_worktree_cli::lookup_prs_for_cli),
+        procs: Arc::new(repo_worktree_cli::live_process_cwds),
         wt_root: crate::gc::worktree_root::worktree_root(),
         liveness: &OsLivenessProbe,
         locked_hard_age: locked_hard_age_from_env(),
+        verdict_deadline: VERDICT_DEADLINE,
     };
     run_in(&main_repo, opts, &env)
 }
@@ -147,13 +149,30 @@ pub fn run(opts: &CleanOptions) -> i32 {
 /// Everything [`run_in`] reads from the outside world besides the repo
 /// itself, injected so the real-git tests (#1606) never reach the network,
 /// the real process table or the real `~/.clud`.
+///
+/// The PR lookup and the process table are `Arc`s because the verdict is
+/// gathered on a worker thread the CLI stops waiting for at
+/// `verdict_deadline` (#1648); a slow source must not hold the command.
 pub(crate) struct CleanEnv<'a> {
-    pub(crate) lookup_prs: &'a dyn Fn(&Path) -> Option<Vec<PrRecord>>,
-    pub(crate) procs: &'a dyn Fn() -> ProcessCwdSnapshot,
+    pub(crate) lookup_prs: PrLookup,
+    pub(crate) procs: ProcsSource,
     pub(crate) wt_root: Option<PathBuf>,
     pub(crate) liveness: &'a dyn LivenessProbe,
     pub(crate) locked_hard_age: Duration,
+    /// Issue #1648: total time the CLI waits for verdict rows. A worktree
+    /// with no row by then keeps the ancestry decision, marked
+    /// `verdict timed out`.
+    pub(crate) verdict_deadline: Duration,
 }
+
+pub(crate) type PrLookup = Arc<dyn Fn(&Path) -> Option<Vec<PrRecord>> + Send + Sync>;
+pub(crate) type ProcsSource = Arc<dyn Fn() -> ProcessCwdSnapshot + Send + Sync>;
+
+/// Issue #1648: the whole verdict phase of `--clean-worktrees` gets this
+/// long, well under the 10 s the CLI smoke test allows on a cold Windows
+/// runner. Past it, the ancestry rules decide, which is the pre-#1606
+/// behavior.
+const VERDICT_DEADLINE: Duration = Duration::from_secs(4);
 
 /// [`run`] against an explicit repo and environment.
 pub(crate) fn run_in(main_repo: &Path, opts: &CleanOptions, env: &CleanEnv<'_>) -> i32 {
@@ -242,8 +261,8 @@ fn execute_candidate(
         Some(row) => worktrees_verdict::tally_reclaim(repo_worktree_cli::reclaim_for_cli(
             row,
             env.wt_root.clone(),
-            env.lookup_prs,
-            env.procs,
+            &*env.lookup_prs,
+            &*env.procs,
         )),
         None => match remove_worktree_path(main_repo, &c.entry.path, opts.force) {
             Ok(note) => Tally::Removed(note.trim().to_string()),
