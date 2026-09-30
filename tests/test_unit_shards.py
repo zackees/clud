@@ -21,8 +21,9 @@ import pytest
 
 from ci import pytest_shard, release_gate, run_bundle
 from ci.ci_matrix import LINUX_X64_UNIT_SHARDS, TARGETS
-from ci.pytest_shard import assign_files, load_weights, parse_spec
-from ci.run_bundle import Shard, parse_shard, run_unit_suite
+from ci.env import is_clud_session_var
+from ci.pytest_shard import SHARD_OPTION, applied_marker, assign_files, load_weights, parse_spec
+from ci.run_bundle import Shard, parse_shard, run_unit_suite, shard_was_applied
 
 ROOT = Path(__file__).resolve().parent.parent
 CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
@@ -140,6 +141,13 @@ class _Hook:
         self.deselected.extend(items)
 
 
+def _config(spec: str | None) -> SimpleNamespace:
+    def getoption(name: str) -> str | None:
+        return spec if name == SHARD_OPTION else None
+
+    return SimpleNamespace(hook=_Hook(), getoption=getoption)
+
+
 def _items(files: dict[str, int]) -> list[SimpleNamespace]:
     return [
         SimpleNamespace(nodeid=f"{name}::test_{i}")
@@ -155,30 +163,42 @@ def test_plugin_keeps_only_this_shards_files_and_reports_the_rest(
     monkeypatch.setattr(pytest_shard, "load_weights", lambda: {})
     kept: list[set[str]] = []
     for spec in ("1/2", "2/2"):
-        monkeypatch.setenv(pytest_shard.SHARD_ENV, spec)
         items = _items(files)
-        hook = _Hook()
-        config = SimpleNamespace(hook=hook)
+        config = _config(spec)
         pytest_shard.pytest_collection_modifyitems(config, items)  # type: ignore[arg-type]
         kept.append({item.nodeid for item in items})
-        assert len(items) + len(hook.deselected) == sum(files.values())
+        assert len(items) + len(config.hook.deselected) == sum(files.values())
     every = {item.nodeid for item in _items(files)}
     assert kept[0] | kept[1] == every
     assert not kept[0] & kept[1]
 
 
-def test_plugin_is_inert_without_a_shard_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(pytest_shard.SHARD_ENV, raising=False)
+def test_plugin_announces_itself_with_the_marker_run_bundle_checks(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(pytest_shard, "load_weights", lambda: {})
+    pytest_shard.pytest_collection_modifyitems(_config("2/3"), _items({"tests/test_a.py": 2}))  # type: ignore[arg-type]
+    assert applied_marker("2/3") in capsys.readouterr().out
+
+
+def test_plugin_is_inert_without_a_shard_spec() -> None:
     items = _items({"tests/test_a.py": 3})
-    pytest_shard.pytest_collection_modifyitems(SimpleNamespace(hook=_Hook()), items)  # type: ignore[arg-type]
+    pytest_shard.pytest_collection_modifyitems(_config(None), items)  # type: ignore[arg-type]
     assert len(items) == 3
+
+
+def test_the_shard_option_is_not_an_environment_variable() -> None:
+    """tests/conftest.py scrubs CLUD_* session variables, which is how an env-var
+    version of this split silently ran the whole suite in every shard."""
+    assert SHARD_OPTION.startswith("--")
+    assert is_clud_session_var("CLUD_PYTEST_SHARD"), "the scrub that motivated the option changed"
 
 
 # ---------------------------------------------------------- run_bundle glue --
 
 
 @pytest.fixture
-def recorded(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+def recorded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
     calls: dict[str, object] = {"harnesses": 0, "pytest": []}
 
     def fake_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
@@ -187,10 +207,14 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
 
     def fake_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str) -> int:
         calls["pytest"].append((marker, dict(env), list(extra), suite))  # type: ignore[attr-defined]
+        if SHARD_OPTION in extra:  # what the real plugin prints after filtering
+            spec = extra[extra.index(SHARD_OPTION) + 1]
+            (tmp_path / "pytest-unit.log").write_text(f"{applied_marker(spec)} 1 of 2 tests\n")
         return 0
 
     monkeypatch.setattr(run_bundle, "run_harnesses", fake_harnesses)
     monkeypatch.setattr(run_bundle, "run_pytest", fake_pytest)
+    monkeypatch.setattr(run_bundle, "LOG_DIR", tmp_path)
     return calls
 
 
@@ -207,16 +231,15 @@ def test_python_shard_runs_pytest_with_its_slice_and_no_harnesses(
     assert recorded["harnesses"] == 0
     ((marker, env, extra, suite),) = recorded["pytest"]  # type: ignore[misc]
     assert (marker, suite) == ("not integration", "unit")
-    assert env["CLUD_PYTEST_SHARD"] == "2/2"
-    assert env["X"] == "1"
-    assert extra == ["-p", "ci.pytest_shard", "-q"]
+    assert env == {"X": "1"}
+    assert extra == ["-p", "ci.pytest_shard", "--clud-shard", "2/2", "-q"]
 
 
 def test_all_runs_everything_unsharded(recorded: dict[str, object]) -> None:
     assert run_unit_suite(Path("b"), {}, {}, parse_shard("all"), []) == 0
     assert recorded["harnesses"] == 1
-    ((_, env, extra, _),) = recorded["pytest"]  # type: ignore[misc]
-    assert "CLUD_PYTEST_SHARD" not in env
+    ((_, _, extra, _),) = recorded["pytest"]  # type: ignore[misc]
+    assert SHARD_OPTION not in extra
     assert "ci.pytest_shard" not in extra
 
 
@@ -227,6 +250,21 @@ def test_a_failing_rust_shard_skips_pytest(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(run_bundle, "run_harnesses", lambda *_: 1)
     monkeypatch.setattr(run_bundle, "run_pytest", no_pytest)
     assert run_unit_suite(Path("b"), {}, {}, parse_shard("all"), []) == 1
+
+
+def test_a_shard_that_did_not_filter_fails_instead_of_running_everything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The regression that motivated the guard: pytest exits 0 having run it all."""
+    monkeypatch.setattr(run_bundle, "run_pytest", lambda *a, **k: 0)
+    monkeypatch.setattr(run_bundle, "LOG_DIR", tmp_path)
+    (tmp_path / "pytest-unit.log").write_text("collected 1652 items\n1449 passed\n")
+    assert run_unit_suite(Path("b"), {}, {}, parse_shard("py1of2"), []) == 1
+    assert "did not filter the collection" in capsys.readouterr().err
+    assert not shard_was_applied("1/2")
+    (tmp_path / "pytest-unit.log").write_text(f"{applied_marker('1/2')} 800 of 1652 tests\n")
+    assert shard_was_applied("1/2")
+    assert not shard_was_applied("2/2")
 
 
 # ------------------------------------------------- workflow + release gate --

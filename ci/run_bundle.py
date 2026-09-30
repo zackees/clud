@@ -38,7 +38,7 @@ from running_process import PseudoTerminalProcess, RunningProcess
 
 from ci import process
 from ci.aliases import materialize as materialize_aliases
-from ci.pytest_shard import SHARD_ENV
+from ci.pytest_shard import SHARD_OPTION, applied_marker
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -488,12 +488,30 @@ def run_unit_suite(
     if not shard.python:
         return 0
     extra = list(pytest_args)
-    child_env = env
     if shard.spec is not None:
-        child_env = {**env, SHARD_ENV: shard.spec}
-        extra = ["-p", "ci.pytest_shard", *extra]
-    rc = run_pytest("not integration", child_env, extra, suite="unit")
-    return 0 if report_pytest_exit(rc) else 1
+        extra = ["-p", "ci.pytest_shard", SHARD_OPTION, shard.spec, *extra]
+    rc = run_pytest("not integration", env, extra, suite="unit")
+    if not report_pytest_exit(rc):
+        return 1
+    if shard.spec is not None and not shard_was_applied(shard.spec):
+        # A shard that silently ran the whole suite still passes, doubles the
+        # lane's cost and hides that the split is broken; fail it instead.
+        print(
+            f"::error::pytest shard {shard.spec} did not filter the collection "
+            f"(no '{applied_marker(shard.spec)}' line in {pytest_log_path('unit')})",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def shard_was_applied(spec: str) -> bool:
+    """Did the shard plugin announce that it filtered this run's collection?"""
+    try:
+        text = pytest_log_path("unit").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return applied_marker(spec) in text
 
 
 def main(argv: list[str] | None = None) -> int:

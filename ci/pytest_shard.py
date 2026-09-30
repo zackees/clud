@@ -8,7 +8,7 @@ Separate machines do not contend, so the lane is now three parallel jobs:
 the Rust harnesses, and two halves of the pytest suite.
 
 This module is the pytest half of that split. `ci/run_bundle.py` passes
-`-p ci.pytest_shard` and `CLUD_PYTEST_SHARD=<k>/<n>`; every shard collects the
+`-p ci.pytest_shard --clud-shard <k>/<n>`; every shard collects the
 full suite and keeps the files `assign_files` gives it. The assignment is a
 pure function of (file list, weights, shard count), so the shards are disjoint
 and cover the suite exactly when they all see the same collection, which the
@@ -17,19 +17,24 @@ shared `-m "not integration"` deselection guarantees.
 Weights are seconds per file, from `ci/unit_shard_weights.json`. Stale or
 missing entries only cost balance, never coverage: an unknown file is weighted
 by its test count.
+
+The spec travels as a command-line option, not an environment variable:
+`tests/conftest.py` scrubs every `CLUD_*` variable that is not test-harness
+configuration, which silently turned the first version of this split (an env
+var) into "every shard runs the whole suite". `applied_marker` is the line
+`run_bundle` looks for afterwards so that failure mode cannot recur unnoticed.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
-SHARD_ENV = "CLUD_PYTEST_SHARD"
+SHARD_OPTION = "--clud-shard"
 WEIGHTS_PATH = Path(__file__).with_name("unit_shard_weights.json")
 #: Weight of one test in a file with no recorded timing (~ suite average).
 DEFAULT_SECONDS_PER_TEST = 0.09
@@ -41,10 +46,10 @@ def parse_spec(spec: str) -> tuple[int, int]:
     """`"2/3"` -> `(1, 3)`: a zero-based shard index and the shard count."""
     match = _SPEC.fullmatch(spec.strip())
     if match is None:
-        raise ValueError(f"{SHARD_ENV} must look like '<k>/<n>', got {spec!r}")
+        raise ValueError(f"{SHARD_OPTION} must look like '<k>/<n>', got {spec!r}")
     number, count = int(match.group(1)), int(match.group(2))
     if count < 1 or not 1 <= number <= count:
-        raise ValueError(f"{SHARD_ENV}={spec!r}: need 1 <= k <= n")
+        raise ValueError(f"{SHARD_OPTION} {spec!r}: need 1 <= k <= n")
     return number - 1, count
 
 
@@ -81,9 +86,24 @@ def assign_files(
     return assignment
 
 
+def applied_marker(spec: str) -> str:
+    """The line the plugin prints once it has filtered a collection to `spec`."""
+    index, count = parse_spec(spec)
+    return f"pytest shard {index + 1}/{count}:"
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        SHARD_OPTION,
+        default=None,
+        metavar="K/N",
+        help="run only shard K of N of the collected test files (ci/pytest_shard.py)",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    spec = os.environ.get(SHARD_ENV)
+    spec = config.getoption(SHARD_OPTION)
     if not spec:
         return
     index, count = parse_spec(spec)
@@ -98,4 +118,4 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         config.hook.pytest_deselected(items=dropped)
     items[:] = kept
     total = len(kept) + len(dropped)
-    print(f"pytest shard {index + 1}/{count}: {len(kept)} of {total} tests", flush=True)
+    print(f"{applied_marker(spec)} {len(kept)} of {total} tests", flush=True)
