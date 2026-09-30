@@ -446,7 +446,7 @@ mod tests {
         let tool = BUNDLED_TOOLS
             .iter()
             .find(|t| t.rel_path == "git/ci_targets.py")
-            .expect("ci_targets.py must stay bundled: the grind integrator discovers targets with it");
+            .expect("ci_targets.py must stay bundled: grind discovers cross-check targets");
         assert!(tool.body.contains("managed-by: clud"));
     }
 
