@@ -1240,6 +1240,80 @@ def _all_rollup_contexts(
     return None
 
 
+_REVIEWS_PAGE_QUERY = """
+query($id:ID!,$after:String!){
+  node(id:$id){... on PullRequest{
+    reviews(first:100,after:$after){
+      nodes{databaseId state author{login}} pageInfo{hasNextPage endCursor}
+    }
+  }}
+}
+"""
+
+_THREADS_PAGE_QUERY = """
+query($id:ID!,$after:String!){
+  node(id:$id){... on PullRequest{
+    reviewThreads(first:100,after:$after){
+      nodes{id isResolved comments(first:20){
+        nodes{databaseId body author{login}} pageInfo{hasNextPage endCursor}
+      }}
+      pageInfo{hasNextPage endCursor}
+    }
+  }}
+}
+"""
+
+_THREAD_COMMENTS_PAGE_QUERY = """
+query($id:ID!,$after:String!){
+  node(id:$id){... on PullRequestReviewThread{
+    comments(first:100,after:$after){
+      nodes{databaseId body author{login}} pageInfo{hasNextPage endCursor}
+    }
+  }}
+}
+"""
+
+
+def _all_node_connection(
+    node_id: object, field: str, query: str, first: object
+) -> list[dict] | None:
+    """Return every node of `field`, paging through `node(id:)` (#1617).
+
+    Follow-up pages are pinned to `node_id` (the pull request or review
+    thread the first page came from). Same fail-closed rules as
+    `_all_rollup_contexts`: any failed, malformed or unbounded page yields
+    None, so a partial list is never treated as the whole one.
+    """
+    collected: list[dict] = []
+    connection = first
+    for _ in range(_MAX_ROLLUP_PAGES):
+        if not isinstance(connection, dict):
+            return None
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            return None
+        collected.extend(node for node in nodes if isinstance(node, dict))
+        has_next = page_info.get("hasNextPage")
+        if has_next is False:
+            return collected
+        cursor = page_info.get("endCursor")
+        if (
+            has_next is not True
+            or not isinstance(cursor, str)
+            or not cursor
+            or not isinstance(node_id, str)
+            or not node_id
+        ):
+            return None
+        data = gh_json(
+            "api", "graphql", "-f", f"query={query}", "-f", f"id={node_id}", "-f", f"after={cursor}"
+        )
+        node = ((data or {}).get("data") or {}).get("node") if isinstance(data, dict) else None
+        connection = node.get(field) if isinstance(node, dict) else None
+    return None
+
+
 LAST_SNAPSHOT_FAILURE = ""
 
 
@@ -1259,13 +1333,15 @@ def fetch_gate_snapshot(repo: str, pr: int, *, include_coderabbit: bool) -> Gate
 query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
-      number state mergeable mergeStateStatus headRefOid baseRefName headRefName
-      reviews(first:100){nodes{databaseId state author{login}} pageInfo{hasNextPage}}
+      id number state mergeable mergeStateStatus headRefOid baseRefName headRefName
+      reviews(first:100){
+        nodes{databaseId state author{login}} pageInfo{hasNextPage endCursor}
+      }
       reviewThreads(first:100) @include(if:$includeCoderabbit){
-        nodes{isResolved comments(first:20){
-          nodes{databaseId body author{login}} pageInfo{hasNextPage}
+        nodes{id isResolved comments(first:20){
+          nodes{databaseId body author{login}} pageInfo{hasNextPage endCursor}
         }}
-        pageInfo{hasNextPage}
+        pageInfo{hasNextPage endCursor}
       }
       comments(last:100) @include(if:$includeCoderabbit){
         nodes{body author{login}} pageInfo{hasPreviousPage}
@@ -1304,9 +1380,12 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
     if not isinstance(pull, dict):
         return None
 
-    reviews_connection = pull.get("reviews")
-    if _connection_truncated(reviews_connection):
-        return _snapshot_gap("reviews connection truncated (more than 100 reviews)")
+    pull_id = pull.get("id")
+    review_nodes = _all_node_connection(
+        pull_id, "reviews", _REVIEWS_PAGE_QUERY, pull.get("reviews")
+    )
+    if review_nodes is None:
+        return _snapshot_gap("reviews pagination failed or was malformed")
 
     commit_nodes = (pull.get("commits") or {}).get("nodes") or []
     rollup_nodes: list[dict] = []
@@ -1338,29 +1417,32 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
         if node.get("__typename") == "StatusContext"
     ]
 
-    review_nodes = reviews_connection.get("nodes") or []
-    human_ids = (
-        frozenset(
-            review["databaseId"]
-            for review in review_nodes
-            if isinstance(review, dict)
-            and isinstance(review.get("databaseId"), int)
-            and "[bot]" not in str((review.get("author") or {}).get("login", ""))
-            and review.get("state") in {"CHANGES_REQUESTED", "COMMENTED"}
-        )
-        if isinstance(review_nodes, list)
-        else frozenset()
+    human_ids = frozenset(
+        review["databaseId"]
+        for review in review_nodes
+        if isinstance(review.get("databaseId"), int)
+        and "[bot]" not in str((review.get("author") or {}).get("login", ""))
+        and review.get("state") in {"CHANGES_REQUESTED", "COMMENTED"}
     )
 
     probe: CodeRabbitProbe | None = None
     observation: CodeRabbitObservation | None = None
     if include_coderabbit:
-        threads_connection = pull.get("reviewThreads")
         comments_connection = pull.get("comments")
-        if _connection_truncated(threads_connection) or _connection_truncated(
-            comments_connection, from_end=True
-        ):
-            return _snapshot_gap("review threads or comments truncated (more than 100)")
+        if _connection_truncated(comments_connection, from_end=True):
+            return _snapshot_gap("PR comments truncated (more than 100)")
+        threads = _all_node_connection(
+            pull_id, "reviewThreads", _THREADS_PAGE_QUERY, pull.get("reviewThreads")
+        )
+        if threads is None:
+            return _snapshot_gap("review-thread pagination failed or was malformed")
+        for thread in threads:
+            thread_comments = _all_node_connection(
+                thread.get("id"), "comments", _THREAD_COMMENTS_PAGE_QUERY, thread.get("comments")
+            )
+            if thread_comments is None:
+                return _snapshot_gap("review-thread comment pagination failed or was malformed")
+            thread["comments"] = {"nodes": thread_comments}
         recent = repository.get("recent")
         recent_nodes = (recent.get("nodes") or []) if isinstance(recent, dict) else None
         sampled = 0
@@ -1384,17 +1466,10 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
             probe = CodeRabbitProbe("detected" if detected else "not_detected", sampled)
         else:
             probe = CodeRabbitProbe("degraded", 0)
-        threads = threads_connection.get("nodes") or []
         comments = comments_connection.get("nodes") or []
-        if not isinstance(threads, list) or not isinstance(comments, list):
+        if not isinstance(comments, list):
             observation = CodeRabbitObservation("degraded", reason="malformed_payload")
         else:
-            if any(
-                not isinstance(thread, dict)
-                or _connection_truncated(thread.get("comments"))
-                for thread in threads
-            ):
-                return _snapshot_gap("review thread comments truncated (more than 20)")
             normalized_comments = [
                 {"user": comment.get("author") or {}, "body": comment.get("body", "")}
                 for comment in comments
