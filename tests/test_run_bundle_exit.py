@@ -199,3 +199,36 @@ def test_abrupt_pytest_exit_leaves_the_active_test_in_progress_log(
     # the test function remains the stable active-test identifier.
     assert entries[0]["nodeid"].endswith("::test_abrupt_exit")
     assert "short test summary info" not in pytest_log_path("unit").read_text(encoding="utf-8")
+
+
+def test_progress_journal_survives_the_repo_conftest_scrub(tmp_path: Path, monkeypatch) -> None:
+    """#1625: `tests/conftest.py` scrubs `CLUD_*` from `os.environ` at import.
+
+    The journal must still be written by the pytest session itself, while the
+    tests, and every child process they spawn (children inherit `os.environ`),
+    must not see the variable. `-p tests.conftest` loads the repo conftest,
+    scrub included, for a test file that lives outside `tests/`.
+    """
+    monkeypatch.setattr(run_bundle, "LOG_DIR", tmp_path / "logs")
+    victim = tmp_path / "test_scrubbed_child_env.py"
+    victim.write_text(
+        "import os\n\n"
+        "def test_child_env_is_scrubbed():\n"
+        "    assert 'CLUD_PYTEST_PROGRESS_LOG' not in os.environ\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        run_pytest(
+            "not integration",
+            {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+            ["-v", "-p", "tests.conftest", str(victim)],
+            suite="unit",
+        )
+        == 0
+    )
+    journal = pytest_progress_path("unit")
+    assert journal.is_file(), "the repo conftest scrub swallowed the journal path (#1625)"
+    entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert [entry["event"] for entry in entries] == ["start", "finish"]
+    assert all(entry["nodeid"].endswith("::test_child_env_is_scrubbed") for entry in entries)
