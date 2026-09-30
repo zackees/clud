@@ -138,7 +138,7 @@ mod tests {
     /// its tracking ref is stale.
     fn rebased() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let base = crate::path_norm::canonicalize_plain(tmp.path()).unwrap();
         let origin = base.join("origin.git");
         std::fs::create_dir_all(&origin).unwrap();
         git(&origin, &["init", "-q", "--bare", "-b", "main"]);
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn no_upstream_means_nothing_to_judge() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let dir = crate::path_norm::canonicalize_plain(tmp.path()).unwrap();
         git(&dir, &["init", "-q", "-b", "main"]);
         commit(&dir, "a.txt");
         assert_eq!(reason("git diff @{upstream}...HEAD", &dir), None);

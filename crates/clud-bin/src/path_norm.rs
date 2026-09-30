@@ -200,6 +200,74 @@ pub fn display_slash(path: &Path) -> String {
     slash_separators(&s)
 }
 
+/// Drop a Windows verbatim (`\\?\`) prefix when the path has an ordinary
+/// spelling: `\\?\C:\x` becomes `C:\x` and `\\?\UNC\srv\share` becomes
+/// `\\srv\share`. Other verbatim forms (`\\?\Volume{…}`) are returned
+/// unchanged, because they have no non-verbatim equivalent.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows. Git (and many
+/// other tools) cannot parse them — `git init \\?\C:\…` fails with "cannot
+/// mkdir … Invalid argument" and a clone URL of that shape is read as a
+/// hostname — so strip it before a path leaves the process (#1628). This is a
+/// pure string operation, so it behaves the same on every host.
+#[must_use]
+pub fn strip_verbatim(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        if drive && (bytes.len() == 2 || bytes[2] == b'\\') {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// `std::fs::canonicalize` without the Windows verbatim prefix; see
+/// [`strip_verbatim`]. Use it whenever the result may be handed to git or
+/// another process.
+pub fn canonicalize_plain(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(|p| strip_verbatim(&p))
+}
+
+/// Canonicalize `path` even when it (or a tail of it) no longer exists: the
+/// deepest existing ancestor is canonicalized and the missing components are
+/// appended. The result carries no verbatim prefix.
+///
+/// Plain `canonicalize` fails on a deleted path, so a comparison that falls
+/// back to the raw spelling misses Windows 8.3 short names
+/// (`RUNNER~1` vs `runneradmin`) and symlinked parents (#1628).
+#[must_use]
+pub fn canonicalize_lenient(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    loop {
+        if let Ok(canonical) = canonicalize_plain(ancestor) {
+            let mut out = canonical;
+            out.extend(missing.iter().rev());
+            return normalize(&out);
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                ancestor = parent;
+            }
+            _ => return normalize(&strip_verbatim(path)),
+        }
+    }
+}
+
+/// Whether two paths name the same location, robust to either side having
+/// been deleted, to separator spelling, to verbatim prefixes and (on Windows
+/// and macOS) to case.
+#[must_use]
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    normalize_for_key(&canonicalize_lenient(a)) == normalize_for_key(&canonicalize_lenient(b))
+}
+
 /// Normalize path separators in a path-shaped string.
 ///
 /// This works on strings received from another platform, unlike
@@ -254,6 +322,55 @@ mod tests {
             display_slash(Path::new(r"\\?\UNC\server\share\dir")),
             "//server/share/dir"
         );
+    }
+
+    #[test]
+    fn strip_verbatim_yields_a_path_git_can_parse() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\Users\t\origin.git")),
+            PathBuf::from(r"C:\Users\t\origin.git")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\srv\share\d")),
+            PathBuf::from(r"\\srv\share\d")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:")),
+            PathBuf::from(r"C:")
+        );
+        // No ordinary spelling exists: left alone.
+        let volume = r"\\?\Volume{0b1c}\x";
+        assert_eq!(strip_verbatim(Path::new(volume)), PathBuf::from(volume));
+        assert_eq!(
+            strip_verbatim(Path::new("/tmp/x")),
+            PathBuf::from("/tmp/x")
+        );
+    }
+
+    #[test]
+    fn same_path_holds_after_one_side_is_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("wt")).unwrap();
+        // Windows runners may lack the symlink privilege; the deleted-path and
+        // separator checks below still run there against the real spelling.
+        #[cfg(unix)]
+        let alias = {
+            let alias = tmp.path().join("alias");
+            std::os::unix::fs::symlink(&real, &alias).unwrap();
+            alias
+        };
+        #[cfg(not(unix))]
+        let alias = real.clone();
+        let via_real = real.join("wt");
+        let via_alias = alias.join("wt");
+        assert!(same_path(&via_real, &via_alias));
+        std::fs::remove_dir(&via_real).unwrap();
+        // Plain canonicalize now fails on both; the parent still resolves.
+        assert!(same_path(&via_real, &via_alias));
+        assert!(!same_path(&via_real, &real.join("other")));
+        let slashed = via_real.to_string_lossy().replace('\\', "/");
+        assert!(same_path(Path::new(&slashed), &via_real));
     }
 
     #[test]

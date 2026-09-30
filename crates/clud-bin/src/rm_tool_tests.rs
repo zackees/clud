@@ -22,7 +22,7 @@ struct World {
 
 fn world() -> World {
     let tmp = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let base = crate::path_norm::canonicalize_plain(tmp.path()).unwrap();
     let root = base.join("repo");
     let home = base.join("home");
     for dir in [&root, &home] {
@@ -462,7 +462,7 @@ fn world_with_worktree() -> (World, PathBuf) {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         }
     }
-    (w, std::fs::canonicalize(wt).unwrap())
+    (w, crate::path_norm::canonicalize_plain(&wt).unwrap())
 }
 
 #[test]
