@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import signal
+import socket
 import sys
 from pathlib import Path
 
@@ -434,3 +436,15 @@ def test_grind_land_documents_the_new_exit_codes_and_a_timeout_below_its_cap() -
     assert "--timeout 540" in body
     for code in ("`8`", "`9`", "`10`", "`11`", "NO_CHECKS", "mergeStateStatus"):
         assert code in body, code
+
+
+def test_cancel_records_name_the_watcher_that_wrote_them(watcher, env) -> None:
+    """#1332: with several watchers on one PR, the log says whose cancel it was."""
+    env["log"].emit("cancel_item", run_id=1, status="cancelled")
+    env["log"].emit("head_moved", old="a", new="b")
+    records = events(env)
+    cancel = [e for e in records if e["event"] == "cancel_item"][-1]
+    assert cancel["watcher_pid"] == os.getpid()
+    assert cancel["watcher_host"] == socket.gethostname()
+    other = [e for e in records if e["event"] == "head_moved"][-1]
+    assert "watcher_pid" not in other
