@@ -19,8 +19,27 @@ allowed checkout may itself be removed, including one git already dropped from
 `git worktree list` after a partly failed `git worktree remove` (its `.git`
 file still names the allowed repo's `.git/worktrees/` metadata; #1573). Before a
 move to the trash or a purge, directories in the tree are made writable, so
-sealed read-only build outputs do not abort the removal halfway. A clone is not
-recognized: only what git registered for an allowed repo. The command refuses
+sealed read-only build outputs do not abort the removal halfway.
+
+A separate clone of an allowed repo (a directory with its own `.git`
+directory, outside the roots) may be removed only when nothing in it would be
+lost (#1573). All of these must hold, checked in order, and a refusal names the
+first that fails:
+
+- its `origin` URL equals the `origin` of an allowed root after
+  normalization: scheme, user, port, trailing `.git` or `/`, ssh
+  (`git@host:owner/repo`) versus https, and the case of host/owner/repo are
+  ignored (`origin mismatch`);
+- `git status --porcelain` is empty, untracked files included and ignored
+  files such as `target/` excluded (`dirty`);
+- no local branch has commits that no `refs/remotes/*` reaches
+  (`unpushed commits on <branch>`);
+- `git stash list` is empty (`stash`).
+
+A matching origin alone is not enough: a real checkout with unpushed work
+would match. A clone that contains an allowed root, is HOME or an ancestor of
+it, or whose `.git` is a file (a worktree or submodule) never qualifies. The
+decision is `rm_tool_clone::verdict` over probed facts. The command refuses
 a root itself,
 anything outside these locations, HOME and its ancestors, filesystem roots,
 `.git` components, and directory trees containing mounts. Symlinked parents
