@@ -28,6 +28,7 @@ mod filesystem;
 mod list_state;
 mod repo_worktree;
 mod repo_worktree_probe;
+mod repo_worktree_reclaim;
 
 use super::watch_service as gc_watch_service;
 

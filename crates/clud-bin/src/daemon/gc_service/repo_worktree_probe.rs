@@ -36,6 +36,10 @@ pub(crate) struct RepoWorktreeRow {
     pub(crate) path: String,
     pub(crate) repo_root: String,
     pub(crate) branch: Option<String>,
+    /// `HEAD` as the probe saw it; `None` when not read (a guard spared the
+    /// row before the tip mattered). The reclaim re-check requires it
+    /// unchanged (#1603).
+    pub(crate) tip: Option<String>,
     /// Directory mtime, standing in for a creation time in `gc list`.
     pub(crate) mtime_unix: i64,
     pub(crate) verdict: RepoWorktreeVerdict,
@@ -310,6 +314,7 @@ fn facts_for(
         is_main_checkout: is_main,
         locked_live_pid: locked_by_live_or_unknown_pid(entry),
         process_inside,
+        processes_unverifiable: false,
         detached: entry.detached || entry.branch.is_none(),
         dirty: None,
         untracked: None,
@@ -380,6 +385,7 @@ pub(crate) fn probe_repo(
                     .branch
                     .as_deref()
                     .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_string()),
+                tip: None,
                 mtime_unix: mtime_unix(&entry.path),
                 verdict: repo_worktree_verdict(&facts),
             }

@@ -52,6 +52,9 @@ pub(crate) struct RepoWorktreeFacts {
     /// A live session's cwd (or a process cwd) sits inside the worktree —
     /// this also covers "the currently checked-out one in any session".
     pub(crate) process_inside: bool,
+    /// Issue #1603: the full process table could not be read (see
+    /// `ProcessCwdSnapshot`), so "nobody is inside" is unproven.
+    pub(crate) processes_unverifiable: bool,
     pub(crate) detached: bool,
     /// Uncommitted changes to tracked files.
     pub(crate) dirty: Option<bool>,
@@ -191,6 +194,7 @@ mod tests {
             is_main_checkout: false,
             locked_live_pid: false,
             process_inside: false,
+            processes_unverifiable: false,
             detached: false,
             dirty: Some(false),
             untracked: Some(false),
@@ -376,6 +380,20 @@ mod tests {
             },
             Pinned,
             "process inside",
+        );
+    }
+
+    /// #1603: a process table that cannot be read proves nothing about who
+    /// is inside, so it spares.
+    #[test]
+    fn unreadable_process_table_is_spared() {
+        assert_verdict(
+            RepoWorktreeFacts {
+                processes_unverifiable: true,
+                ..merged()
+            },
+            Pinned,
+            "process table unavailable",
         );
     }
 

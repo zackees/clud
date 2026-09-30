@@ -1416,6 +1416,7 @@ fn repo_worktree_rows_surface_in_gc_list_shape() {
         path: p.to_string_lossy().to_string(),
         repo_root: "/repo".to_string(),
         branch: Some("feat".to_string()),
+        tip: None,
         mtime_unix: 5,
         verdict: RepoWorktreeVerdict {
             state: RepoWorktreeState::Reclaimable,
