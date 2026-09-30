@@ -27,15 +27,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from running_process import PseudoTerminalProcess, RunningProcess
 
 from ci import process
 from ci.aliases import materialize as materialize_aliases
+from ci.pytest_shard import SHARD_ENV
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -443,12 +446,70 @@ def report_pytest_exit(returncode: int) -> bool:
     return ok
 
 
+@dataclass(frozen=True)
+class Shard:
+    """Which half(ves) of the unit suite one job runs."""
+
+    rust: bool
+    python: bool
+    #: `"<k>/<n>"` for a pytest shard, `None` for the whole pytest suite.
+    spec: str | None = None
+
+
+_SHARD_PYTHON = re.compile(r"py(\d+)of(\d+)")
+
+
+def parse_shard(name: str) -> Shard:
+    """`all` (default) | `rust` | `py<k>of<n>`.
+
+    The Linux x64 unit lane is split into independent jobs (see
+    `ci/pytest_shard.py`): `rust` runs the Rust harnesses, `py1of2`/`py2of2`
+    each run half of the pytest suite. `all` is the whole suite in one job,
+    which every other lane still uses.
+    """
+    if name == "all":
+        return Shard(rust=True, python=True)
+    if name == "rust":
+        return Shard(rust=True, python=False)
+    match = _SHARD_PYTHON.fullmatch(name)
+    if match is not None:
+        number, count = int(match.group(1)), int(match.group(2))
+        if count >= 1 and 1 <= number <= count:
+            return Shard(rust=False, python=True, spec=f"{number}/{count}")
+    raise ValueError(f"unknown unit shard {name!r}: expected all, rust or py<k>of<n>")
+
+
+def run_unit_suite(
+    bundle: Path, manifest: dict, env: dict[str, str], shard: Shard, pytest_args: list[str]
+) -> int:
+    """Run the parts of the unit suite `shard` selects; 0 on success."""
+    if shard.rust and run_harnesses(bundle, manifest, env) != 0:
+        return 1
+    if not shard.python:
+        return 0
+    extra = list(pytest_args)
+    child_env = env
+    if shard.spec is not None:
+        child_env = {**env, SHARD_ENV: shard.spec}
+        extra = ["-p", "ci.pytest_shard", *extra]
+    rc = run_pytest("not integration", child_env, extra, suite="unit")
+    return 0 if report_pytest_exit(rc) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a prebuilt CI test bundle")
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--suite", choices=("unit", "integration", "harness"), required=True)
+    parser.add_argument(
+        "--shard",
+        default="all",
+        help="unit suite only: all (default) | rust | py<k>of<n>; see ci/pytest_shard.py",
+    )
     parser.add_argument("pytest_args", nargs="*")
     args = parser.parse_args(argv)
+    shard = parse_shard(args.shard)
+    if args.suite != "unit" and args.shard != "all":
+        parser.error("--shard applies to the unit suite only")
 
     bundle = args.bundle.resolve()
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
@@ -456,10 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     stage_wheel(bundle)
 
     if args.suite == "unit":
-        if run_harnesses(bundle, manifest, env) != 0:
-            return 1
-        rc = run_pytest("not integration", env, args.pytest_args, suite="unit")
-        return 0 if report_pytest_exit(rc) else 1
+        return run_unit_suite(bundle, manifest, env, shard, args.pytest_args)
 
     if args.suite == "harness":
         # #1323: real Claude Code on `mock-agent serve`. The fixture runs the

@@ -195,15 +195,25 @@ jobs:
       # Linux x64 clippy runs in lint-linux-x64, off this job's critical path.
       clippy: false
 
+  # The unit suite is CPU-bound and a hosted runner is two physical cores, so
+  # in-process parallelism (pytest-xdist) measured slower, not faster. It runs
+  # as independent jobs instead: the Rust harnesses, and each half of the
+  # pytest suite (ci/pytest_shard.py). LINUX_X64_UNIT_SHARDS in ci/ci_matrix.py
+  # owns the names; ci/release_gate.py requires one job per shard.
   test-linux-x64-unit:
     name: Test linux-x64 (unit)
     needs: [static, build-linux-x64]
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [rust, py1of2, py2of2]
     uses: ./.github/workflows/_run-tests.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
       target: x86_64-unknown-linux-gnu
       runs-on: ubuntu-24.04
       suite: unit
+      shard: ${{ matrix.shard }}
 
   test-linux-x64-integration:
     name: Test linux-x64 (integration)

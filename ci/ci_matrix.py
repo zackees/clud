@@ -69,6 +69,14 @@ SDIST_TARGET = "x86_64-unknown-linux-gnu"
 
 SUITES: tuple[str, ...] = ("unit", "integration")
 
+#: The Linux x64 unit suite runs as three independent jobs (see
+#: `ci/pytest_shard.py`): the Rust harnesses, then each half of the pytest
+#: suite. The suite is CPU-bound and hosted runners are two physical cores, so
+#: separate machines are the only parallelism that helps. The names are the
+#: matrix values in `ci.yml` and, through them, the job names `ci/release_gate.py`
+#: requires.
+LINUX_X64_UNIT_SHARDS: tuple[str, ...] = ("rust", "py1of2", "py2of2")
+
 
 def resolve_tier(
     event_name: str,

@@ -9,7 +9,7 @@ import sys
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from ci.ci_matrix import TARGETS
+from ci.ci_matrix import LINUX_X64_UNIT_SHARDS, TARGETS
 
 _NAMES = ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64")
 assert len(_NAMES) == len(TARGETS)
@@ -21,8 +21,16 @@ REQUIRED_JOBS = frozenset(
         f"Test {name} ({suite}) / {target.triple} {suite}"
         for name, target in zip(_NAMES, TARGETS, strict=True)
         for suite in ("unit", "integration")
+        # The Linux x64 unit suite is a matrix over shards, so its cell is
+        # one job per shard rather than a single "(unit)" job.
+        if (name, suite) != ("linux-x64", "unit")
+    }
+    | {
+        f"Test linux-x64 (unit) ({shard}) / {TARGETS[0].triple} unit"
+        for shard in LINUX_X64_UNIT_SHARDS
     }
 )
+assert TARGETS[0].triple == "x86_64-unknown-linux-gnu"
 
 
 def verify_run(run: dict, jobs: list[dict], candidate_sha: str) -> None:
