@@ -601,3 +601,182 @@ fn an_unrelated_directory_or_repo_beside_the_root_is_refused() {
     assert!(err.contains("origin mismatch"), "{err}");
     assert!(other.exists());
 }
+
+// ---- System temp directories (#1622) ----
+//
+// The "system temp" here is a directory the test creates inside the world, so
+// no test reads or deletes anything in the real /tmp beyond its own tempdir.
+
+struct TempWorld {
+    w: World,
+    temp: PathBuf,
+    outside: PathBuf,
+}
+
+fn temp_world() -> TempWorld {
+    let w = world();
+    let base = w.root.parent().unwrap().to_path_buf();
+    let temp = base.join("systmp");
+    let outside = base.join("outside");
+    for dir in [&temp, &outside] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(outside.join("keep"), b"precious").unwrap();
+    TempWorld { w, temp, outside }
+}
+
+impl TempWorld {
+    fn roots(&self) -> Roots {
+        Roots::fixed(vec![self.w.root.clone()], true).with_temp_roots(vec![self.temp.clone()])
+    }
+
+    fn run_with_roots(&self, mut roots: Roots, list: &[&str]) -> (i32, String, String) {
+        let options = parse_args(&args(list)).unwrap().unwrap();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run_with(
+            Kind::File,
+            &options,
+            &self.w.ctx(),
+            &mut roots,
+            &mut out,
+            &mut err,
+        );
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    fn run(&self, list: &[&str]) -> (i32, String, String) {
+        self.run_with_roots(self.roots(), list)
+    }
+
+    fn t(&self, rel: &str) -> String {
+        self.temp.join(rel).to_string_lossy().into_owned()
+    }
+}
+
+#[test]
+fn a_file_under_the_system_temp_dir_is_deletable() {
+    let tw = temp_world();
+    std::fs::write(tw.temp.join("issue-body.md"), b"x").unwrap();
+    let (code, _, err) = tw.run(&[&tw.t("issue-body.md")]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!tw.temp.join("issue-body.md").exists());
+    // --purge too.
+    std::fs::write(tw.temp.join("again"), b"x").unwrap();
+    let (code, _, err) = tw.run(&["--purge", &tw.t("again")]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!tw.temp.join("again").exists());
+}
+
+#[test]
+fn a_nested_directory_under_the_system_temp_dir_is_deletable() {
+    let tw = temp_world();
+    std::fs::create_dir_all(tw.temp.join("build/obj")).unwrap();
+    std::fs::write(tw.temp.join("build/obj/a.o"), b"obj").unwrap();
+    let (code, _, err) = tw.run(&["-r", &tw.t("build")]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!tw.temp.join("build").exists());
+    assert!(tw.temp.is_dir(), "the temp root itself must survive");
+}
+
+#[test]
+fn the_system_temp_dir_itself_is_refused() {
+    let tw = temp_world();
+    std::fs::write(tw.temp.join("f"), b"x").unwrap();
+    let plain = tw.temp.to_string_lossy().into_owned();
+    for operand in [plain.clone(), format!("{plain}/"), format!("{plain}/.")] {
+        let (code, _, err) = tw.run(&["-r", "--purge", &operand]);
+        assert_eq!(code, 1, "{operand}: {err}");
+        assert!(
+            err.contains("temp directory") || err.contains("name it directly"),
+            "{operand}: {err}"
+        );
+    }
+    assert!(tw.temp.join("f").exists());
+    let err = resolve(&plain, &tw.w.root, Some(&tw.w.home), &mut tw.roots()).unwrap_err();
+    assert!(err.contains("system temp directory itself"), "{err}");
+}
+
+#[test]
+fn dot_dot_out_of_the_system_temp_dir_is_judged_by_its_target() {
+    let tw = temp_world();
+    let (code, _, err) = tw.run(&["--purge", &tw.t("../outside/keep")]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("outside the allowed roots"), "{err}");
+    // The refusal lists the temp root among the allowed roots.
+    assert!(err.contains(&*tw.temp.to_string_lossy()), "{err}");
+    assert!(tw.outside.join("keep").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_escape_from_the_system_temp_dir_is_refused_and_the_link_removed_as_a_link() {
+    let tw = temp_world();
+    std::os::unix::fs::symlink(&tw.outside, tw.temp.join("link")).unwrap();
+    let (code, _, err) = tw.run(&["--purge", &tw.t("link/keep")]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("outside"), "{err}");
+    assert!(tw.outside.join("keep").exists());
+    // The link itself goes; its target stays.
+    let (code, _, err) = tw.run(&["--purge", &tw.t("link")]);
+    assert_eq!(code, 0, "{err}");
+    assert!(std::fs::symlink_metadata(tw.temp.join("link")).is_err());
+    assert!(tw.outside.join("keep").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_temp_entry_owned_by_another_user_is_refused() {
+    let tw = temp_world();
+    std::fs::create_dir_all(tw.temp.join("theirs/sub")).unwrap();
+    std::fs::write(tw.temp.join("theirs/sub/f"), b"x").unwrap();
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    let other = me.wrapping_add(1);
+    let roots = || tw.roots().with_temp_owner(other);
+    let (code, _, err) = tw.run_with_roots(roots(), &["-r", "--purge", &tw.t("theirs")]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("not owned by you"), "{err}");
+    // A path below an entry owned by someone else is refused too.
+    let (code, _, err) = tw.run_with_roots(roots(), &["--purge", &tw.t("theirs/sub/f")]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("not owned by you"), "{err}");
+    assert!(tw.temp.join("theirs/sub/f").exists());
+}
+
+#[test]
+fn temp_root_candidates_follow_the_platform_and_env() {
+    let unix_env = |key: &str| match key {
+        "TMPDIR" => Some("/var/folders/ab/xyz/T/".into()),
+        "TEMP" => Some("/ignored/on/unix".into()),
+        _ => None,
+    };
+    let unix = temp_root_candidates(false, &unix_env);
+    assert!(unix.contains(&PathBuf::from("/tmp")), "{unix:?}");
+    assert!(unix.contains(&PathBuf::from("/var/tmp")), "{unix:?}");
+    assert!(
+        unix.iter()
+            .any(|p| p.to_string_lossy().starts_with("/var/folders/ab/xyz/T")),
+        "{unix:?}"
+    );
+    assert!(!unix.iter().any(|p| p.starts_with("/ignored")), "{unix:?}");
+    // A relative or empty TMPDIR is ignored.
+    let rel = temp_root_candidates(false, &|k: &str| (k == "TMPDIR").then(|| "tmp".into()));
+    assert_eq!(rel, vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
+
+    // Windows: %TEMP% and %TMP%, verbatim prefix stripped, duplicates folded,
+    // no Unix defaults. Pure string handling, so it runs on every host.
+    let win_env = |key: &str| match key {
+        "TEMP" => Some(r"C:\Users\u\AppData\Local\Temp".into()),
+        "TMP" => Some(r"\\?\C:\Users\u\AppData\Local\Temp".into()),
+        "TMPDIR" => Some("/tmp".into()),
+        _ => None,
+    };
+    let win = temp_root_candidates(true, &win_env);
+    assert_eq!(win, vec![PathBuf::from(r"C:\Users\u\AppData\Local\Temp")]);
+    let relative = temp_root_candidates(true, &|k: &str| (k == "TEMP").then(|| "Temp".into()));
+    assert!(relative.is_empty(), "{relative:?}");
+}
