@@ -448,27 +448,34 @@ def test_matrices_are_json_serializable_for_github_actions():
         assert json.loads(encoded) == matrix
 
 
-def test_ci_windows_label_selects_only_windows_x64():
-    """#1310: an iteration-only mode for Windows work."""
+def test_ci_windows_label_selects_linux_x64_and_windows_x64():
+    """#1310 fast Windows iteration; #1652 keeps the routine Linux x64 lanes."""
     assert resolve_tier("pull_request", "", "ci-windows") == "windows"
-    assert [t.triple for t in selected("windows")] == ["x86_64-pc-windows-msvc"]
+    assert [t.triple for t in selected("windows")] == [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ]
     # Merge-gating tiers win when both labels are present.
     assert resolve_tier("pull_request", "", "ci-windows,ci-test") == "extended"
     assert resolve_tier("pull_request", "", "ci-windows,ci-full") == "full"
 
 
-def test_ci_windows_mode_skips_linux_and_gates_on_windows_lanes():
+def test_ci_windows_mode_runs_and_gates_on_the_routine_linux_lanes():
+    """#1652: with no merge queue, a green `CI OK` in windows mode must imply the
+    routine (minimal) Linux lanes passed on the same run, hence the same SHA."""
     text = CI_YML.read_text(encoding="utf-8")
-    linux = text.split("\n  build-linux-x64:\n", 1)[1].split("\n\n", 1)[0]
-    assert "needs.static.outputs.mode != 'windows'" in linux
+    for job in ("lint-linux-x64", "build-linux-x64", "test-linux-x64-unit"):
+        block = text.split(f"\n  {job}:\n", 1)[1].split("\n\n", 1)[0]
+        assert "mode != 'windows'" not in block, job
     integration = text.split("\n  test-linux-x64-integration:\n", 1)[1].split("\n\n", 1)[0]
     assert "needs.static.outputs.mode != 'windows'" in integration
     windows = text.split("\n  build-windows-x64:\n", 1)[1].split("\n\n", 1)[0]
     assert "needs.static.outputs.mode == 'windows'" in windows
     gate = text.split("\n  ci-ok:\n", 1)[1]
     branch = gate.split('if [ "$MODE" = "windows" ]; then', 1)[1].split("\n          fi\n", 1)[0]
-    # Any failed static/Windows lane fails the gate; otherwise the mode passes.
-    assert "for result in $STATIC $WINDOWS; do" in branch
+    # MINIMAL carries static, dylint, Linux clippy/build/unit; WINDOWS the x64 lanes.
+    assert "for result in $MINIMAL $WINDOWS; do" in branch
+    assert "$STATIC $WINDOWS" not in branch
     assert branch.rstrip().endswith("exit 0")
 
 
@@ -484,7 +491,7 @@ def test_linux_x64_clippy_runs_beside_the_build_not_inside_it():
     lint = text.split("\n  lint-linux-x64:\n", 1)[1].split("\n  build-linux-x64:\n", 1)[0]
     build = text.split("\n  build-linux-x64:\n", 1)[1].split("\n  test-linux-x64-unit:\n", 1)[0]
     assert "needs: static" in lint
-    assert "if: needs.static.outputs.mode != '' && needs.static.outputs.mode != 'windows'" in lint
+    assert "if: needs.static.outputs.mode != ''" in lint
     assert "clippy: true" in lint
     assert "compile: false" in lint
     assert "bundle: false" in lint
@@ -496,8 +503,6 @@ def test_linux_x64_clippy_runs_beside_the_build_not_inside_it():
     assert "- lint-linux-x64" in gate
     minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
     assert "needs.lint-linux-x64.result" in minimal
-    windows = gate.split("WINDOWS: >-", 1)[1].split("MINIMAL: >-", 1)[0]
-    assert "lint-linux-x64" not in windows  # ci-windows mode skips Linux lanes
     reusable = (CI_YML.parent / "_build-target.yml").read_text(encoding="utf-8")
     assert "inputs.compile &&" in reusable
     setup = (CI_YML.parent.parent / "actions" / "setup-build" / "action.yml").read_text(
