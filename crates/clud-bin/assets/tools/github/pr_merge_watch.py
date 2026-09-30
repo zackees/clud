@@ -134,7 +134,10 @@ SKIP_CI_MARKER = re.compile(r"\[(?:skip ci|ci skip|no ci|skip actions|actions sk
 QUEUED_STATUSES = {"queued", "waiting", "pending", "requested"}
 
 CANCEL_ON_CHOICES = {"fail", "review", "timeout", "closed", "always", "never"}
-CANCEL_ON_DEFAULTS = {"fail", "review", "timeout", "closed"}
+# A watcher timeout is not a CI failure: CI may be healthy, and the grind lander
+# re-watches with `--timeout 540`, which would cancel CI every nine minutes (#1332).
+# `timeout` stays a valid opt-in via `--cancel-on`.
+CANCEL_ON_DEFAULTS = {"fail", "review", "closed"}
 CANCEL_MODE_CHOICES = {"runs", "jobs", "none"}
 
 
@@ -1566,7 +1569,8 @@ def _report_cancel(
                 status="permission_denied",
                 required=opts.require,
             )
-    elif "HTTP 404" in stderr or "HTTP 422" in stderr:
+    elif "HTTP 404" in stderr or "HTTP 409" in stderr or "HTTP 422" in stderr:
+        # 409: another watcher on the same PR already cancelled it (#1332).
         print(f"CANCEL  id={item_id} status=already_completed")
         if log:
             log.emit("cancel_item", mode=mode, item_id=item_id, status="already_completed")
@@ -2451,7 +2455,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "exit codes: 0 green, 1 required check failed, 2 review activity, "
-            "3 PR closed, 4 timeout, 5 approval required, 6 required check never "
+            "3 PR closed, 4 timeout (never cancels), 5 approval required, 6 required check never "
             "reported, 7 stale (re-run needed), 8 no checks will ever report, "
             "9 merge conflict, 10 GitHub unreachable, 11 queued too long, "
             "64 usage error (fix the command; not a verdict), "
@@ -2505,7 +2509,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--cancel-on",
         default=",".join(sorted(CANCEL_ON_DEFAULTS)),
         help="comma-separated subset of "
-        f"{sorted(CANCEL_ON_CHOICES)} (default: fail,review,timeout,closed)",
+        f"{sorted(CANCEL_ON_CHOICES)} (default: fail,review,closed; a timeout never cancels unless asked)",
     )
     p.add_argument(
         "--cancel-mode",

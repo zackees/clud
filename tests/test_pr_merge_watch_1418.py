@@ -101,9 +101,10 @@ def env(watcher, tmp_path, monkeypatch):
     return state
 
 
-def run(watcher, env, repo="zackees/clud", timeout=3600, **kwargs):
+def run(watcher, env, repo="zackees/clud", timeout=3600, on=None, **kwargs):
+    cancel = opts(watcher, on=on) if on is not None else opts(watcher)
     with pytest.raises(SystemExit) as exc:
-        watcher.watch(527, repo, 20, timeout, None, opts(watcher), env["log"], **kwargs)
+        watcher.watch(527, repo, 20, timeout, None, cancel, env["log"], **kwargs)
     return exc.value.code
 
 
@@ -335,10 +336,21 @@ def test_watch_never_cancels_runs_on_a_sha_it_did_not_start_on(watcher, env) -> 
     assert last(env, "cancel_skipped")["reason"] == "head_moved"
 
 
-def test_timeout_on_the_started_sha_still_cancels(watcher, env) -> None:
+def test_timeout_never_cancels_by_default(watcher, env) -> None:
+    """#1332: a watcher timeout is not a CI failure; the lander re-watches after one."""
+    assert "timeout" not in watcher.CANCEL_ON_DEFAULTS
     pending = [watcher.CheckRow("linux", "pending", "IN_PROGRESS")]
     env["set_gates"](lambda n: gate(watcher, pending))
-    assert run(watcher, env, timeout=100) == watcher.EXIT_TIMEOUT
+    on = frozenset(watcher.CANCEL_ON_DEFAULTS)
+    assert run(watcher, env, timeout=100, on=on) == watcher.EXIT_TIMEOUT
+    assert env["cancels"] == []
+
+
+def test_timeout_still_cancels_when_asked_to(watcher, env) -> None:
+    pending = [watcher.CheckRow("linux", "pending", "IN_PROGRESS")]
+    env["set_gates"](lambda n: gate(watcher, pending))
+    on = frozenset({*watcher.CANCEL_ON_DEFAULTS, "timeout"})
+    assert run(watcher, env, timeout=100, on=on) == watcher.EXIT_TIMEOUT
     assert len(env["cancels"]) == 1
 
 
