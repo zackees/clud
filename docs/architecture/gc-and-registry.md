@@ -265,7 +265,8 @@ the default branch, so ancestry-based checks call them live work forever
   `locked by live pid` (a lock with no parseable pid counts as live),
   `process inside` (a live session cwd or any process cwd),
   `process table unavailable`, `detached`, `dirty`, `untracked`,
-  `open PR #N`, `commits after merge`, `no PR`, `unverifiable`.
+  `open PR #N`, `commits after merge`, `no PR`, `unverifiable`, and under
+  `~/.clud/tmp-wt` only, `grace` (see the #1485 subsection below).
 - **Surfacing.** `clud gc list [--json]` appends `kind: repo-worktree` rows
   (`id: 0`, since no redb row backs them) with `state`, `reason`,
   `reclaimable` and `evaluated_unix`. A path the registry already tracks keeps
@@ -304,6 +305,35 @@ the default branch, so ancestry-based checks call them live work forever
 - **Modes.** `CLUD_GC_REPO_WORKTREES`: unset or `1` deletes; `observe` (or
   any unrecognized value) probes and logs `would remove` without deleting;
   `0` turns the probe and the reclaim off.
+
+### The worktree root `~/.clud/tmp-wt` (#1485)
+
+- **Location.** `gc::worktree_root::worktree_root()` is `~/.clud/tmp-wt`, a
+  *sibling* of the `session_tmp` root `~/.clud/tmp`, never inside it, so the
+  72 h mtime sweep cannot see a worktree by construction
+  ([DD-124](../DESIGN_DECISIONS.md#dd-124-agent-worktrees-live-in-a-sibling-of-the-session-temp-root-and-are-never-on-its-timer)).
+  It is created idempotently at session launch (`runner.rs`) and at
+  GC-worker start, and is never a removal target: `git worktree remove` only
+  removes the child it is given.
+- **Allocation.** The bundled `grind-plan` and `clud-git` skills allocate new
+  agent worktrees as `~/.clud/tmp-wt/<repo>-wt-<suffix>`, keeping the
+  `<repo>-wt-` shape reconcile's name matching expects. Existing sibling
+  worktrees are not moved; the discovery above still covers them.
+- **Discovery.** Each direct child of the root seeds the probe as a repo
+  root (`worktree_root_children`), so a tmp-wt worktree is judged even if
+  clud never recorded a visit to its repo. Same verdict, same reclaim path.
+- **Abandoned-empty.** Only under the root: a clean, idle worktree whose
+  branch has zero commits past its merge-base with the default branch, and no
+  open or merged PR, is `reclaimable` / `abandoned-empty` once its directory
+  mtime is 24 h old, and `pinned` / `grace` before that (or when the age is
+  unknown). Nothing else in the verdict consults age.
+- **Size backstop.** `worktrees.warn_bytes` in `~/.clud/settings.json`
+  (seeded 50 GiB, `0` disables): `clud gc list` prints a stderr warning when
+  the root exceeds it (a bounded, early-exit walk). Warn-only: nothing is
+  deleted for size. A launch-banner warning is a follow-up.
+- **Tests.** Unit tests never read the real root: `production_worktree_root()`
+  and `ensure_worktree_root()` return `None` under `cfg(test)`, and tests
+  inject a tempdir root.
 
 ## Filesystem sweeps (non-registry)
 

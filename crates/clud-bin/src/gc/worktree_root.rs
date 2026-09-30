@@ -30,7 +30,7 @@ pub const SIZE_SCAN_ENTRY_BUDGET: usize = 500_000;
 
 /// `<home>/.clud/tmp-wt`. Pure, for tests and for callers holding a home.
 pub fn worktree_root_for(home: &Path) -> PathBuf {
-    home.join(".clud").join("tmp").join("wt") // RED: the original draft
+    home.join(".clud").join(WORKTREE_ROOT_DIR_NAME)
 }
 
 /// `~/.clud/tmp-wt` without creating it; `None` with no home dir. Resolves

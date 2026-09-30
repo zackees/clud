@@ -199,7 +199,7 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
             RepoWorktreeVerdict::reclaimable("landed by patch match")
         }
         PrFact::NoPr | PrFact::Unavailable
-            if facts.under_worktree_root && facts.commits_ahead == Some(u64::MAX) =>
+            if facts.under_worktree_root && facts.commits_ahead == Some(0) =>
         {
             match facts.age_secs {
                 Some(age) if age >= ABANDONED_EMPTY_GRACE_SECS => {
