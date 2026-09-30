@@ -130,7 +130,9 @@ Entry and orchestration:
   mapping: typed in/out structs, transcript-order-preserving tool loops,
   auth-mode-dependent system placement, reasoning round-trip, and bounded
   reversible identifiers. Translation is **total** -- droppable Anthropic
-  fields are dropped, not rejected (#750, DD-030). The carve-out is a stated
+  fields are dropped, not rejected (#750, DD-030); a `tool_use` with a
+  missing/`null` or stringified `input` still replays as object `arguments`
+  (#1533). The carve-out is a stated
   effort the family does not accept (`output_config.effort`, `@effort`): that
   is a 400 naming the accepted values, because the only alternative is running
   the turn at an effort the user never chose (#821, DD-035).
