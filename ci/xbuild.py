@@ -671,7 +671,13 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         repair_windows_gnu_wheel(wheel)
         if verify_wheel_scripts(wheel) != 0 or verify_wheel_modes(wheel) != 0:
             return 1
-    collect_debuginfo(args.target, profile)
+    if collect_debuginfo(args.target, profile):
+        # #1016: publish which binary this `.dwp` belongs to. Read from the
+        # final wheel -- the shipped bytes -- in the same job that staged the
+        # sidecar; the release job folds the fragments into BUILD-IDS.txt.
+        from ci.build_ids import record
+
+        record(args.target, wheels, DEBUGINFO_DIR)
     return 0
 
 

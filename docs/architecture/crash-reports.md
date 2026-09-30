@@ -89,8 +89,8 @@ The verifier itself supports three forms:
 
 - `clud symbols` — five-line summary (total reports, count with /
   without `file:line` frames, most-recent path).
-- `clud symbols install` — verify only the most-recent report;
-  exit 1 if it's unsymbolicated.
+- `clud symbols install` — fetch the release sidecar for the most-recent
+  report, but only when the build-ids pair (next section).
 - `clud symbols verify [--all]` — same; `--all` widens the scope from
   the most-recent report to every report under
   `~/.clud/state/crashes/`.
@@ -99,6 +99,30 @@ A report is considered "unsymbolicated" when `count_resolved_frames` in
 `crates/clud-bin/src/symbols.rs:55` returns 0. The frame heuristic
 matches `at FILE:LINE` lines produced by `std::backtrace::Backtrace`
 (handling Windows drive-letter colons via right-anchored search).
+
+## Sidecar pairing by published build-id (#1016)
+
+Release builds later moved the bulk of their DWARF into a Linux `.dwp`
+sidecar (see [ci.md](ci.md)), so `clud symbols install` fetches again. A
+`.dwp` carries no `.note.gnu.build-id`, so it cannot say which binary it
+belongs to; the release says it instead:
+
+- `ci/build_ids.py` reads the build-id from each shipped Linux binary (the
+  `clud` inside the final wheel) in the job that staged its `.dwp`, and
+  `publish-release` folds the per-triple fragments into one `BUILD-IDS.txt`
+  asset (`<build-id>  <triple>` per line) before generating `SHA256SUMS`.
+- `install` fetches `BUILD-IDS.txt` first and compares the report's
+  `build_id` for its `target`. **Match:** verify `BUILD-IDS.txt` and the
+  `.dwp` against `SHA256SUMS`, then cache under
+  `~/.clud/state/symbols/<build-id>/`, keeping the 2 newest build-ids.
+  **No entry, a different id, no `BUILD-IDS.txt`, or a report with no
+  `build_id`:** skip without requesting the `.dwp`, exit 0, and point at
+  the `target/<triple>/<profile>/` tree a local build's symbols live in.
+- Only `install` touches the network. The crash path and the startup
+  notice never fetch.
+
+Windows and macOS publish no sidecar, so they are out of scope; publishing
+`.pdb` / `.dSYM` would reuse the same `BUILD-IDS.txt` shape.
 
 ## Test coverage
 

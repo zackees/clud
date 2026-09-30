@@ -706,10 +706,12 @@ Diagnostics and misc:
   `startup::install_ctrl_c_flag` / `ctrl_c_track` (#372) path
   authoritative for Ctrl-C.
 - `symbols.rs` - `clud symbols` / `clud symbols install` / `clud symbols
-  verify [--all]` subcommand handler. With `debug = "line-tables-only"`
-  embedded in every build (#374 PR 1), no sidecar files need to be
-  fetched; the verifier confirms the running binary can resolve recent
-  crash reports' `at FILE:LINE` frames and exits 0/1 accordingly. The
+  verify [--all]` subcommand handler. `verify` confirms the running binary
+  can resolve recent crash reports' `at FILE:LINE` frames and exits 0/1.
+  `install` fetches a release's Linux `.dwp` only when the report's GNU
+  build-id matches the release's `BUILD-IDS.txt`, verifies it against
+  `SHA256SUMS`, and caches it under `~/.clud/state/symbols/<build-id>/`
+  (2 newest kept); anything unpaired is a skip, not an error (#1016). The
   bare `clud symbols` form prints a five-line summary. Self-contained
   maintenance command; dispatched from `main.rs` before any backend
   resolution. See `docs/architecture/crash-reports.md`.

@@ -691,6 +691,13 @@ break:
   `.dwp` must not block a release. The guarantee `fail_on_unmatched_files` used
   to give is asserted explicitly instead: the checksums step runs
   `ls dist/*.whl`.
+- Beside each `.dwp`, `ci/build_ids.py` stages a `clud-<triple>.build-id`
+  fragment read from the shipped wheel's `clud`. `publish-release` folds them
+  into a `BUILD-IDS.txt` asset before the checksums step, so `SHA256SUMS`
+  covers it; `clud symbols install` pairs a report to a sidecar through it
+  ([crash-reports.md](crash-reports.md#sidecar-pairing-by-published-build-id-1016)).
+  No PR workflow runs `publish-release`, so this path is exercised only by a
+  release.
 
 Only `clud` itself gets a `.dwp`. It is the sole binary that installs the crash
 reporter, and the shims currently share its whole dep tree, so publishing all

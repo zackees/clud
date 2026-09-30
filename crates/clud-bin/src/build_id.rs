@@ -10,6 +10,11 @@
 //! (`-Wl,--build-id=sha1`); before that clud emitted none at all, and
 //! `readelf -n` on a built binary showed only `.note.ABI-tag`.
 //!
+//! The `.dwp` itself carries no build-id, so the release publishes the other
+//! half: `ci/build_ids.py` reads the same note from each shipped Linux binary
+//! into a `BUILD-IDS.txt` asset, and `clud symbols install` fetches a sidecar
+//! only when a report's id matches it (see [`crate::symbols`]).
+//!
 //! **Scope is ELF, deliberately.** The identity is only load-bearing where a
 //! sidecar exists to be matched, and `ci/xbuild.py::collect_debuginfo` stages
 //! a `.dwp` for ELF triples only — verified against release 2.7.9, where the
