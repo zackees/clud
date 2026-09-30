@@ -247,6 +247,10 @@ pub enum ContentBlock {
     ToolUse {
         id: String,
         name: String,
+        /// #1533: absent on some compat-route blocks. Without the default the
+        /// whole request failed to decode (untagged `Content`), not just this
+        /// block; `tool_use_arguments` maps the resulting `null` to `{}`.
+        #[serde(default)]
         input: serde_json::Value,
     },
     ToolResult {
@@ -900,8 +904,7 @@ fn translate_message(message: &Message, items: &mut Vec<InputItem>) {
                         items.push(InputItem::FunctionCall {
                             call_id: shorten_identifier(id),
                             name: shorten_identifier(name),
-                            arguments: serde_json::to_string(input)
-                                .unwrap_or_else(|_| "{}".to_string()),
+                            arguments: tool_use_arguments(input),
                         });
                     }
                     ContentBlock::ToolResult {
@@ -1073,6 +1076,27 @@ pub fn translate_request(
         },
         tool_names,
     })
+}
+
+/// Serialize a `tool_use` block's `input` as Responses `arguments` (#1533).
+///
+/// Anthropic requires `input` to be an object, but a block recorded on a
+/// compat route (OpenRouter) can reach the Codex route after a failover with
+/// `input` missing, `null`, or as a stringified JSON object. Serializing those
+/// verbatim sent `"null"` or a double-encoded string, which the model reads as
+/// an empty or garbled call. Missing/`null` becomes `{}`, and a string that
+/// already holds a JSON object is passed through unencoded.
+fn tool_use_arguments(input: &serde_json::Value) -> String {
+    match input {
+        serde_json::Value::Null => "{}".to_string(),
+        serde_json::Value::String(text)
+            if serde_json::from_str::<serde_json::Value>(text)
+                .is_ok_and(|value| value.is_object()) =>
+        {
+            text.clone()
+        }
+        other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+    }
 }
 
 /// Decode raw request bytes and translate them in one step.
@@ -1447,6 +1471,60 @@ mod tests {
             &out.input[3],
             InputItem::FunctionCallOutput { .. }
         ));
+    }
+
+    /// #1533: a `tool_use` block produced on a compat route (OpenRouter) can
+    /// reach the Codex translator after a failover with its `input` missing,
+    /// `null`, or as a stringified JSON object. Each must replay as an
+    /// object-shaped `arguments` string, never `"null"` or a double-encoded
+    /// string, and an ordinary object (empty or not) must survive unchanged.
+    #[test]
+    fn tool_use_input_always_replays_as_object_arguments() {
+        let out = ok(json!({
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "missing", "name": "Bash"},
+                    {"type": "tool_use", "id": "null", "name": "Bash", "input": null},
+                    {"type": "tool_use", "id": "string", "name": "Bash",
+                     "input": "{\"command\":\"ls\"}"},
+                    {"type": "tool_use", "id": "empty", "name": "Bash", "input": {}},
+                    {"type": "tool_use", "id": "full", "name": "Bash",
+                     "input": {"command": "pwd"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "missing", "content": "a"},
+                    {"type": "tool_result", "tool_use_id": "null", "content": "b"},
+                    {"type": "tool_result", "tool_use_id": "string", "content": "c"},
+                    {"type": "tool_result", "tool_use_id": "empty", "content": "d"},
+                    {"type": "tool_result", "tool_use_id": "full", "content": "e"}
+                ]}
+            ]
+        }));
+        let arguments: Vec<(String, String)> = out
+            .input
+            .iter()
+            .filter_map(|item| match item {
+                InputItem::FunctionCall {
+                    call_id, arguments, ..
+                } => Some((call_id.clone(), arguments.clone())),
+                _ => None,
+            })
+            .collect();
+        let expected = [
+            ("missing", "{}"),
+            ("null", "{}"),
+            ("string", r#"{"command":"ls"}"#),
+            ("empty", "{}"),
+            ("full", r#"{"command":"pwd"}"#),
+        ];
+        assert_eq!(
+            arguments,
+            expected
+                .iter()
+                .map(|(id, args)| (id.to_string(), args.to_string()))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
