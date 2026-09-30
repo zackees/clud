@@ -179,6 +179,14 @@ See DD-069 and `recursive_agent_decision` in `block_bad_cmd.rs`.
 
 ## Which event an invocation serves, and who dispatches
 
+**Stale-upstream guard (#1301).** For any caller, a shell command that runs
+`git diff` against `@{upstream}` / `@{u}` is denied when `HEAD` does not descend
+from that upstream commit (a rebase or force-push left the tracking ref stale, so
+the range would include the whole rebase delta). The denial names the correct
+`<merge-base>...HEAD` range against the default branch, its diffstat, and
+`git/review_range.py`. A fresh upstream, a branch with no upstream, and any other
+command are untouched. Code: `block_bad_cmd_stale_upstream.rs`.
+
 A bare `clud-cmd-scan` means `PreToolUse`. That is what every already-installed
 hook line means, and those lines keep working untouched. Other events are named
 explicitly: `clud-cmd-scan --event Stop`.
