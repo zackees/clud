@@ -1751,3 +1751,239 @@ def test_usage_error_exits_64_not_the_review_verdict_code(watcher, capsys) -> No
     with pytest.raises(SystemExit) as raised:
         watcher.parse_args([])
     assert raised.value.code == 64
+
+
+# ---- #1332: wait for CodeRabbit to finish the head commit ----
+#
+# Driven by recorded `commits/{sha}/statuses` shapes in
+# tests/fixtures/pr_merge_watch/coderabbit.json. A fake clock stands in for
+# time.monotonic/time.sleep, so no test actually sleeps.
+
+CODERABBIT_STATUSES = json.loads((FIXTURES / "coderabbit.json").read_text(encoding="utf-8"))
+
+
+def coderabbit_watch(
+    watcher,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    statuses,
+    *,
+    observations=None,
+    probe: str = "detected",
+    coderabbit_wait: int = 600,
+    timeout: int = 3600,
+    required=frozenset({"linux"}),
+    extra_rows=(),
+) -> dict:
+    """Run `watch()` with green CI; `statuses(poll)` names the fixture each
+    statuses read returns (None = the read failed)."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(watcher.time, "monotonic", lambda: clock["now"])
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    monkeypatch.setattr(watcher.time, "sleep", sleep)
+    monkeypatch.setattr(
+        watcher.PRSnapshot,
+        "fetch",
+        lambda *args: watcher.PRSnapshot(527, "OPEN", "MERGEABLE", "abc123", "main"),
+    )
+    monkeypatch.setattr(
+        watcher,
+        "fetch_required_check_names",
+        lambda *args: set(required) if required is not None else None,
+    )
+    monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
+    state = {"polls": 0, "status_reads": []}
+
+    def gates(*_args, **_kwargs):
+        state["polls"] += 1
+        observation = observations(state["polls"]) if observations else None
+        return gate_snapshot(
+            watcher,
+            [watcher.CheckRow("linux", "pass", "SUCCESS"), *extra_rows],
+            probe=watcher.CodeRabbitProbe(probe, 1),
+            coderabbit=observation,
+        )
+
+    monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
+
+    def gh_json(*args):
+        assert args[0] == "api"
+        assert args[1].startswith("repos/zackees/clud/commits/abc123/statuses")
+        state["status_reads"].append(clock["now"] - 1000.0)
+        name = statuses(state["polls"])
+        return None if name is None else CODERABBIT_STATUSES[name]
+
+    monkeypatch.setattr(watcher, "gh_json", gh_json)
+    cancels: list = []
+    monkeypatch.setattr(
+        watcher, "cancel_pr_runs", lambda *args, **kwargs: cancels.append(args) or 1
+    )
+    log = watcher.WatchLog.create(527, "zackees/clud", root=tmp_path)
+    opts = watcher.CancelOptions(
+        {"fail", "review", "closed"}, "runs", 30, False, False, True, False
+    )
+    with pytest.raises(SystemExit) as exc:
+        watcher.watch(
+            527, "zackees/clud", 20, timeout, None, opts, log, coderabbit_wait=coderabbit_wait
+        )
+    state["code"] = exc.value.code
+    state["elapsed"] = clock["now"] - 1000.0
+    state["cancels"] = cancels
+    state["events"] = [
+        json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()
+    ]
+    return state
+
+
+def _green_event(state: dict) -> dict:
+    return [e for e in state["events"] if e["event"] == "green"][-1]
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected"),
+    [
+        ("pending", "pending"),
+        ("completed", "completed"),
+        ("rate_limited", "rate_limited"),
+        ("skipped", "skipped"),
+    ],
+)
+def test_coderabbit_status_outcome_reads_the_newest_status(
+    watcher, fixture: str, expected: str
+) -> None:
+    status = watcher.newest_coderabbit_status(CODERABBIT_STATUSES[fixture])
+    assert status is not None
+    assert watcher.coderabbit_status_outcome(status) == expected
+
+
+def test_no_coderabbit_status_on_the_head_is_absent(watcher) -> None:
+    assert watcher.newest_coderabbit_status(CODERABBIT_STATUSES["absent"]) is None
+
+
+def test_coderabbit_wait_flag_defaults_to_ten_minutes(watcher) -> None:
+    assert watcher.parse_args(["527"]).coderabbit_wait == 600
+    assert watcher.parse_args(["527", "--coderabbit-wait", "90"]).coderabbit_wait == 90
+
+
+def test_green_waits_while_coderabbit_is_pending_then_goes_green(
+    watcher, tmp_path, monkeypatch, capsys
+) -> None:
+    state = coderabbit_watch(
+        watcher, tmp_path, monkeypatch, lambda poll: "pending" if poll < 3 else "completed"
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 3
+    assert state["elapsed"] == pytest.approx(40)
+    assert _green_event(state)["coderabbit"] == "completed"
+    waits = [e for e in state["events"] if e["event"] == "coderabbit_wait"]
+    assert [w["state"] for w in waits] == ["pending"]  # logged once, not every poll
+    assert "coderabbit=completed" in capsys.readouterr().out
+    assert state["cancels"] == []
+
+
+def test_new_coderabbit_thread_during_the_wait_exits_two(watcher, tmp_path, monkeypatch) -> None:
+    thread = watcher.CodeRabbitObservation(
+        "actionable", actionable=True, unresolved_threads=1, ids=frozenset({4242})
+    )
+    state = coderabbit_watch(
+        watcher,
+        tmp_path,
+        monkeypatch,
+        lambda poll: "pending",
+        observations=lambda poll: thread if poll >= 2 else watcher.CodeRabbitObservation("quiet"),
+    )
+    assert state["code"] == watcher.EXIT_REVIEW_ACTIVITY
+    assert state["polls"] == 2
+    assert not [e for e in state["events"] if e["event"] == "green"]
+
+
+@pytest.mark.parametrize("fixture", ["rate_limited", "skipped"])
+def test_rate_limited_or_skipped_review_is_finished_and_green_with_a_note(
+    watcher, tmp_path, monkeypatch, capsys, fixture: str
+) -> None:
+    state = coderabbit_watch(watcher, tmp_path, monkeypatch, lambda poll: fixture)
+    assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 1
+    assert _green_event(state)["coderabbit"] == fixture
+    assert f"coderabbit={fixture}" in capsys.readouterr().out
+    assert state["cancels"] == []
+
+
+def test_no_coderabbit_status_within_two_minutes_goes_green(
+    watcher, tmp_path, monkeypatch
+) -> None:
+    state = coderabbit_watch(watcher, tmp_path, monkeypatch, lambda poll: "absent")
+    assert state["code"] == watcher.EXIT_GREEN
+    assert _green_event(state)["coderabbit"] == "absent"
+    # Checked every poll, released at the 120 s mark, far below the 600 s cap.
+    assert state["status_reads"][-1] == pytest.approx(watcher.CODERABBIT_ABSENT_GRACE_SEC)
+    assert state["elapsed"] < 600
+
+
+def test_an_unreadable_status_is_not_mistaken_for_absent(watcher, tmp_path, monkeypatch) -> None:
+    state = coderabbit_watch(
+        watcher, tmp_path, monkeypatch, lambda poll: None if poll < 10 else "completed"
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert _green_event(state)["coderabbit"] == "completed"
+    assert state["elapsed"] > watcher.CODERABBIT_ABSENT_GRACE_SEC
+
+
+def test_coderabbit_wait_cap_goes_green_with_timeout_and_never_cancels(
+    watcher, tmp_path, monkeypatch, capsys
+) -> None:
+    state = coderabbit_watch(
+        watcher, tmp_path, monkeypatch, lambda poll: "pending", coderabbit_wait=100
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert _green_event(state)["coderabbit"] == "timeout"
+    assert state["status_reads"][-1] == pytest.approx(100)
+    assert "coderabbit=timeout" in capsys.readouterr().out
+    assert state["cancels"] == []
+    assert not [e for e in state["events"] if e["event"] == "timeout"]
+
+
+def test_watch_timeout_during_the_coderabbit_wait_is_green_not_exit_four(
+    watcher, tmp_path, monkeypatch
+) -> None:
+    state = coderabbit_watch(watcher, tmp_path, monkeypatch, lambda poll: "pending", timeout=90)
+    assert state["code"] == watcher.EXIT_GREEN
+    assert _green_event(state)["coderabbit"] == "timeout"
+    assert state["elapsed"] < 90
+    assert state["cancels"] == []
+
+
+def test_coderabbit_not_detected_reads_no_status_and_goes_green_at_once(
+    watcher, tmp_path, monkeypatch
+) -> None:
+    state = coderabbit_watch(
+        watcher, tmp_path, monkeypatch, lambda poll: "pending", probe="not_detected"
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 1
+    assert state["status_reads"] == []
+    assert "coderabbit" not in _green_event(state)
+
+
+def test_a_pending_coderabbit_status_is_the_review_gate_not_a_ci_check(
+    watcher, tmp_path, monkeypatch
+) -> None:
+    """Without branch protection every check is required; CodeRabbit's own
+    status is judged by the gate instead, so a stuck review ends green with
+    `coderabbit=timeout` rather than holding CI pending until exit 4."""
+    state = coderabbit_watch(
+        watcher,
+        tmp_path,
+        monkeypatch,
+        lambda poll: "pending",
+        probe="not_detected",
+        required=None,
+        extra_rows=(watcher.CheckRow("CodeRabbit", "pending", "PENDING"),),
+        coderabbit_wait=60,
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert _green_event(state)["coderabbit"] == "timeout"
+    assert state["cancels"] == []

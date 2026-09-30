@@ -20,7 +20,10 @@ server and merge.
    itself instead of being orphaned in the background.
 2. By exit code:
    - `0` (checks green, mergeable): `gh pr merge <n> --admin --squash
-     --delete-branch`. Return `status=merged`.
+     --delete-branch`. Return `status=merged`. When CodeRabbit is active the
+     watch first waits for it to finish the head commit (`--coderabbit-wait`,
+     default 600 s, bounded by `--timeout`); a `coderabbit=rate_limited`,
+     `skipped`, `absent` or `timeout` note is still `0`: merge.
    - `1` (a required check failed): `gh pr checks <n>` and
      `gh run view <run> --log-failed` for the failing job. Return
      `status=needs_fix` with the failing job and the relevant log lines in

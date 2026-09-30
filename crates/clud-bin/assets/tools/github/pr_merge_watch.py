@@ -23,7 +23,8 @@ Immediately announces a durable repo-local JSONL log under
 records use monotonic seconds relative to that start.
 
 Exit codes:
-  0  all required checks green AND mergeable=MERGEABLE
+  0  all required checks green AND mergeable=MERGEABLE (after the CodeRabbit
+     gate below, when CodeRabbit is active)
   1  at least one required check failed (details on stdout)
   2  new review activity (unresolved coderabbit/human review)
   3  PR closed or merged out from under us
@@ -80,6 +81,19 @@ commit only, grouped by (workflow file, check name) -- never the display
     cancelled; newer runs and other workflows are left alone.
 `merge_group` runs and check runs for any other commit are ignored; legacy
 commit statuses keep GitHub's newest-per-context result.
+
+CodeRabbit gate (#1332). When CodeRabbit is active on the repo or on this PR,
+green also waits for CodeRabbit to finish the *current head commit*: the
+newest `CodeRabbit` commit status on the head SHA must not be `pending`.
+Check runs and a review's `commit_id` are not used. The wait starts when
+required CI is green and lasts at most `--coderabbit-wait` seconds (default
+600, and never past `--timeout`). If no `CodeRabbit` status appears on the head
+within 120 s, CodeRabbit is not reviewing this commit. `Review rate limited`
+and `Review skipped` count as finished. Every outcome ends green with a
+`coderabbit=<completed|rate_limited|skipped|absent|timeout>` note: the wait
+never fails and never cancels. New CodeRabbit threads that arrive during the
+wait still exit 2. The `CodeRabbit` status itself is not a CI check unless
+branch protection requires it.
 
 The exit code IS the result — do not pipe this through `tail`, `grep` or
 `head`. A pipeline reports the *last* stage's status, so every one of the
@@ -142,6 +156,11 @@ CANCEL_ON_DEFAULTS = {"fail", "review", "closed"}
 CANCEL_MODE_CHOICES = {"runs", "jobs", "none"}
 # How often (in polls) a watch that found no CodeRabbit looks again (#1332).
 CODERABBIT_RECHECK_POLLS = 3
+# Once CI is green, how long to wait for CodeRabbit to finish the head commit
+# (#1332), and how long a head with no CodeRabbit status at all is waited for.
+DEFAULT_CODERABBIT_WAIT_SEC = 600
+CODERABBIT_ABSENT_GRACE_SEC = 120
+CODERABBIT_STATUS_CONTEXT = "coderabbit"  # compared case-insensitively
 
 
 def _utc_now() -> datetime:
@@ -1353,6 +1372,57 @@ query($owner:String!,$name:String!,$number:Int!){
     return classify_coderabbit(threads, comments)
 
 
+def _is_coderabbit_context(context: object) -> bool:
+    return isinstance(context, str) and context.strip().lower() == CODERABBIT_STATUS_CONTEXT
+
+
+def newest_coderabbit_status(statuses: list[dict]) -> dict | None:
+    """The newest `CodeRabbit` commit status (highest id), or None."""
+    found = [
+        s for s in statuses if isinstance(s, dict) and _is_coderabbit_context(s.get("context"))
+    ]
+    if not found:
+        return None
+    # The REST list is newest first; the id orders it when present.
+    return max(enumerate(found), key=lambda item: (_as_int(item[1].get("id")) or 0, -item[0]))[1]
+
+
+def fetch_coderabbit_status(repo: str, sha: str) -> tuple[bool, dict | None]:
+    """(read ok, newest `CodeRabbit` status) on one commit (#1332)."""
+    data = gh_json("api", f"repos/{repo}/commits/{sha}/statuses?per_page=100")
+    if not isinstance(data, list):
+        return False, None
+    return True, newest_coderabbit_status(data)
+
+
+def coderabbit_status_outcome(status: dict) -> str:
+    """pending | completed | rate_limited | skipped | <other final state>."""
+    state = _lower(status.get("state"))
+    if state == "pending":
+        return "pending"
+    description = str(status.get("description") or "")
+    if re.search(r"rate[\s-]*limit", description, re.IGNORECASE):
+        return "rate_limited"
+    if re.search(r"\bskip", description, re.IGNORECASE):
+        return "skipped"
+    return "completed" if state == "success" else state or "completed"
+
+
+def coderabbit_gate_note(
+    read_ok: bool, status: dict | None, waited: float, wait_cap: float
+) -> str | None:
+    """Pure: the note to go green with, or None to keep waiting (#1332)."""
+    if read_ok and status is not None:
+        outcome = coderabbit_status_outcome(status)
+        if outcome != "pending":
+            return outcome
+    elif read_ok and waited >= CODERABBIT_ABSENT_GRACE_SEC:
+        return "absent"
+    if waited >= wait_cap:
+        return "timeout"
+    return None
+
+
 @dataclass
 class ReviewState:
     """Tracks new human reviews and actionable CodeRabbit threads."""
@@ -1924,6 +1994,7 @@ def watch(
     *,
     no_checks_grace: int = DEFAULT_NO_CHECKS_GRACE_SEC,
     max_queued: int | None = None,
+    coderabbit_wait: int = DEFAULT_CODERABBIT_WAIT_SEC,
 ) -> int:
     deadline = time.monotonic() + timeout
     snapshot: PRSnapshot | None = None
@@ -1968,11 +2039,25 @@ def watch(
     review_state = ReviewState()
     coderabbit_probe_complete = False
     poll_no = 0
+    # CodeRabbit gate (#1332): when required CI went green on this head, and
+    # the green that is only waiting for CodeRabbit to finish the head commit.
+    green_since: float | None = None
+    waiting_green: tuple[list[CheckRow], dict[str, int]] | None = None
+    last_wait_state: str | None = None
+    keep_coderabbit_status = bool(
+        required_names and any(_is_coderabbit_context(name) for name in required_names)
+    )
 
     require_re = re.compile(require_pattern) if require_pattern else None
 
     while True:
         if time.monotonic() >= deadline:
+            if waiting_green is not None:
+                # CI is green and only CodeRabbit is outstanding: the wait
+                # never becomes a timeout verdict (#1332).
+                _exit_green(
+                    pr, repo, snapshot.head_sha, opts, log, *waiting_green, coderabbit="timeout"
+                )
             print(f"TIMEOUT  after {timeout}s")
             if log:
                 log.emit("timeout", timeout_sec=timeout)
@@ -2028,6 +2113,8 @@ def watch(
             seen_head = snapshot.head_sha
             idle_since = None
             unknown_polls = 0
+            green_since = None
+            last_wait_state = None
         merge_fields = {"mergeable": snapshot.mergeable, "merge_state_status": snapshot.merge_state}
         if snapshot.state != "OPEN":
             print(f"PR-STATE  #{pr} state={snapshot.state}")
@@ -2041,7 +2128,29 @@ def watch(
         # are judged by the supersession rule; the rollup rows are the
         # fallback when that data is unavailable.
         verdict: Verdict | None = None
+        waiting_green = None
+        # The `CodeRabbit` status is the review gate below, not a CI check,
+        # unless branch protection makes it one or it is the only thing that
+        # reports on the head (#1332).
+        coderabbit_in_rollup = any(_is_coderabbit_context(c.name) for c in gate.checks) or (
+            gate.head_checks is not None
+            and newest_coderabbit_status(gate.head_checks.statuses) is not None
+        )
         checks = gate.checks
+        ci_statuses = gate.head_checks.statuses if gate.head_checks is not None else []
+        if not keep_coderabbit_status:
+            other_checks = [c for c in checks if not _is_coderabbit_context(c.name)]
+            other_statuses = [
+                s
+                for s in ci_statuses
+                if not (isinstance(s, dict) and _is_coderabbit_context(s.get("context")))
+            ]
+            has_ci = bool(other_checks) or bool(other_statuses) or (
+                gate.head_checks is not None
+                and bool(gate.head_checks.check_runs or gate.head_checks.workflow_runs)
+            )
+            if has_ci:
+                checks, ci_statuses = other_checks, other_statuses
         # Idle: nothing has registered on the head. Idle for the grace period
         # means nothing will.
         # Anything in the rollup (an external CI's status, a check app) means
@@ -2066,7 +2175,7 @@ def watch(
                 gate.head_checks.workflow_runs,
                 snapshot.head_sha,
                 required_names,
-                statuses=gate.head_checks.statuses,
+                statuses=ci_statuses,
                 head_branch=snapshot.head_ref or None,
                 require_re=require_re,
                 runs_grace_elapsed=grace_elapsed,
@@ -2186,8 +2295,9 @@ def watch(
                 EXIT_REVIEW_ACTIVITY, "review", pr, repo, snapshot.head_sha, opts, log
             )
 
-        # CI and review state came from the same GraphQL response, so green
-        # does not initiate or wait for an additional CodeRabbit request.
+        # CI and review state came from the same GraphQL response. Only when
+        # CodeRabbit is active does green make one more request: the head
+        # commit's `CodeRabbit` status (#1332).
         checks_green = verdict.state == "pass" if verdict is not None else not pending
         unknown_polls = unknown_polls + 1 if checks_green and snapshot.mergeable == "UNKNOWN" else 0
         if unknown_polls >= MERGEABLE_UNKNOWN_MAX_POLLS:
@@ -2196,21 +2306,54 @@ def watch(
                 f"{unknown_polls} polls (mergeStateStatus={snapshot.merge_state})"
             )
             _finish_exit(EXIT_CONFLICT, "mergeable_unknown", log, **merge_fields)
+        if not checks_green:
+            green_since = None
+            last_wait_state = None
         if checks_green and snapshot.mergeable == "MERGEABLE":
-            for c in failing:
-                print(f"ADVISORY-FAIL  {c.name} (not in required set)")
-            print(f"GREEN  #{pr} all required checks passed")
-            if log:
-                log.emit("green", mergeable=snapshot.mergeable, checks=counts)
-            _exit_after_cancel(
-                EXIT_GREEN,
-                "always" if "always" in opts.on else "never",
-                pr,
-                repo,
-                snapshot.head_sha,
-                opts,
-                log,
-            )
+            coderabbit_note: str | None = None
+            if review_state.coderabbit_enabled or coderabbit_in_rollup:
+                # CodeRabbit gate (#1332): wait for it to finish the head commit.
+                if green_since is None:
+                    green_since = poll_started
+                waited = poll_started - green_since
+                # Never wait past --timeout: the wait always ends green.
+                wait_cap = min(
+                    float(coderabbit_wait), max(0.0, deadline - interval - green_since)
+                )
+                read_ok, status = fetch_coderabbit_status(repo_for_protection, snapshot.head_sha)
+                coderabbit_note = coderabbit_gate_note(read_ok, status, waited, wait_cap)
+                if coderabbit_note is None:
+                    wait_state = "pending" if status is not None else (
+                        "absent" if read_ok else "unreadable"
+                    )
+                    if wait_state != last_wait_state:
+                        print(
+                            f"WAIT  CI green; CodeRabbit {wait_state} on "
+                            f"{snapshot.head_sha[:7]} (up to {int(wait_cap)}s)",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        if log:
+                            log.emit(
+                                "coderabbit_wait",
+                                state=wait_state,
+                                head_sha=snapshot.head_sha,
+                                waited_sec=round(waited, 2),
+                                wait_cap_sec=round(wait_cap, 2),
+                            )
+                        last_wait_state = wait_state
+                    waiting_green = (failing, counts)
+            if waiting_green is None:
+                _exit_green(
+                    pr,
+                    repo,
+                    snapshot.head_sha,
+                    opts,
+                    log,
+                    failing,
+                    counts,
+                    coderabbit=coderabbit_note,
+                )
 
         try:
             emit_progress_report(pr, repo, snapshot, checks)
@@ -2218,6 +2361,37 @@ def watch(
             print(f"NOTE  progress report failed: {exc}", file=sys.stderr)
 
         _sleep_remaining_interval(poll_started, interval)
+
+
+def _exit_green(
+    pr: int,
+    repo: str | None,
+    head_sha: str,
+    opts: CancelOptions,
+    log: WatchLog | None,
+    advisory_failing: list[CheckRow],
+    counts: dict[str, int],
+    *,
+    coderabbit: str | None = None,
+) -> None:
+    for c in advisory_failing:
+        print(f"ADVISORY-FAIL  {c.name} (not in required set)")
+    suffix = f" (coderabbit={coderabbit})" if coderabbit else ""
+    print(f"GREEN  #{pr} all required checks passed{suffix}")
+    if log:
+        fields: dict[str, object] = {"mergeable": "MERGEABLE", "checks": counts}
+        if coderabbit:
+            fields["coderabbit"] = coderabbit
+        log.emit("green", **fields)
+    _exit_after_cancel(
+        EXIT_GREEN,
+        "always" if "always" in opts.on else "never",
+        pr,
+        repo,
+        head_sha,
+        opts,
+        log,
+    )
 
 
 def _exit_conflict(
@@ -2481,7 +2655,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Fail-fast PR-check waiter for clud (issue #408).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "exit codes: 0 green, 1 required check failed, 2 review activity, "
+            "exit codes: 0 green (after CodeRabbit finishes the head commit, when active), "
+            "1 required check failed, 2 review activity, "
             "3 PR closed, 4 timeout (never cancels), 5 approval required, 6 required check never "
             "reported, 7 stale (re-run needed), 8 no checks will ever report, "
             "9 merge conflict, 10 GitHub unreachable, 11 queued too long, "
@@ -2524,6 +2699,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=None,
         help="exit 11 when a run has waited this many seconds for a runner (default: off)",
+    )
+    p.add_argument(
+        "--coderabbit-wait",
+        type=int,
+        default=DEFAULT_CODERABBIT_WAIT_SEC,
+        help="once CI is green, seconds to wait for CodeRabbit to finish the head commit "
+        "when it is active (default 600, bounded by --timeout); the wait always ends "
+        "green, never in a failure or a cancel",
     )
     p.add_argument(
         "--require",
@@ -2631,6 +2814,7 @@ def main(argv: list[str] | None = None) -> int:
             log,
             no_checks_grace=ns.no_checks_grace,
             max_queued=ns.max_queued,
+            coderabbit_wait=ns.coderabbit_wait,
         )
     except WatchKilled as killed:
         print(f"KILLED  {killed}", file=sys.stderr)
