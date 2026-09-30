@@ -5450,3 +5450,31 @@ before removing anything (DD-129).
 the CLI did before #1606, and the verdict only ever added removals. With no
 verdict nothing is added, so spare on doubt holds. The reason is shown so
 the user can tell a slow probe from a real spare.
+
+## DD-131: the git / gh telemetry shim waits for the child instead of exec'ing
+
+**Context:** #1486, as the user narrowed it: the session `git` and `gh`
+aliases pass every call through unchanged and exist to gather telemetry. The
+other relays (`python`, the old `gh` relay) `exec` the real binary, which
+leaves nothing behind to record the exit code or the duration.
+
+**Decision:** In a session, `git` and `gh` spawn the real binary with
+inherited stdio, wait, append one JSON line, and return the child's code
+(`shim_main::run_child`). On Unix they behave like a shell running one
+command: they ignore SIGINT/SIGQUIT while the child runs, forward
+SIGTERM/SIGHUP to it, and, if the child dies by a signal, record `128 + N`
+and then re-raise N so the caller sees the same wait status. The log is a
+local capped JSONL file (`<state>/logs/shim/git-gh.jsonl`, rotated at 8 MiB),
+and every write error is ignored.
+
+**Why not `exec` and log up front:** a start-only record has no exit code
+and no duration, which are the useful half of the telemetry. **Why not the
+daemon's HTTP telemetry:** a network hop on every `git status` adds latency
+and a failure mode. **Why not refuse clones as first proposed:** Claude
+Code's own worktree isolation, the grind skills and pip/uv all run `git
+clone` / `git worktree add` through the same PATH, so a refusal would break
+them (PR #1613 discussion).
+
+**Consequences:** One extra process stays alive (the shim) for each git/gh
+call in a session. Outside a session, and whenever the target is invalid, the
+alias still `exec`s the next real binary with no telemetry.

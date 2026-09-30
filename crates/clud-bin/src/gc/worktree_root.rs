@@ -84,8 +84,7 @@ pub fn alloc_wt_path(slug: &str, suffix: &str) -> std::io::Result<PathBuf> {
 /// which **exists on return**. On a collision it tries
 /// `<slug>-wt-<suffix>-2`, `-3`, ... in order. Each attempt is one
 /// `create_dir`, which fails if the name exists, so two concurrent callers
-/// never receive the same path. This is the one allocator behind #1486's
-/// refusal messages and `safe-gh-*` helpers: a printed path is always real.
+/// never receive the same path, and a path a caller prints is always real.
 ///
 /// `slug` and `suffix` must each be one non-empty path component with no
 /// separator and no character Windows rejects; otherwise `InvalidInput`, and

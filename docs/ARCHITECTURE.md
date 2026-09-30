@@ -32,6 +32,7 @@ re-explaining.
 | [architecture/rm-tools.md](architecture/rm-tools.md) | ~170 | `safe-rm` (#1461): trash, profile roots, audit, hook rewrite, and the child catastrophe floor |
 | [architecture/shim-dispatch.md](architecture/shim-dispatch.md) | ~90 | `clud-shim`'s alias registry, single dispatch path, session ABI stamp, and fail-open passthrough outside a session (#1546) |
 | [architecture/gh-watch-shim.md](architecture/gh-watch-shim.md) | ~30 | Session `gh` alias, PR-watch translation, and target resolution |
+| [architecture/git-gh-telemetry-shim.md](architecture/git-gh-telemetry-shim.md) | ~90 | Session `git` / `gh` aliases as a telemetry pass-through (#1486): nothing refused, shell-style child handling, the capped JSONL record under `~/.clud/state/logs/shim/`, and how clud's own spawns reach the real binaries |
 | [architecture/ci.md](architecture/ci.md) | ~380 | Build-once/run-everywhere CI: per-triple cross-compilation on Linux, test bundles, exec runners with no toolchain, target tiers, release-profile containment |
 | [architecture/installer-pages.md](architecture/installer-pages.md) | ~30 | Published release assets to validated v1 Catalog, exact Pages paths, and unauthenticated deployment smoke |
 | [architecture/native-installer.md](architecture/native-installer.md) | ~40 | Early installer CLI, selector, exact release choice, consented binary transaction, and pending PATH activation |
@@ -81,3 +82,4 @@ Release-manager evidence for the optional cross-route is tracked separately in
 - **rm safety and shim identity** -> [rm-protection.md](architecture/rm-protection.md)
 - **"Why does `gh`/`python`/`rm` behave normally outside a clud session?"** -> [shim-dispatch.md](architecture/shim-dispatch.md)
 - **"How does an agent delete files, and where do they go?"** -> [rm-tools.md](architecture/rm-tools.md)
+- **"Where do in-session `git` / `gh` calls get logged?"** -> [git-gh-telemetry-shim.md](architecture/git-gh-telemetry-shim.md)

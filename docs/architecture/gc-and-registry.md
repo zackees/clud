@@ -339,8 +339,7 @@ the default branch, so ancestry-based checks call them live work forever
   and, on a collision, takes `-2`, `-3`, ... in order, so the path it returns
   already exists and two callers never share one. `slug` and `suffix` must
   each be one plain path component (`InvalidInput` otherwise, and nothing is
-  reserved). The `git`/`gh` shim's refusal messages and the `safe-gh-*`
-  helpers allocate only through it.
+  reserved).
 - **Reserved-unused (#1486).** A direct child of the root that no `git
   worktree list` claimed is judged by `repo_worktree::reserved_dir_verdict`
   (pure, decision-table tested) instead: an **empty**, idle directory with no

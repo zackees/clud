@@ -105,6 +105,7 @@ pub mod shim_main;
 pub mod shim_registry;
 pub mod shim_resolve;
 pub mod shim_session;
+pub mod shim_telemetry;
 pub mod shim_uv;
 pub mod skills;
 pub mod soldr_activate;

@@ -35,6 +35,8 @@ pub const SESSION_DIR_KEY: &str = "CLUD_RM_SHIM_DIR";
 pub const PYTHON_TARGET_KEY: &str = "CLUD_PYTHON_SHIM_TARGET";
 /// Real `gh` the launching clud resolved before PATH was rewritten.
 pub const GH_TARGET_KEY: &str = "CLUD_GH_SHIM_TARGET";
+/// Real `git` the launching clud resolved before PATH was rewritten (#1486).
+pub const GIT_TARGET_KEY: &str = "CLUD_GIT_SHIM_TARGET";
 /// `1` when the `gh` alias has a target; read by the command guard.
 pub const GH_ACTIVE_KEY: &str = "CLUD_GH_SHIM_ACTIVE";
 /// `0` turns the `gh pr checks --watch` upgrade off.
@@ -51,6 +53,7 @@ pub const SESSION_KEYS: &[&str] = &[
     GH_TARGET_KEY,
     GH_ACTIVE_KEY,
     GH_FAIL_FAST_KEY,
+    GIT_TARGET_KEY,
 ];
 
 /// Interpreter aliases, prepared by `shim_install::prepare_current_session`.
@@ -62,6 +65,9 @@ pub const SESSION_SUBDIR: &str = ".clud/state/rm-shim";
 pub enum ShimKind {
     Python,
     Gh,
+    /// In-session `git`: a pass-through that records one telemetry line per
+    /// invocation (#1486).
+    Git,
     Rm,
     SafeRm,
 }
@@ -120,6 +126,13 @@ pub const SHIMS: &[ShimSpec] = &[
         name: "gh",
         kind: ShimKind::Gh,
         session_keys: &[ABI_KEY, GH_TARGET_KEY, GH_FAIL_FAST_KEY],
+        fallback: Fallback::Passthrough,
+        dirs: &[ShimDir::Session],
+    },
+    ShimSpec {
+        name: "git",
+        kind: ShimKind::Git,
+        session_keys: &[ABI_KEY, GIT_TARGET_KEY],
         fallback: Fallback::Passthrough,
         dirs: &[ShimDir::Session],
     },
@@ -219,6 +232,58 @@ pub fn valid_target(target: &Path, self_exe: &Path, shim_dirs: &[PathBuf]) -> bo
             .parent()
             .is_some_and(|parent| shim_dirs.iter().any(|dir| *dir == canonical(parent)));
     !in_shim_dir && !is_self(&resolved, self_exe)
+}
+
+/// Issue #1486: the real `git` / `gh` for clud's own spawns, so they bypass
+/// the session's telemetry alias (no recorded line, no extra hop).
+///
+/// `name` must be `git` or `gh`; anything else is `None`. The target is the
+/// session's `CLUD_GIT_SHIM_TARGET` / `CLUD_GH_SHIM_TARGET`, resolved by the
+/// launching clud before the alias directory went on PATH, and is used only
+/// when it is absolute, an existing file, and outside every alias
+/// directory. Otherwise `None`, and the caller spawns the bare name: outside
+/// a session nothing is shimmed, and a session without a valid target runs
+/// the alias as a plain passthrough.
+pub fn real_program(name: &str) -> Option<PathBuf> {
+    real_program_with(
+        name,
+        &|key| std::env::var_os(key),
+        home_for_env().as_deref(),
+    )
+}
+
+/// [`real_program`] over injected env and home, for tests.
+pub fn real_program_with(
+    name: &str,
+    var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let key = match name {
+        "git" => GIT_TARGET_KEY,
+        "gh" => GH_TARGET_KEY,
+        _ => return None,
+    };
+    let target = PathBuf::from(var(key)?);
+    if !target.is_absolute() || !target.is_file() {
+        return None;
+    }
+    let session_dir = var(SESSION_DIR_KEY).map(PathBuf::from);
+    let mut alias_dirs: Vec<PathBuf> = session_dir.iter().map(|dir| canonical(dir)).collect();
+    if let Some(home) = home {
+        for dir in [ShimDir::Interpreter, ShimDir::Session] {
+            alias_dirs.push(canonical(&home.join(dir.subdir())));
+        }
+    }
+    let parent = target.parent().map(canonical);
+    if parent.is_some_and(|parent| alias_dirs.contains(&parent)) {
+        return None;
+    }
+    Some(target)
+}
+
+fn home_for_env() -> Option<PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key).map(PathBuf::from)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -402,6 +467,69 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    /// #1486: `git` and `gh` are session aliases (`.exe` on Windows).
+    #[test]
+    fn git_and_gh_are_registered_session_aliases() {
+        for name in ["git", "gh"] {
+            let spec = lookup(OsStr::new(name)).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(spec.name, name);
+            assert!(spec.dirs.contains(&ShimDir::Session), "{name}");
+            assert!(
+                file_names_in(ShimDir::Session).contains(&file_name(name)),
+                "{name}"
+            );
+            let windows = format!(r"C:\u\.clud\state\rm-shim\{name}.EXE");
+            assert_eq!(lookup(OsStr::new(&windows)).map(|s| s.name), Some(name));
+        }
+        assert_eq!(file_name("git").ends_with(".exe"), cfg!(windows));
+    }
+
+    /// #1486 acceptance 5: a target inside an alias directory is never
+    /// used, so clud's own spawns cannot recurse into the shim.
+    #[test]
+    fn real_program_uses_only_a_target_outside_the_alias_dirs() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let session = home.join(SESSION_SUBDIR);
+        let alias = session.join(file_name("git"));
+        let real = temp.path().join("usr").join(file_name("git"));
+        write_exe(&alias, b"alias");
+        write_exe(&real, b"real");
+        let vars = |pairs: Vec<(&'static str, PathBuf)>| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.clone().into_os_string())
+            }
+        };
+        let good = vars(vec![
+            (GIT_TARGET_KEY, real.clone()),
+            (SESSION_DIR_KEY, session.clone()),
+        ]);
+        assert_eq!(
+            real_program_with("git", &good, Some(&home)),
+            Some(real.clone())
+        );
+        assert_eq!(real_program_with("gh", &good, Some(&home)), None);
+        assert_eq!(real_program_with("rm", &good, Some(&home)), None);
+        let recursive = vars(vec![
+            (GIT_TARGET_KEY, alias.clone()),
+            (SESSION_DIR_KEY, session),
+        ]);
+        assert_eq!(
+            real_program_with("git", &recursive, Some(&home)),
+            None,
+            "a target inside the alias dir would recurse into the shim"
+        );
+        let relative = vars(vec![(GIT_TARGET_KEY, PathBuf::from("git"))]);
+        assert_eq!(real_program_with("git", &relative, Some(&home)), None);
+        let gone = vars(vec![(GIT_TARGET_KEY, temp.path().join("missing"))]);
+        assert_eq!(real_program_with("git", &gone, Some(&home)), None);
+        let gh = vars(vec![(GH_TARGET_KEY, real.clone())]);
+        assert_eq!(real_program_with("gh", &gh, None), Some(real));
     }
 
     /// Session key names are spelled once, here. Every module that produces

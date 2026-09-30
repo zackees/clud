@@ -428,12 +428,30 @@ fn command_for_suspended_spawn(argv: &[String]) -> std::io::Result<Command> {
 /// executables and every POSIX target stay as plain `Argv` so we keep the
 /// well-defined argv contract end-to-end.
 pub fn command_spec_for_subprocess(argv: Vec<String>) -> CommandSpec {
+    let argv = with_real_git_or_gh(argv);
     #[cfg(windows)]
     if is_windows_batch_wrapper(argv.first().map(String::as_str)) {
         return CommandSpec::Shell(render_windows_batch_command(&argv));
     }
 
     CommandSpec::Argv(argv)
+}
+
+/// Issue #1486: clud's own `git` / `gh` spawns (GC probes, `worktrees.rs`,
+/// grind, `pr_merge_watch` lookups) bypass the session's telemetry alias:
+/// no extra process hop and no telemetry line for clud's own maintenance.
+/// A bare `git` / `gh` program
+/// becomes the session's real target when one is set
+/// ([`crate::shim_registry::real_program`]); anything else is untouched.
+fn with_real_git_or_gh(mut argv: Vec<String>) -> Vec<String> {
+    if let Some(first) = argv.first_mut() {
+        if first == "git" || first == "gh" {
+            if let Some(real) = crate::shim_registry::real_program(first) {
+                *first = real.to_string_lossy().into_owned();
+            }
+        }
+    }
+    argv
 }
 
 /// Return whether this argv will be launched through `cmd.exe` on Windows.

@@ -91,8 +91,9 @@ def _run(argv: list[str], env: dict[str, str], cwd: Path, stdin: str = ""):
 
 def test_registry_lists_every_alias_the_session_installs() -> None:
     names = {spec["name"] for spec in REGISTRY["shims"]}
-    assert {"python", "python3", "gh", "rm", "safe-rm"} <= names  # python-name-lint: allow
+    assert {"python", "python3", "gh", "git", "rm", "safe-rm"} <= names  # python-name-lint: allow
     assert "gh" in PASSTHROUGH
+    assert "git" in PASSTHROUGH
     assert "rm" in PASSTHROUGH
     assert "safe-rm" in NATIVE
 
