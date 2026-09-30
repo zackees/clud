@@ -73,7 +73,10 @@ commit only, grouped by (workflow file, check name) -- never the display
     (anything but `skipped`), so a skip never hides an older real failure;
   - a cancelled check with no replacement fails only when no newer run of
     its workflow exists on the head commit in any state (queued included);
-  - `success`, `neutral` and `skipped` pass, a required `skipped` included;
+  - `success`, `neutral` and `skipped` pass, but green needs at least one
+    required check that actually ran on the head SHA, a protected check that
+    skipped reads as pending, and without branch protection every head run
+    must have completed (#1639);
   - a cancellation-derived failure is acted on only after re-reading the
     PR's head: if the head moved, the verdict is dropped and the watch
     continues on the new commit;
@@ -809,6 +812,18 @@ def judge_check_runs(
         state = "never_reported" if all_runs_done or no_runs_ever else "pending"
     elif not judgments:
         state = "pass" if all_runs_done else "pending"
+    elif not any(j.state == "pass" and j.conclusion != "skipped" for j in req):
+        # Skips alone prove nothing ran on this head (#1639): the aggregate
+        # may not exist yet because it `needs:` still-queued jobs.
+        state = "pending"
+    elif required and require_re is None and any(
+        j.conclusion == "skipped" for j in req if j.name in required
+    ):
+        state = "pending"  # a protected gate (`CI OK`) that skipped is no verdict
+    elif not required and require_re is None and not all_runs_done and head_runs:
+        # Without branch protection every check is required, including the
+        # ones a queued run has not created yet.
+        state = "pending"
     else:
         state = "pass"
     return Verdict(state, judgments, failing, advisory, failing_run_ids, missing, notes)
