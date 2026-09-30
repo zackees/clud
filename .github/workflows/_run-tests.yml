@@ -24,6 +24,13 @@ on:
         description: 'unit | integration | harness | wheel-smoke'
         required: true
         type: string
+      shard:
+        description: >-
+          unit only: all (default) | rust | py<k>of<n>. The Linux x64 unit suite
+          runs as parallel shards (ci/pytest_shard.py); every other lane is "all".
+        required: false
+        type: string
+        default: all
       wheel-artifact:
         description: >-
           wheel-smoke only: artifact holding the release wheel to pip-install
@@ -112,7 +119,7 @@ jobs:
       - name: Run ${{ inputs.suite }} suite
         if: inputs.suite != 'wheel-smoke'
         shell: bash
-        run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'
+        run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }} --shard ${{ inputs.shard }}'
 
       - name: Diagnose Linux failure
         if: ${{ failure() && runner.os == 'Linux' }}
@@ -133,7 +140,7 @@ jobs:
         if: ${{ always() && (failure() || cancelled()) }}
         uses: actions/upload-artifact@v4
         with:
-          name: failure-logs-${{ inputs.suite }}-${{ inputs.target }}
+          name: failure-logs-${{ inputs.suite }}-${{ inputs.target }}${{ inputs.shard != 'all' && format('-{0}', inputs.shard) || '' }}
           path: |
             logs/*
             bundle/manifest.json

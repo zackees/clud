@@ -30,6 +30,20 @@ zccache namespace read-only (`save-cache: false`) so the two jobs never race to
 write one immutable cache key. Windows and macOS clippy stay inside their
 build jobs (they run only in `ci-test`/`ci-full`).
 
+The Linux x64 unit suite runs as three parallel jobs (`test-linux-x64-unit`, a
+matrix over `LINUX_X64_UNIT_SHARDS` in `ci/ci_matrix.py`): the Rust harnesses
+(`rust`) and each half of the pytest suite (`py1of2`, `py2of2`, split by file
+with recorded weights in `ci/unit_shard_weights.json`, `ci/pytest_shard.py`).
+It was one ~190 s job: ~55 s of harnesses, then ~135 s of serial pytest. The
+suite is CPU-bound (every test launches real `clud` processes) and a hosted
+"4 vCPU" runner is two physical cores, so in-process parallelism does not help
+(pytest-xdist measured slower, 172 s against ~135 s serial, with a 2.5x
+per-test slowdown from contention); separate machines do not contend, so the
+split costs only the extra jobs' setup. `ci/release_gate.py` requires one
+cell per shard. Refresh the weights from a run's `logs/pytest-unit.xml` when
+the balance drifts; a stale or missing entry only costs balance, never
+coverage. All other lanes run the whole suite in one job (`--shard all`).
+
 The release workflow's `full-ci-gate` checks for a completed successful manual
 `CI full <candidate SHA>` run before any release build or publisher starts. It
 checks `CI OK`, Dylint, and the build plus unit and integration execution jobs
