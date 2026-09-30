@@ -33,8 +33,14 @@ pub struct GhSession {
 }
 
 pub enum Session {
-    Python { target: PathBuf },
+    Python {
+        target: PathBuf,
+    },
     Gh(GhSession),
+    /// #1486: the real binary behind the in-session clone/worktree policy.
+    Git {
+        target: PathBuf,
+    },
     Rm,
 }
 
@@ -129,9 +135,10 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
                 fail_fast: var(registry::GH_FAIL_FAST_KEY).as_deref() != Some(OsStr::new("0")),
             })
         }),
+        ShimKind::Git => target(registry::GIT_TARGET_KEY).map(|target| Session::Git { target }),
         ShimKind::Rm => session_dir.map(|_| Session::Rm),
         // Native: never validated here.
-        ShimKind::SafeRm => None,
+        ShimKind::SafeRm | ShimKind::SafeGhClone | ShimKind::SafeGhWorktree => None,
     }
 }
 
@@ -157,6 +164,7 @@ fn handle(session: Session, args: &[OsString]) -> i32 {
     match session {
         Session::Python { target } => super::python_shim::run(&target, args),
         Session::Gh(gh) => super::gh_shim::run(&gh, args),
+        Session::Git { target } => super::git_shim::run(&target, args),
         Session::Rm => super::rm_shim::run(args),
     }
 }
@@ -164,8 +172,10 @@ fn handle(session: Session, args: &[OsString]) -> i32 {
 fn native(kind: ShimKind, args: &[OsString]) -> i32 {
     match kind {
         ShimKind::SafeRm => super::safe_rm::run(args),
+        ShimKind::SafeGhClone => super::safe_gh::run(args, crate::safe_gh::run_clone),
+        ShimKind::SafeGhWorktree => super::safe_gh::run(args, crate::safe_gh::run_worktree),
         // A registry test keeps every other kind `Passthrough`.
-        ShimKind::Python | ShimKind::Gh | ShimKind::Rm => {
+        ShimKind::Python | ShimKind::Gh | ShimKind::Git | ShimKind::Rm => {
             unreachable!("{kind:?} is not a native shim")
         }
     }
@@ -257,6 +267,7 @@ mod tests {
                     self.real("python").into_os_string(),
                 ),
                 (registry::GH_TARGET_KEY, self.real("gh").into_os_string()),
+                (registry::GIT_TARGET_KEY, self.real("git").into_os_string()),
             ])
         }
     }
@@ -313,6 +324,7 @@ mod tests {
         cases.push(("different ABI", other_abi));
         for (key, name) in [
             (registry::GH_TARGET_KEY, "gh"),
+            (registry::GIT_TARGET_KEY, "git"),
             (registry::PYTHON_TARGET_KEY, "python"),
         ] {
             for (label, value) in [

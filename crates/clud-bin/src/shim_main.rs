@@ -1,5 +1,6 @@
 //! The `clud-shim` personality of the one `clud` binary: every clud PATH alias
-//! (`python`, `python3`, `gh`, `rm`, `safe-rm`) is a hardlink, symlink or copy
+//! (`python`, `python3`, `gh`, `git`, `rm`, `safe-rm`, `safe-gh-clone`,
+//! `safe-gh-worktree`) is a hardlink, symlink or copy
 //! of `clud` that [`crate::multicall`] routes here by argv[0] before any other
 //! startup work (#406, #1461, #1518, #1546, #1551).
 //!
@@ -81,6 +82,48 @@ mod safe_rm {
     }
 }
 
+mod safe_gh {
+    //! `safe-gh-clone` / `safe-gh-worktree` (#1486): clud commands, not
+    //! relays. See `crate::safe_gh`.
+
+    use std::ffi::OsString;
+
+    pub fn run(args: &[OsString], helper: fn(&[String]) -> i32) -> i32 {
+        let args: Option<Vec<String>> = args.iter().map(|a| a.clone().into_string().ok()).collect();
+        let Some(args) = args else {
+            eprintln!("safe-gh: non-UTF8 arguments are not supported");
+            return 2;
+        };
+        helper(&args)
+    }
+}
+
+/// The words the clone/worktree policy (#1486) inspects. Non-UTF8 words are
+/// read lossily for the decision only; a passed command still receives the
+/// original bytes.
+fn policy_words(args: &[OsString]) -> Vec<String> {
+    args.iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+mod git_shim {
+    //! In-session `git` (#1486): refuse `clone` / `worktree add` with a
+    //! redirect to the `safe-gh-*` helpers, relay everything else unchanged.
+
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    pub fn run(target: &Path, args: &[OsString]) -> i32 {
+        let words = super::policy_words(args);
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        if let Some(refusal) = crate::git_gh_policy::git_refusal(&words) {
+            return crate::git_gh_policy::refuse(&refusal);
+        }
+        super::exec("git", target, args)
+    }
+}
+
 mod rm_shim {
     //! In-session child `rm`: the catastrophe floor, then a handoff to the
     //! next `rm` on PATH. See `docs/architecture/rm-protection.md`.
@@ -129,6 +172,13 @@ mod gh_shim {
     use super::dispatch::GhSession;
 
     pub fn run(session: &GhSession, args: &[OsString]) -> i32 {
+        // #1486: `gh repo clone` and the `--clone` forms of fork/create are
+        // redirected like `git clone`; nothing else changes.
+        let words = super::policy_words(args);
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        if let Some(refusal) = crate::git_gh_policy::gh_refusal(&words) {
+            return crate::git_gh_policy::refuse(&refusal);
+        }
         if let (true, Some(watcher)) = (session.fail_fast, session.watcher.as_deref()) {
             match watch_words(args) {
                 Ok(Some(words)) => return watch(&session.target, watcher, &words),
@@ -349,6 +399,7 @@ fn session_contract_is_owned_by_dispatch() {
         "GH_TARGET_KEY",
         "GH_ACTIVE_KEY",
         "GH_FAIL_FAST_KEY",
+        "GIT_TARGET_KEY",
         "CLUD_EXE_KEY",
     ];
     let mut needles: Vec<String> = registry::SESSION_KEYS

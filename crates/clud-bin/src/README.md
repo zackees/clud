@@ -843,6 +843,11 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
   failing a launch, with a freshness check that relinks after an upgrade.
 - `shim_main.rs` also owns the session-local GitHub CLI relay and PR-watch translation;
   see [gh-watch-shim.md](../../../docs/architecture/gh-watch-shim.md).
+- `git_gh_policy.rs` — the in-session `git` / `gh` clone and `worktree add`
+  refusals (#1486): pure argv policy, frozen `REFUSED_*` strings, and
+  `refuse`, which reserves the printed path; tests in `git_gh_policy_tests.rs`.
+  `safe_gh.rs` — the `safe-gh-clone` / `safe-gh-worktree` helpers. See
+  [git-gh-redirect.md](../../../docs/architecture/git-gh-redirect.md).
 - `shim_registry.rs` — `SHIMS`, the one list of `clud-shim` aliases, plus the
   session key names, ABI stamp and the PATH resolver every alias shares.
   `shim_main/dispatch.rs` is the shim personality's single entry path: session

@@ -1,14 +1,16 @@
 # `clud-shim` dispatch: one registry, one entry path, fail open
 
 `clud-shim` is the personality of the one `clud` binary behind every PATH alias
-clud installs: `python` and `python3` in `~/.clud/state/shims`, and `rm`, `gh` <!-- python-name-lint: allow -->
-and `safe-rm` in `~/.clud/state/rm-shim`. Each alias is a hardlink, symlink or copy of `clud`
+clud installs: `python` and `python3` in `~/.clud/state/shims`, and `rm`, `gh`, `git`, <!-- python-name-lint: allow -->
+`safe-rm`, `safe-gh-clone` and `safe-gh-worktree` in `~/.clud/state/rm-shim`. Each alias is a hardlink, symlink or copy of `clud`
 (hardlink first; [DD-121](../DESIGN_DECISIONS.md#dd-121-helper-executables-are-argv0-aliases-of-the-one-clud-binary))
 that `multicall::maybe_run` routes here by argv\[0\] before any other startup
 work. The code is `shim_main.rs` and `shim_main/dispatch.rs`. This doc owns the contract every alias shares (#1546). What an
 alias does *inside* a session is owned elsewhere:
 [rm-protection.md](rm-protection.md) for `rm`, [rm-tools.md](rm-tools.md) for
-`safe-rm`, and [gh-watch-shim.md](gh-watch-shim.md) for `gh`.
+`safe-rm`, [gh-watch-shim.md](gh-watch-shim.md) for `gh`, and
+[git-gh-redirect.md](git-gh-redirect.md) for the `git` / `gh` clone and
+`worktree add` refusals and the `safe-gh-*` helpers.
 
 ## The registry
 
@@ -37,7 +39,8 @@ Dispatch owns three things:
 1. **Session detection.** A session is valid when `CLUD_SHIM_ABI` equals the
    binary's `SHIM_ABI` and the alias's own keys are present and sane:
    `CLUD_PYTHON_SHIM_TARGET` for `python`, `CLUD_GH_SHIM_TARGET` for `gh`,
-   an existing absolute `CLUD_RM_SHIM_DIR` for `rm`.
+   `CLUD_GIT_SHIM_TARGET` for `git`, an existing absolute `CLUD_RM_SHIM_DIR`
+   for `rm`.
 2. **Target resolution.** A target must be absolute and executable, outside
    every shim directory, and not a copy of the running shim.
 3. **Fail-open passthrough.** Without a valid session a `Passthrough` alias
@@ -48,7 +51,7 @@ Dispatch owns three things:
    only failure is `127` with one `<name>: command not found` line when no
    real binary exists.
 
-A `Native` alias (`safe-rm`) is a clud command, not a relay. It runs its own
+A `Native` alias (`safe-rm`, `safe-gh-clone`, `safe-gh-worktree`) is a clud command, not a relay. It runs its own
 out-of-session mode: roots fall back to the git checkout or the cwd.
 
 Handlers receive a validated `Session` and never read a session key. The

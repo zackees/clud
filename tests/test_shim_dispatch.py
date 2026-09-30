@@ -91,10 +91,12 @@ def _run(argv: list[str], env: dict[str, str], cwd: Path, stdin: str = ""):
 
 def test_registry_lists_every_alias_the_session_installs() -> None:
     names = {spec["name"] for spec in REGISTRY["shims"]}
-    assert {"python", "python3", "gh", "rm", "safe-rm"} <= names  # python-name-lint: allow
+    assert {"python", "python3", "gh", "git", "rm", "safe-rm"} <= names  # python-name-lint: allow
     assert "gh" in PASSTHROUGH
+    assert "git" in PASSTHROUGH
     assert "rm" in PASSTHROUGH
     assert "safe-rm" in NATIVE
+    assert {"safe-gh-clone", "safe-gh-worktree"} <= set(NATIVE)
 
 
 @pytest.mark.parametrize("name", PASSTHROUGH)
@@ -167,7 +169,9 @@ def test_shim_alone_on_path_is_command_not_found_not_recursion(
     assert "command not found" in result.stderr
 
 
-@pytest.mark.parametrize("name", NATIVE)
+# The safe-gh-* helpers (#1486) clone into ~/.clud/tmp-wt and have their own
+# out-of-session tests in test_git_shim.py; this one drives the safe-rm family.
+@pytest.mark.parametrize("name", [n for n in NATIVE if not n.startswith("safe-gh-")])
 def test_native_shim_runs_its_native_mode_outside_a_session(tmp_path: Path, name: str) -> None:
     shim, _, log = _world(tmp_path, name)
     work = tmp_path / "work"

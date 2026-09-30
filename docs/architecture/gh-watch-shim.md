@@ -22,6 +22,9 @@ output or wait contract.
 The command guard permits the canonical PR-check watch only when
 `CLUD_GH_SHIM_ACTIVE=1`. It still denies run-id watches and polling loops.
 If installation or target resolution fails, that marker is absent/zero and
-the old guard denial remains; the alias itself still relays to the real `gh`. The `git.pr_wait_fail_fast` setting gates
+the old guard denial remains; the alias itself still relays to the real `gh`.
+Before any of this, `gh repo clone` and the `--clone` forms of `gh repo fork`
+/ `create` are refused and redirected to `safe-gh-clone`; see
+[git-gh-redirect.md](git-gh-redirect.md). The `git.pr_wait_fail_fast` setting gates
 the guard; disabling it leaves the alias as an ordinary relay for commands
 that are not intercepted.

@@ -18,6 +18,8 @@ pub const RM_SHIM_DIR_KEY: &str = shim_registry::SESSION_DIR_KEY;
 pub const GH_SHIM_TARGET_KEY: &str = shim_registry::GH_TARGET_KEY;
 pub const GH_SHIM_ACTIVE_KEY: &str = shim_registry::GH_ACTIVE_KEY;
 pub const GH_SHIM_FAIL_FAST_KEY: &str = shim_registry::GH_FAIL_FAST_KEY;
+/// #1486: the real `git`, for the `git` alias and clud's own spawns.
+pub const GIT_SHIM_TARGET_KEY: &str = shim_registry::GIT_TARGET_KEY;
 /// Git's terminal-prompt switch. An agent cannot answer a terminal prompt, so
 /// a credential failure must error instead of waiting (#1546).
 pub const GIT_TERMINAL_PROMPT_KEY: &str = "GIT_TERMINAL_PROMPT";
@@ -103,10 +105,13 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
         .find(|(key, _)| key.eq_ignore_ascii_case(PATH_ENV_VAR))
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
-    let inherited_target = env
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(GH_SHIM_TARGET_KEY))
-        .map(|(_, value)| std::path::PathBuf::from(value));
+    let inherited = |wanted: &str| {
+        env.iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(wanted))
+            .map(|(_, value)| std::path::PathBuf::from(value))
+    };
+    let inherited_target = inherited(GH_SHIM_TARGET_KEY);
+    let inherited_git = inherited(GIT_SHIM_TARGET_KEY);
     let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     let result = env
         .iter()
@@ -130,6 +135,12 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
             } else {
                 set_env(env, GH_SHIM_ACTIVE_KEY, "0");
             }
+            // #1486: the real git, resolved before the prepend like gh's. No
+            // target leaves the `git` alias a plain passthrough.
+            match resolve_target("git", &original_path, inherited_git, &dir, home.as_deref()) {
+                Some(target) => set_env(env, GIT_SHIM_TARGET_KEY, &target.to_string_lossy()),
+                None => env.retain(|(key, _)| !key.eq_ignore_ascii_case(GIT_SHIM_TARGET_KEY)),
+            }
             prepend_to_path(env, &dir);
             set_env(env, RM_SHIM_DIR_KEY, &dir.to_string_lossy());
             set_env(env, shim_registry::ABI_KEY, shim_registry::SHIM_ABI);
@@ -150,7 +161,30 @@ fn resolve_gh_target(
     shim_dir: &Path,
     home: Option<&Path>,
 ) -> Option<std::path::PathBuf> {
-    let shim = crate::shim_install::packaged_shim().unwrap_or_else(|_| shim_dir.join("gh"));
+    resolve_target_raw("gh", original_path, inherited_target, shim_dir, home)
+}
+
+/// [`resolve_gh_target`] for any relayed alias name (`gh`, `git`), with the
+/// result canonicalized so a later PATH change cannot re-point it.
+fn resolve_target(
+    name: &str,
+    original_path: &str,
+    inherited_target: Option<std::path::PathBuf>,
+    shim_dir: &Path,
+    home: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    resolve_target_raw(name, original_path, inherited_target, shim_dir, home)
+        .map(|target| target.canonicalize().unwrap_or(target))
+}
+
+fn resolve_target_raw(
+    name: &str,
+    original_path: &str,
+    inherited_target: Option<std::path::PathBuf>,
+    shim_dir: &Path,
+    home: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    let shim = crate::shim_install::packaged_shim().unwrap_or_else(|_| shim_dir.join(name));
     let mut dirs = shim_registry::shim_dirs(&shim, Some(shim_dir), home);
     // The packaged shim's own directory holds `clud` itself, not aliases.
     if let Some(own) = std::fs::canonicalize(&shim)
@@ -163,7 +197,7 @@ fn resolve_gh_target(
         .filter(|path| shim_registry::valid_target(path, &shim, &dirs))
         .or_else(|| {
             shim_registry::first_on_path(
-                &shim_registry::file_name("gh"),
+                &shim_registry::file_name(name),
                 std::ffi::OsStr::new(original_path),
                 &shim,
                 &dirs,
@@ -214,6 +248,54 @@ mod tests {
             resolve_gh_target(&path, Some(shim_dir.join(name)), &shim_dir, None),
             Some(real),
             "an inherited target inside the alias directory is re-resolved"
+        );
+    }
+
+    /// #1486 acceptance 5: the `git` target resolves to the real binary,
+    /// never to the alias in the session directory or the managed shim dirs.
+    #[test]
+    fn git_target_resolution_never_selects_an_alias_dir() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let shim_dir = home.join(shim_registry::SESSION_SUBDIR);
+        let interp_dir = home.join(shim_registry::INTERPRETER_SUBDIR);
+        let real_dir = temp.path().join("real");
+        let name = shim_registry::file_name("git");
+        for dir in [&shim_dir, &interp_dir, &real_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+            let file = dir.join(&name);
+            std::fs::write(&file, dir.to_string_lossy().as_bytes()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let real = real_dir.join(&name).canonicalize().unwrap();
+        let path = std::env::join_paths([&shim_dir, &interp_dir, &real_dir]).unwrap();
+        let path = path.to_string_lossy();
+        for inherited in [
+            None,
+            Some(shim_dir.join(&name)),
+            Some(interp_dir.join(&name)),
+        ] {
+            let got = resolve_target("git", &path, inherited, &shim_dir, Some(&home)).unwrap();
+            assert_eq!(got, real);
+            for alias_dir in [&shim_dir, &interp_dir] {
+                assert!(!got.starts_with(alias_dir.canonicalize().unwrap()));
+            }
+        }
+        let only_aliases = std::env::join_paths([&shim_dir, &interp_dir]).unwrap();
+        assert_eq!(
+            resolve_target(
+                "git",
+                &only_aliases.to_string_lossy(),
+                None,
+                &shim_dir,
+                Some(&home)
+            ),
+            None,
+            "no real git: no target, so the alias is a plain passthrough"
         );
     }
 
