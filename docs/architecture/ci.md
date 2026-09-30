@@ -23,6 +23,13 @@ unrelated `main` changes. Every checkout uses that SHA. The required `CI OK`
 check verifies every job selected by the mode. Adding or removing a label
 reruns selection on the PR head SHA.
 
+Linux x64 Clippy runs as its own job (`lint-linux-x64`) beside the build, not
+inside it: it produces nothing the unit lane consumes, so as a step of the
+build job it only delayed the unit suite by ~41 s. It shares the build job's
+zccache namespace read-only (`save-cache: false`) so the two jobs never race to
+write one immutable cache key. Windows and macOS clippy stay inside their
+build jobs (they run only in `ci-test`/`ci-full`).
+
 The release workflow's `full-ci-gate` checks for a completed successful manual
 `CI full <candidate SHA>` run before any release build or publisher starts. It
 checks `CI OK`, Dylint, and the build plus unit and integration execution jobs

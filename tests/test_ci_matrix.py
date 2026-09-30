@@ -132,8 +132,9 @@ def test_pr_and_dispatch_source_ref_is_pinned_in_every_job():
         reusable = CI_YML.with_name(name).read_text(encoding="utf-8")
         assert "source_ref:" in reusable, name
         assert "ref: ${{ inputs.source_ref || github.sha }}" in reusable, name
-    # 14 build/test/dylint jobs, plus the #1323 real-harness job.
-    assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 15
+    # 14 build/test/dylint jobs, the #1323 real-harness job, and the Linux x64
+    # clippy job that runs beside the build.
+    assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 16
 
 
 def test_harness_suite_runs_in_full_mode_and_is_gated():
@@ -469,3 +470,37 @@ def test_ci_windows_mode_skips_linux_and_gates_on_windows_lanes():
     # Any failed static/Windows lane fails the gate; otherwise the mode passes.
     assert "for result in $STATIC $WINDOWS; do" in branch
     assert branch.rstrip().endswith("exit 0")
+
+
+def test_linux_x64_clippy_runs_beside_the_build_not_inside_it():
+    """Clippy sat serially ahead of the compile in the job the unit lane waits on.
+
+    It produces nothing the unit lane consumes, so on the PR critical path it was
+    pure delay. It now has its own job, gated exactly like the build, required by
+    `CI OK`, and sharing the build's cache namespace read-only so the two do not
+    race to write one immutable key.
+    """
+    text = CI_YML.read_text(encoding="utf-8")
+    lint = text.split("\n  lint-linux-x64:\n", 1)[1].split("\n  build-linux-x64:\n", 1)[0]
+    build = text.split("\n  build-linux-x64:\n", 1)[1].split("\n  test-linux-x64-unit:\n", 1)[0]
+    assert "needs: static" in lint
+    assert "if: needs.static.outputs.mode != '' && needs.static.outputs.mode != 'windows'" in lint
+    assert "clippy: true" in lint
+    assert "compile: false" in lint
+    assert "bundle: false" in lint
+    assert 'save-cache: "false"' in lint
+    assert "target: x86_64-unknown-linux-gnu" in lint
+    assert "clippy: false" in build
+    assert "clippy: true" not in build
+    gate = text.split("\n  ci-ok:\n", 1)[1]
+    assert "- lint-linux-x64" in gate
+    minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
+    assert "needs.lint-linux-x64.result" in minimal
+    windows = gate.split("WINDOWS: >-", 1)[1].split("MINIMAL: >-", 1)[0]
+    assert "lint-linux-x64" not in windows  # ci-windows mode skips Linux lanes
+    reusable = (CI_YML.parent / "_build-target.yml").read_text(encoding="utf-8")
+    assert "inputs.compile &&" in reusable
+    setup = (CI_YML.parent.parent / "actions" / "setup-build" / "action.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "env.ACT && 'true' || inputs.save-cache" in setup
