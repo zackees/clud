@@ -19,7 +19,7 @@ export const meta = {
 //   goals: [{ id, title, brief }], ci: false, lane?: 'job-id',
 //   models?: { planner, worker, reviewer, integrator },   // omitted = session model
 //   scripts?: { lint?: './lint', test?: './test' },     // omitted = planner picks verify
-//   maxAgents?: 4, maxFixRounds?: 10,
+//   maxAgents?: 4, maxFixRounds?: 10, agentErrors?: 3,   // agentErrors: tool-misuse allowance, apart from fix rounds (#1331)
 //   planOnly?: true, meta?: '<meta issue number>',
 //   base?: 'main',   // default base branch for goals in no plan stage; omitted = main
 //                    // a plan stage's `base` wins for its children (#1409)
@@ -66,6 +66,10 @@ const PARALLEL = args.mode === 'parallel'
 const CI = !!args.ci
 const MAX_AGENTS = Math.max(1, Math.floor(args.maxAgents ?? 4))
 const MAX_FIX = Math.max(0, Math.floor(args.maxFixRounds ?? 10))
+// A lander's own mistake (a bad flag, a missing tool) is not a CI or review
+// failure: it never spends a fix round (#1331). It has its own small allowance
+// per goal; past it the goal stops with `gave_up: tool misuse`.
+const MAX_AGENT_ERRORS = Math.max(0, Math.floor(args.agentErrors ?? 3))
 const MODELS = args.models || {}
 // The repo's ./lint and ./test, chosen once by the /grind router (#1336).
 const SCRIPTS = (args.scripts && (args.scripts.lint || args.scripts.test)) ? args.scripts : null
@@ -144,7 +148,8 @@ const REVIEW = { type: 'object', required: ['approved', 'summary'], properties: 
 const INTEG = { type: 'object', required: ['pushed', 'summary'], properties: {
   pushed: { type: 'boolean' }, pr_url: { type: 'string' }, summary: { type: 'string' }, failure_log: { type: 'string' }, problems: PROBLEMS } }
 const LAND = { type: 'object', required: ['status', 'summary'], properties: {
-  status: { type: 'string', enum: ['merged', 'needs_fix', 'gave_up'] }, summary: { type: 'string' }, failure_log: { type: 'string' }, problems: PROBLEMS } }
+  status: { type: 'string', enum: ['merged', 'needs_fix', 'gave_up', 'tool_misuse'] }, summary: { type: 'string' }, failure_log: { type: 'string' },
+  command: { type: 'string', description: 'tool_misuse only: the command that failed' }, problems: PROBLEMS } }
 const PARK = { type: 'object', required: ['parked', 'clean', 'summary'], properties: {
   parked: { type: 'boolean', description: "true when the goal's changes were committed to the park branch" },
   branch: { type: 'string' }, files: { type: 'array', items: { type: 'string' } },
@@ -619,10 +624,19 @@ const integrateAndLand = async ({ p: planned, review: rv }, g) => {
     if (!(await landed[dep])) return { merged: false, blocked: true, note: depNote(dep) }
   }
   let integ = await integrate(p, g, reviewNote(rv, gate))
+  let agentErrors = 0
   // One watch per push: the first push, then one per fix round.
   for (let fixes = 0; ; fixes++) {
     if (!integ || !integ.pushed) return { merged: false, pushed: false, pr: integ && integ.pr_url, note: integ ? integ.failure_log || integ.summary : 'integrator died' }
-    const l = await land(p, g, integ.pr_url, fixes)
+    let l = await land(p, g, integ.pr_url, fixes)
+    // The lander's own tool mistake: retry the landing, never the integrator,
+    // and never spend a fix round (#1331).
+    while (l && l.status === 'tool_misuse') {
+      agentErrors++
+      if (agentErrors > MAX_AGENT_ERRORS) return { merged: false, pushed: true, pr: integ.pr_url, note: `gave_up: tool misuse (${l.command || l.summary})` }
+      log(`goal ${g.id}: lander tool misuse ${agentErrors} of ${MAX_AGENT_ERRORS} (${l.command || l.summary}); landing again, no fix round`)
+      l = await land(p, g, integ.pr_url, fixes)
+    }
     if (l && l.status === 'merged') return { merged: true, pushed: true, pr: integ.pr_url, note: l.summary }
     if (!l || l.status === 'gave_up' || fixes >= MAX_FIX) return { merged: false, pushed: true, pr: integ.pr_url, note: l ? l.failure_log || l.summary : 'lander died' }
     log(`goal ${g.id}: PR not green, fix round ${fixes + 1} of ${MAX_FIX}`)

@@ -75,6 +75,10 @@ server and merge.
      positional): your own mistake, never a verdict. Fix the command and
      run it again in this round; it never counts as `needs_fix` or spends a
      fix round (#1331). Likewise `command not found` and a wrong tool path.
+     Only if you still cannot run the tool correctly after fixing it twice,
+     return `status=tool_misuse` with the failing command in `command`: the
+     workflow lands again on its own small allowance and never counts it as a
+     fix round. A `4` (timeout) is not misuse: watch again.
    - A cancelled check superseded by a newer run of the same workflow is
      ignored, so concurrency cancellations are not failures.
 3. **Feature stage.** A goal PR in the feature stage has the feature branch
