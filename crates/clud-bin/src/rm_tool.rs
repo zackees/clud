@@ -296,7 +296,9 @@ impl Roots {
     fn check_temp_ownership(&self, temp: &Path, path: &Path) -> Result<(), String> {
         use std::os::unix::fs::MetadataExt;
         // SAFETY: geteuid has no preconditions and cannot fail.
-        let me = self.temp_owner.unwrap_or_else(|| unsafe { libc::geteuid() });
+        let me = self
+            .temp_owner
+            .unwrap_or_else(|| unsafe { libc::geteuid() });
         let Ok(rest) = path.strip_prefix(temp) else {
             return Ok(());
         };
