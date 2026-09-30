@@ -22,12 +22,12 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
-use crate::daemon::repo_worktree_cli::{self, PrRecord, ProcessCwdSnapshot, RepoWorktreeRow};
+use crate::daemon::repo_worktree_cli::{self, PrLookup, ProcsSource, RepoWorktreeRow};
 use crate::gc::extract_pid_from_lock_reason;
 use crate::path_norm::slash_separators;
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
@@ -165,9 +165,6 @@ pub(crate) struct CleanEnv<'a> {
     pub(crate) verdict_deadline: Duration,
 }
 
-pub(crate) type PrLookup = Arc<dyn Fn(&Path) -> Option<Vec<PrRecord>> + Send + Sync>;
-pub(crate) type ProcsSource = Arc<dyn Fn() -> ProcessCwdSnapshot + Send + Sync>;
-
 /// Issue #1648: the whole verdict phase of `--clean-worktrees` gets this
 /// long, well under the 10 s the CLI smoke test allows on a cold Windows
 /// runner. Past it, the ancestry rules decide, which is the pre-#1606
@@ -285,14 +282,25 @@ fn plan_in(
     // Issue #1606: the daemon's squash-aware verdict for every worktree,
     // gathered by the same probe the daemon uses. A worktree the probe
     // yields no row for stays on the ancestry rules alone.
-    let prs = (env.lookup_prs)(&main_repo);
-    let procs = (env.procs)();
-    let verdict_rows = repo_worktree_cli::probe_for_cli(
-        &main_repo,
-        &procs,
-        prs.as_deref(),
-        env.wt_root.as_deref(),
-    );
+    //
+    // Issue #1648: only when there is a worktree to judge (a lone main
+    // checkout pays for no process table and no `gh`), on a worker thread,
+    // and for at most `verdict_deadline` in total. Rows that arrived in
+    // time count; the rest are marked `verdict timed out`.
+    let has_candidates = entries.iter().skip(1).any(|e| !e.bare);
+    let (verdict_rows, timed_out) = if has_candidates {
+        collect_verdicts(
+            repo_worktree_cli::spawn_cli_probe(
+                main_repo.clone(),
+                env.lookup_prs.clone(),
+                env.procs.clone(),
+                env.wt_root.clone(),
+            ),
+            Instant::now() + env.verdict_deadline,
+        )
+    } else {
+        (Vec::new(), false)
+    };
 
     // Gather classified rows. The first entry from `git worktree list` is the
     // main worktree — never a candidate for removal regardless of staleness.
@@ -320,12 +328,32 @@ fn plan_in(
             status,
             age,
             is_main,
+            verdict_timed_out: timed_out && verdict_row.is_none(),
             verdict_row,
         });
     }
 
     let plan = build_plan_with_liveness(&rows, opts, env.liveness, env.locked_hard_age);
     Ok((rows, plan))
+}
+
+/// Issue #1648: drain verdict rows until the probe finishes (the channel
+/// disconnects) or `deadline` passes. Returns the rows plus whether the
+/// deadline cut the probe short.
+fn collect_verdicts(
+    rx: std::sync::mpsc::Receiver<RepoWorktreeRow>,
+    deadline: Instant,
+) -> (Vec<RepoWorktreeRow>, bool) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut rows = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(row) => rows.push(row),
+            Err(RecvTimeoutError::Disconnected) => return (rows, false),
+            Err(RecvTimeoutError::Timeout) => return (rows, true),
+        }
+    }
 }
 
 fn canonical_or_raw(path: &Path) -> PathBuf {
@@ -350,6 +378,9 @@ struct Classified {
     is_main: bool,
     /// Issue #1606: the daemon probe's row for this worktree, if it has one.
     verdict_row: Option<RepoWorktreeRow>,
+    /// Issue #1648: the verdict deadline passed before this worktree's row
+    /// arrived.
+    verdict_timed_out: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -385,7 +416,12 @@ fn build_plan_with_liveness(
             locked_hard_age,
         };
         let verdict = row.verdict_row.as_ref().map(|r| &r.verdict);
-        match worktrees_verdict::decide_with_verdict(inputs, verdict, opts) {
+        let action = if row.verdict_timed_out {
+            worktrees_verdict::decide_verdict_timed_out(inputs, opts)
+        } else {
+            worktrees_verdict::decide_with_verdict(inputs, verdict, opts)
+        };
+        match action {
             Action::Remove(reason) => plan.candidates.push(Candidate {
                 entry: row.entry.clone(),
                 reason,

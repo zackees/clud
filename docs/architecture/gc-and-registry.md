@@ -496,6 +496,16 @@ tip, prune, never a remote delete. A veto at that re-check is reported as `skipp
 changed before removal: ...)`, not a failure. `--dry-run` prints the same plan, verdict and
 reason; the status table shows `[state: reason]` per worktree.
 
+**Verdict deadline (#1648, DD-130).** The verdict phase is bounded: a repo with only its main
+checkout skips it entirely (no process table, no `gh`); otherwise `spawn_cli_probe` gathers rows
+on a worker thread (one process-table snapshot, at most one `gh pr list` with a 3 s timeout and
+only if some worktree reaches the PR check, git probes one worktree at a time) and streams them
+back. `plan_in` waits at most `VERDICT_DEADLINE` (4 s) in total. A worktree whose row has not
+arrived keeps the ancestry decision via `decide_verdict_timed_out`: a skip gains `; verdict timed
+out`, an ignore becomes `skip (verdict timed out)`, and an ancestry removal stays as it was before
+#1606. A missing verdict never produces a verdict-backed removal. `--dry-run` goes through the same
+path, so it shows the timeout reason a real run would act on.
+
 **No lock against a running daemon.** The per-repo reclaim lock (#1632, DD-125) serializes daemon
 pool threads only. The CLI does not take it: its re-probe turns a worktree the daemon already
 reclaimed into a skip (`gone from git worktree list`), and a simultaneous git step contends on

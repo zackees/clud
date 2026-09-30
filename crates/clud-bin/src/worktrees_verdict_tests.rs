@@ -254,6 +254,36 @@ fn executor_removals_and_failures_are_reported_as_such() {
     );
 }
 
+/// #1648: a verdict that missed the deadline never adds a removal. Every
+/// ancestry skip or ignore becomes a skip naming the timeout; only an
+/// ancestry removal (the pre-#1606 behavior) survives unchanged.
+#[test]
+fn a_timed_out_verdict_keeps_the_ancestry_decision_and_names_the_timeout() {
+    let locks = [
+        LockStatus::Unlocked,
+        LockStatus::NoPid,
+        LockStatus::LivePid(7),
+        LockStatus::DeadPid(7),
+    ];
+    for force in [false, true] {
+        for status in ALL_STATUSES {
+            for age in [Duration::ZERO, days(3), days(30)] {
+                for lock in locks {
+                    let i = inputs(status, age, lock);
+                    let got = decide_verdict_timed_out(i, &opts(force));
+                    let expected = match decide_action(i, &opts(force)) {
+                        Action::Skip(r) => Action::Skip(format!("{r}; verdict timed out")),
+                        Action::Ignore => Action::Skip("verdict timed out".to_string()),
+                        other => other,
+                    };
+                    assert_eq!(got, expected, "{status:?} {age:?} {lock:?} force={force}");
+                    assert!(!matches!(got, Action::Reclaim(_)));
+                }
+            }
+        }
+    }
+}
+
 // ---- Tier 2: real git, temp repos only ----
 
 fn git(cwd: &Path, args: &[&str]) -> String {
@@ -438,9 +468,10 @@ fn dry_run_previews_the_verdict_and_reason_the_real_run_acts_on() {
 fn a_slow_verdict_source_is_cut_off_at_the_deadline_and_spares() {
     let fx = fixture();
     let started = Instant::now();
-    let (_, plan) =
-        with_slow_env(Duration::from_millis(500), |env| plan_in(&fx.repo, &opts(false), env))
-            .unwrap();
+    let (_, plan) = with_slow_env(Duration::from_millis(500), |env| {
+        plan_in(&fx.repo, &opts(false), env)
+    })
+    .unwrap();
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(10),
@@ -466,12 +497,20 @@ fn a_slow_verdict_source_is_cut_off_at_the_deadline_and_spares() {
     // A real run against the same slow source removes nothing.
     let started = Instant::now();
     assert_eq!(
-        with_slow_env(Duration::from_millis(500), |env| run_in(&fx.repo, &opts(false), env)),
+        with_slow_env(Duration::from_millis(500), |env| run_in(
+            &fx.repo,
+            &opts(false),
+            env
+        )),
         0
     );
     assert!(started.elapsed() < Duration::from_secs(10));
     for dir in [&fx.merged, &fx.dirty, &fx.unmerged] {
-        assert!(dir.exists(), "a timed-out verdict removed {}", dir.display());
+        assert!(
+            dir.exists(),
+            "a timed-out verdict removed {}",
+            dir.display()
+        );
     }
 }
 

@@ -51,6 +51,27 @@ pub(super) fn decide_with_verdict(
     }
 }
 
+/// Issue #1648: decide a worktree whose verdict missed the CLI's deadline.
+/// The ancestry rules decide alone, exactly as before #1606, and the
+/// outcome says so:
+///
+/// | ancestry action | action                              |
+/// |-----------------|-------------------------------------|
+/// | `Skip(r)`       | `Skip("<r>; verdict timed out")`    |
+/// | `Ignore`        | `Skip("verdict timed out")`         |
+/// | `Remove(r)`     | `Remove(r)` (pre-#1606 behavior)    |
+///
+/// A missing verdict can never produce `Reclaim`, so it never adds a
+/// removal; it only withholds one.
+pub(super) fn decide_verdict_timed_out(inputs: StalenessInputs, opts: &CleanOptions) -> Action {
+    const TIMED_OUT: &str = "verdict timed out";
+    match decide_action(inputs, opts) {
+        Action::Skip(reason) => Action::Skip(format!("{reason}; {TIMED_OUT}")),
+        Action::Ignore => Action::Skip(TIMED_OUT.to_string()),
+        other => other,
+    }
+}
+
 /// How the CLI reports one executor outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Tally {
