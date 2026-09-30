@@ -352,7 +352,8 @@ which test tier a change belongs in — lives in
   forensics. It records host scans and adaptive-backoff deferrals without
   synchronous per-event logging.
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
-  concurrent siblings; `Drop` removes the row, startup GCs dead rows.
+  concurrent siblings; `Drop` removes the row, startup GCs dead rows. Exit-time
+  removal is bounded by `SHUTDOWN_BUDGET` (#1660) so a held lock cannot stall exit.
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and
   daemon-watch root derivation. The GC registry and its shared watcher live inside
   the daemon. `delete_audit.rs` is the pre-deletion JSONL audit trail

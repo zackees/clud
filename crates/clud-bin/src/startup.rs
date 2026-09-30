@@ -129,7 +129,9 @@ pub struct ScopedSessionGuard;
 
 impl Drop for ScopedSessionGuard {
     fn drop(&mut self) {
-        let _ = session_registry::run_shutdown_under_lock();
+        // #1660: bounded, so a contended lock or slow sync cannot hold exit.
+        let _ =
+            session_registry::run_shutdown_under_lock_bounded(session_registry::SHUTDOWN_BUDGET);
     }
 }
 
