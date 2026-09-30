@@ -1449,6 +1449,60 @@ mod tests {
         ));
     }
 
+    /// #1533: a `tool_use` block produced on a compat route (OpenRouter) can
+    /// reach the Codex translator after a failover with its `input` missing,
+    /// `null`, or as a stringified JSON object. Each must replay as an
+    /// object-shaped `arguments` string, never `"null"` or a double-encoded
+    /// string, and an ordinary object (empty or not) must survive unchanged.
+    #[test]
+    fn tool_use_input_always_replays_as_object_arguments() {
+        let out = ok(json!({
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "missing", "name": "Bash"},
+                    {"type": "tool_use", "id": "null", "name": "Bash", "input": null},
+                    {"type": "tool_use", "id": "string", "name": "Bash",
+                     "input": "{\"command\":\"ls\"}"},
+                    {"type": "tool_use", "id": "empty", "name": "Bash", "input": {}},
+                    {"type": "tool_use", "id": "full", "name": "Bash",
+                     "input": {"command": "pwd"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "missing", "content": "a"},
+                    {"type": "tool_result", "tool_use_id": "null", "content": "b"},
+                    {"type": "tool_result", "tool_use_id": "string", "content": "c"},
+                    {"type": "tool_result", "tool_use_id": "empty", "content": "d"},
+                    {"type": "tool_result", "tool_use_id": "full", "content": "e"}
+                ]}
+            ]
+        }));
+        let arguments: Vec<(String, String)> = out
+            .input
+            .iter()
+            .filter_map(|item| match item {
+                InputItem::FunctionCall {
+                    call_id, arguments, ..
+                } => Some((call_id.clone(), arguments.clone())),
+                _ => None,
+            })
+            .collect();
+        let expected = [
+            ("missing", "{}"),
+            ("null", "{}"),
+            ("string", r#"{"command":"ls"}"#),
+            ("empty", "{}"),
+            ("full", r#"{"command":"pwd"}"#),
+        ];
+        assert_eq!(
+            arguments,
+            expected
+                .iter()
+                .map(|(id, args)| (id.to_string(), args.to_string()))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn tool_choice_modes_map_and_control_parallelism() {
         let base = |choice: serde_json::Value| {
