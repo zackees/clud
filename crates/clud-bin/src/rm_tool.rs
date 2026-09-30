@@ -150,6 +150,12 @@ pub struct Roots {
     git_dirs: Option<Vec<PathBuf>>,
     /// `remote.origin.url` of the roots that are checkouts.
     origins: Option<Vec<String>>,
+    /// Canonical system temp directories (#1622): entries strictly under
+    /// them may be deleted, the directories themselves never.
+    pub temp_roots: Vec<PathBuf>,
+    /// The uid a temp entry must be owned by on Unix; `None` means the
+    /// effective uid. Injectable so tests can simulate another user's file.
+    temp_owner: Option<u32>,
 }
 
 impl Roots {
@@ -193,7 +199,23 @@ impl Roots {
             worktrees: None,
             git_dirs: None,
             origins: None,
+            temp_roots: Vec::new(),
+            temp_owner: None,
         }
+    }
+
+    /// These roots plus `temp` as system temp directories (#1622).
+    #[must_use]
+    pub fn with_temp_roots(mut self, temp: Vec<PathBuf>) -> Self {
+        self.temp_roots = temp;
+        self
+    }
+
+    /// Require temp entries to be owned by `uid` instead of the effective uid.
+    #[must_use]
+    pub fn with_temp_owner(mut self, uid: u32) -> Self {
+        self.temp_owner = Some(uid);
+        self
     }
 
     /// The deepest root strictly containing `path`, or why there is none.
@@ -1199,6 +1221,15 @@ pub fn session_roots_value(cwd: &Path) -> Option<String> {
     std::env::join_paths(roots)
         .ok()
         .map(|v| v.to_string_lossy().into_owned())
+}
+
+/// The system temp directories named by the platform and `env` (#1622), as
+/// absolute, verbatim-free spellings, deduplicated, not yet canonicalized.
+pub(crate) fn temp_root_candidates(
+    _windows: bool,
+    _env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 #[path = "rm_tool_clone.rs"]
