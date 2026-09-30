@@ -1101,7 +1101,7 @@ fn process_op(
                 // derive it rather than rely on a cached marker the next
                 // probe snapshot would wipe.
                 let live_cwds = canonicalize_live_cwds(live_cwds);
-                let out: Vec<ListRow> = rows
+                let mut out: Vec<ListRow> = rows
                     .into_iter()
                     .map(|r| {
                         let live_locked = (r.kind == "worktree" && live_locks.contains(&r.path))
@@ -1137,7 +1137,6 @@ fn process_op(
                         }
                     })
                     .collect();
-                let mut out = out;
                 // Issue #1591: append the cached repo-worktree verdicts. No
                 // git here either — they come from the off-worker snapshot.
                 if kind.as_deref().is_none_or(|k| k == REPO_WORKTREE_KIND) {
