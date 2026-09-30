@@ -21,6 +21,40 @@ file still names the allowed repo's `.git/worktrees/` metadata; #1573). Before a
 move to the trash or a purge, directories in the tree are made writable, so
 sealed read-only build outputs do not abort the removal halfway.
 
+### System temp directories (#1622)
+
+Files and directories **strictly under** a system temp directory are always
+deletable, in and out of a session: `/tmp`, `/var/tmp` and `$TMPDIR` on Unix
+(macOS's `/var/folders/.../T`), `%TEMP%` and `%TMP%` on Windows. Each is
+resolved to its canonical form (Windows `\\?\` prefix stripped by
+`path_norm::canonicalize_plain`) when the roots are built
+(`rm_tool::system_temp_roots`). Every other check still applies:
+
+- the temp directory itself (`safe-rm /tmp`, `/tmp/`, `/tmp/.`) is refused;
+- the operand's parent is canonicalized before matching, so `/tmp/../etc/x`
+  is judged as `/etc/x` and `/tmp/link/x` with `link -> /home/u` as
+  `/home/u/x`; a final symlink is removed as a link, never followed;
+- a temp directory that is a filesystem root, is HOME or an ancestor of it is
+  dropped. On Unix one inside HOME (`TMPDIR=~/Documents`) is dropped too; on
+  Windows only the profile's `AppData\Local` may hold it. The command-scan
+  hook refuses a deletion command that assigns `TMPDIR`, `TEMP` or `TMP`,
+  like `CLUD_RM_ROOTS`.
+
+**Ownership.** `/tmp` is shared and world-writable. Its sticky bit already
+stops unlinking another user's entry directly in `/tmp`, but not a file inside
+a directory another user left writable, and trashing (a rename) would move it
+out of their reach. So on Unix every existing entry from the temp directory
+down to the operand must be owned by the effective uid, or the path is refused
+(`... is not owned by you`). Windows has no equivalent check: `%TEMP%` is
+per-user under the profile and protected by its ACL, so ownership adds nothing
+there ([DD-128](../DESIGN_DECISIONS.md#dd-128-safe-rm-always-allows-entries-under-the-system-temp-dirs-owned-by-you-on-unix)). The refusal for a path outside every root lists the temp directories
+with a `(temp)` suffix.
+
+Grind profiles keep their narrower scope: `block_bad_cmd_grind_caps` still
+limits integrators to their checkout and workers/reviewers to their task
+directories, so the temp allowance widens only the main session and
+user-invoked `safe-rm`.
+
 A separate clone of an allowed repo (a directory with its own `.git`
 directory, outside the roots) may be removed only when nothing in it would be
 lost (#1573). All of these must hold, checked in order, and a refusal names the
@@ -40,8 +74,8 @@ A matching origin alone is not enough: a real checkout with unpushed work
 would match. A clone that contains an allowed root, is HOME or an ancestor of
 it, or whose `.git` is a file (a worktree or submodule) never qualifies. The
 decision is `rm_tool_clone::verdict` over probed facts. The command refuses
-a root itself,
-anything outside these locations, HOME and its ancestors, filesystem roots,
+a root itself, a system temp directory itself,
+anything outside these locations (a temp entry another user owns included), HOME and its ancestors, filesystem roots,
 `.git` components, and directory trees containing mounts. Symlinked parents
 are resolved before authorization; a final symlink is moved as a link.
 

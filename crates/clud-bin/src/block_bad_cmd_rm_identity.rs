@@ -6,7 +6,7 @@
 
 pub(super) fn check(command: &str, _path_env: &str) -> Result<(), String> {
     if super::block_bad_cmd_rm_redirect::changes_deletion_environment(command) {
-        Err("deletion commands may not change PATH, CLUD_RM_ROOTS or CLUD_RM_ROLE".into())
+        Err("deletion commands may not change PATH, CLUD_RM_ROOTS, CLUD_RM_ROLE, TMPDIR, TEMP or TMP".into())
     } else {
         Ok(())
     }
@@ -22,9 +22,14 @@ mod tests {
             "PATH=/usr/bin safe-rm x",
             "export CLUD_RM_ROOTS=/tmp; safe-rm x",
             "CLUD_RM_ROLE=user safe-rm x",
+            "TMPDIR=/home/u/Documents safe-rm -r /home/u/Documents/x",
+            "export TEMP=C:/Users/u/Documents; safe-rm x",
+            "TMP=/srv safe-rm /srv/x",
         ] {
             assert!(check(command, "").is_err(), "{command}");
         }
         assert!(check("safe-rm x", "").is_ok());
+        // A file merely named like the variable is not an assignment.
+        assert!(check("safe-rm TEMP", "").is_ok());
     }
 }

@@ -5352,3 +5352,35 @@ pins a live value (the 60f6087b failure mode) can still go red after a refresh;
 `main`, not before the push. `test_refresh_openrouter_catalog.py` tests the
 producer's logic on fixtures, not the committed catalog itself. Revisit with a
 PR-based flow if the owner adds a bot token.
+
+## DD-128: safe-rm always allows entries under the system temp dirs, owned-by-you on Unix
+
+**Context:** #1622. An agent wrote `/tmp/clud-issue-body.md`, then could not
+remove it: `safe-rm` was the only deletion path and `/tmp` was outside the
+session roots. Temp files are exactly what a delete guard should not block.
+
+**Decision:** `/tmp`, `/var/tmp`, `$TMPDIR` (Unix) and `%TEMP%`/`%TMP%`
+(Windows), canonicalized, are extra roots kept apart from `Roots::roots`
+(`Roots::temp_roots`): entries strictly under them are deletable, the
+directories themselves never. On Unix every existing entry from the temp root
+down to the operand must be owned by the effective uid. See
+[rm-tools.md](architecture/rm-tools.md#system-temp-directories-1622).
+
+**Why an ownership check:** `/tmp` is shared. The sticky bit covers only
+direct children of `/tmp`; a file inside another user's world-writable
+directory is still unlinkable by the kernel, and a trash move takes it away
+from them. Checking the uid is cheap and matches what an agent could
+legitimately have created. **Why none on Windows:** `%TEMP%` lives in the
+user's profile under a per-user ACL; there is no shared temp to protect.
+
+**Why not simply add the temp dirs to `CLUD_RM_ROOTS`:** those roots have no
+ownership rule, would be subject to grind-profile scoping and checkout
+semantics (worktrees, clones), and the env var only exists in sessions; the
+user-invoked `safe-rm` should behave the same.
+
+**Tradeoff:** `$TMPDIR`/`%TEMP%` come from the environment. A value that is a
+filesystem root, HOME or an ancestor is dropped, one inside HOME is dropped on
+Unix (on Windows only `AppData\Local` is accepted), and the hook refuses a
+deletion command that assigns them. A user whose `TMPDIR` is `~/tmp` does not
+get that directory as a temp root; `/tmp` still works.
+

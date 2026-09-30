@@ -13,7 +13,9 @@
 //! checkout also covers that repository's linked worktrees, so a `/grind`
 //! integrator can clean its sibling worktree. A separate clone of an allowed
 //! repo qualifies too when nothing in it would be lost (see
-//! `rm_tool_clone.rs`). Filesystem roots, `$HOME` and
+//! `rm_tool_clone.rs`). Entries strictly under the system temp directories
+//! (`/tmp`, `/var/tmp`, `$TMPDIR`; `%TEMP%`/`%TMP%` on Windows) are always
+//! allowed, on Unix only when the caller owns them (#1622). Filesystem roots, `$HOME` and
 //! its ancestors, a root itself, `.git`, and anything reached through a
 //! symlinked parent that leaves the roots are always refused. Each call
 //! writes one JSONL audit record under `~/.clud/state/logs/rm/`.
@@ -178,7 +180,7 @@ impl Roots {
                 .filter(usable)
                 .collect();
             roots.dedup();
-            return Self::fixed(roots, true);
+            return Self::fixed(roots, true).with_temp_roots(system_temp_roots(home.as_deref()));
         }
         let base = crate::block_bad_cmd::nearest_repo_root_public(cwd)
             .unwrap_or_else(|| cwd.to_path_buf());
@@ -189,6 +191,7 @@ impl Roots {
                 .collect(),
             false,
         )
+        .with_temp_roots(system_temp_roots(home.as_deref()))
     }
 
     /// Exactly `roots` (assumed canonical), plus their repos' worktrees.
@@ -229,6 +232,15 @@ impl Roots {
         if self.roots.iter().any(|r| r == path) {
             return Err("is an allowed root itself".into());
         }
+        // Strictly under a system temp directory (#1622): allowed when every
+        // existing entry from the temp root down is the caller's own.
+        if let Some(temp) = deepest_containing(&self.temp_roots, path) {
+            self.check_temp_ownership(&temp, path)?;
+            return Ok(temp);
+        }
+        if self.temp_roots.iter().any(|r| r == path) {
+            return Err("is a system temp directory itself".into());
+        }
         // A linked worktree of an allowed repo may itself be deleted (#1573):
         // git created it for that repo. It stays refused while it is a root.
         if self.worktrees().iter().any(|r| r == path) {
@@ -250,7 +262,16 @@ impl Roots {
             Some(Err(reason)) => Some(reason),
             None => None,
         };
-        let shown: Vec<String> = self.roots.iter().map(|r| r.display().to_string()).collect();
+        let shown: Vec<String> = self
+            .roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .chain(
+                self.temp_roots
+                    .iter()
+                    .map(|r| format!("{} (temp)", r.display())),
+            )
+            .collect();
         let shown = if shown.is_empty() {
             "none".to_string()
         } else {
@@ -263,6 +284,44 @@ impl Roots {
             ),
             None => format!("is outside the allowed roots ({shown})"),
         })
+    }
+
+    /// Refuse `path` under the temp root `temp` when an existing entry
+    /// between them (the target included) belongs to another user. `/tmp` is
+    /// shared and world-writable; its sticky bit already stops unlinking
+    /// another user's entry directly in it, but not a file inside a directory
+    /// someone left writable, so safe-rm checks ownership itself. Windows has
+    /// no equivalent: `%TEMP%` is per-user under the profile, so no check.
+    #[cfg(unix)]
+    fn check_temp_ownership(&self, temp: &Path, path: &Path) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = self.temp_owner.unwrap_or_else(|| unsafe { libc::geteuid() });
+        let Ok(rest) = path.strip_prefix(temp) else {
+            return Ok(());
+        };
+        let mut current = temp.to_path_buf();
+        for part in rest.components() {
+            current.push(part);
+            match std::fs::symlink_metadata(&current) {
+                Ok(meta) if meta.uid() != me => {
+                    return Err(format!(
+                        "is under the system temp directory {} but {} is not owned by you",
+                        temp.display(),
+                        current.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn check_temp_ownership(&self, _temp: &Path, _path: &Path) -> Result<(), String> {
+        let _ = self.temp_owner;
+        Ok(())
     }
 
     /// Whether `root` is itself the top of a git checkout.
@@ -1226,10 +1285,85 @@ pub fn session_roots_value(cwd: &Path) -> Option<String> {
 /// The system temp directories named by the platform and `env` (#1622), as
 /// absolute, verbatim-free spellings, deduplicated, not yet canonicalized.
 pub(crate) fn temp_root_candidates(
-    _windows: bool,
-    _env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    windows: bool,
+    env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Vec<PathBuf> {
-    Vec::new()
+    let mut raw: Vec<String> = Vec::new();
+    if windows {
+        raw.extend(
+            ["TEMP", "TMP"]
+                .iter()
+                .filter_map(|k| env(k))
+                .map(|v| v.to_string_lossy().into_owned()),
+        );
+    } else {
+        raw.push("/tmp".into());
+        raw.push("/var/tmp".into());
+        raw.extend(env("TMPDIR").map(|v| v.to_string_lossy().into_owned()));
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for value in raw {
+        let plain = crate::path_norm::strip_verbatim(Path::new(value.trim()));
+        let text = plain.to_string_lossy();
+        let text = if windows {
+            text.trim_end_matches(['\\', '/'])
+        } else {
+            text.trim_end_matches('/')
+        };
+        let bytes = text.as_bytes();
+        let absolute = if windows {
+            (bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'\\' | b'/'))
+                || text.starts_with(r"\\")
+        } else {
+            text.len() > 1 && text.starts_with('/')
+        };
+        let duplicate = out.iter().any(|seen| {
+            let seen = seen.to_string_lossy();
+            if windows {
+                seen.eq_ignore_ascii_case(text)
+            } else {
+                seen == text
+            }
+        });
+        if absolute && !duplicate {
+            out.push(PathBuf::from(text));
+        }
+    }
+    out
+}
+
+/// This host's system temp directories, canonical (#1622). One that is a
+/// filesystem root, or is `home` or an ancestor of it, is dropped. On Unix so
+/// is one inside `home` (`TMPDIR=~/Documents` must not widen the roots); on
+/// Windows only the profile's `AppData\Local` may hold it.
+fn system_temp_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty());
+    let mut out: Vec<PathBuf> = Vec::new();
+    for candidate in temp_root_candidates(cfg!(windows), &env) {
+        let Ok(root) = crate::path_norm::canonicalize_plain(&candidate) else {
+            continue;
+        };
+        if root.parent().is_none() || !root.is_dir() {
+            continue;
+        }
+        if let Some(home) = home {
+            if home.starts_with(&root) {
+                continue;
+            }
+            let allowed_under_home =
+                cfg!(windows) && root.starts_with(home.join("AppData").join("Local"));
+            if root.starts_with(home) && !allowed_under_home {
+                continue;
+            }
+        }
+        if !out.contains(&root) {
+            out.push(root);
+        }
+    }
+    out
 }
 
 #[path = "rm_tool_clone.rs"]
