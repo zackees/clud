@@ -260,8 +260,10 @@ Routine PRs and `main` updates run Linux x64 build + unit tests only. Use litera
 targets, including both hosted macOS architectures, and Dylint; existing
 `ci:full` labels remain equivalent. `ci-windows` runs only static checks plus
 the Windows x64 build and suites for fast Windows iteration; `CI OK` then
-gates on those lanes, and the merge queue still runs the full matrix.
-The merge queue is always full. Manual full CI pins every job to a verified
+gates on those lanes. There is **no merge queue** (the `merge_group`
+trigger is inert): PR CI tests the head SHA, and `main`'s push run is the
+only test of the merged tree, so get a Linux run before merging a
+`ci-windows` PR. Manual full CI pins every job to a verified
 candidate SHA. See
 [`ci.md`](docs/architecture/ci.md#current-ci-selection).
 

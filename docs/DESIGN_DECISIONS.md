@@ -5478,3 +5478,23 @@ them (PR #1613 discussion).
 **Consequences:** One extra process stays alive (the shim) for each git/gh
 call in a session. Outside a session, and whenever the target is invalid, the
 alias still `exec`s the next real binary with no telemetry.
+
+## DD-132: there is no merge queue; the `ci-windows` rationale in DD-088 is corrected
+
+**Context:** DD-088 called the `ci-windows` label safe "because the merge
+queue always runs the full matrix". No merge queue was ever configured for
+`main`: no ruleset, no branch protection, and zero `merge_group` runs as of
+2026-09-30 (#1651). PR CI tests the head SHA, so `main`'s post-merge `push`
+run is the only test the merged tree gets.
+
+**Decision:** Docs and `ci.yml` comments describe that reality. The
+`merge_group:` trigger stays, marked inert, so a future queue gets the `full`
+tier with no workflow change. Enabling a queue, and deciding whether a
+`ci-windows` PR must also pass the routine Linux lanes before merge, are
+owner decisions recorded in
+[ci.md](architecture/ci.md#what-protects-main-today).
+`tests/test_ci_merge_queue_claims.py` fails if a queue claim returns.
+
+**Consequences:** Until a queue exists, merging a `ci-windows` PR needs a
+separate Linux run by convention, and a PR behind `main` merges an untested
+tree.
