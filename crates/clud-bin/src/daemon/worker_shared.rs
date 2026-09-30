@@ -115,6 +115,15 @@ pub(super) struct WorkerShared {
     client: Mutex<Option<AttachedClient>>,
     next_client_id: AtomicU64,
     pub(super) stop_accepting: AtomicBool,
+    /// #1582: set once any client completes `attach_client`. Until then the
+    /// launching client may still be on its way (it can spend seconds on
+    /// pre-attach work such as Codex model discovery), so an exited worker
+    /// must keep its port open for it; see `awaiting_first_client`.
+    ever_attached: AtomicBool,
+    /// #1582: when the child's exit was broadcast, bounding how long an
+    /// exited worker waits for a first client that may never come
+    /// (`--detach`).
+    exit_broadcast_at: Mutex<Option<Instant>>,
 }
 
 struct TranscriptSink {
@@ -152,6 +161,8 @@ impl WorkerShared {
             client: Mutex::new(None),
             next_client_id: AtomicU64::new(1),
             stop_accepting: AtomicBool::new(false),
+            ever_attached: AtomicBool::new(false),
+            exit_broadcast_at: Mutex::new(None),
         }
     }
 
@@ -397,6 +408,7 @@ impl WorkerShared {
             attached_at: Instant::now(),
         });
         drop(guard);
+        self.ever_attached.store(true, Ordering::Release);
         self.set_background(false);
         let snapshot = self.snapshot();
         // For PTY sessions with terminal capture, emit a single synthesized
@@ -505,8 +517,31 @@ impl WorkerShared {
 
     pub(super) fn broadcast_exit(&self, exit_code: i32) {
         let exit_code = self.set_exit_code(exit_code);
+        self.exit_broadcast_at
+            .lock()
+            .expect("exit_broadcast_at mutex poisoned")
+            .get_or_insert_with(Instant::now);
         self.stop_accepting.store(true, Ordering::Release);
         self.send_to_client(WorkerServerMessage::Exited { exit_code });
+    }
+
+    /// #1582: true while no client has ever attached and the child exited
+    /// less than `grace` ago. The exit code and backlog live in this process,
+    /// so a worker that quit here would turn a successful short session into
+    /// a client-side "worker has died" failure for the client still
+    /// connecting to it.
+    pub(super) fn awaiting_first_client(&self, grace: Duration) -> bool {
+        if self.ever_attached.load(Ordering::Acquire) {
+            return false;
+        }
+        match *self
+            .exit_broadcast_at
+            .lock()
+            .expect("exit_broadcast_at mutex poisoned")
+        {
+            Some(at) => at.elapsed() < grace,
+            None => true,
+        }
     }
 
     pub(super) fn send_to_client(&self, message: WorkerServerMessage) {

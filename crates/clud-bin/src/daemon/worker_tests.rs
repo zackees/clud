@@ -242,7 +242,7 @@ fn worker_attach_live_path_accepts_prost_messages() {
 #[test]
 fn a_dead_daemon_stops_the_loop_even_with_a_client_attached() {
     assert!(
-        should_stop_accepting(true, true, true),
+        should_stop_accepting(true, true, true, false),
         "this is the 8-and-15-hour leak: daemon gone, client stuck attached"
     );
 }
@@ -251,8 +251,8 @@ fn a_dead_daemon_stops_the_loop_even_with_a_client_attached() {
 /// `broadcast_exit`, but the loop must not depend on having observed both.
 #[test]
 fn a_dead_daemon_stops_the_loop_on_its_own() {
-    assert!(should_stop_accepting(true, false, false));
-    assert!(should_stop_accepting(true, false, true));
+    assert!(should_stop_accepting(true, false, false, false));
+    assert!(should_stop_accepting(true, false, true, false));
 }
 
 /// The graceful drain is untouched. The child exited and a client is still
@@ -261,11 +261,11 @@ fn a_dead_daemon_stops_the_loop_on_its_own() {
 #[test]
 fn a_graceful_exit_still_waits_for_the_client_to_finish_reading() {
     assert!(
-        !should_stop_accepting(false, true, true),
+        !should_stop_accepting(false, true, true, false),
         "a live daemon plus an attached client must keep draining"
     );
     assert!(
-        should_stop_accepting(false, true, false),
+        should_stop_accepting(false, true, false, false),
         "once the client is gone there is nothing left to drain"
     );
 }
@@ -273,8 +273,8 @@ fn a_graceful_exit_still_waits_for_the_client_to_finish_reading() {
 /// A healthy, idle worker keeps accepting.
 #[test]
 fn a_running_worker_keeps_accepting() {
-    assert!(!should_stop_accepting(false, false, false));
-    assert!(!should_stop_accepting(false, false, true));
+    assert!(!should_stop_accepting(false, false, false, false));
+    assert!(!should_stop_accepting(false, false, true, false));
 }
 
 /// The eviction thread shares this predicate, so this case is doing double
@@ -290,8 +290,50 @@ fn a_running_worker_keeps_accepting() {
 #[test]
 fn the_evictor_outlives_the_start_of_shutdown() {
     assert!(
-        !should_stop_accepting(false, true, true),
+        !should_stop_accepting(false, true, true, false),
         "the evictor must still be running here, or the client that pins \
          has_client() can never be cleared"
+    );
+}
+
+/// #1582: a child that exits before the launching client connects must not
+/// take the worker's port with it. The worker used to stop accepting the
+/// moment the child exited with no client attached, so a client still busy
+/// with pre-attach work (Codex model discovery) found the port closed and
+/// reported "worker has died" for a session that had succeeded.
+#[test]
+fn an_exit_before_the_first_attach_keeps_the_worker_accepting() {
+    assert!(
+        !should_stop_accepting(false, true, false, true),
+        "no client has attached yet: the exit code must wait for one"
+    );
+    assert!(
+        should_stop_accepting(true, true, false, true),
+        "a dead daemon still ends the loop"
+    );
+}
+
+#[test]
+fn the_first_attach_window_opens_at_exit_and_closes_on_attach_or_grace() {
+    let tmp = TempDir::new().unwrap();
+    let shared = test_shared(&tmp);
+    let grace = std::time::Duration::from_secs(30);
+    shared.broadcast_exit(0);
+    assert!(
+        shared.awaiting_first_client(grace),
+        "the child exited before any client attached"
+    );
+    assert!(
+        !shared.awaiting_first_client(std::time::Duration::ZERO),
+        "the wait is bounded, so a --detach session with no client still ends"
+    );
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (client_id, ..) = shared.attach_client(stream).unwrap();
+    shared.detach_client(client_id);
+    assert!(
+        !shared.awaiting_first_client(grace),
+        "once a client has attached, the normal drain rule applies"
     );
 }
