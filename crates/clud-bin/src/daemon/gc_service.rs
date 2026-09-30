@@ -26,6 +26,8 @@ use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 mod extern_repo;
 mod filesystem;
 mod list_state;
+mod repo_worktree;
+mod repo_worktree_probe;
 
 use super::watch_service as gc_watch_service;
 
@@ -35,6 +37,7 @@ use filesystem::{
     remove_entry_and_delete_row, remove_entry_filesystem,
 };
 use list_state::{derive_state, EntryState, SpareReasons};
+use repo_worktree_probe::{RepoWorktreeRow, REPO_WORKTREE_KIND};
 
 /// How long a connection thread waits for the registry worker before
 /// giving up. Since #268 the worker no longer runs `remove_dir_all`
@@ -92,6 +95,9 @@ pub(super) enum RegistryMsg {
     /// handed, so the worker replaces the cache wholesale rather than
     /// merging (which is what keeps it from growing without bound).
     ExternVerdicts(Vec<(String, PurgeDecision)>),
+    /// Issue #1591: a complete snapshot of repo-worktree verdicts, computed
+    /// off-worker by `spawn_repo_worktree_probe`. Display only.
+    RepoWorktreeVerdicts(Vec<RepoWorktreeRow>),
 }
 
 /// Issue #268: result of one entry's parallel filesystem deletion,
@@ -382,6 +388,7 @@ fn run_worker_loop(
             &completion_tx,
             config.activity.as_ref(),
             &mut spare_reasons,
+            &config.live_cwds_provider,
         );
         while let Ok(msg) = rx.recv() {
             handle_registry_msg(
@@ -410,6 +417,7 @@ fn run_worker_loop(
         &completion_tx,
         config.activity.as_ref(),
         &mut spare_reasons,
+        &config.live_cwds_provider,
     );
     let mut next_tick = Instant::now() + tick_cadence;
     loop {
@@ -498,6 +506,9 @@ fn handle_registry_msg(
         RegistryMsg::PurgeCompletion(c) => apply_purge_completion(registry, c),
         RegistryMsg::ExternVerdicts(verdicts) => {
             spare_reasons.replace_extern(verdicts, now_unix());
+        }
+        RegistryMsg::RepoWorktreeVerdicts(rows) => {
+            spare_reasons.replace_repo_worktrees(rows, now_unix());
         }
         RegistryMsg::WatchRescan(roots) => {
             for root in roots {
@@ -664,6 +675,14 @@ where
         Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
         Err(err) => eprintln!("[clud] gc tick: extern-repo list failed: {err}"),
     }
+    // Issue #1591: same off-worker pattern for repo-worktree verdicts.
+    spawn_repo_worktree_probe(
+        registry,
+        completion_tx,
+        activity,
+        spare_reasons,
+        live_cwds_provider(),
+    );
 
     match reap_trash_entries(registry) {
         Ok((removed, failed)) => {
@@ -722,11 +741,100 @@ fn prime_extern_verdicts(
     completion_tx: &mpsc::Sender<RegistryMsg>,
     activity: Option<&DaemonActivity>,
     spare_reasons: &mut SpareReasons,
+    live_cwds_provider: &LiveCwdsProvider,
 ) {
     match registry.list(Some(EXTERN_REPO_KIND)) {
         Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
         Err(err) => eprintln!("[clud] gc: initial extern-repo list failed: {err}"),
     }
+    spawn_repo_worktree_probe(
+        registry,
+        completion_tx,
+        activity,
+        spare_reasons,
+        live_cwds_provider(),
+    );
+}
+
+/// `CLUD_GC_REPO_WORKTREES=0` turns the repo-worktree probe (#1591) off.
+const ENV_GC_REPO_WORKTREES: &str = "CLUD_GC_REPO_WORKTREES";
+
+/// Issue #1591: compute squash-aware verdicts for every worktree of every
+/// visited repo **off** the registry worker (#946) and deliver the complete
+/// snapshot back as `RegistryMsg::RepoWorktreeVerdicts`. The worker only
+/// reads the repo-visit list (it owns redb); every `git`/`gh` spawn happens
+/// on the probe thread. Read-only: the snapshot feeds `gc list` and nothing
+/// else.
+fn spawn_repo_worktree_probe(
+    registry: &Registry,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    activity: Option<&DaemonActivity>,
+    spare_reasons: &mut SpareReasons,
+    live_cwds: Vec<PathBuf>,
+) {
+    if !parse_bool_setting(std::env::var(ENV_GC_REPO_WORKTREES).ok().as_deref(), true) {
+        return;
+    }
+    let repo_roots: Vec<String> = match registry.list_repo_visits() {
+        Ok(rows) => rows.into_iter().map(|r| r.repo_root).collect(),
+        Err(err) => {
+            eprintln!("[clud] gc: repo-visit list failed: {err}");
+            return;
+        }
+    };
+    if !spare_reasons.begin_repo_probe() {
+        return;
+    }
+    let tx = completion_tx.clone();
+    let activity = activity.cloned();
+    let spawned = thread::Builder::new()
+        .name("clud-gc-repo-worktree-probe".to_string())
+        .spawn(move || {
+            let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
+            let rows = repo_worktree_probe::probe_repos(&repo_roots, &live_cwds);
+            let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
+        });
+    if spawned.is_err() {
+        spare_reasons.repo_probe_finished();
+    }
+}
+
+/// Issue #1591: `gc list` rows for the cached repo-worktree snapshot.
+/// Paths the registry already tracks are skipped (their own row wins), and a
+/// live session cwd inside a worktree pins it now, even if the snapshot is
+/// up to a tick old. `id` is 0: no redb row backs these, so no delete path
+/// can select them.
+fn repo_worktree_list_rows(
+    spare_reasons: &SpareReasons,
+    tracked_paths: &HashSet<String>,
+    live_cwds: &[PathBuf],
+) -> Vec<ListRow> {
+    let (rows, evaluated_unix) = spare_reasons.repo_worktrees();
+    rows.iter()
+        .filter(|r| !tracked_paths.contains(&r.path))
+        .map(|r| {
+            let live = entry_path_contains_live_cwd_path(&r.path, live_cwds);
+            let (state, reason) = if live {
+                ("pinned", "process inside".to_string())
+            } else {
+                (r.verdict.state.as_str(), r.verdict.reason.clone())
+            };
+            ListRow {
+                id: 0,
+                kind: REPO_WORKTREE_KIND.to_string(),
+                path: r.path.clone(),
+                repo_root: Some(r.repo_root.clone()),
+                branch: r.branch.clone(),
+                agent_id: None,
+                created_unix: r.mtime_unix,
+                live_locked: live,
+                state: state.to_string(),
+                reclaimable: state == "reclaimable",
+                reason: Some(reason),
+                evaluated_unix,
+            }
+        })
+        .collect()
 }
 
 /// Compute extern-repo purge verdicts **off** the registry worker thread and
@@ -993,7 +1101,7 @@ fn process_op(
                 // derive it rather than rely on a cached marker the next
                 // probe snapshot would wipe.
                 let live_cwds = canonicalize_live_cwds(live_cwds);
-                let out: Vec<ListRow> = rows
+                let mut out: Vec<ListRow> = rows
                     .into_iter()
                     .map(|r| {
                         let live_locked = (r.kind == "worktree" && live_locks.contains(&r.path))
@@ -1029,6 +1137,18 @@ fn process_op(
                         }
                     })
                     .collect();
+                // Issue #1591: append the cached repo-worktree verdicts. No
+                // git here either — they come from the off-worker snapshot.
+                if kind.as_deref().is_none_or(|k| k == REPO_WORKTREE_KIND) {
+                    let tracked: HashSet<String> = match kind {
+                        None => out.iter().map(|r| r.path.clone()).collect(),
+                        Some(_) => registry
+                            .list(None)
+                            .map(|rows| rows.into_iter().map(|r| r.path).collect())
+                            .unwrap_or_default(),
+                    };
+                    out.extend(repo_worktree_list_rows(spare_reasons, &tracked, &live_cwds));
+                }
                 GcReply::ListOk { rows: out }
             }
             Err(e) => GcReply::Error {

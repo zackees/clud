@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 
 use super::extern_repo::{PurgeClass, PurgeDecision};
+use super::repo_worktree_probe::RepoWorktreeRow;
 
 /// A purge verdict recorded by the tick, for later display by `gc list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,9 +52,37 @@ pub(super) struct SpareReasons {
     /// (a test binary runs many) and cannot be left set by an unrelated
     /// thread — the same reason the cache itself is loop-owned.
     probe_in_flight: bool,
+    /// Issue #1591: the latest repo-worktree snapshot, computed off-worker
+    /// by `spawn_repo_worktree_probe`, plus when it was installed. Display
+    /// only: no purge path reads it.
+    repo_worktrees: Vec<RepoWorktreeRow>,
+    repo_worktrees_evaluated_unix: Option<i64>,
+    repo_probe_in_flight: bool,
 }
 
 impl SpareReasons {
+    /// Issue #1591: install a complete repo-worktree snapshot, releasing the
+    /// probe slot. Wholesale replacement, for the same reason as
+    /// `replace_extern`.
+    pub(super) fn replace_repo_worktrees(&mut self, rows: Vec<RepoWorktreeRow>, now: i64) {
+        self.repo_probe_in_flight = false;
+        self.repo_worktrees = rows;
+        self.repo_worktrees_evaluated_unix = Some(now);
+    }
+
+    pub(super) fn repo_worktrees(&self) -> (&[RepoWorktreeRow], Option<i64>) {
+        (&self.repo_worktrees, self.repo_worktrees_evaluated_unix)
+    }
+
+    /// Claim the repo-worktree probe slot; `false` while one is running.
+    pub(super) fn begin_repo_probe(&mut self) -> bool {
+        !std::mem::replace(&mut self.repo_probe_in_flight, true)
+    }
+
+    pub(super) fn repo_probe_finished(&mut self) {
+        self.repo_probe_in_flight = false;
+    }
+
     pub(super) fn new() -> Self {
         Self::default()
     }

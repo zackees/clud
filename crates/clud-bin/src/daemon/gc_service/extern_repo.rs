@@ -84,7 +84,7 @@ const GIT_DISCOVERY_ENV: &[&str] = &[
     "GIT_COMMON_DIR",
 ];
 
-fn git_discovery_env_is_poisoned() -> bool {
+pub(super) fn git_discovery_env_is_poisoned() -> bool {
     GIT_DISCOVERY_ENV
         .iter()
         .any(|key| std::env::var_os(key).is_some())
@@ -97,7 +97,23 @@ fn git_discovery_env_is_poisoned() -> bool {
 /// Deliberately not `worktrees::run_git`: that helper is unbounded by
 /// design and other callers rely on its patience. See `GIT_PROBE_TIMEOUT`.
 fn probe_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let mut argv = vec!["git".to_string()];
+    match probe_cmd("git", cwd, args, GIT_PROBE_TIMEOUT)? {
+        (0, text) => Some(text),
+        _ => None,
+    }
+}
+
+/// Bounded runner behind [`probe_git`], shared with the repo-worktree probe
+/// (#1591), which also needs the exit code (`merge-base --is-ancestor`
+/// answers through it) and a longer deadline for `gh`. Returns
+/// `(exit_code, stdout)`, or `None` on spawn failure or timeout.
+pub(super) fn probe_cmd(
+    program: &str,
+    cwd: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<(i32, String)> {
+    let mut argv = vec![program.to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
     let process = NativeProcess::new(ProcessConfig {
         command: subprocess::command_spec_for_subprocess(argv),
@@ -128,7 +144,7 @@ fn probe_git(cwd: &Path, args: &[&str]) -> Option<String> {
         }
     };
 
-    let deadline = Instant::now() + GIT_PROBE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut text = String::new();
     loop {
         match process.read_combined(Some(Duration::from_millis(25))) {
@@ -156,10 +172,10 @@ fn probe_git(cwd: &Path, args: &[&str]) -> Option<String> {
         }
     }
 
-    match process.wait(Some(Duration::from_secs(1))) {
-        Ok(0) => Some(text),
-        _ => None,
-    }
+    process
+        .wait(Some(Duration::from_secs(1)))
+        .ok()
+        .map(|code| (code, text))
 }
 
 /// The remote default branch to compare against, e.g. `origin/main`.

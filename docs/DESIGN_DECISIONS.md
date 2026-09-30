@@ -5164,3 +5164,34 @@ fallback costs the full size per alias). Windows cold start of a 30 MB PE
 under Defender is not yet measured; `ci-windows` must record it. On Windows
 a hardlink keeps `clud.exe`'s data alive and locked while an alias runs, so
 the self-install transaction (DD-109) relinks after replacing it.
+
+## DD-122: worktree "landed" verdicts need PR or patch evidence, not ancestry
+
+**Context:** #1591. This repo squash-merges. The squash commit on the default
+branch is new, so a merged branch's tip is an ancestor of nothing there:
+`git branch --merged`, `merge-base --is-ancestor` and `--clean-worktrees`'
+`unpushed`/`no-upstream` states all report a landed branch as live work
+forever, and sibling worktrees accumulate.
+
+**Decision:** A worktree is judged landed only on positive evidence: a
+merged PR whose `headRefOid` is the local tip or has it as an ancestor, or,
+when there is no PR or no `gh`, the branch's cumulative diff since its
+merge-base appearing verbatim (blob ids and hunk positions stripped, `-U0`)
+as one default-branch commit. A `... (#N)` subject line is not evidence on
+its own. Every doubt spares: a failed query, unknown coverage, an open PR
+with the same head name, commits after the merged head, a branch with no
+commits of its own, a lock without a pid. The decision is a pure function
+over injected facts (`repo_worktree_verdict`), matching the reap/spare rule.
+
+**Why not patch ids per commit (`git cherry`):** a multi-commit branch
+squashes into one commit whose patch matches none of the originals.
+Comparing the cumulative diff covers both shapes. Context lines are dropped
+because the squash commit's parent can differ from the merge-base when
+unrelated work landed in between.
+
+**Consequences:** Reclaiming needs a network `gh` call per repo per tick, or
+falls back to a diff comparison bounded to 100 default-branch commits. A
+branch squash-merged with conflict edits matches neither signal without
+`gh`, and stays pinned as `unverifiable`: the cost is disk, never work.
+The first PR only surfaces verdicts in `clud gc list`; deletion lands
+separately.
