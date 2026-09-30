@@ -25,6 +25,7 @@ Design: docs/architecture/ci.md
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -403,6 +404,34 @@ def run_streamed(argv: list[str], env: dict[str, str], log_path: Path) -> int:
     return proc.wait()
 
 
+def xdist_args(suite: str) -> list[str]:
+    """pytest-xdist flags for `suite`, or `[]` to run it in one process.
+
+    The unit suite's Python half was the single longest step of the PR
+    critical path: ~1,570 tests, serial, ~135 s on a 4-vCPU runner, most of it
+    waiting on child `clud` processes rather than using CPU. `-n auto` spreads
+    it across the runner's cores; `--dist loadfile` keeps every test of a file
+    on one worker, so file-level fixtures and module state behave as they do
+    serially.
+
+    Linux only: the Windows and macOS lanes share console/PTY state between
+    tests (see `run_harnesses`), so they stay serial. Only the unit suite is
+    parallel; the integration and harness suites drive real daemons and PTYs.
+    `CLUD_PYTEST_SERIAL=1` is the escape hatch for bisecting a suspected
+    cross-test interaction, and `CLUD_PYTEST_WORKERS` overrides the count.
+    Without `pytest-xdist` in the exec venv the suite runs serially rather
+    than failing.
+    """
+    if suite != "unit" or not sys.platform.startswith("linux"):
+        return []
+    if os.environ.get("CLUD_PYTEST_SERIAL"):
+        return []
+    if importlib.util.find_spec("xdist") is None:
+        return []
+    workers = os.environ.get("CLUD_PYTEST_WORKERS") or "auto"
+    return ["-n", workers, "--dist", "loadfile"]
+
+
 def run_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str) -> int:
     """Run pytest, teed to a log and also writing its own junit XML report.
 
@@ -422,6 +451,7 @@ def run_pytest(marker: str, env: dict[str, str], extra: list[str], *, suite: str
         f"--junitxml={pytest_junit_path(suite)}",
         "-o",
         "junit_logging=all",
+        *xdist_args(suite),
         *extra,
     ]
     child_env = dict(env)

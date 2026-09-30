@@ -23,6 +23,15 @@ unrelated `main` changes. Every checkout uses that SHA. The required `CI OK`
 check verifies every job selected by the mode. Adding or removing a label
 reruns selection on the PR head SHA.
 
+The Linux unit lane runs the Python half of its suite under `pytest-xdist`
+(`-n auto --dist loadfile`, `ci/run_bundle.py::xdist_args`). It was ~135 s of
+serial pytest on a 4-vCPU runner, the longest step of the PR critical path,
+and most of it was time spent waiting on child processes. Windows and macOS
+lanes and the integration and harness suites stay serial (shared console/PTY
+state, real daemons). `CLUD_PYTEST_SERIAL=1` runs the suite in one process to
+bisect a suspected cross-test interaction; `CLUD_PYTEST_WORKERS=<n>` overrides
+the worker count.
+
 The release workflow's `full-ci-gate` checks for a completed successful manual
 `CI full <candidate SHA>` run before any release build or publisher starts. It
 checks `CI OK`, Dylint, and the build plus unit and integration execution jobs

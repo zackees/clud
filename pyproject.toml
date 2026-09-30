@@ -49,6 +49,9 @@ test = [
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",
     "pytest-timeout>=2.3.0",
+    # The Linux unit lane runs its Python half in parallel (ci/run_bundle.py
+    # `xdist_args`); the lane falls back to serial if this is absent.
+    "pytest-xdist>=3.6.0",
     # The Windows installer selector test runs in a real ConPTY; it must not
     # silently lose that coverage in the unit lane.
     "pywinpty>=3.0.5; sys_platform == 'win32'",
