@@ -18,7 +18,7 @@
 //! `git worktree list --porcelain` via the *unbounded* `worktrees::run_git`.
 //! That is a separate, pre-existing path from the probe #946 moved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::extern_repo::{PurgeClass, PurgeDecision};
 use super::repo_worktree_probe::RepoWorktreeRow;
@@ -53,11 +53,14 @@ pub(super) struct SpareReasons {
     /// thread — the same reason the cache itself is loop-owned.
     probe_in_flight: bool,
     /// Issue #1591: the latest repo-worktree snapshot, computed off-worker
-    /// by `spawn_repo_worktree_probe`, plus when it was installed. Display
-    /// only: no purge path reads it.
+    /// by `spawn_repo_worktree_probe`, plus when it was installed. `gc list`
+    /// displays it; the next tick selects reclaims from it (#1603), each
+    /// re-verified on the purge pool before anything is deleted.
     repo_worktrees: Vec<RepoWorktreeRow>,
     repo_worktrees_evaluated_unix: Option<i64>,
     repo_probe_in_flight: bool,
+    /// Issue #1603: paths with a reclaim queued or running on the pool.
+    repo_reclaims_in_flight: HashSet<String>,
 }
 
 impl SpareReasons {
@@ -72,6 +75,25 @@ impl SpareReasons {
 
     pub(super) fn repo_worktrees(&self) -> (&[RepoWorktreeRow], Option<i64>) {
         (&self.repo_worktrees, self.repo_worktrees_evaluated_unix)
+    }
+
+    /// Issue #1603: a reclaim of `path` was dispatched to the pool.
+    pub(super) fn begin_repo_reclaim(&mut self, path: String) {
+        self.repo_reclaims_in_flight.insert(path);
+    }
+
+    pub(super) fn repo_reclaim_in_flight(&self, path: &str) -> bool {
+        self.repo_reclaims_in_flight.contains(path)
+    }
+
+    pub(super) fn repo_reclaim_finished(&mut self, path: &str) {
+        self.repo_reclaims_in_flight.remove(path);
+    }
+
+    /// Drop a removed worktree's row so `gc list` stops showing it before the
+    /// next probe replaces the snapshot.
+    pub(super) fn forget_repo_worktree(&mut self, path: &str) {
+        self.repo_worktrees.retain(|r| r.path != path);
     }
 
     /// Claim the repo-worktree probe slot; `false` while one is running.

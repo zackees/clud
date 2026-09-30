@@ -29,7 +29,11 @@ pub(crate) enum ReclaimMode {
 /// Parse `CLUD_GC_REPO_WORKTREES`. An unrecognized value is doubt, and doubt
 /// never deletes: it maps to `Observe`.
 pub(crate) fn reclaim_mode_from_raw(raw: Option<&str>) -> ReclaimMode {
-    unimplemented!("#1603 RED")
+    match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("" | "1" | "true" | "on" | "yes") => ReclaimMode::Delete,
+        Some("0" | "false" | "off" | "no") => ReclaimMode::Off,
+        Some(_) => ReclaimMode::Observe,
+    }
 }
 
 /// What the registry worker does with one cached row on a tick.
@@ -52,7 +56,22 @@ pub(crate) fn reclaim_selection(
     live_now: bool,
     in_flight: bool,
 ) -> ReclaimSelection {
-    unimplemented!("#1603 RED")
+    if state != RepoWorktreeState::Reclaimable {
+        return ReclaimSelection::Spare("not reclaimable");
+    }
+    if mode == ReclaimMode::Off {
+        return ReclaimSelection::Spare("repo-worktree gc off");
+    }
+    if live_now {
+        return ReclaimSelection::Spare("process inside");
+    }
+    if in_flight {
+        return ReclaimSelection::Spare("reclaim already in flight");
+    }
+    match mode {
+        ReclaimMode::Observe => ReclaimSelection::WouldRemove,
+        _ => ReclaimSelection::Dispatch,
+    }
 }
 
 /// Last-moment re-check on the purge-pool thread (the #946 pattern).
@@ -63,7 +82,20 @@ pub(crate) fn reverify_reclaim(
     cached: &RepoWorktreeRow,
     fresh: Option<&RepoWorktreeRow>,
 ) -> Result<(), String> {
-    unimplemented!("#1603 RED")
+    let Some(fresh) = fresh else {
+        return Err("gone from git worktree list".to_string());
+    };
+    if fresh.verdict.state != RepoWorktreeState::Reclaimable {
+        return Err(format!("now {}", fresh.verdict.reason));
+    }
+    if fresh.branch.is_none() || fresh.branch != cached.branch {
+        return Err("branch changed".to_string());
+    }
+    match (cached.tip.as_deref(), fresh.tip.as_deref()) {
+        (Some(was), Some(now)) if was == now => Ok(()),
+        (None, _) | (_, None) => Err("tip unknown".to_string()),
+        _ => Err("tip moved".to_string()),
+    }
 }
 
 /// `git branch -D` runs only when the local branch still points at the tip
@@ -73,7 +105,11 @@ pub(crate) fn branch_delete_decision(
     branch_tip_now: Option<&str>,
     verified_tip: &str,
 ) -> Result<(), &'static str> {
-    unimplemented!("#1603 RED")
+    match branch_tip_now {
+        None => Err("local branch already gone"),
+        Some(now) if now == verified_tip => Ok(()),
+        Some(_) => Err("local branch moved"),
+    }
 }
 
 /// Remote branch deletion: off unless the user opted in, and then only when
@@ -85,7 +121,14 @@ pub(crate) fn remote_delete_decision(
     remote_tip: Option<&str>,
     verified_tip: &str,
 ) -> Result<(), &'static str> {
-    unimplemented!("#1603 RED")
+    if !opted_in {
+        return Err("remote deletion off");
+    }
+    match remote_tip {
+        None => Err("no remote branch"),
+        Some(tip) if tip == verified_tip => Ok(()),
+        Some(_) => Err("remote branch moved"),
+    }
 }
 
 /// One snapshot of every visible process's cwd, the `ProcessFacts` way
@@ -101,7 +144,39 @@ pub(crate) struct ProcessCwdSnapshot {
 /// Whether any process sits inside `worktree` (both canonical). `None` when
 /// the snapshot is unavailable: doubt, which the verdict spares.
 pub(crate) fn process_inside(snapshot: &ProcessCwdSnapshot, worktree: &Path) -> Option<bool> {
-    unimplemented!("#1603 RED")
+    if !snapshot.available {
+        return None;
+    }
+    Some(snapshot.cwds.iter().any(|cwd| cwd.starts_with(worktree)))
+}
+
+/// PIDs of the daemon's own `git` helpers (its direct `git` children and
+/// their `git` descendants), which the snapshot must ignore: the probe and
+/// the pool run `git status` *inside* worktrees, and counting those would
+/// make GC pin the very worktree it is inspecting. Anything else — a session
+/// worker, a shell, an editor, a non-git child — still counts.
+/// `procs` is `(pid, parent, image name)`.
+pub(crate) fn own_git_helpers(
+    procs: &[(u32, Option<u32>, String)],
+    own_pid: u32,
+) -> std::collections::HashSet<u32> {
+    fn is_git(name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        name == "git" || name == "git.exe" || name.starts_with("git-")
+    }
+    let mut helpers = std::collections::HashSet::new();
+    loop {
+        let before = helpers.len();
+        for (pid, parent, name) in procs {
+            let Some(parent) = parent else { continue };
+            if *pid != own_pid && is_git(name) && (*parent == own_pid || helpers.contains(parent)) {
+                helpers.insert(*pid);
+            }
+        }
+        if helpers.len() == before {
+            return helpers;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +185,12 @@ mod tests {
     use crate::daemon::gc_service::repo_worktree::RepoWorktreeVerdict;
     use RepoWorktreeState::{Dangling, Pinned, Reclaimable};
 
-    fn row(state: RepoWorktreeState, reason: &str, branch: Option<&str>, tip: Option<&str>) -> RepoWorktreeRow {
+    fn row(
+        state: RepoWorktreeState,
+        reason: &str,
+        branch: Option<&str>,
+        tip: Option<&str>,
+    ) -> RepoWorktreeRow {
         RepoWorktreeRow {
             path: "/wt".to_string(),
             repo_root: "/repo".to_string(),
@@ -210,7 +290,14 @@ mod tests {
 
     #[test]
     fn reverify_spares_when_the_fresh_verdict_is_no_longer_reclaimable() {
-        for reason in ["dirty", "untracked", "process inside", "open PR #4", "commits after merge", "unverifiable"] {
+        for reason in [
+            "dirty",
+            "untracked",
+            "process inside",
+            "open PR #4",
+            "commits after merge",
+            "unverifiable",
+        ] {
             let fresh = row(Pinned, reason, Some("feat"), Some("abc"));
             assert_eq!(
                 reverify_reclaim(&landed(), Some(&fresh)),
@@ -260,8 +347,14 @@ mod tests {
 
     #[test]
     fn branch_delete_requires_the_verified_tip() {
-        assert_eq!(branch_delete_decision(None, "abc"), Err("local branch already gone"));
-        assert_eq!(branch_delete_decision(Some("def"), "abc"), Err("local branch moved"));
+        assert_eq!(
+            branch_delete_decision(None, "abc"),
+            Err("local branch already gone")
+        );
+        assert_eq!(
+            branch_delete_decision(Some("def"), "abc"),
+            Err("local branch moved")
+        );
         assert_eq!(branch_delete_decision(Some("abc"), "abc"), Ok(()));
     }
 
@@ -271,7 +364,10 @@ mod tests {
             remote_delete_decision(false, Some("abc"), "abc"),
             Err("remote deletion off")
         );
-        assert_eq!(remote_delete_decision(true, None, "abc"), Err("no remote branch"));
+        assert_eq!(
+            remote_delete_decision(true, None, "abc"),
+            Err("no remote branch")
+        );
         assert_eq!(
             remote_delete_decision(true, Some("def"), "abc"),
             Err("remote branch moved")
@@ -280,6 +376,21 @@ mod tests {
     }
 
     // ---- process table ----
+
+    #[test]
+    fn only_the_daemons_own_git_helpers_are_ignored() {
+        let own = 100;
+        let procs = vec![
+            (1, Some(own), "git".to_string()),
+            (2, Some(1), "git-remote-https".to_string()),
+            (3, Some(own), "claude".to_string()),
+            (4, Some(3), "git".to_string()),
+            (5, Some(999), "git.exe".to_string()),
+            (6, None, "git".to_string()),
+        ];
+        let helpers = own_git_helpers(&procs, own);
+        assert_eq!(helpers, [1, 2].into_iter().collect());
+    }
 
     #[test]
     fn an_unreadable_process_table_is_doubt() {
@@ -297,7 +408,10 @@ mod tests {
             cwds: vec![PathBuf::from("/wt/src"), PathBuf::from("/elsewhere")],
         };
         assert_eq!(process_inside(&snapshot, Path::new("/wt")), Some(true));
-        assert_eq!(process_inside(&snapshot, Path::new("/elsewhere")), Some(true));
+        assert_eq!(
+            process_inside(&snapshot, Path::new("/elsewhere")),
+            Some(true)
+        );
         assert_eq!(process_inside(&snapshot, Path::new("/wt2")), Some(false));
         // Component-wise, not string prefix: `/wt` does not contain `/wtx`.
         let sibling = ProcessCwdSnapshot {

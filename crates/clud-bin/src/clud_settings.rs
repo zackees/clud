@@ -247,6 +247,13 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
             .or_insert(Value::Bool(false));
     }
 
+    if let Some(gc) = seed_object_entry(document, "gc") {
+        // #1603: when the daemon reclaims a squash-merged repo worktree it
+        // deletes the local branch; the remote branch only on this opt-in.
+        gc.entry("delete_remote_branches".to_string())
+            .or_insert(Value::Bool(false));
+    }
+
     if let Some(daemon) = seed_object_entry(document, "daemon") {
         // #645: a daemon that has no owned work may retire after fifteen
         // minutes. Zero remains the documented explicit opt-out.
@@ -800,6 +807,31 @@ pub fn save_pr_wait_fail_fast_enabled_at(home: &Path, enabled: bool) -> Result<(
             .or_insert_with(|| Value::String(GIT_PR_WAIT_FAIL_FAST_NOTE.to_string()));
         git.insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
     })
+}
+
+/// `gc.delete_remote_branches` (#1603): whether reclaiming a squash-merged
+/// repo worktree also deletes its branch on `origin`. Off by default; the
+/// daemon reads it each tick, and `CLUD_GC_DELETE_REMOTE_BRANCHES` overrides
+/// it. See docs/architecture/gc-and-registry.md.
+pub fn load_gc_delete_remote_branches() -> Result<bool, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_gc_delete_remote_branches_at(&home)
+}
+
+pub fn load_gc_delete_remote_branches_at(home: &Path) -> Result<bool, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(gc_delete_remote_branches_from(&document))
+}
+
+/// Pure reader: only a literal JSON `true` opts in.
+pub fn gc_delete_remote_branches_from(document: &Value) -> bool {
+    document
+        .get("gc")
+        .and_then(|item| item.get("delete_remote_branches"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// `bash.block_cd` as set at the user level (`~/.clud/settings.json`).

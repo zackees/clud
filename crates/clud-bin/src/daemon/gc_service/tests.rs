@@ -252,7 +252,11 @@ fn drain_purge_completions(
             Ok(RegistryMsg::WatchRescan(_)) => {
                 // Watch notifications are irrelevant to periodic-purge tests.
             }
-            Ok(RegistryMsg::ExternVerdicts(_) | RegistryMsg::RepoWorktreeVerdicts(_)) => {
+            Ok(
+                RegistryMsg::ExternVerdicts(_)
+                | RegistryMsg::RepoWorktreeVerdicts(_)
+                | RegistryMsg::RepoWorktreeReclaimed { .. },
+            ) => {
                 // Issue #946: the off-worker probe publishes here. These
                 // tests drive the tick directly and assert on the registry,
                 // not on cached verdicts, so the snapshot is ignored.
@@ -697,6 +701,10 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
             session_state_dir: None,
             activity: None,
             spare_reasons: &mut SpareReasons::new(),
+            repo_worktrees: RepoWorktreeGcConfig {
+                mode: ReclaimMode::Off,
+                delete_remote: false,
+            },
         },
     );
     // The two seeded entries — one worktree, one sibling clone — are both
@@ -764,6 +772,10 @@ fn periodic_tick_keeps_old_worktree_entry_when_free_space_is_healthy() {
             session_state_dir: None,
             activity: None,
             spare_reasons: &mut SpareReasons::new(),
+            repo_worktrees: RepoWorktreeGcConfig {
+                mode: ReclaimMode::Off,
+                delete_remote: false,
+            },
         },
     );
     // Healthy disk → no dispatches expected, so no completions
@@ -1397,6 +1409,8 @@ fn list_filter_by_kind() {
 
 #[path = "tests/delete_and_pool.rs"]
 mod delete_and_pool;
+#[path = "tests/repo_worktree_reclaim.rs"]
+mod repo_worktree_reclaim_tick;
 
 /// Issue #1591: `gc list` surfaces the cached repo-worktree snapshot with
 /// state, reason, reclaimable and evaluated_unix; a registry-tracked path

@@ -238,7 +238,7 @@ is **an error**, not a fallback — there is no read-only path in v1
 Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the daemon
 (`crates/clud-bin/src/gc/cli.rs`).
 
-## Repo worktrees: squash-aware verdict (#1591)
+## Repo worktrees: squash-aware verdict (#1591) and reclaim (#1603)
 
 Sibling worktrees such as `~/dev/clud2-wt-<issue>` match none of the tracked
 kinds, and in a squash-merging repo their branch tips are never ancestors of
@@ -252,8 +252,9 @@ the default branch, so ancestry-based checks call them live work forever
   `clud-gc-repo-worktree-probe` thread (`spawn_repo_worktree_probe`), which
   sends a complete snapshot back as `RegistryMsg::RepoWorktreeVerdicts`, the
   same off-worker pattern as the extern-repo probe (#946). One probe at a
-  time; primed at startup, refreshed each tick. `CLUD_GC_REPO_WORKTREES=0`
-  disables it. All git/`gh` calls are bounded `running-process` spawns.
+  time; primed at startup, refreshed each tick. All git/`gh` calls are
+  bounded `running-process` spawns. The probe thread also takes one
+  process-table snapshot (`collect_process_cwds`, below).
 - **Verdict.** `repo_worktree_verdict` (`daemon/gc_service/repo_worktree.rs`)
   is a pure function over `RepoWorktreeFacts`; its doc table is the
   precedence. Reclaimable only on positive evidence: a merged PR (one
@@ -262,16 +263,47 @@ the default branch, so ancestry-based checks call them live work forever
   cumulative `-U0` diff appearing verbatim as one default-branch commit.
   Spared, with a reason: `no verdict yet`, `main checkout`,
   `locked by live pid` (a lock with no parseable pid counts as live),
-  `process inside` (a live session cwd), `detached`, `dirty`, `untracked`,
+  `process inside` (a live session cwd or any process cwd),
+  `process table unavailable`, `detached`, `dirty`, `untracked`,
   `open PR #N`, `commits after merge`, `no PR`, `unverifiable`.
 - **Surfacing.** `clud gc list [--json]` appends `kind: repo-worktree` rows
   (`id: 0`, since no redb row backs them) with `state`, `reason`,
   `reclaimable` and `evaluated_unix`. A path the registry already tracks keeps
   its own row. A live session cwd inside pins the row at list time even if
   the snapshot is older.
-- **Not yet.** Nothing deletes on this verdict. Removal (`git worktree
-  remove` → `git branch -D` → `git worktree prune`, re-verified on the purge
-  pool) is a follow-up; see the issue linked from #1591.
+- **Process table (#1603).** `collect_process_cwds` reads every visible
+  process's cwd once (sysinfo) into a `ProcessCwdSnapshot`, and the pure
+  `process_inside` decides against it, the `ProcessFacts` pattern from
+  [process-reaping.md](process-reaping.md#daemon-sparing-os-signals-first-marker-second-whitelist-last).
+  If the daemon cannot read its own cwd the snapshot is unavailable and every
+  row spares as `process table unavailable`. The daemon's own `git` helpers
+  (`own_git_helpers`) are ignored so a probe's `git status` does not pin the
+  worktree it inspects.
+- **Reclaim (#1603).** On each tick `run_repo_worktree_phase` walks the
+  cached snapshot (taken by the *previous* probe) and, per the pure
+  `reclaim_selection`, dispatches each `reclaimable` row with no live session
+  cwd and no reclaim in flight to the purge pool as `PurgeWork::RepoWorktree`.
+  The pool thread (`repo_worktree_reclaim_exec::run_reclaim`) re-probes that
+  one worktree from scratch (fresh git, fresh `gh`, fresh process table) and
+  `reverify_reclaim` vetoes on any change: verdict no longer reclaimable,
+  branch changed, tip moved or unknown, worktree gone. Then, all through
+  `running-process`: make read-only directories writable, `git worktree
+  remove <path>` (**never** `--force`, so git itself refuses a tree that got
+  dirty in the last instant), `git branch -D` only if the branch still points
+  at the verified tip, optionally the remote branch (below), then `git
+  worktree prune`. The outcome returns as `RegistryMsg::RepoWorktreeReclaimed`
+  and is logged (`removed`, `spared at delete time: <reason>`, or `failed`);
+  a removed row leaves the `gc list` snapshot. A failure is never retried
+  with force: a locked worktree, or one with submodules, just stays.
+  Rationale: [DD-123](../DESIGN_DECISIONS.md#dd-123-repo-worktree-reclaim-re-verifies-from-scratch-and-never-forces).
+- **Remote branches.** Off by default. `gc.delete_remote_branches: true` in
+  `~/.clud/settings.json` (seeded `false`), or
+  `CLUD_GC_DELETE_REMOTE_BRANCHES=1`, also deletes `origin/<branch>`, only
+  when the remote-tracking ref equals the verified tip, and the push carries
+  `--force-with-lease=refs/heads/<branch>:<tip>`.
+- **Modes.** `CLUD_GC_REPO_WORKTREES`: unset or `1` deletes; `observe` (or
+  any unrecognized value) probes and logs `would remove` without deleting;
+  `0` turns the probe and the reclaim off.
 
 ## Filesystem sweeps (non-registry)
 

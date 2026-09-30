@@ -13,8 +13,9 @@
 //! so the precedence here is unit-testable with no repo, no process table and
 //! no network, per the reap/spare rule in `CLAUDE.md`.
 //!
-//! This PR is **read-only**: the verdict is surfaced by `clud gc list` and
-//! nothing deletes on it yet (follow-up tracked in the PR description).
+//! `clud gc list` surfaces the verdict; since #1603 the daemon also acts on
+//! `reclaimable` rows, after re-verifying on the purge pool
+//! (`repo_worktree_reclaim`).
 
 /// What the merged-PR lookup said about this worktree's branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +118,7 @@ impl RepoWorktreeVerdict {
 /// | main checkout                              | pinned      | `main checkout`            |
 /// | locked by a live pid                       | pinned      | `locked by live pid`       |
 /// | a process/session inside                   | pinned      | `process inside`           |
+/// | process table unreadable                   | pinned      | `process table unavailable`|
 /// | detached HEAD                              | pinned      | `detached`                 |
 /// | dirty/untracked unknown                    | pinned      | `unverifiable`             |
 /// | dirty                                      | pinned      | `dirty`                    |
@@ -146,6 +148,9 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
     }
     if facts.process_inside {
         return RepoWorktreeVerdict::pinned("process inside");
+    }
+    if facts.processes_unverifiable {
+        return RepoWorktreeVerdict::pinned("process table unavailable");
     }
     if facts.detached {
         return RepoWorktreeVerdict::pinned("detached");

@@ -101,6 +101,11 @@ The spare decision carries a **reason**, and `ReapOutcome::spared` surfaces it
 to the caller. "The daemon survived" is not the property worth asserting — a
 reaper that never saw the process at all also leaves it running.
 
+The same collect-once-then-decide shape guards directory deletion too: repo-worktree
+GC snapshots every process cwd (`ProcessCwdSnapshot`) and a process inside a
+worktree pins it. See
+[gc-and-registry.md → Repo worktrees](gc-and-registry.md#repo-worktrees-squash-aware-verdict-1591-and-reclaim-1603).
+
 ### Precedence
 
 | # | Signal | Windows | POSIX | Catches |
