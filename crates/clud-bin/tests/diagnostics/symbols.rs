@@ -203,7 +203,8 @@ fn symbols_bare_prints_summary() {
 /// The version and target are what name the release asset; without them there
 /// is no sidecar to ask for. Guessing at this binary's own version would fetch
 /// symbols for the wrong build, which mis-symbolicates with confident, wrong
-/// line numbers — the failure #1016 argues is worse than none.
+/// line numbers — the failure #1016 argues is worse than none. It is a skip
+/// with a reason, not an error: an old report is a normal thing to have.
 #[test]
 fn symbols_install_reports_a_pre_1016_report_rather_than_guessing() {
     let tmp = TempDir::new().unwrap();
@@ -220,7 +221,7 @@ fn symbols_install_reports_a_pre_1016_report_rather_than_guessing() {
 
     let (exit, output) = run_clud(&["symbols", "install"], &state_dir);
 
-    assert_eq!(exit, 1, "expected exit 1; output: {output}");
+    assert_eq!(exit, 0, "expected exit 0; output: {output}");
     assert!(
         output.contains("version/target"),
         "the reason must name what is missing; got: {output}"

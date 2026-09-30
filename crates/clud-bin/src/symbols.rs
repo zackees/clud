@@ -18,10 +18,12 @@
 //! - `clud symbols` (bare) prints a five-line summary of the crash-
 //!   reports directory.
 //! - `clud symbols install` fetches the sidecar the most recent report
-//!   needs, checks it against the release's `SHA256SUMS`, and caches it
-//!   under `~/.clud/state/symbols/<version>/`. It used to be an alias
-//!   for `verify`, which was honest while no sidecars existed and became
-//!   wrong the moment `split-debuginfo = "packed"` shipped them.
+//!   needs, but only after the release's `BUILD-IDS.txt` says the report's
+//!   GNU build-id is the published binary for its triple. It checks the
+//!   sidecar against the release's `SHA256SUMS` and caches it under
+//!   `~/.clud/state/symbols/<build-id>/`. A report from a local build or a
+//!   same-version rebuild has no matching entry, so nothing is fetched and
+//!   the user is pointed at the `target/` tree beside the binary instead.
 //! - `clud symbols verify [--all]` checks that the running binary can
 //!   resolve a report's backtrace. Exits 1 if it can't. `--all` widens
 //!   the scope from the most recent report to every report.
@@ -95,25 +97,53 @@ pub fn checksum_manifest_url(version: &str) -> String {
     format!("{RELEASE_DOWNLOAD_BASE}/{version}/{CHECKSUM_MANIFEST}")
 }
 
+/// The release asset that pairs each shipped Linux binary with its sidecar.
+///
+/// One line per triple, `<gnu-build-id-hex>  <triple>`, written by
+/// `ci/build_ids.py` from the shipped binary's `.note.gnu.build-id` and listed
+/// in [`CHECKSUM_MANIFEST`]. `tests/test_build_ids.py` pins this name against
+/// the Python side.
+pub const BUILD_IDS_ASSET: &str = "BUILD-IDS.txt";
+
+/// URL of `version`'s [`BUILD_IDS_ASSET`].
+#[must_use]
+pub fn build_ids_url(version: &str) -> String {
+    format!("{RELEASE_DOWNLOAD_BASE}/{version}/{BUILD_IDS_ASSET}")
+}
+
+/// The published build-id for `target`, parsed out of a `BUILD-IDS.txt` body,
+/// lowercased. `None` when the triple has no entry.
+#[must_use]
+pub fn published_build_id(build_ids: &str, target: &str) -> Option<String> {
+    build_ids.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let id = parts.next()?;
+        let triple = parts.next()?;
+        (triple == target && parts.next().is_none()).then(|| id.to_ascii_lowercase())
+    })
+}
+
 /// The expected sha256 of `asset`, parsed out of a `SHA256SUMS` body.
 ///
 /// Entries are `<hex>  ./<name>`, the `sha256sum` format the release job
 /// generates from inside the directory, hence the `./` prefix. Both spellings
 /// are accepted so a manifest generated without it still matches.
 ///
-/// # Why a checksum is the verification available, and what it does not prove
+/// # What a checksum proves, and what pairs the sidecar to the binary
 ///
-/// #1016 item 3 asks that a sidecar whose build-id does not match be refused.
-/// The published `.dwp` has no build-id to compare: a DWARF package is a
+/// This authenticates the *asset*: the bytes are the ones the release
+/// published for this version and triple. It says nothing about which binary
+/// they belong to, and the `.dwp` cannot say either -- a DWARF package is a
 /// relocatable object carrying `.debug_*.dwo` sections and `.debug_cu_index`,
-/// and `readelf -n` on release 2.7.9's sidecar reports no notes at all.
+/// with no `.note.gnu.build-id` (`readelf -n` on release 2.7.9's sidecar
+/// reports no notes at all).
 ///
-/// So this authenticates the *asset*, not the *pairing*: it proves the bytes
-/// are the ones that release published for this version and triple. It does
-/// not prove they belong to the binary in hand -- a rebuild at the same
-/// version would still pair with the published sidecar and mis-symbolicate.
-/// DWARF's own answer to that is the DWO ID, which `.debug_cu_index` is keyed
-/// by; see the discussion on #1016.
+/// The pairing comes from [`BUILD_IDS_ASSET`] instead: the release job reads
+/// the build-id of each shipped Linux binary in the job that produced its
+/// `.dwp` and publishes `<build-id>  <triple>` lines. [`install_with`] fetches
+/// the sidecar only when the crash report's `build_id` equals that entry, so
+/// a local build or a same-version rebuild is never paired with the published
+/// DWARF (#1016, option 2 of the discussion there).
 #[must_use]
 pub fn expected_sha256(manifest: &str, asset: &str) -> Option<String> {
     manifest.lines().find_map(|line| {
@@ -122,6 +152,11 @@ pub fn expected_sha256(manifest: &str, asset: &str) -> Option<String> {
         let name = name.strip_prefix("./").unwrap_or(name);
         (name == asset && !hex.is_empty()).then(|| hex.trim().to_string())
     })
+}
+
+/// True for a plausible GNU build-id: 8 to 128 hex digits and nothing else.
+fn is_build_id_hex(id: &str) -> bool {
+    (8..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Heuristic for whether a single backtrace line is an `at FILE:LINE`
@@ -207,26 +242,53 @@ fn read_report_backtrace(path: &Path) -> Option<(String, String, u128)> {
 /// `.dwp` is not something a test suite should be downloading, and a test that
 /// needs the real release to exist would fail for reasons that have nothing to
 /// do with the code.
-pub type Fetch<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
+pub type Fetch<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, FetchError>;
+
+/// Why a fetch produced no bytes.
+///
+/// `NotFound` is its own case because it is an *answer*, not a failure: a
+/// release with no [`BUILD_IDS_ASSET`] (a version never published, or one
+/// published before the pairing existed) means "this binary cannot be paired",
+/// which is a skip, while a network error is a real failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchError {
+    NotFound,
+    Failed(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("404 not found"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
 
 /// The real fetcher. `ureq` is already this crate's HTTP client (`codex_auth`,
 /// `codex_bridge`).
-fn ureq_fetch(url: &str) -> Result<Vec<u8>, String> {
-    let response = ureq::get(url).call().map_err(|err| err.to_string())?;
+fn ureq_fetch(url: &str) -> Result<Vec<u8>, FetchError> {
+    let response = match ureq::get(url).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(404, _)) => return Err(FetchError::NotFound),
+        Err(err) => return Err(FetchError::Failed(err.to_string())),
+    };
     let mut bytes = Vec::new();
     // `into_reader`, not `into_string`: the payload is a binary sidecar tens
     // of megabytes long, and `into_string` both caps at 10 MB and would mangle
     // it as UTF-8.
     std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| FetchError::Failed(err.to_string()))?;
     Ok(bytes)
 }
 
-/// Where fetched sidecars live: `~/.clud/state/symbols/<version>/<asset>`.
+/// Where fetched sidecars live: `~/.clud/state/symbols/<build-id>/<asset>`.
 ///
-/// Beside `~/.clud/state/crashes/`, as #1016 suggested. Keyed by version
-/// because that is what the asset is keyed by -- see [`expected_sha256`] for
-/// why a build-id cannot be the key here.
+/// Beside `~/.clud/state/crashes/`, as #1016 suggested. Keyed by the GNU
+/// build-id because that is what identifies the binary the sidecar belongs
+/// to; a version names a release, and a rebuild at the same version is a
+/// different binary. Only a build-id that [`BUILD_IDS_ASSET`] vouches for is
+/// ever used as a key.
 fn cache_root() -> std::io::Result<PathBuf> {
     let dir = crate::crash_report::crashes_dir()?
         .parent()
@@ -235,14 +297,45 @@ fn cache_root() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// The `(version, target)` a report was written by, or `None` if it does not
-/// say. Older reports predate both fields.
-fn read_report_identity(path: &Path) -> Option<(String, String)> {
-    let raw = fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let version = value.get("version")?.as_str()?.to_string();
-    let target = value.get("target")?.as_str()?.to_string();
-    Some((version, target))
+/// Which build wrote a report. Every field is optional: reports written
+/// before #1016 carry no `target` and no `build_id`, and non-ELF builds never
+/// carry a `build_id`.
+#[derive(Debug)]
+struct ReportIdentity {
+    version: Option<String>,
+    target: Option<String>,
+    build_id: Option<String>,
+}
+
+fn read_report_identity(path: &Path) -> ReportIdentity {
+    let value: Option<serde_json::Value> = fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let field = |name: &str| {
+        value
+            .as_ref()
+            .and_then(|v| v.get(name))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
+    ReportIdentity {
+        version: field("version"),
+        target: field("target"),
+        build_id: field("build_id").map(|id| id.to_ascii_lowercase()),
+    }
+}
+
+/// The note printed whenever a binary cannot be paired with a published
+/// sidecar. Deliberately not phrased as an error: a local build *has* its
+/// symbols -- cargo left them beside the binary.
+fn print_not_published(reason: &str, target: &str) {
+    println!(
+        "clud symbols: {reason}\n\
+         This binary is not a published build, so no sidecar was fetched. Its \
+         symbols are beside it in target/{target}/<profile>/ (clud.dwp, or \
+         deps/clud-*.dwp) of the tree that built it."
+    );
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -256,28 +349,30 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// How many release versions' sidecars the cache keeps.
+/// How many builds' sidecars the cache keeps.
 ///
-/// Two: the release you are running and the one you just upgraded from, which
+/// Two: the build you are running and the one you just upgraded from, which
 /// is the pair a crash report in hand can plausibly need. A `.dwp` is ~85 MB,
 /// so this is a bound of roughly 170 MB rather than an unbounded tree.
 ///
 /// #1016 asks for an eviction rule specifically because of #1014 -- nothing
 /// sweeps `~/.clud/state/`, and adding a directory that only grows would be
 /// repeating the mistake that issue was filed about.
-const MAX_CACHED_VERSIONS: usize = 2;
+const MAX_CACHED_BUILDS: usize = 2;
 
-/// Drop all but the newest [`MAX_CACHED_VERSIONS`] version directories.
+/// Drop all but the newest [`MAX_CACHED_BUILDS`] build-id directories.
+///
+/// Any directory counts, so the `<version>/` directories an earlier clud
+/// cached under are aged out by the same rule rather than left behind.
 ///
 /// Runs after a successful install rather than on a timer: the cache only
 /// grows when something is added to it, so the moment of adding is the only
 /// moment a bound can be crossed. That also keeps this out of the daemon's
 /// periodic work, which #542 asks not to grow.
 ///
-/// Newest by directory mtime, not by parsing versions: a version string is not
-/// reliably ordered (`2.8.0` vs `2.10.0` needs semver, and a fork may not use
-/// semver at all), whereas "the one I fetched least recently" is exactly the
-/// thing worth dropping and is what mtime records.
+/// Newest by directory mtime: a build-id has no order at all, and "the one I
+/// fetched least recently" is exactly the thing worth dropping and is what
+/// mtime records.
 ///
 /// Failures are non-fatal. A cache that could not be pruned is a disk-space
 /// problem; an install that reported failure because pruning failed would be a
@@ -286,7 +381,7 @@ fn prune_cache(cache_root: &Path) -> usize {
     let Ok(entries) = fs::read_dir(cache_root) else {
         return 0;
     };
-    let mut versions: Vec<(std::time::SystemTime, PathBuf)> = entries
+    let mut builds: Vec<(std::time::SystemTime, PathBuf)> = entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| {
@@ -294,19 +389,19 @@ fn prune_cache(cache_root: &Path) -> usize {
             Some((mtime, entry.path()))
         })
         .collect();
-    if versions.len() <= MAX_CACHED_VERSIONS {
+    if builds.len() <= MAX_CACHED_BUILDS {
         return 0;
     }
-    versions.sort_by_key(|version| std::cmp::Reverse(version.0));
+    builds.sort_by_key(|build| std::cmp::Reverse(build.0));
     let mut removed = 0;
-    for (_, path) in versions.into_iter().skip(MAX_CACHED_VERSIONS) {
+    for (_, path) in builds.into_iter().skip(MAX_CACHED_BUILDS) {
         // Audit before acting (#893). These are large files clud fetched
         // rather than the user's own data, but the audit line is what proves
         // afterwards what was removed and under which rule.
         crate::gc::delete_audit::record(
             "gc.symbols-cache",
             &path,
-            &format!("symbols-cache keep-newest>{MAX_CACHED_VERSIONS}"),
+            &format!("symbols-cache keep-newest>{MAX_CACHED_BUILDS}"),
         );
         if fs::remove_dir_all(&path).is_ok() {
             removed += 1;
@@ -338,19 +433,25 @@ pub fn install(reports: &[PathBuf]) -> i32 {
 }
 
 /// Test seam for [`install`].
+///
+/// Order matters: `BUILD-IDS.txt` is consulted *before* anything that could
+/// fetch the sidecar, so a binary the release does not vouch for never costs
+/// an 85 MB download, and every "cannot pair" outcome is a skip (exit 0), not
+/// an error -- a local build is a normal thing to be running.
 pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32 {
     let Some(report) = reports.first() else {
         println!("clud symbols: no crash reports, so no sidecar to fetch.");
         return 0;
     };
-    let Some((version, target)) = read_report_identity(report) else {
-        eprintln!(
-            "clud symbols: {} records no version/target, so the matching \
-             sidecar cannot be named. Reports written before #1016 do not \
-             carry them.",
+    let identity = read_report_identity(report);
+    let (Some(version), Some(target)) = (identity.version, identity.target) else {
+        println!(
+            "clud symbols: {} records no version/target, so no published \
+             sidecar can be paired with it (reports written before #1016 do \
+             not carry them). Nothing was fetched.",
             report.display()
         );
-        return 1;
+        return 0;
     };
     let Some(asset) = sidecar_asset_name(&target) else {
         // Not a failure of this machine: no such asset is published. Saying
@@ -362,8 +463,23 @@ pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32
         );
         return 0;
     };
+    // The build-id becomes a cache path component, so it must be plain hex:
+    // a report is a file on disk, and a crafted `"../.."` must not steer a
+    // write anywhere.
+    let Some(build_id) = identity.build_id.filter(|id| is_build_id_hex(id)) else {
+        print_not_published(
+            &format!(
+                "{} records no GNU build-id (reports written before #1129 do \
+                 not carry one), so it cannot be matched against release \
+                 {version}'s {BUILD_IDS_ASSET}.",
+                report.display()
+            ),
+            &target,
+        );
+        return 0;
+    };
 
-    let destination = cache_root.join(&version).join(&asset);
+    let destination = cache_root.join(&build_id).join(&asset);
     if destination.is_file() {
         println!(
             "clud symbols: already have {} ({})",
@@ -371,6 +487,49 @@ pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32
             destination.display()
         );
         return 0;
+    }
+
+    // Pair first. Only a build-id the release published for this triple may
+    // be matched with the published sidecar; anything else would symbolicate
+    // to confident, wrong line numbers.
+    let pairing_url = build_ids_url(&version);
+    let build_ids_bytes = match fetch(&pairing_url) {
+        Ok(bytes) => bytes,
+        Err(FetchError::NotFound) => {
+            print_not_published(
+                &format!(
+                    "release {version} publishes no {BUILD_IDS_ASSET} (it was \
+                     never released, or predates build-id pairing)."
+                ),
+                &target,
+            );
+            return 0;
+        }
+        Err(err) => {
+            eprintln!("clud symbols: cannot fetch {pairing_url}: {err}");
+            return 1;
+        }
+    };
+    let build_ids = String::from_utf8_lossy(&build_ids_bytes);
+    match published_build_id(&build_ids, &target) {
+        Some(published) if published == build_id => {}
+        Some(published) => {
+            print_not_published(
+                &format!(
+                    "build-id {build_id} is not release {version}'s published \
+                     {target} binary ({published})."
+                ),
+                &target,
+            );
+            return 0;
+        }
+        None => {
+            print_not_published(
+                &format!("release {version}'s {BUILD_IDS_ASSET} has no entry for {target}."),
+                &target,
+            );
+            return 0;
+        }
     }
 
     let manifest_url = checksum_manifest_url(&version);
@@ -381,6 +540,17 @@ pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32
             return 1;
         }
     };
+    // The pairing itself must be the published one: a tampered BUILD-IDS.txt
+    // could vouch for any binary. Checked before the payload is fetched.
+    if expected_sha256(&manifest, BUILD_IDS_ASSET).as_deref()
+        != Some(sha256_hex(&build_ids_bytes).as_str())
+    {
+        eprintln!(
+            "clud symbols: {BUILD_IDS_ASSET} does not match release {version}'s \
+             {CHECKSUM_MANIFEST}; refusing to pair a sidecar on its word."
+        );
+        return 1;
+    }
     // The expected digest is read *before* the payload, so there is never a
     // window where a downloaded file exists with nothing to check it against.
     let Some(expected) = expected_sha256(&manifest, &asset) else {
@@ -446,7 +616,7 @@ pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32
     if pruned > 0 {
         println!(
             "clud symbols: dropped {pruned} older sidecar version(s), keeping \
-             the newest {MAX_CACHED_VERSIONS}"
+             the newest {MAX_CACHED_BUILDS}"
         );
     }
     0
@@ -568,9 +738,10 @@ fn verify(reports: &[PathBuf], all: bool) -> i32 {
         // baked in (`crash_report::BUILD_TARGET`).
         match sidecar_url(env!("CARGO_PKG_VERSION"), crate::crash_report::BUILD_TARGET) {
             Some(url) => println!(
-                "\nThis build's sidecar debug info (the inlined-frame DIEs a release\n\
-                 binary does not carry) is published beside the release:\n  {url}\n\
-                 Fetching it automatically is #1016; for now it can be downloaded by hand."
+                "\nA release binary's sidecar debug info (the inlined-frame DIEs it\n\
+                 does not carry) is published beside the release:\n  {url}\n\
+                 `clud symbols install` fetches it when the report's build-id is the\n\
+                 published one; a local build's sidecar is already beside it in target/."
             ),
             None => println!(
                 "\nNo sidecar is published for {} — on this platform the debug info\n\
@@ -808,72 +979,202 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // #1016: `clud symbols install` actually fetches.
+    // #1016: `clud symbols install` pairs by BUILD-IDS.txt, then fetches.
     // -----------------------------------------------------------------
 
     use std::cell::RefCell;
 
+    const LINUX: &str = "x86_64-unknown-linux-gnu";
+    const BUILD_ID: &str = "0123456789abcdef0123456789abcdef01234567";
+
     /// A report on disk, as `install_with` will read it.
-    fn write_report(dir: &Path, version: &str, target: &str) -> PathBuf {
+    fn write_report(dir: &Path, version: &str, target: &str, build_id: Option<&str>) -> PathBuf {
         fs::create_dir_all(dir).unwrap();
         let path = dir.join("1700000000000-crash.json");
-        fs::write(
-            &path,
-            serde_json::json!({
-                "version": version,
-                "target": target,
-                "backtrace": "0: main\n",
-            })
-            .to_string(),
-        )
-        .unwrap();
+        let mut value = serde_json::json!({
+            "version": version,
+            "target": target,
+            "backtrace": "0: main\n",
+        });
+        if let Some(id) = build_id {
+            value["build_id"] = serde_json::Value::from(id);
+        }
+        fs::write(&path, value.to_string()).unwrap();
         path
     }
 
-    /// Records every URL asked for, so a test can assert that nothing was
-    /// fetched at all — "did not touch the network" is a property worth
-    /// pinning, not just "returned the right code".
+    /// Records every URL asked for, so a test can assert what was *not*
+    /// fetched — "the 85 MB sidecar was never requested" is the property the
+    /// skip paths exist for, not just "returned 0".
     struct FakeNet {
+        /// `None` models a release with no BUILD-IDS.txt (a 404).
+        build_ids: Option<String>,
         manifest: String,
         payload: Vec<u8>,
         seen: RefCell<Vec<String>>,
     }
 
     impl FakeNet {
-        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError> {
             self.seen.borrow_mut().push(url.to_string());
-            if url.ends_with(CHECKSUM_MANIFEST) {
+            if url.ends_with(BUILD_IDS_ASSET) {
+                self.build_ids
+                    .clone()
+                    .map(String::into_bytes)
+                    .ok_or(FetchError::NotFound)
+            } else if url.ends_with(CHECKSUM_MANIFEST) {
                 Ok(self.manifest.clone().into_bytes())
             } else {
                 Ok(self.payload.clone())
             }
         }
+
+        fn requested_the_sidecar(&self) -> bool {
+            self.seen.borrow().iter().any(|url| url.ends_with(".dwp"))
+        }
     }
 
-    const LINUX: &str = "x86_64-unknown-linux-gnu";
-
-    fn net_for(payload: &[u8]) -> FakeNet {
+    /// A consistent release: BUILD-IDS.txt names `published` for LINUX, and
+    /// SHA256SUMS covers both it and the sidecar.
+    fn release(published: &str, payload: &[u8]) -> FakeNet {
         let asset = sidecar_asset_name(LINUX).unwrap();
+        let other = "ff".repeat(20);
+        let build_ids = format!("{published}  {LINUX}\n{other}  aarch64-unknown-linux-gnu\n");
         FakeNet {
-            manifest: format!("{}  ./{asset}\n", sha256_hex(payload)),
+            manifest: format!(
+                "{}  ./{asset}\n{}  ./{BUILD_IDS_ASSET}\n",
+                sha256_hex(payload),
+                sha256_hex(build_ids.as_bytes())
+            ),
+            build_ids: Some(build_ids),
             payload: payload.to_vec(),
             seen: RefCell::new(Vec::new()),
         }
     }
 
+    fn report_in(tmp: &Path, version: &str, build_id: Option<&str>) -> PathBuf {
+        write_report(&tmp.join("crashes"), version, LINUX, build_id)
+    }
+
     #[test]
-    fn a_verified_sidecar_is_installed_into_the_cache() {
+    fn published_build_id_reads_the_entry_for_the_triple() {
+        let body = format!(
+            "{}  aarch64-unknown-linux-gnu\n{}  {LINUX}\n",
+            "ab".repeat(20),
+            BUILD_ID.to_uppercase()
+        );
+        assert_eq!(published_build_id(&body, LINUX).as_deref(), Some(BUILD_ID));
+        assert_eq!(published_build_id(&body, "x86_64-unknown-linux-musl"), None);
+        assert_eq!(published_build_id("", LINUX), None);
+        assert_eq!(published_build_id("garbage\n", LINUX), None);
+    }
+
+    #[test]
+    fn the_build_ids_url_sits_beside_the_sidecar() {
+        assert_eq!(
+            build_ids_url("2.7.9"),
+            "https://github.com/zackees/clud/releases/download/2.7.9/BUILD-IDS.txt"
+        );
+    }
+
+    /// Match: the report's build-id is the published one, so the sidecar is
+    /// fetched, verified and cached under that build-id.
+    #[test]
+    fn a_matching_build_id_installs_the_sidecar_under_its_build_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
         let cache = tmp.path().join("symbols");
-        let net = net_for(b"dwarf package bytes");
+        let net = release(BUILD_ID, b"dwarf package bytes");
 
         let code = install_with(&[report], &|url| net.fetch(url), &cache);
 
         assert_eq!(code, 0);
-        let installed = cache.join("2.8.0").join(sidecar_asset_name(LINUX).unwrap());
+        let installed = cache
+            .join(BUILD_ID)
+            .join(sidecar_asset_name(LINUX).unwrap());
         assert!(installed.is_file(), "sidecar was not cached");
         assert_eq!(fs::read(&installed).unwrap(), b"dwarf package bytes");
+        assert!(
+            !cache.join("2.8.0").exists(),
+            "the cache is keyed by build-id, not version"
+        );
+        let seen = net.seen.borrow();
+        assert_eq!(seen[0], build_ids_url("2.8.0"), "pairing is checked first");
+        assert_eq!(seen[1], checksum_manifest_url("2.8.0"));
+        assert_eq!(seen[2], sidecar_url("2.8.0", LINUX).unwrap());
+    }
+
+    /// Mismatch: a local build or a same-version rebuild. Skip, not an error,
+    /// and the sidecar URL is never requested.
+    #[test]
+    fn a_different_build_id_skips_without_requesting_the_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
+        let cache = tmp.path().join("symbols");
+        let net = release(&"ee".repeat(20), b"dwarf package bytes");
+
+        let code = install_with(&[report], &|url| net.fetch(url), &cache);
+
+        assert_eq!(code, 0, "a local build is not an error");
+        assert!(!net.requested_the_sidecar(), "{:?}", net.seen.borrow());
+        assert!(
+            !cache.exists(),
+            "nothing may be cached for an unpaired build"
+        );
+    }
+
+    /// No entry for the triple: same skip.
+    #[test]
+    fn a_missing_entry_skips_without_requesting_the_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
+        let cache = tmp.path().join("symbols");
+        let mut net = release(BUILD_ID, b"dwarf package bytes");
+        net.build_ids = Some(format!("{}  aarch64-unknown-linux-gnu\n", "ab".repeat(20)));
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+        assert!(!net.requested_the_sidecar(), "{:?}", net.seen.borrow());
+    }
+
+    /// A release with no BUILD-IDS.txt at all (never released, or older than
+    /// the pairing) is the same "not a published build" answer.
+    #[test]
+    fn a_release_without_build_ids_skips_without_requesting_the_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
+        let cache = tmp.path().join("symbols");
+        let mut net = release(BUILD_ID, b"dwarf package bytes");
+        net.build_ids = None;
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+        assert!(!net.requested_the_sidecar(), "{:?}", net.seen.borrow());
+    }
+
+    /// A report written before #1129 has no build-id: nothing can be paired,
+    /// so nothing is fetched at all.
+    #[test]
+    fn a_report_without_a_build_id_skips_without_any_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = report_in(tmp.path(), "2.8.0", None);
+        let cache = tmp.path().join("symbols");
+        let net = release(BUILD_ID, b"unused");
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+        assert!(net.seen.borrow().is_empty(), "{:?}", net.seen.borrow());
+    }
+
+    /// The build-id becomes a path component; a crafted report must not steer
+    /// the cache write outside the cache.
+    #[test]
+    fn a_non_hex_build_id_is_treated_as_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = report_in(tmp.path(), "2.8.0", Some("../../escape"));
+        let cache = tmp.path().join("symbols");
+        let net = release("../../escape", b"payload");
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
+        assert!(net.seen.borrow().is_empty());
+        assert!(!tmp.path().join("escape").exists());
     }
 
     /// The refusal that matters. A sidecar that is not the published one
@@ -882,9 +1183,9 @@ mod tests {
     #[test]
     fn a_checksum_mismatch_installs_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
         let cache = tmp.path().join("symbols");
-        let mut net = net_for(b"the published bytes");
+        let mut net = release(BUILD_ID, b"the published bytes");
         net.payload = b"something else entirely".to_vec();
 
         let code = install_with(&[report], &|url| net.fetch(url), &cache);
@@ -892,13 +1193,27 @@ mod tests {
         assert_eq!(code, 1);
         let asset = sidecar_asset_name(LINUX).unwrap();
         assert!(
-            !cache.join("2.8.0").join(&asset).exists(),
+            !cache.join(BUILD_ID).join(&asset).exists(),
             "a file that failed verification was left on disk"
         );
         assert!(
-            !cache.join("2.8.0").join(format!("{asset}.part")).exists(),
+            !cache.join(BUILD_ID).join(format!("{asset}.part")).exists(),
             "the staging file was left behind"
         );
+    }
+
+    /// BUILD-IDS.txt is itself vouched for by SHA256SUMS; a tampered pairing
+    /// is refused before the sidecar is requested.
+    #[test]
+    fn a_build_ids_file_that_fails_its_checksum_is_refused_before_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
+        let cache = tmp.path().join("symbols");
+        let mut net = release(BUILD_ID, b"payload");
+        net.build_ids = Some(format!("{BUILD_ID}  {LINUX}\n"));
+
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 1);
+        assert!(!net.requested_the_sidecar(), "{:?}", net.seen.borrow());
     }
 
     /// A release that does not list the asset vouches for nothing, so there is
@@ -906,23 +1221,32 @@ mod tests {
     #[test]
     fn an_asset_absent_from_the_manifest_is_refused_before_download() {
         let tmp = tempfile::tempdir().unwrap();
-        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
         let cache = tmp.path().join("symbols");
-        let net = FakeNet {
-            manifest: "deadbeef  ./some-other-file.tar.gz\n".to_string(),
-            payload: b"never requested".to_vec(),
-            seen: RefCell::new(Vec::new()),
-        };
+        let mut net = release(BUILD_ID, b"never requested");
+        let ids = net.build_ids.clone().unwrap();
+        net.manifest = format!("{}  ./{BUILD_IDS_ASSET}\n", sha256_hex(ids.as_bytes()));
 
-        let code = install_with(&[report], &|url| net.fetch(url), &cache);
-
-        assert_eq!(code, 1);
-        let seen = net.seen.borrow();
-        assert_eq!(
-            seen.len(),
-            1,
-            "the payload must not be fetched when nothing can verify it: {seen:?}"
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 1);
+        assert!(
+            !net.requested_the_sidecar(),
+            "the payload must not be fetched when nothing can verify it: {:?}",
+            net.seen.borrow()
         );
+    }
+
+    /// A network failure (not a 404) on BUILD-IDS.txt is a real error.
+    #[test]
+    fn a_failed_build_ids_fetch_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
+        let cache = tmp.path().join("symbols");
+        let code = install_with(
+            &[report],
+            &|_url| Err(FetchError::Failed("connection reset".into())),
+            &cache,
+        );
+        assert_eq!(code, 1);
     }
 
     /// Windows and macOS publish no `.dwp`. Reporting that is the correct
@@ -934,9 +1258,10 @@ mod tests {
             &tmp.path().join("crashes"),
             "2.8.0",
             "x86_64-pc-windows-msvc",
+            None,
         );
         let cache = tmp.path().join("symbols");
-        let net = net_for(b"unused");
+        let net = release(BUILD_ID, b"unused");
 
         let code = install_with(&[report], &|url| net.fetch(url), &cache);
 
@@ -949,9 +1274,9 @@ mod tests {
     #[test]
     fn an_already_installed_sidecar_is_not_fetched_again() {
         let tmp = tempfile::tempdir().unwrap();
-        let report = write_report(&tmp.path().join("crashes"), "2.8.0", LINUX);
+        let report = report_in(tmp.path(), "2.8.0", Some(BUILD_ID));
         let cache = tmp.path().join("symbols");
-        let net = net_for(b"dwarf package bytes");
+        let net = release(BUILD_ID, b"dwarf package bytes");
 
         assert_eq!(
             install_with(std::slice::from_ref(&report), &|url| net.fetch(url), &cache),
@@ -968,8 +1293,8 @@ mod tests {
         );
     }
 
-    /// Reports written before #1016 carry no version/target, so the asset
-    /// cannot be named. Say that rather than guessing at one.
+    /// Reports written before #1016 carry no version/target, so no asset can
+    /// be named. That is a skip with a reason, not an error, and not a guess.
     #[test]
     fn a_report_without_version_or_target_is_not_guessed_at() {
         let tmp = tempfile::tempdir().unwrap();
@@ -978,9 +1303,9 @@ mod tests {
         let report = dir.join("1700000000000-crash.json");
         fs::write(&report, r#"{"backtrace":"0: main\n"}"#).unwrap();
         let cache = tmp.path().join("symbols");
-        let net = net_for(b"unused");
+        let net = release(BUILD_ID, b"unused");
 
-        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 1);
+        assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
         assert!(net.seen.borrow().is_empty());
     }
 
@@ -988,7 +1313,7 @@ mod tests {
     #[test]
     fn no_reports_is_not_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let net = net_for(b"unused");
+        let net = release(BUILD_ID, b"unused");
 
         assert_eq!(install_with(&[], &|url| net.fetch(url), tmp.path()), 0);
         assert!(net.seen.borrow().is_empty());
@@ -1000,24 +1325,30 @@ mod tests {
     #[test]
     fn the_fetched_urls_name_the_reports_own_release() {
         let tmp = tempfile::tempdir().unwrap();
-        let report = write_report(&tmp.path().join("crashes"), "1.2.3", LINUX);
+        let report = report_in(tmp.path(), "1.2.3", Some(BUILD_ID));
         let cache = tmp.path().join("symbols");
-        let net = net_for(b"payload");
+        let net = release(BUILD_ID, b"payload");
 
         install_with(&[report], &|url| net.fetch(url), &cache);
 
         let seen = net.seen.borrow();
-        assert_eq!(seen[0], checksum_manifest_url("1.2.3"));
-        assert_eq!(seen[1], sidecar_url("1.2.3", LINUX).unwrap());
+        assert_eq!(
+            *seen,
+            vec![
+                build_ids_url("1.2.3"),
+                checksum_manifest_url("1.2.3"),
+                sidecar_url("1.2.3", LINUX).unwrap(),
+            ]
+        );
     }
 
     // -----------------------------------------------------------------
     // #1016: the cache is bounded (#1014's lesson).
     // -----------------------------------------------------------------
 
-    /// Make `count` version dirs, oldest first, each holding a file. Returns
-    /// them in creation order.
-    fn seed_versions(cache: &Path, names: &[&str]) -> Vec<PathBuf> {
+    /// Make one build-id dir per name, oldest first, each holding a file.
+    /// Returns them in creation order.
+    fn seed_builds(cache: &Path, names: &[&str]) -> Vec<PathBuf> {
         let mut made = Vec::new();
         for (index, name) in names.iter().enumerate() {
             let dir = cache.join(name);
@@ -1035,40 +1366,36 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_keeps_only_the_newest_versions() {
+    fn the_cache_keeps_only_the_newest_builds() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path();
-        let dirs = seed_versions(cache, &["2.6.0", "2.7.0", "2.8.0", "2.9.0"]);
+        let dirs = seed_builds(cache, &["aaaa0001", "ffff0002", "0000cafe", "bbbb0004"]);
 
         let removed = prune_cache(cache);
 
-        assert_eq!(removed, dirs.len() - MAX_CACHED_VERSIONS);
+        assert_eq!(removed, dirs.len() - MAX_CACHED_BUILDS);
         assert!(!dirs[0].exists(), "oldest should have gone");
         assert!(!dirs[1].exists());
-        assert!(
-            dirs[2].exists(),
-            "newest {MAX_CACHED_VERSIONS} must survive"
-        );
+        assert!(dirs[2].exists(), "newest {MAX_CACHED_BUILDS} must survive");
         assert!(dirs[3].exists());
     }
 
-    /// Ordering is by mtime, not by version string. `2.10.0` sorts before
-    /// `2.9.0` lexically, so a name-ordered prune would drop the newer one --
-    /// and a fork need not use semver at all.
+    /// Ordering is by mtime, not by name: a build-id has no order, and the
+    /// version-keyed dirs an older clud left behind age out by the same rule.
     #[test]
-    fn pruning_is_by_recency_not_by_version_string() {
+    fn pruning_is_by_recency_not_by_name() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path();
-        // Created oldest-to-newest, so "2.10.0" is the most recent.
-        let dirs = seed_versions(cache, &["2.8.0", "2.9.0", "2.10.0"]);
+        // Created oldest-to-newest; the names sort in the opposite order.
+        let dirs = seed_builds(cache, &["2.9.0", "ffff", "0000"]);
 
         prune_cache(cache);
 
-        assert!(!dirs[0].exists(), "2.8.0 is the least recently fetched");
+        assert!(!dirs[0].exists(), "the legacy version dir is least recent");
         assert!(dirs[1].exists());
         assert!(
             dirs[2].exists(),
-            "2.10.0 is newest by mtime and must survive a lexical sort"
+            "newest by mtime must survive a lexical sort"
         );
     }
 
@@ -1076,7 +1403,7 @@ mod tests {
     fn a_cache_within_the_bound_is_left_alone() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path();
-        let dirs = seed_versions(cache, &["2.8.0", "2.9.0"]);
+        let dirs = seed_builds(cache, &["aaaa", "bbbb"]);
 
         assert_eq!(prune_cache(cache), 0);
         assert!(dirs.iter().all(|d| d.exists()));
@@ -1089,27 +1416,27 @@ mod tests {
     }
 
     /// End to end: installing into a cache that is already at the bound
-    /// evicts, so the tree cannot grow one release at a time.
+    /// evicts, so exactly the 2 newest build-ids remain.
     #[test]
-    fn installing_prunes_the_cache_it_just_grew() {
+    fn installing_prunes_the_cache_to_two_builds() {
         let tmp = tempfile::tempdir().unwrap();
-        let report = write_report(&tmp.path().join("crashes"), "9.9.9", LINUX);
+        let report = report_in(tmp.path(), "9.9.9", Some(BUILD_ID));
         let cache = tmp.path().join("symbols");
-        let old = seed_versions(&cache, &["1.0.0", "2.0.0"]);
-        let net = net_for(b"dwarf package bytes");
+        let old = seed_builds(&cache, &["aaaa0001", "bbbb0002"]);
+        let net = release(BUILD_ID, b"dwarf package bytes");
 
         assert_eq!(install_with(&[report], &|url| net.fetch(url), &cache), 0);
 
         assert!(
-            cache.join("9.9.9").is_file()
-                || cache
-                    .join("9.9.9")
-                    .join(sidecar_asset_name(LINUX).unwrap())
-                    .is_file(),
+            cache
+                .join(BUILD_ID)
+                .join(sidecar_asset_name(LINUX).unwrap())
+                .is_file(),
             "the new sidecar must be installed"
         );
-        assert!(!old[0].exists(), "the oldest version was not evicted");
+        assert!(!old[0].exists(), "the oldest build was not evicted");
+        assert!(old[1].exists(), "the second-newest build must be kept");
         let kept = fs::read_dir(&cache).unwrap().count();
-        assert_eq!(kept, MAX_CACHED_VERSIONS, "cache exceeded its bound");
+        assert_eq!(kept, MAX_CACHED_BUILDS, "cache exceeded its bound");
     }
 }

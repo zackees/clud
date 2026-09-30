@@ -334,6 +334,20 @@ jobs:
       - name: Verify six native download assets
         run: python -m installer.verify_native_assets '${{ needs.preflight.outputs.version }}' standalone
 
+      # #1016: each Linux build job staged a one-line `clud-<triple>.build-id`
+      # fragment beside its `.dwp`, read from the shipped binary. This is the
+      # only job where every triple's fragments meet, so fold them into one
+      # BUILD-IDS.txt asset here -- before the checksum step, so SHA256SUMS
+      # covers it. `clud symbols install` fetches a `.dwp` only when the crash
+      # report's build-id matches this file's entry for its triple.
+      - name: Combine build-ids
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d debuginfo ]; then
+            python -m ci.build_ids combine debuginfo
+          fi
+
       - name: Generate checksums
         shell: bash
         run: |
