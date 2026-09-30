@@ -193,7 +193,7 @@ fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
         let entry = match job.work {
             PurgeWork::Tracked(entry) => entry,
             PurgeWork::RepoWorktree(reclaim) => {
-                let outcome = repo_worktree_reclaim_exec::run_reclaim(
+                let outcome = repo_worktree_reclaim_exec::run_reclaim_serialized(
                     &reclaim,
                     &repo_worktree_probe::lookup_prs,
                 );

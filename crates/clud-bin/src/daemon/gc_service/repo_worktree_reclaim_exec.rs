@@ -17,8 +17,14 @@
 //! 4. Opt-in only: delete `origin/<branch>` with a lease on the verified tip
 //!    ([`remote_delete_decision`]).
 //! 5. `git worktree prune`.
+//!
+//! Issue #1632: the whole sequence runs under a per-repo lock
+//! ([`run_reclaim_serialized`]), so two pool threads never run git against
+//! the same repository at once. Different repos still run in parallel.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd_streams};
@@ -61,6 +67,73 @@ pub(crate) enum ReclaimOutcome {
     Spared(String),
     /// A git step failed; nothing past it ran.
     Failed(String),
+}
+
+/// Issue #1632: one mutex per repository, so reclaims of two worktrees of
+/// the same repo run one after the other while different repos stay
+/// parallel. `git worktree remove`, `branch -D` and `worktree prune` all
+/// rewrite shared state under the repo's git dir (`worktrees/`, refs, their
+/// `.lock` files); run concurrently they can fail with exit 255, which on
+/// Windows' mandatory file locks happened often enough to flake CI.
+///
+/// Deadlock-free by construction: a thread holds at most one repo lock,
+/// and the map's own mutex is held only to look up or drop an entry, never
+/// while waiting for a repo lock or running git. The lock is taken on the
+/// pool thread after the job has left the queue, so it never stalls
+/// dispatch. An entry is dropped once nothing references it, so the map
+/// holds only repos with a reclaim in flight.
+#[derive(Default)]
+pub(crate) struct RepoLocks {
+    map: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+}
+
+impl RepoLocks {
+    /// Run `f` while holding the lock for `key`.
+    pub(crate) fn with_lock<T>(&self, key: &Path, f: impl FnOnce() -> T) -> T {
+        let repo_lock = {
+            let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(map.entry(key.to_path_buf()).or_default())
+        };
+        let result = {
+            // A poisoned repo lock only means an earlier reclaim panicked;
+            // the mutex guards no data, so carry on.
+            let _held = repo_lock.lock().unwrap_or_else(PoisonError::into_inner);
+            f()
+        };
+        let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        // Two references: the map's and ours. Anyone else waiting holds a
+        // third, and their own release will drop the entry instead.
+        if Arc::strong_count(&repo_lock) == 2 {
+            map.remove(key);
+        }
+        result
+    }
+}
+
+/// The daemon-wide lock map every pool thread shares.
+static RECLAIM_LOCKS: LazyLock<RepoLocks> = LazyLock::new(RepoLocks::default);
+
+/// The lock key for a repo root: canonical when it resolves, so two
+/// spellings of one repo share a lock; the raw path otherwise.
+fn repo_lock_key(repo_root: &str) -> PathBuf {
+    let raw = PathBuf::from(repo_root);
+    std::fs::canonicalize(&raw).unwrap_or(raw)
+}
+
+/// [`run_reclaim`] under the per-repo lock (#1632). Reservation rows have no
+/// repo and never run git, so they skip the lock.
+pub(crate) fn run_reclaim_serialized(
+    job: &ReclaimJob,
+    lookup_prs: &dyn Fn(&Path) -> Option<Vec<PrRecord>>,
+) -> ReclaimOutcome {
+    serialize_by_repo(&RECLAIM_LOCKS, job, || run_reclaim(job, lookup_prs))
+}
+
+fn serialize_by_repo<T>(locks: &RepoLocks, job: &ReclaimJob, f: impl FnOnce() -> T) -> T {
+    if job.row.reservation || job.row.repo_root.is_empty() {
+        return f();
+    }
+    locks.with_lock(&repo_lock_key(&job.row.repo_root), f)
 }
 
 fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
@@ -252,3 +325,7 @@ fn run_reservation_reclaim(job: &ReclaimJob) -> ReclaimOutcome {
         Err(err) => ReclaimOutcome::Failed(format!("remove_dir: {err}")),
     }
 }
+
+#[cfg(test)]
+#[path = "repo_worktree_reclaim_exec_tests.rs"]
+mod tests;
