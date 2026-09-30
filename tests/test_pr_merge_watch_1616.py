@@ -19,7 +19,7 @@ SCRIPT = ROOT / "crates" / "clud-bin" / "assets" / "tools" / "github" / "pr_merg
 
 PASSING_PANIC_THEN_PYTEST_FAILURE = """\
 running 3 tests
-thread 'pty_pump::raw_pump_restores_raw_mode_on_panic' panicked at crates/clud-bin/src/pty_pump.rs:88:9:
+thread 'pty_pump::raw_pump_restores_raw_mode_on_panic' panicked at src/pty_pump.rs:88:9:
 deliberate panic
 test pty_pump::raw_pump_restores_raw_mode_on_panic ... ok
 test pty_pump::other ... ok
