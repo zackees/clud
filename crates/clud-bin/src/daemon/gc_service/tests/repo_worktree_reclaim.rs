@@ -343,8 +343,7 @@ fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
     identity(&repo);
 
     // A fake clud home: `<home>/.clud/tmp-wt`, never the real one.
-    let wt_root =
-        crate::gc::worktree_root::ensure_worktree_root_at(&root.join("home")).unwrap();
+    let wt_root = crate::gc::worktree_root::ensure_worktree_root_at(&root.join("home")).unwrap();
     let merged = wt_root.join("repo-wt-merged");
     let empty_old = wt_root.join("repo-wt-empty-old");
     let empty_new = wt_root.join("repo-wt-empty-new");
@@ -436,5 +435,8 @@ fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
         assert!(dir.exists(), "{} must be kept", dir.display());
         assert!(has_branch(&repo, branch), "{branch} must be kept");
     }
-    assert!(wt_root.is_dir(), "the tmp-wt root is never a removal target");
+    assert!(
+        wt_root.is_dir(),
+        "the tmp-wt root is never a removal target"
+    );
 }

@@ -49,7 +49,9 @@ fn session_tmp_sweep_never_touches_tmp_wt() {
     let home = tempdir().unwrap();
     let tmp = session_tmp_dir_for(home.path());
     fs::create_dir_all(&tmp).unwrap();
-    let wt = ensure_worktree_root_at(home.path()).unwrap().join("repo-wt-1");
+    let wt = ensure_worktree_root_at(home.path())
+        .unwrap()
+        .join("repo-wt-1");
     fs::create_dir_all(&wt).unwrap();
     fs::write(wt.join("f.txt"), "work").unwrap();
     let ancient = Duration::from_secs(365 * 24 * 3600);
@@ -73,7 +75,10 @@ fn under_root_matches_children_only() {
     let child = root.join("repo-wt-2");
     fs::create_dir_all(&child).unwrap();
     assert!(is_under_worktree_root(&child, &root));
-    assert!(!is_under_worktree_root(&root, &root), "never the root itself");
+    assert!(
+        !is_under_worktree_root(&root, &root),
+        "never the root itself"
+    );
     assert!(!is_under_worktree_root(home.path(), &root));
 }
 
@@ -83,7 +88,10 @@ fn size_check_is_under_over_or_unknown() {
     fs::create_dir_all(dir.path().join("a/b")).unwrap();
     fs::write(dir.path().join("a/b/x"), vec![0u8; 100]).unwrap();
     fs::write(dir.path().join("a/y"), vec![0u8; 50]).unwrap();
-    assert_eq!(check_tree_size(dir.path(), 1_000, 100), SizeCheck::Under(150));
+    assert_eq!(
+        check_tree_size(dir.path(), 1_000, 100),
+        SizeCheck::Under(150)
+    );
     assert!(matches!(
         check_tree_size(dir.path(), 120, 100),
         SizeCheck::Over(n) if n > 120
@@ -113,7 +121,9 @@ fn allocated_names_keep_the_reconcile_shape() {
     let home = tempdir().unwrap();
     let wt = worktree_root_for(home.path()).join("clud2-wt-1485");
     let name = wt.file_name().unwrap().to_str().unwrap();
-    assert!(crate::gc::reconcile::is_sibling_clone_dir_name("clud2", name));
+    assert!(crate::gc::reconcile::is_sibling_clone_dir_name(
+        "clud2", name
+    ));
     assert!(!crate::gc::reconcile::is_sibling_clone_dir_name(
         "clud2",
         WORKTREE_ROOT_DIR_NAME

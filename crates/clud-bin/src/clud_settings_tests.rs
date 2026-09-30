@@ -48,7 +48,10 @@ fn worktrees_warn_bytes_defaults_and_parses() {
         (json!({}), DEFAULT_WARN_BYTES),
         (json!({"worktrees": {"warn_bytes": 0}}), 0),
         (json!({"worktrees": {"warn_bytes": 1234}}), 1234),
-        (json!({"worktrees": {"warn_bytes": "9"}}), DEFAULT_WARN_BYTES),
+        (
+            json!({"worktrees": {"warn_bytes": "9"}}),
+            DEFAULT_WARN_BYTES,
+        ),
         (json!({"worktrees": {"warn_bytes": -1}}), DEFAULT_WARN_BYTES),
     ] {
         assert_eq!(worktrees_warn_bytes_from(&doc), want, "{doc}");

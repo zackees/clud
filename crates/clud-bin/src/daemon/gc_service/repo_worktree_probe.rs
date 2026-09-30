@@ -231,7 +231,9 @@ fn tip_covered_by(cwd: &Path, tip: &str, head: &str) -> Option<bool> {
 /// branch. `None` when any query fails.
 fn ahead_of_default(cwd: &Path, tip: &str) -> Option<(String, String, u64)> {
     let upstream = default_ref(cwd)?;
-    let base = git(cwd, &["merge-base", &upstream, tip])?.trim().to_string();
+    let base = git(cwd, &["merge-base", &upstream, tip])?
+        .trim()
+        .to_string();
     let ahead = git(cwd, &["rev-list", "--count", &format!("{base}..{tip}")])?;
     let ahead = ahead.trim().parse::<u64>().ok()?;
     Some((upstream, base, ahead))
