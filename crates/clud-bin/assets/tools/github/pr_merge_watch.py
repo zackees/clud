@@ -93,6 +93,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import re
 import signal
 import sys
@@ -215,6 +216,11 @@ class WatchLog:
             "elapsed_sec": round(max(0.0, time.monotonic() - self.started_monotonic), 2),
             "event": event,
         }
+        if event == "cancel_item":
+            # Which watcher cancelled what: with several watchers on one PR the
+            # log must say whose cancel this was (#1332).
+            record["watcher_pid"] = os.getpid()
+            record["watcher_host"] = socket.gethostname()
         record.update(fields)
         self._write(record)
 
