@@ -475,10 +475,11 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
         text=True,
         env=env,
     )
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline and not (state_dir / "daemon.json").is_file():
-        time.sleep(0.05)
-    assert (state_dir / "daemon.json").is_file(), "foreground client never started a daemon"
+    # #1637: wait for the lease itself, not merely for daemon.json. The client
+    # used to skip the lease on this (centralized) path, so the daemon it
+    # started retired during slow Windows startup and `Create` spawned a
+    # second one; the test then watched the first, dead, PID.
+    _wait_for_events(state_dir, {"client_lease_acquired"}, timeout=8)
     info = json.loads((state_dir / "daemon.json").read_text(encoding="utf-8"))
 
     # No repeated daemon RPC is sent here. The client lease alone must outlive
@@ -495,7 +496,10 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
         f"foreground stderr: {client.stderr.read() if client.stderr else '<not captured>'}"
     )
     _wait_for_identity_exit(info, timeout=8, state_dir=state_dir)
-    assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
+    events = _events(state_dir)
+    assert "daemon_idle_shutdown" in {event["op"] for event in events}
+    started = [event for event in events if event["op"] == "daemon_started"]
+    assert len(started) == 1, _daemon_diagnostics(state_dir)
 
 
 def test_zero_production_idle_timeout_remains_disabled(

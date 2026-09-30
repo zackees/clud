@@ -1036,12 +1036,15 @@ fn run(mut args: args::Args) {
                         verbose_log::log(format_args!("[clud] daemon: unavailable: {e}"));
                     }
                 } else {
-                    if !daemon::experimental_enabled(&args) {
-                        match daemon::acquire_foreground_client_lease(&state_dir) {
-                            Ok(lease) => foreground_client_lease = Some(lease),
-                            Err(error) => {
-                                eprintln!("[clud] note: foreground lease unavailable: {error}");
-                            }
+                    // #1637: centralized launches take the lease too. Their
+                    // session only holds the daemon once `Create` lands, and
+                    // the startup work before it can outlast a short idle
+                    // timeout; the daemon then retired and `Create` spawned a
+                    // replacement *after* the job tracker below (#569).
+                    match daemon::acquire_foreground_client_lease(&state_dir) {
+                        Ok(lease) => foreground_client_lease = Some(lease),
+                        Err(error) => {
+                            eprintln!("[clud] note: foreground lease unavailable: {error}");
                         }
                     }
                     // Issue #183: record one row in the `repo_visits` table
