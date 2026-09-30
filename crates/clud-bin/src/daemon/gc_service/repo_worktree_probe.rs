@@ -5,7 +5,9 @@
 //! registry worker (#946): every query is a bounded `git`/`gh` spawn through
 //! `running-process` (`extern_repo::probe_cmd`). A query that fails or times
 //! out yields `None`/`Unavailable`, which the verdict treats as doubt and
-//! spares. Read-only: nothing here mutates a repository.
+//! spares. Read-only: nothing here mutates a repository; the #1603
+//! executor (`repo_worktree_reclaim_exec`) re-runs [`probe_one`] immediately
+//! before it deletes anything.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -19,6 +21,7 @@ use crate::worktrees::{parse_worktree_porcelain, WorktreeEntry};
 
 use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd};
 use super::repo_worktree::{repo_worktree_verdict, PrFact, RepoWorktreeFacts, RepoWorktreeVerdict};
+use super::repo_worktree_reclaim::{own_git_helpers, process_inside, ProcessCwdSnapshot};
 
 /// `clud gc list` kind for these rows. Not a registry kind: no redb row
 /// backs them, so no purge path can select them.
@@ -36,6 +39,10 @@ pub(crate) struct RepoWorktreeRow {
     pub(crate) path: String,
     pub(crate) repo_root: String,
     pub(crate) branch: Option<String>,
+    /// `HEAD` as the probe saw it; `None` when not read (a guard spared the
+    /// row before the tip mattered). The reclaim re-check requires it
+    /// unchanged (#1603).
+    pub(crate) tip: Option<String>,
     /// Directory mtime, standing in for a creation time in `gc list`.
     pub(crate) mtime_unix: i64,
     pub(crate) verdict: RepoWorktreeVerdict,
@@ -293,23 +300,80 @@ fn mtime_unix(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+/// Issue #1603: the full process table's cwds, the producer half of the
+/// `ProcessFacts` approach (process-reaping.md). The decision
+/// ([`process_inside`]) only ever sees this data.
+///
+/// Trust check: if our own process's cwd cannot be read, cwd reading does not
+/// work here at all, and an empty answer would read as "nobody inside" — so
+/// the snapshot is marked unavailable and every worktree is spared. A single
+/// process whose cwd is unreadable (typically another user's) is skipped.
+pub(crate) fn collect_process_cwds() -> ProcessCwdSnapshot {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+    );
+    let own = sysinfo::Pid::from_u32(std::process::id());
+    let own_cwd_readable = system
+        .process(own)
+        .and_then(|p| p.cwd())
+        .is_some_and(|c| !c.as_os_str().is_empty());
+    if !own_cwd_readable {
+        return ProcessCwdSnapshot::default();
+    }
+    let table: Vec<(u32, Option<u32>, String)> = system
+        .processes()
+        .values()
+        .map(|p| {
+            (
+                p.pid().as_u32(),
+                p.parent().map(|pp| pp.as_u32()),
+                p.name().to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let helpers = own_git_helpers(&table, std::process::id());
+    let mut cwds: Vec<PathBuf> = system
+        .processes()
+        .values()
+        .filter(|p| !helpers.contains(&p.pid().as_u32()))
+        .filter_map(|p| p.cwd())
+        .filter(|c| !c.as_os_str().is_empty())
+        .map(canonical)
+        .collect();
+    cwds.sort();
+    cwds.dedup();
+    ProcessCwdSnapshot {
+        available: true,
+        cwds,
+    }
+}
+
 /// Gather facts for one worktree entry. `prs` is the repo's lookup result.
+/// Returns the facts plus the `HEAD` it read, if it got that far.
 fn facts_for(
     entry: &WorktreeEntry,
     is_main: bool,
     live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
     prs: Option<&[PrRecord]>,
-) -> RepoWorktreeFacts {
+) -> (RepoWorktreeFacts, Option<String>) {
     let path = &entry.path;
     let path_exists = path.try_exists().unwrap_or(true);
     let canon = canonical(path);
-    let process_inside = live_cwds.iter().any(|cwd| cwd.starts_with(&canon));
+    let in_table = process_inside(procs, &canon);
+    let process_inside =
+        live_cwds.iter().any(|cwd| cwd.starts_with(&canon)) || in_table == Some(true);
     let mut facts = RepoWorktreeFacts {
         evaluated: true,
         path_exists,
         is_main_checkout: is_main,
         locked_live_pid: locked_by_live_or_unknown_pid(entry),
         process_inside,
+        processes_unverifiable: in_table.is_none(),
         detached: entry.detached || entry.branch.is_none(),
         dirty: None,
         untracked: None,
@@ -321,19 +385,20 @@ fn facts_for(
         || facts.is_main_checkout
         || facts.locked_live_pid
         || facts.process_inside
+        || facts.processes_unverifiable
         || facts.detached
     {
-        return facts;
+        return (facts, None);
     }
     let (dirty, untracked) = work_tree_status(path);
     facts.dirty = dirty;
     facts.untracked = untracked;
     if dirty != Some(false) || untracked != Some(false) {
-        return facts;
+        return (facts, None);
     }
     let Some(tip) = git(path, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string()) else {
         facts.dirty = None;
-        return facts;
+        return (facts, None);
     };
     let branch = entry
         .branch
@@ -344,14 +409,55 @@ fn facts_for(
     if matches!(facts.pr, PrFact::NoPr | PrFact::Unavailable) {
         facts.patch_landed = patch_landed(path, &tip);
     }
-    facts
+    (facts, Some(tip))
+}
+
+/// Probe every worktree of `repo_root` with an all-clear process table.
+/// Test-only convenience over [`probe_repo_with`]; production always passes
+/// a real [`collect_process_cwds`] snapshot.
+#[cfg(test)]
+pub(crate) fn probe_repo(
+    repo_root: &Path,
+    live_cwds: &[PathBuf],
+    prs: Option<&[PrRecord]>,
+) -> Vec<RepoWorktreeRow> {
+    let procs = ProcessCwdSnapshot {
+        available: true,
+        cwds: Vec::new(),
+    };
+    probe_repo_with(repo_root, live_cwds, &procs, prs)
 }
 
 /// Probe every worktree of `repo_root`. `prs` is injected so tests can
 /// exercise both the merged-PR path and the `gh`-unavailable fallback.
-pub(crate) fn probe_repo(
+pub(crate) fn probe_repo_with(
     repo_root: &Path,
     live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+    prs: Option<&[PrRecord]>,
+) -> Vec<RepoWorktreeRow> {
+    probe_entries(repo_root, None, live_cwds, procs, prs)
+}
+
+/// Re-probe exactly one worktree from scratch (#1603's pre-delete re-check).
+/// `None` when `git worktree list` no longer shows it.
+pub(crate) fn probe_one(
+    repo_root: &Path,
+    worktree: &Path,
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+    prs: Option<&[PrRecord]>,
+) -> Option<RepoWorktreeRow> {
+    probe_entries(repo_root, Some(worktree), live_cwds, procs, prs)
+        .into_iter()
+        .next()
+}
+
+fn probe_entries(
+    repo_root: &Path,
+    only: Option<&Path>,
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
     prs: Option<&[PrRecord]>,
 ) -> Vec<RepoWorktreeRow> {
     if git_discovery_env_is_poisoned() {
@@ -363,12 +469,17 @@ pub(crate) fn probe_repo(
     let entries = parse_worktree_porcelain(&raw);
     let main_path = entries.first().map(|e| canonical(&e.path));
     let live_cwds: Vec<PathBuf> = live_cwds.iter().map(|p| canonical(p)).collect();
+    let only = only.map(canonical);
     entries
         .iter()
         .filter(|e| !e.bare)
+        .filter(|e| {
+            only.as_deref()
+                .is_none_or(|want| canonical(&e.path) == want)
+        })
         .map(|entry| {
             let is_main = main_path.as_deref() == Some(canonical(&entry.path).as_path());
-            let facts = facts_for(entry, is_main, &live_cwds, prs);
+            let (facts, tip) = facts_for(entry, is_main, &live_cwds, procs, prs);
             RepoWorktreeRow {
                 path: entry.path.to_string_lossy().to_string(),
                 repo_root: main_path
@@ -380,6 +491,7 @@ pub(crate) fn probe_repo(
                     .branch
                     .as_deref()
                     .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_string()),
+                tip,
                 mtime_unix: mtime_unix(&entry.path),
                 verdict: repo_worktree_verdict(&facts),
             }
@@ -389,7 +501,11 @@ pub(crate) fn probe_repo(
 
 /// Probe every visited repo, one `gh` lookup per repo, deduplicating repos
 /// that are worktrees of one another and rows reached through two roots.
-pub(crate) fn probe_repos(repo_roots: &[String], live_cwds: &[PathBuf]) -> Vec<RepoWorktreeRow> {
+pub(crate) fn probe_repos(
+    repo_roots: &[String],
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+) -> Vec<RepoWorktreeRow> {
     let mut seen_roots = HashSet::new();
     let mut seen_paths = HashSet::new();
     let mut out = Vec::new();
@@ -408,7 +524,7 @@ pub(crate) fn probe_repos(repo_roots: &[String], live_cwds: &[PathBuf]) -> Vec<R
             continue;
         }
         let prs = lookup_prs(root);
-        for row in probe_repo(root, live_cwds, prs.as_deref()) {
+        for row in probe_repo_with(root, live_cwds, procs, prs.as_deref()) {
             if seen_paths.insert(row.path.clone()) {
                 out.push(row);
             }

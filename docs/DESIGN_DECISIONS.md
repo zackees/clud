@@ -5195,3 +5195,31 @@ branch squash-merged with conflict edits matches neither signal without
 `gh`, and stays pinned as `unverifiable`: the cost is disk, never work.
 The first PR only surfaces verdicts in `clud gc list`; deletion lands
 separately.
+
+## DD-123: repo-worktree reclaim re-verifies from scratch and never forces
+
+**Context:** #1603, the deletion half of #1591. The DD-122 verdict is
+computed on a probe thread up to one tick before anything acts on it, and a
+developer can return to a worktree at any moment in between.
+
+**Decision:** The tick only *selects* from the cached snapshot. The purge
+pool re-probes the one worktree immediately before deleting (fresh git,
+fresh `gh`, fresh process table) and deletes only if the verdict is still
+`reclaimable` with the same branch and tip. Removal is `git worktree remove`
+without `--force`, so git's own clean check is a second, independent guard;
+a failure is logged and never escalated to force. `git branch -D` runs only
+while the branch still points at the verified tip. Remote branch deletion is
+opt-in (`gc.delete_remote_branches`) and leased on the verified tip. A
+process whose cwd is inside the worktree pins it, from a whole-process-table
+snapshot; if the daemon cannot read even its own cwd, nothing is reclaimed.
+
+**Why not delete straight from the snapshot:** that re-creates the #946
+hazard: an hour-old "clean" verdict authorizing deletion of fresh work.
+**Why not `--force` after re-verification:** re-verification and removal
+are still two steps; without force git closes the remaining window itself.
+
+**Consequences:** A worktree is removed at the earliest one tick after it is
+first seen landed. Locked worktrees (dead pid), worktrees with submodules and
+half-removed trees are left on disk and logged each tick: the cost is disk,
+never work. `CLUD_GC_REPO_WORKTREES=observe` shows what would go without
+deleting anything.

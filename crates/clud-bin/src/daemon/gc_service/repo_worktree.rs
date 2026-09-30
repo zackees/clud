@@ -13,8 +13,9 @@
 //! so the precedence here is unit-testable with no repo, no process table and
 //! no network, per the reap/spare rule in `CLAUDE.md`.
 //!
-//! This PR is **read-only**: the verdict is surfaced by `clud gc list` and
-//! nothing deletes on it yet (follow-up tracked in the PR description).
+//! `clud gc list` surfaces the verdict; since #1603 the daemon also acts on
+//! `reclaimable` rows, after re-verifying on the purge pool
+//! (`repo_worktree_reclaim`).
 
 /// What the merged-PR lookup said about this worktree's branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,9 @@ pub(crate) struct RepoWorktreeFacts {
     /// A live session's cwd (or a process cwd) sits inside the worktree —
     /// this also covers "the currently checked-out one in any session".
     pub(crate) process_inside: bool,
+    /// Issue #1603: the full process table could not be read (see
+    /// `ProcessCwdSnapshot`), so "nobody is inside" is unproven.
+    pub(crate) processes_unverifiable: bool,
     pub(crate) detached: bool,
     /// Uncommitted changes to tracked files.
     pub(crate) dirty: Option<bool>,
@@ -114,6 +118,7 @@ impl RepoWorktreeVerdict {
 /// | main checkout                              | pinned      | `main checkout`            |
 /// | locked by a live pid                       | pinned      | `locked by live pid`       |
 /// | a process/session inside                   | pinned      | `process inside`           |
+/// | process table unreadable                   | pinned      | `process table unavailable`|
 /// | detached HEAD                              | pinned      | `detached`                 |
 /// | dirty/untracked unknown                    | pinned      | `unverifiable`             |
 /// | dirty                                      | pinned      | `dirty`                    |
@@ -143,6 +148,9 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
     }
     if facts.process_inside {
         return RepoWorktreeVerdict::pinned("process inside");
+    }
+    if facts.processes_unverifiable {
+        return RepoWorktreeVerdict::pinned("process table unavailable");
     }
     if facts.detached {
         return RepoWorktreeVerdict::pinned("detached");
@@ -191,6 +199,7 @@ mod tests {
             is_main_checkout: false,
             locked_live_pid: false,
             process_inside: false,
+            processes_unverifiable: false,
             detached: false,
             dirty: Some(false),
             untracked: Some(false),
@@ -376,6 +385,20 @@ mod tests {
             },
             Pinned,
             "process inside",
+        );
+    }
+
+    /// #1603: a process table that cannot be read proves nothing about who
+    /// is inside, so it spares.
+    #[test]
+    fn unreadable_process_table_is_spared() {
+        assert_verdict(
+            RepoWorktreeFacts {
+                processes_unverifiable: true,
+                ..merged()
+            },
+            Pinned,
+            "process table unavailable",
         );
     }
 

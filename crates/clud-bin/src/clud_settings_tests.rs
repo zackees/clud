@@ -16,6 +16,24 @@ fn missing_settings_file_defaults_auto_fix_hooks_enabled() {
     assert!(load_auto_fix_hooks_enabled_at(home.path()).unwrap());
 }
 
+/// #1603: remote branch deletion is opt-in; absent, wrong-typed or false
+/// never deletes a remote branch, and the seeded default says so.
+#[test]
+fn gc_delete_remote_branches_is_off_unless_literally_true() {
+    let home = tempdir().unwrap();
+    assert!(!load_gc_delete_remote_branches_at(home.path()).unwrap());
+    for (doc, want) in [
+        (json!({}), false),
+        (json!({"gc": {"delete_remote_branches": "true"}}), false),
+        (json!({"gc": {"delete_remote_branches": false}}), false),
+        (json!({"gc": {"delete_remote_branches": true}}), true),
+    ] {
+        assert_eq!(gc_delete_remote_branches_from(&doc), want, "{doc}");
+    }
+    let seeded = seeded_global_settings_document();
+    assert_eq!(seeded["gc"]["delete_remote_branches"], json!(false));
+}
+
 #[test]
 fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();

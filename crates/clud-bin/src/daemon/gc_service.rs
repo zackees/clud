@@ -28,6 +28,8 @@ mod filesystem;
 mod list_state;
 mod repo_worktree;
 mod repo_worktree_probe;
+mod repo_worktree_reclaim;
+mod repo_worktree_reclaim_exec;
 
 use super::watch_service as gc_watch_service;
 
@@ -38,6 +40,10 @@ use filesystem::{
 };
 use list_state::{derive_state, EntryState, SpareReasons};
 use repo_worktree_probe::{RepoWorktreeRow, REPO_WORKTREE_KIND};
+use repo_worktree_reclaim::{
+    reclaim_mode_from_raw, reclaim_selection, ReclaimMode, ReclaimSelection,
+};
+use repo_worktree_reclaim_exec::{ReclaimJob, ReclaimOutcome};
 
 /// How long a connection thread waits for the registry worker before
 /// giving up. Since #268 the worker no longer runs `remove_dir_all`
@@ -96,8 +102,15 @@ pub(super) enum RegistryMsg {
     /// merging (which is what keeps it from growing without bound).
     ExternVerdicts(Vec<(String, PurgeDecision)>),
     /// Issue #1591: a complete snapshot of repo-worktree verdicts, computed
-    /// off-worker by `spawn_repo_worktree_probe`. Display only.
+    /// off-worker by `spawn_repo_worktree_probe`. Feeds `gc list` and, one
+    /// tick later, reclaim selection (#1603).
     RepoWorktreeVerdicts(Vec<RepoWorktreeRow>),
+    /// Issue #1603: one repo-worktree reclaim finished on the purge pool
+    /// (removed, spared at delete time, or failed).
+    RepoWorktreeReclaimed {
+        path: String,
+        outcome: ReclaimOutcome,
+    },
 }
 
 /// Issue #268: result of one entry's parallel filesystem deletion,
@@ -119,8 +132,17 @@ pub(super) struct PurgeCompletion {
 /// pool thread sends `RegistryMsg::PurgeCompletion(..)` into it, so
 /// completions land in the same queue the worker is already draining.
 struct PurgeJob {
-    entry: TrackedEntry,
+    work: PurgeWork,
     completion_tx: mpsc::Sender<RegistryMsg>,
+}
+
+/// What a purge-pool thread is asked to do.
+enum PurgeWork {
+    /// A registry row: `remove_dir_all` after `reverify_before_delete`.
+    Tracked(TrackedEntry),
+    /// Issue #1603: a repo worktree, which has no registry row. Re-verified
+    /// and removed through git by `repo_worktree_reclaim_exec::run_reclaim`.
+    RepoWorktree(ReclaimJob),
 }
 
 type LiveCwdsProvider = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync + 'static>;
@@ -168,22 +190,36 @@ fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
             guard.recv()
         };
         let Ok(job) = job else { return };
+        let entry = match job.work {
+            PurgeWork::Tracked(entry) => entry,
+            PurgeWork::RepoWorktree(reclaim) => {
+                let outcome = repo_worktree_reclaim_exec::run_reclaim(
+                    &reclaim,
+                    &repo_worktree_probe::lookup_prs,
+                );
+                let _ = job.completion_tx.send(RegistryMsg::RepoWorktreeReclaimed {
+                    path: reclaim.row.path.clone(),
+                    outcome,
+                });
+                continue;
+            }
+        };
         // Issue #946: the verdict that authorized this delete was computed by
         // the probe thread, up to a tick ago. Re-check it here, immediately
         // before `remove_dir_all` and still off the registry worker, so a
         // checkout the developer came back to in the meantime is not deleted
         // on a stale "clean and pushed". Before the probe was decoupled this
         // was implicit: the verdict was computed inline microseconds earlier.
-        let spared = reverify_before_delete(&job.entry);
+        let spared = reverify_before_delete(&entry);
         let result = if spared.is_some() {
             Ok(())
         } else {
-            remove_entry_filesystem(&job.entry)
+            remove_entry_filesystem(&entry)
         };
         let completion = PurgeCompletion {
-            id: job.entry.id,
-            path: job.entry.path.clone(),
-            kind: job.entry.kind.clone(),
+            id: entry.id,
+            path: entry.path.clone(),
+            kind: entry.kind.clone(),
             result,
             spared,
         };
@@ -510,6 +546,9 @@ fn handle_registry_msg(
         RegistryMsg::RepoWorktreeVerdicts(rows) => {
             spare_reasons.replace_repo_worktrees(rows, now_unix());
         }
+        RegistryMsg::RepoWorktreeReclaimed { path, outcome } => {
+            apply_repo_worktree_reclaimed(spare_reasons, &path, &outcome);
+        }
         RegistryMsg::WatchRescan(roots) => {
             for root in roots {
                 let _ = reconcile_registered_dir(
@@ -540,6 +579,31 @@ fn reverify_before_delete(entry: &TrackedEntry) -> Option<&'static str> {
     }
     let decision = extern_repo_purge_verdict(entry, extern_repo_stale_after());
     (!decision.purge).then_some(decision.reason)
+}
+
+/// Issue #1603: log one reclaim outcome, free its in-flight slot and, when
+/// the directory is gone, drop its row from the `gc list` snapshot.
+fn apply_repo_worktree_reclaimed(
+    spare_reasons: &mut SpareReasons,
+    path: &str,
+    outcome: &ReclaimOutcome,
+) {
+    spare_reasons.repo_reclaim_finished(path);
+    match outcome {
+        ReclaimOutcome::Removed { notes } => {
+            spare_reasons.forget_repo_worktree(path);
+            eprintln!(
+                "[clud] gc: removed repo worktree {path} ({})",
+                notes.join("; ")
+            );
+        }
+        ReclaimOutcome::Spared(reason) => {
+            eprintln!("[clud] gc: spared repo worktree {path} at delete time: {reason}");
+        }
+        ReclaimOutcome::Failed(err) => {
+            eprintln!("[clud] gc: failed to remove repo worktree {path}: {err}");
+        }
+    }
 }
 
 fn apply_purge_completion(registry: &Registry, c: PurgeCompletion) {
@@ -577,6 +641,7 @@ fn run_periodic_purge_tick(
     spare_reasons: &mut SpareReasons,
 ) -> usize {
     let config = GcDiskWatchdogConfig::from_env();
+    let repo_worktrees = RepoWorktreeGcConfig::from_env_and_settings();
     run_periodic_purge_tick_with_free_space(
         registry,
         pool_tx,
@@ -588,6 +653,7 @@ fn run_periodic_purge_tick(
             session_state_dir,
             activity,
             spare_reasons,
+            repo_worktrees,
         },
     )
 }
@@ -607,6 +673,9 @@ struct PeriodicPurgeContext<'a> {
     /// Verdicts recorded by this tick, for `gc list` to explain retained
     /// rows without re-probing git (issue #896).
     spare_reasons: &'a mut SpareReasons,
+    /// Issue #1603: repo-worktree mode and the remote-branch opt-in,
+    /// resolved by the caller so tests never read `~/.clud`.
+    repo_worktrees: RepoWorktreeGcConfig,
 }
 
 fn run_periodic_purge_tick_with_free_space<F>(
@@ -625,6 +694,7 @@ where
         session_state_dir,
         activity,
         spare_reasons,
+        repo_worktrees,
     } = context;
 
     let mut dispatched = run_disk_watchdog_tick(
@@ -675,13 +745,16 @@ where
         Ok(rows) => spawn_extern_probe(rows, completion_tx, activity, spare_reasons),
         Err(err) => eprintln!("[clud] gc tick: extern-repo list failed: {err}"),
     }
-    // Issue #1591: same off-worker pattern for repo-worktree verdicts.
-    spawn_repo_worktree_probe(
+    // Issues #1591/#1603: act on the previous snapshot's reclaimable rows,
+    // then refresh the snapshot off-worker.
+    dispatched += run_repo_worktree_phase(
         registry,
+        pool_tx,
         completion_tx,
         activity,
         spare_reasons,
         live_cwds_provider(),
+        repo_worktrees,
     );
 
     match reap_trash_entries(registry) {
@@ -753,26 +826,113 @@ fn prime_extern_verdicts(
         activity,
         spare_reasons,
         live_cwds_provider(),
+        repo_worktree_mode_from_env(),
     );
 }
 
-/// `CLUD_GC_REPO_WORKTREES=0` turns the repo-worktree probe (#1591) off.
+/// `CLUD_GC_REPO_WORKTREES`: `0` turns repo-worktree GC (#1591) off
+/// entirely, `observe` probes and logs without deleting, unset/`1` deletes
+/// (#1603). See `reclaim_mode_from_raw`.
 const ENV_GC_REPO_WORKTREES: &str = "CLUD_GC_REPO_WORKTREES";
+/// Overrides the `gc.delete_remote_branches` setting (#1603).
+const ENV_GC_DELETE_REMOTE_BRANCHES: &str = "CLUD_GC_DELETE_REMOTE_BRANCHES";
+
+fn repo_worktree_mode_from_env() -> ReclaimMode {
+    reclaim_mode_from_raw(std::env::var(ENV_GC_REPO_WORKTREES).ok().as_deref())
+}
+
+/// Issue #1603: how the tick treats repo worktrees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepoWorktreeGcConfig {
+    mode: ReclaimMode,
+    delete_remote: bool,
+}
+
+impl RepoWorktreeGcConfig {
+    /// Production only: reads the env and `~/.clud/settings.json`. A
+    /// settings read error means no remote deletion.
+    fn from_env_and_settings() -> Self {
+        let delete_remote = match std::env::var(ENV_GC_DELETE_REMOTE_BRANCHES).ok() {
+            Some(raw) => parse_bool_setting(Some(&raw), false),
+            None => crate::clud_settings::load_gc_delete_remote_branches().unwrap_or(false),
+        };
+        Self {
+            mode: repo_worktree_mode_from_env(),
+            delete_remote,
+        }
+    }
+}
+
+/// Issue #1603: dispatch every reclaimable row of the cached snapshot (taken
+/// by the previous probe) to the purge pool, which re-verifies each one from
+/// scratch before touching it; then start the next probe. Returns the number
+/// of reclaims dispatched. Runs on the registry worker, so it only reads the
+/// cache and does path arithmetic — no git.
+fn run_repo_worktree_phase(
+    registry: &Registry,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    activity: Option<&DaemonActivity>,
+    spare_reasons: &mut SpareReasons,
+    live_cwds: Vec<PathBuf>,
+    config: RepoWorktreeGcConfig,
+) -> usize {
+    let live = canonicalize_live_cwds(live_cwds.clone());
+    let rows: Vec<RepoWorktreeRow> = spare_reasons.repo_worktrees().0.to_vec();
+    let mut dispatched = 0usize;
+    for row in rows {
+        let live_now = entry_path_contains_live_cwd_path(&row.path, &live);
+        let in_flight = spare_reasons.repo_reclaim_in_flight(&row.path);
+        match reclaim_selection(config.mode, row.verdict.state, live_now, in_flight) {
+            ReclaimSelection::Spare(_) => {}
+            ReclaimSelection::WouldRemove => eprintln!(
+                "[clud] gc tick: observe mode, would remove repo worktree {} ({})",
+                row.path, row.verdict.reason
+            ),
+            ReclaimSelection::Dispatch => {
+                let path = row.path.clone();
+                let job = PurgeJob {
+                    work: PurgeWork::RepoWorktree(ReclaimJob {
+                        row,
+                        delete_remote: config.delete_remote,
+                        session_cwds: live_cwds.clone(),
+                    }),
+                    completion_tx: completion_tx.clone(),
+                };
+                if pool_tx.send(job).is_err() {
+                    break;
+                }
+                spare_reasons.begin_repo_reclaim(path);
+                dispatched += 1;
+            }
+        }
+    }
+    spawn_repo_worktree_probe(
+        registry,
+        completion_tx,
+        activity,
+        spare_reasons,
+        live_cwds,
+        config.mode,
+    );
+    dispatched
+}
 
 /// Issue #1591: compute squash-aware verdicts for every worktree of every
 /// visited repo **off** the registry worker (#946) and deliver the complete
 /// snapshot back as `RegistryMsg::RepoWorktreeVerdicts`. The worker only
-/// reads the repo-visit list (it owns redb); every `git`/`gh` spawn happens
-/// on the probe thread. Read-only: the snapshot feeds `gc list` and nothing
-/// else.
+/// reads the repo-visit list (it owns redb); every `git`/`gh` spawn and the
+/// process-table scan happen on the probe thread. Read-only: the snapshot
+/// feeds `gc list` and the next tick's `run_repo_worktree_phase`.
 fn spawn_repo_worktree_probe(
     registry: &Registry,
     completion_tx: &mpsc::Sender<RegistryMsg>,
     activity: Option<&DaemonActivity>,
     spare_reasons: &mut SpareReasons,
     live_cwds: Vec<PathBuf>,
+    mode: ReclaimMode,
 ) {
-    if !parse_bool_setting(std::env::var(ENV_GC_REPO_WORKTREES).ok().as_deref(), true) {
+    if mode == ReclaimMode::Off {
         return;
     }
     let repo_roots: Vec<String> = match registry.list_repo_visits() {
@@ -791,7 +951,8 @@ fn spawn_repo_worktree_probe(
         .name("clud-gc-repo-worktree-probe".to_string())
         .spawn(move || {
             let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
-            let rows = repo_worktree_probe::probe_repos(&repo_roots, &live_cwds);
+            let procs = repo_worktree_probe::collect_process_cwds();
+            let rows = repo_worktree_probe::probe_repos(&repo_roots, &live_cwds, &procs);
             let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
         });
     if spawned.is_err() {

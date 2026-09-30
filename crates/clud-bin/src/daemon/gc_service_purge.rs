@@ -76,7 +76,7 @@ pub(super) fn dispatch_purge_entries(
     let mut dispatched = 0usize;
     for entry in purgeable {
         let job = PurgeJob {
-            entry,
+            work: PurgeWork::Tracked(entry),
             completion_tx: completion_tx.clone(),
         };
         if pool_tx.send(job).is_err() {
