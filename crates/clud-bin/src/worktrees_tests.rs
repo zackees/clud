@@ -484,6 +484,7 @@ fn classified_locked(
         status,
         age,
         is_main: false,
+        verdict_row: None,
     }
 }
 

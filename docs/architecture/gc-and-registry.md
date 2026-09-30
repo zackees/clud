@@ -472,9 +472,37 @@ the entry pass through the same clean/dirty/unpushed/no-upstream/force rules as 
 worktree. `--dry-run` is a faithful preview: nothing is mutated until the actual verified
 worktree removal path.
 
-The GC daemon does borrow `parse_worktree_porcelain` and the "extract pid from locked-reason"
-helper from this module to compute the `live_locked` flag on `gc.list` output, but the two flows
-are otherwise independent.
+**Shared landing verdict (#1606).** Ancestry cannot see a squash merge (DD-122), so before its
+own rules the CLI runs the daemon's probe and `repo_worktree_verdict` for every worktree of the
+repo (`crates/clud-bin/src/worktrees_verdict.rs`, through the bridge
+`crates/clud-bin/src/daemon/gc_service/repo_worktree_cli.rs`), with one `gh pr list` per repo
+and the patch-match fallback when `gh` is unavailable. Precedence, first match wins:
+
+| condition | action |
+|-----------|--------|
+| lock too fresh for the hard-age gate | skip, as before |
+| verdict `reclaimable` and ancestry status not `dirty` | remove via the daemon executor, reason = verdict reason (no `--force` needed) |
+| any other verdict, ancestry skips | skip, reason gains `; verdict: <reason>` |
+| any other verdict, or no probe row | the ancestry action, unchanged |
+
+So the verdict only adds removals backed by positive evidence (merged PR covering the tip, patch
+match, abandoned-empty under `~/.clud/tmp-wt`); every spare verdict (`dirty`, `untracked`,
+`open PR #N`, `commits after merge`, `no PR`, `locked by live pid`, `process inside`, `detached`,
+`main checkout`, `unverifiable`, ...) leaves `--force`, `--stale-after` and the lock rules exactly
+as documented above. Verdict-backed removals go through `run_reclaim_with`
+([reclaim](#repo-worktrees-squash-aware-verdict-1591-and-reclaim-1603)): fresh re-probe with an
+unchanged verdict and tip, `git worktree remove` never `--force`, `branch -D` only at the verified
+tip, prune, never a remote delete. A veto at that re-check is reported as `skipped (verdict
+changed before removal: ...)`, not a failure. `--dry-run` prints the same plan, verdict and
+reason; the status table shows `[state: reason]` per worktree.
+
+**No lock against a running daemon.** The per-repo reclaim lock (#1632, DD-125) serializes daemon
+pool threads only. The CLI does not take it: its re-probe turns a worktree the daemon already
+reclaimed into a skip (`gone from git worktree list`), and a simultaneous git step contends on
+git's own `.lock` files and fails without forcing anything (DD-129).
+
+The GC daemon also borrows `parse_worktree_porcelain` and the "extract pid from locked-reason"
+helper from this module to compute the `live_locked` flag on `gc.list` output.
 
 ## Key types
 

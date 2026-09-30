@@ -33,6 +33,7 @@ use super::repo_worktree_probe::{
 };
 use super::repo_worktree_reclaim::{
     branch_delete_decision, remote_delete_decision, reverify_reclaim, reverify_reservation,
+    ProcessCwdSnapshot,
 };
 use crate::gc::worktree_root::is_under_worktree_root;
 
@@ -221,6 +222,18 @@ pub(crate) fn run_reclaim(
     job: &ReclaimJob,
     lookup_prs: &dyn Fn(&Path) -> Option<Vec<PrRecord>>,
 ) -> ReclaimOutcome {
+    run_reclaim_with(job, lookup_prs, &collect_process_cwds)
+}
+
+/// [`run_reclaim`] with the fresh process-table producer injected, so the
+/// `--clean-worktrees` real-git tests (#1606) do not depend on whether the
+/// CI sandbox can read process cwds. Production passes
+/// [`collect_process_cwds`].
+pub(crate) fn run_reclaim_with(
+    job: &ReclaimJob,
+    lookup_prs: &dyn Fn(&Path) -> Option<Vec<PrRecord>>,
+    collect_procs: &dyn Fn() -> ProcessCwdSnapshot,
+) -> ReclaimOutcome {
     if job.row.reservation {
         return run_reservation_reclaim(job);
     }
@@ -231,7 +244,7 @@ pub(crate) fn run_reclaim(
     let worktree = PathBuf::from(&job.row.path);
 
     // 1. Fresh facts, then the pure re-check.
-    let procs = collect_process_cwds();
+    let procs = collect_procs();
     let prs = lookup_prs(&repo_root);
     let fresh = probe_one(
         &repo_root,
