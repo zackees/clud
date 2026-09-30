@@ -5275,3 +5275,46 @@ leaves failures on disk rather than escalating.
 **Consequences:** A pool thread can block behind another reclaim of the same
 repo, bounded by that reclaim's git timeouts; other pool threads keep
 draining the queue.
+
+## DD-126: `model_contexts` publishes the default-routed endpoint's window, not the endpoint maximum
+
+**Context:** #1634. OpenRouter's top-level `context_length` is the largest
+window any endpoint of a model serves. `ci/refresh_model_contexts.py`
+published it as-is, and clud passes it as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
+clud sends OpenRouter no provider preferences (no `provider.order`, no
+pinning), so a request goes wherever OpenRouter routes it. On 2026-09-30, 34
+of 464 models advertised more than their `top_provider.context_length`:
+`xiaomi/mimo-v2.6-flash` advertised 1,050,000 because one endpoint
+(GMICloud) serves that, while the default-routed endpoints serve 1,048,576.
+Claude Code then plans for tokens the serving endpoint rejects and fails near
+the limit instead of compacting.
+
+**Decision:** publish `min(context_length, top_provider.context_length)`.
+When `top_provider.context_length` is `null` or absent (router rows such as
+`openrouter/auto-beta`), keep `context_length`, so the row stays in the map.
+A malformed `top_provider` fails the run like any other malformed field.
+
+**Why not the minimum over `/endpoints`:** it needs one extra request per
+model (~460 per run), and one small or newly added endpoint would shrink the
+row for every user, so the published value would move with inventory rather
+than with routing. **Why not pin routing:** pinning a provider trades
+OpenRouter's fallbacks and price routing for a context number, a much larger
+behavior change owned by provider selection, not by this map (DD-054).
+**Why not a clud-side per-model override table:** the override already
+exists. A catalog row's reviewed `claude_max_context_tokens` wins over the
+served map, and an ambient `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is never
+overwritten. A third source would only add drift.
+
+**Tradeoff:** a few models whose default endpoint is much smaller than their
+largest one shrink a lot (`meta-llama/llama-4-scout` 1,310,720 to 327,680,
+`qwen/qwen3.8-27b` 1,000,000 to 262,144). A prompt above the published value
+could still be served by a larger endpoint, but clud cannot know it will be,
+and overstating is the failure (hard error at the limit), while understating
+only compacts earlier. This does not regress #1276: rows are never dropped,
+and the MiMo rows lose 1,424 tokens and keep their ~1M window, far above
+Claude Code's 200k unknown-model clamp.
+
+**Consequences:** the value is still read from the one datasheet request, so
+the refresh stays deterministic for a given payload. It follows OpenRouter's
+choice of top provider, so a routing change upstream moves the row on the
+next daily refresh.

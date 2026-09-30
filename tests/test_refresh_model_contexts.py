@@ -167,3 +167,66 @@ def test_main_refreshes_then_reports_no_change(monkeypatch, tmp_path) -> None:
     # Second run against fresh data is a no-op.
     assert producer.main([]) == 0
     assert asset.read_text(encoding="utf-8") == written
+
+
+# #1634: rows recorded from the live datasheet on 2026-09-30, trimmed to the
+# fields the producer reads. The top-level `context_length` is the maximum
+# over a model's endpoints; `top_provider.context_length` is the window of the
+# endpoint OpenRouter routes to by default. clud sends no provider
+# preferences, so that is the endpoint a launch is normally served by.
+SERVED_WINDOW_ROWS: list[dict] = [
+    # One endpoint (GMICloud) advertises 1_050_000; the default-routed
+    # endpoints serve 1_048_576. Publishing the maximum overflowed near the limit.
+    {
+        "id": "xiaomi/mimo-v2.6-flash",
+        "context_length": 1_050_000,
+        "top_provider": {"context_length": 1_048_576},
+    },
+    {
+        "id": "z-ai/glm-4.7",
+        "context_length": 204_800,
+        "top_provider": {"context_length": 202_752},
+    },
+    {
+        "id": "~anthropic/claude-sonnet-latest",
+        "context_length": 1_000_000,
+        "top_provider": {"context_length": 1_000_000},
+    },
+    # Router rows publish no top provider: keep the advertised window rather
+    # than dropping the row (a missing row regresses to Claude Code's 200k
+    # clamp, the #1276 incident).
+    {
+        "id": "openrouter/auto-beta",
+        "context_length": 2_000_000,
+        "top_provider": {"context_length": None},
+    },
+    {"id": "openrouter/free", "context_length": 200_000},
+]
+
+
+def test_publishes_the_served_window_never_the_endpoint_maximum() -> None:
+    windows = producer.normalize(SERVED_WINDOW_ROWS)
+    assert windows["xiaomi/mimo-v2.6-flash"] == 1_048_576
+    assert windows["z-ai/glm-4.7"] == 202_752
+    assert windows["~anthropic/claude-sonnet-latest"] == 1_000_000
+    assert windows["openrouter/auto-beta"] == 2_000_000
+    assert windows["openrouter/free"] == 200_000
+
+
+def test_top_provider_above_the_advertised_window_is_clamped_down() -> None:
+    row = {"id": "a/b", "context_length": 131_072, "top_provider": {"context_length": 262_144}}
+    assert producer.normalize([row]) == {"a/b": 131_072}
+
+
+def test_malformed_top_provider_fails_loudly() -> None:
+    bad_tops: list = [
+        "1048576",
+        {"context_length": "1048576"},
+        {"context_length": 1.5},
+        {"context_length": 10},
+        {"context_length": True},
+    ]
+    for top in bad_tops:
+        row = {"id": "a/b", "context_length": 1_048_576, "top_provider": top}
+        with pytest.raises(producer.RefreshError):
+            producer.normalize([row])
