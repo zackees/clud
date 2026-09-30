@@ -1474,8 +1474,9 @@ def test_t4_skipped_not_required_is_ignored(watcher) -> None:
     assert not docs.required
 
 
-def test_t5_skipped_required_passes(watcher) -> None:
-    assert judge(watcher, load_case("terminal", "T5")).state == "pass"
+def test_t5_skipped_required_is_pending(watcher) -> None:
+    # #1639: a skip proves nothing ran on the head; it never reads as green.
+    assert judge(watcher, load_case("terminal", "T5")).state == "pending"
 
 
 def test_t6_neutral_passes(watcher) -> None:
@@ -1615,8 +1616,9 @@ def test_a10_stale_exits_seven_with_rerun_needed(
     assert "re-run needed" in capsys.readouterr().out
 
 
-def test_a11_required_skipped_passes(watcher) -> None:
-    assert judge(watcher, load_case("review", "A11")).state == "pass"
+def test_a11_required_skipped_is_pending(watcher) -> None:
+    # #1639: a skipped required check is no verdict.
+    assert judge(watcher, load_case("review", "A11")).state == "pending"
 
 
 def test_a12_fail_fast_siblings_are_not_reported(watcher) -> None:
