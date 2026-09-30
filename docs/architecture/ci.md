@@ -356,7 +356,7 @@ explicitly. Until then, a `ci-windows` PR should also get a green routine
 Linux run (drop the label and let the `minimal` run pass, or use `ci-test`)
 before merge. Making `CI OK` enforce that itself was left out of #1651: in
 `windows` mode the Linux lanes are skipped on that run, so the gate would
-need to query other runs for the same SHA. Tracked as a follow-up
+need to query other runs for the same SHA. Tracked in #1652
 ([DD-132](../DESIGN_DECISIONS.md#dd-132-there-is-no-merge-queue-the-ci-windows-rationale-in-dd-088-is-corrected)).
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
