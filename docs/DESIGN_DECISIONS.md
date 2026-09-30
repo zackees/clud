@@ -5498,3 +5498,22 @@ owner decisions recorded in
 **Consequences:** Until a queue exists, merging a `ci-windows` PR needs a
 separate Linux run by convention, and a PR behind `main` merges an untested
 tree.
+
+## DD-133: `ci-windows` runs the routine Linux lanes on the same run
+
+**Context:** With no merge queue (DD-132), `CI OK` in `windows` mode went
+green with static + Windows x64 only, so a `ci-windows` PR could merge with
+no Linux test of its head SHA (#1652). #1655 showed the mirror-image gap.
+
+**Decision:** `windows` mode also runs every `minimal` lane (Dylint, Linux
+clippy, build and unit shards) and `CI OK` requires `$MINIMAL $WINDOWS`.
+Coverage comes from the same run, so it is deterministic and needs no API
+lookup. A cross-run SHA lookup was rejected for its races with queued,
+skipped or cancelled runs (#1639) and for failing `pr_merge_watch` early; a
+Rust-only Linux subset was rejected because it drops pytest and clippy.
+
+**Consequences:** Each `ci-windows` push costs ~10 extra Linux
+runner-minutes, in parallel with the longer Windows lanes, so wall-clock
+feedback is unchanged. Linux integration and macOS still need `ci-test` /
+`ci-full`. `tests/test_ci_matrix.py` pins the gate. Details:
+[ci.md](architecture/ci.md#ci-windows-keeps-the-routine-linux-lanes-1652-decided).

@@ -101,8 +101,8 @@ local-only act workflow step and remove that step before committing. Do not
 switch to `bosn run --task focused-test`, direct `bash test`/`bash lint`, or a
 host toolchain. `act` cannot execute native Windows or macOS; for Windows-only
 code, use the `ci-windows` PR label for the Windows build, unit, and integration
-suites after local act checks. Keep Windows PTY tests enabled. There is no merge queue, so a
-`ci-windows` PR gets no Linux or macOS run before merge
+suites after local act checks. Keep Windows PTY tests enabled. There is no merge queue; a
+`ci-windows` run still includes the routine Linux x64 lanes but no macOS
 ([What protects `main` today](#what-protects-main-today)).
 
 These tasks use the `clud_act` stack (`bosn/act.Dockerfile`), which carries
@@ -307,10 +307,11 @@ Three structural claims, in the order they matter:
 ## Target tiers — using scarce runners sparingly
 
 The `ci-windows` label is an iteration mode for Windows-only work (#1310): it
-runs static checks plus the Windows x64 build and both Windows suites, and
-skips Linux and macOS build/test lanes, but retains the Linux Dylint job with
-its Windows and macOS cross-target passes. `CI OK` passes only when Dylint,
-static checks, and the Windows lanes pass; `ci-test`/`ci-full` take
+runs static checks plus the Windows x64 build and both Windows suites, plus
+every routine (`minimal`) Linux x64 lane: Dylint with its Windows and macOS
+cross-target passes, clippy, build and the unit shards (#1652). It skips Linux
+integration, harness and the other targets. `CI OK` passes only when all of
+those lanes pass; `ci-test`/`ci-full` take
 precedence. No merge queue backs this label; see
 [What protects `main` today](#what-protects-main-today).
 
@@ -321,7 +322,7 @@ every push needs all six targets.
 | --- | --- | --- |
 | `minimal` | Linux Dylint (host + Windows/macOS cross-target) + `x86_64-unknown-linux-gnu` build and unit suite | ordinary PR and `main` push |
 | `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
-| `windows` | Linux Dylint (host + Windows/macOS cross-target) + static + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
+| `windows` | minimal + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
 | `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch (a `merge_group` event would select it, but none is configured) |
 
 `ci-test` covers Linux and Windows product build/tests. Both hosted macOS
@@ -338,12 +339,35 @@ happened. So:
 
 - PR CI tests the PR head SHA (`github.event.pull_request.head.sha`), not
   the merge commit. A PR that is behind `main` merges an untested tree.
-- The label picks the lanes. `CI OK` is green for a `ci-windows` PR when
-  static + Windows x64 pass, with no Linux or macOS run on that SHA.
+- The label picks the lanes. Every mode, `ci-windows` included, requires
+  the routine Linux x64 lanes on the head SHA before `CI OK` is green
+  (#1652); macOS runs only under `ci-full`.
 - The `push` run on `main` is the only test the merged tree gets, and it
   runs the `minimal` tier. It reports after the merge; it does not block it.
 - The `merge_group:` trigger in `ci.yml` is inert. It stays so that a queue,
   once enabled, runs the `full` tier.
+
+#### `ci-windows` keeps the routine Linux lanes (#1652, decided)
+
+`windows` mode runs every `minimal` lane on the same run, and `CI OK`
+requires them (`for result in $MINIMAL $WINDOWS`). So a green `CI OK` always
+means the routine Linux lanes passed on that head SHA. Rejected options:
+
+- Look up another run for the same SHA from `CI OK`. That adds a GitHub API
+  dependency and ordering races: the other run may still be queued, skipped
+  or cancelled. #1639 was this bug class (skipped/queued runs counted as
+  passing), and `pr_merge_watch` stops at the first red `CI OK`, so a gate
+  that fails "not yet" would abort the watch.
+- Run only Linux build + the Rust unit shard. That saves ~3 runner-minutes
+  (the two pytest shards) but leaves the Python suite and clippy unchecked,
+  which a routine run would have caught.
+
+Cost, measured on `main` minimal runs 36764898391 / 36770722764: the added
+Linux lanes are ~9.7-9.9 runner-minutes (clippy 1.7, build 3.5-3.8, unit
+shards 1.2-1.7 each) and ~6 minutes of wall-clock. They run beside the
+Windows build/test, which is longer, so the label's feedback time does not
+change. The #1310 goal of fast Windows iteration still holds; the label now
+spends ~10 Linux minutes per push to keep `CI OK` honest.
 
 #### Decision needed (owner)
 
@@ -352,12 +376,10 @@ change: add a ruleset on `main` with "Require merge queue" and `CI OK` as
 the required status check. `ci.yml` already resolves `merge_group` to the
 `full` tier. Cost: every merge waits for the full six-target matrix, and
 direct pushes / admin merges must go through the queue or bypass it
-explicitly. Until then, a `ci-windows` PR should also get a green routine
-Linux run (drop the label and let the `minimal` run pass, or use `ci-test`)
-before merge. Making `CI OK` enforce that itself was left out of #1651: in
-`windows` mode the Linux lanes are skipped on that run, so the gate would
-need to query other runs for the same SHA. Tracked in #1652
-([DD-132](../DESIGN_DECISIONS.md#dd-132-there-is-no-merge-queue-the-ci-windows-rationale-in-dd-088-is-corrected)).
+explicitly. Recommendation: enable it; it is the only thing that tests the
+merged tree rather than the head SHA
+([DD-132](../DESIGN_DECISIONS.md#dd-132-there-is-no-merge-queue-the-ci-windows-rationale-in-dd-088-is-corrected),
+[DD-133](../DESIGN_DECISIONS.md#dd-133-ci-windows-runs-the-routine-linux-lanes-on-the-same-run)).
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old

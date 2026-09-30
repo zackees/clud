@@ -124,7 +124,8 @@ def selected(tier: Mode | TargetTier) -> list[Target]:
     if tier == "minimal":
         return [TARGETS[0]]
     if tier == "windows":
-        return [target for target in TARGETS if target.triple == "x86_64-pc-windows-msvc"]
+        # #1652: the routine Linux x64 lanes run too, so CI OK covers them.
+        return [TARGETS[0], *(t for t in TARGETS if t.triple == "x86_64-pc-windows-msvc")]
     raise ValueError(f"unsupported CI tier: {tier}")
 
 

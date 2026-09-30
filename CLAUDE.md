@@ -258,12 +258,11 @@ aggregate jobs, for the same gate.
 Routine PRs and `main` updates run Linux x64 build + unit tests only. Use literal
 `ci-test` for Linux integration plus Windows x64, or `ci-full` for all six
 targets, including both hosted macOS architectures, and Dylint; existing
-`ci:full` labels remain equivalent. `ci-windows` runs only static checks plus
-the Windows x64 build and suites for fast Windows iteration; `CI OK` then
-gates on those lanes. There is **no merge queue** (the `merge_group`
-trigger is inert): PR CI tests the head SHA, and `main`'s push run is the
-only test of the merged tree, so get a Linux run before merging a
-`ci-windows` PR. Manual full CI pins every job to a verified
+`ci:full` labels remain equivalent. `ci-windows` runs the routine Linux x64
+lanes plus the Windows x64 build and suites for fast Windows iteration;
+`CI OK` gates on all of them (#1652). There is **no merge queue** (the
+`merge_group` trigger is inert): PR CI tests the head SHA, and `main`'s push
+run is the only test of the merged tree. Manual full CI pins every job to a verified
 candidate SHA. See
 [`ci.md`](docs/architecture/ci.md#current-ci-selection).
 
