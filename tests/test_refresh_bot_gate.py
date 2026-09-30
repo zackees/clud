@@ -62,4 +62,6 @@ def test_bot_runs_producer_tests_between_refresh_and_commit(workflow: str) -> No
 @pytest.mark.parametrize("workflow", sorted(BOTS))
 def test_bot_never_syncs_the_project(workflow: str) -> None:
     # `uv run` would trigger a full maturin build (CLAUDE.md, ci.md).
-    assert "uv run" not in (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    lines = (WORKFLOWS / workflow).read_text(encoding="utf-8").splitlines()
+    code = [line for line in lines if not line.lstrip().startswith("#")]
+    assert not any("uv run" in line for line in code)
