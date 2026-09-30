@@ -297,6 +297,13 @@ the default branch, so ancestry-based checks call them live work forever
   a removed row leaves the `gc list` snapshot. A failure is never retried
   with force: a locked worktree, or one with submodules, just stays.
   Rationale: [DD-123](../DESIGN_DECISIONS.md#dd-123-repo-worktree-reclaim-re-verifies-from-scratch-and-never-forces).
+- **One reclaim per repo at a time (#1632).** The pool runs reclaims in
+  parallel, but `run_reclaim_serialized` holds a per-repo mutex (keyed by the
+  canonical repo root, `RepoLocks`) for the whole sequence above, so two
+  worktrees of one repo are removed one after the other; different repos stay
+  parallel. Concurrent git on one git dir failed with exit 255 on Windows.
+  Reservation rows run no git and take no lock. Rationale:
+  [DD-125](../DESIGN_DECISIONS.md#dd-125-repo-worktree-reclaims-are-serialized-per-repository-by-a-lock-on-the-pool-thread).
 - **Remote branches.** Off by default. `gc.delete_remote_branches: true` in
   `~/.clud/settings.json` (seeded `false`), or
   `CLUD_GC_DELETE_REMOTE_BRANCHES=1`, also deletes `origin/<branch>`, only

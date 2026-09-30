@@ -5249,3 +5249,29 @@ empty sibling worktree is never reclaimed for being empty.
 
 **Consequences:** Unlanded work is kept indefinitely and surfaced as
 `pinned` with a reason in `clud gc list`; the cost is disk, never work.
+
+## DD-125: repo-worktree reclaims are serialized per repository by a lock on the pool thread
+
+**Context:** #1632. The purge pool runs reclaims in parallel, so one tick
+that reclaims two worktrees of the same repo ran two `git worktree remove` /
+`branch -D` / `worktree prune` sequences against one git dir at once. They
+contend on its `worktrees/`, refs and `.lock` files; on Windows one of them
+intermittently died with exit 255.
+
+**Decision:** `run_reclaim_serialized` holds a per-repo mutex, keyed by the
+canonical repo root, for the whole reclaim, taken on the pool thread after
+the job left the queue. The lock map's own mutex is held only to look up or
+drop an entry, and a thread holds at most one repo lock, so there is no lock
+ordering to get wrong. Entries are dropped when nothing references them.
+
+**Why not group jobs per repo at dispatch:** the tick would have to batch
+and hand a repo's whole list to one thread, changing the pool's one-job
+contract and the per-row completion messages for no gain. **Why not one
+global reclaim lock:** different repos share nothing, and a multi-GB
+`worktree remove` in one repo should not stall another. **Why not retry on
+failure:** a retry hides a race instead of removing it, and DD-123 already
+leaves failures on disk rather than escalating.
+
+**Consequences:** A pool thread can block behind another reclaim of the same
+repo, bounded by that reclaim's git timeouts; other pool threads keep
+draining the queue.

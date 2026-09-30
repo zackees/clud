@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd_streams};
@@ -90,8 +90,23 @@ pub(crate) struct RepoLocks {
 impl RepoLocks {
     /// Run `f` while holding the lock for `key`.
     pub(crate) fn with_lock<T>(&self, key: &Path, f: impl FnOnce() -> T) -> T {
-        let _ = (key, &self.map);
-        f()
+        let repo_lock = {
+            let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(map.entry(key.to_path_buf()).or_default())
+        };
+        let result = {
+            // A poisoned repo lock only means an earlier reclaim panicked;
+            // the mutex guards no data, so carry on.
+            let _held = repo_lock.lock().unwrap_or_else(PoisonError::into_inner);
+            f()
+        };
+        let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        // Two references: the map's and ours. Anyone else waiting holds a
+        // third, and their own release will drop the entry instead.
+        if Arc::strong_count(&repo_lock) == 2 {
+            map.remove(key);
+        }
+        result
     }
 }
 
