@@ -8,6 +8,11 @@
 //! The root itself is never a removal target: nothing in clud deletes it, and
 //! `git worktree remove` only removes the child it is given.
 //!
+//! [`alloc_wt_path`] is the one allocator for entries (#1486): it reserves
+//! the directory atomically, so a path it returns exists before any caller
+//! prints it. An unused reservation stays an empty, non-git directory that
+//! the daemon reclaims as `reserved-unused` after the same 24 h grace.
+//!
 //! Also owns the warn-only size check behind `worktrees.warn_bytes`: size
 //! never deletes pinned work, it only produces a warning in `clud gc list`.
 
@@ -57,6 +62,73 @@ pub fn ensure_worktree_root() -> Option<PathBuf> {
         return None;
     }
     ensure_worktree_root_at(&super::session_tmp::home_dir()?).ok()
+}
+
+/// The infix between the repo slug and the suffix, shared with
+/// `gc/reconcile.rs`'s `{repo_name}-wt-` matcher.
+pub const WT_INFIX: &str = "-wt-";
+
+/// Upper bound on collision ordinals (`-2`, `-3`, ...). Reaching it means
+/// something is creating names in a loop, not a legitimate collision.
+const MAX_ORDINAL: u32 = 10_000;
+
+/// Issue #1486: reserve a fresh `~/.clud/tmp-wt/<slug>-wt-<suffix>` and
+/// return it. See [`alloc_wt_path_in`].
+pub fn alloc_wt_path(slug: &str, suffix: &str) -> std::io::Result<PathBuf> {
+    let root = worktree_root()
+        .ok_or_else(|| std::io::Error::other("no home directory; cannot resolve ~/.clud/tmp-wt"))?;
+    alloc_wt_path_in(&root, slug, suffix)
+}
+
+/// Reserve a fresh `<root>/<slug>-wt-<suffix>` directory and return its path,
+/// which **exists on return**. On a collision it tries
+/// `<slug>-wt-<suffix>-2`, `-3`, ... in order. Each attempt is one
+/// `create_dir`, which fails if the name exists, so two concurrent callers
+/// never receive the same path. This is the one allocator behind #1486's
+/// refusal messages and `safe-gh-*` helpers: a printed path is always real.
+///
+/// `slug` and `suffix` must each be one non-empty path component with no
+/// separator and no character Windows rejects; otherwise `InvalidInput`, and
+/// nothing is reserved.
+pub fn alloc_wt_path_in(root: &Path, slug: &str, suffix: &str) -> std::io::Result<PathBuf> {
+    validate_component("slug", slug)?;
+    validate_component("suffix", suffix)?;
+    fs::create_dir_all(root)?;
+    let base = format!("{slug}{WT_INFIX}{suffix}");
+    for ordinal in 1..=MAX_ORDINAL {
+        let name = if ordinal == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{ordinal}")
+        };
+        let candidate = root.join(name);
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "no free ordinal for {base} under {} after {MAX_ORDINAL} attempts",
+        root.display()
+    )))
+}
+
+/// Separators, and the characters Windows rejects in a file name.
+fn is_forbidden_char(c: char) -> bool {
+    c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+}
+
+fn validate_component(what: &str, value: &str) -> std::io::Result<()> {
+    let bad =
+        value.is_empty() || value == "." || value == ".." || value.chars().any(is_forbidden_char);
+    if bad {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid worktree {what} {value:?}: must be one plain path component"),
+        ));
+    }
+    Ok(())
 }
 
 /// Result of a bounded size check.

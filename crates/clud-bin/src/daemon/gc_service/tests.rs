@@ -1438,6 +1438,7 @@ fn repo_worktree_rows_surface_in_gc_list_shape() {
             state: RepoWorktreeState::Reclaimable,
             reason: reason.to_string(),
         },
+        reservation: false,
     };
     let mut cache = SpareReasons::new();
     assert!(cache.begin_repo_probe());

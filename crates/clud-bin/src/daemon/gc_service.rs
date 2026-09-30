@@ -1010,7 +1010,7 @@ fn repo_worktree_list_rows(
                 id: 0,
                 kind: REPO_WORKTREE_KIND.to_string(),
                 path: r.path.clone(),
-                repo_root: Some(r.repo_root.clone()),
+                repo_root: (!r.reservation).then(|| r.repo_root.clone()),
                 branch: r.branch.clone(),
                 agent_id: None,
                 created_unix: r.mtime_unix,

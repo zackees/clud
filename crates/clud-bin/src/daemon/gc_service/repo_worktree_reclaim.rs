@@ -98,6 +98,27 @@ pub(crate) fn reverify_reclaim(
     }
 }
 
+/// Issue #1486: the pool-side re-check for an unused `tmp-wt` reservation.
+/// `fresh` is `probe_reservation` re-run immediately before the delete;
+/// `still_under_root` is whether the path is still strictly inside the
+/// worktree root the verdict was computed against. Anything but an
+/// unchanged `reserved-unused` verdict vetoes.
+pub(crate) fn reverify_reservation(
+    fresh: &RepoWorktreeRow,
+    still_under_root: bool,
+) -> Result<(), String> {
+    if !still_under_root {
+        return Err("not under the worktree root".to_string());
+    }
+    if !fresh.reservation {
+        return Err("no longer a reservation".to_string());
+    }
+    if fresh.verdict.state != RepoWorktreeState::Reclaimable {
+        return Err(format!("now {}", fresh.verdict.reason));
+    }
+    Ok(())
+}
+
 /// `git branch -D` runs only when the local branch still points at the tip
 /// the verdict proved landed. `-D` is needed because a squash-merged tip is
 /// never "merged" by ancestry (DD-122); this equality is what makes it safe.
@@ -201,7 +222,48 @@ mod tests {
                 state,
                 reason: reason.to_string(),
             },
+            reservation: false,
         }
+    }
+
+    fn reserved(state: RepoWorktreeState, reason: &str) -> RepoWorktreeRow {
+        RepoWorktreeRow {
+            repo_root: String::new(),
+            reservation: true,
+            ..row(state, reason, None, None)
+        }
+    }
+
+    // ---- #1486: reservation re-check. Spare + reason first. ----
+
+    #[test]
+    fn reverify_reservation_spares_every_changed_fact() {
+        for reason in ["not empty", "process inside", "unlisted checkout", "grace"] {
+            assert_eq!(
+                reverify_reservation(&reserved(Pinned, reason), true),
+                Err(format!("now {reason}"))
+            );
+        }
+        assert_eq!(
+            reverify_reservation(&reserved(Dangling, "path missing"), true),
+            Err("now path missing".to_string())
+        );
+        assert_eq!(
+            reverify_reservation(&reserved(Reclaimable, "reserved-unused"), false),
+            Err("not under the worktree root".to_string())
+        );
+        assert_eq!(
+            reverify_reservation(&landed(), true),
+            Err("no longer a reservation".to_string())
+        );
+    }
+
+    #[test]
+    fn reverify_reservation_passes_an_unchanged_unused_reservation() {
+        assert_eq!(
+            reverify_reservation(&reserved(Reclaimable, "reserved-unused"), true),
+            Ok(())
+        );
     }
 
     fn landed() -> RepoWorktreeRow {

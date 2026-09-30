@@ -22,10 +22,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd};
-use super::repo_worktree_probe::{collect_process_cwds, probe_one, PrRecord, RepoWorktreeRow};
-use super::repo_worktree_reclaim::{
-    branch_delete_decision, remote_delete_decision, reverify_reclaim,
+use super::repo_worktree_probe::{
+    collect_process_cwds, probe_one, probe_reservation, PrRecord, RepoWorktreeRow,
 };
+use super::repo_worktree_reclaim::{
+    branch_delete_decision, remote_delete_decision, reverify_reclaim, reverify_reservation,
+};
+use crate::gc::worktree_root::is_under_worktree_root;
 
 const GIT_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Removing a worktree deletes its ignored build output too (a `target/` can
@@ -138,6 +141,9 @@ pub(crate) fn run_reclaim(
     job: &ReclaimJob,
     lookup_prs: &dyn Fn(&Path) -> Option<Vec<PrRecord>>,
 ) -> ReclaimOutcome {
+    if job.row.reservation {
+        return run_reservation_reclaim(job);
+    }
     if git_discovery_env_is_poisoned() {
         return ReclaimOutcome::Spared("git discovery env set".to_string());
     }
@@ -214,4 +220,28 @@ pub(crate) fn run_reclaim(
         notes.push(format!("prune failed: {err}"));
     }
     ReclaimOutcome::Removed { notes }
+}
+
+/// Issue #1486: reclaim an unused `tmp-wt` reservation. Re-probes it from
+/// scratch (fresh process table, fresh emptiness, fresh age), requires the
+/// unchanged `reserved-unused` verdict ([`reverify_reservation`]), then
+/// calls `remove_dir`, which the OS refuses for a directory that gained an
+/// entry in the last instant. Never recursive, never git.
+fn run_reservation_reclaim(job: &ReclaimJob) -> ReclaimOutcome {
+    let path = PathBuf::from(&job.row.path);
+    let still_under_root = job
+        .wt_root
+        .as_deref()
+        .is_some_and(|root| is_under_worktree_root(&path, root));
+    let procs = collect_process_cwds();
+    let fresh = probe_reservation(&path, &job.session_cwds, &procs);
+    if let Err(reason) = reverify_reservation(&fresh, still_under_root) {
+        return ReclaimOutcome::Spared(reason);
+    }
+    match std::fs::remove_dir(&path) {
+        Ok(()) => ReclaimOutcome::Removed {
+            notes: vec!["removed unused reservation".to_string()],
+        },
+        Err(err) => ReclaimOutcome::Failed(format!("remove_dir: {err}")),
+    }
 }

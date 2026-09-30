@@ -129,3 +129,104 @@ fn allocated_names_keep_the_reconcile_shape() {
         WORKTREE_ROOT_DIR_NAME
     ));
 }
+
+// ---- #1486: the ordinal allocator. ----
+
+#[test]
+fn alloc_takes_the_plain_name_first_and_it_exists() {
+    let home = tempdir().unwrap();
+    let root = worktree_root_for(home.path());
+    let path = alloc_wt_path_in(&root, "clud", "432").unwrap();
+    assert!(path.is_dir(), "returned path must exist on return");
+    assert_eq!(path, root.join("clud-wt-432"));
+    let name = path.file_name().unwrap().to_str().unwrap();
+    assert!(crate::gc::reconcile::is_sibling_clone_dir_name(
+        "clud", name
+    ));
+}
+
+/// #1486 acceptance 6 at the allocator: consecutive calls get `-wt-432`,
+/// `-wt-432-2`, `-wt-432-3`, and each exists the moment it is returned.
+#[test]
+fn alloc_collisions_take_the_next_ordinal_and_every_path_exists() {
+    let home = tempdir().unwrap();
+    let root = worktree_root_for(home.path());
+    let mut got = Vec::new();
+    for _ in 0..3 {
+        let path = alloc_wt_path_in(&root, "clud", "432").unwrap();
+        assert!(path.exists(), "{} must exist on return", path.display());
+        got.push(path);
+    }
+    assert_eq!(
+        got,
+        [
+            root.join("clud-wt-432"),
+            root.join("clud-wt-432-2"),
+            root.join("clud-wt-432-3")
+        ]
+    );
+}
+
+/// A pre-existing plain file counts as taken, and a gap is reused lowest
+/// ordinal first.
+#[test]
+fn alloc_skips_a_file_and_fills_a_gap() {
+    let home = tempdir().unwrap();
+    let root = ensure_worktree_root_at(home.path()).unwrap();
+    fs::write(root.join("clud-wt-7"), b"not a dir").unwrap();
+    fs::create_dir(root.join("clud-wt-7-3")).unwrap();
+    assert_eq!(
+        alloc_wt_path_in(&root, "clud", "7").unwrap(),
+        root.join("clud-wt-7-2")
+    );
+    assert_eq!(
+        alloc_wt_path_in(&root, "clud", "7").unwrap(),
+        root.join("clud-wt-7-4")
+    );
+}
+
+#[test]
+fn concurrent_allocations_never_share_a_path() {
+    let home = tempdir().unwrap();
+    let root = worktree_root_for(home.path());
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let root = root.clone();
+            std::thread::spawn(move || alloc_wt_path_in(&root, "clud", "1").unwrap())
+        })
+        .collect();
+    let mut paths: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(paths.iter().all(|p| p.is_dir()));
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths.len(), 8, "every caller must get its own directory");
+}
+
+#[test]
+fn alloc_rejects_components_that_would_escape_the_root() {
+    let home = tempdir().unwrap();
+    let root = worktree_root_for(home.path());
+    for (slug, suffix) in [
+        ("", "1"),
+        ("clud", ""),
+        ("..", "1"),
+        (".", "1"),
+        ("clud", ".."),
+        ("a/b", "1"),
+        ("a\\b", "1"),
+        ("clud", "1/../../x"),
+        ("c:", "1"),
+        ("clud", "a\nb"),
+    ] {
+        let err = alloc_wt_path_in(&root, slug, suffix).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{slug:?} {suffix:?}"
+        );
+    }
+    assert!(
+        !root.exists() || fs::read_dir(&root).unwrap().next().is_none(),
+        "a rejected call must reserve nothing"
+    );
+}

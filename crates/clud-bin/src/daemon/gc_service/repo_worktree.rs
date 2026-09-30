@@ -213,9 +213,181 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
     }
 }
 
+/// Issue #1486: facts for a direct child of `~/.clud/tmp-wt` that no
+/// `git worktree list` claimed — typically a directory the refusal message
+/// or a `safe-gh-*` helper reserved through `alloc_wt_path` and nobody used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReservedDirFacts {
+    pub(crate) path_exists: bool,
+    /// The directory holds a `.git` entry: a checkout the repo probe could
+    /// not place (its repo moved, or git failed). Never reclaimed here.
+    pub(crate) has_git_entry: bool,
+    /// `Some(true)` when it has no entries at all; `None` when unreadable.
+    pub(crate) empty: Option<bool>,
+    pub(crate) process_inside: bool,
+    pub(crate) processes_unverifiable: bool,
+    /// Seconds since the directory's mtime; `None` when unknown.
+    pub(crate) age_secs: Option<u64>,
+}
+
+/// Decide one unclaimed `tmp-wt` child. Precedence, first match wins:
+///
+/// | condition                          | state       | reason                     |
+/// |------------------------------------|-------------|----------------------------|
+/// | path missing                       | dangling    | `path missing`             |
+/// | a process/session inside           | pinned      | `process inside`           |
+/// | process table unreadable           | pinned      | `process table unavailable`|
+/// | holds a `.git` entry               | pinned      | `unlisted checkout`        |
+/// | emptiness unknown                  | pinned      | `unverifiable`             |
+/// | not empty                          | pinned      | `not empty`                |
+/// | empty, age >= 24 h                 | reclaimable | `reserved-unused`          |
+/// | empty, younger/age unknown         | pinned      | `grace`                    |
+///
+/// Only an empty directory is ever reclaimable, and the executor removes it
+/// with a plain `remove_dir`, which the OS refuses for a non-empty one.
+pub(crate) fn reserved_dir_verdict(facts: &ReservedDirFacts) -> RepoWorktreeVerdict {
+    if !facts.path_exists {
+        return RepoWorktreeVerdict {
+            state: RepoWorktreeState::Dangling,
+            reason: "path missing".to_string(),
+        };
+    }
+    if facts.process_inside {
+        return RepoWorktreeVerdict::pinned("process inside");
+    }
+    if facts.processes_unverifiable {
+        return RepoWorktreeVerdict::pinned("process table unavailable");
+    }
+    if facts.has_git_entry {
+        return RepoWorktreeVerdict::pinned("unlisted checkout");
+    }
+    match facts.empty {
+        None => RepoWorktreeVerdict::pinned("unverifiable"),
+        Some(false) => RepoWorktreeVerdict::pinned("not empty"),
+        Some(true) => match facts.age_secs {
+            Some(age) if age >= ABANDONED_EMPTY_GRACE_SECS => {
+                RepoWorktreeVerdict::reclaimable(RESERVED_UNUSED)
+            }
+            _ => RepoWorktreeVerdict::pinned("grace"),
+        },
+    }
+}
+
+/// The `gc list` reason for a reclaimable unused reservation (#1486).
+pub(crate) const RESERVED_UNUSED: &str = "reserved-unused";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty, idle reservation two days old. Each test flips one fact.
+    fn reservation() -> ReservedDirFacts {
+        ReservedDirFacts {
+            path_exists: true,
+            has_git_entry: false,
+            empty: Some(true),
+            process_inside: false,
+            processes_unverifiable: false,
+            age_secs: Some(2 * DAY),
+        }
+    }
+
+    fn assert_reserved(facts: ReservedDirFacts, state: RepoWorktreeState, reason: &str) {
+        assert_eq!(
+            reserved_dir_verdict(&facts),
+            RepoWorktreeVerdict {
+                state,
+                reason: reason.to_string()
+            },
+            "facts: {facts:?}"
+        );
+    }
+
+    // ---- #1486: reserved-unused. Spare + reason first. ----
+
+    #[test]
+    fn reserved_dir_spare_rows_each_carry_their_reason() {
+        let cases = [
+            (
+                ReservedDirFacts {
+                    process_inside: true,
+                    ..reservation()
+                },
+                "process inside",
+            ),
+            (
+                ReservedDirFacts {
+                    processes_unverifiable: true,
+                    ..reservation()
+                },
+                "process table unavailable",
+            ),
+            (
+                ReservedDirFacts {
+                    has_git_entry: true,
+                    ..reservation()
+                },
+                "unlisted checkout",
+            ),
+            (
+                ReservedDirFacts {
+                    empty: None,
+                    ..reservation()
+                },
+                "unverifiable",
+            ),
+            (
+                ReservedDirFacts {
+                    empty: Some(false),
+                    age_secs: Some(400 * DAY),
+                    ..reservation()
+                },
+                "not empty",
+            ),
+            (
+                ReservedDirFacts {
+                    age_secs: Some(DAY - 1),
+                    ..reservation()
+                },
+                "grace",
+            ),
+            (
+                ReservedDirFacts {
+                    age_secs: None,
+                    ..reservation()
+                },
+                "grace",
+            ),
+        ];
+        for (facts, reason) in cases {
+            assert_reserved(facts, Pinned, reason);
+        }
+    }
+
+    #[test]
+    fn a_missing_reservation_is_dangling() {
+        assert_reserved(
+            ReservedDirFacts {
+                path_exists: false,
+                ..reservation()
+            },
+            Dangling,
+            "path missing",
+        );
+    }
+
+    #[test]
+    fn an_empty_idle_reservation_past_grace_is_reserved_unused() {
+        assert_reserved(reservation(), Reclaimable, RESERVED_UNUSED);
+        assert_reserved(
+            ReservedDirFacts {
+                age_secs: Some(DAY),
+                ..reservation()
+            },
+            Reclaimable,
+            "reserved-unused",
+        );
+    }
 
     /// A clean, idle, attached worktree whose branch is squash-merged via a
     /// PR that covers its tip. Each test flips exactly one fact.
