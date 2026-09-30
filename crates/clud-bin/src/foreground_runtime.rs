@@ -3676,9 +3676,14 @@ mod tests {
         let store = FakeSecretStore(Some("openrouter-routing-secret".to_string()));
         let runtime =
             ForegroundRuntime::start_with_secret_store(&plan, Vec::new(), &store).unwrap();
+        // Expected window read from the served seed, which the scheduled
+        // refresh rewrites; the invariant is that it is emitted verbatim.
+        let served = crate::server_settings::effective_context_window("xiaomi/mimo-v2.6-flash")
+            .expect("seed covers the reported model")
+            .to_string();
         assert_eq!(
             lookup(runtime.env(), "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
-            Some("1048576")
+            Some(served.as_str())
         );
         // The compact threshold stays unset on this route: with the real
         // window learned, the harness derives its own threshold (#1258).

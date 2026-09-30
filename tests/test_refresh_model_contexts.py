@@ -105,9 +105,9 @@ def test_committed_seed_covers_the_reported_model() -> None:
     document = json.loads(_asset_text())
     assert document["schema_version"] == 1
     windows = document["sections"][producer.SECTION_KEY]
-    # The day-one seed from the live datasheet (#1258). If a later refresh
-    # changes this value, that is a real window change worth reviewing.
-    assert windows["xiaomi/mimo-v2.6-flash"] == 1_048_576
+    # Coverage, not a pinned value: the scheduled refresh (#1258) rewrites
+    # windows from the live datasheet, so a literal here breaks `main`.
+    assert "xiaomi/mimo-v2.6-flash" in windows
     assert all(
         producer.MIN_CONTEXT_TOKENS <= value <= producer.MAX_CONTEXT_TOKENS
         for value in windows.values()

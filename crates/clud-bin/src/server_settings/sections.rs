@@ -326,14 +326,15 @@ mod tests {
     fn built_in_model_contexts_cover_the_live_inventory() {
         let windows = &built_in::<ModelContexts>().windows;
         assert!(!windows.is_empty());
-        // Day-one seed from the live datasheet (#1258). If a later scheduled
-        // refresh changes this value, that is a real window change worth
-        // reviewing, not a flake.
-        assert_eq!(windows.get("xiaomi/mimo-v2.6-flash"), Some(&1_048_576));
-        assert_eq!(
-            windows.get("~anthropic/claude-sonnet-latest"),
-            Some(&1_000_000)
-        );
+        // Coverage, not values: the scheduled refresh (#1258) rewrites the
+        // windows from OpenRouter's live datasheet, so pinning a number here
+        // turns every upstream change into a red `main`.
+        for id in ["xiaomi/mimo-v2.6-flash", "~anthropic/claude-sonnet-latest"] {
+            assert!(windows.contains_key(id), "seed must cover {id}");
+        }
+        assert!(windows
+            .values()
+            .all(|tokens| (1_000..=10_000_000).contains(tokens)));
     }
 
     #[test]
@@ -413,9 +414,15 @@ mod tests {
         assert_eq!(effective_context_window("gpt-6-sol"), Some(1_050_000));
         assert!(!model_contexts().windows.contains_key("gpt-6-sol"));
         // Served map: uncataloged OpenRouter IDs resolve from the datasheet.
+        // Compared against the seed itself: the scheduled refresh rewrites it.
+        let served = model_contexts()
+            .windows
+            .get("xiaomi/mimo-v2.6-flash")
+            .copied()
+            .expect("seed covers the reported model");
         assert_eq!(
             effective_context_window("xiaomi/mimo-v2.6-flash"),
-            Some(1_048_576)
+            Some(served)
         );
         // Neither source: nothing, which leaves today's behavior unchanged.
         assert_eq!(
