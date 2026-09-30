@@ -163,27 +163,10 @@ pub fn resolve_passthrough(name: &str, facts: &Facts) -> Option<PathBuf> {
 fn handle(session: Session, args: &[OsString]) -> i32 {
     match session {
         Session::Python { target } => super::python_shim::run(&target, args),
-        Session::Gh(gh) => recorded("gh", args, |rec| super::gh_shim::run(&gh, args, rec)),
-        Session::Git { target } => recorded("git", args, |rec| {
-            super::run_child("git", &target, args, rec)
-        }),
+        Session::Gh(gh) => super::gh_shim::run(&gh, args),
+        Session::Git { target } => super::git_shim::run(&target, args),
         Session::Rm => super::rm_shim::run(args),
     }
-}
-
-/// #1486: one telemetry line per in-session `git` / `gh` invocation. A
-/// handler that ran a child records its exit itself, before it re-raises a
-/// fatal signal; every other return is recorded here. Recording never fails
-/// and never touches the streams.
-fn recorded(
-    tool: &str,
-    args: &[OsString],
-    run: impl FnOnce(&crate::shim_telemetry::Recorder) -> i32,
-) -> i32 {
-    let recorder = crate::shim_telemetry::Recorder::start(tool, args);
-    let code = run(&recorder);
-    recorder.record(code);
-    code
 }
 
 fn native(kind: ShimKind, args: &[OsString]) -> i32 {

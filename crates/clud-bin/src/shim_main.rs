@@ -191,6 +191,35 @@ mod unix_signals {
     }
 }
 
+/// #1486: one telemetry line per in-session `git` / `gh` invocation. A
+/// handler that ran a child records its exit itself, before it re-raises a
+/// fatal signal; every other return is recorded here. Recording never fails
+/// and never touches the streams.
+fn recorded(
+    tool: &str,
+    args: &[OsString],
+    run: impl FnOnce(&crate::shim_telemetry::Recorder) -> i32,
+) -> i32 {
+    let recorder = crate::shim_telemetry::Recorder::start(tool, args);
+    let code = run(&recorder);
+    recorder.record(code);
+    code
+}
+
+mod git_shim {
+    //! In-session `git` (#1486): a telemetry pass-through. Every argv runs
+    //! on the real binary unchanged; nothing is refused.
+
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    pub fn run(target: &Path, args: &[OsString]) -> i32 {
+        super::recorded("git", args, |recorder| {
+            super::run_child("git", target, args, recorder)
+        })
+    }
+}
+
 mod python_shim {
     //! In-session `python` / `python3`: run the interpreter clud resolved
     //! at startup, before the alias directory went on PATH.
@@ -267,7 +296,11 @@ mod gh_shim {
     use super::dispatch::GhSession;
     use crate::shim_telemetry::Recorder;
 
-    pub fn run(session: &GhSession, args: &[OsString], recorder: &Recorder) -> i32 {
+    pub fn run(session: &GhSession, args: &[OsString]) -> i32 {
+        super::recorded("gh", args, |recorder| relay(session, args, recorder))
+    }
+
+    fn relay(session: &GhSession, args: &[OsString], recorder: &Recorder) -> i32 {
         if let (true, Some(watcher)) = (session.fail_fast, session.watcher.as_deref()) {
             match watch_words(args) {
                 Ok(Some(words)) => return watch(&session.target, watcher, &words, recorder),
