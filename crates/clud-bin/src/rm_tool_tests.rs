@@ -510,3 +510,94 @@ fn a_sealed_tree_is_purged_too() {
     assert_eq!(code, 0, "{err}");
     assert!(!wt.exists());
 }
+
+fn git(cwd: &Path, a: &[&str]) -> String {
+    crate::worktrees::run_git(cwd, a).unwrap()
+}
+
+/// Commit `file` (written with `body`) in the checkout at `dir`.
+fn commit_file(dir: &Path, file: &str, body: &str) {
+    std::fs::write(dir.join(file), body).unwrap();
+    git(dir, &["add", file]);
+    let identity = ["-c", "user.name=t", "-c", "user.email=t@localhost"];
+    let mut commit = identity.to_vec();
+    commit.extend(["commit", "-q", "-m", file]);
+    git(dir, &commit);
+}
+
+/// `w.root` pushes to a bare `remote.git` (its `origin`), beside the root and
+/// outside the allowed roots (#1573).
+fn world_with_remote() -> World {
+    let w = world();
+    let base = w.root.parent().unwrap().to_path_buf();
+    let bare = base.join("remote.git");
+    let bare = bare.to_str().unwrap();
+    git(&base, &["init", "-q", "--bare", "-b", "main", bare]);
+    git(&w.root, &["init", "-q", "-b", "main"]);
+    commit_file(&w.root, "a.txt", "a");
+    git(&w.root, &["remote", "add", "origin", bare]);
+    git(&w.root, &["push", "-q", "origin", "main"]);
+    w
+}
+
+/// A fresh clone of `remote.git` named `name`, beside the root.
+fn clone_beside(w: &World, name: &str) -> PathBuf {
+    let base = w.root.parent().unwrap();
+    let bare = base.join("remote.git");
+    git(base, &["clone", "-q", bare.to_str().unwrap(), name]);
+    base.join(name)
+}
+
+#[test]
+fn a_clean_fully_pushed_clone_of_an_allowed_repo_is_trashed() {
+    let w = world_with_remote();
+    let clone = clone_beside(&w, "clone");
+    let (code, _, err) = w.run(Kind::Dir, &["../clone"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!clone.exists(), "the clone is gone");
+    assert_eq!(w.entries().len(), 1, "one trash entry");
+}
+
+#[test]
+fn a_clone_with_unpushed_commits_is_refused() {
+    let w = world_with_remote();
+    let clone = clone_beside(&w, "clone");
+    commit_file(&clone, "b.txt", "b");
+    let (code, _, err) = w.run(Kind::Dir, &["../clone"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("unpushed commits on main"), "{err}");
+    assert!(clone.join("b.txt").exists());
+}
+
+#[test]
+fn a_clone_with_an_untracked_file_is_refused() {
+    let w = world_with_remote();
+    let clone = clone_beside(&w, "clone");
+    std::fs::write(clone.join("notes.txt"), b"keep me").unwrap();
+    let (code, _, err) = w.run(Kind::Dir, &["../clone"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("dirty"), "{err}");
+    assert!(clone.join("notes.txt").exists());
+}
+
+#[test]
+fn an_unrelated_directory_or_repo_beside_the_root_is_refused() {
+    let w = world_with_remote();
+    let base = w.root.parent().unwrap().to_path_buf();
+    let plain = base.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let (code, _, err) = w.run(Kind::Dir, &["../plain"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("outside the allowed roots"), "{err}");
+    assert!(plain.exists());
+
+    let other = base.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q", "-b", "main"]);
+    let url = "https://example.com/else/repo";
+    git(&other, &["remote", "add", "origin", url]);
+    let (code, _, err) = w.run(Kind::Dir, &["../other"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("origin mismatch"), "{err}");
+    assert!(other.exists());
+}

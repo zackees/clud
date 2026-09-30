@@ -11,7 +11,9 @@
 //! `CLUD_RM_ROOTS` path list clud sets for a session, or, outside a session,
 //! the current git checkout (the cwd outside a repo). A root that is a git
 //! checkout also covers that repository's linked worktrees, so a `/grind`
-//! integrator can clean its sibling worktree. Filesystem roots, `$HOME` and
+//! integrator can clean its sibling worktree. A separate clone of an allowed
+//! repo qualifies too when nothing in it would be lost (see
+//! `rm_tool_clone.rs`). Filesystem roots, `$HOME` and
 //! its ancestors, a root itself, `.git`, and anything reached through a
 //! symlinked parent that leaves the roots are always refused. Each call
 //! writes one JSONL audit record under `~/.clud/state/logs/rm/`.
@@ -146,6 +148,8 @@ pub struct Roots {
     worktrees: Option<Vec<PathBuf>>,
     /// The `.git` directories (common dirs) of the roots that are checkouts.
     git_dirs: Option<Vec<PathBuf>>,
+    /// `remote.origin.url` of the roots that are checkouts.
+    origins: Option<Vec<String>>,
 }
 
 impl Roots {
@@ -188,6 +192,7 @@ impl Roots {
             from_env,
             worktrees: None,
             git_dirs: None,
+            origins: None,
         }
     }
 
@@ -216,28 +221,87 @@ impl Roots {
         if let Some(dir) = self.half_removed_worktree(path) {
             return Ok(dir.parent().map_or(dir.clone(), Path::to_path_buf));
         }
+        // And so may a separate clone of an allowed repo, but only when
+        // nothing in it would be lost (#1573).
+        let clone_refusal = match self.clone_of_allowed_repo(path) {
+            Some(Ok(dir)) => return Ok(dir.parent().map_or(dir.clone(), Path::to_path_buf)),
+            Some(Err(reason)) => Some(reason),
+            None => None,
+        };
         let shown: Vec<String> = self.roots.iter().map(|r| r.display().to_string()).collect();
-        Err(format!(
-            "is outside the allowed roots ({})",
-            if shown.is_empty() {
-                "none".to_string()
-            } else {
-                shown.join(", ")
+        let shown = if shown.is_empty() {
+            "none".to_string()
+        } else {
+            shown.join(", ")
+        };
+        Err(match clone_refusal {
+            Some(reason) => format!(
+                "is outside the allowed roots ({shown}), and is not a clone of an allowed repo \
+                 with nothing to lose: {reason}"
+            ),
+            None => format!("is outside the allowed roots ({shown})"),
+        })
+    }
+
+    /// Whether `root` is itself the top of a git checkout.
+    fn is_checkout(root: &Path) -> bool {
+        crate::block_bad_cmd::nearest_repo_root_public(root)
+            .and_then(|r| std::fs::canonicalize(r).ok())
+            .is_some_and(|r| r == root)
+    }
+
+    /// The `origin` URLs of the roots that are checkouts.
+    fn origins(&mut self) -> &[String] {
+        if self.origins.is_none() {
+            let mut found: Vec<String> = Vec::new();
+            for root in self.roots.iter().filter(|r| Self::is_checkout(r)) {
+                let Ok(url) =
+                    crate::worktrees::run_git(root, &["config", "--get", "remote.origin.url"])
+                else {
+                    continue;
+                };
+                let url = url.trim().to_string();
+                if !url.is_empty() && !found.contains(&url) {
+                    found.push(url);
+                }
             }
-        ))
+            self.origins = Some(found);
+        }
+        self.origins.as_deref().unwrap_or_default()
+    }
+
+    /// For `path` in (or equal to) a clone outside the roots: `Ok(clone)` when
+    /// it is a clone of an allowed repo with nothing to lose, `Err(reason)`
+    /// naming the failing check otherwise. `None` when `path` is in no clone.
+    fn clone_of_allowed_repo(&mut self, path: &Path) -> Option<Result<PathBuf, String>> {
+        // The nearest enclosing checkout, which must be a standalone clone
+        // (a `.git` directory, not a worktree's or submodule's `.git` file).
+        let dir = path
+            .ancestors()
+            .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())?
+            .to_path_buf();
+        if !std::fs::symlink_metadata(dir.join(".git")).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+        let home = home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+        if home.as_ref().is_some_and(|home| home.starts_with(&dir)) {
+            return None;
+        }
+        if self.roots.iter().any(|root| root.starts_with(&dir)) {
+            return Some(Err("it contains an allowed root".into()));
+        }
+        let origins = self.origins().to_vec();
+        let verdict = clone::probe(&dir, &origins)
+            .map_err(|error| format!("cannot inspect it: {error}"))
+            .and_then(|facts| clone::verdict(&facts));
+        Some(verdict.map(|()| dir))
     }
 
     /// The `.git` directories of the roots that are themselves checkouts.
     fn git_dirs(&mut self) -> &[PathBuf] {
         if self.git_dirs.is_none() {
             let mut found: Vec<PathBuf> = Vec::new();
-            for root in &self.roots {
-                let is_checkout = crate::block_bad_cmd::nearest_repo_root_public(root)
-                    .and_then(|r| std::fs::canonicalize(r).ok())
-                    .is_some_and(|r| &r == root);
-                if !is_checkout {
-                    continue;
-                }
+            for root in self.roots.iter().filter(|r| Self::is_checkout(r)) {
                 let Ok(text) = crate::worktrees::run_git(root, &["rev-parse", "--git-common-dir"])
                 else {
                     continue;
@@ -290,16 +354,10 @@ impl Roots {
     fn worktrees(&mut self) -> &[PathBuf] {
         if self.worktrees.is_none() {
             let mut found = Vec::new();
-            for root in &self.roots {
-                // Only a root that is itself a checkout brings its worktrees;
-                // a directory inside some repo (say, a dotfiles `$HOME`) must
-                // not widen to that repo.
-                let is_checkout = crate::block_bad_cmd::nearest_repo_root_public(root)
-                    .and_then(|r| std::fs::canonicalize(r).ok())
-                    .is_some_and(|r| &r == root);
-                if !is_checkout {
-                    continue;
-                }
+            // Only a root that is itself a checkout brings its worktrees; a
+            // directory inside some repo (say, a dotfiles `$HOME`) must not
+            // widen to that repo.
+            for root in self.roots.iter().filter(|r| Self::is_checkout(r)) {
                 let Ok(text) =
                     crate::worktrees::run_git(root, &["worktree", "list", "--porcelain"])
                 else {
@@ -1138,6 +1196,9 @@ pub fn session_roots_value(cwd: &Path) -> Option<String> {
         .ok()
         .map(|v| v.to_string_lossy().into_owned())
 }
+
+#[path = "rm_tool_clone.rs"]
+mod clone;
 
 #[cfg(test)]
 #[path = "rm_tool_tests.rs"]
