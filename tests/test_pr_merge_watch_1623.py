@@ -83,7 +83,8 @@ def test_panic_thread_pattern_captures_name_with_and_without_id(watcher) -> None
         "thread 'a::b' panicked at x.rs:1:1:",
     ):
         m = watcher.PANIC_THREAD.match(line)
-        assert m is not None and m.group(1) == "a::b"
+        assert m is not None
+        assert m.group(1) == "a::b"
 
 
 def test_colored_timestamped_failed_line_survives_normalization(watcher) -> None:
