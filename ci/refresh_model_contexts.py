@@ -62,8 +62,37 @@ def _validate_model_id(model_id: Any, index: int) -> str:
     return model_id
 
 
+def _served_window(model_id: str, top_provider: Any) -> int | None:
+    """``top_provider.context_length``, or ``None`` when the row has none.
+
+    Router rows (``openrouter/auto-beta``) publish ``null``; they keep the
+    advertised window instead of losing their row (DD-126). Any other shape
+    fails the run, like every malformed datasheet field.
+    """
+    if top_provider is None:
+        return None
+    if not isinstance(top_provider, dict):
+        raise RefreshError(f"{model_id}: `top_provider` is not an object: {top_provider!r}")
+    served = top_provider.get("context_length")
+    if served is None:
+        return None
+    if not isinstance(served, int) or isinstance(served, bool):
+        raise RefreshError(
+            f"{model_id}: `top_provider.context_length` is not an integer: {served!r}"
+        )
+    if not MIN_CONTEXT_TOKENS <= served <= MAX_CONTEXT_TOKENS:
+        raise RefreshError(
+            f"{model_id}: `top_provider.context_length` {served} outside "
+            f"{MIN_CONTEXT_TOKENS}..={MAX_CONTEXT_TOKENS}"
+        )
+    return served
+
+
 def normalize(rows: list[Any]) -> dict[str, int]:
-    """``{wire id: context_length}`` sorted by wire id (deterministic diffs).
+    """``{wire id: served window}`` sorted by wire id (deterministic diffs).
+
+    The served window is ``min(context_length, top_provider.context_length)``
+    (#1634, DD-126): never more than the default-routed endpoint accepts.
 
     A malformed row fails the whole run: skipping it would silently shrink
     the published map, which is exactly the failure this producer exists to
@@ -84,6 +113,11 @@ def normalize(rows: list[Any]) -> dict[str, int]:
                 f"{model_id}: `context_length` {context} outside "
                 f"{MIN_CONTEXT_TOKENS}..={MAX_CONTEXT_TOKENS}"
             )
+        served = _served_window(model_id, row.get("top_provider"))
+        if served is not None:
+            # #1634 / DD-126: the top-level value is the maximum over every
+            # endpoint; the default-routed endpoint may accept less.
+            context = min(context, served)
         if model_id in windows:
             raise RefreshError(f"{model_id}: duplicate id in the datasheet")
         windows[model_id] = context

@@ -144,7 +144,7 @@ The same edit also becomes the built-in copy in the next release.
 ## The `model_contexts` map (#1258)
 
 `model_contexts` is a flat `{ "<wire-id>": <context window in tokens> }` map of
-exact OpenRouter context windows. Claude Code clamps auto-compact to 200k for
+OpenRouter context windows as served by the default-routed endpoint. Claude Code clamps auto-compact to 200k for
 any model its own catalog does not describe, so without this map every newly
 listed OpenRouter model — starting with `xiaomi/mimo-v2.6-flash`, a 1M model —
 compacts far too early.
@@ -164,6 +164,11 @@ compacts far too early.
   publishing an empty or stale map. The refreshed file is committed straight
   to `main`; installed builds see it through the normal fetch-from-`main` path
   in about 20 minutes.
+- **Which window.** The served window, `min(context_length,
+  top_provider.context_length)`, not the maximum over endpoints, so the map
+  never overstates what the default-routed endpoint accepts (#1634,
+  [DD-126](../DESIGN_DECISIONS.md#dd-126-model_contexts-publishes-the-default-routed-endpoints-window-not-the-endpoint-maximum)).
+  Rows without a top provider keep `context_length`.
 - **Bounds.** Keys are wire IDs: 1..=128 bytes of `[A-Za-z0-9._-/:~]`. Values
   are `1_000..=10_000_000` tokens. The producer and `ModelContexts::validate`
   mirror each other; changing one without the other turns CI red.
