@@ -59,7 +59,8 @@ _TRIPLE = re.compile(
     r"\b((?:x86_64|aarch64|i686|i586|armv7|arm|riscv64gc|wasm32|powerpc64le|s390x)"
     r"-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?)\b"
 )
-_RUNNER = re.compile(r"\b((?:ubuntu|windows|macos)-[a-z0-9.]+(?:-[a-z0-9.]+)*)\b", re.I)
+# The lookbehind keeps `pc-windows-gnu` (a triple) from reading as a runner.
+_RUNNER = re.compile(r"(?<![\w-])((?:ubuntu|windows|macos)-[a-z0-9.]+(?:-[a-z0-9.]+)*)\b", re.I)
 
 
 def runner_triple(runner: str) -> str | None:
