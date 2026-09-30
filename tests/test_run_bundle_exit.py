@@ -13,6 +13,7 @@ and a flushed test-boundary journal that survives an abrupt pytest exit (#1178).
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -218,10 +219,13 @@ def test_progress_journal_survives_the_repo_conftest_scrub(tmp_path: Path, monke
         encoding="utf-8",
     )
 
+    # `run_pytest` replaces the child environment wholesale, and the repo
+    # conftest spawns `git` at session start. Without the parent's PATH and
+    # SYSTEMROOT, Windows cannot find it ("program not found", #1654).
     assert (
         run_pytest(
             "not integration",
-            {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+            {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
             ["-v", "-p", "tests.conftest", str(victim)],
             suite="unit",
         )
