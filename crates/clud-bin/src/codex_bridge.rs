@@ -3352,14 +3352,26 @@ fn record_cache_fuse_refusal(log: Option<&SharedBridgeLog>, conversation_key: &C
     }
 }
 
+/// Not retryable by the client (see [`write_cache_fuse_refusal`]).
+const CACHE_FUSE_REFUSAL_STATUS: u16 = 400;
+const CACHE_FUSE_REFUSAL_BODY: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"clud cache-health fuse: this conversation sent repeated large uncached requests and was stopped before another one. This is not retryable and is not a provider rate limit. The likely cause is a wrong or oversized diff range (for example a stale @{upstream} after a rebase): check the range, then run /clear or restart to resume, or switch to --harness codex"}}"#;
+
 fn write_cache_fuse_refusal(
     stream: &mut TcpStream,
     log: Option<&SharedBridgeLog>,
     conversation_key: &ConversationKey,
 ) {
     record_cache_fuse_refusal(log, conversation_key);
-    let body = br#"{"type":"error","error":{"type":"overloaded_error","message":"clud stopped this Codex conversation after repeated large uncached requests; run /clear or restart after investigating cache health, or switch to --harness codex"}}"#;
-    let _ = write_response(stream, 429, "application/json", body, false);
+    // A 400 `invalid_request_error`, not a 429 `overloaded_error`: Claude Code
+    // retries a 429 on its own, which is the loop this refusal exists to stop
+    // (#1301). The likely cause is a wrong diff range, so the message says so.
+    let _ = write_response(
+        stream,
+        CACHE_FUSE_REFUSAL_STATUS,
+        "application/json",
+        CACHE_FUSE_REFUSAL_BODY.as_bytes(),
+        false,
+    );
 }
 
 fn cache_health_name(health: CacheHealth) -> &'static str {
@@ -4530,7 +4542,11 @@ Connection: close
                 &headers,
             ),
         );
-        assert_eq!(status(&refused), 429, "{refused}");
+        assert_eq!(status(&refused), 400, "{refused}");
+        assert!(refused.contains("invalid_request_error"), "{refused}");
+        assert!(!refused.contains("overloaded_error"), "{refused}");
+        assert!(refused.contains("diff range"), "{refused}");
+        assert!(refused.contains("not retryable"), "{refused}");
         assert_eq!(
             upstream.requests().len(),
             4,
@@ -4795,7 +4811,7 @@ Connection: close
                 .collect::<Vec<_>>()
         });
         statuses.sort_unstable();
-        assert_eq!(statuses, [200, 200, 200, 200, 429]);
+        assert_eq!(statuses, [200, 200, 200, 200, 400]);
         assert_eq!(upstream.requests().len(), 4, "the fifth turn stays local");
         bridge.shutdown().unwrap();
     }

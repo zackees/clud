@@ -195,7 +195,12 @@ The first large turn after startup, compaction, clear, or a route boundary is
 cold. Thereafter three consecutive 50K-or-larger requests with less than 10%
 cache credit arm a session-local fuse. The bridge warns as the window becomes
 degraded, then rejects the following Codex request locally before it can incur
-another large replay. A lifecycle boundary or bridge restart starts a new cold
+another large replay. The refusal is an HTTP 400 `invalid_request_error`, never
+a 429: Claude Code retries a 429 by itself, which is exactly the loop the fuse
+exists to stop. Its message says it is not retryable and names the likely cause
+(a wrong or oversized review diff range, such as a stale `@{upstream}`) and how
+to resume (check the range, then `/clear` or restart). Thresholds are
+unchanged, and a genuine upstream 429 keeps its bounded retry. A lifecycle boundary or bridge restart starts a new cold
 window. Missing or malformed usage is inert: it cannot panic, trip, clear, or
 poison later valid accounting. Anthropic-shaped DeepSeek and OpenRouter proxies
 are intentionally outside this Codex-specific fuse.
