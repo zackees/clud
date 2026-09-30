@@ -113,6 +113,18 @@ pub(super) fn probe_cmd(
     args: &[&str],
     timeout: Duration,
 ) -> Option<(i32, String)> {
+    probe_cmd_streams(program, cwd, args, timeout).map(|(code, stdout, _)| (code, stdout))
+}
+
+/// [`probe_cmd`] that also returns stderr, kept apart from stdout, for a
+/// caller that reports why a command failed (#1628/#1632: a reclaim's
+/// `git worktree remove` exit code alone named no cause).
+pub(super) fn probe_cmd_streams(
+    program: &str,
+    cwd: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<(i32, String, String)> {
     let mut argv = vec![program.to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
     let process = NativeProcess::new(ProcessConfig {
@@ -137,18 +149,22 @@ pub(super) fn probe_cmd(
 
     // `read_combined` yields both streams regardless of `stderr_mode`, so
     // the stream tag is what actually keeps stderr out of the signal.
-    let push_stdout = |text: &mut String, event: running_process::StreamEvent| {
-        if event.stream == StreamKind::Stdout {
-            text.push_str(&String::from_utf8_lossy(&event.line));
-            text.push('\n');
-        }
+    let mut err = String::new();
+    let mut push = |text: &mut String, event: running_process::StreamEvent| {
+        let sink = if event.stream == StreamKind::Stdout {
+            text
+        } else {
+            &mut err
+        };
+        sink.push_str(&String::from_utf8_lossy(&event.line));
+        sink.push('\n');
     };
 
     let deadline = Instant::now() + timeout;
     let mut text = String::new();
     loop {
         match process.read_combined(Some(Duration::from_millis(25))) {
-            ReadStatus::Line(event) => push_stdout(&mut text, event),
+            ReadStatus::Line(event) => push(&mut text, event),
             ReadStatus::Eof => break,
             ReadStatus::Timeout => {}
         }
@@ -158,7 +174,7 @@ pub(super) fn probe_cmd(
                 while let ReadStatus::Line(event) =
                     process.read_combined(Some(Duration::from_millis(5)))
                 {
-                    push_stdout(&mut text, event);
+                    push(&mut text, event);
                 }
                 break;
             }
@@ -175,7 +191,7 @@ pub(super) fn probe_cmd(
     process
         .wait(Some(Duration::from_secs(1)))
         .ok()
-        .map(|code| (code, text))
+        .map(|code| (code, text, err))
 }
 
 /// The remote default branch to compare against, e.g. `origin/main`.

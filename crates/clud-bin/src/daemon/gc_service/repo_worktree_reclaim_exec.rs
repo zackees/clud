@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd};
+use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd_streams};
 use super::repo_worktree_probe::{
     collect_process_cwds, probe_one, probe_reservation, PrRecord, RepoWorktreeRow,
 };
@@ -64,9 +64,16 @@ pub(crate) enum ReclaimOutcome {
 }
 
 fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
-    match probe_cmd("git", cwd, args, timeout) {
-        Some((0, out)) => Ok(out),
-        Some((code, _)) => Err(format!("git {} exited {code}", args.join(" "))),
+    match probe_cmd_streams("git", cwd, args, timeout) {
+        Some((0, out, _)) => Ok(out),
+        Some((code, _, err)) => {
+            let err = err.trim();
+            if err.is_empty() {
+                Err(format!("git {} exited {code}", args.join(" ")))
+            } else {
+                Err(format!("git {} exited {code}: {err}", args.join(" ")))
+            }
+        }
         None => Err(format!(
             "git {} timed out or failed to start",
             args.join(" ")
