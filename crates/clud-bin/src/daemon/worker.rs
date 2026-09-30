@@ -220,6 +220,7 @@ pub(super) fn run_worker(
                 daemon_gone.load(Ordering::Acquire),
                 shared.stop_accepting.load(Ordering::Acquire),
                 shared.has_client(),
+                shared.awaiting_first_client(FIRST_ATTACH_GRACE),
             ) {
                 break;
             }
@@ -233,6 +234,7 @@ pub(super) fn run_worker(
             daemon_gone.load(Ordering::Acquire),
             shared.stop_accepting.load(Ordering::Acquire),
             shared.has_client(),
+            shared.awaiting_first_client(FIRST_ATTACH_GRACE),
         ) {
             break;
         }
@@ -412,8 +414,19 @@ fn run_repeat_worker(
 /// hours after their daemons died, reparented to init, ignoring SIGTERM and
 /// needing SIGKILL. The watchdog had run -- the tree was reaped and the exit
 /// broadcast -- but the process itself never left this loop.
-fn should_stop_accepting(daemon_gone: bool, stop_accepting: bool, has_client: bool) -> bool {
-    daemon_gone || (stop_accepting && !has_client)
+/// #1582: how long an exited worker keeps its port open for a client that
+/// has not attached yet. The launching client learns the port from the
+/// daemon and then does pre-attach work before connecting; a child that
+/// exits inside that gap must still hand its exit code to that client.
+pub(super) const FIRST_ATTACH_GRACE: Duration = Duration::from_secs(30);
+
+fn should_stop_accepting(
+    daemon_gone: bool,
+    stop_accepting: bool,
+    has_client: bool,
+    awaiting_first_client: bool,
+) -> bool {
+    daemon_gone || (stop_accepting && !has_client && !awaiting_first_client)
 }
 
 fn run_repeat_once(
