@@ -438,8 +438,9 @@ pub fn command_spec_for_subprocess(argv: Vec<String>) -> CommandSpec {
 }
 
 /// Issue #1486: clud's own `git` / `gh` spawns (GC probes, `worktrees.rs`,
-/// grind, `pr_merge_watch` lookups) must never route through the session
-/// alias, which refuses clone / `worktree add`. A bare `git` / `gh` program
+/// grind, `pr_merge_watch` lookups) bypass the session's telemetry alias:
+/// no extra process hop and no telemetry line for clud's own maintenance.
+/// A bare `git` / `gh` program
 /// becomes the session's real target when one is set
 /// ([`crate::shim_registry::real_program`]); anything else is untouched.
 fn with_real_git_or_gh(mut argv: Vec<String>) -> Vec<String> {

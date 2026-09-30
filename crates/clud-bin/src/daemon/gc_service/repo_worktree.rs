@@ -214,8 +214,8 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
 }
 
 /// Issue #1486: facts for a direct child of `~/.clud/tmp-wt` that no
-/// `git worktree list` claimed — typically a directory the refusal message
-/// or a `safe-gh-*` helper reserved through `alloc_wt_path` and nobody used.
+/// `git worktree list` claimed — typically a directory reserved through
+/// `alloc_wt_path` that nobody used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReservedDirFacts {
     pub(crate) path_exists: bool,

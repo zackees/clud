@@ -138,7 +138,7 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
         ShimKind::Git => target(registry::GIT_TARGET_KEY).map(|target| Session::Git { target }),
         ShimKind::Rm => session_dir.map(|_| Session::Rm),
         // Native: never validated here.
-        ShimKind::SafeRm | ShimKind::SafeGhClone | ShimKind::SafeGhWorktree => None,
+        ShimKind::SafeRm => None,
     }
 }
 
@@ -163,17 +163,32 @@ pub fn resolve_passthrough(name: &str, facts: &Facts) -> Option<PathBuf> {
 fn handle(session: Session, args: &[OsString]) -> i32 {
     match session {
         Session::Python { target } => super::python_shim::run(&target, args),
-        Session::Gh(gh) => super::gh_shim::run(&gh, args),
-        Session::Git { target } => super::git_shim::run(&target, args),
+        Session::Gh(gh) => recorded("gh", args, |rec| super::gh_shim::run(&gh, args, rec)),
+        Session::Git { target } => recorded("git", args, |rec| {
+            super::run_child("git", &target, args, rec)
+        }),
         Session::Rm => super::rm_shim::run(args),
     }
+}
+
+/// #1486: one telemetry line per in-session `git` / `gh` invocation. A
+/// handler that ran a child records its exit itself, before it re-raises a
+/// fatal signal; every other return is recorded here. Recording never fails
+/// and never touches the streams.
+fn recorded(
+    tool: &str,
+    args: &[OsString],
+    run: impl FnOnce(&crate::shim_telemetry::Recorder) -> i32,
+) -> i32 {
+    let recorder = crate::shim_telemetry::Recorder::start(tool, args);
+    let code = run(&recorder);
+    recorder.record(code);
+    code
 }
 
 fn native(kind: ShimKind, args: &[OsString]) -> i32 {
     match kind {
         ShimKind::SafeRm => super::safe_rm::run(args),
-        ShimKind::SafeGhClone => super::safe_gh::run(args, crate::safe_gh::run_clone),
-        ShimKind::SafeGhWorktree => super::safe_gh::run(args, crate::safe_gh::run_worktree),
         // A registry test keeps every other kind `Passthrough`.
         ShimKind::Python | ShimKind::Gh | ShimKind::Git | ShimKind::Rm => {
             unreachable!("{kind:?} is not a native shim")

@@ -65,15 +65,11 @@ pub const SESSION_SUBDIR: &str = ".clud/state/rm-shim";
 pub enum ShimKind {
     Python,
     Gh,
-    /// In-session `git`: refuses clone / `worktree add`, relays the rest
-    /// (#1486).
+    /// In-session `git`: a pass-through that records one telemetry line per
+    /// invocation (#1486).
     Git,
     Rm,
     SafeRm,
-    /// `safe-gh-clone` / `safe-gh-worktree` (#1486): clud commands that
-    /// clone or add a worktree into an allocated `~/.clud/tmp-wt` entry.
-    SafeGhClone,
-    SafeGhWorktree,
 }
 
 /// What a shim does without a valid session.
@@ -153,20 +149,6 @@ pub const SHIMS: &[ShimSpec] = &[
         session_keys: &[],
         fallback: Fallback::Native,
         dirs: &[ShimDir::Interpreter, ShimDir::Session],
-    },
-    ShimSpec {
-        name: crate::git_gh_policy::SAFE_CLONE,
-        kind: ShimKind::SafeGhClone,
-        session_keys: &[],
-        fallback: Fallback::Native,
-        dirs: &[ShimDir::Session],
-    },
-    ShimSpec {
-        name: crate::git_gh_policy::SAFE_WORKTREE,
-        kind: ShimKind::SafeGhWorktree,
-        session_keys: &[],
-        fallback: Fallback::Native,
-        dirs: &[ShimDir::Session],
     },
 ];
 
@@ -252,9 +234,8 @@ pub fn valid_target(target: &Path, self_exe: &Path, shim_dirs: &[PathBuf]) -> bo
     !in_shim_dir && !is_self(&resolved, self_exe)
 }
 
-/// Issue #1486: the real `git` / `gh` for clud's own spawns and the
-/// `safe-gh-*` helpers, so neither ever routes through the session alias
-/// (which refuses clone / `worktree add`).
+/// Issue #1486: the real `git` / `gh` for clud's own spawns, so they bypass
+/// the session's telemetry alias (no recorded line, no extra hop).
 ///
 /// `name` must be `git` or `gh`; anything else is `None`. The target is the
 /// session's `CLUD_GIT_SHIM_TARGET` / `CLUD_GH_SHIM_TARGET`, resolved by the
@@ -477,25 +458,21 @@ mod tests {
     }
 
     #[test]
-    fn only_clud_commands_have_a_native_mode() {
+    fn only_safe_rm_has_a_native_mode() {
         for spec in SHIMS {
             assert_eq!(
                 spec.fallback == Fallback::Native,
-                matches!(
-                    spec.kind,
-                    ShimKind::SafeRm | ShimKind::SafeGhClone | ShimKind::SafeGhWorktree
-                ),
+                spec.kind == ShimKind::SafeRm,
                 "{}",
                 spec.name
             );
         }
     }
 
-    /// #1486 acceptance 5 and 8: `git` and `gh` are aliases (with `.exe` on
-    /// Windows) and so are both helpers, in the session alias directory.
+    /// #1486: `git` and `gh` are session aliases (`.exe` on Windows).
     #[test]
-    fn git_gh_and_the_safe_helpers_are_registered_aliases() {
-        for name in ["git", "gh", "safe-gh-clone", "safe-gh-worktree"] {
+    fn git_and_gh_are_registered_session_aliases() {
+        for name in ["git", "gh"] {
             let spec = lookup(OsStr::new(name)).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(spec.name, name);
             assert!(spec.dirs.contains(&ShimDir::Session), "{name}");
