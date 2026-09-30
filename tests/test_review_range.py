@@ -41,6 +41,13 @@ def _git(cwd: Path, *args: str) -> str:
             "user.email=t@localhost",
             "-c",
             "commit.gpgsign=false",
+            # No background maintenance, fsmonitor daemon in the fixture repos.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.fsmonitor=false",
             *args,
         ],
         cwd=str(cwd),
@@ -72,10 +79,14 @@ def rebased_branch(tmp_path: Path):
     _git(work, "checkout", "-q", "-b", "feat")
     _commit(work, "feature.txt", "one\ntwo\n")
     _git(work, "push", "-q", "-u", "origin", "feat")
-    # main moves on by many files, then the branch is rebased onto it.
+    # main moves on by many files, then the branch is rebased onto it. The
+    # files land in one commit: the stale range counts files, not commits, and
+    # 120 serial git spawns blew the 80 s per-test budget on Windows (#1644).
     _git(work, "checkout", "-q", "main")
     for i in range(60):
-        _commit(work, f"upstream-{i}.txt")
+        (work / f"upstream-{i}.txt").write_text("x\n", encoding="utf-8")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "add 60 upstream files")
     _git(work, "push", "-q", "origin", "main")
     _git(work, "checkout", "-q", "feat")
     _git(work, "rebase", "-q", "main")
