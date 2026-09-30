@@ -479,8 +479,7 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // reads the whole rebase delta. Any caller, not only grind roles: the
     // built-in `/code-review` hardcodes that range and clud does not own it.
     if event == PRE_TOOL_USE_EVENT && block_bad_cmd_gate::gates_tool(&payload.tool_name) {
-        if let Some(reason) = block_bad_cmd_stale_upstream::reason(&payload.command, &payload.cwd)
-        {
+        if let Some(reason) = block_bad_cmd_stale_upstream::reason(&payload.command, &payload.cwd) {
             append_log(&format!("STALE-UPSTREAM-BLOCKED: {reason}"));
             println!("{}", deny_json(&reason));
             eprintln!("[clud] {reason}");

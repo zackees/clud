@@ -80,20 +80,27 @@ fn diffs_against_upstream(words: &[String]) -> bool {
 /// `<merge-base>...HEAD` against the default branch and its diffstat.
 fn correct_range(cwd: &Path) -> Option<(String, String)> {
     let git = |args: &[&str]| crate::worktrees::run_git(cwd, args).ok();
-    let base = git(&["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            ["origin/main", "origin/master"]
-                .iter()
-                .find(|c| git(&["rev-parse", "--verify", "--quiet", c]).is_some())
-                .map(|c| c.to_string())
-        })?;
+    let base = git(&[
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "refs/remotes/origin/HEAD",
+    ])
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .or_else(|| {
+        ["origin/main", "origin/master"]
+            .iter()
+            .find(|c| git(&["rev-parse", "--verify", "--quiet", c]).is_some())
+            .map(|c| c.to_string())
+    })?;
     let merge_base = git(&["merge-base", &base, "HEAD"])?.trim().to_string();
     if merge_base.is_empty() {
         return None;
     }
-    let stat = git(&["diff", "--shortstat", &merge_base, "HEAD"])?.trim().to_string();
+    let stat = git(&["diff", "--shortstat", &merge_base, "HEAD"])?
+        .trim()
+        .to_string();
     let short = &merge_base[..merge_base.len().min(12)];
     Some((format!("{short}...HEAD"), stat))
 }
@@ -175,11 +182,16 @@ mod tests {
             let why = reason(command, &work).unwrap_or_else(|| panic!("allowed `{command}`"));
             assert!(why.contains("is stale"), "{why}");
             assert!(why.contains("...HEAD"), "{why}");
-            assert!(why.contains("1 file changed"), "the small real range: {why}");
+            assert!(
+                why.contains("1 file changed"),
+                "the small real range: {why}"
+            );
         }
         // The range it names is the branch's own delta from main.
         let main = git(&work, &["rev-parse", "--short=12", "main"]);
-        assert!(reason("git diff @{u}...HEAD", &work).unwrap().contains(main.trim()));
+        assert!(reason("git diff @{u}...HEAD", &work)
+            .unwrap()
+            .contains(main.trim()));
     }
 
     #[test]
