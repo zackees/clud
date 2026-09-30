@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime};
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
+use crate::daemon::repo_worktree_cli::{self, PrRecord, ProcessCwdSnapshot, RepoWorktreeRow};
 use crate::gc::extract_pid_from_lock_reason;
 use crate::path_norm::slash_separators;
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
@@ -128,15 +129,146 @@ pub fn run(opts: &CleanOptions) -> i32 {
             return 1;
         }
     };
+    let env = CleanEnv {
+        lookup_prs: &repo_worktree_cli::lookup_prs,
+        procs: &repo_worktree_cli::live_process_cwds,
+        wt_root: crate::gc::worktree_root::worktree_root(),
+        liveness: &OsLivenessProbe,
+        locked_hard_age: locked_hard_age_from_env(),
+    };
+    run_in(&main_repo, opts, &env)
+}
 
-    let raw = match run_git(&main_repo, &["worktree", "list", "--porcelain"]) {
-        Ok(out) => out,
+/// Everything [`run_in`] reads from the outside world besides the repo
+/// itself, injected so the real-git tests (#1606) never reach the network,
+/// the real process table or the real `~/.clud`.
+pub(crate) struct CleanEnv<'a> {
+    pub(crate) lookup_prs: &'a dyn Fn(&Path) -> Option<Vec<PrRecord>>,
+    pub(crate) procs: &'a dyn Fn() -> ProcessCwdSnapshot,
+    pub(crate) wt_root: Option<PathBuf>,
+    pub(crate) liveness: &'a dyn LivenessProbe,
+    pub(crate) locked_hard_age: Duration,
+}
+
+/// [`run`] against an explicit repo and environment.
+pub(crate) fn run_in(main_repo: &Path, opts: &CleanOptions, env: &CleanEnv<'_>) -> i32 {
+    let main_repo = main_repo.to_path_buf();
+    let (rows, plan) = match plan_in(&main_repo, opts, env) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("error: failed to list worktrees: {e}");
             return 1;
         }
     };
+
+    // Print a status table for visibility.
+    print_table(&rows, opts);
+
+    if plan.candidates.is_empty() {
+        println!("\nNo worktrees match the removal criteria.");
+        print_skipped(&plan.skipped);
+        return 0;
+    }
+
+    println!("\nRemoval plan ({} candidate(s)):", plan.candidates.len());
+    for c in &plan.candidates {
+        println!("  remove  {}  ({})", c.entry.path.display(), c.reason);
+    }
+    print_skipped(&plan.skipped);
+
+    if opts.dry_run {
+        println!("\n--dry-run: no changes made.");
+        return 0;
+    }
+
+    if !opts.yes && !confirm_interactive(plan.candidates.len()) {
+        println!("Aborted.");
+        return 0;
+    }
+
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    let mut spared = 0usize;
+    for c in &plan.candidates {
+        match execute_candidate(&main_repo, c, opts, env) {
+            Tally::Removed(note) if note.is_empty() => {
+                println!("removed {}", c.entry.path.display());
+                removed += 1;
+            }
+            Tally::Removed(note) => {
+                println!("removed {} ({note})", c.entry.path.display());
+                removed += 1;
+            }
+            Tally::Skipped(reason) => {
+                println!("skipped {} ({reason})", c.entry.path.display());
+                spared += 1;
+            }
+            Tally::Failed(e) => {
+                eprintln!("error removing {}: {}", c.entry.path.display(), e);
+                failed += 1;
+            }
+        }
+    }
+
+    println!(
+        "\nSummary: {removed} removed, {skipped} skipped, {failed} failed.",
+        removed = removed,
+        skipped = plan.skipped.len() + spared,
+        failed = failed,
+    );
+
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Remove one planned candidate. A verdict-driven candidate goes through
+/// the daemon's executor, which re-verifies from scratch and never forces
+/// (DD-123); an ancestry-driven one keeps the original removal path.
+fn execute_candidate(
+    main_repo: &Path,
+    c: &Candidate,
+    opts: &CleanOptions,
+    env: &CleanEnv<'_>,
+) -> Tally {
+    match &c.via_verdict {
+        Some(row) => worktrees_verdict::tally_reclaim(repo_worktree_cli::reclaim_for_cli(
+            row,
+            env.wt_root.clone(),
+            env.lookup_prs,
+            env.procs,
+        )),
+        None => match remove_worktree_path(main_repo, &c.entry.path, opts.force) {
+            Ok(note) => Tally::Removed(note.trim().to_string()),
+            Err(e) => Tally::Failed(e),
+        },
+    }
+}
+
+/// Side-effect free: list, classify, probe the shared verdict, and plan.
+/// `--dry-run` prints exactly this plan, so it is a faithful preview.
+fn plan_in(
+    main_repo: &Path,
+    opts: &CleanOptions,
+    env: &CleanEnv<'_>,
+) -> Result<(Vec<Classified>, Plan), String> {
+    let main_repo = main_repo.to_path_buf();
+    let raw = run_git(&main_repo, &["worktree", "list", "--porcelain"])?;
     let entries = parse_worktree_porcelain(&raw);
+
+    // Issue #1606: the daemon's squash-aware verdict for every worktree,
+    // gathered by the same probe the daemon uses. A worktree the probe
+    // yields no row for stays on the ancestry rules alone.
+    let prs = (env.lookup_prs)(&main_repo);
+    let procs = (env.procs)();
+    let verdict_rows = repo_worktree_cli::probe_for_cli(
+        &main_repo,
+        &procs,
+        prs.as_deref(),
+        env.wt_root.as_deref(),
+    );
 
     // Gather classified rows. The first entry from `git worktree list` is the
     // main worktree — never a candidate for removal regardless of staleness.
@@ -154,71 +286,35 @@ pub fn run(opts: &CleanOptions) -> i32 {
             classify_status(&entry.path)
         };
         let age = path_age(&entry.path).unwrap_or(Duration::ZERO);
+        let want = canonical_or_raw(&entry.path);
+        let verdict_row = verdict_rows
+            .iter()
+            .find(|r| canonical_or_raw(Path::new(&r.path)) == want)
+            .cloned();
         rows.push(Classified {
             entry: entry.clone(),
             status,
             age,
             is_main,
+            verdict_row,
         });
     }
 
-    // Print a status table for visibility.
-    print_table(&rows, opts);
+    let plan = build_plan_with_liveness(&rows, opts, env.liveness, env.locked_hard_age);
+    Ok((rows, plan))
+}
 
-    // Decide actions.
-    let plan = build_plan(&rows, opts);
-    if plan.candidates.is_empty() {
-        println!("\nNo worktrees match the removal criteria.");
-        return 0;
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn print_skipped(skipped: &[Candidate]) {
+    if skipped.is_empty() {
+        return;
     }
-
-    println!("\nRemoval plan ({} candidate(s)):", plan.candidates.len());
-    for c in &plan.candidates {
-        println!("  remove  {}  ({})", c.entry.path.display(), c.reason);
-    }
-    if !plan.skipped.is_empty() {
-        println!("\nSkipped ({}):", plan.skipped.len());
-        for s in &plan.skipped {
-            println!("  skip    {}  ({})", s.entry.path.display(), s.reason);
-        }
-    }
-
-    if opts.dry_run {
-        println!("\n--dry-run: no changes made.");
-        return 0;
-    }
-
-    if !opts.yes && !confirm_interactive(plan.candidates.len()) {
-        println!("Aborted.");
-        return 0;
-    }
-
-    let mut removed = 0usize;
-    let mut failed = 0usize;
-    for c in &plan.candidates {
-        match remove_worktree_path(&main_repo, &c.entry.path, opts.force) {
-            Ok(note) => {
-                println!("removed {}{}", c.entry.path.display(), note);
-                removed += 1;
-            }
-            Err(e) => {
-                eprintln!("error removing {}: {}", c.entry.path.display(), e);
-                failed += 1;
-            }
-        }
-    }
-
-    println!(
-        "\nSummary: {removed} removed, {skipped} skipped, {failed} failed.",
-        removed = removed,
-        skipped = plan.skipped.len(),
-        failed = failed,
-    );
-
-    if failed > 0 {
-        1
-    } else {
-        0
+    println!("\nSkipped ({}):", skipped.len());
+    for s in skipped {
+        println!("  skip    {}  ({})", s.entry.path.display(), s.reason);
     }
 }
 
@@ -228,23 +324,23 @@ struct Classified {
     status: WorktreeStatus,
     age: Duration,
     is_main: bool,
+    /// Issue #1606: the daemon probe's row for this worktree, if it has one.
+    verdict_row: Option<RepoWorktreeRow>,
 }
 
 #[derive(Debug, Clone)]
 struct Candidate {
     entry: WorktreeEntry,
     reason: String,
+    /// Set when the shared verdict (not ancestry) made this a candidate: the
+    /// row the daemon's executor re-verifies before removing (#1606).
+    via_verdict: Option<RepoWorktreeRow>,
 }
 
 #[derive(Debug, Default)]
 struct Plan {
     candidates: Vec<Candidate>,
     skipped: Vec<Candidate>,
-}
-
-fn build_plan(rows: &[Classified], opts: &CleanOptions) -> Plan {
-    let probe = OsLivenessProbe;
-    build_plan_with_liveness(rows, opts, &probe, locked_hard_age_from_env())
 }
 
 fn build_plan_with_liveness(
@@ -264,14 +360,22 @@ fn build_plan_with_liveness(
             lock_status: lock_status_for_entry(&row.entry, probe),
             locked_hard_age,
         };
-        match decide_action(inputs, opts) {
+        let verdict = row.verdict_row.as_ref().map(|r| &r.verdict);
+        match worktrees_verdict::decide_with_verdict(inputs, verdict, opts) {
             Action::Remove(reason) => plan.candidates.push(Candidate {
                 entry: row.entry.clone(),
                 reason,
+                via_verdict: None,
+            }),
+            Action::Reclaim(reason) => plan.candidates.push(Candidate {
+                entry: row.entry.clone(),
+                reason,
+                via_verdict: row.verdict_row.clone(),
             }),
             Action::Skip(reason) => plan.skipped.push(Candidate {
                 entry: row.entry.clone(),
                 reason,
+                via_verdict: None,
             }),
             Action::Ignore => {}
         }
@@ -299,6 +403,9 @@ fn lock_status_for_entry(entry: &WorktreeEntry, probe: &dyn LivenessProbe) -> Lo
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Remove(String),
+    /// Issue #1606: the shared verdict says `reclaimable`; remove through the
+    /// daemon's re-verifying executor instead of the ancestry path.
+    Reclaim(String),
     Skip(String),
     /// Worktree didn't trip any criterion; don't print it in the skipped list.
     Ignore,
@@ -400,10 +507,15 @@ fn apply_lock_prefix(action: Action, lock_prefix: Option<String>) -> Action {
     };
     match action {
         Action::Remove(reason) => Action::Remove(format!("{prefix}; {reason}")),
+        Action::Reclaim(reason) => Action::Reclaim(format!("{prefix}; {reason}")),
         Action::Skip(reason) => Action::Skip(format!("{prefix}; {reason}")),
         Action::Ignore => Action::Ignore,
     }
 }
+
+#[path = "worktrees_verdict.rs"]
+mod worktrees_verdict;
+use worktrees_verdict::Tally;
 
 #[path = "worktrees_locked_age.rs"]
 mod worktrees_locked_age;
@@ -433,6 +545,12 @@ fn print_table(rows: &[Classified], _opts: &CleanOptions) {
         path_w = path_w
     );
     for r in rows {
+        let verdict = r
+            .verdict_row
+            .as_ref()
+            .filter(|_| !r.is_main)
+            .map(|v| format!(" [{}: {}]", v.verdict.state.as_str(), v.verdict.reason))
+            .unwrap_or_default();
         let notes = if r.is_main {
             "main".to_string()
         } else if r.entry.locked {
@@ -447,7 +565,7 @@ fn print_table(rows: &[Classified], _opts: &CleanOptions) {
             r.entry.path.display(),
             r.status.as_str(),
             fmt_age(r.age),
-            notes,
+            format!("{notes}{verdict}").trim(),
             path_w = path_w
         );
     }

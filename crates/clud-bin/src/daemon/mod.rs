@@ -44,6 +44,9 @@ pub use client::{
     try_handoff_kill_to_daemon, try_request_orphan_reap, ForegroundClientLease, GcPurgeOutcome,
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
+/// Issue #1606: `--clean-worktrees` shares the daemon's repo-worktree
+/// verdict, probe and reclaim executor through this one bridge.
+pub(crate) use gc_service::repo_worktree_cli;
 pub use http::{
     dashboard_url_from_info, fetch_state_json, read_api_info, read_dashboard_info,
     read_dashboard_port, DashboardInfo,

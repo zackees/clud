@@ -27,6 +27,7 @@ mod extern_repo;
 mod filesystem;
 mod list_state;
 mod repo_worktree;
+pub(crate) mod repo_worktree_cli;
 mod repo_worktree_probe;
 mod repo_worktree_reclaim;
 mod repo_worktree_reclaim_exec;
