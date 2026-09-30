@@ -1,0 +1,101 @@
+{
+ "_comment": "GET repos/{o}/{r}/commits/{sha}/statuses items (newest first) as CodeRabbit sets them on a PR head (#1332). Shapes observed on FastLED/fbuild #1584 and #1596.",
+ "pending": [
+  {
+   "id": 40000000002,
+   "node_id": "SC_kwDOPending0000002",
+   "state": "pending",
+   "description": "Review in progress",
+   "target_url": null,
+   "context": "CodeRabbit",
+   "created_at": "2026-09-28T18:02:11Z",
+   "updated_at": "2026-09-28T18:02:11Z",
+   "creator": {"login": "coderabbitai[bot]", "type": "Bot"}
+  },
+  {
+   "id": 40000000001,
+   "node_id": "SC_kwDOOther00000001",
+   "state": "success",
+   "description": "Build passed",
+   "target_url": "https://ci.example/build/1",
+   "context": "external-ci",
+   "created_at": "2026-09-28T18:01:55Z",
+   "updated_at": "2026-09-28T18:01:55Z",
+   "creator": {"login": "external-ci", "type": "User"}
+  }
+ ],
+ "completed": [
+  {
+   "id": 40000000003,
+   "node_id": "SC_kwDOCompleted0003",
+   "state": "success",
+   "description": "Review completed",
+   "target_url": null,
+   "context": "CodeRabbit",
+   "created_at": "2026-09-28T18:06:40Z",
+   "updated_at": "2026-09-28T18:06:40Z",
+   "creator": {"login": "coderabbitai[bot]", "type": "Bot"}
+  },
+  {
+   "id": 40000000002,
+   "node_id": "SC_kwDOPending0000002",
+   "state": "pending",
+   "description": "Review in progress",
+   "target_url": null,
+   "context": "CodeRabbit",
+   "created_at": "2026-09-28T18:02:11Z",
+   "updated_at": "2026-09-28T18:02:11Z",
+   "creator": {"login": "coderabbitai[bot]", "type": "Bot"}
+  }
+ ],
+ "rate_limited": [
+  {
+   "id": 40000000004,
+   "node_id": "SC_kwDORateLimit0004",
+   "state": "success",
+   "description": "Review rate limited",
+   "target_url": null,
+   "context": "CodeRabbit",
+   "created_at": "2026-09-28T18:03:02Z",
+   "updated_at": "2026-09-28T18:03:02Z",
+   "creator": {"login": "coderabbitai[bot]", "type": "Bot"}
+  },
+  {
+   "id": 40000000002,
+   "node_id": "SC_kwDOPending0000002",
+   "state": "pending",
+   "description": "Review in progress",
+   "target_url": null,
+   "context": "CodeRabbit",
+   "created_at": "2026-09-28T18:02:11Z",
+   "updated_at": "2026-09-28T18:02:11Z",
+   "creator": {"login": "coderabbitai[bot]", "type": "Bot"}
+  }
+ ],
+ "skipped": [
+  {
+   "id": 40000000005,
+   "node_id": "SC_kwDOSkipped00005",
+   "state": "success",
+   "description": "Review skipped",
+   "target_url": null,
+   "context": "CodeRabbit",
+   "created_at": "2026-09-28T18:02:30Z",
+   "updated_at": "2026-09-28T18:02:30Z",
+   "creator": {"login": "coderabbitai[bot]", "type": "Bot"}
+  }
+ ],
+ "absent": [
+  {
+   "id": 40000000001,
+   "node_id": "SC_kwDOOther00000001",
+   "state": "success",
+   "description": "Build passed",
+   "target_url": "https://ci.example/build/1",
+   "context": "external-ci",
+   "created_at": "2026-09-28T18:01:55Z",
+   "updated_at": "2026-09-28T18:01:55Z",
+   "creator": {"login": "external-ci", "type": "User"}
+  }
+ ]
+}
