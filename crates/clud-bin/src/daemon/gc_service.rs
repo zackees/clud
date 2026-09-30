@@ -26,6 +26,7 @@ use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 mod extern_repo;
 mod filesystem;
 mod list_state;
+mod repo_worktree;
 
 use super::watch_service as gc_watch_service;
 
