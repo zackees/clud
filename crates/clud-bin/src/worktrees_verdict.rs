@@ -10,16 +10,45 @@
 
 use crate::daemon::repo_worktree_cli::{ReclaimOutcome, RepoWorktreeState, RepoWorktreeVerdict};
 
-use super::{decide_action, Action, CleanOptions, StalenessInputs};
+use super::{
+    apply_lock_prefix, decide_action, locked_removal_prefix, Action, CleanOptions, StalenessInputs,
+    WorktreeStatus,
+};
 
-/// Decide one non-main worktree (RED stub: ignores the verdict).
+/// Decide one non-main worktree. Precedence, first match wins:
+///
+/// | condition                                        | action                          |
+/// |--------------------------------------------------|---------------------------------|
+/// | lock too fresh (live/dead/no pid under hard age) | legacy skip (`locked ...`)      |
+/// | verdict `reclaimable`, status not `dirty`        | `Reclaim(<verdict reason>)`     |
+/// | any other verdict, legacy skips                  | legacy skip + `; verdict: <r>`  |
+/// | any other verdict / no verdict                   | legacy action, unchanged        |
+///
+/// So the verdict only ever *adds* removals backed by positive landing
+/// evidence; every spare, `--force` and `--stale-after` outcome of the
+/// ancestry rules is untouched, and a skip names the verdict so
+/// `--dry-run` shows why. A `reclaimable` verdict never needs `--force`:
+/// the executor it routes to refuses to force anything (DD-123).
 pub(super) fn decide_with_verdict(
     inputs: StalenessInputs,
     verdict: Option<&RepoWorktreeVerdict>,
     opts: &CleanOptions,
 ) -> Action {
-    let _ = (verdict, RepoWorktreeState::Reclaimable);
-    decide_action(inputs, opts)
+    let legacy = decide_action(inputs, opts);
+    let Some(verdict) = verdict else {
+        return legacy;
+    };
+    let lock_prefix = match locked_removal_prefix(inputs) {
+        Ok(prefix) => prefix,
+        Err(_) => return legacy,
+    };
+    if verdict.state == RepoWorktreeState::Reclaimable && inputs.status != WorktreeStatus::Dirty {
+        return apply_lock_prefix(Action::Reclaim(verdict.reason.clone()), lock_prefix);
+    }
+    match legacy {
+        Action::Skip(reason) => Action::Skip(format!("{reason}; verdict: {}", verdict.reason)),
+        other => other,
+    }
 }
 
 /// How the CLI reports one executor outcome.
@@ -30,11 +59,16 @@ pub(super) enum Tally {
     Failed(String),
 }
 
-/// RED stub: treats every non-removal as a failure.
+/// Map an executor outcome to the CLI's report. A veto at re-verification
+/// (including a worktree a running daemon reclaimed first, DD-129) is a
+/// skip, not a failure: nothing was touched and a re-run is safe.
 pub(super) fn tally_reclaim(outcome: ReclaimOutcome) -> Tally {
     match outcome {
-        ReclaimOutcome::Removed { notes } => Tally::Removed(notes.join(", ")),
-        ReclaimOutcome::Spared(r) | ReclaimOutcome::Failed(r) => Tally::Failed(r),
+        ReclaimOutcome::Removed { notes } => Tally::Removed(notes.join("; ")),
+        ReclaimOutcome::Spared(reason) => {
+            Tally::Skipped(format!("verdict changed before removal: {reason}"))
+        }
+        ReclaimOutcome::Failed(err) => Tally::Failed(err),
     }
 }
 

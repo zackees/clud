@@ -7,6 +7,11 @@
 //! that are safe to remove. "Safe" means **clean** AND
 //! (older than `--stale-after` OR upstream `[gone]`).
 //!
+//! Issue #1606: the daemon's squash-aware verdict is consulted first
+//! (`worktrees_verdict.rs`); a `reclaimable` verdict adds a removal that the
+//! daemon's re-verifying executor performs, and every other verdict leaves
+//! the rules above untouched (DD-129).
+//!
 //! The flow is intentionally side-effect free until we actually invoke
 //! `git worktree remove`, so a `--dry-run` is a faithful preview of what a
 //! real run would do.

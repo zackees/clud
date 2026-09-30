@@ -5384,3 +5384,43 @@ Unix (on Windows only `AppData\Local` is accepted), and the hook refuses a
 deletion command that assigns them. A user whose `TMPDIR` is `~/tmp` does not
 get that directory as a temp root; `/tmp` still works.
 
+
+## DD-129: `--clean-worktrees` adds verdict-backed removals and does not lock against the daemon
+
+**Context:** #1606. `--clean-worktrees` judged "landed" by ancestry, so a
+squash-merged branch read as `unpushed`/`no-upstream` forever and was never
+removed (DD-122), while the daemon, using `repo_worktree_verdict`, reclaimed
+the same worktree. The two paths disagreed about the same fact.
+
+**Decision:** the CLI runs the daemon's probe (`repo_worktree_probe`, through
+`daemon::repo_worktree_cli`) and consults the verdict first. A `reclaimable`
+verdict (merged PR covering the tip, patch match, abandoned-empty) makes the
+worktree a candidate even when ancestry would skip or ignore it, and it is
+removed by the daemon's executor (`run_reclaim_with`: fresh re-probe,
+unchanged verdict, `git worktree remove` without `--force`, `branch -D` at the
+verified tip, prune; never a remote delete). Any other verdict leaves the
+ancestry decision exactly as it was, including `--force`, `--stale-after`
+and the lock hard age; a skip gains `; verdict: <reason>` so `--dry-run`
+shows the reason the real run acts on. A lock too fresh to pass the hard-age
+gate still skips first, and a `dirty` ancestry status beats a stale
+`reclaimable` verdict.
+
+**Why additive, not a replacement:** the verdict pins things the CLI has
+always removed on purpose (a stale clean worktree with no PR, anything under
+`--force`). Replacing the rules would silently narrow a documented CLI.
+Letting the verdict only add removals backed by positive evidence keeps every
+existing spare and every existing removal.
+
+**Why no cross-process lock with a running daemon:** the #1632 lock (DD-125)
+is an in-process mutex for pool threads. The CLI already re-probes each
+worktree immediately before removing it, so a worktree the daemon reclaimed
+first comes back `gone from git worktree list` and is reported as skipped,
+not failed; a truly simultaneous git step contends on git's own `.lock` files
+and fails cleanly, and neither side forces. A file lock shared with the
+daemon would add a new cross-process protocol to prevent an outcome that is
+already harmless. Tested by
+`a_worktree_reclaimed_by_someone_else_after_planning_is_skipped`.
+
+**Consequences:** `--clean-worktrees` now also runs `gh pr list` once per
+repo (bounded, `None` on any failure) and one probe pass; with `gh`
+unavailable the patch-match fallback still finds squash merges.

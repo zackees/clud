@@ -364,7 +364,10 @@ which test tier a change belongs in — lives in
   see [gc-and-registry.md → worktree root](../../../docs/architecture/gc-and-registry.md#the-worktree-root-cludtmp-wt-1485).
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
   `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone,
-  removes safe ones; `--dry-run` faithful.
+  removes safe ones; `--dry-run` faithful. `worktrees_verdict.rs` (#1606)
+  first consults the daemon's squash-aware verdict through
+  `daemon::repo_worktree_cli`, so landed work is removed by the daemon's
+  executor; see [gc-and-registry.md → `--clean-worktrees`](../../../docs/architecture/gc-and-registry.md#--clean-worktrees).
 - `optimize.rs` - `clud optimize rust`: installs/persists soldr defaults and
   writes repo-local `.clud/settings.json` directives.
 - `repo_clud_config.rs` - `.clud/settings.json` discovery + parser, both
