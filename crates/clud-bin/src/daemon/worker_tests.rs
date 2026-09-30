@@ -337,3 +337,24 @@ fn the_first_attach_window_opens_at_exit_and_closes_on_attach_or_grace() {
         "once a client has attached, the normal drain rule applies"
     );
 }
+
+/// #1628: a `--detach` launch never attaches, so its exited worker must not
+/// sit out the 30 s first-attach grace (the Windows daemon integration tests
+/// waited 10 s for it to exit and failed).
+#[test]
+fn a_background_launch_has_no_first_attach_grace() {
+    let tmp = TempDir::new().unwrap();
+    let shared = test_shared(&tmp);
+    shared.broadcast_exit(17);
+    assert!(!shared.awaiting_first_client(first_attach_grace(true)));
+    assert!(should_stop_accepting(
+        false,
+        true,
+        false,
+        shared.awaiting_first_client(first_attach_grace(true)),
+    ));
+    assert!(
+        shared.awaiting_first_client(first_attach_grace(false)),
+        "a foreground launcher is still on its way to attach"
+    );
+}

@@ -585,7 +585,9 @@ Platform glue:
   [DD-022](../../../docs/DESIGN_DECISIONS.md#dd-022-the-large-file-guard-reads-the-git-index-in-process-not-the-worktree).
 - `path_norm.rs` - fbuild/zccache-style `NormalizedPath` and separator-safe
   path-string helpers for cross-platform path keys, serialization, and
-  executable names received from another OS.
+  executable names received from another OS. `canonicalize_plain` strips the
+  Windows `\\?\` prefix (git cannot parse it) before a path goes to git, and
+  `same_path` compares paths even after one side was deleted (#1628).
 - `launch_setup.rs` - session-only/global setup selector plus
   selected-backend persistent setup actions for skills and Codex hook
   normalization.

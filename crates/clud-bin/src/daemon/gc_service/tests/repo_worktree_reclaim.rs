@@ -52,10 +52,10 @@ fn has_branch(repo: &Path, branch: &str) -> bool {
     )
 }
 
+/// Outcomes name worktrees as git spells them and the worktree is gone by
+/// then, so compare leniently (8.3 short names, separators; #1628).
 fn same_path(a: &str, b: &Path) -> bool {
-    let a = fs::canonicalize(a).unwrap_or_else(|_| PathBuf::from(a));
-    let b = fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
-    a == b
+    crate::path_norm::same_path(Path::new(a), b)
 }
 
 /// Wait for the off-worker probe's snapshot and install it, as the worker
