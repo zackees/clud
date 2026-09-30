@@ -5318,3 +5318,37 @@ Claude Code's 200k unknown-model clamp.
 the refresh stays deterministic for a given payload. It follows OpenRouter's
 choice of top provider, so a routing change upstream moves the row on the
 next daily refresh.
+
+## DD-127: Scheduled refresh bots gate their commit on the producer tests, not on a PR
+
+**Context:** #1635. `refresh-model-contexts.yml` and
+`refresh-openrouter-catalog.yml` commit their regenerated asset straight to
+`main`. On 60f6087b a refresh landed a value that tests pinned, and `main` went
+red with no PR to catch it (fixed by #1636).
+
+**Decision:** each bot runs its producer's pytest file
+(`tests/test_refresh_model_contexts.py`, `tests/test_refresh_openrouter_catalog.py`)
+after the refresh and before the commit step. A failure fails the job, so
+nothing is pushed. The step installs only `pytest`, `pytest-timeout` and
+`running-process` (what `tests/conftest.py` and `pyproject.toml` need); it never
+syncs the project. `tests/test_refresh_bot_gate.py` asserts the ordering.
+
+**Why not have the bot open a PR:** a PR opened with `GITHUB_TOKEN` does not
+trigger `pull_request` workflows (GitHub's recursion guard), so `ci.yml` would
+never run on it and the PR would sit ungated. Making it work needs a PAT or
+GitHub App token, and the repository has no such secret (only
+`DOCKER_PASSWORD`). Adding one is a credential decision for the owner. A PR
+path would also turn a daily, unattended refresh into a daily merge chore.
+
+**Why not run the Rust `server_settings::` tests in the bot:** that needs the
+Rust toolchain and a clud build, minutes of work for a JSON rewrite. The
+producers already enforce the bounds `ModelContexts::validate` checks
+(server-settings.md, "Bounds"), and the pytest files check the rewrite touches
+only its section and is idempotent on the committed document.
+
+**Tradeoff:** the gate covers the Python-side invariants only. A Rust test that
+pins a live value (the 60f6087b failure mode) can still go red after a refresh;
+#1636 removed those pins, and a new one would be caught by the next CI run on
+`main`, not before the push. `test_refresh_openrouter_catalog.py` tests the
+producer's logic on fixtures, not the committed catalog itself. Revisit with a
+PR-based flow if the owner adds a bot token.

@@ -161,9 +161,12 @@ compacts far too early.
   scheduled workflow. It fetches `https://openrouter.ai/api/v1/models` with
   stdlib `urllib`, rewrites **only** this section, and exits non-zero when the
   datasheet cannot be fetched or parsed, so a run fails loudly instead of
-  publishing an empty or stale map. The refreshed file is committed straight
-  to `main`; installed builds see it through the normal fetch-from-`main` path
-  in about 20 minutes.
+  publishing an empty or stale map. Before committing, the job runs
+  `tests/test_refresh_model_contexts.py` against the regenerated file and
+  stops on a failure. The refreshed file is committed straight to `main`;
+  installed builds see it through the normal fetch-from-`main` path in about
+  20 minutes. The Rust `server_settings::` tests are not run by the bot
+  ([DD-127](../DESIGN_DECISIONS.md#dd-127-scheduled-refresh-bots-gate-their-commit-on-the-producer-tests-not-on-a-pr)).
 - **Which window.** The served window, `min(context_length,
   top_provider.context_length)`, not the maximum over endpoints, so the map
   never overstates what the default-routed endpoint accepts (#1634,
@@ -184,7 +187,8 @@ catalog. Cache entries refresh after six hours. The consumer never follows
 URLs from the remote document.
 
 The producer runs daily at 04:37 UTC and fails the workflow on fetch,
-normalization, or serialization errors. It publishes schema version 1 with
+normalization, or serialization errors. It then runs `tests/test_refresh_openrouter_catalog.py`
+before committing (DD-127). It publishes schema version 1 with
 sorted raw model rows, OpenRouter source attribution, and a convenience
 shortlist. Additive fields do not change the version; Rust ignores unknown
 fields so older builds can read a newer additive document.
