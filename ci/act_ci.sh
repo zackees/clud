@@ -161,41 +161,67 @@ fi
 # Logs are user-only: act masks secrets, but a log is still not for others.
 chmod 700 "$LOG_DIR" 2>/dev/null || true
 umask 077
-LOG="$LOG_DIR/$RUN-$JOB.log"
-: >"$LOG"
-# The container runs as root; hand the log to the host user who owns the
-# directory, so `tail -f` on the host can read it.
+BASE="$LOG_DIR/$RUN-$JOB"
+OUT="$BASE.stdout.log"
+ERR="$BASE.stderr.log"
+STATUS="$BASE.status.jsonl"
+# The container runs as root; hand the files to the host user who owns the
+# directory, so `tail -f` on the host can read them.
 OWNER="$(stat -c %u:%g "$LOG_DIR" 2>/dev/null || true)"
-[ -z "$OWNER" ] || chown "$OWNER" "$LOG" 2>/dev/null || true
-echo "act_ci: log   $LOG" >&2
-# ACT_JSON=1 asks act for one JSON object per line (act --json replaces the
-# text stream, so the .log then holds JSON, teed to a .jsonl of its own).
-if [ "${ACT_JSON:-0}" = 1 ]; then
-    JSONL="$LOG_DIR/$RUN-$JOB.jsonl"
-    : >"$JSONL"
-    [ -z "$OWNER" ] || chown "$OWNER" "$JSONL" 2>/dev/null || true
-    echo "act_ci: jsonl $JSONL" >&2
-    set -- --json "$@"
-else
-    # One prefix per job so parallel jobs do not interleave unreadably.
-    set -- --log-prefix-job-id "$@"
-fi
+for f in "$OUT" "$ERR" "$STATUS"; do
+    : >"$f"
+    [ -z "$OWNER" ] || chown "$OWNER" "$f" 2>/dev/null || true
+done
+echo "act_ci: stdout $OUT" >&2
+echo "act_ci: stderr $ERR" >&2
+echo "act_ci: status $STATUS" >&2
+# One prefix per job so parallel jobs do not interleave unreadably.
+set -- --log-prefix-job-id "$@"
 
-# Follow the log so bosn's stream shows output as it appears. This is a tee
-# in POSIX sh, which has no pipefail or PIPESTATUS: act's own status is kept.
-tail -n +1 -f "$LOG" &
-TAIL_PID=$!
+# stdout and stderr stay separate (#1549): a failing step's stderr appears only
+# in the stderr file. Both are followed so bosn's stream shows output as it
+# appears; this is a tee in POSIX sh, which has no pipefail or PIPESTATUS, so
+# act's own status is kept.
+tail -n +1 -f "$OUT" &
+TAIL_OUT=$!
+tail -n +1 -f "$ERR" >&2 &
+TAIL_ERR=$!
+# A timeout or Ctrl-C reaches here as a signal: record it, so a reader of the
+# status file sees the run was cancelled, not that it finished.
+trap 'printf "{\"event\":\"cancelled\"}\n" >>"$STATUS"; exit 130' INT TERM
 status=0
-run_act "$@" >>"$LOG" 2>&1 || status=$?
+run_act "$@" >>"$OUT" 2>>"$ERR" || status=$?
 sleep 1
-kill "$TAIL_PID" 2>/dev/null || true
-wait "$TAIL_PID" 2>/dev/null || true
-[ -z "${JSONL:-}" ] || cp "$LOG" "$JSONL"
+kill "$TAIL_OUT" "$TAIL_ERR" 2>/dev/null || true
+wait "$TAIL_OUT" "$TAIL_ERR" 2>/dev/null || true
+
+# One status record per step act reports, taken from its own "Success - " /
+# "Failure - " lines: {"job","step","conclusion","time"}.
+awk '
+function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+{
+    i = index($0, " Success - "); c = "success"
+    if (!i) { i = index($0, " Failure - "); c = "failure" }
+    if (!i) next
+    job = $0; sub(/^\[/, "", job); sub(/\].*/, "", job)
+    rest = substr($0, i + 11); t = ""
+    if (match(rest, / \[[0-9.]+(ms|s)\]$/)) {
+        t = substr(rest, RSTART + 2, RLENGTH - 3); rest = substr(rest, 1, RSTART - 1)
+    }
+    printf("{\"job\":\"%s\",\"step\":\"%s\",\"conclusion\":\"%s\",\"time\":\"%s\"}\n", esc(job), esc(rest), c, t)
+}' "$OUT" "$ERR" >>"$STATUS"
+FAILED="$(grep -c '"conclusion":"failure"' "$STATUS" || true)"
+if [ "$FAILED" != 0 ]; then
+    echo "act_ci: $FAILED step(s) failed; first: $(grep -m1 '"conclusion":"failure"' "$STATUS")" >&2
+    echo "act_ci: its stderr is in $ERR" >&2
+fi
 [ "$status" -eq 0 ] || exit "$status"
 
 if [ "${ACT_PUBLIC_X64:-0}" = 1 ]; then
     # Act may exit successfully after a skipped job; require the actual pytest
     # result and the host's emitted evidence for this exact release and arch.
+    LOG="/tmp/$RUN/act.merged"
+    cat "$OUT" "$ERR" >"$LOG"
     grep -F 'Job succeeded' "$LOG" >/dev/null
     grep -E '(^|[^0-9])1 passed([,[:space:]]|$)' "$LOG" >/dev/null
     grep -F 'PUBLIC_EVIDENCE ' "$LOG" \

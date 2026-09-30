@@ -106,25 +106,30 @@ Caches persist across runs in two machine-scoped Bosn volumes:
   solo Rust toolchain and soldr's zccache build cache. Before that volume
   existed, the server lived in the container and every run started cold.
 
-**Live, durable act logs (#1548).** bosn buffers a task's output until it
-exits and removes the container on a timeout or Ctrl-C, so `ci/act_ci.sh` also
-writes act's output to `.clud/act-logs/<run>-<job>.log` on the host (the
-`clud_act` stack binds that directory at `/act-logs`; it is tracked only as an
-empty directory whose own `.gitignore` ignores the logs). The path is printed
-first, before act starts:
+**Live, durable act logs (#1548, #1549).** bosn buffers a task's output until
+it exits and removes the container on a timeout or Ctrl-C, so `ci/act_ci.sh`
+also writes act's output to the host (the `clud_act` stack binds
+`.clud/act-logs` at `/act-logs`; it is tracked only as an empty directory whose
+own `.gitignore` ignores the logs). Three files per run, paths printed first,
+before act starts:
 
 ```
-tail -f .clud/act-logs/<run>-<job>.log      # follow a running job
+tail -f .clud/act-logs/<run>-<job>.stdout.log   # act's stdout, live
+tail -f .clud/act-logs/<run>-<job>.stderr.log   # act's stderr, live
+cat     .clud/act-logs/<run>-<job>.status.jsonl # one record per step
 ```
 
-The log is a live follow of act's stream (POSIX sh has no `pipefail`, so act's
-own exit status is kept and the evidence greps read the same file), lines carry
-a job-id prefix so parallel jobs stay readable, and the file survives a
-timeout, Ctrl-C and container removal. Files are owned by the host user, mode
-`0600`, in a `0700` directory. `ACT_JSON=1` runs act with `--json` and also
-writes `<run>-<job>.jsonl` (act's JSON replaces its text stream, so the `.log`
-then holds the same JSON). Once bosn streams logs itself (zackees/bosn#305)
-this tee is deleted.
+stdout and stderr stay separate (a failing step's stderr appears only in the
+stderr file). Each `status.jsonl` record is `{"job","step","conclusion","time"}`,
+taken from act's own `Success - ` / `Failure - ` lines, and a timeout or Ctrl-C
+appends `{"event":"cancelled"}`. At the end the script prints how many steps
+failed, the first one, and where its stderr is. POSIX sh has no `pipefail`, so
+act's own exit status is kept and the evidence greps read the merged files;
+lines carry a job-id prefix so parallel jobs stay readable. The files survive a
+timeout, Ctrl-C and container removal, are owned by the host user with mode
+`0600`, in a `0700` directory. Not yet done: a `seq`/timestamp index in bosn#306's
+schema and redaction of `bosn.toml` env values beyond act's own secret masking.
+Once bosn streams logs itself (zackees/bosn#305-#307) this tee is deleted.
 
 **Native bosn and the GitHub API proxy.** These tasks need native Rust bosn
 (0.1.4+, with zackees/bosn#312), which provides `bosn run --task` and refuses
