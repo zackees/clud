@@ -5424,3 +5424,29 @@ already harmless. Tested by
 **Consequences:** `--clean-worktrees` now also runs `gh pr list` once per
 repo (bounded, `None` on any failure) and one probe pass; with `gh`
 unavailable the patch-match fallback still finds squash merges.
+
+## DD-130: `--clean-worktrees` bounds the verdict phase with one deadline and abandons a late probe
+
+**Context:** #1648. DD-129 made `--clean-worktrees` (and its `--dry-run`)
+run the daemon's probe unconditionally: a whole-process-table cwd snapshot,
+a `gh pr list` with the daemon's 20 s timeout, and 5 s-per-call git probes
+for every worktree. None of it had a total bound, so on a native Windows
+runner the CLI smoke test's 10 s budget ran out.
+
+**Decision:** the verdict phase runs on a worker thread and the CLI waits
+for it at most 4 s in total (`VERDICT_DEADLINE`). Rows stream back per
+worktree, so every verdict that arrived in time is used; the rest keep the
+pre-#1606 ancestry decision, labelled `verdict timed out`. A repo with only
+its main checkout skips the phase. `gh` gets 3 s and runs only if a
+worktree reaches the PR check; the process table is read once per run.
+
+**Why abandon the worker instead of cancelling it:** a blocking
+`sysinfo` refresh cannot be interrupted, and the probe only reads. The
+worker exits with the process. A real run acts only on verdicts that
+arrived before the deadline, and the reclaim executor re-probes each one
+before removing anything (DD-129).
+
+**Why fall back to ancestry rather than skipping everything:** that is what
+the CLI did before #1606, and the verdict only ever added removals. With no
+verdict nothing is added, so spare on doubt holds. The reason is shown so
+the user can tell a slow probe from a real spare.

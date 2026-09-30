@@ -147,6 +147,15 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
 /// Look up this repo's PRs once per tick. `None` unless the origin is a
 /// GitHub remote and `gh` answers with parseable JSON in time.
 pub(crate) fn lookup_prs(repo_root: &Path) -> Option<Vec<PrRecord>> {
+    lookup_prs_with_timeout(repo_root, GH_TIMEOUT)
+}
+
+/// [`lookup_prs`] with a caller-chosen `gh` timeout: the interactive
+/// `--clean-worktrees` uses a short one (#1648).
+pub(crate) fn lookup_prs_with_timeout(
+    repo_root: &Path,
+    gh_timeout: Duration,
+) -> Option<Vec<PrRecord>> {
     let url = git(repo_root, &["remote", "get-url", "origin"])?;
     if !url.contains("github.com") {
         return None;
@@ -164,7 +173,7 @@ pub(crate) fn lookup_prs(repo_root: &Path) -> Option<Vec<PrRecord>> {
             "--json",
             "number,state,headRefName,headRefOid",
         ],
-        GH_TIMEOUT,
+        gh_timeout,
     )?;
     if code != 0 {
         return None;
@@ -372,12 +381,15 @@ pub(crate) fn collect_process_cwds() -> ProcessCwdSnapshot {
 
 /// Gather facts for one worktree entry. `prs` is the repo's lookup result.
 /// Returns the facts plus the `HEAD` it read, if it got that far.
-fn facts_for(
+///
+/// `prs` is called only when a worktree gets as far as needing PR facts,
+/// so a caller can defer the network lookup until then (#1648).
+fn facts_for<'p>(
     entry: &WorktreeEntry,
     is_main: bool,
     live_cwds: &[PathBuf],
     procs: &ProcessCwdSnapshot,
-    prs: Option<&[PrRecord]>,
+    prs: &dyn Fn() -> Option<&'p [PrRecord]>,
     wt_root: Option<&Path>,
 ) -> (RepoWorktreeFacts, Option<String>) {
     let path = &entry.path;
@@ -433,7 +445,7 @@ fn facts_for(
         .as_deref()
         .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b))
         .unwrap_or_default();
-    facts.pr = pr_fact_for_branch(branch, prs, &mut |head| tip_covered_by(path, &tip, head));
+    facts.pr = pr_fact_for_branch(branch, prs(), &mut |head| tip_covered_by(path, &tip, head));
     if matches!(facts.pr, PrFact::NoPr | PrFact::Unavailable) {
         facts.patch_landed = patch_landed(path, &tip);
         facts.commits_ahead = ahead_of_default(path, &tip).map(|(_, _, n)| n);
@@ -494,11 +506,47 @@ fn probe_entries(
     prs: Option<&[PrRecord]>,
     wt_root: Option<&Path>,
 ) -> Vec<RepoWorktreeRow> {
+    let mut rows = Vec::new();
+    probe_entries_each(
+        repo_root,
+        only,
+        live_cwds,
+        procs,
+        &|| prs,
+        wt_root,
+        &mut |row| rows.push(row),
+    );
+    rows
+}
+
+/// Issue #1648: [`probe_repo_with`] for the interactive CLI. Rows are handed
+/// to `sink` one at a time as each worktree finishes, so a caller with a
+/// deadline keeps every verdict that arrived in time, and `prs` is only
+/// called if some worktree actually needs PR facts.
+pub(crate) fn probe_repo_each<'p>(
+    repo_root: &Path,
+    procs: &ProcessCwdSnapshot,
+    prs: &dyn Fn() -> Option<&'p [PrRecord]>,
+    wt_root: Option<&Path>,
+    sink: &mut dyn FnMut(RepoWorktreeRow),
+) {
+    probe_entries_each(repo_root, None, &[], procs, prs, wt_root, sink);
+}
+
+fn probe_entries_each<'p>(
+    repo_root: &Path,
+    only: Option<&Path>,
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+    prs: &dyn Fn() -> Option<&'p [PrRecord]>,
+    wt_root: Option<&Path>,
+    sink: &mut dyn FnMut(RepoWorktreeRow),
+) {
     if git_discovery_env_is_poisoned() {
-        return Vec::new();
+        return;
     }
     let Some(raw) = git(repo_root, &["worktree", "list", "--porcelain"]) else {
-        return Vec::new();
+        return;
     };
     let entries = parse_worktree_porcelain(&raw);
     let main_path = entries.first().map(|e| canonical(&e.path));
@@ -511,10 +559,10 @@ fn probe_entries(
             only.as_deref()
                 .is_none_or(|want| canonical(&e.path) == want)
         })
-        .map(|entry| {
+        .for_each(|entry| {
             let is_main = main_path.as_deref() == Some(canonical(&entry.path).as_path());
             let (facts, tip) = facts_for(entry, is_main, &live_cwds, procs, prs, wt_root);
-            RepoWorktreeRow {
+            sink(RepoWorktreeRow {
                 path: entry.path.to_string_lossy().to_string(),
                 repo_root: main_path
                     .as_deref()
@@ -529,9 +577,8 @@ fn probe_entries(
                 mtime_unix: mtime_unix(&entry.path),
                 verdict: repo_worktree_verdict(&facts),
                 reservation: false,
-            }
-        })
-        .collect()
+            });
+        });
 }
 
 /// #1485: every direct child of the worktree root, as candidate repo roots.
