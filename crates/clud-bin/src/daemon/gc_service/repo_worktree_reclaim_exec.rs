@@ -44,6 +44,9 @@ pub(crate) struct ReclaimJob {
     /// Live clud session cwds at dispatch time. The fresh process table
     /// covers them too; these are belt and braces.
     pub(crate) session_cwds: Vec<PathBuf>,
+    /// #1485: the worktree root the verdict was computed against, so the
+    /// re-check applies the same abandoned-empty scope.
+    pub(crate) wt_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +153,7 @@ pub(crate) fn run_reclaim(
         &job.session_cwds,
         &procs,
         prs.as_deref(),
+        job.wt_root.as_deref(),
     );
     if let Err(reason) = reverify_reclaim(&job.row, fresh.as_ref()) {
         return ReclaimOutcome::Spared(reason);

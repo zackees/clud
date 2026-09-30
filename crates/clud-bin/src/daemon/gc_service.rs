@@ -413,6 +413,8 @@ fn run_worker_loop(
 ) {
     let session_state_dir = config.session_state_dir.as_deref();
     let mut watch_service = None;
+    // Issue #1485: create ~/.clud/tmp-wt at daemon start (no-op in tests).
+    let _ = crate::gc::worktree_root::ensure_worktree_root();
     let Some(tick_cadence) = config.tick_cadence else {
         // No periodic tick in this mode, so the startup probe below is the
         // only one that ever runs. Without it extern-repo rows would have no
@@ -827,6 +829,7 @@ fn prime_extern_verdicts(
         spare_reasons,
         live_cwds_provider(),
         repo_worktree_mode_from_env(),
+        production_worktree_root(),
     );
 }
 
@@ -842,10 +845,24 @@ fn repo_worktree_mode_from_env() -> ReclaimMode {
 }
 
 /// Issue #1603: how the tick treats repo worktrees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RepoWorktreeGcConfig {
     mode: ReclaimMode,
     delete_remote: bool,
+    /// #1485: `~/.clud/tmp-wt`, whose children seed the probe and alone
+    /// qualify for the abandoned-empty rule. `None` in tests.
+    wt_root: Option<PathBuf>,
+}
+
+/// #1485: the production worktree root. `None` under `cfg(test)`, so no
+/// unit test can probe (let alone reclaim) the developer's real
+/// `~/.clud/tmp-wt`; tests inject a tempdir root instead.
+fn production_worktree_root() -> Option<PathBuf> {
+    if cfg!(test) {
+        None
+    } else {
+        crate::gc::worktree_root::worktree_root()
+    }
 }
 
 impl RepoWorktreeGcConfig {
@@ -859,6 +876,7 @@ impl RepoWorktreeGcConfig {
         Self {
             mode: repo_worktree_mode_from_env(),
             delete_remote,
+            wt_root: production_worktree_root(),
         }
     }
 }
@@ -896,6 +914,7 @@ fn run_repo_worktree_phase(
                         row,
                         delete_remote: config.delete_remote,
                         session_cwds: live_cwds.clone(),
+                        wt_root: config.wt_root.clone(),
                     }),
                     completion_tx: completion_tx.clone(),
                 };
@@ -914,6 +933,7 @@ fn run_repo_worktree_phase(
         spare_reasons,
         live_cwds,
         config.mode,
+        config.wt_root,
     );
     dispatched
 }
@@ -931,6 +951,7 @@ fn spawn_repo_worktree_probe(
     spare_reasons: &mut SpareReasons,
     live_cwds: Vec<PathBuf>,
     mode: ReclaimMode,
+    wt_root: Option<PathBuf>,
 ) {
     if mode == ReclaimMode::Off {
         return;
@@ -952,7 +973,12 @@ fn spawn_repo_worktree_probe(
         .spawn(move || {
             let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
             let procs = repo_worktree_probe::collect_process_cwds();
-            let rows = repo_worktree_probe::probe_repos(&repo_roots, &live_cwds, &procs);
+            let rows = repo_worktree_probe::probe_repos(
+                &repo_roots,
+                &live_cwds,
+                &procs,
+                wt_root.as_deref(),
+            );
             let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
         });
     if spawned.is_err() {

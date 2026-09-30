@@ -17,6 +17,8 @@
 //! `reclaimable` rows, after re-verifying on the purge pool
 //! (`repo_worktree_reclaim`).
 
+use crate::gc::worktree_root::ABANDONED_EMPTY_GRACE_SECS;
+
 /// What the merged-PR lookup said about this worktree's branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrFact {
@@ -67,6 +69,15 @@ pub(crate) struct RepoWorktreeFacts {
     /// commit on the default branch. Never true for a branch with no
     /// commits of its own.
     pub(crate) patch_landed: Option<bool>,
+    /// #1485: the worktree sits under the clud-owned root `~/.clud/tmp-wt`.
+    /// Only there does the abandoned-empty rule apply; a hand-made sibling
+    /// worktree elsewhere is never reclaimed for being empty.
+    pub(crate) under_worktree_root: bool,
+    /// Commits on the branch past its merge-base with the default branch;
+    /// `None` when not computed or the query failed.
+    pub(crate) commits_ahead: Option<u64>,
+    /// Seconds since the worktree directory's mtime; `None` when unknown.
+    pub(crate) age_secs: Option<u64>,
 }
 
 /// Displayed class, matching `clud gc list`'s `state` column.
@@ -129,7 +140,13 @@ impl RepoWorktreeVerdict {
 /// | merged PR #N, coverage unknown             | pinned      | `unverifiable`             |
 /// | no PR / lookup unavailable, patch landed   | reclaimable | `landed by patch match`    |
 /// | no PR, no patch match                      | pinned      | `no PR`                    |
+/// | under tmp-wt, 0 ahead, age >= 24 h (#1485) | reclaimable | `abandoned-empty`          |
+/// | under tmp-wt, 0 ahead, younger/age unknown | pinned      | `grace`                    |
 /// | lookup unavailable, no patch match         | pinned      | `unverifiable`             |
+///
+/// The abandoned-empty rows apply only when no PR is open or merged for the
+/// branch and no patch match already decided; age never changes any other
+/// row (#1485 acceptance 4).
 pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVerdict {
     if !facts.evaluated {
         return RepoWorktreeVerdict::pinned("no verdict yet");
@@ -181,6 +198,16 @@ pub(crate) fn repo_worktree_verdict(facts: &RepoWorktreeFacts) -> RepoWorktreeVe
         PrFact::NoPr | PrFact::Unavailable if patch_landed => {
             RepoWorktreeVerdict::reclaimable("landed by patch match")
         }
+        PrFact::NoPr | PrFact::Unavailable
+            if facts.under_worktree_root && facts.commits_ahead == Some(u64::MAX) =>
+        {
+            match facts.age_secs {
+                Some(age) if age >= ABANDONED_EMPTY_GRACE_SECS => {
+                    RepoWorktreeVerdict::reclaimable("abandoned-empty")
+                }
+                _ => RepoWorktreeVerdict::pinned("grace"),
+            }
+        }
         PrFact::NoPr => RepoWorktreeVerdict::pinned("no PR"),
         PrFact::Unavailable => RepoWorktreeVerdict::pinned("unverifiable"),
     }
@@ -210,6 +237,24 @@ mod tests {
             // Squash-merged: the tip is NOT an ancestor of main, so there is
             // no ancestry signal anywhere in these facts — only the PR.
             patch_landed: Some(false),
+            under_worktree_root: false,
+            commits_ahead: None,
+            age_secs: Some(0),
+        }
+    }
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// #1485: a clean, commit-free, idle worktree under `~/.clud/tmp-wt`
+    /// with no PR — a reservation that was never used.
+    fn empty_in_root(age_secs: u64) -> RepoWorktreeFacts {
+        RepoWorktreeFacts {
+            pr: PrFact::NoPr,
+            patch_landed: Some(false),
+            under_worktree_root: true,
+            commits_ahead: Some(0),
+            age_secs: Some(age_secs),
+            ..merged()
         }
     }
 
@@ -504,6 +549,114 @@ mod tests {
             Reclaimable,
             "landed by patch match",
         );
+    }
+
+    // ---- #1485: abandoned-empty under tmp-wt. ----
+
+    #[test]
+    fn abandoned_empty_past_grace_is_reclaimable() {
+        assert_verdict(empty_in_root(DAY), Reclaimable, "abandoned-empty");
+        assert_verdict(empty_in_root(400 * DAY), Reclaimable, "abandoned-empty");
+        assert_verdict(
+            RepoWorktreeFacts {
+                pr: PrFact::Unavailable,
+                ..empty_in_root(2 * DAY)
+            },
+            Reclaimable,
+            "abandoned-empty",
+        );
+    }
+
+    #[test]
+    fn abandoned_empty_inside_grace_is_spared_as_grace() {
+        assert_verdict(empty_in_root(0), Pinned, "grace");
+        assert_verdict(empty_in_root(DAY - 1), Pinned, "grace");
+        assert_verdict(
+            RepoWorktreeFacts {
+                age_secs: None,
+                ..empty_in_root(0)
+            },
+            Pinned,
+            "grace",
+        );
+    }
+
+    /// Outside tmp-wt an empty worktree is someone's hand-made checkout:
+    /// the existing `no PR` spare stands however old it is.
+    #[test]
+    fn empty_worktree_outside_root_is_never_reclaimed_for_age() {
+        assert_verdict(
+            RepoWorktreeFacts {
+                under_worktree_root: false,
+                ..empty_in_root(400 * DAY)
+            },
+            Pinned,
+            "no PR",
+        );
+    }
+
+    /// Commits ahead (or an unknown count) is work: `no PR` / `unverifiable`.
+    #[test]
+    fn commits_with_no_pr_in_root_are_spared_at_any_age() {
+        assert_verdict(
+            RepoWorktreeFacts {
+                commits_ahead: Some(3),
+                ..empty_in_root(400 * DAY)
+            },
+            Pinned,
+            "no PR",
+        );
+        assert_verdict(
+            RepoWorktreeFacts {
+                commits_ahead: None,
+                ..empty_in_root(400 * DAY)
+            },
+            Pinned,
+            "no PR",
+        );
+        assert_verdict(
+            RepoWorktreeFacts {
+                pr: PrFact::Unavailable,
+                commits_ahead: Some(1),
+                ..empty_in_root(400 * DAY)
+            },
+            Pinned,
+            "unverifiable",
+        );
+    }
+
+    /// #1485 acceptance 4: arbitrarily old age never changes a spare, even
+    /// under tmp-wt with zero commits ahead.
+    #[test]
+    fn age_never_overrides_a_spare_in_root() {
+        let old = empty_in_root(10_000 * DAY);
+        let with = |f: &dyn Fn(&mut RepoWorktreeFacts)| {
+            let mut facts = old.clone();
+            f(&mut facts);
+            facts
+        };
+        let cases: Vec<(RepoWorktreeFacts, &str)> = vec![
+            (with(&|f| f.evaluated = false), "no verdict yet"),
+            (with(&|f| f.dirty = Some(true)), "dirty"),
+            (with(&|f| f.untracked = Some(true)), "untracked"),
+            (with(&|f| f.locked_live_pid = true), "locked by live pid"),
+            (with(&|f| f.process_inside = true), "process inside"),
+            (with(&|f| f.detached = true), "detached"),
+            (with(&|f| f.pr = PrFact::Open { number: 9 }), "open PR #9"),
+            (
+                with(&|f| {
+                    f.pr = PrFact::Merged {
+                        number: 9,
+                        tip_covered: Some(false),
+                    }
+                }),
+                "commits after merge",
+            ),
+            (with(&|f| f.commits_ahead = Some(2)), "no PR"),
+        ];
+        for (facts, reason) in cases {
+            assert_verdict(facts, Pinned, reason);
+        }
     }
 
     #[test]

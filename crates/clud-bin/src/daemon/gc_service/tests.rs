@@ -704,6 +704,7 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
             repo_worktrees: RepoWorktreeGcConfig {
                 mode: ReclaimMode::Off,
                 delete_remote: false,
+                wt_root: None,
             },
         },
     );
@@ -775,6 +776,7 @@ fn periodic_tick_keeps_old_worktree_entry_when_free_space_is_healthy() {
             repo_worktrees: RepoWorktreeGcConfig {
                 mode: ReclaimMode::Off,
                 delete_remote: false,
+                wt_root: None,
             },
         },
     );

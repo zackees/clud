@@ -258,6 +258,9 @@ fn apply_child_env_policy_with_nounset_opt_out(
     for (key, value) in crate::gc::session_tmp::env_overrides() {
         push_or_replace(&mut env, &key, &value);
     }
+    // Issue #1485: the agent worktree root, a sibling of ~/.clud/tmp that
+    // the mtime sweep never sees. Created idempotently; failure is harmless.
+    let _ = crate::gc::worktree_root::ensure_worktree_root();
 
     // Issue #753: keep Git-Bash completion functions out of the backend's
     // shell snapshot. Without this, every Bash tool call re-sources ~85
