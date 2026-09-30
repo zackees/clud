@@ -31,6 +31,26 @@ You hold the run's build lock, so nothing else builds while you do.
 3. **RED -> GREEN.** Run the goal's focused regression test and show it
    fails without the fix (check out the test alone on the base, or cite the
    reproduction), then passes with it.
+3b. **Cross-check every target the project's CI tests**, before any host
+   lint or test (Rust repos only; #1430). A code error can hide on the host
+   and fail only on another OS's CI, for example a `#[cfg(test)]` helper whose
+   only caller is behind `#[cfg(target_os = "linux")]`. Run
+   `clud tool run git/ci_targets.py --host <host triple>`: it prints the
+   triples the repo's CI runs (from `runs-on:`, explicit `--target`, and
+   `rust-toolchain.toml`) as `targets`, and lists every triple soldr cannot
+   cross-check under `skipped` with a reason; print each skipped triple and
+   its reason, never drop one silently. A repo that is not Rust prints one
+   line, `not a Rust project`: skip this stage. Then, per target, cheapest
+   first, each in its own `CARGO_TARGET_DIR`, with warnings denied:
+   - `soldr cargo check --workspace --all-targets --target <triple>`
+     (`--all-targets` evaluates `cfg(test)`, bench and example code). Use the
+     repo's CI feature set when it declares one.
+   - `soldr cargo clippy --workspace --all-targets --target <triple>` with
+     the repo's clippy flags.
+   - `cargo dylint` for the target when the repo configures dylint.
+   A cross-check failure is fixed like any verify failure (edit, commit,
+   rerun); it is never skipped or weakened. Host lint and test (step 4) run
+   only after every target passes.
 4. **Verify.** Run the plan's lint, build and test commands. Fix failures by
    editing, commit, and rerun until green. Do not skip or weaken a test.
    **Run must_verify.** The reviewer cannot run anything, so the checks it

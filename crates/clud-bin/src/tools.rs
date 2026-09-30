@@ -133,6 +133,15 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "git/ci_targets.py",
+        body: include_str!("../assets/tools/git/ci_targets.py"),
+        // Read-only scan of a checkout's CI files (#1430); runs nothing.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "git/review_range.py",
         body: include_str!("../assets/tools/git/review_range.py"),
         // Read-only git/gh query (#1301): pins the diff range a review reads.
@@ -388,11 +397,12 @@ mod tests {
             "clud gc ",
             "clud --version",
         ];
-        // The /grind router, intake and lander run under clud-cmd-scan's rm-identity
+        // The /grind router, intake, integrator and lander run under clud-cmd-scan's rm-identity
         // check, which refuses any program word containing `$`, so a
         // `"$CLUD_EXE" tool run` call is denied there. They use a bare `clud`,
         // as `/grind` already does for `clud grind-scripts` (#1405, #1414).
-        const BARE_CLUD_ALLOWED: &[&str] = &["grind", "grind-intake", "grind-land"];
+        const BARE_CLUD_ALLOWED: &[&str] =
+            &["grind", "grind-intake", "grind-integrate", "grind-land"];
         for skill in BUNDLED_SKILLS {
             if BARE_CLUD_ALLOWED.contains(&skill.name) {
                 continue;
@@ -432,6 +442,15 @@ mod tests {
 
     /// Issue #489: the old Python command guard stays in BUNDLED_TOOLS only
     /// as a compatibility shim. The native binary owns the policy logic.
+    #[test]
+    fn bundled_includes_ci_targets() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "git/ci_targets.py")
+            .expect("ci_targets.py must stay bundled: grind discovers cross-check targets");
+        assert!(tool.body.contains("managed-by: clud"));
+    }
+
     #[test]
     fn bundled_includes_review_range() {
         let tool = BUNDLED_TOOLS

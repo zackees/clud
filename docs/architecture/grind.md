@@ -537,6 +537,16 @@ The rationale is in
 ### Integration order
 
 - Plan, work and review run at most **4** agents at a time.
+- **Cross-check before host verification (#1430).** For a Rust repo, the
+  integrator first runs `git/ci_targets.py`, which lists the target triples
+  the project's CI tests (`runs-on:` runners, explicit `--target`,
+  `rust-toolchain.toml`; not a fixed list), and then `soldr cargo check
+  --workspace --all-targets`, `clippy` and, when configured, `dylint` for each
+  one with warnings denied, cheapest first. Triples soldr cannot cross-check
+  are reported as skipped with a reason, never dropped. Only after every
+  target passes do host `./lint` and `./test` run. A `cfg`-gated dead-code
+  error that only Windows CI would see is thus found locally in about a
+  minute instead of after a remote round.
 - Exactly **one** integrator runs at a time. It is the only role that
   builds, so builds never overlap and caches stay warm. No `bosn` wrapper is
   needed or allowed.
