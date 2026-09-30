@@ -15,8 +15,14 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 
 # workflow file -> (producer module, producer test file)
 BOTS = {
-    "refresh-model-contexts.yml": ("ci.refresh_model_contexts", "tests/test_refresh_model_contexts.py"),
-    "refresh-openrouter-catalog.yml": ("ci.refresh_openrouter_catalog", "tests/test_refresh_openrouter_catalog.py"),
+    "refresh-model-contexts.yml": (
+        "ci.refresh_model_contexts",
+        "tests/test_refresh_model_contexts.py",
+    ),
+    "refresh-openrouter-catalog.yml": (
+        "ci.refresh_openrouter_catalog",
+        "tests/test_refresh_openrouter_catalog.py",
+    ),
 }
 
 
