@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd_streams};
