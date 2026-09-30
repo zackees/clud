@@ -15,7 +15,7 @@ Every PR runs one Linux Dylint job for the custom late lint: a host pass plus
 check-only cross-target passes for `x86_64-pc-windows-msvc` and
 `aarch64-apple-darwin`. Full local `bash lint` runs the host Dylint pass after
 Clippy. `ci-full` (and
-existing `ci:full` labels), merge queue runs, and manual full runs select all
+existing `ci:full` labels) and manual full runs select all
 six build targets. A manual run requires a reachable
 `candidate_sha`; its CI workflow and helper tree must match the selected
 branch's workflow revision, so the same candidate can be retried after
@@ -101,8 +101,9 @@ local-only act workflow step and remove that step before committing. Do not
 switch to `bosn run --task focused-test`, direct `bash test`/`bash lint`, or a
 host toolchain. `act` cannot execute native Windows or macOS; for Windows-only
 code, use the `ci-windows` PR label for the Windows build, unit, and integration
-suites after local act checks. Keep Windows PTY tests enabled. The merge queue
-still runs the full matrix ([Current CI selection](#current-ci-selection)).
+suites after local act checks. Keep Windows PTY tests enabled. There is no merge queue, so a
+`ci-windows` PR gets no Linux or macOS run before merge
+([What protects `main` today](#what-protects-main-today)).
 
 These tasks use the `clud_act` stack (`bosn/act.Dockerfile`), which carries
 only the `act` and `docker` clients and drives the host engine through the
@@ -310,8 +311,9 @@ runs static checks plus the Windows x64 build and both Windows suites, and
 skips Linux and macOS build/test lanes, but retains the Linux Dylint job with
 its Windows and macOS cross-target passes. `CI OK` passes only when Dylint,
 static checks, and the Windows lanes pass; `ci-test`/`ci-full` take
-precedence, and the merge
-queue still runs the full matrix before anything merges.
+precedence. No merge queue backs this label; see
+[What protects `main` today](#what-protects-main-today).
+
 `ci/ci_matrix.py` defines the target inventory consumed by the workflow. Not
 every push needs all six targets.
 
@@ -320,13 +322,42 @@ every push needs all six targets.
 | `minimal` | Linux Dylint (host + Windows/macOS cross-target) + `x86_64-unknown-linux-gnu` build and unit suite | ordinary PR and `main` push |
 | `extended` | minimal + Linux x64 integration + `x86_64-pc-windows-msvc` | PR labeled `ci-test` |
 | `windows` | Linux Dylint (host + Windows/macOS cross-target) + static + `x86_64-pc-windows-msvc` build, unit and integration | PR labeled `ci-windows` |
-| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, `merge_group`, source-pinned manual dispatch |
+| `full` | extended + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, both Darwin triples | PR labeled `ci-full` or legacy `ci:full`, source-pinned manual dispatch (a `merge_group` event would select it, but none is configured) |
 
 `ci-test` covers Linux and Windows product build/tests. Both hosted macOS
 architectures run product tests only in `ci-full` and release validation;
 the macOS Dylint cross-target pass runs in every mode. Routine events use
-Linux x64 for fast feedback, while the merge queue still requires the complete
-matrix.
+Linux x64 for fast feedback. Nothing runs the complete matrix before merge
+unless the PR carries `ci-full`; see below.
+
+### What protects `main` today
+
+Verified 2026-09-30 (#1651): `gh api repos/zackees/clud/rulesets` returns
+`[]`, `main` has no branch protection, and no `merge_group` run has ever
+happened. So:
+
+- PR CI tests the PR head SHA (`github.event.pull_request.head.sha`), not
+  the merge commit. A PR that is behind `main` merges an untested tree.
+- The label picks the lanes. `CI OK` is green for a `ci-windows` PR when
+  static + Windows x64 pass, with no Linux or macOS run on that SHA.
+- The `push` run on `main` is the only test the merged tree gets, and it
+  runs the `minimal` tier. It reports after the merge; it does not block it.
+- The `merge_group:` trigger in `ci.yml` is inert. It stays so that a queue,
+  once enabled, runs the `full` tier.
+
+#### Decision needed (owner)
+
+Enabling a merge queue is a repository-settings change, not a workflow
+change: add a ruleset on `main` with "Require merge queue" and `CI OK` as
+the required status check. `ci.yml` already resolves `merge_group` to the
+`full` tier. Cost: every merge waits for the full six-target matrix, and
+direct pushes / admin merges must go through the queue or bypass it
+explicitly. Until then, a `ci-windows` PR should also get a green routine
+Linux run (drop the label and let the `minimal` run pass, or use `ci-test`)
+before merge. Making `CI OK` enforce that itself was left out of #1651: in
+`windows` mode the Linux lanes are skipped on that run, so the gate would
+need to query other runs for the same SHA. Tracked as a follow-up
+([DD-132](../DESIGN_DECISIONS.md#dd-132-there-is-no-merge-queue-the-ci-windows-rationale-in-dd-088-is-corrected)).
 
 macOS ARM is part of full coverage. `soldr prepare --target aarch64-apple-darwin`
 provisions the target-shaped Apple SDK on the Linux builder, so the old
