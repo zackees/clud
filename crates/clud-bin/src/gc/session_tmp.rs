@@ -132,7 +132,13 @@ pub const OVERRIDDEN_KEYS: &[&str] = &["TMPDIR", "TMP", "TEMP"];
 /// be determined (headless/misconfigured env) — the caller then leaves the
 /// OS temp dir in place.
 pub fn session_tmp_dir() -> Option<PathBuf> {
-    Some(home_dir()?.join(".clud").join("tmp"))
+    Some(session_tmp_dir_for(&home_dir()?))
+}
+
+/// `<home>/.clud/tmp`. Pure; `worktree_root` (#1485) asserts its own root is
+/// a sibling of this one, never inside it.
+pub fn session_tmp_dir_for(home: &Path) -> PathBuf {
+    home.join(".clud").join("tmp")
 }
 
 /// Whether the redirect is disabled via [`DISABLE_ENV`]. Default: enabled.
@@ -497,7 +503,7 @@ fn remove_entry(path: &Path, is_dir: bool, dry_run: bool, rule: &str, report: &m
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         if let Some(path) = std::env::var_os("USERPROFILE") {

@@ -502,10 +502,32 @@ fn cmd_list(state_dir: &Path, json: bool, kind_filter: Option<&str>) -> i32 {
                 return 1;
             }
         }
+        warn_if_worktree_root_oversized();
         return 0;
     }
     print_table_from_rows(&rows);
+    warn_if_worktree_root_oversized();
     0
+}
+
+/// #1485: warn (stderr, so `--json` stays parseable) when `~/.clud/tmp-wt`
+/// exceeds `worktrees.warn_bytes`. Warn-only: nothing is deleted for size.
+fn warn_if_worktree_root_oversized() {
+    use crate::gc::worktree_root::{
+        check_tree_size, size_warning, worktree_root, DEFAULT_WARN_BYTES, SIZE_SCAN_ENTRY_BUDGET,
+    };
+    let Some(root) = worktree_root() else {
+        return;
+    };
+    let warn_bytes =
+        crate::clud_settings::load_worktrees_warn_bytes().unwrap_or(DEFAULT_WARN_BYTES);
+    if warn_bytes == 0 {
+        return;
+    }
+    let check = check_tree_size(&root, warn_bytes, SIZE_SCAN_ENTRY_BUDGET);
+    if let Some(line) = size_warning(&root, warn_bytes, check) {
+        eprintln!("{line}");
+    }
 }
 
 fn cmd_reconcile(state_dir: &Path) -> i32 {

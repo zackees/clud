@@ -5223,3 +5223,29 @@ first seen landed. Locked worktrees (dead pid), worktrees with submodules and
 half-removed trees are left on disk and logged each tick: the cost is disk,
 never work. `CLUD_GC_REPO_WORKTREES=observe` shows what would go without
 deleting anything.
+
+## DD-124: agent worktrees live in a sibling of the session temp root and are never on its timer
+
+**Context:** #1485. Agent worktrees scattered next to their repos
+(`~/dev/<repo>-wt-<n>`) with nothing reclaiming them. The first draft put
+them under `~/.clud/tmp/wt` and let the `session_tmp` 72 h mtime sweep age
+them out.
+
+**Decision:** New agent worktrees go to `~/.clud/tmp-wt/<repo>-wt-<suffix>`,
+a sibling of `~/.clud/tmp`, and are reclaimed only by the repo-worktree
+verdict (DD-122/DD-123). The one time-based rule is `abandoned-empty`: a
+clean, idle worktree under the root with zero commits ahead of the default
+branch and no PR is reclaimable after a 24 h grace. Size only warns
+(`worktrees.warn_bytes`).
+
+**Why not the timer:** an old mtime is not evidence that a worktree's work
+landed (an open PR can sit untouched for days), and in a squash-merging repo
+neither is ancestry. Deleting on age risks unpushed commits; keeping on age
+leaves merged clutter. Putting the root *outside* the sweep's scope, rather
+than adding a skip-list entry inside it, means safety cannot regress the way
+#1148's depth blind spot did. The grace rule is safe only for worktrees
+holding nothing, and only under the clud-owned root: a user's hand-made
+empty sibling worktree is never reclaimed for being empty.
+
+**Consequences:** Unlanded work is kept indefinitely and surfaced as
+`pinned` with a reason in `clud gc list`; the cost is disk, never work.

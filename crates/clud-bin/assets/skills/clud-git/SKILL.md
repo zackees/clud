@@ -19,7 +19,7 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 
 ## Three hard rules
 
-1. **`.gitignore` gate first.** Before creating any worktree under `.claude/worktrees/`, confirm `.gitignore` covers `.claude/`. If it doesn't, refuse to create the worktree inside the repo — use a sibling path (`../<repo>-wt-<branch>/`) or ask to add `.claude/` to `.gitignore`.
+1. **`.gitignore` gate first.** Before creating any worktree under `.claude/worktrees/`, confirm `.gitignore` covers `.claude/`. If it doesn't, refuse to create the worktree inside the repo — use clud's worktree root (`~/.clud/tmp-wt/<repo>-wt-<branch>/`, reclaimed by the daemon once the work lands) or ask to add `.claude/` to `.gitignore`.
 2. **Process audit before destructive removal.** Windows file locks routinely cause `git worktree remove` to fail with `Permission denied` / `Access is denied`. Always audit which processes hold the directory before resorting to `--force`, then prefer `"$CLUD_EXE" trash` over `rm -rf` retry loops.
 3. **Never blind-loop `rm -rf`.** A `rm -rf` retry loop hides the actual problem (a process holding a file open) instead of fixing it. Audit, stop the specific offender, OR quarantine via `"$CLUD_EXE" trash`.
 

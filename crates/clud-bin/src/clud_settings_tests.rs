@@ -34,6 +34,32 @@ fn gc_delete_remote_branches_is_off_unless_literally_true() {
     assert_eq!(seeded["gc"]["delete_remote_branches"], json!(false));
 }
 
+/// #1485: the tmp-wt size warning threshold defaults to 50 GiB, `0`
+/// disables it, and a malformed value falls back to the default.
+#[test]
+fn worktrees_warn_bytes_defaults_and_parses() {
+    use crate::gc::worktree_root::DEFAULT_WARN_BYTES;
+    let home = tempdir().unwrap();
+    assert_eq!(
+        load_worktrees_warn_bytes_at(home.path()).unwrap(),
+        DEFAULT_WARN_BYTES
+    );
+    for (doc, want) in [
+        (json!({}), DEFAULT_WARN_BYTES),
+        (json!({"worktrees": {"warn_bytes": 0}}), 0),
+        (json!({"worktrees": {"warn_bytes": 1234}}), 1234),
+        (
+            json!({"worktrees": {"warn_bytes": "9"}}),
+            DEFAULT_WARN_BYTES,
+        ),
+        (json!({"worktrees": {"warn_bytes": -1}}), DEFAULT_WARN_BYTES),
+    ] {
+        assert_eq!(worktrees_warn_bytes_from(&doc), want, "{doc}");
+    }
+    let seeded = seeded_global_settings_document();
+    assert_eq!(seeded["worktrees"]["warn_bytes"], json!(DEFAULT_WARN_BYTES));
+}
+
 #[test]
 fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();

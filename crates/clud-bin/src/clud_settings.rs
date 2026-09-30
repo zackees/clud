@@ -254,6 +254,13 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
             .or_insert(Value::Bool(false));
     }
 
+    if let Some(worktrees) = seed_object_entry(document, "worktrees") {
+        // #1485: warn-only size threshold for ~/.clud/tmp-wt; 0 disables.
+        worktrees
+            .entry("warn_bytes".to_string())
+            .or_insert(json!(crate::gc::worktree_root::DEFAULT_WARN_BYTES));
+    }
+
     if let Some(daemon) = seed_object_entry(document, "daemon") {
         // #645: a daemon that has no owned work may retire after fifteen
         // minutes. Zero remains the documented explicit opt-out.
@@ -832,6 +839,30 @@ pub fn gc_delete_remote_branches_from(document: &Value) -> bool {
         .and_then(|item| item.get("delete_remote_branches"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// `worktrees.warn_bytes` (#1485): when `~/.clud/tmp-wt` grows past this,
+/// `clud gc list` warns. Warn-only: size never deletes pinned work. `0`
+/// disables; absent or not a non-negative integer means the default.
+pub fn load_worktrees_warn_bytes() -> Result<u64, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_worktrees_warn_bytes_at(&home)
+}
+
+pub fn load_worktrees_warn_bytes_at(home: &Path) -> Result<u64, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(worktrees_warn_bytes_from(&document))
+}
+
+/// Pure reader for `worktrees.warn_bytes`.
+pub fn worktrees_warn_bytes_from(document: &Value) -> u64 {
+    document
+        .get("worktrees")
+        .and_then(|item| item.get("warn_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::gc::worktree_root::DEFAULT_WARN_BYTES)
 }
 
 /// `bash.block_cd` as set at the user level (`~/.clud/settings.json`).

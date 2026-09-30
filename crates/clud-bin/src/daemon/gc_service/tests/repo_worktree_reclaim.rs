@@ -177,6 +177,7 @@ fn a_real_tick_reclaims_only_the_squash_merged_clean_worktree() {
     let config = RepoWorktreeGcConfig {
         mode: ReclaimMode::Delete,
         delete_remote: false,
+        wt_root: None,
     };
 
     // Tick 1: nothing cached yet, so nothing is dispatched; the probe runs.
@@ -187,7 +188,7 @@ fn a_real_tick_reclaims_only_the_squash_merged_clean_worktree() {
         None,
         &mut spare_reasons,
         Vec::new(),
-        config,
+        config.clone(),
     );
     assert_eq!(dispatched, 0, "no snapshot yet: nothing may be dispatched");
     apply_repo_snapshot(&rx, &mut spare_reasons);
@@ -313,8 +314,129 @@ fn observe_mode_never_dispatches() {
         RepoWorktreeGcConfig {
             mode: ReclaimMode::Observe,
             delete_remote: false,
+            wt_root: None,
         },
     );
     assert_eq!(dispatched, 0);
     assert!(wt.exists());
+}
+
+/// Issue #1485: worktrees under a (tempdir) `tmp-wt` root are probed even
+/// when their repo was never visited, a squash-merged one and an
+/// abandoned-empty one past the 24 h grace are reclaimed, a fresh empty one
+/// is spared as `grace`, a dirty sibling survives, and the root itself is
+/// never removed.
+#[test]
+fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let origin = root.join("origin");
+    fs::create_dir_all(&origin).unwrap();
+    run_git(&origin, &["init", "--initial-branch=main"]);
+    identity(&origin);
+    commit_file(&origin, "base.txt", "base\n", "base");
+    let repo = root.join("repo");
+    run_git(
+        root,
+        &["clone", origin.to_str().unwrap(), repo.to_str().unwrap()],
+    );
+    identity(&repo);
+
+    // A fake clud home: `<home>/.clud/tmp-wt`, never the real one.
+    let wt_root = crate::gc::worktree_root::ensure_worktree_root_at(&root.join("home")).unwrap();
+    let merged = wt_root.join("repo-wt-merged");
+    let empty_old = wt_root.join("repo-wt-empty-old");
+    let empty_new = wt_root.join("repo-wt-empty-new");
+    let dirty = wt_root.join("repo-wt-dirty");
+    for (dir, branch) in [
+        (&merged, "feat-merged"),
+        (&empty_old, "feat-empty-old"),
+        (&empty_new, "feat-empty-new"),
+        (&dirty, "feat-dirty"),
+    ] {
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", branch, dir.to_str().unwrap()],
+        );
+    }
+    commit_file(&merged, "m.txt", "m\n", "merged");
+    commit_file(&dirty, "d.txt", "d\n", "dirty");
+    commit_file(&origin, "m.txt", "m\n", "merged (#1)");
+    run_git(&repo, &["fetch", "origin"]);
+    run_git(&repo, &["remote", "set-head", "origin", "main"]);
+    fs::write(dirty.join("d.txt"), "d, edited\n").unwrap();
+    let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
+    filetime::set_file_mtime(
+        &empty_old,
+        filetime::FileTime::from_system_time(two_days_ago),
+    )
+    .unwrap();
+
+    // No record_repo_visit: the tmp-wt children alone seed the probe.
+    let registry = Registry::open_at(&root.join("gc.redb")).unwrap();
+    let pool_tx = spawn_purge_pool(2);
+    let (completion_tx, rx) = mpsc::channel::<RegistryMsg>();
+    let mut spare_reasons = SpareReasons::new();
+    let config = RepoWorktreeGcConfig {
+        mode: ReclaimMode::Delete,
+        delete_remote: false,
+        wt_root: Some(wt_root.clone()),
+    };
+    let dispatched = run_repo_worktree_phase(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        None,
+        &mut spare_reasons,
+        Vec::new(),
+        config.clone(),
+    );
+    assert_eq!(dispatched, 0);
+    apply_repo_snapshot(&rx, &mut spare_reasons);
+
+    use RepoWorktreeState::{Pinned, Reclaimable};
+    assert_eq!(
+        state_for(&spare_reasons, &merged),
+        (Reclaimable, "landed by patch match".to_string())
+    );
+    assert_eq!(
+        state_for(&spare_reasons, &empty_old),
+        (Reclaimable, "abandoned-empty".to_string())
+    );
+    assert_eq!(
+        state_for(&spare_reasons, &empty_new),
+        (Pinned, "grace".to_string())
+    );
+    assert_eq!(
+        state_for(&spare_reasons, &dirty),
+        (Pinned, "dirty".to_string())
+    );
+
+    let dispatched = run_repo_worktree_phase(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        None,
+        &mut spare_reasons,
+        Vec::new(),
+        config,
+    );
+    assert_eq!(dispatched, 2, "the landed and the abandoned-empty rows");
+    let outcomes = expect_reclaims(&rx, &mut spare_reasons, 2);
+    for (dir, branch) in [(&merged, "feat-merged"), (&empty_old, "feat-empty-old")] {
+        assert!(
+            matches!(outcome_for(&outcomes, dir), ReclaimOutcome::Removed { .. }),
+            "{outcomes:?}"
+        );
+        assert!(!dir.exists(), "{} must be gone", dir.display());
+        assert!(!has_branch(&repo, branch), "{branch} must be gone");
+    }
+    for (dir, branch) in [(&empty_new, "feat-empty-new"), (&dirty, "feat-dirty")] {
+        assert!(dir.exists(), "{} must be kept", dir.display());
+        assert!(has_branch(&repo, branch), "{branch} must be kept");
+    }
+    assert!(
+        wt_root.is_dir(),
+        "the tmp-wt root is never a removal target"
+    );
 }

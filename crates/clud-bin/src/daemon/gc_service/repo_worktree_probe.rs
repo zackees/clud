@@ -16,6 +16,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde::Deserialize;
 
 use crate::gc::extract_pid_from_lock_reason;
+use crate::gc::worktree_root::is_under_worktree_root;
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
 use crate::worktrees::{parse_worktree_porcelain, WorktreeEntry};
 
@@ -226,12 +227,22 @@ fn tip_covered_by(cwd: &Path, tip: &str, head: &str) -> Option<bool> {
 /// Fallback evidence: the branch's cumulative change since its merge-base
 /// appears verbatim as one commit on the default branch (a squash merge).
 /// `Some(false)` for a branch with no commits of its own.
-fn patch_landed(cwd: &Path, tip: &str) -> Option<bool> {
+/// `(upstream, merge-base, commits ahead)` of `tip` against the default
+/// branch. `None` when any query fails.
+fn ahead_of_default(cwd: &Path, tip: &str) -> Option<(String, String, u64)> {
     let upstream = default_ref(cwd)?;
-    let base = git(cwd, &["merge-base", &upstream, tip])?;
-    let base = base.trim();
+    let base = git(cwd, &["merge-base", &upstream, tip])?
+        .trim()
+        .to_string();
     let ahead = git(cwd, &["rev-list", "--count", &format!("{base}..{tip}")])?;
-    if ahead.trim().parse::<u64>().ok()? == 0 {
+    let ahead = ahead.trim().parse::<u64>().ok()?;
+    Some((upstream, base, ahead))
+}
+
+fn patch_landed(cwd: &Path, tip: &str) -> Option<bool> {
+    let (upstream, base, ahead) = ahead_of_default(cwd, tip)?;
+    let base = base.as_str();
+    if ahead == 0 {
         return Some(false);
     }
     let branch_diff = normalize_diff(&git(
@@ -360,9 +371,16 @@ fn facts_for(
     live_cwds: &[PathBuf],
     procs: &ProcessCwdSnapshot,
     prs: Option<&[PrRecord]>,
+    wt_root: Option<&Path>,
 ) -> (RepoWorktreeFacts, Option<String>) {
     let path = &entry.path;
     let path_exists = path.try_exists().unwrap_or(true);
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mtime = mtime_unix(path);
+    let age_secs = (mtime > 0 && now >= mtime).then(|| (now - mtime) as u64);
     let canon = canonical(path);
     let in_table = process_inside(procs, &canon);
     let process_inside =
@@ -379,6 +397,9 @@ fn facts_for(
         untracked: None,
         pr: PrFact::Unavailable,
         patch_landed: None,
+        under_worktree_root: wt_root.is_some_and(|root| is_under_worktree_root(path, root)),
+        commits_ahead: None,
+        age_secs,
     };
     // Every cheaper guard that already spares makes the rest moot.
     if !path_exists
@@ -408,6 +429,7 @@ fn facts_for(
     facts.pr = pr_fact_for_branch(branch, prs, &mut |head| tip_covered_by(path, &tip, head));
     if matches!(facts.pr, PrFact::NoPr | PrFact::Unavailable) {
         facts.patch_landed = patch_landed(path, &tip);
+        facts.commits_ahead = ahead_of_default(path, &tip).map(|(_, _, n)| n);
     }
     (facts, Some(tip))
 }
@@ -425,18 +447,21 @@ pub(crate) fn probe_repo(
         available: true,
         cwds: Vec::new(),
     };
-    probe_repo_with(repo_root, live_cwds, &procs, prs)
+    probe_repo_with(repo_root, live_cwds, &procs, prs, None)
 }
 
 /// Probe every worktree of `repo_root`. `prs` is injected so tests can
-/// exercise both the merged-PR path and the `gh`-unavailable fallback.
+/// exercise both the merged-PR path and the `gh`-unavailable fallback, and
+/// `wt_root` (#1485, production: `~/.clud/tmp-wt`) so tests never read the
+/// real home.
 pub(crate) fn probe_repo_with(
     repo_root: &Path,
     live_cwds: &[PathBuf],
     procs: &ProcessCwdSnapshot,
     prs: Option<&[PrRecord]>,
+    wt_root: Option<&Path>,
 ) -> Vec<RepoWorktreeRow> {
-    probe_entries(repo_root, None, live_cwds, procs, prs)
+    probe_entries(repo_root, None, live_cwds, procs, prs, wt_root)
 }
 
 /// Re-probe exactly one worktree from scratch (#1603's pre-delete re-check).
@@ -447,8 +472,9 @@ pub(crate) fn probe_one(
     live_cwds: &[PathBuf],
     procs: &ProcessCwdSnapshot,
     prs: Option<&[PrRecord]>,
+    wt_root: Option<&Path>,
 ) -> Option<RepoWorktreeRow> {
-    probe_entries(repo_root, Some(worktree), live_cwds, procs, prs)
+    probe_entries(repo_root, Some(worktree), live_cwds, procs, prs, wt_root)
         .into_iter()
         .next()
 }
@@ -459,6 +485,7 @@ fn probe_entries(
     live_cwds: &[PathBuf],
     procs: &ProcessCwdSnapshot,
     prs: Option<&[PrRecord]>,
+    wt_root: Option<&Path>,
 ) -> Vec<RepoWorktreeRow> {
     if git_discovery_env_is_poisoned() {
         return Vec::new();
@@ -479,7 +506,7 @@ fn probe_entries(
         })
         .map(|entry| {
             let is_main = main_path.as_deref() == Some(canonical(&entry.path).as_path());
-            let (facts, tip) = facts_for(entry, is_main, &live_cwds, procs, prs);
+            let (facts, tip) = facts_for(entry, is_main, &live_cwds, procs, prs, wt_root);
             RepoWorktreeRow {
                 path: entry.path.to_string_lossy().to_string(),
                 repo_root: main_path
@@ -499,13 +526,37 @@ fn probe_entries(
         .collect()
 }
 
+/// #1485: every direct child of the worktree root, as candidate repo roots.
+/// A worktree there resolves (via `--git-common-dir`) to its main repo, so
+/// its whole repo is probed even if clud never recorded a visit to it. The
+/// root itself is never returned, so it can never become a target.
+pub(crate) fn worktree_root_children(wt_root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(wt_root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
 /// Probe every visited repo, one `gh` lookup per repo, deduplicating repos
 /// that are worktrees of one another and rows reached through two roots.
+/// Worktrees under `wt_root` also seed their repos (#1485).
 pub(crate) fn probe_repos(
     repo_roots: &[String],
     live_cwds: &[PathBuf],
     procs: &ProcessCwdSnapshot,
+    wt_root: Option<&Path>,
 ) -> Vec<RepoWorktreeRow> {
+    let mut repo_roots = repo_roots.to_vec();
+    if let Some(root) = wt_root {
+        repo_roots.extend(worktree_root_children(root));
+    }
+    let repo_roots = repo_roots.as_slice();
     let mut seen_roots = HashSet::new();
     let mut seen_paths = HashSet::new();
     let mut out = Vec::new();
@@ -524,7 +575,7 @@ pub(crate) fn probe_repos(
             continue;
         }
         let prs = lookup_prs(root);
-        for row in probe_repo_with(root, live_cwds, procs, prs.as_deref()) {
+        for row in probe_repo_with(root, live_cwds, procs, prs.as_deref(), wt_root) {
             if seen_paths.insert(row.path.clone()) {
                 out.push(row);
             }
