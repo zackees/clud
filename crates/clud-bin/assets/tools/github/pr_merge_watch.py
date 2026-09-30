@@ -950,9 +950,10 @@ FIRST_ERROR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^Diff in "),
 ]
 
-# `thread '<name>' panicked at`: the test harness names the thread after the
-# test, so a panic can be attributed to the test that printed it.
-PANIC_THREAD = re.compile(r"^thread '([^']+)' panicked at")
+# `thread '<name>' [(<tid>)] panicked at`: the test harness names the thread after the
+# test, so a panic can be attributed to the test that printed it. Current Rust
+# inserts the thread id (`'name' (12080) panicked`); older Rust omits it (#1623).
+PANIC_THREAD = re.compile(r"^thread '([^']+)'(?: \(\d+\))? panicked at")
 CARGO_TEST_OK = re.compile(r"^test (\S+) \.\.\. ok\b")
 
 
