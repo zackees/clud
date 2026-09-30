@@ -21,7 +21,10 @@ use crate::session_registry::{LivenessProbe, OsLivenessProbe};
 use crate::worktrees::{parse_worktree_porcelain, WorktreeEntry};
 
 use super::extern_repo::{git_discovery_env_is_poisoned, probe_cmd};
-use super::repo_worktree::{repo_worktree_verdict, PrFact, RepoWorktreeFacts, RepoWorktreeVerdict};
+use super::repo_worktree::{
+    repo_worktree_verdict, reserved_dir_verdict, PrFact, RepoWorktreeFacts, RepoWorktreeVerdict,
+    ReservedDirFacts,
+};
 use super::repo_worktree_reclaim::{own_git_helpers, process_inside, ProcessCwdSnapshot};
 
 /// `clud gc list` kind for these rows. Not a registry kind: no redb row
@@ -47,6 +50,10 @@ pub(crate) struct RepoWorktreeRow {
     /// Directory mtime, standing in for a creation time in `gc list`.
     pub(crate) mtime_unix: i64,
     pub(crate) verdict: RepoWorktreeVerdict,
+    /// Issue #1486: an unclaimed `tmp-wt` child judged by
+    /// [`reserved_dir_verdict`], not a git worktree. `repo_root` is empty
+    /// and the executor removes it with `remove_dir`, never git.
+    pub(crate) reservation: bool,
 }
 
 /// One row of `gh pr list --json number,state,headRefName,headRefOid`.
@@ -521,6 +528,7 @@ fn probe_entries(
                 tip,
                 mtime_unix: mtime_unix(&entry.path),
                 verdict: repo_worktree_verdict(&facts),
+                reservation: false,
             }
         })
         .collect()
@@ -581,7 +589,59 @@ pub(crate) fn probe_repos(
             }
         }
     }
+    // #1486: every tmp-wt child no worktree list claimed is judged as a
+    // reservation, so an unused `alloc_wt_path` directory is not leaked.
+    if let Some(root) = wt_root {
+        let claimed: HashSet<PathBuf> = out.iter().map(|r| canonical(Path::new(&r.path))).collect();
+        for child in worktree_root_children(root) {
+            let child = Path::new(&child);
+            if !claimed.contains(&canonical(child)) {
+                out.push(probe_reservation(child, live_cwds, procs));
+            }
+        }
+    }
     out
+}
+
+/// Issue #1486: judge one unclaimed `tmp-wt` child. Pure over the
+/// filesystem and the injected process snapshot; runs no git. The #1603
+/// executor calls it again immediately before removing anything.
+pub(crate) fn probe_reservation(
+    path: &Path,
+    live_cwds: &[PathBuf],
+    procs: &ProcessCwdSnapshot,
+) -> RepoWorktreeRow {
+    let row = |verdict| RepoWorktreeRow {
+        path: path.to_string_lossy().to_string(),
+        repo_root: String::new(),
+        branch: None,
+        tip: None,
+        mtime_unix: mtime_unix(path),
+        verdict,
+        reservation: true,
+    };
+    let path_exists = path.try_exists().unwrap_or(true);
+    let canon = canonical(path);
+    let in_table = process_inside(procs, &canon);
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mtime = mtime_unix(path);
+    let facts = ReservedDirFacts {
+        path_exists,
+        has_git_entry: path.join(".git").symlink_metadata().is_ok(),
+        empty: std::fs::read_dir(path)
+            .ok()
+            .map(|mut entries| entries.next().is_none()),
+        process_inside: live_cwds
+            .iter()
+            .any(|cwd| canonical(cwd).starts_with(&canon))
+            || in_table == Some(true),
+        processes_unverifiable: in_table.is_none(),
+        age_secs: (mtime > 0 && now >= mtime).then(|| (now - mtime) as u64),
+    };
+    row(reserved_dir_verdict(&facts))
 }
 
 #[cfg(test)]

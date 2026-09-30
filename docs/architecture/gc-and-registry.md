@@ -327,6 +327,23 @@ the default branch, so ancestry-based checks call them live work forever
   open or merged PR, is `reclaimable` / `abandoned-empty` once its directory
   mtime is 24 h old, and `pinned` / `grace` before that (or when the age is
   unknown). Nothing else in the verdict consults age.
+- **Ordinal allocator (#1486).** `gc::worktree_root::alloc_wt_path(slug,
+  suffix)` reserves `<root>/<slug>-wt-<suffix>` with one atomic `create_dir`
+  and, on a collision, takes `-2`, `-3`, ... in order, so the path it returns
+  already exists and two callers never share one. `slug` and `suffix` must
+  each be one plain path component (`InvalidInput` otherwise, and nothing is
+  reserved). The `git`/`gh` shim's refusal messages and the `safe-gh-*`
+  helpers allocate only through it.
+- **Reserved-unused (#1486).** A direct child of the root that no `git
+  worktree list` claimed is judged by `repo_worktree::reserved_dir_verdict`
+  (pure, decision-table tested) instead: an **empty**, idle directory with no
+  `.git` entry is `reclaimable` / `reserved-unused` after the same 24 h grace
+  and `pinned` / `grace` before it. A non-empty one is `pinned` / `not empty`,
+  one holding a `.git` entry is `pinned` / `unlisted checkout`, and neither is
+  ever deleted by this rule. The purge pool re-probes it from scratch
+  (`reverify_reservation`) and then calls a plain `remove_dir`, which the OS
+  refuses for a directory that gained an entry in the meantime; no git and no
+  recursive delete is involved.
 - **Size backstop.** `worktrees.warn_bytes` in `~/.clud/settings.json`
   (seeded 50 GiB, `0` disables): `clud gc list` prints a stderr warning when
   the root exceeds it (a bounded, early-exit walk). Warn-only: nothing is

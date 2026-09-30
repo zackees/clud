@@ -299,6 +299,7 @@ fn observe_mode_never_dispatches() {
                 state: RepoWorktreeState::Reclaimable,
                 reason: "merged via PR #1".to_string(),
             },
+            reservation: false,
         }],
         now_unix(),
     );
@@ -439,4 +440,99 @@ fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
         wt_root.is_dir(),
         "the tmp-wt root is never a removal target"
     );
+}
+
+/// Issue #1486: an `alloc_wt_path` reservation nobody used is an empty,
+/// non-git `tmp-wt` child. Past the 24 h grace a real tick removes it as
+/// `reserved-unused`; a fresh one is spared as `grace`; an old one that holds
+/// a file is spared as `not empty` and never deleted; and one that gains a
+/// file between the probe and the delete is spared by the pool's re-check.
+#[test]
+fn a_real_tick_reclaims_only_old_empty_reservations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wt_root =
+        crate::gc::worktree_root::ensure_worktree_root_at(&tmp.path().join("home")).unwrap();
+    let alloc = |suffix: &str| {
+        crate::gc::worktree_root::alloc_wt_path_in(&wt_root, "repo", suffix).unwrap()
+    };
+    let old_empty = alloc("1");
+    let fresh_empty = alloc("2");
+    let old_full = alloc("3");
+    let race = alloc("4");
+    fs::write(old_full.join("work.txt"), "keep me\n").unwrap();
+    let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
+    for dir in [&old_empty, &old_full, &race] {
+        filetime::set_file_mtime(dir, filetime::FileTime::from_system_time(two_days_ago)).unwrap();
+    }
+
+    let registry = Registry::open_at(&tmp.path().join("gc.redb")).unwrap();
+    let pool_tx = spawn_purge_pool(2);
+    let (completion_tx, rx) = mpsc::channel::<RegistryMsg>();
+    let mut spare_reasons = SpareReasons::new();
+    let config = RepoWorktreeGcConfig {
+        mode: ReclaimMode::Delete,
+        delete_remote: false,
+        wt_root: Some(wt_root.clone()),
+    };
+    let phase = |spare_reasons: &mut SpareReasons| {
+        run_repo_worktree_phase(
+            &registry,
+            &pool_tx,
+            &completion_tx,
+            None,
+            spare_reasons,
+            Vec::new(),
+            config.clone(),
+        )
+    };
+    assert_eq!(phase(&mut spare_reasons), 0);
+    apply_repo_snapshot(&rx, &mut spare_reasons);
+
+    use RepoWorktreeState::{Pinned, Reclaimable};
+    for dir in [&old_empty, &race] {
+        assert_eq!(
+            state_for(&spare_reasons, dir),
+            (Reclaimable, "reserved-unused".to_string())
+        );
+    }
+    assert_eq!(
+        state_for(&spare_reasons, &fresh_empty),
+        (Pinned, "grace".to_string())
+    );
+    assert_eq!(
+        state_for(&spare_reasons, &old_full),
+        (Pinned, "not empty".to_string())
+    );
+
+    // The race: an agent starts using the reservation after the probe.
+    fs::write(race.join("new.txt"), "fresh work\n").unwrap();
+
+    assert_eq!(
+        phase(&mut spare_reasons),
+        2,
+        "the two cached reclaimable rows"
+    );
+    let outcomes = expect_reclaims(&rx, &mut spare_reasons, 2);
+    assert!(
+        matches!(
+            outcome_for(&outcomes, &old_empty),
+            ReclaimOutcome::Removed { .. }
+        ),
+        "{outcomes:?}"
+    );
+    assert!(!old_empty.exists(), "the unused reservation must be gone");
+    assert_eq!(
+        outcome_for(&outcomes, &race),
+        &ReclaimOutcome::Spared("now not empty".to_string())
+    );
+    assert_eq!(
+        fs::read_to_string(race.join("new.txt")).unwrap(),
+        "fresh work\n"
+    );
+    assert!(fresh_empty.is_dir());
+    assert_eq!(
+        fs::read_to_string(old_full.join("work.txt")).unwrap(),
+        "keep me\n"
+    );
+    assert!(wt_root.is_dir(), "the root is never a removal target");
 }
