@@ -899,7 +899,9 @@ fn make_writable(path: &Path) {
             use std::os::unix::fs::PermissionsExt;
             permissions.set_mode(permissions.mode() | 0o700);
         }
+        // Windows has no mode bits: this only clears FILE_ATTRIBUTE_READONLY.
         #[cfg(not(unix))]
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         let _ = std::fs::set_permissions(path, permissions);
         if let Ok(entries) = std::fs::read_dir(path) {
@@ -909,6 +911,7 @@ fn make_writable(path: &Path) {
         }
     } else if cfg!(windows) && permissions.readonly() {
         #[cfg(not(unix))]
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         let _ = std::fs::set_permissions(path, permissions);
     }
