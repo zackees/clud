@@ -177,7 +177,9 @@ def test_threads_pagination_failure_is_never_green(watcher, monkeypatch, bad):
     t = thread("T1", conn([], None))
     pages = {
         ("first", None, None): first_page(reviews=conn([], None), threads=conn([t], "t1")),
-        ("reviewThreads", PR_NODE, "t1"): _second("reviewThreads", bad, thread("T2", conn([], None))),
+        ("reviewThreads", PR_NODE, "t1"): _second(
+            "reviewThreads", bad, thread("T2", conn([], None))
+        ),
     }
     assert snapshot(watcher, monkeypatch, pages, coderabbit=True) is None
 
