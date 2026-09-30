@@ -140,6 +140,8 @@ CANCEL_ON_CHOICES = {"fail", "review", "timeout", "closed", "always", "never"}
 # `timeout` stays a valid opt-in via `--cancel-on`.
 CANCEL_ON_DEFAULTS = {"fail", "review", "closed"}
 CANCEL_MODE_CHOICES = {"runs", "jobs", "none"}
+# How often (in polls) a watch that found no CodeRabbit looks again (#1332).
+CODERABBIT_RECHECK_POLLS = 3
 
 
 def _utc_now() -> datetime:
@@ -1356,6 +1358,8 @@ class ReviewState:
     """Tracks new human reviews and actionable CodeRabbit threads."""
 
     coderabbit_enabled: bool = False
+    # CodeRabbit said it skipped this PR: never re-enable it by re-checking.
+    coderabbit_skipped: bool = False
     seen_review_ids: set[int] = field(default_factory=set)
     seen_coderabbit_ids: set[int] = field(default_factory=set)
     initialized: bool = False
@@ -1406,6 +1410,7 @@ class ReviewState:
             self.last_coderabbit_state = signature
             if observation.state == "skipped":
                 self.coderabbit_enabled = False
+                self.coderabbit_skipped = True
             if observation.actionable:
                 new_ids = set(observation.ids) - self.seen_coderabbit_ids
                 coderabbit_actionable = bool(new_ids) or not self.initialized
@@ -1962,6 +1967,7 @@ def watch(
 
     review_state = ReviewState()
     coderabbit_probe_complete = False
+    poll_no = 0
 
     require_re = re.compile(require_pattern) if require_pattern else None
 
@@ -1972,6 +1978,17 @@ def watch(
                 log.emit("timeout", timeout_sec=timeout)
             _exit_after_cancel(EXIT_TIMEOUT, "timeout", pr, repo, snapshot.head_sha, opts, log)
         poll_started = time.monotonic()
+        poll_no += 1
+        # A probe that found no CodeRabbit is not final (#1332): its comments
+        # can arrive minutes after the first poll, and a probe that never runs
+        # again would ignore them and let a merge through. Every few polls the
+        # current PR is looked at again for direct CodeRabbit output.
+        recheck_coderabbit = (
+            coderabbit_probe_complete
+            and not review_state.coderabbit_enabled
+            and not review_state.coderabbit_skipped
+            and poll_no % CODERABBIT_RECHECK_POLLS == 0
+        )
 
         # One current GraphQL snapshot owns PR state, check rollup, human
         # reviews, and optional CodeRabbit fields. This prevents bot APIs from
@@ -1979,7 +1996,11 @@ def watch(
         gate = fetch_gate_snapshot(
             repo_for_protection,
             pr,
-            include_coderabbit=not coderabbit_probe_complete or review_state.coderabbit_enabled,
+            include_coderabbit=(
+                not coderabbit_probe_complete
+                or review_state.coderabbit_enabled
+                or recheck_coderabbit
+            ),
         )
         if gate is None:
             api_failures += 1
@@ -2134,7 +2155,7 @@ def watch(
         if snapshot.mergeable == "CONFLICTING" or snapshot.merge_state == "DIRTY":
             _exit_conflict(pr, snapshot, log, merge_fields)
 
-        if not coderabbit_probe_complete:
+        if not coderabbit_probe_complete or recheck_coderabbit:
             probe = gate.coderabbit_probe or CodeRabbitProbe("degraded", 0)
             if (
                 probe.state != "detected"

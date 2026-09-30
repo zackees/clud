@@ -448,3 +448,54 @@ def test_cancel_records_name_the_watcher_that_wrote_them(watcher, env) -> None:
     assert cancel["watcher_host"] == socket.gethostname()
     other = [e for e in records if e["event"] == "head_moved"][-1]
     assert "watcher_pid" not in other
+
+
+def _with_coderabbit(watcher, snapshot, observation):
+    import dataclasses
+
+    return dataclasses.replace(snapshot, coderabbit=observation)
+
+
+def test_coderabbit_that_speaks_after_the_probe_said_none_still_stops_the_watch(
+    watcher, env
+) -> None:
+    """#1332: a probe that found no CodeRabbit is re-checked, so a late review is not missed."""
+    pending = [watcher.CheckRow("linux", "pending", "IN_PROGRESS")]
+    late = watcher.CodeRabbitObservation(
+        "actionable", actionable=True, unresolved_threads=1, ids=frozenset({7})
+    )
+
+    def gates(n):
+        snapshot = gate(watcher, pending)
+        if n >= watcher.CODERABBIT_RECHECK_POLLS:
+            return _with_coderabbit(watcher, snapshot, late)
+        return snapshot
+
+    env["set_gates"](gates)
+    assert run(watcher, env, timeout=1000) == watcher.EXIT_REVIEW_ACTIVITY
+    assert env["polls"] == watcher.CODERABBIT_RECHECK_POLLS
+    assert last(env, "review_activity")["state"] == "actionable"
+
+
+def test_no_coderabbit_anywhere_keeps_the_watch_unchanged(watcher, env) -> None:
+    pending = [watcher.CheckRow("linux", "pending", "IN_PROGRESS")]
+    env["set_gates"](lambda n: gate(watcher, pending))
+    assert run(watcher, env, timeout=100) == watcher.EXIT_TIMEOUT
+    assert not [e for e in events(env) if e.get("event") == "review_activity"]
+
+
+def test_a_skipped_review_is_not_re_enabled_by_the_recheck(watcher, env) -> None:
+    pending = [watcher.CheckRow("linux", "pending", "IN_PROGRESS")]
+    skipped = watcher.CodeRabbitObservation("skipped", reason="docs only")
+
+    def gates(n):
+        snapshot = gate(watcher, pending)
+        if n >= watcher.CODERABBIT_RECHECK_POLLS:
+            return _with_coderabbit(watcher, snapshot, skipped)
+        return snapshot
+
+    env["set_gates"](gates)
+    assert run(watcher, env, timeout=200) == watcher.EXIT_TIMEOUT
+    coderabbit = [e for e in events(env) if e.get("event") == "coderabbit"]
+    skipped_events = [e for e in coderabbit if e["coderabbit"].get("state") == "skipped"]
+    assert len(skipped_events) <= 1
