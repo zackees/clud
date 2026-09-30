@@ -942,11 +942,18 @@ def strip_ansi(text: str) -> str:
 FIRST_ERROR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^##\[error\]"),
     re.compile(r"^FAILED \S"),
+    re.compile(r"^test result: FAILED"),
+    re.compile(r"^--- FAILED"),
     re.compile(r"^thread .*? panicked at"),
     re.compile(r"^error(\[E\d+\])?:"),
     re.compile(r"^Error:"),
     re.compile(r"^Diff in "),
 ]
+
+# `thread '<name>' panicked at`: the test harness names the thread after the
+# test, so a panic can be attributed to the test that printed it.
+PANIC_THREAD = re.compile(r"^thread '([^']+)' panicked at")
+CARGO_TEST_OK = re.compile(r"^test (\S+) \.\.\. ok\b")
 
 
 def first_error_line(sample: str) -> str:
@@ -956,10 +963,17 @@ def first_error_line(sample: str) -> str:
     pattern precision, because a test may legitimately be *named* after the
     failure mode it guards ("..._not_panicked_on") and no error pattern can
     tell that apart from a real panic by content alone.
+
+    A panic printed by a test that then reports `... ok` (a deliberate,
+    caught panic) is skipped too (#1616): it is not why the job failed.
     """
-    for raw in sample.splitlines():
-        line = raw.strip()
+    lines = [raw.strip() for raw in sample.splitlines()]
+    passed = {m.group(1) for line in lines if (m := CARGO_TEST_OK.match(line))}
+    for line in lines:
         if not line or CARGO_TEST_OUTCOME.match(line):
+            continue
+        panic = PANIC_THREAD.match(line)
+        if panic and panic.group(1) in passed:
             continue
         for pattern in FIRST_ERROR_PATTERNS:
             if pattern.search(line):
