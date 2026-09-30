@@ -77,7 +77,10 @@ def test_explicit_target_triples_and_the_host_exclusion(ct, tmp_path: Path) -> N
 def test_rust_toolchain_targets_count(ct, tmp_path: Path) -> None:
     repo = _repo(
         tmp_path,
-        toolchain='[toolchain]\nchannel = "1.95"\ntargets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]\n',
+        toolchain=(
+            '[toolchain]\nchannel = "1.95"\n'
+            'targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]\n'
+        ),
     )
     result = ct.discover(repo)
     assert _triples(result) == {"aarch64-apple-darwin"}
