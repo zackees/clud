@@ -914,6 +914,58 @@ def fetch_required_check_names(repo: str, base_ref: str) -> set[str] | None:
 # One bounded probe. It runs on the fail-fast path, ahead of cancellation,
 # so it must never be what delays either.
 LOG_PROBE_TIMEOUT_SEC = 25.0
+# #1631: a concluded job can briefly serve an empty log body while GitHub
+# finishes uploading it. One short, bounded retry; never a loop.
+LOG_EMPTY_RETRY_DELAY_SEC = 3.0
+
+
+def _log_failure_reason(source: str, res: GhResult) -> str:
+    """Why one log source produced nothing, in a few words."""
+    if res.exit_code == 124:
+        return f"{source} timed out after {LOG_PROBE_TIMEOUT_SEC:g}s"
+    if res.ok:
+        return f"{source} returned an empty log"
+    detail = (res.stderr or res.stdout).strip()
+    if "still in progress" in detail:
+        return f"{source} refused while the run is still in progress"
+    first = detail.splitlines()[0][:160] if detail else f"exit {res.exit_code}"
+    return f"{source} failed ({first})"
+
+
+def fetch_failure_log_explained(
+    repo: str, run_id: str | None, job_id: str | None
+) -> tuple[str, str]:
+    """`(log, why_unavailable)`: exactly one of the two is non-empty.
+
+    Same sources and order as `fetch_failure_log`; the second value names
+    each source that produced nothing and why (#1631), so a missing first
+    error line is explained rather than silent.
+    """
+    reasons: list[str] = []
+    if job_id:
+        args = (
+            "api",
+            f"repos/{repo}/actions/jobs/{job_id}/logs",
+            "--allow-escape-sequences",
+        )
+        res = gh(*args, timeout=LOG_PROBE_TIMEOUT_SEC)
+        if res.ok and not res.stdout.strip():
+            # The job has concluded (it is being reported as failed), so an
+            # empty body is an upload lag, not "no log". Retry once.
+            time.sleep(LOG_EMPTY_RETRY_DELAY_SEC)
+            res = gh(*args, timeout=LOG_PROBE_TIMEOUT_SEC)
+        if res.ok and res.stdout.strip():
+            return normalize_log(strip_ansi(res.stdout)), ""
+        reasons.append(_log_failure_reason("job log", res))
+    if run_id:
+        res = gh(
+            "run", "view", run_id, "--repo", repo, "--log-failed",
+            timeout=LOG_PROBE_TIMEOUT_SEC,
+        )
+        if res.ok and res.stdout.strip():
+            return normalize_log(strip_ansi(res.stdout)), ""
+        reasons.append(_log_failure_reason("run log", res))
+    return "", "; ".join(reasons) or "no job or run id"
 
 
 def fetch_failure_log(repo: str, run_id: str | None, job_id: str | None) -> str:
@@ -926,22 +978,7 @@ def fetch_failure_log(repo: str, run_id: str | None, job_id: str | None) -> str:
     run-level probe returns nothing exactly when the caller needs it most.
     The job endpoint serves a finished job's log regardless of its siblings.
     """
-    if job_id:
-        res = gh(
-            "api",
-            f"repos/{repo}/actions/jobs/{job_id}/logs",
-            "--allow-escape-sequences",
-            timeout=LOG_PROBE_TIMEOUT_SEC,
-        )
-        if res.ok and res.stdout.strip():
-            return normalize_log(strip_ansi(res.stdout))
-    if not run_id:
-        return ""
-    res = gh(
-        "run", "view", run_id, "--repo", repo, "--log-failed",
-        timeout=LOG_PROBE_TIMEOUT_SEC,
-    )
-    return normalize_log(strip_ansi(res.stdout)) if res.ok else ""
+    return fetch_failure_log_explained(repo, run_id, job_id)[0]
 
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -1004,16 +1041,23 @@ def classify_failure(
 
     Returns (first_error_line, classifier_label).
     """
-    sample = fetch_failure_log(repo, run_id, job_id)
+    return classify_failure_explained(repo, run_id, job_id)[:2]
+
+
+def classify_failure_explained(
+    repo: str, run_id: str | None, job_id: str | None
+) -> tuple[str, str | None, str]:
+    """`classify_failure` plus why the log was unavailable (`""` if read)."""
+    sample, unavailable = fetch_failure_log_explained(repo, run_id, job_id)
     if not sample:
-        return "", None
+        return "", None, unavailable
     first_err = first_error_line(sample)
     label = None
     for pattern, lbl in CLASSIFIERS:
         if pattern.search(sample):
             label = lbl
             break
-    return first_err, label
+    return first_err, label, ""
 
 
 @dataclass
@@ -1022,6 +1066,8 @@ class FailureReport:
     run_id: str | None
     first_error: str
     classifier: str | None
+    # #1631: why no log could be read; rendered so the gap is not silent.
+    log_unavailable: str = ""
 
     def render(self) -> str:
         lines = [
@@ -1034,6 +1080,8 @@ class FailureReport:
             lines.append(f"  log probe:  gh run view {self.run_id} --log-failed | tail -100")
         if self.first_error:
             lines.append(f"  first error: {self.first_error}")
+        elif self.log_unavailable:
+            lines.append(f"  log unavailable: {self.log_unavailable}")
         if self.classifier:
             lines.append(f"  classifier: {self.classifier}")
         return "\n".join(lines)
@@ -2799,10 +2847,16 @@ def _build_failure_report(c: CheckRow, repo: str | None) -> FailureReport:
     # run-level log — the one that is unavailable while the run is in
     # progress, which on this path it always is.
     job_id = c.job_id or _extract_job_id_from_link(c.link)
-    first_err, classifier = ("", None)
+    first_err, classifier, unavailable = ("", None, "")
     if repo and (run_id or job_id):
-        first_err, classifier = classify_failure(repo, run_id, job_id)
-    return FailureReport(check=c, run_id=run_id, first_error=first_err, classifier=classifier)
+        first_err, classifier, unavailable = classify_failure_explained(repo, run_id, job_id)
+    return FailureReport(
+        check=c,
+        run_id=run_id,
+        first_error=first_err,
+        classifier=classifier,
+        log_unavailable=unavailable,
+    )
 
 
 def _extract_run_id_from_link(link: str | None) -> str | None:
