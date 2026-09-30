@@ -1137,6 +1137,8 @@ def test_gh_asks_for_stderr_separately_and_never_returns_none_streams(
     [
         ("HTTP 403: Resource not accessible by integration", "permission_denied"),
         ("gh: HTTP 422: Cannot cancel a workflow run that is completed", "already_completed"),
+        # Another watcher on the same PR cancelled it first (#1332).
+        ("gh: HTTP 409: Cannot cancel a workflow run that is completed.", "already_completed"),
         ("", "error"),
     ],
 )
