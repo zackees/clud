@@ -84,8 +84,10 @@ def test_run_pytest_passes_xdist_only_to_the_unit_suite(
 ) -> None:
     unit = _captured_argv(monkeypatch, tmp_path, "not integration", "unit")
     assert unit[unit.index("-n") + 1] == "auto"
-    assert "--dist" in unit and "loadfile" in unit
-    assert "-p" in unit and "ci.pytest_progress" in unit  # the progress journal still loads
+    assert "--dist" in unit
+    assert "loadfile" in unit
+    assert "-p" in unit
+    assert "ci.pytest_progress" in unit  # the progress journal still loads
     assert unit[-1] == "-q"  # caller-supplied args stay last
 
     integration = _captured_argv(monkeypatch, tmp_path, "integration", "integration")
