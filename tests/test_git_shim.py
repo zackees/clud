@@ -243,7 +243,8 @@ def test_safe_gh_clone_runs_the_real_git_or_gh(tmp_path: Path) -> None:
     second = Path(slug.stdout.splitlines()[-1])
     root = _tmp_wt(tmp_path)
     assert (first, second) == (root / "clud-wt-clone", root / "clud-wt-clone-2")
-    assert first.exists() and second.exists()
+    assert first.exists()
+    assert second.exists()
     assert (tmp_path / "real.log").read_text(encoding="utf-8").splitlines() == [
         f"clone --depth 1 https://github.com/zackees/clud {first}",
         f"repo clone zackees/clud {second}",
@@ -305,4 +306,5 @@ def test_windows_git_alias_relays_and_refuses(tmp_path: Path) -> None:
     assert not recorded.exists(), "the refused clone never ran"
     reserved = _reserved(refused.stderr)
     assert reserved.is_dir()
-    assert "\\" in str(reserved) and "/" not in str(reserved), "native separators"
+    assert "\\" in str(reserved), "native separators"
+    assert "/" not in str(reserved), "native separators"
