@@ -27,6 +27,13 @@ inputs:
     description: Rust toolchain version (must match rust-toolchain.toml).
     required: false
     default: "1.95.0"
+  save-cache:
+    description: >
+      setup-soldr save-cache policy (auto | true | false). A job that shares
+      another job's cache-key-suffix passes false so only one of them writes
+      the immutable key. Overridden to true under act (local bosn runs).
+    required: false
+    default: auto
 runs:
   using: composite
   steps:
@@ -83,7 +90,7 @@ runs:
         toolchain: ${{ inputs.toolchain }}
         cache: true
         # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
-        save-cache: ${{ env.ACT && 'true' || 'auto' }}
+        save-cache: ${{ env.ACT && 'true' || inputs.save-cache }}
         build-cache-mode: thin
         shims: true
         linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}

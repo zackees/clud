@@ -34,6 +34,16 @@ on:
         required: false
         type: boolean
         default: true
+      compile:
+        description: Build the workspace binaries (and, with bundle, the test harnesses). Off only for a lint-only call.
+        required: false
+        type: boolean
+        default: true
+      save-cache:
+        description: setup-soldr save-cache policy (auto | true | false). A caller that shares another job's cache namespace passes false so the two do not race to write one immutable key.
+        required: false
+        type: string
+        default: auto
       bundle:
         description: Produce and upload a test bundle (bins + test harness binaries + dev wheel).
         required: false
@@ -120,6 +130,7 @@ jobs:
           strategy: ${{ inputs.strategy }}
           profile: ${{ inputs.profile }}
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
+          save-cache: ${{ inputs.save-cache }}
 
       # Every cargo/maturin invocation goes through ci/xbuild.py so the
       # per-strategy environment (zig wrappers, the SDKROOT/CMake plumbing on
@@ -136,7 +147,7 @@ jobs:
         run: '"$VENV_PY" -m ci.xbuild clippy --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Build binaries and test harnesses
-        if: ${{ inputs.standalone-artifact == '' && inputs.candidate-artifact == '' }}
+        if: ${{ inputs.compile && inputs.standalone-artifact == '' && inputs.candidate-artifact == '' }}
         run: >
           "$VENV_PY" -m ci.xbuild compile
           --target ${{ inputs.target }}

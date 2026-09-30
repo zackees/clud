@@ -161,6 +161,27 @@ jobs:
   # ci-test also adds Windows x64; ci-full, merge_group, and
   # SHA-pinned dispatches add the other architectures.
 
+  # Clippy used to run inside build-linux-x64, serially ahead of the compile,
+  # so every PR waited ~41 s on it between Static and the unit suite even
+  # though the unit lane consumes none of its output. It now runs beside the
+  # build. It shares the build job's zccache namespace (cache-key-suffix
+  # build-<triple>) read-only: two writers to one immutable key race, and the
+  # build job's outputs are the ones the next run needs.
+  lint-linux-x64:
+    name: Clippy linux-x64
+    needs: static
+    if: needs.static.outputs.mode != '' && needs.static.outputs.mode != 'windows'
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      source_ref: ${{ needs.static.outputs.source_ref }}
+      target: x86_64-unknown-linux-gnu
+      runs-on: ubuntu-24.04
+      strategy: soldr
+      clippy: true
+      compile: false
+      bundle: false
+      save-cache: "false"
+
   build-linux-x64:
     name: Build linux-x64
     needs: static
@@ -171,7 +192,8 @@ jobs:
       target: x86_64-unknown-linux-gnu
       runs-on: ubuntu-24.04
       strategy: soldr
-      clippy: true
+      # Linux x64 clippy runs in lint-linux-x64, off this job's critical path.
+      clippy: false
 
   test-linux-x64-unit:
     name: Test linux-x64 (unit)
@@ -365,6 +387,7 @@ jobs:
     needs:
       - static
       - dylint
+      - lint-linux-x64
       - build-linux-x64
       - test-linux-x64-unit
       - test-linux-x64-integration
@@ -401,6 +424,7 @@ jobs:
           MINIMAL: >-
             ${{ needs.static.result }}
             ${{ needs.dylint.result }}
+            ${{ needs.lint-linux-x64.result }}
             ${{ needs.build-linux-x64.result }}
             ${{ needs.test-linux-x64-unit.result }}
           EXTENDED: >-
