@@ -198,6 +198,8 @@ pub(super) fn run_worker(
         });
     }
 
+    let attach_grace = first_attach_grace(spec.background_on_launch);
+
     // Heartbeat thread: periodically probe the attached client's TCP connection.
     // If the peer has disconnected (e.g. terminal crash, SSH drop), evict the
     // dead client so new attach attempts succeed immediately.
@@ -220,7 +222,7 @@ pub(super) fn run_worker(
                 daemon_gone.load(Ordering::Acquire),
                 shared.stop_accepting.load(Ordering::Acquire),
                 shared.has_client(),
-                shared.awaiting_first_client(FIRST_ATTACH_GRACE),
+                shared.awaiting_first_client(attach_grace),
             ) {
                 break;
             }
@@ -234,7 +236,7 @@ pub(super) fn run_worker(
             daemon_gone.load(Ordering::Acquire),
             shared.stop_accepting.load(Ordering::Acquire),
             shared.has_client(),
-            shared.awaiting_first_client(FIRST_ATTACH_GRACE),
+            shared.awaiting_first_client(attach_grace),
         ) {
             break;
         }
@@ -419,6 +421,18 @@ fn run_repeat_worker(
 /// daemon and then does pre-attach work before connecting; a child that
 /// exits inside that gap must still hand its exit code to that client.
 pub(super) const FIRST_ATTACH_GRACE: Duration = Duration::from_secs(30);
+
+/// #1628: the first-attach grace only exists for a launcher that is on its
+/// way to attach. A `--detach` (or repeat) launch returns without attaching,
+/// so no client is coming: holding the exited worker 30 s there kept it (and
+/// its reaping) alive well past the session's end.
+fn first_attach_grace(background_on_launch: bool) -> Duration {
+    if background_on_launch {
+        Duration::ZERO
+    } else {
+        FIRST_ATTACH_GRACE
+    }
+}
 
 fn should_stop_accepting(
     daemon_gone: bool,
