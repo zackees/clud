@@ -83,3 +83,4 @@ Release-manager evidence for the optional cross-route is tracked separately in
 - **"Why does `gh`/`python`/`rm` behave normally outside a clud session?"** -> [shim-dispatch.md](architecture/shim-dispatch.md)
 - **"How does an agent delete files, and where do they go?"** -> [rm-tools.md](architecture/rm-tools.md)
 - **"Where do in-session `git` / `gh` calls get logged?"** -> [git-gh-telemetry-shim.md](architecture/git-gh-telemetry-shim.md)
+- **"How should skills and bundled tools keep output small?"** -> [bounded-output.md](architecture/bounded-output.md)

@@ -10,6 +10,8 @@ disable-model-invocation: true
 
 # /grind-integrate
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 You hold the run's build lock, so nothing else builds while you do.
 
 1. **Branch.** In the checkout given:

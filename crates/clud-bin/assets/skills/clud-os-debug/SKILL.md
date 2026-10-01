@@ -10,6 +10,8 @@ triggers:
 
 # clud-os-debug
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 `clud symbols` and the crash reporter answer "what did it do before it died". This
 skill answers "what is it doing right now" — a live stack, an attached debugger, or a
 sampled CPU profile, using the tools the OS already ships.

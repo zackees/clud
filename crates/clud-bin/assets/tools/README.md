@@ -11,6 +11,9 @@ finished successfully. The watchdog passes its command cap to children as
 `CLUD_TOOL_COMMAND_TIMEOUT_SECS`; `github/pr_merge_watch.py` uses that value
 to finish its own timeout and cleanup before the wrapper's cap.
 
+Stdout over 32 KB truncates visibly with an artifact path; see
+[bounded-output.md](../../../../docs/architecture/bounded-output.md).
+
 `diagnostics/transcript_report.py` reports repeated tool-call bursts,
 compactions, context jumps and context errors from one Claude transcript.
 It joins clud's launch-context record by hashed session id to report the
