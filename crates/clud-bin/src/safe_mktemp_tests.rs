@@ -152,6 +152,12 @@ fn windows_refuses_before_creating_anything() {
 #[test]
 fn only_safe_mktemp_calls_the_ledger_insert() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    if !src.is_dir() {
+        // Cross-built test bundles run without the source tree (Windows
+        // exec runners); the Linux lane, built and run in place, enforces it.
+        eprintln!("skipped: no source tree at {}", src.display());
+        return;
+    }
     let mut callers = Vec::new();
     let mut stack = vec![src.clone()];
     while let Some(dir) = stack.pop() {
