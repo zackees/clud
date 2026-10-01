@@ -3231,6 +3231,9 @@ mod block_bad_cmd_grind_caps;
 #[path = "block_bad_cmd_stale_upstream.rs"]
 mod block_bad_cmd_stale_upstream;
 
+#[path = "block_bad_cmd_repeat.rs"]
+mod block_bad_cmd_repeat;
+
 /// The `/grind` role-cap denial for this call, if its agent is a capped role,
 /// or the feature-branch-mode router caps for any other caller while
 /// the session's run facts record a feature.
