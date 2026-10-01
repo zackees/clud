@@ -29,7 +29,8 @@ SESSION_ID = "622e60e1-5376-44bd-be2c-059a72786a16"
 def tr():
     name = "clud_test_transcript_report"
     spec = importlib.util.spec_from_file_location(name, SCRIPT)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -197,7 +198,8 @@ def test_report_never_leaks_raw_content(tr, tmp_path, capsys):
             "thrashing: the context",
         ):
             assert secret not in blob, f"{secret!r} leaked into the report"
-        assert "371" in blob and "294" in blob
+        assert "371" in blob
+        assert "294" in blob
     assert sorted(p.name for p in tmp_path.iterdir()) == before, "the tool must write no files"
 
 
@@ -206,7 +208,8 @@ def test_fingerprints_are_salted_per_invocation(tr):
     b = tr.analyze(incident_rows(), salt=b"b" * 16)
     fa = {x["call_fingerprint"] for x in a["repeated_call_bursts"]}
     fb = {x["call_fingerprint"] for x in b["repeated_call_bursts"]}
-    assert len(fa) == 2 and fa.isdisjoint(fb)
+    assert len(fa) == 2
+    assert fa.isdisjoint(fb)
 
 
 def test_missing_file_exits_one(tr, tmp_path, capsys):
