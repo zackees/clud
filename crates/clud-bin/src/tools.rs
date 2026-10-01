@@ -267,6 +267,17 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: Some(std::time::Duration::from_secs(120)),
         quiet_ok: false,
     },
+    // transcript-report — privacy-preserving analyzer for one Claude session
+    // transcript (#1276, DD-138). Read-only and writes no files, so killing
+    // it loses no work — `Resumable`.
+    BundledTool {
+        rel_path: "diagnostics/transcript_report.py",
+        body: include_str!("../assets/tools/diagnostics/transcript_report.py"),
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
     // docker-recover — Docker Desktop recovery + diagnostics (issue #531).
     // `Killable`: the tool process IS the work (restart/reset drive Docker
     // Desktop; `doctor` is a fast read-only probe). `doctor` finishes in
@@ -530,6 +541,20 @@ mod tests {
             "BUNDLED_TOOLS must include github/is_meta_issue.py; \
              got {names:?}",
         );
+    }
+
+    /// The #1276 transcript analyzer must stay bundled, managed, stdlib-only
+    /// (no subprocess) and must not write files.
+    #[test]
+    fn bundled_includes_transcript_report() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "diagnostics/transcript_report.py")
+            .expect("BUNDLED_TOOLS must include diagnostics/transcript_report.py");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
+        assert!(!tool.body.contains("write_text("));
+        assert_eq!(tool.kill_semantics, KillSemantics::Resumable);
     }
 
     /// is_meta_issue.py must carry the managed marker (so the installer

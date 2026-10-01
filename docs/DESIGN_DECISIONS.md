@@ -5668,3 +5668,42 @@ path computed at run time, and Codex has no file-tool deny; the override's
 own rules (strictly under, ownership, HOME rejected, reason logged) still bound
 what a forged entry could reach. Policy text:
 [rm-tools.md](architecture/rm-tools.md#override-safe_rmextra_roots-1668).
+
+## DD-138: the first #1276 slice is a read-only transcript analyzer, not a repeated-call guard
+
+**Context:** #1276: a direct `--openrouter` MiMo session lost its `/goal`
+after "Autocompact is thrashing". Two capped responses (32,000 output tokens
+each) emitted 294 and 371 identical Bash calls; their results refilled
+context after each compaction. On the direct OpenRouter route clud only
+overlays the child environment (`foreground_runtime.rs`,
+`apply_anthropic_compat_overlay`): there is no clud bridge in the request
+path, so compaction, the thrash detector and goal clearing all belong to the
+harness. clud owns its hooks, its bundled guidance and tools, and offline
+analysis.
+
+**Decision:** ship `diagnostics/transcript_report.py` as a bundled tool
+(`clud tool run diagnostics/transcript_report.py <transcript.jsonl>`). It
+collapses transcript rows by `message.id` and counts each response's usage
+once, reports bursts of identical tool calls inside one response (copies
+and longest streak), compaction boundaries, context jumps, terminal context
+errors and tool-result byte totals. It marks the effective max-context value
+unavailable, since a transcript does not record the child environment. Its
+output holds counts, tool names, timestamps and fingerprints keyed with a
+random per-run salt. It never prints prompts, commands, tool inputs or
+output, or the session id. It writes no files.
+
+**Why not the PreToolUse repeated-call guard first:** a guard runs on every
+tool call of every session and needs cross-call state, and its threshold has
+no measured baseline. Legitimate polling (`gh pr checks`, retry loops) repeats
+identical calls, so a wrong threshold blocks real work. By the time a hook
+sees the calls, the 32,000 output tokens are already spent. The analyzer is
+read-only, testable offline and cannot break a session, and it produces the
+baseline a guard's threshold needs. The guard is a tracked follow-up.
+
+**Why not a `clud` subcommand:** a top-level subcommand costs four registry
+places and a release for a diagnostic that one script handles. The
+bundled-tool runner already gives it a watchdog and an installed path.
+
+**Consequences:** the incident shape is now detectable from a transcript.
+Nothing stops a live burst yet. The session ledger, the guard, bounded-output
+guidance and the harness-owned goal recovery are separate #1276 follow-ups.
