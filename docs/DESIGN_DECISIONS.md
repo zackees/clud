@@ -5744,3 +5744,52 @@ directory for heavy users.
 **Consequences:** a session started outside clud, or whose hook did not run,
 has no record and the analyzer still prints "unavailable". `harness_version`
 stays `null` until it is known without a spawn.
+
+## DD-140: the repeated-call guard denies call 201 of an identical streak and fails open
+
+**Context:** #1674 (parent #1276, follow-up named in
+[DD-138](#dd-138-the-first-1276-slice-is-a-read-only-transcript-analyzer-not-a-repeated-call-guard)).
+One MiMo response emitted 294, then 371, identical Bash calls. The guard
+needs a threshold, and a threshold set too low blocks legitimate polling.
+
+**Evidence:** the bundled analyzer's call fingerprinting (tool name +
+key-sorted input), run read-only over 3,539 local Claude Code transcripts
+(215,077 tool calls; only counts were kept). Longest consecutive identical
+streak per session: median 1, p99 6, and 3,249 of 3,393 sessions never
+repeated a call. Inside a single response no legitimate transcript ever
+repeated a call (max 1). Across responses the tail is long: sleep-paced
+polls (`gh pr checks`, `sleep … &&` loops) reached 39, 48, 63 and 138; a
+10-minute scheduled tick reached 50; three Claude sessions issued the same
+call 297, 343 and 391 times at 2–4 s intervals without sleeping. The
+incident streaks were 294 and 371 at sub-second intervals in one response.
+
+**Decision:** `N = 200` consecutive identical calls are allowed per session;
+call 201 and later are denied with a "stop repeating, decide afresh"
+message. A gap over 120 s resets the streak. `CLUD_REPEAT_CALL_LIMIT` or
+`hooks.repeat_call_limit` changes N, `0` disables the guard, and
+`CLUD_ALLOW_REPEAT=1` in a command bypasses it for that call with an audit
+line. Contract: [hook-dispatch.md](architecture/hook-dispatch.md#repeated-call-guard-1674).
+
+**Why 200:** it is 45% above the longest observed sleep-paced poll (138) and
+four times the scheduled-tick streak, so measured legitimate work is never
+denied, while both incident streaks (294, 371) are cut by a third or more.
+25, the issue's starting suggestion, would have denied the 39-, 48-, 63- and
+138-call polls. The 297–391 un-slept loops would be denied; they are
+treated as the same pathology (a model re-issuing a call without a new
+decision), the deny message tells the model to sleep between polls, and the
+override exists for the rare deliberate case.
+
+**Why no response id or timing in the key:** the PreToolUse payload carries
+no message id, and inter-call gaps overlap (incident median 0.44 s; fast
+cross-response loops reached 0.74 s). The only time rule is the 120 s idle
+reset, which no burst can meet and which keeps scheduled `/loop` ticks
+unbounded.
+
+**Why fail open:** the guard is a safety net against runaway loops, not a
+security boundary. A state error that denied calls would break every tool
+call of a session, which is worse than the loop it guards against.
+
+**Consequences:** the guard sees calls only after the model emitted them, so
+a burst's output tokens are still spent; it stops the results from refilling
+context. Sessions without a `session_id` in the hook payload, and harnesses
+that run no `PreToolUse` hook, are unguarded.

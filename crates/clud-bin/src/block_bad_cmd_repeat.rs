@@ -69,7 +69,7 @@ pub(super) fn decide(
         count,
         last: now,
     };
-    let verdict = if limit > u32::MAX && count > limit {
+    let verdict = if limit > 0 && count > limit {
         Verdict::Deny { count }
     } else {
         Verdict::Allow

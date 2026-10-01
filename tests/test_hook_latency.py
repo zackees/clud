@@ -21,7 +21,13 @@ def test_mixed_hook_payloads_have_sub_20ms_p99(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
     env = os.environ.copy()
-    env.update(HOME=str(home), USERPROFILE=str(home), CLUD_SKIP_RM_IDENTITY="1")
+    env.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        CLUD_SKIP_RM_IDENTITY="1",
+        CLUD_DAEMON_STATE_DIR=str(tmp_path / "state"),
+    )
+    env.pop("CLUD_REPEAT_CALL_LIMIT", None)
     commands = [
         "echo ready",
         "r" + "m -rf build",
@@ -29,7 +35,16 @@ def test_mixed_hook_payloads_have_sub_20ms_p99(tmp_path: Path) -> None:
         "grep -n 'rm |mktemp' script.sh",
     ]
     payloads = [
-        json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(tmp_path)})
+        # A session id puts every call through the #1674 repeat guard's state
+        # read and atomic write; the rotation keeps streaks below the limit.
+        json.dumps(
+            {
+                "session_id": "latency",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "cwd": str(tmp_path),
+            }
+        )
         for command in commands
     ]
     samples_ms = []
