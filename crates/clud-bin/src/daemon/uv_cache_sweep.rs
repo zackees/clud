@@ -67,6 +67,22 @@ fn maybe_sweep_at_root(
     }
     let report = uv_cache::sweep_stale_at(cache_root, now, false)?;
     write_sentinel(sentinel_path, now)?;
+    // #1691 (DD-145): size cap. Only the production root; tests that pass a
+    // temp root exercise `enforce_cap_at` directly with a fake uv. Compiled
+    // out of unit tests so no test can ever reach the real cache or real uv.
+    #[cfg(not(test))]
+    if cache_root == crate::tools::clud_uv_cache_dir() {
+        let max = home_dir()
+            .map(|h| crate::clud_settings::peek_cache_max_bytes_at(&h))
+            .unwrap_or(0);
+        match uv_cache::enforce_cap(max) {
+            uv_cache::CapOutcome::Cleaned { before_bytes } => eprintln!(
+                "[clud] uv-cache over cache.max_bytes ({before_bytes} bytes): ran `uv cache clean`"
+            ),
+            uv_cache::CapOutcome::Failed(e) => eprintln!("[clud] uv-cache cap: {e}"),
+            uv_cache::CapOutcome::Spared(_) => {}
+        }
+    }
     if report.stale_envs_removed > 0 || report.locked_envs_skipped > 0 {
         eprintln!(
             "[clud] uv-cache sweep: removed {} stale env{}, {} locked-skipped",

@@ -431,10 +431,17 @@ for size; the 72 h age sweep stays the only deleter of session temp
 **Cache size warning (#1691).** `cache.warn_bytes` (seeded 20 GiB, `0` disables) applies the
 same mechanism to `~/.clud/cache`, which is almost entirely uv's own cache under `cache/uv`:
 `clud gc list` walks it (bounded), the maintenance sweep thread writes `~/.clud/cache-size.json`,
-and `clud_cache_launch_warning` reads only that file at launch. **Warn-only:** clud never deletes
-inside uv's cache for size and does not run `uv cache prune` (which also drops every
-`environments-v2` env); the uv sweep (#423) still only ages out stale envs
+and `clud_cache_launch_warning` reads only that file at launch. The warning itself never deletes,
+and clud does not run `uv cache prune` (which also drops every `environments-v2` env)
 ([DD-144](../DESIGN_DECISIONS.md#dd-144-cludcache-size-is-reported-clud-does-not-run-uv-cache-prune)).
+
+**Cache size cap (#1691).** `cache.max_bytes` (seeded 32 GiB, `0` disables): after its age pass,
+the daily uv sweep (`daemon/uv_cache_sweep.rs`) calls `gc::uv_cache::enforce_cap`, which runs
+`uv cache clean --cache-dir ~/.clud/cache/uv` when the cache is over the cap. clud deletes no
+bucket itself. The pure `decide_cap` spares when any `uv` process is running, the root is a
+symlink or not directly inside a real `~/.clud/cache`, or `UV_LINK_MODE=symlink`. Each clean is
+audited as `gc.uv-cache-cap`
+([DD-145](../DESIGN_DECISIONS.md#dd-145-the-uv-cache-is-capped-by-uv-cache-clean-never-by-deleting-buckets)).
 
 **Trash retention and size cap (#1340, #1672).** `~/.clud/trash` holds `clud trash` quarantine
 entries (reaped on the next GC tick) and `safe-rm` entries (they carry `TRASH_MANIFEST`, kept for

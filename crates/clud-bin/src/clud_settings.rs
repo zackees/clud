@@ -275,6 +275,10 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
         cache.entry("warn_bytes".to_string()).or_insert(json!(
             crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES
         ));
+        // #1691 (DD-145): size cap enforced via `uv cache clean`; 0 disables.
+        cache
+            .entry("max_bytes".to_string())
+            .or_insert(json!(crate::gc::uv_cache::DEFAULT_MAX_BYTES));
     }
 
     if let Some(trash) = seed_object_entry(document, "trash") {
@@ -959,7 +963,7 @@ pub fn trash_max_bytes_from(document: &Value) -> u64 {
 
 /// `cache.warn_bytes` (#1691): when `~/.clud/cache` (almost all uv's own
 /// cache) grows past this, `clud gc list` and the launch banner warn.
-/// Warn-only: clud never deletes inside uv's cache for size (DD-144). `0`
+/// Warn-only; the size cap is `cache.max_bytes` (DD-144, DD-145). `0`
 /// disables; absent or not a non-negative integer means the default.
 pub fn load_cache_warn_bytes() -> Result<u64, SettingsError> {
     let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
@@ -987,6 +991,24 @@ pub fn cache_warn_bytes_from(document: &Value) -> u64 {
         .and_then(|item| item.get("warn_bytes"))
         .and_then(Value::as_u64)
         .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES)
+}
+
+/// `cache.max_bytes` (#1691, DD-145): when clud's uv cache grows past this,
+/// the daily uv sweep asks uv to empty it (`uv cache clean`) if no uv
+/// process is running. `0` disables; absent or malformed means the default.
+pub fn peek_cache_max_bytes_at(home: &Path) -> u64 {
+    read_settings_or_legacy(home)
+        .map(|document| cache_max_bytes_from(&document))
+        .unwrap_or(crate::gc::uv_cache::DEFAULT_MAX_BYTES)
+}
+
+/// Pure reader for `cache.max_bytes`.
+pub fn cache_max_bytes_from(document: &Value) -> u64 {
+    document
+        .get("cache")
+        .and_then(|item| item.get("max_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::gc::uv_cache::DEFAULT_MAX_BYTES)
 }
 
 /// The JSON key path of the human-set safe-rm root override (#1668,
