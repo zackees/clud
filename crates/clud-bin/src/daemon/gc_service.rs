@@ -981,10 +981,27 @@ fn spawn_repo_worktree_probe(
                 wt_root.as_deref(),
             );
             let _ = tx.send(RegistryMsg::RepoWorktreeVerdicts(rows));
+            // Issue #1610: size tmp-wt here, off the launch path, so the
+            // launch banner only reads the cached result.
+            refresh_worktree_size_cache(wt_root.as_deref());
         });
     if spawned.is_err() {
         spare_reasons.repo_probe_finished();
     }
+}
+
+/// Issue #1610: bounded `check_tree_size` walk of `tmp-wt`, cached for the
+/// launch banner. Best effort; errors are ignored. Warn-only: nothing is
+/// deleted for size.
+fn refresh_worktree_size_cache(wt_root: Option<&std::path::Path>) {
+    let Some(root) = wt_root else { return };
+    let warn_bytes = crate::clud_settings::load_worktrees_warn_bytes()
+        .unwrap_or(crate::gc::worktree_root::DEFAULT_WARN_BYTES);
+    let _ = crate::gc::worktree_size_cache::refresh_cache(
+        root,
+        warn_bytes,
+        crate::gc::worktree_size_cache::now_unix(),
+    );
 }
 
 /// Issue #1591: `gc list` rows for the cached repo-worktree snapshot.

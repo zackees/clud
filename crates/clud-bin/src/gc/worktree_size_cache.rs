@@ -63,9 +63,26 @@ pub fn banner_decision(
     warn_bytes: u64,
     now_unix: i64,
 ) -> BannerVerdict {
-    // RED stub (#1610)
-    let _ = (cached, warn_bytes, now_unix);
-    BannerVerdict::Skip(SkipReason::NoCache)
+    if warn_bytes == 0 {
+        return BannerVerdict::Skip(SkipReason::Disabled);
+    }
+    let Some(cached) = cached else {
+        return BannerVerdict::Skip(SkipReason::NoCache);
+    };
+    let age = now_unix.saturating_sub(cached.checked_unix);
+    if age < -FUTURE_SKEW_SECS {
+        return BannerVerdict::Skip(SkipReason::FutureTimestamp);
+    }
+    if age > MAX_CACHE_AGE_SECS {
+        return BannerVerdict::Skip(SkipReason::Stale);
+    }
+    match cached.check {
+        SizeCheck::Unknown => BannerVerdict::Skip(SkipReason::Unknown),
+        SizeCheck::Over(bytes) | SizeCheck::Under(bytes) if bytes > warn_bytes => {
+            BannerVerdict::Warn { bytes }
+        }
+        SizeCheck::Over(_) | SizeCheck::Under(_) => BannerVerdict::Skip(SkipReason::Under),
+    }
 }
 
 fn gib(bytes: u64) -> String {
@@ -74,9 +91,13 @@ fn gib(bytes: u64) -> String {
 
 /// The one-line banner warning.
 pub fn banner_line(root: &Path, bytes: u64, warn_bytes: u64) -> String {
-    // RED stub (#1610)
-    let _ = (root, bytes, warn_bytes);
-    String::new()
+    format!(
+        "[clud] warning: {} holds at least {}, over worktrees.warn_bytes ({}); \
+         review `clud gc list`, or raise worktrees.warn_bytes in ~/.clud/settings.json (0 disables)",
+        root.display(),
+        gib(bytes),
+        gib(warn_bytes)
+    )
 }
 
 /// Cache path for a worktree root: `<root>/../tmp-wt-size.json`.
@@ -94,31 +115,82 @@ struct Wire {
 
 /// Failure-silent read: missing or malformed means `None`.
 pub fn read_cache(path: &Path) -> Option<CachedTreeSize> {
-    // RED stub (#1610)
-    let _ = path;
-    None
+    let text = fs::read_to_string(path).ok()?;
+    let wire: Wire = serde_json::from_str(&text).ok()?;
+    let check = match wire.state.as_str() {
+        "over" => SizeCheck::Over(wire.bytes),
+        "under" => SizeCheck::Under(wire.bytes),
+        "unknown" => SizeCheck::Unknown,
+        _ => return None,
+    };
+    Some(CachedTreeSize {
+        checked_unix: wire.checked_unix,
+        warn_bytes: wire.warn_bytes,
+        check,
+    })
 }
 
 /// Atomic write (temp file + rename) so a launch never reads a torn file.
 pub fn write_cache(path: &Path, entry: &CachedTreeSize) -> std::io::Result<()> {
-    // RED stub (#1610)
-    let _ = (path, entry);
-    Ok(())
+    let (state, bytes) = match entry.check {
+        SizeCheck::Over(b) => ("over", b),
+        SizeCheck::Under(b) => ("under", b),
+        SizeCheck::Unknown => ("unknown", 0),
+    };
+    let wire = Wire {
+        checked_unix: entry.checked_unix,
+        warn_bytes: entry.warn_bytes,
+        state: state.to_string(),
+        bytes,
+    };
+    let text = serde_json::to_string(&wire).map_err(std::io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
 }
 
 /// Daemon side: run the bounded walk and record it. `warn_bytes == 0`
 /// removes any old cache instead of walking.
 pub fn refresh_cache(wt_root: &Path, warn_bytes: u64, now_unix: i64) -> std::io::Result<()> {
-    // RED stub (#1610)
-    let _ = (wt_root, warn_bytes, now_unix);
-    Ok(())
+    let path = cache_path_for(wt_root);
+    if warn_bytes == 0 {
+        return match fs::remove_file(&path) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+    }
+    let check = check_tree_size(
+        wt_root,
+        warn_bytes,
+        crate::gc::worktree_root::SIZE_SCAN_ENTRY_BUDGET,
+    );
+    write_cache(
+        &path,
+        &CachedTreeSize {
+            checked_unix: now_unix,
+            warn_bytes,
+            check,
+        },
+    )
 }
 
 /// Launch side, testable against any home.
 pub fn launch_warning_at(home: &Path, now_unix: i64) -> Option<String> {
-    // RED stub (#1610)
-    let _ = (home, now_unix);
-    None
+    let warn_bytes = crate::clud_settings::peek_worktrees_warn_bytes_at(home);
+    if warn_bytes == 0 {
+        return None;
+    }
+    let root = worktree_root_for(home);
+    let cached = read_cache(&cache_path_for(&root));
+    match banner_decision(cached.as_ref(), warn_bytes, now_unix) {
+        BannerVerdict::Warn { bytes } => Some(banner_line(&root, bytes, warn_bytes)),
+        BannerVerdict::Skip(_) => None,
+    }
 }
 
 pub fn now_unix() -> i64 {

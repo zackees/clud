@@ -1321,6 +1321,12 @@ fn run(mut args: args::Args) {
         eprintln!("{notice}");
     }
 
+    // Issue #1610: tmp-wt size warning from the daemon's cached walk. Reads
+    // one small file; no walk, no daemon round trip, silent on any failure.
+    if let Some(line) = gc::worktree_size_cache::launch_warning() {
+        eprintln!("{line}");
+    }
+
     // Issue #79 / #65 / #66: register `clud` as the IDropTarget for
     // the console window so dropped files reach the backend. Held for
     // the lifetime of the launch; dropped on graceful exit so the
