@@ -148,40 +148,8 @@ fn windows_refuses_before_creating_anything() {
     assert!(writer.rows.borrow().is_empty());
 }
 
-/// Acceptance: no code path but `safe-mktemp` writes a creation-ledger row.
-#[test]
-fn only_safe_mktemp_calls_the_ledger_insert() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    if !src.is_dir() {
-        // Cross-built test bundles run without the source tree (Windows
-        // exec runners); the Linux lane, built and run in place, enforces it.
-        eprintln!("skipped: no source tree at {}", src.display());
-        return;
-    }
-    let mut callers = Vec::new();
-    let mut stack = vec![src.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                if text.contains(concat!("gc_client_insert", "_created(")) {
-                    callers.push(path.strip_prefix(&src).unwrap().to_path_buf());
-                }
-            }
-        }
-    }
-    callers.sort();
-    assert_eq!(
-        callers,
-        vec![
-            PathBuf::from("daemon").join("client.rs"),
-            PathBuf::from("safe_mktemp.rs"),
-        ]
-    );
-}
+// The writer guard (only `safe-mktemp` inserts rows) is the source scan in
+// `tests/test_ledger_writer_guard.py`, which runs from the checkout.
 
 // ---------- the session env is shared by sub-agent processes ----------
 
