@@ -127,6 +127,17 @@ pub fn handle(args: &HookArgs, payload: &Value) -> Option<String> {
         .as_deref()
         .filter(|_| args.event == "SessionStart")
         .and_then(take_recovery_file);
+    // #1675: bind this launch's pending launch-context record to the session
+    // id Claude just assigned. The token arrives through the env the launch
+    // gave the child; failure-silent like everything else here.
+    if args.event == "SessionStart" {
+        if let (Ok(token), Some(session_id)) = (
+            std::env::var(crate::launch_context::TOKEN_ENV),
+            text("session_id"),
+        ) {
+            crate::launch_context::bind(&args.state_dir, &token, &session_id);
+        }
+    }
     if let (Some(session_id), Some(cwd)) = (text("session_id"), text("cwd")) {
         let transcript_path = text("transcript_path").map(PathBuf::from);
         let _ = record(

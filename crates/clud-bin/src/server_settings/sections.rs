@@ -137,18 +137,37 @@ pub fn model_contexts() -> &'static ModelContexts {
 /// reviewed `claude_max_context_tokens` wins when it has one, otherwise the
 /// served datasheet row, and `None` when neither source knows the ID.
 pub fn effective_context_window(wire_id: &str) -> Option<u32> {
+    effective_context_window_with_source(wire_id).map(|(tokens, _)| tokens)
+}
+
+/// Which source [`effective_context_window`] took its value from (#1675).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextWindowSource {
+    /// A reviewed `claude_max_context_tokens` catalog row.
+    Catalog,
+    /// The served `model_contexts` datasheet section (#1258).
+    Served,
+}
+
+/// [`effective_context_window`] plus the source it came from, so the
+/// launch-context record (#1675) can name it without a second lookup path.
+pub fn effective_context_window_with_source(wire_id: &str) -> Option<(u32, ContextWindowSource)> {
     if let Some(tokens) = provider_catalog::model_by_wire_id(wire_id)
         .and_then(|entry| entry.claude_max_context_tokens)
     {
-        return Some(tokens);
+        return Some((tokens, ContextWindowSource::Catalog));
     }
     if wire_id.starts_with("gpt-") {
         let choice = crate::codex_runtime::active_choice();
         if let Some(tokens) = dynamic_codex_context_window(wire_id, choice) {
-            return Some(tokens);
+            return Some((tokens, ContextWindowSource::Catalog));
         }
     }
-    model_contexts().windows.get(wire_id).copied()
+    model_contexts()
+        .windows
+        .get(wire_id)
+        .copied()
+        .map(|tokens| (tokens, ContextWindowSource::Served))
 }
 
 fn dynamic_codex_context_window(

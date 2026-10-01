@@ -594,6 +594,10 @@ Platform glue:
   executable names received from another OS. `canonicalize_plain` strips the
   Windows `\\?\` prefix (git cannot parse it) before a path goes to git, and
   `same_path` compares paths even after one side was deleted (#1628).
+- `launch_context.rs` - per-session launch-context record (#1675): the
+  context-window values the child receives, written at launch and bound to a
+  hashed session id by `clud session-hook`; see
+  [launch-plan.md](../../../docs/architecture/launch-plan.md#launch-context-record-1675).
 - `launch_setup.rs` - session-only/global setup selector plus
   selected-backend persistent setup actions for skills and Codex hook
   normalization.

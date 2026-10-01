@@ -8,7 +8,7 @@
 
 Usage:
   transcript_report.py <transcript.jsonl> [--json] [--burst-threshold N]
-                       [--jump-threshold TOKENS]
+                       [--jump-threshold TOKENS] [--state-dir DIR]
 
 Reads one Claude Code session transcript (JSONL) and reports what drove its
 context usage (issue #1276):
@@ -22,8 +22,13 @@ context usage (issue #1276):
 * compaction boundaries (``compact_boundary`` system rows), context jumps
   between consecutive responses, and terminal context errors.
 * tool-result byte totals and the largest single result.
-* the effective max-context setting, which a transcript does not record; the
-  field is reported as unavailable instead of being guessed.
+* the effective max-context setting, which a transcript does not record. It
+  comes from clud's per-session launch-context record (#1675), joined by a
+  hashed session id (see ``launch_context_key``) from
+  ``<state>/launch-context/<key>.json``; ``<state>`` is ``--state-dir``, else
+  ``$CLUD_DAEMON_STATE_DIR``, else ``~/.clud/state``. Without a record the
+  field is reported as unavailable instead of being guessed. Per-response
+  token and compaction numbers always come from the transcript.
 
 Privacy: the report never contains prompts, commands, tool inputs, tool
 output or the session id. Tool calls are identified by tool name plus a
@@ -44,6 +49,8 @@ import argparse
 import hashlib
 import hmac
 import json
+import os
+import re
 import secrets
 import sys
 from dataclasses import dataclass, field
@@ -52,6 +59,15 @@ from typing import Any
 
 DEFAULT_BURST_THRESHOLD = 20
 DEFAULT_JUMP_THRESHOLD = 50_000
+
+# Must match `launch_context::HASH_DOMAIN` in crates/clud-bin/src/launch_context.rs.
+LAUNCH_CONTEXT_HASH_DOMAIN = "clud-launch-context-v1\0"
+UNAVAILABLE = "unavailable: a transcript does not record the child environment"
+_SOURCES = {"ambient", "catalog", "served", "unset", "unknown"}
+_ROUTES = {"direct", "unified_gateway", "codex_bridge", "native"}
+_WORD = re.compile(r"[a-z0-9_-]{1,32}")
+_MODEL = re.compile(r"[A-Za-z0-9._/:@\[\]~+-]{1,128}")
+_VERSION = re.compile(r"[A-Za-z0-9._+-]{1,40}")
 
 # Lower-cased markers of a terminal context failure. Only the marker name is
 # reported, never the surrounding text.
@@ -82,6 +98,67 @@ class Response:
 
 def _fingerprint(salt: bytes, value: str) -> str:
     return hmac.new(salt, value.encode("utf-8"), hashlib.sha256).hexdigest()[:12]
+
+
+def launch_context_key(session_id: str) -> str:
+    """The join key clud's writer files the record under.
+
+    First 16 hex chars of ``sha256("clud-launch-context-v1\\0" + session_id)``,
+    the same bytes as ``launch_context::session_hash`` in Rust.
+    """
+    data = (LAUNCH_CONTEXT_HASH_DOMAIN + session_id).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _setting(v: Any) -> dict[str, Any] | None:
+    if not isinstance(v, dict) or v.get("source") not in _SOURCES:
+        return None
+    value = v.get("value")
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+        return None
+    return {"value": value, "source": v["source"]}
+
+
+def _match(pattern: re.Pattern[str], v: Any) -> str | None:
+    return v if isinstance(v, str) and pattern.fullmatch(v) else None
+
+
+def load_launch_context(state_dir: Path, session_id: str) -> dict[str, Any] | None:
+    """Read and allowlist the record for ``session_id``; None when absent or bad."""
+    key = launch_context_key(session_id)
+    path = state_dir / "launch-context" / (key + ".json")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("session") != key:
+        return None
+    max_ctx = _setting(raw.get("max_context_tokens"))
+    if max_ctx is None or raw.get("route") not in _ROUTES:
+        return None
+    pct = raw.get("autocompact_pct_override")
+    return {
+        "clud_version": _match(_VERSION, raw.get("clud_version")),
+        "harness": _match(_WORD, raw.get("harness")),
+        "harness_version": _match(_VERSION, raw.get("harness_version")),
+        "route": raw["route"],
+        "provider": _match(_WORD, raw.get("provider")),
+        "wire_model": _match(_MODEL, raw.get("wire_model")),
+        "max_context_tokens": max_ctx,
+        "auto_compact_window": _setting(raw.get("auto_compact_window")),
+        "autocompact_pct_override": pct
+        if isinstance(pct, int) and not isinstance(pct, bool)
+        else None,
+    }
+
+
+def default_state_dir() -> Path | None:
+    """Mirror ``daemon::default_state_dir``: env override, else ~/.clud/state."""
+    override = os.environ.get("CLUD_DAEMON_STATE_DIR")
+    if override:
+        return Path(override)
+    home = os.environ.get("USERPROFILE") or os.environ.get("HOME")
+    return Path(home) / ".clud" / "state" if home else None
 
 
 def _int(v: Any) -> int:
@@ -118,8 +195,10 @@ def analyze(
     burst_threshold: int = DEFAULT_BURST_THRESHOLD,
     jump_threshold: int = DEFAULT_JUMP_THRESHOLD,
     salt: bytes | None = None,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     salt = salt if salt is not None else secrets.token_bytes(16)
+    session_id: str | None = None
     responses: dict[str, Response] = {}
     order: list[str] = []
     compactions: list[dict[str, Any]] = []
@@ -133,6 +212,8 @@ def analyze(
         if not isinstance(row, dict):
             malformed += 1
             continue
+        if session_id is None and isinstance(row.get("sessionId"), str) and row["sessionId"]:
+            session_id = row["sessionId"]
         ts = row.get("timestamp") if isinstance(row.get("timestamp"), str) else None
         rtype = row.get("type")
         msg = row.get("message") if isinstance(row.get("message"), dict) else {}
@@ -240,6 +321,11 @@ def analyze(
             }
         )
 
+    launch = (
+        load_launch_context(state_dir, session_id)
+        if state_dir is not None and session_id is not None
+        else None
+    )
     return {
         "rows": len(rows),
         "malformed_rows": malformed,
@@ -258,12 +344,19 @@ def analyze(
             "total_bytes": result_total,
             "max_bytes": result_max,
         },
-        "max_context_tokens": {
-            "value": None,
-            "source": "unavailable: a transcript does not record the child environment",
-        },
+        "max_context_tokens": launch["max_context_tokens"]
+        if launch
+        else {"value": None, "source": UNAVAILABLE},
+        "launch_context": launch,
         "per_response": resp_out,
     }
+
+
+def _max_context_line(report: dict[str, Any]) -> str:
+    mc = report["max_context_tokens"]
+    if report.get("launch_context") is None:
+        return f"max context: {mc['source']}"
+    return f"max context: {mc['value']} (source: {mc['source']})"
 
 
 def render_text(report: dict[str, Any]) -> str:
@@ -276,7 +369,7 @@ def render_text(report: dict[str, Any]) -> str:
         f"tool results: {report['tool_results']['count']} totaling"
         f" {report['tool_results']['total_bytes']} bytes"
         f" (largest {report['tool_results']['max_bytes']})",
-        f"max context: {report['max_context_tokens']['source']}",
+        _max_context_line(report),
         f"repeated tool-call bursts: {len(report['repeated_call_bursts'])}",
     ]
     for b in report["repeated_call_bursts"]:
@@ -284,6 +377,14 @@ def render_text(report: dict[str, Any]) -> str:
             f"  {b['copies']} x {b['tool']} [{b['call_fingerprint']}] in response"
             f" {b['response']} (streak {b['longest_streak']}, {b['output_tokens']} output"
             f" tokens, {b['first_timestamp']} .. {b['last_timestamp']})"
+        )
+    launch = report.get("launch_context")
+    if launch:
+        compact = launch.get("auto_compact_window") or {}
+        lines.append(
+            f"launch: route: {launch['route']} provider: {launch['provider']}"
+            f" model: {launch['wire_model']} clud: {launch['clud_version']}"
+            f" auto-compact window: {compact.get('value')} (source: {compact.get('source')})"
         )
     lines.append(f"compaction boundaries: {len(report['compactions'])}")
     for c in report["compactions"]:
@@ -317,6 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     parser.add_argument("--burst-threshold", type=int, default=DEFAULT_BURST_THRESHOLD)
     parser.add_argument("--jump-threshold", type=int, default=DEFAULT_JUMP_THRESHOLD)
+    parser.add_argument(
+        "--state-dir", type=Path, default=None, help="clud state dir holding launch-context/"
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -327,7 +431,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot read transcript: {exc.strerror}", file=sys.stderr)
         return 1
     report = analyze(
-        rows, burst_threshold=max(2, args.burst_threshold), jump_threshold=args.jump_threshold
+        rows,
+        burst_threshold=max(2, args.burst_threshold),
+        jump_threshold=args.jump_threshold,
+        state_dir=args.state_dir or default_state_dir(),
     )
     print(json.dumps(report, indent=2) if args.json else render_text(report))
     return 0

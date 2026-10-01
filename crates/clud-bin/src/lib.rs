@@ -65,6 +65,7 @@ pub mod hook_health;
 pub mod hook_trust;
 pub mod job_orphan_reaper;
 pub mod large_file_guard;
+pub mod launch_context;
 pub mod launch_log;
 pub mod launch_setup;
 pub mod log_event;

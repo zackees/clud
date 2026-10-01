@@ -13,5 +13,8 @@ to finish its own timeout and cleanup before the wrapper's cap.
 
 `diagnostics/transcript_report.py` reports repeated tool-call bursts,
 compactions, context jumps and context errors from one Claude transcript.
+It joins clud's launch-context record by hashed session id to report the
+effective max-context value and its source
+([launch-plan.md](../../../../docs/architecture/launch-plan.md#launch-context-record-1675)).
 Its output holds counts and salted fingerprints, never raw content (#1276,
 [DD-138](../../../../docs/DESIGN_DECISIONS.md#dd-138-the-first-1276-slice-is-a-read-only-transcript-analyzer-not-a-repeated-call-guard)).

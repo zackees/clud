@@ -23,9 +23,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 pub use sections::{
-    deepseek, effective_context_window, model_contexts, per_turn_effort, per_turn_effort_enabled,
-    provider_default_model, provider_subagent_model, DeepSeekSettings, ModelContexts,
-    PerTurnEffort,
+    deepseek, effective_context_window, effective_context_window_with_source, model_contexts,
+    per_turn_effort, per_turn_effort_enabled, provider_default_model, provider_subagent_model,
+    ContextWindowSource, DeepSeekSettings, ModelContexts, PerTurnEffort,
 };
 
 /// The built-in copy, and the single source of the file served from `main`.

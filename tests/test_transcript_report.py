@@ -25,6 +25,16 @@ SECRET_PROMPT = "USER-PROMPT-SHOULD-NOT-LEAK investigate mimalloc"
 SESSION_ID = "622e60e1-5376-44bd-be2c-059a72786a16"
 
 
+@pytest.fixture(autouse=True)
+def _temp_state(tmp_path, monkeypatch):
+    """Never read the real ~/.clud: point HOME and the state dir at a temp."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("CLUD_DAEMON_STATE_DIR", str(tmp_path / "state"))
+
+
 @pytest.fixture
 def tr():
     name = "clud_test_transcript_report"
@@ -215,3 +225,105 @@ def test_fingerprints_are_salted_per_invocation(tr):
 def test_missing_file_exits_one(tr, tmp_path, capsys):
     assert tr.main([str(tmp_path / "nope.jsonl")]) == 1
     assert "cannot read transcript" in capsys.readouterr().err
+
+
+# --- launch-context join (#1675) -------------------------------------------
+
+# The writer's documented vector (crates/clud-bin/src/launch_context_tests.rs
+# ::session_hash_is_the_documented_vector asserts the same literal).
+WRITER_KEY = "eaf004849717de56"
+
+
+def _record(**overrides):
+    record = {
+        "v": 1,
+        "session": WRITER_KEY,
+        "launched_at": 1,
+        "clud_version": "2.0.0",
+        "harness": "claude",
+        "harness_version": None,
+        "route": "direct",
+        "provider": "openrouter",
+        "wire_model": "xiaomi/mimo-v2.6-flash",
+        "max_context_tokens": {"value": 1048576, "source": "served"},
+        "auto_compact_window": {"value": None, "source": "unset"},
+        "autocompact_pct_override": None,
+    }
+    record.update(overrides)
+    return record
+
+
+def _write_record(state, record):
+    d = state / "launch-context"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{WRITER_KEY}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def _transcript(tmp_path):
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in incident_rows()), encoding="utf-8")
+    return path
+
+
+def test_join_key_matches_the_writer(tr):
+    assert tr.launch_context_key(SESSION_ID) == WRITER_KEY
+
+
+def test_record_value_and_source_replace_unavailable(tr, tmp_path, capsys):
+    state = tmp_path / "state"
+    _write_record(state, _record())
+    report = tr.analyze(incident_rows(), state_dir=state)
+    assert report["max_context_tokens"] == {"value": 1048576, "source": "served"}
+    assert report["launch_context"]["route"] == "direct"
+    assert report["launch_context"]["auto_compact_window"]["source"] == "unset"
+    path = _transcript(tmp_path)
+    before = sorted(str(p) for p in tmp_path.rglob("*"))
+    assert tr.main([str(path), "--state-dir", str(state)]) == 0
+    out = capsys.readouterr().out
+    assert "max context: 1048576 (source: served)" in out
+    assert "route: direct" in out
+    assert SESSION_ID not in out
+    assert WRITER_KEY not in out
+    assert sorted(str(p) for p in tmp_path.rglob("*")) == before, "the tool must write no files"
+
+
+def test_default_state_dir_comes_from_the_env(tr, tmp_path, capsys):
+    _write_record(tmp_path / "state", _record())
+    assert tr.main([str(_transcript(tmp_path))]) == 0
+    assert "max context: 1048576 (source: served)" in capsys.readouterr().out
+
+
+def test_missing_record_still_unavailable(tr, tmp_path):
+    report = tr.analyze(incident_rows(), state_dir=tmp_path / "state")
+    assert report["max_context_tokens"]["value"] is None
+    assert "unavailable" in report["max_context_tokens"]["source"]
+    assert report["launch_context"] is None
+
+
+def test_malformed_record_is_ignored(tr, tmp_path):
+    state = tmp_path / "state"
+    d = state / "launch-context"
+    d.mkdir(parents=True)
+    (d / f"{WRITER_KEY}.json").write_text("{not json", encoding="utf-8")
+    report = tr.analyze(incident_rows(), state_dir=state)
+    assert "unavailable" in report["max_context_tokens"]["source"]
+    _write_record(state, _record(max_context_tokens={"value": "x", "source": "evil text"}))
+    report = tr.analyze(incident_rows(), state_dir=state)
+    assert "unavailable" in report["max_context_tokens"]["source"]
+
+
+def test_record_fields_are_allowlisted(tr, tmp_path):
+    state = tmp_path / "state"
+    _write_record(state, _record(extra="SECRET-EXTRA-FIELD"))
+    report = tr.analyze(incident_rows(), state_dir=state)
+    assert "SECRET-EXTRA-FIELD" not in json.dumps(report)
+
+
+def test_token_fields_stay_transcript_derived(tr, tmp_path):
+    """A record never changes per-response token or compaction numbers."""
+    state = tmp_path / "state"
+    without = tr.analyze(incident_rows(), state_dir=state, salt=b"s" * 16)
+    _write_record(state, _record())
+    with_record = tr.analyze(incident_rows(), state_dir=state, salt=b"s" * 16)
+    for key in ("per_response", "compactions", "output_tokens_total", "context_jumps"):
+        assert with_record[key] == without[key]
