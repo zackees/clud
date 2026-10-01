@@ -283,6 +283,92 @@ pub fn tmp_launch_warning() -> Option<String> {
     tmp_launch_warning_at(&home, now_unix())
 }
 
+// ---- #1691: the same warn-only cached size check for `~/.clud/cache` ----
+
+/// File name of the `~/.clud/cache` size cache, a sibling of `cache` so uv
+/// (which owns everything inside `cache/uv`) never sees it.
+pub const CLUD_CACHE_SIZE_FILE_NAME: &str = "cache-size.json";
+
+/// Default for `cache.warn_bytes`: 20 GiB, same as `tmp.warn_bytes`. The
+/// #1691 machine held 31-33 GB, so this speaks up there. `0` disables.
+pub const DEFAULT_CACHE_WARN_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+/// `<home>/.clud/cache`: the parent of `tools::clud_uv_cache_dir`.
+pub fn clud_cache_dir_for(home: &Path) -> PathBuf {
+    home.join(".clud").join("cache")
+}
+
+/// `<home>/.clud/cache-size.json`.
+pub fn clud_cache_size_path_for(home: &Path) -> PathBuf {
+    home.join(".clud").join(CLUD_CACHE_SIZE_FILE_NAME)
+}
+
+/// The one-line banner warning for `~/.clud/cache`.
+pub fn clud_cache_banner_line(root: &Path, bytes: u64, warn_bytes: u64) -> String {
+    banner_line_for("cache.warn_bytes", root, bytes, warn_bytes)
+}
+
+/// The `clud gc list` warning line for `~/.clud/cache`, or `None`.
+/// `warn_bytes == 0` disables it.
+pub fn clud_cache_list_warning(root: &Path, warn_bytes: u64, check: SizeCheck) -> Option<String> {
+    if warn_bytes == 0 {
+        return None;
+    }
+    match check {
+        SizeCheck::Under(_) => None,
+        SizeCheck::Over(bytes) => Some(format!(
+            "warning: {} holds at least {bytes} bytes, over cache.warn_bytes ({warn_bytes}); \
+             clud never deletes inside uv's cache — reclaim with \
+             `UV_CACHE_DIR={} uv cache prune` or `clud gc purge --kind uv-cache --yes`",
+            root.display(),
+            root.join("uv").display()
+        )),
+        SizeCheck::Unknown => Some(format!(
+            "warning: {} is too large to size within budget; it may exceed \
+             cache.warn_bytes ({warn_bytes})",
+            root.display()
+        )),
+    }
+}
+
+/// Daemon side for `~/.clud/cache`. Read-only walk; deletes nothing but a
+/// stale cache file when the warning is disabled.
+pub fn refresh_clud_cache_size(
+    home: &Path,
+    warn_bytes: u64,
+    now_unix: i64,
+) -> std::io::Result<()> {
+    refresh_cache_at(
+        &clud_cache_size_path_for(home),
+        &clud_cache_dir_for(home),
+        warn_bytes,
+        now_unix,
+    )
+}
+
+/// Launch side for `~/.clud/cache`, testable against any home.
+pub fn clud_cache_launch_warning_at(home: &Path, now_unix: i64) -> Option<String> {
+    let warn_bytes = crate::clud_settings::peek_cache_warn_bytes_at(home);
+    if warn_bytes == 0 {
+        return None;
+    }
+    let cached = read_cache(&clud_cache_size_path_for(home));
+    match banner_decision(cached.as_ref(), warn_bytes, now_unix) {
+        BannerVerdict::Warn { bytes } => Some(clud_cache_banner_line(
+            &clud_cache_dir_for(home),
+            bytes,
+            warn_bytes,
+        )),
+        BannerVerdict::Skip(_) => None,
+    }
+}
+
+/// Launch side for `~/.clud/cache`: never fails, never walks.
+pub fn clud_cache_launch_warning() -> Option<String> {
+    let home = crate::gc::session_tmp::home_dir()?;
+    clud_cache_launch_warning_at(&home, now_unix())
+}
+
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

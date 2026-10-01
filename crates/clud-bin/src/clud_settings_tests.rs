@@ -128,10 +128,7 @@ fn cache_warn_bytes_defaults_and_parses() {
         load_cache_warn_bytes_at(home.path()).unwrap(),
         DEFAULT_CACHE_WARN_BYTES
     );
-    assert_eq!(
-        peek_cache_warn_bytes_at(home.path()),
-        DEFAULT_CACHE_WARN_BYTES
-    );
+    assert_eq!(peek_cache_warn_bytes_at(home.path()), DEFAULT_CACHE_WARN_BYTES);
     for (doc, want) in [
         (json!({}), DEFAULT_CACHE_WARN_BYTES),
         (json!({"cache": {"warn_bytes": 0}}), 0),

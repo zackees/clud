@@ -5865,3 +5865,39 @@ possible.
 **Consequences:** under a burst larger than the cap, entries older than an
 hour lose their restore window early. A user who wants the full 72 h can set
 `trash.max_bytes` to `0`.
+
+## DD-144: `~/.clud/cache` size is reported; clud does not run `uv cache prune`
+
+**Context:** #1691: `~/.clud/cache` reached 31-33 GB, almost all uv's own
+content-addressed cache (`archive-v0` 28 GB, `sdists-v9` 4.5 GB). The daily
+uv sweep (#423) only ages out `environments-v2/` entries. The issue proposed
+reporting the size and optionally running `uv cache prune` from that sweep.
+
+**Decision:** `cache.warn_bytes` (default 20 GiB, `0` disables) only warns, in
+`clud gc list` and on the launch banner, through the cached walk of DD-141
+(`gc::worktree_size_cache`, cache file `~/.clud/cache-size.json`, a sibling of
+`cache` so uv never sees it). clud does **not** invoke `uv cache prune`, and
+its own walker never deletes inside uv's cache. The warning names the
+upstream commands (`uv cache prune`, `clud gc purge --kind uv-cache --yes`)
+for a human to run. Contract:
+[gc-and-registry.md](architecture/gc-and-registry.md#filesystem-sweeps-non-registry).
+
+**Why not an automatic prune (checked against docs.astral.sh/uv, cache
+concept and CLI reference):**
+- `uv cache prune` "removes all unused cache entries **and all centralized
+  project environments**". `environments-v2/` is where `uv run --script`
+  keeps every bundled-tool and hook env, so a daily prune would wipe envs
+  clud's own 72 h sweep deliberately keeps, and every hook would re-resolve.
+- The concurrency guarantee is a 5-minute wait for other uv processes, after
+  which behaviour is not specified there, and `--force` removes locks held by
+  others. It also depends on the user's uv version (clud runs whatever `uv`
+  is on `PATH`), which clud cannot verify offline.
+- "Unused" means unreachable from uv's own wheel index, not from any clud
+  env, so the 28 GB of referenced `archive-v0` entries are likely not
+  reclaimed at all; the cost is real and the benefit unproven.
+- `--ci` drops all pre-built wheels: a forced re-download of everything.
+
+**Consequences:** the cache can still grow; the banner makes it visible and
+the human chooses when to prune. An opt-in prune can revisit this once its
+reclaim on a real cache and its lock behaviour across supported uv versions
+are measured.
