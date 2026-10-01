@@ -37,7 +37,7 @@ def _run(pytester: pytest.Pytester, body: str) -> tuple[int, list[Path]]:
     # inline_run, unlike runpytest, injects no --basetemp, so the inner session
     # takes the default base temp under pytester's private temp root.
     reprec = pytester.inline_run("-p", "ci.pytest_tmp_retention", "-p", "no:cacheprovider")
-    roots = list(Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).glob("pytest-of-*/pytest-*"))
+    roots = list(Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).glob("pytest-of-*/pytest-[0-9]*"))
     return reprec.ret, roots
 
 
