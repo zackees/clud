@@ -2408,6 +2408,9 @@ mod tests {
         if sealed.exists() {
             fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        assert!(!candidate.exists(), "a read-only tree must not be retried forever");
+        assert!(
+            !candidate.exists(),
+            "a read-only tree must not be retried forever"
+        );
     }
 }
