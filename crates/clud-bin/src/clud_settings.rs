@@ -265,8 +265,9 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
 
     if let Some(tmp) = seed_object_entry(document, "tmp") {
         // #1327: warn-only size threshold for ~/.clud/tmp; 0 disables.
-        tmp.entry("warn_bytes".to_string())
-            .or_insert(json!(crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES));
+        tmp.entry("warn_bytes".to_string()).or_insert(json!(
+            crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES
+        ));
     }
 
     if let Some(daemon) = seed_object_entry(document, "daemon") {
