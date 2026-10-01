@@ -195,6 +195,37 @@ fn prune(dir: &Path, now: SystemTime) {
     }
 }
 
+/// Temp file + rename, **without** `fsync`: this runs in front of every tool
+/// call, and an fsync per call cost ~110 ms of p99 on CI disks (#1674). A
+/// streak lost to a crash only undercounts, which this fail-open guard
+/// tolerates. Owner-only mode on Unix; the file holds only a hash and counts.
+fn write_fast(path: &Path, bytes: &[u8], create_dir: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if create_dir {
+        std::fs::create_dir_all(parent)?;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let temp = parent.join(format!(".tmp-{}-{nanos}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options
+        .open(&temp)
+        .and_then(|mut file| file.write_all(bytes))
+        .and_then(|()| std::fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 /// Record this call against the session's streak in `state_dir` and return
 /// the verdict. Every failure allows.
 pub(super) fn check_at(
@@ -216,7 +247,7 @@ pub(super) fn check_at(
     let Ok(bytes) = serde_json::to_vec(&streak) else {
         return Verdict::Allow;
     };
-    if crate::fs_private::write_private_atomic(&path, &bytes).is_err() {
+    if write_fast(&path, &bytes, existing.is_none()).is_err() {
         return Verdict::Allow;
     }
     if existing.is_none() {
