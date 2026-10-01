@@ -504,11 +504,13 @@ fn cmd_list(state_dir: &Path, json: bool, kind_filter: Option<&str>) -> i32 {
         }
         warn_if_worktree_root_oversized();
         warn_if_session_tmp_oversized();
+        warn_if_clud_cache_oversized();
         return 0;
     }
     print_table_from_rows(&rows);
     warn_if_worktree_root_oversized();
     warn_if_session_tmp_oversized();
+    warn_if_clud_cache_oversized();
     0
 }
 
@@ -526,6 +528,28 @@ fn warn_if_session_tmp_oversized() {
     }
     let check = check_tree_size(&root, warn_bytes, SIZE_SCAN_ENTRY_BUDGET);
     if let Some(line) = tmp_list_warning(&root, warn_bytes, check) {
+        eprintln!("{line}");
+    }
+}
+
+/// #1691: warn (stderr) when `~/.clud/cache` exceeds `cache.warn_bytes`.
+/// Warn-only: clud never deletes inside uv's cache for size (DD-144).
+fn warn_if_clud_cache_oversized() {
+    use crate::gc::worktree_root::{check_tree_size, SIZE_SCAN_ENTRY_BUDGET};
+    use crate::gc::worktree_size_cache::{
+        clud_cache_dir_for, clud_cache_list_warning, DEFAULT_CACHE_WARN_BYTES,
+    };
+    let Some(home) = crate::gc::session_tmp::home_dir() else {
+        return;
+    };
+    let warn_bytes =
+        crate::clud_settings::load_cache_warn_bytes().unwrap_or(DEFAULT_CACHE_WARN_BYTES);
+    if warn_bytes == 0 {
+        return;
+    }
+    let root = clud_cache_dir_for(&home);
+    let check = check_tree_size(&root, warn_bytes, SIZE_SCAN_ENTRY_BUDGET);
+    if let Some(line) = clud_cache_list_warning(&root, warn_bytes, check) {
         eprintln!("{line}");
     }
 }

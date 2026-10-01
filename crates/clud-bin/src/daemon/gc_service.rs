@@ -1033,6 +1033,25 @@ fn refresh_session_tmp_size_cache() {
     );
 }
 
+/// Issue #1691: bounded, read-only size walk of `~/.clud/cache` (mostly
+/// uv's own cache), cached for the launch banner. Warn-only (DD-144).
+fn refresh_clud_cache_size_cache() {
+    // Unit tests never write into the real `~/.clud`.
+    if cfg!(test) {
+        return;
+    }
+    let Some(home) = crate::gc::session_tmp::home_dir() else {
+        return;
+    };
+    let warn_bytes = crate::clud_settings::load_cache_warn_bytes()
+        .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES);
+    let _ = crate::gc::worktree_size_cache::refresh_clud_cache_size(
+        &home,
+        warn_bytes,
+        crate::gc::worktree_size_cache::now_unix(),
+    );
+}
+
 /// Issue #1591: `gc list` rows for the cached repo-worktree snapshot.
 /// Paths the registry already tracks are skipped (their own row wins), and a
 /// live session cwd inside a worktree pins it now, even if the snapshot is
@@ -1193,6 +1212,7 @@ fn run_maintenance_sweeps(warn_free_bytes: u64) {
         MaintenanceAction::RunUrgent => {
             crate::daemon::session_tmp_sweep::sweep_now();
             refresh_session_tmp_size_cache();
+            refresh_clud_cache_size_cache();
             crate::daemon::session_state_sweep::sweep_now();
             crate::daemon::target_sweep::sweep_now();
             crate::daemon::trash_cap::maybe_enforce();
@@ -1200,6 +1220,7 @@ fn run_maintenance_sweeps(warn_free_bytes: u64) {
         MaintenanceAction::RunNormal => {
             crate::daemon::session_tmp_sweep::maybe_sweep_session_tmp();
             refresh_session_tmp_size_cache();
+            refresh_clud_cache_size_cache();
             crate::daemon::session_state_sweep::maybe_sweep_session_state();
             crate::daemon::target_sweep::maybe_sweep_targets();
             crate::daemon::trash_cap::maybe_enforce();

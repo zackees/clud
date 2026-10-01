@@ -270,6 +270,13 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
         ));
     }
 
+    if let Some(cache) = seed_object_entry(document, "cache") {
+        // #1691: warn-only size threshold for ~/.clud/cache; 0 disables.
+        cache.entry("warn_bytes".to_string()).or_insert(json!(
+            crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES
+        ));
+    }
+
     if let Some(trash) = seed_object_entry(document, "trash") {
         // #1672: size cap on ~/.clud/trash, oldest evicted first; 0 disables.
         trash
@@ -948,6 +955,38 @@ pub fn trash_max_bytes_from(document: &Value) -> u64 {
         .and_then(|item| item.get("max_bytes"))
         .and_then(Value::as_u64)
         .unwrap_or(crate::rm_tool::TRASH_MAX_BYTES_DEFAULT)
+}
+
+/// `cache.warn_bytes` (#1691): when `~/.clud/cache` (almost all uv's own
+/// cache) grows past this, `clud gc list` and the launch banner warn.
+/// Warn-only: clud never deletes inside uv's cache for size (DD-144). `0`
+/// disables; absent or not a non-negative integer means the default.
+pub fn load_cache_warn_bytes() -> Result<u64, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_cache_warn_bytes_at(&home)
+}
+
+pub fn load_cache_warn_bytes_at(home: &Path) -> Result<u64, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(cache_warn_bytes_from(&document))
+}
+
+/// Lock-free, failure-silent read of `cache.warn_bytes` for the banner.
+pub fn peek_cache_warn_bytes_at(home: &Path) -> u64 {
+    read_settings_or_legacy(home)
+        .map(|document| cache_warn_bytes_from(&document))
+        .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES)
+}
+
+/// Pure reader for `cache.warn_bytes`.
+pub fn cache_warn_bytes_from(document: &Value) -> u64 {
+    document
+        .get("cache")
+        .and_then(|item| item.get("warn_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES)
 }
 
 /// The JSON key path of the human-set safe-rm root override (#1668,

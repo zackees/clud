@@ -117,6 +117,44 @@ fn trash_max_bytes_defaults_and_parses() {
     assert_eq!(seeded["trash"]["max_bytes"], json!(TRASH_MAX_BYTES_DEFAULT));
 }
 
+/// #1691: the warn-only `~/.clud/cache` size threshold defaults to 20 GiB,
+/// `0` disables it, and a malformed value falls back to the default.
+#[test]
+fn cache_warn_bytes_defaults_and_parses() {
+    use crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES;
+    assert_eq!(DEFAULT_CACHE_WARN_BYTES, 20 * 1024 * 1024 * 1024);
+    let home = tempdir().unwrap();
+    assert_eq!(
+        load_cache_warn_bytes_at(home.path()).unwrap(),
+        DEFAULT_CACHE_WARN_BYTES
+    );
+    assert_eq!(
+        peek_cache_warn_bytes_at(home.path()),
+        DEFAULT_CACHE_WARN_BYTES
+    );
+    for (doc, want) in [
+        (json!({}), DEFAULT_CACHE_WARN_BYTES),
+        (json!({"cache": {"warn_bytes": 0}}), 0),
+        (json!({"cache": {"warn_bytes": 1234}}), 1234),
+        (
+            json!({"cache": {"warn_bytes": "9"}}),
+            DEFAULT_CACHE_WARN_BYTES,
+        ),
+        (
+            json!({"cache": {"warn_bytes": -1}}),
+            DEFAULT_CACHE_WARN_BYTES,
+        ),
+        (json!({"tmp": {"warn_bytes": 7}}), DEFAULT_CACHE_WARN_BYTES),
+    ] {
+        assert_eq!(cache_warn_bytes_from(&doc), want, "{doc}");
+    }
+    let seeded = seeded_global_settings_document();
+    assert_eq!(
+        seeded["cache"]["warn_bytes"],
+        json!(DEFAULT_CACHE_WARN_BYTES)
+    );
+}
+
 #[test]
 fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();

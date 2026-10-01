@@ -234,3 +234,67 @@ fn tmp_refresh_and_launch_warning_round_trip_and_never_delete() {
     assert!(!tmp_cache_path_for(home.path()).exists());
     assert!(blob.exists());
 }
+
+// ---- #1691: the same warn-only cached size check for `~/.clud/cache` ----
+
+#[test]
+fn clud_cache_size_file_lives_beside_cache_not_inside_it() {
+    let home = tempdir().unwrap();
+    let root = clud_cache_dir_for(home.path());
+    assert_eq!(root, home.path().join(".clud").join("cache"));
+    let path = clud_cache_size_path_for(home.path());
+    assert_eq!(path.parent(), root.parent(), "sibling of ~/.clud/cache");
+    assert!(!path.starts_with(&root), "uv must never see it");
+    assert_ne!(path, tmp_cache_path_for(home.path()));
+}
+
+#[test]
+fn clud_cache_banner_and_list_lines_name_cache_setting() {
+    let root = Path::new("/h/.clud/cache");
+    let line = clud_cache_banner_line(root, 30 * GIB, 20 * GIB);
+    assert!(!line.contains('\n'), "{line}");
+    assert!(line.contains("cache.warn_bytes"), "{line}");
+    assert!(!line.contains("tmp.warn_bytes"), "{line}");
+    assert_eq!(clud_cache_list_warning(root, 10, SizeCheck::Under(5)), None);
+    assert_eq!(clud_cache_list_warning(root, 0, SizeCheck::Over(50)), None);
+    let over = clud_cache_list_warning(root, 10, SizeCheck::Over(50)).unwrap();
+    assert!(over.contains("cache.warn_bytes"), "{over}");
+    assert!(
+        over.contains("uv cache prune"),
+        "points at upstream: {over}"
+    );
+    let unknown = clud_cache_list_warning(root, 10, SizeCheck::Unknown).unwrap();
+    assert!(unknown.contains("cache.warn_bytes"), "{unknown}");
+}
+
+#[test]
+fn clud_cache_refresh_and_launch_warning_round_trip_and_never_delete() {
+    let home = tempdir().unwrap();
+    assert_eq!(clud_cache_launch_warning_at(home.path(), NOW), None);
+    let root = clud_cache_dir_for(home.path());
+    std::fs::create_dir_all(root.join("uv/archive-v0/x")).unwrap();
+    let blob = root.join("uv/archive-v0/x/blob");
+    std::fs::write(&blob, vec![0u8; 300]).unwrap();
+    let settings = crate::clud_settings::settings_path_at(home.path());
+    std::fs::write(&settings, br#"{"cache":{"warn_bytes":100}}"#).unwrap();
+
+    refresh_clud_cache_size(home.path(), 100, NOW).unwrap();
+    let entry = read_cache(&clud_cache_size_path_for(home.path())).unwrap();
+    assert!(matches!(entry.check, SizeCheck::Over(b) if b > 100));
+    assert!(blob.exists(), "warn-only: the walk deletes nothing");
+
+    let line = clud_cache_launch_warning_at(home.path(), NOW).expect("over cache warns");
+    assert!(line.contains("cache.warn_bytes"), "{line}");
+    // Independent of the tmp banner.
+    assert_eq!(tmp_launch_warning_at(home.path(), NOW), None);
+    assert_eq!(
+        clud_cache_launch_warning_at(home.path(), NOW + MAX_CACHE_AGE_SECS + 1),
+        None
+    );
+
+    std::fs::write(&settings, br#"{"cache":{"warn_bytes":0}}"#).unwrap();
+    assert_eq!(clud_cache_launch_warning_at(home.path(), NOW), None);
+    refresh_clud_cache_size(home.path(), 0, NOW).unwrap();
+    assert!(!clud_cache_size_path_for(home.path()).exists());
+    assert!(blob.exists());
+}
