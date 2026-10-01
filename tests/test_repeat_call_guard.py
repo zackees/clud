@@ -83,7 +83,8 @@ def test_incident_294_identical_calls_are_denied_from_call_n_plus_one(tmp_path: 
     state = tmp_path / "state" / "repeat-guard"
     for file in state.iterdir():
         text = file.read_text(encoding="utf-8")
-        assert "echo" not in text and "s-1" not in text, "state stores only hashes and counts"
+        assert "echo" not in text, "state stores only hashes and counts"
+        assert "s-1" not in text, "state never stores the session id"
 
 
 def test_differing_calls_and_sessions_reset_the_streak(tmp_path: Path) -> None:
