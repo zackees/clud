@@ -352,6 +352,78 @@ fn local_pump_releases_lone_esc_through_toast_filter() {
     assert!(!mouse.has_pending());
 }
 
+/// #1697: SGR any-motion reports as the Windows console reader delivers them
+/// under VT input: one chunk per character.
+const MOUSE_MOTION: &[u8] = b"\x1b[<35;31;18M\x1b[<35;31;19M\x1b[<35;33;20M";
+
+/// Runs `chunks` through the shared pipeline the way the pump does (one
+/// `filter_user_input_chunk` per chunk, then an idle flush) and returns each
+/// non-empty PTY write.
+fn pump_writes(chunks: &[&[u8]], targets: Option<ToastHitTargets>) -> Vec<Vec<u8>> {
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let mut writes: Vec<Vec<u8>> = chunks
+        .iter()
+        .map(|chunk| filter_user_input_chunk(chunk, &mut paste, &mut mouse, targets).bytes)
+        .collect();
+    writes.push(flush_pending_user_input(&mut paste, &mut mouse, targets));
+    writes.retain(|write| !write.is_empty());
+    writes
+}
+
+/// #1697: ConPTY's input parser flushes whatever sequence is still open at
+/// the end of each write, so a report written across several writes reaches
+/// the child as a lost `ESC [ <` plus literal `35;31;18M` text. Every write
+/// the pump makes must therefore hold only whole escape sequences.
+#[test]
+fn byte_at_a_time_mouse_reports_reach_the_pty_as_whole_writes() {
+    for targets in [None, parity_targets()] {
+        let chunks: Vec<&[u8]> = MOUSE_MOTION.chunks(1).collect();
+        let writes = pump_writes(&chunks, targets);
+        assert_eq!(
+            writes,
+            vec![
+                b"\x1b[<35;31;18M".to_vec(),
+                b"\x1b[<35;31;19M".to_vec(),
+                b"\x1b[<35;33;20M".to_vec(),
+            ],
+            "toast armed: {}",
+            targets.is_some()
+        );
+    }
+}
+
+/// #1697: every split of a mixed input stream still forwards it byte-exact,
+/// and no write ends inside an escape sequence before the idle flush.
+#[test]
+fn every_split_of_mixed_input_is_byte_exact_and_never_ends_mid_sequence() {
+    let input: &[u8] = b"a\x1b[<35;31;18Mb\x1b[A\x1b[13;2u\x1b\r\x1bOPc\x1b[<0;5;5m";
+    for split in 1..input.len() {
+        let (left, right) = input.split_at(split);
+        for targets in [None, parity_targets()] {
+            let writes = pump_writes(&[left, right], targets);
+            assert_eq!(writes.concat(), input, "split at {split}");
+            for write in &writes[..writes.len() - 1] {
+                assert!(
+                    !ends_inside_escape_sequence(write),
+                    "split at {split}: write {write:?} ends mid-sequence"
+                );
+            }
+        }
+    }
+}
+
+fn ends_inside_escape_sequence(write: &[u8]) -> bool {
+    let Some(esc) = write.iter().rposition(|&b| b == 0x1b) else {
+        return false;
+    };
+    match &write[esc + 1..] {
+        [] | [b'O'] => true,
+        [b'[', params @ ..] => params.iter().all(|b| (0x20..=0x3f).contains(b)),
+        _ => false,
+    }
+}
+
 #[test]
 fn ctrl_c_byte_requests_interrupt() {
     assert!(!stdin_chunk_requests_interrupt(b"abc"));
