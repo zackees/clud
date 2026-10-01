@@ -185,11 +185,7 @@ fn recorded_file_now_a_directory_is_refused() {
 
 #[test]
 fn recorded_path_gone_is_refused() {
-    let f = facts(
-        "/work/out/x",
-        Ok(vec![dir_row("/work/out")]),
-        &[],
-    );
+    let f = facts("/work/out/x", Ok(vec![dir_row("/work/out")]), &[]);
     assert!(refusal(&f).contains("no longer exists"));
 }
 
