@@ -738,6 +738,15 @@ where
     );
     dispatched += log_periodic_purge_reply(EXTERN_REPO_KIND, extern_reply);
 
+    // #1666: creation-ledger rows expire with the session's other GC state
+    // (its temp dir and trash keep the same 72h window).
+    let ledger_keep = crate::gc::session_tmp::STALE_THRESHOLD.as_secs() as i64;
+    match registry.expire_created(now_unix().saturating_sub(ledger_keep)) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[clud] gc tick: expired {n} creation-ledger row(s)"),
+        Err(err) => eprintln!("[clud] gc tick: creation-ledger expiry failed: {err}"),
+    }
+
     // Issue #946: refresh the verdicts the pass above consumed, off-worker.
     // Listing is the one part only this thread can do (it owns redb); the
     // probe's `git` spawns happen on their own thread and land back as
@@ -1437,6 +1446,22 @@ fn process_op(
             let stamp = provided.unwrap_or_else(now_unix);
             match registry.record_repo_visit(&repo_root, &cwd, stamp) {
                 Ok(()) => GcReply::RepoVisitOk,
+                Err(e) => GcReply::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+
+        GcOp::InsertCreated { entry } => match registry.insert_created(&entry) {
+            Ok(inserted) => GcReply::CreatedInsertOk { inserted },
+            Err(e) => GcReply::Error {
+                message: e.to_string(),
+            },
+        },
+
+        GcOp::QueryCreated { session_id, path } => {
+            match registry.query_created(&session_id, &path) {
+                Ok(rows) => GcReply::CreatedRowsOk { rows },
                 Err(e) => GcReply::Error {
                     message: e.to_string(),
                 },

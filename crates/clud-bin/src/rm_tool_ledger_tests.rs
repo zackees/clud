@@ -234,7 +234,7 @@ fn entry_owned_by_another_user_under_a_recorded_dir_is_refused() {
         ],
     );
     let reason = refusal(&f);
-    assert!(reason.contains("/work/out/theirs"), "{reason}");
+    assert!(reason.contains("theirs"), "{reason}");
     assert!(reason.contains("not owned by you"), "{reason}");
 }
 

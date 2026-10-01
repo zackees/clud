@@ -26,6 +26,28 @@ pub trait CreationLedger: Debug {
     fn lookup(&self, path: &Path) -> Result<Vec<CreatedEntry>, String>;
 }
 
+/// The production ledger: the daemon's GC registry, asked over JSON-over-TCP
+/// without spawning a daemon. Every failure reads as "unavailable".
+#[derive(Debug)]
+pub struct DaemonLedger {
+    pub state_dir: Option<PathBuf>,
+    pub session_id: Option<String>,
+}
+
+impl CreationLedger for DaemonLedger {
+    fn lookup(&self, path: &Path) -> Result<Vec<CreatedEntry>, String> {
+        let session = self.session_id.as_deref().ok_or("no clud session id")?;
+        let state = self.state_dir.as_deref().ok_or("no clud state directory")?;
+        crate::daemon::gc_client_query_created(
+            state,
+            session,
+            &path.to_string_lossy(),
+            crate::daemon::LEDGER_QUERY_TIMEOUT,
+        )
+        .map_err(|error| format!("clud daemon not reachable: {error}"))
+    }
+}
+
 /// The live state of one path, from `symlink_metadata` (never followed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveEntry {
@@ -119,8 +141,75 @@ fn stat(path: &Path) -> Option<LiveEntry> {
 /// `Ok(reason)` naming the ledger row that allows deleting the target, or
 /// `Err(clause)` for the refusal.
 pub fn verdict(facts: &LedgerFacts) -> Result<String, String> {
-    let _ = facts;
-    Err("creation ledger not implemented".into())
+    let rows = match &facts.rows {
+        Ok(rows) => rows,
+        Err(reason) => return Err(format!("creation ledger unavailable ({reason})")),
+    };
+    let mut candidates: Vec<&CreatedEntry> = rows
+        .iter()
+        .filter(|row| covers(row, &facts.target))
+        .collect();
+    if candidates.is_empty() {
+        return Err("not created by this session (no creation ledger entry)".into());
+    }
+    // The deepest row first: its refusal is the most specific.
+    candidates.sort_by_key(|row| std::cmp::Reverse(Path::new(&row.path).components().count()));
+    let mut first_refusal = None;
+    for row in candidates {
+        match check_row(row, facts) {
+            Ok(()) => {
+                return Ok(format!(
+                    "creation ledger: {} {} recorded for session {} by {}",
+                    row.kind.as_str(),
+                    row.path,
+                    row.session_id,
+                    row.role
+                ));
+            }
+            Err(reason) => {
+                first_refusal.get_or_insert(reason);
+            }
+        }
+    }
+    Err(first_refusal.unwrap_or_default())
+}
+
+fn check_row(row: &CreatedEntry, facts: &LedgerFacts) -> Result<(), String> {
+    let recorded = Path::new(&row.path);
+    let kind = row.kind.as_str();
+    let Some(live) = facts.live.get(recorded) else {
+        return Err(format!("recorded {kind} {} no longer exists", row.path));
+    };
+    if live.is_symlink {
+        return Err(format!("recorded {kind} {} is now a symlink", row.path));
+    }
+    let live_kind = if live.is_dir { "dir" } else { "file" };
+    if live_kind != kind {
+        return Err(format!("recorded {kind} {} is now a {live_kind}", row.path));
+    }
+    let (Some(dev), Some(ino), Some((live_dev, live_ino)), Some(me)) =
+        (row.dev, row.ino, live.id, facts.me)
+    else {
+        return Err(format!(
+            "cannot verify the identity of recorded {kind} {} (the device/inode check is \
+             Unix-only)",
+            row.path
+        ));
+    };
+    if (dev, ino) != (live_dev, live_ino) {
+        return Err(format!("recorded {kind} {} was replaced (device/inode differ)", row.path));
+    }
+    if row.uid != Some(me) {
+        return Err(format!("recorded {kind} {} is not owned by you", row.path));
+    }
+    for path in chain(row, &facts.target) {
+        if let Some(entry) = facts.live.get(&path) {
+            if entry.uid != Some(me) {
+                return Err(format!("{} is not owned by you", path.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

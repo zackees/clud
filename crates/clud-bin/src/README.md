@@ -828,6 +828,7 @@ Session rm activation and hook identity checks: [rm protection](../../../docs/ar
 Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../../docs/architecture/rm-tools.md).
 
 - `rm_tool.rs` — `safe-rm` (#1340): flags, `Roots` from `CLUD_RM_ROOTS` or the checkout (plus its worktrees), `resolve`'s refusals, the system temp roots (#1622, #1659 `/dev/shm`; RAM-backed ones purge instead of trashing, [rm-tools.md](../../../docs/architecture/rm-tools.md#system-temp-directories-1622)), trash entries with `.clud-rm.json`, `--purge`, the per-call audit log, and `session_roots_value` for the child env; tests in `rm_tool_tests.rs`.
+- `rm_tool_ledger.rs` — submodule `rm_tool::ledger`: the creation-ledger consult for a path outside every root (#1666), as `verdict` over injected `LedgerFacts` plus `probe` and the daemon-backed `DaemonLedger`; tests in `rm_tool_ledger_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#creation-ledger-implemented-slice-1-1666).
 - `rm_tool_clone.rs` — submodule of `rm_tool.rs`: whether a clone outside the roots may be removed (#1573), as `verdict` over injected `CloneFacts` (origin match, clean, fully pushed, no stash) plus the git `probe`; rule in [rm-tools.md](../../../docs/architecture/rm-tools.md#location-policy).
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
 - `rm_guard.rs` — catastrophe-floor decisions, canonical operands, and mount
