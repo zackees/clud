@@ -187,6 +187,45 @@ the range would include the whole rebase delta). The denial names the correct
 `git/review_range.py`. A fresh upstream, a branch with no upstream, and any other
 command are untouched. Code: `block_bad_cmd_stale_upstream.rs`.
 
+### Repeated-call guard (#1674)
+
+For every `PreToolUse` call that carries a `session_id`, the scan hashes the
+tool name plus the canonical (key-sorted) `tool_input` and counts how many
+times in a row that same call has arrived in the session. Call `N + 1` and
+every further identical call are denied with a message telling the model to
+stop repeating and decide afresh. Any different call resets the streak, and
+so does a gap of more than 120 s since the previous call (a `/loop` tick or a
+long `sleep` poll is not a burst). A denied call still counts, so a blind
+retry stays denied.
+
+- **Limit:** `N = 200` by default. `CLUD_REPEAT_CALL_LIMIT=<n>` in the
+  environment wins, then `hooks.repeat_call_limit` in `~/.clud/settings.json`;
+  `0` turns the guard off (the rollback switch). Evidence and tradeoff:
+  [DD-140](../DESIGN_DECISIONS.md#dd-140-the-repeated-call-guard-denies-call-201-of-an-identical-streak-and-fails-open).
+- **Override:** a command carrying `CLUD_ALLOW_REPEAT=1` skips the guard for
+  that call and writes `REPEAT-GUARD-OVERRIDE` with the tool name to the hook
+  log (`~/.clud/tools/hooks/block-bad-cmd.log`). `CLUD_ALLOW_ALL_CMDS=1`, in
+  the env or the command, also skips it, like every other check. Non-shell
+  tools have no command text, so their only switches are the limit settings.
+- **State:** `<clud state dir>/repeat-guard/<hash>.json`, one file per
+  session named by `sha256("clud-repeat-guard-v1\0session\0" + session_id)`,
+  holding only the call hash, the count and a timestamp. Pruned to 2 days and
+  500 files when a session's file is first created.
+- **Fails open:** a missing session id, an unresolvable state dir, or a state
+  read or write failure allows the call. It is a safety net against runaway
+  loops, not a security boundary. Parallel calls in one response can race on
+  the file; the last writer wins, which can only undercount.
+- **Where it runs:** wherever clud's scan runs as a `PreToolUse` hook with a
+  `*` matcher: Claude Code on every route (native, the direct OpenRouter /
+  DeepSeek / Kimi overlay, the unified gateway) and Codex sessions whose hook
+  payload includes `session_id`. A harness that runs no `PreToolUse` hook, or
+  a `Bash`-only matcher, gets no guard (or a Bash-only one). A hook only sees
+  a call after the model has emitted it, so the output tokens of a burst are
+  already spent; the guard stops the results from re-entering context.
+- Code: `block_bad_cmd_repeat.rs`, decision table in
+  `block_bad_cmd_repeat_tests.rs`, end-to-end in
+  `tests/test_repeat_call_guard.py`.
+
 A bare `clud-cmd-scan` means `PreToolUse`. That is what every already-installed
 hook line means, and those lines keep working untouched. Other events are named
 explicitly: `clud-cmd-scan --event Stop`.

@@ -444,6 +444,27 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         return 0;
     }
 
+    // #1674: deny the same call once it has run more than N times in a row
+    // in this session. Fails open on any state error; see the module docs.
+    if event == PRE_TOOL_USE_EVENT {
+        if block_bad_cmd_repeat::opts_out(&payload.command) {
+            append_log(&format!(
+                "REPEAT-GUARD-OVERRIDE: {} in command: repeat guard bypassed for tool_name={:?}",
+                block_bad_cmd_repeat::ALLOW_REPEAT_TOKEN,
+                payload.tool_name
+            ));
+        } else if let Some(reason) = block_bad_cmd_repeat::reason(
+            &payload.tool_name,
+            payload.tool_input.as_ref(),
+            payload.session_id.as_deref(),
+        ) {
+            append_log(&format!("REPEAT-GUARD-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("{reason}");
+            return 2;
+        }
+    }
+
     // #812: refuse a subagent creating another agent, before the descendant is
     // allocated or reaches the bridge. Checked ahead of the command rules
     // because an `Agent` call has no command for them to inspect — the
@@ -3230,6 +3251,9 @@ mod block_bad_cmd_grind_caps;
 
 #[path = "block_bad_cmd_stale_upstream.rs"]
 mod block_bad_cmd_stale_upstream;
+
+#[path = "block_bad_cmd_repeat.rs"]
+mod block_bad_cmd_repeat;
 
 /// The `/grind` role-cap denial for this call, if its agent is a capped role,
 /// or the feature-branch-mode router caps for any other caller while
