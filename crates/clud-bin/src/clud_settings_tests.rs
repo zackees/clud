@@ -105,7 +105,10 @@ fn trash_max_bytes_defaults_and_parses() {
         (json!({}), TRASH_MAX_BYTES_DEFAULT),
         (json!({"trash": {"max_bytes": 0}}), 0),
         (json!({"trash": {"max_bytes": 1234}}), 1234),
-        (json!({"trash": {"max_bytes": "9"}}), TRASH_MAX_BYTES_DEFAULT),
+        (
+            json!({"trash": {"max_bytes": "9"}}),
+            TRASH_MAX_BYTES_DEFAULT,
+        ),
         (json!({"trash": {"max_bytes": -1}}), TRASH_MAX_BYTES_DEFAULT),
     ] {
         assert_eq!(trash_max_bytes_from(&doc), want, "{doc}");

@@ -36,8 +36,6 @@ pub struct TrashFact {
 /// `max_bytes == 0` disables the cap. Entries younger than [`MIN_AGE`] (or
 /// dated in the future) are never chosen, even if the cap stays exceeded.
 pub fn plan_eviction(facts: &[TrashFact], max_bytes: u64, now: SystemTime) -> Vec<PathBuf> {
-    let _ = (facts, max_bytes, now);
-    return Vec::new(); // RED stub
     if max_bytes == 0 {
         return Vec::new();
     }
@@ -116,7 +114,9 @@ pub fn enforce_at(trash_root: &Path, max_bytes: u64, now: SystemTime) -> CapRepo
         return report;
     };
     let mut facts = Vec::new();
-    let mut cache = SIZE_CACHE.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut cache = SIZE_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let cache = cache.get_or_insert_with(HashMap::new);
     let mut seen = Vec::new();
     for entry in entries.flatten() {

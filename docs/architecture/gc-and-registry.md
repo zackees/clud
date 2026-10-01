@@ -428,6 +428,21 @@ early-exit walk, and the daemon's maintenance sweep thread (after the age sweep,
 for size; the 72 h age sweep stays the only deleter of session temp
 ([DD-141](../DESIGN_DECISIONS.md#dd-141-session-temp-size-is-reported-never-a-deletion-trigger)).
 
+**Trash retention and size cap (#1340, #1672).** `~/.clud/trash` holds `clud trash` quarantine
+entries (reaped on the next GC tick) and `safe-rm` entries (they carry `TRASH_MANIFEST`, kept for
+`rm_tool::TRASH_KEEP` = 72 h so they can be restored by hand). The tick's reaper makes a tree
+owner-writable before `remove_dir_all`, as safe-rm's purge does (#1573), logs each failure with
+its OS error, and drops a registered row whose directory is already gone. Files owned by another
+user (root, from a Docker bind mount) still cannot be removed by the daemon; they are logged on
+each tick and need a `sudo rm` or a container-side `chown`. On top of the time window,
+`trash.max_bytes` in `~/.clud/settings.json` (seeded 20 GiB, `0` disables) caps the total: the
+maintenance sweep thread (`daemon/trash_cap.rs`, skipped on `Defer`) evicts the oldest real
+directories directly inside the canonical trash root until the total fits, never one trashed less
+than an hour ago, never following a symlink, auditing each removal as `gc.trash-cap`. Entry sizes
+are walked once per daemon lifetime, since entries do not change. `clud gc purge trash --yes`
+empties registered entries on demand
+([DD-143](../DESIGN_DECISIONS.md#dd-143-trash-has-a-size-cap-session-temp-does-not)).
+
 **Forensic session state (#1014).** Every launch leaves a `<pid>__<start-epoch>/` directory under
 `~/.clud/state/sessions/` holding the reaper's `reap.jsonl` / `reap-health.json` and, since #1011,
 a `bridge.jsonl`. Nothing aged it out, so it accumulated one entry per session ever run — the
