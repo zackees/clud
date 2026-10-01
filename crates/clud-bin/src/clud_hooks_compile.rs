@@ -73,10 +73,18 @@ pub const PRE_TOOL_USE: &str = "PreToolUse";
 /// PreToolUse scanner never sees — an alias or a script that chdirs.
 pub const CWD_CHANGED_EVENT: &str = "CwdChanged";
 
+/// Claude file-tool denies for the user settings file (#1668, DD-137): it
+/// holds the `safe_rm.extra_roots` override, which only the user may write.
+/// The Bash path is refused by the command-scan hook; `Edit(...)` rules
+/// cover every built-in file-editing tool.
+pub const SETTINGS_FILE_DENIES: &[&str] = &["Edit(~/.clud/settings.json)"];
+
 #[must_use]
 pub fn deletion_safety_fragment() -> Value {
+    let mut deny = crate::deletion_rules::generated().claude_denies;
+    deny.extend(SETTINGS_FILE_DENIES.iter().map(|rule| (*rule).to_string()));
     json!({
-        "permissions": { "deny": crate::deletion_rules::generated().claude_denies },
+        "permissions": { "deny": deny },
         "hooks": {
             "PreToolUse": [{
                 "matcher": "Bash",

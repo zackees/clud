@@ -5634,3 +5634,37 @@ where the ledger cannot verify identity.
   `safe-rm` will refuse would pretend the ledger works.
 
 Policy text: [rm-tools.md](architecture/rm-tools.md#creation-ledger).
+
+## DD-137: the safe-rm root override is user-level only, and agents cannot write the settings file
+
+**Context:** DD-135 slice 3 (#1668): a human-set, reasoned extension of the
+safe-rm roots. clud reads settings from the user's `~/.clud/settings.json`
+and, for some keys, a repo's `.clud/settings.json`. The override must be
+something an agent cannot set for itself.
+
+**Decision:** `safe_rm.extra_roots` (`[{path, reason}]`) is read only from
+`~/.clud/settings.json`. An entry without a non-empty reason is dropped with
+a message on every call. There is no environment-variable form. The
+command-scan hook refuses any shell command that names that file or the key
+unless it is a plain read, and the check runs before the per-call
+`CLUD_ALLOW_ALL_CMDS=1` opt-out. Claude gets an `Edit(~/.clud/settings.json)`
+deny for its file tools.
+
+**Why not repo-level:** an agent edits files in its checkout all day; a repo
+layer would let it widen its own deletion roots with one `Write`. **Why no env
+form:** clud passes its environment to the agent, and the agent controls the
+environment of the commands it runs, so an env override is agent-settable by
+construction (the reason `CLUD_RM_ROOTS` assignments are refused). **Why deny
+all file-tool edits of the settings file, not just the key:** a `Write`
+replaces the whole file, so a key-level check would have to parse every
+proposed content; the file is the user's configuration, and the `clud
+settings` TUI remains the user's way to change it. **Why fail closed on
+unknown programs:** a read-only allowlist cannot be bypassed by a writer the
+list forgot.
+
+**Consequences:** agents can no longer edit `~/.clud/settings.json` with
+Claude's file tools or shell writers, for any key. The text scan cannot see a
+path computed at run time, and Codex has no file-tool deny; the override's
+own rules (strictly under, ownership, HOME rejected, reason logged) still bound
+what a forged entry could reach. Policy text:
+[rm-tools.md](architecture/rm-tools.md#override-safe_rmextra_roots-1668).

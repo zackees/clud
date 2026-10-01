@@ -24,8 +24,116 @@ pub(super) const REFUSAL: &str = "agents may not write ~/.clud/settings.json or 
 
 /// The refusal for `command`, or `None` when it cannot write the override.
 pub(super) fn reason(command: &str) -> Option<String> {
-    let _ = (command, READ_ONLY);
-    None
+    let normalized: String = command
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    // A repo's own `.clud/settings.json` is never read for the override, so
+    // only a spelling that can reach the user's home counts.
+    let reaches_home = ["~", "home", "userprofile", "/users/", "/root/"]
+        .iter()
+        .any(|marker| normalized.contains(marker));
+    let names_override = normalized.contains("extra_roots")
+        || (normalized.contains(".clud") && normalized.contains("settings.json") && reaches_home);
+    if !names_override || only_reads(command) {
+        return None;
+    }
+    Some(REFUSAL.to_string())
+}
+
+/// Whether every statement of `command` is a [`READ_ONLY`] program and no
+/// output is redirected anywhere but `/dev/null` or another descriptor.
+fn only_reads(command: &str) -> bool {
+    let mut statements: Vec<Vec<String>> = vec![Vec::new()];
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut redirect_pending = false;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else if ch == '\\' && q == '"' {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            '>' => {
+                // `2>` / `&>`: the descriptor digits are not a word.
+                if word.chars().all(|c| c.is_ascii_digit() || c == '&') {
+                    word.clear();
+                }
+                if !finish(&mut word, &mut statements, &mut redirect_pending) {
+                    return false;
+                }
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                }
+                if chars.peek() == Some(&'&') {
+                    // `>&2` duplicates a descriptor; it writes no file.
+                    chars.next();
+                    while chars.peek().is_some_and(char::is_ascii_digit) {
+                        chars.next();
+                    }
+                } else {
+                    redirect_pending = true;
+                }
+            }
+            ';' | '&' | '|' | '\n' | '\r' | '(' | ')' | '`' => {
+                if !finish(&mut word, &mut statements, &mut redirect_pending) {
+                    return false;
+                }
+                statements.push(Vec::new());
+            }
+            c if c.is_whitespace() => {
+                if !finish(&mut word, &mut statements, &mut redirect_pending) {
+                    return false;
+                }
+            }
+            c => word.push(c),
+        }
+    }
+    if !finish(&mut word, &mut statements, &mut redirect_pending) || redirect_pending {
+        return false;
+    }
+    statements.iter().all(|words| {
+        let Some(program) = words
+            .iter()
+            .find(|w| !super::block_bad_cmd_shell::is_env_assignment(w))
+        else {
+            return true;
+        };
+        let name = super::block_bad_cmd_shell::program_name(program);
+        READ_ONLY.contains(&name.as_str()) || program == "["
+    })
+}
+
+/// Close the current word. A redirection target that is not `/dev/null`
+/// means the command writes, which is reported as `false`.
+fn finish(word: &mut String, statements: &mut [Vec<String>], pending: &mut bool) -> bool {
+    if word.is_empty() {
+        return true;
+    }
+    let text = std::mem::take(word);
+    if std::mem::take(pending) {
+        return text == "/dev/null";
+    }
+    if let Some(last) = statements.last_mut() {
+        last.push(text);
+    }
+    true
 }
 
 #[cfg(test)]
@@ -67,6 +175,8 @@ mod tests {
             "echo settings.json > notes.txt",
             "cargo test",
             "cat ./settings.json",
+            // The repo layer is never read for the override.
+            "jq '.bash.block_cd=false' .clud/settings.json > t && mv t .clud/settings.json",
         ] {
             assert_eq!(reason(command), None, "{command}");
         }

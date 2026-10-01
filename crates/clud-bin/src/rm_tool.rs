@@ -330,11 +330,29 @@ impl Roots {
         // Strictly under a system temp directory (#1622): allowed when every
         // existing entry from the temp root down is the caller's own.
         if let Some(temp) = deepest_containing(&self.temp_roots, path) {
-            self.check_temp_ownership(&temp, path)?;
+            self.check_owned_under("the system temp directory", &temp, path)?;
             return Ok(temp);
         }
         if self.temp_roots.iter().any(|r| r == path) {
             return Err("is a system temp directory itself".into());
+        }
+        // Strictly under a human-set extra root (#1668): the temp-root rules,
+        // and the override's reason goes into the audit records.
+        let extra = self
+            .extra_roots
+            .iter()
+            .filter(|e| path.starts_with(&e.root) && path != e.root.as_path())
+            .max_by_key(|e| e.root.components().count())
+            .cloned();
+        if let Some(extra) = extra {
+            self.check_owned_under("the safe_rm.extra_roots override", &extra.root, path)?;
+            let reason = extra_roots::grant_reason(&extra);
+            self.ledger_grants.insert(path.to_path_buf(), reason.clone());
+            self.extra_grants.insert(path.to_path_buf(), reason);
+            return Ok(extra.root);
+        }
+        if self.extra_roots.iter().any(|e| e.root == path) {
+            return Err("is a safe_rm.extra_roots extra root itself".into());
         }
         // A linked worktree of an allowed repo may itself be deleted (#1573):
         // git created it for that repo. It stays refused while it is a root.
@@ -365,6 +383,11 @@ impl Roots {
                 self.temp_roots
                     .iter()
                     .map(|r| format!("{} (temp)", r.display())),
+            )
+            .chain(
+                self.extra_roots
+                    .iter()
+                    .map(|e| format!("{} (override)", e.root.display())),
             )
             .collect();
         let shown = if shown.is_empty() {
@@ -403,7 +426,7 @@ impl Roots {
     /// someone left writable, so safe-rm checks ownership itself. Windows has
     /// no equivalent: `%TEMP%` is per-user under the profile, so no check.
     #[cfg(unix)]
-    fn check_temp_ownership(&self, temp: &Path, path: &Path) -> Result<(), String> {
+    fn check_owned_under(&self, what: &str, temp: &Path, path: &Path) -> Result<(), String> {
         use std::os::unix::fs::MetadataExt;
         let Some(me) = self.owner_uid() else {
             return Ok(());
@@ -417,7 +440,7 @@ impl Roots {
             match std::fs::symlink_metadata(&current) {
                 Ok(meta) if meta.uid() != me => {
                     return Err(format!(
-                        "is under the system temp directory {} but {} is not owned by you",
+                        "is under {what} {} but {} is not owned by you",
                         temp.display(),
                         current.display()
                     ));
@@ -430,7 +453,7 @@ impl Roots {
     }
 
     #[cfg(not(unix))]
-    fn check_temp_ownership(&self, _temp: &Path, _path: &Path) -> Result<(), String> {
+    fn check_owned_under(&self, _what: &str, _temp: &Path, _path: &Path) -> Result<(), String> {
         Ok(())
     }
 
@@ -593,8 +616,12 @@ pub struct Target {
     pub is_dir: bool,
     pub is_symlink: bool,
     /// Why the creation ledger allowed it, when it lies outside every root
-    /// (#1666); recorded in the audit log.
+    /// (#1666), or which `safe_rm.extra_roots` entry did (#1668); recorded
+    /// in the audit log.
     pub ledger: Option<String>,
+    /// Set only when a `safe_rm.extra_roots` override alone allowed it
+    /// (#1668): its reason also goes into the GC delete audit.
+    pub override_reason: Option<String>,
 }
 
 /// What [`resolve`] found for one operand.
@@ -683,12 +710,14 @@ pub fn resolve(
         reject_mounts(&path)?;
     }
     let ledger = roots.ledger_grant(&path).map(str::to_string);
+    let override_reason = roots.extra_grant(&path).map(str::to_string);
     Ok(Resolved::Present(Target {
         path,
         root,
         is_dir,
         is_symlink,
         ledger,
+        override_reason,
     }))
 }
 
@@ -805,7 +834,18 @@ impl Context {
             state_dir: crate::daemon::default_state_dir().ok(),
             session_id: session_id.clone(),
         };
-        let roots = Roots::resolve(roots_env.as_deref(), &cwd).with_ledger(Arc::new(source));
+        // #1668: the human-set override, from the user's settings file only.
+        let (extra, warnings) = match home.as_deref() {
+            Some(home_path) => {
+                let (entries, rejected) =
+                    crate::clud_settings::peek_safe_rm_extra_roots_at(home_path);
+                extra_roots::load(&entries, rejected, Some(home_path), effective_uid())
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let roots = Roots::resolve(roots_env.as_deref(), &cwd)
+            .with_ledger(Arc::new(source))
+            .with_extra_roots(extra, warnings);
         let role = std::env::var(ROLE_ENV)
             .ok()
             .filter(|r| !r.is_empty())
@@ -833,6 +873,17 @@ pub fn session_id_from_env() -> Option<String> {
     ["CLUD_SESSION_ID", crate::grind_facts::SESSION_ENV]
         .iter()
         .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()))
+}
+
+#[cfg(unix)]
+fn effective_uid() -> Option<u32> {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    Some(unsafe { libc::geteuid() })
+}
+
+#[cfg(not(unix))]
+fn effective_uid() -> Option<u32> {
+    None
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -886,6 +937,11 @@ pub fn run_with(
     err: &mut dyn Write,
 ) -> i32 {
     let cmd = COMMAND;
+    // #1668: a dropped `safe_rm.extra_roots` entry is said on every call, so
+    // the user sees why the override they wrote is not honored.
+    for warning in &roots.extra_root_warnings {
+        let _ = writeln!(err, "{cmd}: {warning}");
+    }
     let mut outcomes: Vec<Outcome> = Vec::new();
     let mut accepted: Vec<Target> = Vec::new();
     for raw in &options.paths {
@@ -992,7 +1048,14 @@ pub fn run_with(
                 trash_path: None,
             }
         } else if purge_it {
-            crate::gc::delete_audit::record("rm-tool.purge", &target.path, cmd);
+            match &target.override_reason {
+                Some(reason) => crate::gc::delete_audit::record(
+                    "rm-tool.purge",
+                    &target.path,
+                    &format!("{cmd} {reason}"),
+                ),
+                None => crate::gc::delete_audit::record("rm-tool.purge", &target.path, cmd),
+            }
             match purge(target) {
                 Ok(()) => Outcome {
                     path: shown.clone(),
@@ -1008,6 +1071,15 @@ pub fn run_with(
                 },
             }
         } else {
+            // An override-only trash move is audited too: it leaves a path
+            // the session roots would have refused (#1668).
+            if let Some(reason) = &target.override_reason {
+                crate::gc::delete_audit::record(
+                    "rm-tool.trash-override",
+                    &target.path,
+                    &format!("{cmd} {reason}"),
+                );
+            }
             let result = entry_dir(&mut entry, &ctx.trash_root, target, ctx.now).and_then(|dir| {
                 let dest = dir.join(root_dir_name(&mut root_dirs, &target.root)).join(
                     target

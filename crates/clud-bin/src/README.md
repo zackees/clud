@@ -556,7 +556,8 @@ which test tier a change belongs in — lives in
   over global boolean settings in `~/.clud/settings.json` (`clud_settings.rs`
   owns persistence). Pure `Menu` state machine + crossterm raw-mode I/O shell,
   same split as `launch_setup.rs`'s `ScopeSelector`. `--list` prints current
-  values non-interactively.
+  values non-interactively. It does not expose `safe_rm.extra_roots`
+  (#1668): the user adds that by editing the file by hand.
 
 Platform glue:
 
@@ -831,7 +832,9 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `rm_tool_ledger.rs` — submodule `rm_tool::ledger`: the creation-ledger consult for a path outside every root (#1666), as `verdict` over injected `LedgerFacts` plus `probe` and the daemon-backed `DaemonLedger`; tests in `rm_tool_ledger_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#creation-ledger).
 - `safe_mktemp.rs` — the `safe-mktemp` multicall name (#1667): exclusive `mkdir` of one directory, then the only creation-ledger insert (`gc_client_insert_created`); undoes the `mkdir` if the insert fails, refuses on Windows; tests in `safe_mktemp_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#creation-ledger), [DD-136](../../../docs/DESIGN_DECISIONS.md#dd-136-safe-mktemp-is-the-only-ledger-writer-and-undoes-its-mkdir-when-the-insert-fails).
 - `rm_tool_clone.rs` — submodule of `rm_tool.rs`: whether a clone outside the roots may be removed (#1573), as `verdict` over injected `CloneFacts` (origin match, clean, fully pushed, no stash) plus the git `probe`; rule in [rm-tools.md](../../../docs/architecture/rm-tools.md#location-policy).
+- `rm_tool_extra_roots.rs` — submodule `rm_tool::extra_roots`: the human-set `safe_rm.extra_roots` override (#1668), as `verdict` over injected `EntryFacts` plus `probe`/`load`; the settings reader is `clud_settings::safe_rm_extra_roots_from`; tests in `rm_tool_extra_roots_tests.rs`; policy in [rm-tools.md](../../../docs/architecture/rm-tools.md#override-safe_rmextra_roots-1668), [DD-137](../../../docs/DESIGN_DECISIONS.md#dd-137-the-safe-rm-root-override-is-user-level-only-and-agents-cannot-write-the-settings-file).
 - `block_bad_cmd_rm_redirect.rs` — the hook's redirect of an agent's own `rm`/`rmdir`/`unlink`/`find -delete`/`xargs rm` to safe-rm, and `rm_tool_only`, the no-prompt allow.
+- `block_bad_cmd_rm_override.rs` — refuses any agent shell command that could write `~/.clud/settings.json` or the `safe_rm.extra_roots` key (#1668), before the per-call opt-out.
 - `rm_guard.rs` — catastrophe-floor decisions, canonical operands, and mount
   protection; it contains no removal implementation. In a session,
   `shim_main.rs` hands accepted requests to the next real `rm` on PATH.
