@@ -532,6 +532,20 @@ mod tests {
         );
     }
 
+    /// The #1276 transcript analyzer must stay bundled, managed, stdlib-only
+    /// (no subprocess) and must not write files.
+    #[test]
+    fn bundled_includes_transcript_report() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "diagnostics/transcript_report.py")
+            .expect("BUNDLED_TOOLS must include diagnostics/transcript_report.py");
+        assert!(tool.body.contains("managed-by: clud"));
+        assert!(!tool.body.contains("import subprocess"));
+        assert!(!tool.body.contains("write_text("));
+        assert_eq!(tool.kill_semantics, KillSemantics::Resumable);
+    }
+
     /// is_meta_issue.py must carry the managed marker (so the installer
     /// can update/purge it) and must not use the banned subprocess module.
     #[test]
