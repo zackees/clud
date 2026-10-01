@@ -503,11 +503,31 @@ fn cmd_list(state_dir: &Path, json: bool, kind_filter: Option<&str>) -> i32 {
             }
         }
         warn_if_worktree_root_oversized();
+        warn_if_session_tmp_oversized();
         return 0;
     }
     print_table_from_rows(&rows);
     warn_if_worktree_root_oversized();
+    warn_if_session_tmp_oversized();
     0
+}
+
+/// #1327: warn (stderr) when `~/.clud/tmp` exceeds `tmp.warn_bytes`.
+/// Warn-only: the 72 h age sweep stays the only deleter of session temp.
+fn warn_if_session_tmp_oversized() {
+    use crate::gc::worktree_root::{check_tree_size, SIZE_SCAN_ENTRY_BUDGET};
+    use crate::gc::worktree_size_cache::{tmp_list_warning, DEFAULT_TMP_WARN_BYTES};
+    let Some(root) = crate::gc::session_tmp::session_tmp_dir() else {
+        return;
+    };
+    let warn_bytes = crate::clud_settings::load_tmp_warn_bytes().unwrap_or(DEFAULT_TMP_WARN_BYTES);
+    if warn_bytes == 0 {
+        return;
+    }
+    let check = check_tree_size(&root, warn_bytes, SIZE_SCAN_ENTRY_BUDGET);
+    if let Some(line) = tmp_list_warning(&root, warn_bytes, check) {
+        eprintln!("{line}");
+    }
 }
 
 /// #1485: warn (stderr, so `--json` stays parseable) when `~/.clud/tmp-wt`

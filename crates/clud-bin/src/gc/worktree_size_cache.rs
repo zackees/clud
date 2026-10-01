@@ -8,6 +8,13 @@
 //! file: no walk, no daemon round trip. A missing, corrupt, stale or
 //! future-dated cache shows nothing. Warn-only: nothing is ever deleted for
 //! size. See `docs/architecture/gc-and-registry.md`.
+//!
+//! Issue #1327 reuses the same mechanism for the session temp root
+//! `~/.clud/tmp` behind `tmp.warn_bytes`: the daemon's maintenance sweep
+//! thread calls [`refresh_tmp_cache`] (cache file `~/.clud/tmp-size.json`,
+//! a sibling of `tmp` so the 72 h sweep never sees it) and the launch path
+//! calls [`tmp_launch_warning`]. Also warn-only: the age-based sweep remains
+//! the only thing that deletes session temp (DD-141).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +25,14 @@ use crate::gc::worktree_root::{check_tree_size, worktree_root_for, SizeCheck};
 
 /// File name of the cache, a sibling of `tmp-wt` under `~/.clud`.
 pub const CACHE_FILE_NAME: &str = "tmp-wt-size.json";
+
+/// File name of the `~/.clud/tmp` size cache, a sibling of `tmp` (#1327).
+pub const TMP_CACHE_FILE_NAME: &str = "tmp-size.json";
+
+/// Default for `tmp.warn_bytes`: 20 GiB. `0` disables the warning. Four
+/// times the per-session report threshold (`SIZE_REPORT_THRESHOLD`), small
+/// enough to speak up long before the 100+ GiB trees of #1327 and #1672.
+pub const DEFAULT_TMP_WARN_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 /// A cache older than this is ignored. The GC tick is hourly by default, so
 /// this tolerates several missed ticks before going quiet.
@@ -91,13 +106,50 @@ fn gib(bytes: u64) -> String {
 
 /// The one-line banner warning.
 pub fn banner_line(root: &Path, bytes: u64, warn_bytes: u64) -> String {
+    banner_line_for("worktrees.warn_bytes", root, bytes, warn_bytes)
+}
+
+/// The one-line banner warning for `~/.clud/tmp` (#1327).
+pub fn tmp_banner_line(root: &Path, bytes: u64, warn_bytes: u64) -> String {
+    banner_line_for("tmp.warn_bytes", root, bytes, warn_bytes)
+}
+
+fn banner_line_for(setting: &str, root: &Path, bytes: u64, warn_bytes: u64) -> String {
     format!(
-        "[clud] warning: {} holds at least {}, over worktrees.warn_bytes ({}); \
-         review `clud gc list`, or raise worktrees.warn_bytes in ~/.clud/settings.json (0 disables)",
+        "[clud] warning: {} holds at least {}, over {setting} ({}); \
+         review `clud gc list`, or raise {setting} in ~/.clud/settings.json (0 disables)",
         root.display(),
         gib(bytes),
         gib(warn_bytes)
     )
+}
+
+/// The `clud gc list` warning line for `~/.clud/tmp` (#1327), or `None`
+/// when there is nothing to say. `warn_bytes == 0` disables it.
+pub fn tmp_list_warning(root: &Path, warn_bytes: u64, check: SizeCheck) -> Option<String> {
+    if warn_bytes == 0 {
+        return None;
+    }
+    match check {
+        SizeCheck::Under(_) => None,
+        SizeCheck::Over(bytes) => Some(format!(
+            "warning: {} holds at least {bytes} bytes, over tmp.warn_bytes ({warn_bytes}); \
+             session temp is never deleted for size (only the 72 h age sweep reclaims it) \
+             — remove what you no longer need",
+            root.display()
+        )),
+        SizeCheck::Unknown => Some(format!(
+            "warning: {} is too large to size within budget; it may exceed \
+             tmp.warn_bytes ({warn_bytes})",
+            root.display()
+        )),
+    }
+}
+
+/// Cache path for the session temp root: `<home>/.clud/tmp-size.json`.
+pub fn tmp_cache_path_for(home: &Path) -> PathBuf {
+    let tmp = crate::gc::session_tmp::session_tmp_dir_for(home);
+    tmp.parent().unwrap_or(&tmp).join(TMP_CACHE_FILE_NAME)
 }
 
 /// Cache path for a worktree root: `<root>/../tmp-wt-size.json`.
@@ -157,20 +209,35 @@ pub fn write_cache(path: &Path, entry: &CachedTreeSize) -> std::io::Result<()> {
 /// Daemon side: run the bounded walk and record it. `warn_bytes == 0`
 /// removes any old cache instead of walking.
 pub fn refresh_cache(wt_root: &Path, warn_bytes: u64, now_unix: i64) -> std::io::Result<()> {
-    let path = cache_path_for(wt_root);
+    refresh_cache_at(&cache_path_for(wt_root), wt_root, warn_bytes, now_unix)
+}
+
+/// Daemon side for `~/.clud/tmp` (#1327). Read-only walk; deletes nothing
+/// but a stale cache file when the warning is disabled.
+pub fn refresh_tmp_cache(home: &Path, warn_bytes: u64, now_unix: i64) -> std::io::Result<()> {
+    let root = crate::gc::session_tmp::session_tmp_dir_for(home);
+    refresh_cache_at(&tmp_cache_path_for(home), &root, warn_bytes, now_unix)
+}
+
+fn refresh_cache_at(
+    path: &Path,
+    root: &Path,
+    warn_bytes: u64,
+    now_unix: i64,
+) -> std::io::Result<()> {
     if warn_bytes == 0 {
-        return match fs::remove_file(&path) {
+        return match fs::remove_file(path) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
             _ => Ok(()),
         };
     }
     let check = check_tree_size(
-        wt_root,
+        root,
         warn_bytes,
         crate::gc::worktree_root::SIZE_SCAN_ENTRY_BUDGET,
     );
     write_cache(
-        &path,
+        path,
         &CachedTreeSize {
             checked_unix: now_unix,
             warn_bytes,
@@ -191,6 +258,29 @@ pub fn launch_warning_at(home: &Path, now_unix: i64) -> Option<String> {
         BannerVerdict::Warn { bytes } => Some(banner_line(&root, bytes, warn_bytes)),
         BannerVerdict::Skip(_) => None,
     }
+}
+
+/// Launch side for `~/.clud/tmp` (#1327), testable against any home.
+pub fn tmp_launch_warning_at(home: &Path, now_unix: i64) -> Option<String> {
+    let warn_bytes = crate::clud_settings::peek_tmp_warn_bytes_at(home);
+    if warn_bytes == 0 {
+        return None;
+    }
+    let cached = read_cache(&tmp_cache_path_for(home));
+    match banner_decision(cached.as_ref(), warn_bytes, now_unix) {
+        BannerVerdict::Warn { bytes } => Some(tmp_banner_line(
+            &crate::gc::session_tmp::session_tmp_dir_for(home),
+            bytes,
+            warn_bytes,
+        )),
+        BannerVerdict::Skip(_) => None,
+    }
+}
+
+/// Launch side for `~/.clud/tmp`: never fails, never walks.
+pub fn tmp_launch_warning() -> Option<String> {
+    let home = crate::gc::session_tmp::home_dir()?;
+    tmp_launch_warning_at(&home, now_unix())
 }
 
 pub fn now_unix() -> i64 {

@@ -5793,3 +5793,26 @@ call of a session, which is worse than the loop it guards against.
 a burst's output tokens are still spent; it stops the results from refilling
 context. Sessions without a `session_id` in the hook payload, and harnesses
 that run no `PreToolUse` hook, are unguarded.
+
+## DD-141: session temp size is reported, never a deletion trigger
+
+**Context:** #1327 asked to "bound `~/.clud/tmp`" with a size cap on the
+session-temp sweep. The tree that grows past any cap is, by construction,
+mostly the live sessions' scratchpads, pytest `tmp_path` worlds and build
+output: the data an agent is using right now. #1148 already declined to
+reclaim oversized live session directories for the same reason.
+
+**Decision:** `tmp.warn_bytes` (default 20 GiB, `0` disables) only warns, in
+`clud gc list` and on the launch banner, using the cached walk of #1610
+(`gc::worktree_size_cache`). The 72 h mtime sweep remains the only thing
+that deletes session temp. Contract:
+[gc-and-registry.md](architecture/gc-and-registry.md#filesystem-sweeps-non-registry).
+
+**Why not evict oldest-first past the cap:** "oldest" by mtime under 72 h is
+still possibly active (a long build writes into a directory created hours
+ago), and a cap that fires mid-session deletes working data with no owner
+consulted. A warning costs nothing and points the human at the culprit.
+
+**Consequences:** `~/.clud/tmp` can still exceed the threshold for up to the
+age-sweep window; the acceptance line "stays under a configured size" in
+#1327 is met by visibility, not enforcement.

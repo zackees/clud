@@ -79,10 +79,7 @@ fn tmp_warn_bytes_defaults_and_parses() {
         (json!({"tmp": {"warn_bytes": "9"}}), DEFAULT_TMP_WARN_BYTES),
         (json!({"tmp": {"warn_bytes": -1}}), DEFAULT_TMP_WARN_BYTES),
         // The tmp-wt setting must not leak into the tmp one.
-        (
-            json!({"worktrees": {"warn_bytes": 7}}),
-            DEFAULT_TMP_WARN_BYTES,
-        ),
+        (json!({"worktrees": {"warn_bytes": 7}}), DEFAULT_TMP_WARN_BYTES),
     ] {
         assert_eq!(tmp_warn_bytes_from(&doc), want, "{doc}");
     }
