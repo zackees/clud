@@ -208,6 +208,54 @@ inspects the command vector, and only then decides whether to spawn).
 bearing invocations. The stream-json splice in `builder.rs` is the load-
 bearing reason this invariant holds, and downstream tooling depends on it.
 
+`launch_context` (Claude harness only, else `null`) previews the
+[launch-context record](#launch-context-record-1675) this launch would
+write, with `session: null` and `launched_at: 0`.
+
+## Launch-context record (#1675)
+
+A transcript does not record the child environment, so clud records the
+context-window values the child actually receives, once per launch
+(`crates/clud-bin/src/launch_context.rs`).
+
+- **Written from the resolved env.** `ForegroundRuntime::start` builds the
+  record after every route overlay has run, reading
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` from the final child env. Sources come
+  from a decision table over injected facts (`decide_max_context`,
+  `decide_compact_window`) that mirrors each overlay: the direct route
+  `push_default`s `server_settings::effective_context_window_with_source`
+  (so an ambient value wins), the Codex bridge `set_env`s the common Codex
+  catalog ceiling, the unified gateway and native Claude never touch the key.
+  A child value the table did not predict is recorded with source `unknown`.
+  `--dry-run` shows the table's prediction (`PlanFacts::preview`); a test
+  asserts it equals the record built from a real runtime env.
+- **Fields:** `v`, `session` (hash), `launched_at`, `clud_version`,
+  `harness`, `harness_version` (always `null`: knowing it costs a spawn),
+  `route` (`direct` / `unified_gateway` / `codex_bridge` / `native`),
+  `provider`, `wire_model`, `max_context_tokens` and `auto_compact_window`
+  as `{value, source}` with source `ambient` / `catalog` / `served` /
+  `unset` / `unknown`, and `autocompact_pct_override`. No prompt, path,
+  command text, credential, raw session id or other env value. Under 512
+  bytes.
+- **Two steps.** An interactive launch does not know its session id, so the
+  launch writes `<state>/launch-context/pending-<token>.json` and passes the
+  random token to the child as `CLUD_LAUNCH_CONTEXT_TOKEN`. The existing
+  `clud session-hook --event SessionStart` reads it and copies the record to
+  `<state>/launch-context/<hash>.json` with `session` set (`bind`).
+- **Join key:** first 16 hex chars of
+  `sha256("clud-launch-context-v1\0" + session_id)`, defined once in
+  `launch_context::session_hash` and mirrored by
+  `transcript_report.py::launch_context_key`; both test suites assert the
+  same literal vector.
+- **Retention:** pruned at every write: records older than 14 days are
+  deleted, then only the newest 200 kept. One `read_dir`, no recursion.
+- **Failure-silent:** writes are atomic (`fs_private::write_private_atomic`,
+  owner-only); any error skips the record and the launch proceeds. No daemon
+  round trip.
+
+Why this shape: [DD-139](../DESIGN_DECISIONS.md#dd-139-the-launch-context-record-is-bound-by-the-sessionstart-hook-and-keyed-by-a-domain-separated-session-hash).
+
 ## Key types
 
 - `LaunchPlan`, `LoopMarkers`, `RepeatSchedule` —

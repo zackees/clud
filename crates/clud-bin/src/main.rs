@@ -1296,6 +1296,14 @@ fn run(mut args: args::Args) {
             // first one declines.
             "failover": plan.failover,
             "failover_allow_metered": plan.failover_allow_metered,
+            // #1675: the launch-context record this launch would write
+            // (session unbound, launched_at 0). Claude harness only.
+            "launch_context": (plan.effective_harness() == backend::Backend::Claude).then(|| {
+                let ambient: Vec<(String, String)> = std::env::vars_os()
+                    .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+                    .collect();
+                clud::foreground_runtime::launch_context_plan_facts(&plan).preview(&ambient)
+            }),
             "transcript": args.transcript.as_ref().map(|p| p.to_string_lossy().to_string()),
             "loop_markers": plan.loop_markers.as_ref().map(|m| serde_json::json!({
                 "done_path": m.done_path,

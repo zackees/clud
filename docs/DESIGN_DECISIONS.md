@@ -5686,8 +5686,11 @@ analysis.
 collapses transcript rows by `message.id` and counts each response's usage
 once, reports bursts of identical tool calls inside one response (copies
 and longest streak), compaction boundaries, context jumps, terminal context
-errors and tool-result byte totals. It marks the effective max-context value
-unavailable, since a transcript does not record the child environment. Its
+errors and tool-result byte totals. A transcript does not record the child
+environment, so the effective max-context value comes from clud's
+launch-context record joined by hashed session id (#1675,
+[DD-139](#dd-139-the-launch-context-record-is-bound-by-the-sessionstart-hook-and-keyed-by-a-domain-separated-session-hash)), and is
+reported as unavailable when no record exists. Its
 output holds counts, tool names, timestamps and fingerprints keyed with a
 random per-run salt. It never prints prompts, commands, tool inputs or
 output, or the session id. It writes no files.
@@ -5707,3 +5710,37 @@ bundled-tool runner already gives it a watchdog and an installed path.
 **Consequences:** the incident shape is now detectable from a transcript.
 Nothing stops a live burst yet. The session ledger, the guard, bounded-output
 guidance and the harness-owned goal recovery are separate #1276 follow-ups.
+
+## DD-139: the launch-context record is bound by the SessionStart hook and keyed by a domain-separated session hash
+
+**Context:** #1675 (parent #1276): nobody could tell which
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` a failing child inherited. The value is
+decided at launch, but an interactive Claude launch does not know its session
+id, and the transcript that names the session does not record the env.
+
+**Decision:** the launch writes a pending record from the final child env and
+hands its random token to the child; the `SessionStart` hook clud already
+registers (`clud session-hook`) receives the session id and copies the record
+to `<state>/launch-context/<hash>.json`. The hash is the first 16 hex chars of
+`sha256("clud-launch-context-v1\0" + session_id)`. Records live under the
+clud state dir and are pruned at write time to 14 days and 200 files. Contract:
+[launch-plan.md](architecture/launch-plan.md#launch-context-record-1675).
+
+**Why not pass `--session-id` at launch:** it changes the argv of every
+interactive launch and conflicts with `--resume`/`--continue`; the hook
+already runs on every Claude launch and costs nothing new.
+
+**Why an unsalted hash:** the reader must find the record from the transcript
+alone, so a per-run salt (as the analyzer uses for fingerprints) cannot work.
+A session id is a random UUID, so a truncated SHA-256 of it cannot be
+reversed; the domain prefix keeps it distinct from any other hash of the id.
+
+**Why per-session files, not one JSONL:** the reader opens one known path
+instead of scanning, a rewrite on `/clear` or resume replaces one file
+atomically, and pruning is a single directory listing. 14 days covers the
+window in which a failure is investigated; the 200-file cap bounds the
+directory for heavy users.
+
+**Consequences:** a session started outside clud, or whose hook did not run,
+has no record and the analyzer still prints "unavailable". `harness_version`
+stays `null` until it is known without a spawn.

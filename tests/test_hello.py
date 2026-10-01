@@ -786,6 +786,44 @@ def test_dry_run_inline_key_equals_form_matches_the_space_form(
     assert key not in equals.stderr
 
 
+_OPENROUTER_KEY = "sk-or-v1-" + "0123456789abcdef" * 2
+
+
+def test_dry_run_shows_the_launch_context_record() -> None:
+    """#1675: the dry run previews the record the launch would write."""
+    result = _run("--dry-run", "--openrouter", _OPENROUTER_KEY, "-p", "hi")
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)["launch_context"]
+    assert record["route"] == "direct"
+    assert record["provider"] == "openrouter"
+    assert record["harness"] == "claude"
+    assert record["session"] is None
+    assert record["max_context_tokens"]["source"] in {"catalog", "served", "unset"}
+    assert _OPENROUTER_KEY not in json.dumps(record)
+
+
+def test_dry_run_launch_context_reports_an_ambient_max_context() -> None:
+    result = _run(
+        "--dry-run",
+        "--openrouter",
+        _OPENROUTER_KEY,
+        "-p",
+        "hi",
+        env_overrides={"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "4242"},
+    )
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)["launch_context"]
+    assert record["max_context_tokens"] == {"value": 4242, "source": "ambient"}
+
+
+def test_dry_run_launch_context_native_claude_is_unset() -> None:
+    result = _run("--dry-run", "--claude", "-p", "hi")
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)["launch_context"]
+    assert record["route"] == "native"
+    assert record["max_context_tokens"] == {"value": None, "source": "unset"}
+
+
 def test_dry_run_inline_key_equals_form_rejects_a_non_key_value() -> None:
     result = _run("--dry-run", "--deepseek=not-a-key", "-p", "hi")
     assert result.returncode == 2, result.stderr

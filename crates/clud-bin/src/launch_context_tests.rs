@@ -24,20 +24,74 @@ fn max_context_decision_table() {
     let catalog = Some((400_000, ContextWindowSource::Catalog));
     // (route, ambient, model window, codex common) -> expected
     let rows: &[(Route, Option<Option<u64>>, _, Option<u32>, Setting)] = &[
-        (Route::Direct, None, served, None, s(Some(1_048_576), Source::Served)),
-        (Route::Direct, None, catalog, None, s(Some(400_000), Source::Catalog)),
+        (
+            Route::Direct,
+            None,
+            served,
+            None,
+            s(Some(1_048_576), Source::Served),
+        ),
+        (
+            Route::Direct,
+            None,
+            catalog,
+            None,
+            s(Some(400_000), Source::Catalog),
+        ),
         (Route::Direct, None, None, None, s(None, Source::Unset)),
         // push_default: an ambient value wins on the direct route.
-        (Route::Direct, Some(Some(4242)), served, None, s(Some(4242), Source::Ambient)),
-        (Route::Direct, Some(None), served, None, s(None, Source::Ambient)),
+        (
+            Route::Direct,
+            Some(Some(4242)),
+            served,
+            None,
+            s(Some(4242), Source::Ambient),
+        ),
+        (
+            Route::Direct,
+            Some(None),
+            served,
+            None,
+            s(None, Source::Ambient),
+        ),
         // set_env: the Codex bridge overrides an ambient value.
-        (Route::CodexBridge, Some(Some(4242)), None, Some(272_000), s(Some(272_000), Source::Catalog)),
-        (Route::CodexBridge, None, None, None, s(None, Source::Unknown)),
+        (
+            Route::CodexBridge,
+            Some(Some(4242)),
+            None,
+            Some(272_000),
+            s(Some(272_000), Source::Catalog),
+        ),
+        (
+            Route::CodexBridge,
+            None,
+            None,
+            None,
+            s(None, Source::Unknown),
+        ),
         // The gateway and native launches never touch the key.
-        (Route::UnifiedGateway, None, served, Some(1), s(None, Source::Unset)),
-        (Route::UnifiedGateway, Some(Some(7)), served, None, s(Some(7), Source::Ambient)),
+        (
+            Route::UnifiedGateway,
+            None,
+            served,
+            Some(1),
+            s(None, Source::Unset),
+        ),
+        (
+            Route::UnifiedGateway,
+            Some(Some(7)),
+            served,
+            None,
+            s(Some(7), Source::Ambient),
+        ),
         (Route::Native, None, catalog, None, s(None, Source::Unset)),
-        (Route::Native, Some(Some(9)), None, None, s(Some(9), Source::Ambient)),
+        (
+            Route::Native,
+            Some(Some(9)),
+            None,
+            None,
+            s(Some(9), Source::Ambient),
+        ),
     ];
     for (route, ambient, window, codex, expected) in rows {
         let f = Facts {
@@ -46,19 +100,38 @@ fn max_context_decision_table() {
             codex_common_window: *codex,
             ..facts(*route)
         };
-        assert_eq!(decide_max_context(&f), *expected, "{route:?} {ambient:?} {window:?}");
+        assert_eq!(
+            decide_max_context(&f),
+            *expected,
+            "{route:?} {ambient:?} {window:?}"
+        );
     }
 }
 
 #[test]
 fn compact_window_decision_table() {
     let rows: &[(Route, Option<Option<u64>>, Option<u32>, Setting)] = &[
-        (Route::Direct, None, Some(180_000), s(Some(180_000), Source::Catalog)),
+        (
+            Route::Direct,
+            None,
+            Some(180_000),
+            s(Some(180_000), Source::Catalog),
+        ),
         // The direct overlay scrubs an ambient compact window.
         (Route::Direct, Some(Some(5)), None, s(None, Source::Unset)),
-        (Route::CodexBridge, Some(Some(5)), Some(1), s(Some(5), Source::Ambient)),
+        (
+            Route::CodexBridge,
+            Some(Some(5)),
+            Some(1),
+            s(Some(5), Source::Ambient),
+        ),
         (Route::UnifiedGateway, None, Some(1), s(None, Source::Unset)),
-        (Route::Native, Some(Some(6)), None, s(Some(6), Source::Ambient)),
+        (
+            Route::Native,
+            Some(Some(6)),
+            None,
+            s(Some(6), Source::Ambient),
+        ),
     ];
     for (route, ambient, catalog, expected) in rows {
         let f = Facts {
@@ -74,7 +147,10 @@ fn compact_window_decision_table() {
 fn reconcile_takes_the_child_value_and_flags_surprises() {
     let served = s(Some(1_048_576), Source::Served);
     assert_eq!(reconcile(served, Some(Some(1_048_576))), served);
-    assert_eq!(reconcile(served, Some(Some(200_000))), s(Some(200_000), Source::Unknown));
+    assert_eq!(
+        reconcile(served, Some(Some(200_000))),
+        s(Some(200_000), Source::Unknown)
+    );
     assert_eq!(reconcile(served, None), s(None, Source::Unknown));
     let unset = s(None, Source::Unset);
     assert_eq!(reconcile(unset, None), unset);
@@ -115,7 +191,14 @@ fn record_contains_no_secrets_paths_or_raw_session_ids() {
     let mut record = plan_facts().at_launch(&hostile_env(), &child, 1);
     record.session = Some(session_hash(SESSION_ID));
     let text = serde_json::to_string(&record).unwrap();
-    for needle in [SECRET_KEY, SESSION_ID, "secret-project", "/home/", "USER-PROMPT", "TOKEN"] {
+    for needle in [
+        SECRET_KEY,
+        SESSION_ID,
+        "secret-project",
+        "/home/",
+        "USER-PROMPT",
+        "TOKEN",
+    ] {
         assert!(!text.contains(needle), "{needle} leaked: {text}");
     }
     assert!(text.len() < 512, "record is {} bytes", text.len());
@@ -134,7 +217,10 @@ fn bind_copies_pending_to_the_hashed_name_and_prunes() {
         &std::fs::read(dir(state).join(format!("{}.json", session_hash(SESSION_ID)))).unwrap(),
     )
     .unwrap();
-    assert_eq!(bound.session.as_deref(), Some(session_hash(SESSION_ID).as_str()));
+    assert_eq!(
+        bound.session.as_deref(),
+        Some(session_hash(SESSION_ID).as_str())
+    );
     assert_eq!(bound.max_context_tokens.value, Some(200_000));
     // A bad token or an empty session id writes nothing.
     bind(state, "../../etc/passwd", SESSION_ID);
@@ -171,7 +257,10 @@ fn prune_enforces_age_and_count() {
     // Everything is older than MAX_AGE as seen from 15 days in the future.
     prune(d, SystemTime::now() + MAX_AGE + Duration::from_secs(86_400));
     assert_eq!(json(d), 0);
-    assert!(d.join("keep.txt").exists(), "non-record files are left alone");
+    assert!(
+        d.join("keep.txt").exists(),
+        "non-record files are left alone"
+    );
 }
 
 #[test]

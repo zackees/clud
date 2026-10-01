@@ -273,9 +273,19 @@ impl ForegroundRuntime {
         // PTY, detached, and worker launches. It must precede BridgeHandle
         // construction so refusal cannot bind a listener or expose settings.
         Self::preflight(plan)?;
+        // #1675: the env as the launch received it, before any overlay, so
+        // the launch-context record can tell an ambient value from ours.
+        let ambient = env.clone();
         let mut runtime = Self::start_with_secret_store(plan, env, &store)?;
         runtime.apply_attribution(plan)?;
         runtime.apply_session_history(plan);
+        if plan.effective_harness() == Backend::Claude && !cfg!(test) {
+            crate::launch_context::record_launch(
+                &launch_context_plan_facts(plan),
+                &ambient,
+                &mut runtime.env,
+            );
+        }
         if !pin_notices.is_empty() {
             let mut notices = pin_notices;
             notices.append(&mut runtime.startup_notices);
@@ -865,6 +875,50 @@ pub fn with_foreground_runtime<ResultValue>(
     Ok(run(&runtime))
 }
 
+/// Route, harness, provider and wire model for the launch-context record
+/// (#1675), classified by the same predicates `start_with_secret_store`
+/// branches on. `--dry-run` previews the record from this too.
+pub fn launch_context_plan_facts(plan: &LaunchPlan) -> crate::launch_context::PlanFacts {
+    use crate::launch_context::Route;
+    let selected = plan
+        .model_selection
+        .as_ref()
+        .and_then(|selection| selection.wire_model.clone());
+    let (route, wire_model) = if is_unified(plan) {
+        (Route::UnifiedGateway, selected)
+    } else if is_codex_via_claude(plan) {
+        (Route::CodexBridge, selected)
+    } else if is_anthropic_compat_via_claude(plan) {
+        let model = direct_wire_model(plan.model_provider(), plan.model_selection.as_ref());
+        (Route::Direct, model.map(str::to_string))
+    } else {
+        (Route::Native, selected)
+    };
+    crate::launch_context::PlanFacts {
+        route,
+        harness: plan
+            .effective_harness()
+            .as_model_provider()
+            .as_str()
+            .to_string(),
+        provider: plan.model_provider().as_str().to_string(),
+        wire_model,
+    }
+}
+
+/// The wire model the direct overlay launches: the selection's, else the
+/// provider's reviewed catalog default.
+fn direct_wire_model(
+    provider: ModelProvider,
+    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
+) -> Option<&str> {
+    selection
+        .and_then(|selection| selection.wire_model.as_deref())
+        .or_else(|| {
+            crate::provider_catalog::reviewed_default_model(provider).map(|row| row.wire_id)
+        })
+}
+
 fn is_codex_via_claude(plan: &LaunchPlan) -> bool {
     plan.model_provider() == ModelProvider::Codex && plan.effective_harness() == Backend::Claude
 }
@@ -1173,15 +1227,10 @@ fn apply_anthropic_compat_overlay(
     if descriptor.provider == ModelProvider::OpenRouter {
         env.retain(|(key, _)| !key.eq_ignore_ascii_case("OPENROUTER_API_KEY"));
     }
-    let default_wire_model = crate::provider_catalog::reviewed_default_model(descriptor.provider)
-        .expect(
-            "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
-             -- add a `provider_default: true` row in provider_catalog.rs",
-        )
-        .wire_id;
-    let model = selection
-        .and_then(|selection| selection.wire_model.as_deref())
-        .unwrap_or(default_wire_model);
+    let model = direct_wire_model(descriptor.provider, selection).expect(
+        "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
+         -- add a `provider_default: true` row in provider_catalog.rs",
+    );
     let role_models = descriptor.role_models;
     // A served subagent name (#1192) replaces the descriptor's compiled-in one.
     let subagent_wire_id = crate::server_settings::provider_subagent_model(descriptor.provider)
@@ -3691,6 +3740,36 @@ mod tests {
             lookup(runtime.env(), "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
             None
         );
+    }
+
+    /// #1675: the record built from the real child env equals the dry-run
+    /// preview, with and without an ambient override.
+    #[test]
+    fn launch_context_record_matches_the_dry_run_preview_on_the_direct_route() {
+        use crate::launch_context::Source;
+        let mut plan = plan(ModelProvider::OpenRouter, Backend::Claude);
+        plan.model_selection = Some(openrouter_selection("xiaomi/mimo-v2.6-flash"));
+        let store = FakeSecretStore(Some("openrouter-routing-secret".to_string()));
+        let facts = launch_context_plan_facts(&plan);
+        assert_eq!(facts.route, crate::launch_context::Route::Direct);
+        for (ambient, source) in [
+            (Vec::new(), Source::Served),
+            (
+                vec![(
+                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
+                    "4242".to_string(),
+                )],
+                Source::Ambient,
+            ),
+        ] {
+            let runtime =
+                ForegroundRuntime::start_with_secret_store(&plan, ambient.clone(), &store).unwrap();
+            let launched = facts.at_launch(&ambient, runtime.env(), 0);
+            assert_eq!(launched, facts.preview(&ambient));
+            assert_eq!(launched.max_context_tokens.source, source);
+            let text = serde_json::to_string(&launched).unwrap();
+            assert!(!text.contains("openrouter-routing-secret"));
+        }
     }
 
     #[test]
