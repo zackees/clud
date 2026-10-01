@@ -1013,6 +1013,26 @@ fn refresh_worktree_size_cache(wt_root: Option<&std::path::Path>) {
     );
 }
 
+/// Issue #1327: bounded, read-only size walk of `~/.clud/tmp`, cached for
+/// the launch banner. Runs after the age sweep so it sizes what survived.
+/// Best effort; warn-only: nothing is deleted for size.
+fn refresh_session_tmp_size_cache() {
+    // Unit tests never write into the real `~/.clud`.
+    if cfg!(test) {
+        return;
+    }
+    let Some(home) = crate::gc::session_tmp::home_dir() else {
+        return;
+    };
+    let warn_bytes = crate::clud_settings::load_tmp_warn_bytes()
+        .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES);
+    let _ = crate::gc::worktree_size_cache::refresh_tmp_cache(
+        &home,
+        warn_bytes,
+        crate::gc::worktree_size_cache::now_unix(),
+    );
+}
+
 /// Issue #1591: `gc list` rows for the cached repo-worktree snapshot.
 /// Paths the registry already tracks are skipped (their own row wins), and a
 /// live session cwd inside a worktree pins it now, even if the snapshot is
@@ -1172,11 +1192,13 @@ fn run_maintenance_sweeps(warn_free_bytes: u64) {
     match maintenance_action(low_disk, cpu_busy) {
         MaintenanceAction::RunUrgent => {
             crate::daemon::session_tmp_sweep::sweep_now();
+            refresh_session_tmp_size_cache();
             crate::daemon::session_state_sweep::sweep_now();
             crate::daemon::target_sweep::sweep_now();
         }
         MaintenanceAction::RunNormal => {
             crate::daemon::session_tmp_sweep::maybe_sweep_session_tmp();
+            refresh_session_tmp_size_cache();
             crate::daemon::session_state_sweep::maybe_sweep_session_state();
             crate::daemon::target_sweep::maybe_sweep_targets();
         }

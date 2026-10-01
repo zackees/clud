@@ -412,6 +412,16 @@ directories removed, reclaimed apparent bytes, pending phases, retry count, work
 last error path/class, current phase/path, and cursor position. An exclusive lock prevents
 concurrent daemons from overwriting the continuation queue.
 
+**Session temp size warning (#1327).** `tmp.warn_bytes` in `~/.clud/settings.json` (seeded
+20 GiB, `0` disables) is the `~/.clud/tmp` twin of `worktrees.warn_bytes` and reuses its
+mechanism in `gc::worktree_size_cache`: `clud gc list` prints a stderr warning from a bounded,
+early-exit walk, and the daemon's maintenance sweep thread (after the age sweep, skipped on
+`Defer`) writes `~/.clud/tmp-size.json`, a sibling of `tmp` so the sweep never sees it. At launch
+`tmp_launch_warning` reads only that file and a lock-free settings peek, with the same
+`banner_decision` table (stale after 6 h, quiet on unknown). **Warn-only:** nothing is deleted
+for size; the 72 h age sweep stays the only deleter of session temp
+([DD-141](../DESIGN_DECISIONS.md#dd-141-session-temp-size-is-reported-never-a-deletion-trigger)).
+
 **Forensic session state (#1014).** Every launch leaves a `<pid>__<start-epoch>/` directory under
 `~/.clud/state/sessions/` holding the reaper's `reap.jsonl` / `reap-health.json` and, since #1011,
 a `bridge.jsonl`. Nothing aged it out, so it accumulated one entry per session ever run — the

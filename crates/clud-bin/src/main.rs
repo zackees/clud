@@ -1334,6 +1334,10 @@ fn run(mut args: args::Args) {
     if let Some(line) = gc::worktree_size_cache::launch_warning() {
         eprintln!("{line}");
     }
+    // Issue #1327: same cached, warn-only check for ~/.clud/tmp.
+    if let Some(line) = gc::worktree_size_cache::tmp_launch_warning() {
+        eprintln!("{line}");
+    }
 
     // Issue #79 / #65 / #66: register `clud` as the IDropTarget for
     // the console window so dropped files reach the backend. Held for

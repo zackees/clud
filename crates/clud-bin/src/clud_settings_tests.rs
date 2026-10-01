@@ -60,6 +60,36 @@ fn worktrees_warn_bytes_defaults_and_parses() {
     assert_eq!(seeded["worktrees"]["warn_bytes"], json!(DEFAULT_WARN_BYTES));
 }
 
+/// #1327: the warn-only `~/.clud/tmp` size threshold defaults to 20 GiB,
+/// `0` disables it, and a malformed value falls back to the default.
+#[test]
+fn tmp_warn_bytes_defaults_and_parses() {
+    use crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES;
+    assert_eq!(DEFAULT_TMP_WARN_BYTES, 20 * 1024 * 1024 * 1024);
+    let home = tempdir().unwrap();
+    assert_eq!(
+        load_tmp_warn_bytes_at(home.path()).unwrap(),
+        DEFAULT_TMP_WARN_BYTES
+    );
+    assert_eq!(peek_tmp_warn_bytes_at(home.path()), DEFAULT_TMP_WARN_BYTES);
+    for (doc, want) in [
+        (json!({}), DEFAULT_TMP_WARN_BYTES),
+        (json!({"tmp": {"warn_bytes": 0}}), 0),
+        (json!({"tmp": {"warn_bytes": 1234}}), 1234),
+        (json!({"tmp": {"warn_bytes": "9"}}), DEFAULT_TMP_WARN_BYTES),
+        (json!({"tmp": {"warn_bytes": -1}}), DEFAULT_TMP_WARN_BYTES),
+        // The tmp-wt setting must not leak into the tmp one.
+        (
+            json!({"worktrees": {"warn_bytes": 7}}),
+            DEFAULT_TMP_WARN_BYTES,
+        ),
+    ] {
+        assert_eq!(tmp_warn_bytes_from(&doc), want, "{doc}");
+    }
+    let seeded = seeded_global_settings_document();
+    assert_eq!(seeded["tmp"]["warn_bytes"], json!(DEFAULT_TMP_WARN_BYTES));
+}
+
 #[test]
 fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();

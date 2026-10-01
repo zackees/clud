@@ -263,6 +263,13 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
             .or_insert(json!(crate::gc::worktree_root::DEFAULT_WARN_BYTES));
     }
 
+    if let Some(tmp) = seed_object_entry(document, "tmp") {
+        // #1327: warn-only size threshold for ~/.clud/tmp; 0 disables.
+        tmp.entry("warn_bytes".to_string()).or_insert(json!(
+            crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES
+        ));
+    }
+
     if let Some(daemon) = seed_object_entry(document, "daemon") {
         // #645: a daemon that has no owned work may retire after fifteen
         // minutes. Zero remains the documented explicit opt-out.
@@ -878,6 +885,38 @@ pub fn worktrees_warn_bytes_from(document: &Value) -> u64 {
         .and_then(|item| item.get("warn_bytes"))
         .and_then(Value::as_u64)
         .unwrap_or(crate::gc::worktree_root::DEFAULT_WARN_BYTES)
+}
+
+/// `tmp.warn_bytes` (#1327): when `~/.clud/tmp` grows past this, `clud gc
+/// list` and the launch banner warn. Warn-only: the 72 h age sweep stays the
+/// only deleter of session temp. `0` disables; absent or not a non-negative
+/// integer means the default.
+pub fn load_tmp_warn_bytes() -> Result<u64, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_tmp_warn_bytes_at(&home)
+}
+
+pub fn load_tmp_warn_bytes_at(home: &Path) -> Result<u64, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(tmp_warn_bytes_from(&document))
+}
+
+/// Lock-free, failure-silent read of `tmp.warn_bytes` for the launch banner.
+pub fn peek_tmp_warn_bytes_at(home: &Path) -> u64 {
+    read_settings_or_legacy(home)
+        .map(|document| tmp_warn_bytes_from(&document))
+        .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES)
+}
+
+/// Pure reader for `tmp.warn_bytes`.
+pub fn tmp_warn_bytes_from(document: &Value) -> u64 {
+    document
+        .get("tmp")
+        .and_then(|item| item.get("warn_bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_TMP_WARN_BYTES)
 }
 
 /// The JSON key path of the human-set safe-rm root override (#1668,
