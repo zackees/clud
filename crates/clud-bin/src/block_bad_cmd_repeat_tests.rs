@@ -22,34 +22,34 @@ fn denied(keys: &[&str], gap: u64, limit: u32) -> Vec<usize> {
 
 #[test]
 fn incident_294_identical_calls_are_denied_from_call_n_plus_one() {
-    let keys = vec!["a"; 294];
+    let keys = ["a"; 294];
     let expected: Vec<usize> = (N as usize + 1..=294).collect();
     assert_eq!(denied(&keys, 0, N), expected);
 }
 
 #[test]
 fn incident_371_identical_calls_are_denied_from_call_n_plus_one() {
-    let keys = vec!["a"; 371];
+    let keys = ["a"; 371];
     assert_eq!(denied(&keys, 0, N).first(), Some(&(N as usize + 1)));
     assert_eq!(denied(&keys, 0, N).len(), 371 - N as usize);
 }
 
 #[test]
 fn exactly_n_identical_calls_are_all_allowed() {
-    assert!(denied(&vec!["a"; N as usize], 0, N).is_empty());
+    assert!(denied(&["a"; N as usize], 0, N).is_empty());
 }
 
 #[test]
 fn polling_loop_below_the_limit_is_never_denied() {
     // The longest sleep-paced poll seen in local transcripts was 138 calls.
-    assert!(denied(&vec!["poll"; 138], 2, N).is_empty());
+    assert!(denied(&["poll"; 138], 2, N).is_empty());
 }
 
 #[test]
 fn a_different_call_in_between_resets_the_streak() {
     let mut keys = vec!["a"; N as usize];
     keys.push("b");
-    keys.extend(vec!["a"; N as usize]);
+    keys.extend(["a"; N as usize]);
     assert!(denied(&keys, 0, N).is_empty());
 }
 
@@ -62,22 +62,19 @@ fn interleaved_calls_never_build_a_streak() {
 #[test]
 fn an_idle_gap_longer_than_the_reset_window_starts_a_new_streak() {
     // A `/loop` tick every 10 minutes repeats one call indefinitely.
-    assert!(denied(&vec!["tick"; 1_000], IDLE_RESET_SECS + 1, N).is_empty());
+    assert!(denied(&["tick"; 1_000], IDLE_RESET_SECS + 1, N).is_empty());
     // At the window it still counts.
-    assert_eq!(
-        denied(&vec!["a"; N as usize + 1], IDLE_RESET_SECS, N),
-        vec![N as usize + 1]
-    );
+    assert_eq!(denied(&["a"; N as usize + 1], IDLE_RESET_SECS, N), vec![N as usize + 1]);
 }
 
 #[test]
 fn a_denied_call_keeps_counting_so_a_blind_retry_stays_denied() {
-    assert_eq!(denied(&vec!["a"; 5], 0, 3), vec![4, 5]);
+    assert_eq!(denied(&["a"; 5], 0, 3), vec![4, 5]);
 }
 
 #[test]
 fn limit_zero_disables_the_guard() {
-    assert!(denied(&vec!["a"; 1_000], 0, 0).is_empty());
+    assert!(denied(&["a"; 1_000], 0, 0).is_empty());
 }
 
 #[test]
@@ -100,7 +97,8 @@ fn limit_resolution_env_then_settings_then_default() {
     assert_eq!(limit_from(Some("0"), Some(&settings)), 0);
     assert_eq!(limit_from(None, Some(&settings)), 40);
     assert_eq!(limit_from(Some("junk"), None), DEFAULT_LIMIT);
-    assert_eq!(limit_from(None, Some(&json!({"hooks": {"repeat_call_limit": "x"}}))), DEFAULT_LIMIT);
+    let bad = json!({"hooks": {"repeat_call_limit": "x"}});
+    assert_eq!(limit_from(None, Some(&bad)), DEFAULT_LIMIT);
     assert_eq!(limit_from(None, None), DEFAULT_LIMIT);
 }
 
@@ -119,10 +117,7 @@ fn check_at_persists_only_hashes_and_counts_per_session() {
     for i in 0..3 {
         assert_eq!(check_at(tmp.path(), "sess-1", "k", 10 + i, 3), Verdict::Allow);
     }
-    assert_eq!(
-        check_at(tmp.path(), "sess-1", "k", 14, 3),
-        Verdict::Deny { count: 4 }
-    );
+    assert_eq!(check_at(tmp.path(), "sess-1", "k", 14, 3), Verdict::Deny { count: 4 });
     // Another session has its own streak.
     assert_eq!(check_at(tmp.path(), "sess-2", "k", 14, 3), Verdict::Allow);
     let dir = tmp.path().join(DIR_NAME);
