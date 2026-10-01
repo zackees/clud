@@ -756,6 +756,10 @@ fn temp_root_candidates_follow_the_platform_and_env() {
     };
     let unix = temp_root_candidates(false, &unix_env);
     assert!(unix.contains(&PathBuf::from("/tmp")), "{unix:?}");
+    // #1659: POSIX shared memory is a temp root; the per-user runtime dir,
+    // which holds live session sockets, is not.
+    assert!(unix.contains(&PathBuf::from("/dev/shm")), "{unix:?}");
+    assert!(!unix.iter().any(|p| p.starts_with("/run")), "{unix:?}");
     assert!(unix.contains(&PathBuf::from("/var/tmp")), "{unix:?}");
     assert!(
         unix.iter()
@@ -765,7 +769,14 @@ fn temp_root_candidates_follow_the_platform_and_env() {
     assert!(!unix.iter().any(|p| p.starts_with("/ignored")), "{unix:?}");
     // A relative or empty TMPDIR is ignored.
     let rel = temp_root_candidates(false, &|k: &str| (k == "TMPDIR").then(|| "tmp".into()));
-    assert_eq!(rel, vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
+    assert_eq!(
+        rel,
+        vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/var/tmp"),
+            PathBuf::from("/dev/shm")
+        ]
+    );
 
     // Windows: %TEMP% and %TMP%, verbatim prefix stripped, duplicates folded,
     // no Unix defaults. Pure string handling, so it runs on every host.
@@ -779,4 +790,104 @@ fn temp_root_candidates_follow_the_platform_and_env() {
     assert_eq!(win, vec![PathBuf::from(r"C:\Users\u\AppData\Local\Temp")]);
     let relative = temp_root_candidates(true, &|k: &str| (k == "TEMP").then(|| "Temp".into()));
     assert!(relative.is_empty(), "{relative:?}");
+}
+
+// ---- RAM-backed temp roots: /dev/shm (#1659) ----
+//
+// "shm" is a directory the test creates inside the world standing in for
+// /dev/shm; no test touches the real /dev/shm.
+
+fn shm_world() -> (TempWorld, PathBuf) {
+    let tw = temp_world();
+    let shm = tw.w.root.parent().unwrap().join("shm");
+    std::fs::create_dir_all(shm.join("wild-review/out")).unwrap();
+    std::fs::write(shm.join("wild-review/out/a.o"), b"link output").unwrap();
+    (tw, shm)
+}
+
+fn shm_roots(tw: &TempWorld, shm: &Path) -> Roots {
+    Roots::fixed(vec![tw.w.root.clone()], true)
+        .with_temp_roots(vec![tw.temp.clone(), shm.to_path_buf()])
+        .with_ram_roots(vec![shm.to_path_buf()])
+}
+
+#[test]
+fn a_path_outside_every_root_is_refused_even_with_purge_and_says_so() {
+    let (tw, shm) = shm_world();
+    // The 2.8.20 shape: the shm dir is not a temp root at all.
+    let target = shm.join("wild-review").to_string_lossy().into_owned();
+    for flags in [&["-r"][..], &["-r", "--purge"][..]] {
+        let mut list = flags.to_vec();
+        list.push(&target);
+        let (code, _, err) = tw.run(&list);
+        assert_eq!(code, 1, "{err}");
+        assert!(err.contains("outside the allowed roots"), "{err}");
+        assert!(err.contains("--purge does not relax"), "{err}");
+        assert!(err.contains("session temp dir"), "{err}");
+    }
+    assert!(shm.join("wild-review/out/a.o").exists());
+}
+
+#[test]
+fn a_tree_under_a_ram_backed_temp_root_is_purged_without_trashing() {
+    let (tw, shm) = shm_world();
+    let target = shm.join("wild-review").to_string_lossy().into_owned();
+    let (code, out, err) = tw.run_with_roots(shm_roots(&tw, &shm), &["-r", "--dry-run", &target]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("would-purge"), "{out}{err}");
+    assert!(shm.join("wild-review").exists());
+    // No --purge given: still purged, and nothing lands in the trash.
+    let (code, _, err) = tw.run_with_roots(shm_roots(&tw, &shm), &["-r", &target]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!shm.join("wild-review").exists());
+    assert!(shm.is_dir(), "the shm root itself must survive");
+    assert!(tw.w.entries().is_empty(), "{:?}", tw.w.entries());
+}
+
+#[test]
+fn a_ram_backed_temp_root_itself_is_refused() {
+    let (tw, shm) = shm_world();
+    let plain = shm.to_string_lossy().into_owned();
+    let (code, _, err) = tw.run_with_roots(shm_roots(&tw, &shm), &["-r", "--purge", &plain]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("temp directory itself"), "{err}");
+    assert!(shm.join("wild-review/out/a.o").exists());
+}
+
+#[test]
+fn a_disk_backed_temp_root_still_trashes() {
+    let (tw, shm) = shm_world();
+    std::fs::write(tw.temp.join("f"), b"x").unwrap();
+    let (code, _, err) = tw.run_with_roots(shm_roots(&tw, &shm), &[&tw.t("f")]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!tw.temp.join("f").exists());
+    assert_eq!(tw.w.entries().len(), 1, "a disk temp entry is trashed");
+}
+
+#[cfg(unix)]
+#[test]
+fn ram_backed_temp_roots_keep_the_ownership_and_symlink_rules() {
+    let (tw, shm) = shm_world();
+    // SAFETY: geteuid has no preconditions.
+    let other = unsafe { libc::geteuid() }.wrapping_add(1);
+    let target = shm.join("wild-review").to_string_lossy().into_owned();
+    let roots = shm_roots(&tw, &shm).with_temp_owner(other);
+    let (code, _, err) = tw.run_with_roots(roots, &["-r", &target]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("not owned by you"), "{err}");
+    assert!(shm.join("wild-review/out/a.o").exists());
+    // A link out of the shm root is judged by its target.
+    std::os::unix::fs::symlink(&tw.outside, shm.join("link")).unwrap();
+    let escape = shm.join("link/keep").to_string_lossy().into_owned();
+    let (code, _, err) = tw.run_with_roots(shm_roots(&tw, &shm), &[&escape]);
+    assert_eq!(code, 1, "{err}");
+    assert!(tw.outside.join("keep").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ram_backing_is_detected_from_the_filesystem_type() {
+    // /proc is procfs, never tmpfs; a missing path is not RAM-backed.
+    assert!(!is_ram_backed(Path::new("/proc")));
+    assert!(!is_ram_backed(Path::new("/definitely/not/here")));
 }

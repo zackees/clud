@@ -5517,3 +5517,89 @@ runner-minutes, in parallel with the longer Windows lanes, so wall-clock
 feedback is unchanged. Linux integration and macOS still need `ci-test` /
 `ci-full`. `tests/test_ci_matrix.py` pins the gate. Details:
 [ci.md](architecture/ci.md#ci-windows-keeps-the-routine-linux-lanes-1652-decided).
+
+## DD-134: `/dev/shm` is a safe-rm temp root, and RAM-backed temp entries are purged, not trashed
+
+**Context:** #1659. A sub-agent wrote 13 GB of benchmark output to
+`/dev/shm/wild-review` (tmpfs, held in RAM). `safe-rm` refused it as outside
+the roots, with or without `--purge`, so the data stayed in RAM until a human
+removed it. DD-128 listed `/tmp`, `/var/tmp` and `$TMPDIR` but not `/dev/shm`;
+that was an omission, not a decision.
+
+**Decision:** `/dev/shm` joins the Unix temp-root candidates under exactly the
+DD-128 rules: canonicalized, strictly under it only, the root itself refused,
+symlinked parents judged by their target, every existing entry owned by the
+effective uid. It is dropped where it does not exist (macOS). Separately, a
+temp root on tmpfs or ramfs (Linux `statfs` magic; `Roots::ram_roots`) has
+its entries **purged even without `--purge`**, after the usual GC audit line.
+The outside-the-roots refusal now says `--purge` does not relax the check and
+names the session temp dir as the place for scratch data.
+
+**Why purge on tmpfs:** the trash is on disk under `~/.clud`. Trashing a RAM
+tree is a cross-device copy: 13 GB written to disk and kept 72 hours, or a
+failure halfway when the disk is smaller. tmpfs data does not survive a reboot
+anyway, so the trash's recovery promise buys little. Refusing to trash with a
+"pass `--purge`" message was rejected: it adds a round trip that every agent
+would take, for the same end state. This applies to `/tmp` too when it is
+tmpfs.
+
+**Why not `/run/user/<uid>`:** it is per-user, but it holds live session
+sockets and state (D-Bus, PipeWire, Wayland, systemd). Agents have no reason
+to write scratch data there and every reason not to delete there. **Why not
+a "`--purge` relaxes the roots" rule:** `--purge` chooses trash versus delete;
+mixing in *where* would make the more destructive flag the less checked one.
+
+**Consequences:** a POSIX shared-memory segment the user owns (for example a
+running browser's) is deletable under `/dev/shm`, just as the user's own
+sockets under `/tmp` are under DD-128. Ownership is the boundary in both. The
+general case, data a session created anywhere else, is DD-135.
+
+## DD-135: a creation ledger for safe-rm is hybrid, daemon-held, and written only by clud creating the path
+
+**Context:** #1621 and the follow-up in #1659 ask whether `safe-rm` should
+keep a per-file or per-directory record of what a session (and its
+sub-agents) created, held in the clud daemon, so the session may delete its
+own output outside the roots. No ledger exists today. `safe-rm` already talks
+to the daemon (trash entries are inserted into the GC registry with
+`gc_client_insert`), and Claude Code sub-agents run inside the parent's
+process environment, so they share its `CLUD_RM_ROOTS` and session id: the
+roots that refused `/dev/shm/wild-review` were the sub-agent's roots too.
+
+**Decision (design; built in follow-up slices, not in the #1659 PR):**
+
+- **Granularity: hybrid.** A *directory* is recorded when clud created it;
+  everything under it is then deletable. A *file* is recorded only when clud
+  created it inside a directory it did not create; only that file is
+  deletable. A pre-existing directory is never ledger-eligible as a whole.
+  Pure per-file was rejected because a build or benchmark writes hundreds of
+  thousands of files through child processes nobody observes; pure
+  "directories touched" was rejected because one write into `~/Documents`
+  would make its siblings deletable.
+- **Home: the daemon's GC registry**, as a new row kind keyed by session id,
+  persisted in the registry's existing store, so it survives daemon and
+  session restarts and compaction, and expires with the session's GC rows.
+  Each row stores the canonical path, kind, session id, creator role, time,
+  and on Unix device, inode and uid. `safe-rm` consults it only for a path
+  outside the roots, after canonicalization, and requires the live
+  device/inode to match, so a path swapped for a symlink or another file is
+  refused. With the daemon unreachable, `safe-rm` falls back to today's strict
+  roots and says so in the refusal; it never fails open.
+- **Writers: clud must have created the path itself.** The daemon accepts a
+  ledger insert only from a clud helper that performed the create (an
+  exclusive `mkdir`/`O_EXCL` open, then insert with the resulting
+  device/inode), never a "please record X" from an agent. That rules out
+  self-declaration, which would let an agent ledger a pre-existing path and
+  delete it. Rejected: filesystem watchers (fanotify needs privileges,
+  inotify does not recurse cheaply, both see unrelated processes), and
+  before/after snapshot diffs of every Bash call (cost proportional to the
+  watched trees, and child-process noise).
+- **Override:** a human-set, reasoned allowance (an extension of the roots,
+  logged with its reason on every use) is the escape hatch for what the ledger
+  cannot cover. An agent cannot set it.
+
+**Why not in this release:** it needs a registry schema addition, a daemon op,
+a new multicall helper name and agent guidance, each independently
+reviewable. The common cases that motivated it (`/tmp`, `/dev/shm`, the
+scratchpad) are covered by DD-128 and DD-134 now. Slices are tracked as
+follow-up issues linked from #1621. Policy text:
+[rm-tools.md](architecture/rm-tools.md#creation-ledger-design-1621-1659).
