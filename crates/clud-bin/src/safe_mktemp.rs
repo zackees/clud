@@ -36,7 +36,7 @@ pub(crate) trait LedgerWriter {
     fn record(&self, entry: &CreatedEntry) -> Result<(), String>;
 }
 
-/// The daemon's GC registry (`GcOp::InsertCreated`).
+/// The daemon's GC registry, through its creation-ledger insert op.
 // Windows refuses before reading any of it (`create`).
 #[cfg_attr(not(unix), allow(dead_code))]
 struct DaemonWriter {
