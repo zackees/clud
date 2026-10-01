@@ -5842,3 +5842,26 @@ undeletable path block every other candidate on the machine.
 (every six hours) instead of continuously, and each give-up is logged with
 its last error. Deletion rules are unchanged: only a fully scanned, idle,
 rechecked tree is removed.
+
+## DD-143: trash has a size cap, session temp does not
+
+**Context:** #1672: `~/.clud/trash` held 87 GB on a disk that was 94 % full.
+Almost all of it was inside the 72 h `safe-rm` restore window: agents had
+deleted large `target/` trees in a burst, and retention was time-only.
+DD-141 declined a size cap for `~/.clud/tmp`.
+
+**Decision:** `trash.max_bytes` (default 20 GiB, `0` disables) evicts the
+oldest trash entries first until the total fits. An entry trashed less than
+an hour ago is never evicted. Only real directories directly inside the
+canonical trash root are considered; symlinks are never followed. Each
+removal is audited.
+
+**Why trash and not tmp:** session temp is live working data with no owner
+to ask (DD-141). Trash is data a user or agent already asked to delete.
+Nothing reads it back except a human restoring by hand, so eviction only
+shortens the restore window. The one-hour floor keeps an immediate "undo"
+possible.
+
+**Consequences:** under a burst larger than the cap, entries older than an
+hour lose their restore window early. A user who wants the full 72 h can set
+`trash.max_bytes` to `0`.

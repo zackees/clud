@@ -94,20 +94,41 @@ pub(super) fn reap_trash_entries_at(
         if crate::rm_tool::keep_trash_entry(Path::new(&entry.path), now) {
             continue;
         }
+        let path = Path::new(&entry.path);
+        if std::fs::symlink_metadata(path)
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+        {
+            // Already gone (size cap, or removed by hand): drop the row
+            // instead of failing on it every tick (#1672).
+            registry.delete(entry.id).map_err(|err| err.to_string())?;
+            removed += 1;
+            continue;
+        }
         // Audit before acting (#893).
-        crate::gc::delete_audit::record("gc.trash-reap", Path::new(&entry.path), "trash");
-        match std::fs::remove_dir_all(&entry.path) {
+        crate::gc::delete_audit::record("gc.trash-reap", path, "trash");
+        match remove_trash_dir(path) {
             Ok(()) => {
                 registry.delete(entry.id).map_err(|err| err.to_string())?;
                 eprintln!("[gc] trash: reaped {}", entry.path);
                 removed += 1;
             }
-            Err(_) => {
+            Err(err) => {
+                // #1672: this used to be silent; one root-owned entry was
+                // "reaped" 373 times with no trace of why it stayed.
+                eprintln!("[gc] trash: could not remove {}: {err}", entry.path);
                 failed += 1;
             }
         }
     }
     Ok((removed, failed))
+}
+
+/// `remove_dir_all` after making the tree owner-writable, as safe-rm's own
+/// purge does (#1573): sealed build output is read-only. Files owned by
+/// another user (root, from a Docker bind mount) still fail, loudly.
+fn remove_trash_dir(path: &Path) -> std::io::Result<()> {
+    crate::rm_tool::make_writable(path);
+    std::fs::remove_dir_all(path)
 }
 
 /// Remove expired `safe-rm` trash entries under `trash_root` that
@@ -118,9 +139,12 @@ pub(super) fn reap_unregistered_rm_trash(trash_root: &Path, now: std::time::Syst
     for dir in crate::rm_tool::expired_trash_entries(trash_root, now) {
         // Audit before acting (#893).
         crate::gc::delete_audit::record("gc.rm-trash-reap", &dir, "rm-trash expired");
-        if std::fs::remove_dir_all(&dir).is_ok() {
-            eprintln!("[gc] trash: reaped {}", dir.display());
-            removed += 1;
+        match remove_trash_dir(&dir) {
+            Ok(()) => {
+                eprintln!("[gc] trash: reaped {}", dir.display());
+                removed += 1;
+            }
+            Err(err) => eprintln!("[gc] trash: could not remove {}: {err}", dir.display()),
         }
     }
     removed

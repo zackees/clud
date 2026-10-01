@@ -90,6 +90,33 @@ fn tmp_warn_bytes_defaults_and_parses() {
     assert_eq!(seeded["tmp"]["warn_bytes"], json!(DEFAULT_TMP_WARN_BYTES));
 }
 
+/// #1672: the trash size cap defaults to 20 GiB, `0` disables it, and a
+/// malformed value falls back to the default.
+#[test]
+fn trash_max_bytes_defaults_and_parses() {
+    use crate::rm_tool::TRASH_MAX_BYTES_DEFAULT;
+    assert_eq!(TRASH_MAX_BYTES_DEFAULT, 20 * 1024 * 1024 * 1024);
+    let home = tempdir().unwrap();
+    assert_eq!(
+        load_trash_max_bytes_at(home.path()).unwrap(),
+        TRASH_MAX_BYTES_DEFAULT
+    );
+    for (doc, want) in [
+        (json!({}), TRASH_MAX_BYTES_DEFAULT),
+        (json!({"trash": {"max_bytes": 0}}), 0),
+        (json!({"trash": {"max_bytes": 1234}}), 1234),
+        (
+            json!({"trash": {"max_bytes": "9"}}),
+            TRASH_MAX_BYTES_DEFAULT,
+        ),
+        (json!({"trash": {"max_bytes": -1}}), TRASH_MAX_BYTES_DEFAULT),
+    ] {
+        assert_eq!(trash_max_bytes_from(&doc), want, "{doc}");
+    }
+    let seeded = seeded_global_settings_document();
+    assert_eq!(seeded["trash"]["max_bytes"], json!(TRASH_MAX_BYTES_DEFAULT));
+}
+
 #[test]
 fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();

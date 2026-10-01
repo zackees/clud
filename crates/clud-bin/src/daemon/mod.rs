@@ -29,6 +29,7 @@ mod session_tmp_sweep;
 mod sessions;
 mod target_sweep;
 mod top;
+mod trash_cap;
 mod types;
 pub mod uv_cache_sweep;
 mod watch_service;
