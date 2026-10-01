@@ -5901,3 +5901,45 @@ concept and CLI reference):**
 the human chooses when to prune. An opt-in prune can revisit this once its
 reclaim on a real cache and its lock behaviour across supported uv versions
 are measured.
+
+## DD-145: the uv cache is capped by `uv cache clean`, never by deleting buckets
+
+**Context:** #1691 reopened after DD-144: `~/.clud/cache/uv` held 33 GB
+(`archive-v0` 28 GB, `sdists-v9` 4.5 GB). The growth is not bundled tools:
+`main.rs` pins `UV_CACHE_DIR` for clud's whole process tree, so every `uv`
+an agent runs in a user project fills this cache. On the reporting host,
+22.5 GB of `archive-v0` was single-linked (only the cache held it) and
+10 GB was hard-linked into live venvs, which deleting the cache would not
+free and would not break.
+
+**Decision:** `cache.max_bytes` (seeded 32 GiB, `0` disables). Once a day the
+uv sweep (#423) measures the cache; above the cap it runs
+`uv cache clean --cache-dir ~/.clud/cache/uv` (via `running-process`),
+audited as `gc.uv-cache-cap`. The pure `gc::uv_cache::decide_cap` spares when
+the cap is off, the root is not a real `uv` directory directly inside a
+non-symlinked `~/.clud/cache`, the cache is under the cap, **any** process
+named `uv` is running on the host, or `UV_LINK_MODE=symlink`. clud never
+waits more than 15 minutes and never kills the uv it started.
+
+**Why not the alternatives (checked against docs.astral.sh/uv/concepts/cache):**
+- Deleting `archive-v0`/`sdists-v9` by age: uv says "it's *never* safe to
+  modify the cache directly (e.g., by removing a file or directory)". The
+  bucket indexes would point at missing archives.
+- `uv cache prune`: DD-144 still holds (drops centralized environments,
+  "unused" relative to uv's index, so little reclaim).
+- Splitting the cache per purpose: the bulk comes from user-project uv runs,
+  which would then land in the user's `~/.cache/uv`, outside clud's control,
+  and the bundled-tool slice is small. It moves the bytes, it does not bound them.
+- `uv cache clean` is uv's own documented "removes all cache entries" and
+  takes uv's cache lock itself, so clud deletes nothing inside the cache.
+
+**Why on by default:** the cache is entirely re-derivable, and an unbounded
+cache filled real disks. 32 GiB sits above `cache.warn_bytes` (20 GiB), so
+the banner warns first. The cost is bandwidth: after a clean, the next
+builds re-download only what they use (typically a few GB), once per
+crossing. `environments-v2` script envs are rebuilt on next use. Symlink-mode
+venvs would break, hence that spare. A user with metered bandwidth sets `0`.
+
+**Consequences:** the cache is bounded to roughly `cache.max_bytes` plus one
+day of growth, deferred while any uv runs at sweep time. A busy host that
+always has some uv running is never cleaned; the warning still shows.

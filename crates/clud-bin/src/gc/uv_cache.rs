@@ -16,6 +16,9 @@
 //!   daily sweep tick (issue #423).
 //! - [`purge_all`] — nuclear `rm -rf ~/.clud/cache/uv/`. Requires
 //!   `--yes`. Used by `clud gc purge --kind uv-cache --yes`.
+//! - [`enforce_cap`] — `cache.max_bytes` (#1691, DD-145): over the cap, runs
+//!   `uv cache clean` when no uv process is alive. Called from the daily
+//!   sweep after [`sweep_stale`].
 //!
 //! Windows file-lock fallback: when `remove_dir_all` fails with a
 //! permission error, the path is quarantined via `crate::trash` so the
@@ -259,8 +262,62 @@ pub enum CapDecision {
 
 /// Pure cap decision. Spare on any doubt.
 pub fn decide_cap(facts: &CapFacts) -> CapDecision {
-    let _ = facts;
-    CapDecision::Spare("unimplemented")
+    if facts.max_bytes == 0 {
+        return CapDecision::Spare("cap disabled");
+    }
+    if let Err(reason) = facts.root_check {
+        return CapDecision::Spare(reason);
+    }
+    if facts.total_bytes <= facts.max_bytes {
+        return CapDecision::Spare("under cap");
+    }
+    if facts.uv_running {
+        return CapDecision::Spare("a uv process is running");
+    }
+    if facts.symlink_link_mode {
+        return CapDecision::Spare("UV_LINK_MODE=symlink");
+    }
+    CapDecision::Clean
+}
+
+/// How long the daemon's sweep thread waits for `uv cache clean`. On timeout
+/// clud stops waiting and reports failure; it never kills the uv process.
+const CLEAN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Production entry: the clud uv cache root under the canonical
+/// `~/.clud/cache`, `uv` from `PATH`, liveness from a host process scan.
+pub fn enforce_cap(max_bytes: u64) -> CapOutcome {
+    let root = clud_uv_cache_dir();
+    let Some(parent) = root.parent().map(Path::to_path_buf) else {
+        return CapOutcome::Spared("root has no parent");
+    };
+    let symlink = std::env::var("UV_LINK_MODE")
+        .map(|v| v.eq_ignore_ascii_case("symlink"))
+        .unwrap_or(false);
+    // Size first: skip the host process scan entirely when under the cap.
+    if max_bytes == 0 {
+        return CapOutcome::Spared("cap disabled");
+    }
+    enforce_cap_at(
+        &root,
+        &parent,
+        max_bytes,
+        any_uv_process_running(),
+        symlink,
+        Path::new("uv"),
+    )
+}
+
+/// True when any process named `uv` (or `uv.exe`) is alive on the host. It
+/// does not try to tell whose cache that uv uses: any uv spares the clean.
+fn any_uv_process_running() -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    sys.processes().values().any(|p| {
+        let name = p.name().to_string_lossy().to_ascii_lowercase();
+        name == "uv" || name == "uv.exe"
+    })
 }
 
 /// Outcome of [`enforce_cap_at`].
@@ -281,22 +338,77 @@ pub fn enforce_cap_at(
     symlink_link_mode: bool,
     uv_program: &Path,
 ) -> CapOutcome {
-    let _ = (
-        root,
-        cache_parent,
+    let root_check = check_cap_root(root, cache_parent);
+    let total_bytes = if root_check.is_ok() && max_bytes > 0 {
+        list_at(root).map(|s| s.total_bytes).unwrap_or(0)
+    } else {
+        0
+    };
+    let facts = CapFacts {
+        total_bytes,
         max_bytes,
+        root_check,
         uv_running,
         symlink_link_mode,
-        uv_program,
-    );
-    CapOutcome::Spared("unimplemented")
+    };
+    match decide_cap(&facts) {
+        CapDecision::Spare(reason) => CapOutcome::Spared(reason),
+        CapDecision::Clean => {
+            // Audit before acting (#893).
+            delete_audit::record("gc.uv-cache-cap", root, CAP_RULE);
+            match run_uv_cache_clean(root, uv_program) {
+                Ok(()) => CapOutcome::Cleaned {
+                    before_bytes: total_bytes,
+                },
+                Err(e) => CapOutcome::Failed(e),
+            }
+        }
+    }
+}
+
+fn run_uv_cache_clean(root: &Path, uv_program: &Path) -> Result<(), String> {
+    let argv = vec![
+        uv_program.to_string_lossy().into_owned(),
+        "cache".to_string(),
+        "clean".to_string(),
+        "--cache-dir".to_string(),
+        root.to_string_lossy().into_owned(),
+    ];
+    let process =
+        crate::subprocess::ManagedSubprocess::start_inheriting_env(argv, None, true, None)?;
+    match process.wait(Some(CLEAN_TIMEOUT)) {
+        Ok(0) => Ok(()),
+        Ok(code) => Err(format!("`uv cache clean` exited with {code}")),
+        Err(e) => Err(format!("`uv cache clean` did not finish: {e}")),
+    }
 }
 
 /// Refuse a root that is not exactly `<cache_parent>/uv` as a real
 /// directory (not a symlink, canonical parent matches).
 pub fn check_cap_root(root: &Path, cache_parent: &Path) -> Result<(), &'static str> {
-    let _ = (root, cache_parent);
-    Err("unimplemented")
+    let meta = fs::symlink_metadata(root).map_err(|_| "root missing")?;
+    if meta.file_type().is_symlink() {
+        return Err("root is a symlink");
+    }
+    if !meta.is_dir() {
+        return Err("root is not a directory");
+    }
+    if root.file_name().and_then(|n| n.to_str()) != Some("uv") {
+        return Err("root is not named uv");
+    }
+    // A symlinked `~/.clud/cache` could alias the user's own `~/.cache`.
+    if fs::symlink_metadata(cache_parent)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(true)
+    {
+        return Err("cache parent is a symlink or missing");
+    }
+    let canon_root = fs::canonicalize(root).map_err(|_| "root not canonicalizable")?;
+    let canon_parent = fs::canonicalize(cache_parent).map_err(|_| "parent not canonicalizable")?;
+    if canon_root.parent() != Some(canon_parent.as_path()) {
+        return Err("root escapes the cache parent");
+    }
+    Ok(())
 }
 
 fn dir_size(path: &Path) -> u64 {
