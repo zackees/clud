@@ -658,6 +658,89 @@ fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
     );
 }
 
+/// #1697: under VT input the Windows console delivers a terminal's SGR mouse
+/// report as one `KEY_EVENT` per character, so the adapter emits it one byte
+/// per event. ConPTY flushes a sequence left open at the end of each write,
+/// so if the pump wrote those bytes separately the child would lose `ESC [ <`
+/// and read `35;31;18M` as typed text. Drives the real adapter, pump and
+/// ConPTY into mock-agent, which reads with VT input like Claude Code.
+#[cfg(windows)]
+#[test]
+fn extra_rx_mouse_reports_split_per_character_reach_the_child_whole() {
+    require_pty_or_skip!("extra_rx_mouse_reports_split_per_character_reach_the_child_whole");
+
+    use running_process::pty::terminal_input::{TerminalInputCore, TerminalInputEventRecord};
+
+    let agent = mock_agent_path();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let raw_stdin = tmp.path().join("stdin_raw.bin");
+    let ready = tmp.path().join("ready");
+
+    let argv = vec![
+        agent.to_string_lossy().to_string(),
+        "--mock-read-stdin-ms".to_string(),
+        "800".to_string(),
+        "--mock-stdin-raw-to".to_string(),
+        raw_stdin.to_string_lossy().to_string(),
+        "--mock-ready-file".to_string(),
+        ready.to_string_lossy().to_string(),
+    ];
+
+    let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+    wait_for_mock_ready(&process, &ready);
+
+    let core = std::sync::Arc::new(TerminalInputCore::new());
+    {
+        let mut state = core.state.lock().expect("terminal input state");
+        state.closed = false;
+    }
+    let mut input = clud::console_input::spawn_terminal_input_adapter(std::sync::Arc::clone(&core))
+        .expect("spawn terminal input adapter");
+    let extra_rx = input.take_receiver().expect("terminal input receiver");
+
+    let reports: &[&[u8]] = &[b"\x1b[<35;31;18M", b"\x1b[<35;31;19M", b"\x1b[<35;33;20M"];
+    let char_event = |byte: u8| TerminalInputEventRecord {
+        data: vec![byte],
+        submit: false,
+        shift: false,
+        ctrl: false,
+        alt: false,
+        virtual_key_code: 0,
+        repeat_count: 1,
+    };
+    {
+        let mut state = core.state.lock().expect("terminal input state");
+        state
+            .events
+            .extend(reports.concat().into_iter().map(char_event));
+    }
+    core.condvar.notify_all();
+
+    let interrupted = AtomicBool::new(false);
+    let mut hooks = CountingHooks::new(false);
+    let _exit = clud::session::run_raw_pty_pump_with_extra_rx(
+        &process,
+        &interrupted,
+        &mut hooks,
+        Cursor::new(Vec::<u8>::new()),
+        Some(extra_rx),
+    );
+
+    let _ = process.wait_impl(Some(5.0));
+    let _ = drain_reader(&process, Duration::from_millis(300));
+    let _ = process.close_impl();
+
+    let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    let expected = reports.concat();
+    assert!(
+        got.windows(expected.len()).any(|window| window == expected),
+        "the child must read whole SGR mouse reports, not `ESC [ <`-less text; got {:?}",
+        String::from_utf8_lossy(&got)
+    );
+}
+
 /// Regression: a Ctrl-C byte (0x03) arriving via `extra_rx` must trigger
 /// the pump's interrupt path. This is the path the Windows
 /// `console_input` reader uses when `ENABLE_PROCESSED_INPUT` is off and

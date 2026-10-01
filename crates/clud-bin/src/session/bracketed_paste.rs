@@ -1,3 +1,4 @@
+use super::escape_gate::EscapeSequenceGate;
 use super::{looks_like_dropped_path, normalize_dropped_path};
 
 /// Bracketed-paste byte sequence emitted by xterm-class terminals when
@@ -22,6 +23,12 @@ pub(crate) const PASTE_END: &[u8] = b"\x1b[201~";
 /// The PASS-IT-VERBATIM rule on non-path content is essential — a
 /// multi-line code paste must not be mutated, even if its first line
 /// happens to start with `/`.
+///
+/// Every chunk the normalizer emits also passes through an
+/// [`EscapeSequenceGate`], so no escape sequence leaves it split across two
+/// chunks (#1697). Both input paths (the local pump and the daemon attach)
+/// already route every chunk through here and honor `has_pending` /
+/// `flush_pending`, so the gate needs no plumbing of its own.
 pub struct BracketedPasteNormalizer {
     /// How many bytes of `PASTE_START` we've matched while outside a
     /// paste. 0..PASTE_START.len().
@@ -32,6 +39,8 @@ pub struct BracketedPasteNormalizer {
     inside: Option<Vec<u8>>,
     /// How many bytes of `PASTE_END` we've matched while inside a paste.
     end_match: usize,
+    /// Holds an incomplete trailing escape sequence of the output (#1697).
+    gate: EscapeSequenceGate,
 }
 
 impl BracketedPasteNormalizer {
@@ -40,6 +49,7 @@ impl BracketedPasteNormalizer {
             start_match: 0,
             inside: None,
             end_match: 0,
+            gate: EscapeSequenceGate::default(),
         }
     }
 
@@ -100,25 +110,25 @@ impl BracketedPasteNormalizer {
                 }
             }
         }
-        out
+        self.gate.push(out)
     }
 
-    /// True while a partial `PASTE_START` prefix is held outside a paste,
-    /// waiting for the bytes that decide whether it opens one. A lone Esc
-    /// keypress is the common case.
+    /// True while bytes are held outside a paste: a partial `PASTE_START`
+    /// prefix waiting for the bytes that decide whether it opens one, or an
+    /// incomplete escape sequence. A lone Esc keypress is the common case.
     pub fn has_pending(&self) -> bool {
-        self.inside.is_none() && self.start_match > 0
+        self.gate.has_pending() || (self.inside.is_none() && self.start_match > 0)
     }
 
-    /// Release a held partial `PASTE_START` prefix verbatim, so a lone Esc
-    /// is not stuck until the next keystroke. Returns nothing inside a
-    /// paste body, which only its end marker may close.
+    /// Release held bytes verbatim, in input order, so a lone Esc is not
+    /// stuck until the next keystroke. A paste body is never released: only
+    /// its end marker may close it.
     pub fn flush_pending(&mut self) -> Vec<u8> {
-        if !self.has_pending() {
-            return Vec::new();
+        let mut pending = self.gate.flush();
+        if self.inside.is_none() && self.start_match > 0 {
+            pending.extend_from_slice(&PASTE_START[..self.start_match]);
+            self.start_match = 0;
         }
-        let pending = PASTE_START[..self.start_match].to_vec();
-        self.start_match = 0;
         pending
     }
 }

@@ -335,6 +335,24 @@ mod tests {
         assert!(!filter.has_pending());
     }
 
+    /// #1697: the worker writes each `Input` message to ConPTY as its own
+    /// write, and ConPTY flushes a sequence left open at the end of a write.
+    /// A mouse report read one character at a time must leave as one chunk.
+    #[test]
+    fn byte_at_a_time_mouse_report_is_forwarded_whole() {
+        let mut filter = RemoteInputFilter::new(false);
+        let report = b"\x1b[<35;31;18M";
+        let (last, head) = report.split_last().expect("non-empty report");
+        for byte in head {
+            assert!(
+                filter.process(std::slice::from_ref(byte)).bytes.is_empty(),
+                "partial report must be held, not forwarded"
+            );
+        }
+        assert_eq!(filter.process(&[*last]).bytes, report.to_vec());
+        assert!(!filter.has_pending());
+    }
+
     const IMAGE_PATH: &[u8] = b"/tmp/clud-clipboard/paste-1.png\n";
 
     /// #1373: a byte-stream source (POSIX stdin) delivers Ctrl+V as a raw
