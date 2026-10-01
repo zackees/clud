@@ -14,8 +14,9 @@
 //! integrator can clean its sibling worktree. A separate clone of an allowed
 //! repo qualifies too when nothing in it would be lost (see
 //! `rm_tool_clone.rs`). Entries strictly under the system temp directories
-//! (`/tmp`, `/var/tmp`, `$TMPDIR`; `%TEMP%`/`%TMP%` on Windows) are always
-//! allowed, on Unix only when the caller owns them (#1622). Filesystem roots, `$HOME` and
+//! (`/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`; `%TEMP%`/`%TMP%` on Windows)
+//! are always allowed, on Unix only when the caller owns them (#1622,
+//! #1659); one on tmpfs/ramfs is purged, never trashed. Filesystem roots, `$HOME` and
 //! its ancestors, a root itself, `.git`, and anything reached through a
 //! symlinked parent that leaves the roots are always refused. Each call
 //! writes one JSONL audit record under `~/.clud/state/logs/rm/`.
@@ -37,6 +38,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const ROOTS_ENV: &str = "CLUD_RM_ROOTS";
 /// Optional caller role recorded in the audit log.
 pub const ROLE_ENV: &str = "CLUD_RM_ROLE";
+/// Appended to every outside-the-roots refusal (#1659): `--purge` changes
+/// only trash-versus-delete, never where a call may delete.
+const OUTSIDE_HINT: &str = "; --purge does not relax this check. Write scratch data under an \
+     allowed root (the session temp dir) or a system temp dir instead, or ask the user to \
+     remove this path";
+
 /// Marks a trash entry as written by `safe-rm`, and records what
 /// it holds so it can be restored by hand.
 pub const TRASH_MANIFEST: &str = ".clud-rm.json";
@@ -158,6 +165,10 @@ pub struct Roots {
     /// The uid a temp entry must be owned by on Unix; `None` means the
     /// effective uid. Injectable so tests can simulate another user's file.
     temp_owner: Option<u32>,
+    /// The temp roots on a RAM-backed filesystem (tmpfs/ramfs, #1659).
+    /// Entries under them are purged, never trashed: the trash is on disk,
+    /// so trashing would copy RAM-held data there and keep it for 72h.
+    pub ram_roots: Vec<PathBuf>,
 }
 
 impl Roots {
@@ -180,7 +191,7 @@ impl Roots {
                 .filter(usable)
                 .collect();
             roots.dedup();
-            return Self::fixed(roots, true).with_temp_roots(system_temp_roots(home.as_deref()));
+            return Self::fixed(roots, true).with_system_temp_roots(home.as_deref());
         }
         let base = crate::block_bad_cmd::nearest_repo_root_public(cwd)
             .unwrap_or_else(|| cwd.to_path_buf());
@@ -191,7 +202,14 @@ impl Roots {
                 .collect(),
             false,
         )
-        .with_temp_roots(system_temp_roots(home.as_deref()))
+        .with_system_temp_roots(home.as_deref())
+    }
+
+    /// This host's temp roots, with the RAM-backed ones marked (#1659).
+    fn with_system_temp_roots(self, home: Option<&Path>) -> Self {
+        let temp = system_temp_roots(home);
+        let ram = temp.iter().filter(|r| is_ram_backed(r)).cloned().collect();
+        self.with_temp_roots(temp).with_ram_roots(ram)
     }
 
     /// Exactly `roots` (assumed canonical), plus their repos' worktrees.
@@ -204,6 +222,7 @@ impl Roots {
             origins: None,
             temp_roots: Vec::new(),
             temp_owner: None,
+            ram_roots: Vec::new(),
         }
     }
 
@@ -212,6 +231,18 @@ impl Roots {
     pub fn with_temp_roots(mut self, temp: Vec<PathBuf>) -> Self {
         self.temp_roots = temp;
         self
+    }
+
+    /// Treat `ram` (a subset of the temp roots) as RAM-backed (#1659).
+    #[must_use]
+    pub fn with_ram_roots(mut self, ram: Vec<PathBuf>) -> Self {
+        self.ram_roots = ram;
+        self
+    }
+
+    /// Whether a target under `root` must be purged rather than trashed.
+    pub fn is_ram_root(&self, root: &Path) -> bool {
+        self.ram_roots.iter().any(|r| r == root)
     }
 
     /// Require temp entries to be owned by `uid` instead of the effective uid.
@@ -277,13 +308,14 @@ impl Roots {
         } else {
             shown.join(", ")
         };
-        Err(match clone_refusal {
+        let refusal = match clone_refusal {
             Some(reason) => format!(
                 "is outside the allowed roots ({shown}), and is not a clone of an allowed repo \
                  with nothing to lose: {reason}"
             ),
             None => format!("is outside the allowed roots ({shown})"),
-        })
+        };
+        Err(refusal + OUTSIDE_HINT)
     }
 
     /// Refuse `path` under the temp root `temp` when an existing entry
@@ -851,13 +883,15 @@ pub fn run_with(
     let mut root_dirs: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
     let mut moved: Vec<(String, PathBuf)> = Vec::new();
     for target in &accepted {
+        // RAM-backed temp roots are always purged (#1659).
+        let purge_it = options.purge || roots.is_ram_root(&target.root);
         let shown = target.path.display().to_string();
         #[cfg(windows)]
         let shown = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string();
         let outcome = if options.dry_run {
             Outcome {
                 path: shown.clone(),
-                action: if options.purge {
+                action: if purge_it {
                     "would-purge"
                 } else {
                     "would-trash"
@@ -865,7 +899,7 @@ pub fn run_with(
                 reason: None,
                 trash_path: None,
             }
-        } else if options.purge {
+        } else if purge_it {
             crate::gc::delete_audit::record("rm-tool.purge", &target.path, cmd);
             match purge(target) {
                 Ok(()) => Outcome {
@@ -1301,6 +1335,10 @@ pub(crate) fn temp_root_candidates(
     } else {
         raw.push("/tmp".into());
         raw.push("/var/tmp".into());
+        // POSIX shared memory, tmpfs on Linux (#1659). Absent on macOS, where
+        // canonicalization drops it. `/run/user/<uid>` is deliberately not a
+        // root: it holds live session sockets (D-Bus, PipeWire, Wayland).
+        raw.push("/dev/shm".into());
         raw.extend(env("TMPDIR").map(|v| v.to_string_lossy().into_owned()));
     }
     let mut out: Vec<PathBuf> = Vec::new();
@@ -1366,6 +1404,33 @@ fn system_temp_roots(home: Option<&Path>) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Whether `path` is on tmpfs or ramfs (#1659). Linux only; elsewhere no
+/// temp root counts as RAM-backed, so its entries are trashed as before.
+#[cfg(target_os = "linux")]
+fn is_ram_backed(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    const TMPFS_MAGIC: i64 = 0x0102_1994;
+    const RAMFS_MAGIC: i64 = 0x8584_58f6;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: an all-zero statfs is a valid value for this plain C struct.
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is NUL-terminated and `buf` is a writable statfs that
+    // outlives the call.
+    if unsafe { libc::statfs(c.as_ptr(), &mut buf) } != 0 {
+        return false;
+    }
+    #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+    let kind = buf.f_type as i64;
+    kind == TMPFS_MAGIC || kind == RAMFS_MAGIC
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_ram_backed(_: &Path) -> bool {
+    false
 }
 
 #[path = "rm_tool_clone.rs"]

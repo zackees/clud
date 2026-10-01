@@ -24,8 +24,10 @@ sealed read-only build outputs do not abort the removal halfway.
 ### System temp directories (#1622)
 
 Files and directories **strictly under** a system temp directory are always
-deletable, in and out of a session: `/tmp`, `/var/tmp` and `$TMPDIR` on Unix
-(macOS's `/var/folders/.../T`), `%TEMP%` and `%TMP%` on Windows. Each is
+deletable, in and out of a session: `/tmp`, `/var/tmp`, `/dev/shm` (#1659)
+and `$TMPDIR` on Unix (macOS's `/var/folders/.../T`), `%TEMP%` and `%TMP%` on
+Windows. `/run/user/<uid>` is deliberately not one: it holds live session
+sockets. Each is
 resolved to its canonical form (Windows `\\?\` prefix stripped by
 `path_norm::canonicalize_plain`) when the roots are built
 (`rm_tool::system_temp_roots`). Every other check still applies:
@@ -48,7 +50,33 @@ down to the operand must be owned by the effective uid, or the path is refused
 (`... is not owned by you`). Windows has no equivalent check: `%TEMP%` is
 per-user under the profile and protected by its ACL, so ownership adds nothing
 there ([DD-128](../DESIGN_DECISIONS.md#dd-128-safe-rm-always-allows-entries-under-the-system-temp-dirs-owned-by-you-on-unix)). The refusal for a path outside every root lists the temp directories
-with a `(temp)` suffix.
+with a `(temp)` suffix, states that `--purge` does not relax the check (it
+picks trash versus delete, never where), and names the session temp dir as the
+place for scratch data.
+
+**RAM-backed temp roots (#1659).** A temp root on tmpfs or ramfs
+(`rm_tool::is_ram_backed`, Linux `statfs`; `Roots::ram_roots`) has its entries
+purged even without `--purge`, with the same GC audit line, and `--dry-run`
+reports `would-purge`. The trash is on disk, so trashing would copy RAM-held
+data there for 72 hours ([DD-134](../DESIGN_DECISIONS.md#dd-134-devshm-is-a-safe-rm-temp-root-and-ram-backed-temp-entries-are-purged-not-trashed)).
+
+**Agent guidance.** Write scratch data under the session temp dir; use
+`/dev/shm` only when the work must stay off disk (benchmarks), and clean it up
+with `safe-rm -r`. Do not point the scratchpad at tmpfs through a symlink: its
+canonical form would leave the roots. A path a session wrote anywhere else is
+still refused; the agent leaves it and reports the exact path to the user. Do
+not bypass `safe-rm` with another deletion route.
+
+### Creation ledger (design, #1621, #1659)
+
+Not built yet; [DD-135](../DESIGN_DECISIONS.md#dd-135-a-creation-ledger-for-safe-rm-is-hybrid-daemon-held-and-written-only-by-clud-creating-the-path)
+records the decision. In short: a hybrid ledger (directories clud created are
+deletable wholesale; single files clud created inside pre-existing directories
+are deletable individually) held as session-keyed rows in the daemon's GC
+registry, written only by a clud helper that performed the create itself, and
+matched by device/inode at delete time. Sub-agents share the parent session's
+id and environment, so their entries serve the parent. With the daemon down,
+`safe-rm` keeps today's strict roots and says so.
 
 Grind profiles keep their narrower scope: `block_bad_cmd_grind_caps` still
 limits integrators to their checkout and workers/reviewers to their task
