@@ -2289,6 +2289,7 @@ mod tests {
     // starts when the queue is empty, so no session that went stale after the
     // pass began was ever evaluated: 1084 of 1184 session dirs were >72h old.
 
+    #[cfg(unix)]
     fn backdate(path: &Path, now: SystemTime) {
         let old = now - STALE_THRESHOLD - Duration::from_secs(3_600);
         filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
