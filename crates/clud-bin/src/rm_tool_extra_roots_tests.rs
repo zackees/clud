@@ -4,8 +4,11 @@
 
 use super::*;
 use crate::clud_settings::{safe_rm_extra_roots_from, SafeRmExtraRootEntry};
-use extra_roots::{verdict, EntryFacts, ExtraRoot};
+use extra_roots::ExtraRoot;
+#[cfg(unix)]
+use extra_roots::{verdict, EntryFacts};
 
+#[cfg(unix)]
 fn facts(raw: &str, reason: &str) -> EntryFacts {
     EntryFacts {
         raw: raw.into(),
