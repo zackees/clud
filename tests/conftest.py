@@ -11,6 +11,10 @@ import pytest
 
 from ci import aliases, tracked_files
 from ci.env import scrub_clud_session_env
+from ci.pytest_tmp_retention import (  # noqa: F401  (pytest hooks, #1686)
+    pytest_sessionfinish,
+    pytest_terminal_summary,
+)
 
 # A clud session exports state such as CLUD_SKIP_RM_IDENTITY (auto-on in
 # clud's own repo) and CLUD_ROUTE_CONTEXT. Inherited by the hook binaries
