@@ -1064,7 +1064,9 @@ pub fn gc_client_query_created(
             reply: GcReply::Error { message },
         }
         | DaemonResponse::Error { message } => Err(io::Error::other(message)),
-        other => Err(io::Error::other(format!("unexpected daemon response: {other:?}"))),
+        other => Err(io::Error::other(format!(
+            "unexpected daemon response: {other:?}"
+        ))),
     }
 }
 

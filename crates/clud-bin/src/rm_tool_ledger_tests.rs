@@ -18,6 +18,16 @@ fn row(path: &str, kind: CreatedKind, id: Option<(u64, u64)>, uid: Option<u32>) 
     }
 }
 
+/// A directory row with identity (1, 10), owned by [`ME`].
+fn dir_row(path: &str) -> CreatedEntry {
+    row(path, CreatedKind::Dir, Some((1, 10)), Some(ME))
+}
+
+/// A file row with identity (1, 20), owned by [`ME`].
+fn file_row(path: &str) -> CreatedEntry {
+    row(path, CreatedKind::File, Some((1, 20)), Some(ME))
+}
+
 fn dir_entry(id: (u64, u64), uid: u32) -> LiveEntry {
     LiveEntry {
         is_dir: true,
@@ -57,7 +67,7 @@ fn refusal(f: &LedgerFacts) -> String {
 fn recorded_directory_itself_is_allowed_and_names_the_ledger() {
     let f = facts(
         "/work/out",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[("/work/out", dir_entry((1, 10), ME))],
     );
     let reason = verdict(&f).expect("allowed");
@@ -69,7 +79,7 @@ fn recorded_directory_itself_is_allowed_and_names_the_ledger() {
 fn entry_under_a_recorded_directory_is_allowed() {
     let f = facts(
         "/work/out/a/b.txt",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[
             ("/work/out", dir_entry((1, 10), ME)),
             ("/work/out/a", dir_entry((1, 11), ME)),
@@ -83,7 +93,7 @@ fn entry_under_a_recorded_directory_is_allowed() {
 fn recorded_file_is_allowed() {
     let f = facts(
         "/docs/report.md",
-        Ok(vec![row("/docs/report.md", CreatedKind::File, Some((1, 20)), Some(ME))]),
+        Ok(vec![file_row("/docs/report.md")]),
         &[("/docs/report.md", file_entry((1, 20), ME))],
     );
     assert!(verdict(&f).is_ok());
@@ -95,7 +105,7 @@ fn pre_existing_sibling_of_a_recorded_file_is_refused() {
     // row, a sibling is not covered by a FILE row.
     let f = facts(
         "/docs/other.md",
-        Ok(vec![row("/docs/report.md", CreatedKind::File, Some((1, 20)), Some(ME))]),
+        Ok(vec![file_row("/docs/report.md")]),
         &[("/docs/other.md", file_entry((1, 21), ME))],
     );
     assert!(refusal(&f).contains("not created by this session"));
@@ -105,7 +115,7 @@ fn pre_existing_sibling_of_a_recorded_file_is_refused() {
 fn parent_of_a_recorded_file_is_refused() {
     let f = facts(
         "/docs",
-        Ok(vec![row("/docs/report.md", CreatedKind::File, Some((1, 20)), Some(ME))]),
+        Ok(vec![file_row("/docs/report.md")]),
         &[("/docs", dir_entry((1, 2), ME))],
     );
     assert!(refusal(&f).contains("not created by this session"));
@@ -129,7 +139,7 @@ fn unavailable_ledger_refuses_and_says_so() {
 fn recorded_path_swapped_for_a_symlink_is_refused() {
     let f = facts(
         "/work/out",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[(
             "/work/out",
             LiveEntry {
@@ -147,7 +157,7 @@ fn recorded_path_swapped_for_a_symlink_is_refused() {
 fn recorded_path_with_a_different_inode_is_refused() {
     let f = facts(
         "/work/out",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[("/work/out", dir_entry((1, 77), ME))],
     );
     assert!(refusal(&f).contains("replaced"));
@@ -157,7 +167,7 @@ fn recorded_path_with_a_different_inode_is_refused() {
 fn recorded_path_on_a_different_device_is_refused() {
     let f = facts(
         "/work/out",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[("/work/out", dir_entry((2, 10), ME))],
     );
     assert!(refusal(&f).contains("replaced"));
@@ -167,7 +177,7 @@ fn recorded_path_on_a_different_device_is_refused() {
 fn recorded_file_now_a_directory_is_refused() {
     let f = facts(
         "/docs/report.md",
-        Ok(vec![row("/docs/report.md", CreatedKind::File, Some((1, 20)), Some(ME))]),
+        Ok(vec![file_row("/docs/report.md")]),
         &[("/docs/report.md", dir_entry((1, 20), ME))],
     );
     assert!(refusal(&f).contains("is now a"));
@@ -177,7 +187,7 @@ fn recorded_file_now_a_directory_is_refused() {
 fn recorded_path_gone_is_refused() {
     let f = facts(
         "/work/out/x",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[],
     );
     assert!(refusal(&f).contains("no longer exists"));
@@ -197,7 +207,7 @@ fn row_without_identity_refuses_on_doubt() {
 fn platform_without_identity_refuses_on_doubt() {
     let mut f = facts(
         "/work/out",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[(
             "/work/out",
             LiveEntry {
@@ -214,9 +224,11 @@ fn platform_without_identity_refuses_on_doubt() {
 
 #[test]
 fn row_recorded_for_another_uid_is_refused() {
+    let mut foreign_row = dir_row("/work/out");
+    foreign_row.uid = Some(ME + 1);
     let f = facts(
         "/work/out",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME + 1))]),
+        Ok(vec![foreign_row]),
         &[("/work/out", dir_entry((1, 10), ME))],
     );
     assert!(refusal(&f).contains("not owned by you"));
@@ -226,7 +238,7 @@ fn row_recorded_for_another_uid_is_refused() {
 fn entry_owned_by_another_user_under_a_recorded_dir_is_refused() {
     let f = facts(
         "/work/out/theirs/f",
-        Ok(vec![row("/work/out", CreatedKind::Dir, Some((1, 10)), Some(ME))]),
+        Ok(vec![dir_row("/work/out")]),
         &[
             ("/work/out", dir_entry((1, 10), ME)),
             ("/work/out/theirs", dir_entry((1, 11), ME + 1)),

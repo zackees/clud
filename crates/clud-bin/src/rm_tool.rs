@@ -250,7 +250,10 @@ impl Roots {
     #[cfg(unix)]
     fn owner_uid(&self) -> Option<u32> {
         // SAFETY: geteuid has no preconditions and cannot fail.
-        Some(self.temp_owner.unwrap_or_else(|| unsafe { libc::geteuid() }))
+        Some(
+            self.temp_owner
+                .unwrap_or_else(|| unsafe { libc::geteuid() }),
+        )
     }
 
     #[cfg(not(unix))]

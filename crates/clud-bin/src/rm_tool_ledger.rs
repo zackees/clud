@@ -197,7 +197,10 @@ fn check_row(row: &CreatedEntry, facts: &LedgerFacts) -> Result<(), String> {
         ));
     };
     if (dev, ino) != (live_dev, live_ino) {
-        return Err(format!("recorded {kind} {} was replaced (device/inode differ)", row.path));
+        return Err(format!(
+            "recorded {kind} {} was replaced (device/inode differ)",
+            row.path
+        ));
     }
     if row.uid != Some(me) {
         return Err(format!("recorded {kind} {} is not owned by you", row.path));
