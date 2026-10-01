@@ -891,3 +891,166 @@ fn ram_backing_is_detected_from_the_filesystem_type() {
     assert!(!is_ram_backed(Path::new("/proc")));
     assert!(!is_ram_backed(Path::new("/definitely/not/here")));
 }
+
+// ---------- #1666: creation ledger consult ----------
+
+use crate::gc::CreatedEntry;
+#[cfg(unix)]
+use crate::gc::CreatedKind;
+
+#[derive(Debug)]
+struct FakeLedger(Result<Vec<CreatedEntry>, String>);
+
+impl ledger::CreationLedger for FakeLedger {
+    fn lookup(&self, _path: &Path) -> Result<Vec<CreatedEntry>, String> {
+        self.0.clone()
+    }
+}
+
+#[cfg(unix)]
+fn recorded(path: &Path, kind: CreatedKind) -> CreatedEntry {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    CreatedEntry {
+        session_id: "session-1".into(),
+        path: path.display().to_string(),
+        kind,
+        role: "agent".into(),
+        created_unix: 1,
+        dev: Some(meta.dev()),
+        ino: Some(meta.ino()),
+        uid: Some(meta.uid()),
+    }
+}
+
+fn run_ledger(
+    w: &World,
+    rows: Result<Vec<CreatedEntry>, String>,
+    list: &[&str],
+) -> (i32, String, String) {
+    let options = parse_args(&args(list)).unwrap().unwrap();
+    let mut roots = w.roots().with_ledger(Arc::new(FakeLedger(rows)));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run_with(
+        Kind::Safe,
+        &options,
+        &w.ctx(),
+        &mut roots,
+        &mut out,
+        &mut err,
+    );
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_recorded_directory_outside_the_roots_is_removed_wholesale() {
+    let w = world();
+    let out = w.home.parent().unwrap().join("elsewhere").join("out");
+    std::fs::create_dir_all(out.join("a")).unwrap();
+    std::fs::write(out.join("a").join("b.txt"), "x").unwrap();
+    let rows = Ok(vec![recorded(&out, CreatedKind::Dir)]);
+    let (code, _, err) = run_ledger(&w, rows, &["-r", out.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.exists());
+    let records = w.audit_records();
+    let reason = records[0]["paths"][0]["reason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(reason.contains("creation ledger"), "{records:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_pre_existing_sibling_of_a_recorded_file_is_refused() {
+    let w = world();
+    let docs = w.home.parent().unwrap().join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    let report = docs.join("report.md");
+    let other = docs.join("other.md");
+    std::fs::write(&report, "mine").unwrap();
+    std::fs::write(&other, "theirs").unwrap();
+    let rows = vec![recorded(&report, CreatedKind::File)];
+    let (code, _, err) = run_ledger(&w, Ok(rows.clone()), &[other.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("not created by this session"), "{err}");
+    assert!(other.exists());
+    let (code, _, err) = run_ledger(&w, Ok(rows), &[report.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!report.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_recorded_path_swapped_for_a_symlink_is_refused_and_the_target_untouched() {
+    let w = world();
+    let base = w.home.parent().unwrap().to_path_buf();
+    let victim = base.join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("keep.txt"), "keep").unwrap();
+    let out = base.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let rows = vec![recorded(&out, CreatedKind::Dir)];
+    std::fs::remove_dir(&out).unwrap();
+    std::os::unix::fs::symlink(&victim, &out).unwrap();
+
+    let (code, _, err) = run_ledger(&w, Ok(rows.clone()), &["-r", out.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("symlink"), "{err}");
+    let inside = out.join("keep.txt");
+    let (code, _, err) = run_ledger(&w, Ok(rows), &[inside.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("not created by this session"), "{err}");
+    assert!(victim.join("keep.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_recorded_path_with_a_different_inode_is_refused() {
+    let w = world();
+    let base = w.home.parent().unwrap().to_path_buf();
+    let out = base.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let rows = vec![recorded(&out, CreatedKind::Dir)];
+    // Keep the old inode alive so the new directory cannot reuse it.
+    std::fs::rename(&out, base.join("out-old")).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    let (code, _, err) = run_ledger(&w, Ok(rows), &["-r", out.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("replaced"), "{err}");
+    assert!(out.exists());
+}
+
+#[test]
+fn ledger_unavailable_keeps_the_strict_refusal_and_says_so() {
+    let w = world();
+    let outside = w.home.parent().unwrap().join("outside.txt");
+    std::fs::write(&outside, "x").unwrap();
+    let rows = Err("clud daemon not reachable: connection refused".to_string());
+    let (code, _, err) = run_ledger(&w, rows, &[outside.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("outside the allowed roots"), "{err}");
+    assert!(err.contains("creation ledger unavailable"), "{err}");
+    assert!(outside.exists());
+}
+
+#[test]
+fn daemon_ledger_without_a_running_daemon_is_unavailable() {
+    let state = tempfile::tempdir().unwrap();
+    let source = ledger::DaemonLedger {
+        state_dir: Some(state.path().to_path_buf()),
+        session_id: Some("session-1".into()),
+    };
+    let error = ledger::CreationLedger::lookup(&source, Path::new("/x")).unwrap_err();
+    assert!(error.contains("not reachable"), "{error}");
+    let no_session = ledger::DaemonLedger {
+        state_dir: Some(state.path().to_path_buf()),
+        session_id: None,
+    };
+    let error = ledger::CreationLedger::lookup(&no_session, Path::new("/x")).unwrap_err();
+    assert!(error.contains("no clud session id"), "{error}");
+}

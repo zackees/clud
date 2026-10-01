@@ -537,6 +537,16 @@ pub(crate) enum GcOp {
     DeleteById {
         id: i64,
     },
+    /// #1666 (DD-135): record one creation-ledger (`created`) row. Internal
+    /// API: only the clud helper that performed the create sends it (#1667).
+    InsertCreated {
+        entry: crate::gc::CreatedEntry,
+    },
+    /// #1666: the session's ledger rows naming or containing `path`.
+    QueryCreated {
+        session_id: String,
+        path: String,
+    },
 }
 
 /// Issue #135: payload carried by `DaemonResponse::Gc`. Mirrors what the
@@ -586,6 +596,16 @@ pub(crate) enum GcReply {
     /// Issue #183: payload for `GcOp::ListRepoVisits`.
     RepoVisitsOk {
         rows: Vec<RepoVisit>,
+    },
+    /// #1666: ack for `GcOp::InsertCreated`; `inserted` is `false` when an
+    /// existing row for the same session and path was replaced.
+    CreatedInsertOk {
+        #[serde(default)]
+        inserted: bool,
+    },
+    /// #1666: payload for `GcOp::QueryCreated`.
+    CreatedRowsOk {
+        rows: Vec<crate::gc::CreatedEntry>,
     },
     Error {
         message: String,

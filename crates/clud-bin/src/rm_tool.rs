@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Path list (`std::env::split_paths` syntax) of the directories a session
@@ -169,6 +170,11 @@ pub struct Roots {
     /// Entries under them are purged, never trashed: the trash is on disk,
     /// so trashing would copy RAM-held data there and keep it for 72h.
     pub ram_roots: Vec<PathBuf>,
+    /// The creation ledger consulted for a path outside every root and temp
+    /// root (#1666); `None` keeps the strict roots with no ledger clause.
+    ledger: Option<Arc<dyn ledger::CreationLedger>>,
+    /// Paths the ledger allowed, with the reason for the audit record.
+    ledger_grants: BTreeMap<PathBuf, String>,
 }
 
 impl Roots {
@@ -223,7 +229,37 @@ impl Roots {
             temp_roots: Vec::new(),
             temp_owner: None,
             ram_roots: Vec::new(),
+            ledger: None,
+            ledger_grants: BTreeMap::new(),
         }
+    }
+
+    /// Consult `ledger` for paths outside every root and temp root (#1666).
+    #[must_use]
+    pub fn with_ledger(mut self, ledger: Arc<dyn ledger::CreationLedger>) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// The ledger reason that allowed `path`, if the ledger did.
+    pub fn ledger_grant(&self, path: &Path) -> Option<&str> {
+        self.ledger_grants.get(path).map(String::as_str)
+    }
+
+    /// The uid entries must belong to on Unix; `None` elsewhere.
+    #[cfg(unix)]
+    fn owner_uid(&self) -> Option<u32> {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        Some(
+            self.temp_owner
+                .unwrap_or_else(|| unsafe { libc::geteuid() }),
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn owner_uid(&self) -> Option<u32> {
+        let _ = self.temp_owner;
+        None
     }
 
     /// These roots plus `temp` as system temp directories (#1622).
@@ -308,6 +344,20 @@ impl Roots {
         } else {
             shown.join(", ")
         };
+        // Outside every root and temp root: the creation ledger (#1666).
+        let ledger_clause = match &self.ledger {
+            Some(source) => {
+                let facts = ledger::probe(path, source.as_ref(), self.owner_uid());
+                match ledger::verdict(&facts) {
+                    Ok(reason) => {
+                        self.ledger_grants.insert(path.to_path_buf(), reason);
+                        return Ok(path.parent().map_or(path.to_path_buf(), Path::to_path_buf));
+                    }
+                    Err(clause) => format!("; {clause}"),
+                }
+            }
+            None => String::new(),
+        };
         let refusal = match clone_refusal {
             Some(reason) => format!(
                 "is outside the allowed roots ({shown}), and is not a clone of an allowed repo \
@@ -315,7 +365,7 @@ impl Roots {
             ),
             None => format!("is outside the allowed roots ({shown})"),
         };
-        Err(refusal + OUTSIDE_HINT)
+        Err(refusal + &ledger_clause + OUTSIDE_HINT)
     }
 
     /// Refuse `path` under the temp root `temp` when an existing entry
@@ -327,10 +377,9 @@ impl Roots {
     #[cfg(unix)]
     fn check_temp_ownership(&self, temp: &Path, path: &Path) -> Result<(), String> {
         use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        let me = self
-            .temp_owner
-            .unwrap_or_else(|| unsafe { libc::geteuid() });
+        let Some(me) = self.owner_uid() else {
+            return Ok(());
+        };
         let Ok(rest) = path.strip_prefix(temp) else {
             return Ok(());
         };
@@ -354,7 +403,6 @@ impl Roots {
 
     #[cfg(not(unix))]
     fn check_temp_ownership(&self, _temp: &Path, _path: &Path) -> Result<(), String> {
-        let _ = self.temp_owner;
         Ok(())
     }
 
@@ -516,6 +564,9 @@ pub struct Target {
     pub root: PathBuf,
     pub is_dir: bool,
     pub is_symlink: bool,
+    /// Why the creation ledger allowed it, when it lies outside every root
+    /// (#1666); recorded in the audit log.
+    pub ledger: Option<String>,
 }
 
 /// What [`resolve`] found for one operand.
@@ -603,11 +654,13 @@ pub fn resolve(
     if is_dir {
         reject_mounts(&path)?;
     }
+    let ledger = roots.ledger_grant(&path).map(str::to_string);
     Ok(Resolved::Present(Target {
         path,
         root,
         is_dir,
         is_symlink,
+        ledger,
     }))
 }
 
@@ -719,14 +772,18 @@ impl Context {
             .ok()
             .map(|state| state.join("logs").join("rm"));
         let roots_env = std::env::var_os(ROOTS_ENV);
-        let roots = Roots::resolve(roots_env.as_deref(), &cwd);
+        let session_id = ["CLUD_SESSION_ID", crate::grind_facts::SESSION_ENV]
+            .iter()
+            .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()));
+        let source = ledger::DaemonLedger {
+            state_dir: crate::daemon::default_state_dir().ok(),
+            session_id: session_id.clone(),
+        };
+        let roots = Roots::resolve(roots_env.as_deref(), &cwd).with_ledger(Arc::new(source));
         let role = std::env::var(ROLE_ENV)
             .ok()
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| if roots.from_env { "agent" } else { "user" }.to_string());
-        let session_id = ["CLUD_SESSION_ID", crate::grind_facts::SESSION_ENV]
-            .iter()
-            .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()));
         Ok((
             Self {
                 cwd,
@@ -896,7 +953,7 @@ pub fn run_with(
                 } else {
                     "would-trash"
                 },
-                reason: None,
+                reason: target.ledger.clone(),
                 trash_path: None,
             }
         } else if purge_it {
@@ -905,7 +962,7 @@ pub fn run_with(
                 Ok(()) => Outcome {
                     path: shown.clone(),
                     action: "purged",
-                    reason: None,
+                    reason: target.ledger.clone(),
                     trash_path: None,
                 },
                 Err(error) => Outcome {
@@ -934,7 +991,7 @@ pub fn run_with(
                     Outcome {
                         path: shown.clone(),
                         action: "trashed",
-                        reason: None,
+                        reason: target.ledger.clone(),
                         trash_path: Some(dest),
                     }
                 }
@@ -1435,6 +1492,9 @@ fn is_ram_backed(_: &Path) -> bool {
 
 #[path = "rm_tool_clone.rs"]
 mod clone;
+
+#[path = "rm_tool_ledger.rs"]
+pub mod ledger;
 
 #[cfg(test)]
 #[path = "rm_tool_tests.rs"]

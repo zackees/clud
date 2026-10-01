@@ -39,9 +39,10 @@ mod worker_shared;
 pub use client::try_register_gc_watch;
 pub use client::{
     acquire_foreground_client_lease, daemon_client_metrics, ensure_daemon, gc_client_insert,
-    gc_client_list, gc_client_list_repo_visits, gc_client_purge, gc_client_reconcile,
-    gc_client_record_repo_visit, is_incompatible_daemon_error, print_incompatible_daemon_error,
-    try_handoff_kill_to_daemon, try_request_orphan_reap, ForegroundClientLease, GcPurgeOutcome,
+    gc_client_insert_created, gc_client_list, gc_client_list_repo_visits, gc_client_purge,
+    gc_client_query_created, gc_client_reconcile, gc_client_record_repo_visit,
+    is_incompatible_daemon_error, print_incompatible_daemon_error, try_handoff_kill_to_daemon,
+    try_request_orphan_reap, ForegroundClientLease, GcPurgeOutcome, LEDGER_QUERY_TIMEOUT,
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
 /// Issue #1606: `--clean-worktrees` shares the daemon's repo-worktree

@@ -5602,4 +5602,4 @@ a new multicall helper name and agent guidance, each independently
 reviewable. The common cases that motivated it (`/tmp`, `/dev/shm`, the
 scratchpad) are covered by DD-128 and DD-134 now. Slices are tracked as
 follow-up issues linked from #1621. Policy text:
-[rm-tools.md](architecture/rm-tools.md#creation-ledger-design-1621-1659).
+[rm-tools.md](architecture/rm-tools.md#creation-ledger-implemented-slice-1-1666).

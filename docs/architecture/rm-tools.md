@@ -67,16 +67,45 @@ canonical form would leave the roots. A path a session wrote anywhere else is
 still refused; the agent leaves it and reports the exact path to the user. Do
 not bypass `safe-rm` with another deletion route.
 
-### Creation ledger (design, #1621, #1659)
+### Creation ledger (implemented slice 1, #1666)
 
-Not built yet; [DD-135](../DESIGN_DECISIONS.md#dd-135-a-creation-ledger-for-safe-rm-is-hybrid-daemon-held-and-written-only-by-clud-creating-the-path)
-records the decision. In short: a hybrid ledger (directories clud created are
-deletable wholesale; single files clud created inside pre-existing directories
-are deletable individually) held as session-keyed rows in the daemon's GC
+[DD-135](../DESIGN_DECISIONS.md#dd-135-a-creation-ledger-for-safe-rm-is-hybrid-daemon-held-and-written-only-by-clud-creating-the-path)
+records the decision: a hybrid ledger (directories clud created are deletable
+wholesale; single files clud created inside pre-existing directories are
+deletable individually) held as session-keyed rows in the daemon's GC
 registry, written only by a clud helper that performed the create itself, and
 matched by device/inode at delete time. Sub-agents share the parent session's
-id and environment, so their entries serve the parent. With the daemon down,
-`safe-rm` keeps today's strict roots and says so.
+id and environment, so their entries serve the parent.
+
+Slice 1 (#1666) builds the store and the consult; nothing writes rows yet. The
+creating helper is #1667 and the human override #1668.
+
+- **Store.** The `created` rows live in `data.redb`'s `created_entries` table,
+  keyed by `(session id, canonical path)`, each holding kind (`dir`/`file`),
+  creator role, time, and on Unix device, inode and uid
+  (`gc::CreatedEntry`). They survive daemon restarts and expire on the GC tick
+  after the same 72h window as the session's temp directory and trash entries
+  (`gc::session_tmp::STALE_THRESHOLD`). Only the registry worker touches them,
+  through `GcOp::InsertCreated` (internal API, `daemon::gc_client_insert_created`)
+  and `GcOp::QueryCreated`.
+- **Consult.** For a canonical path outside every root and every temp root,
+  `safe-rm` asks the daemon (`daemon::gc_client_query_created`, 2s timeout,
+  never spawning one) and allows the path when it is a recorded file or is or
+  lies under a recorded directory, that entry is still the same device/inode
+  and not a symlink, and every existing entry from it down to the target is
+  owned by the caller (the DD-128 rule). The audit record's `reason` names the
+  ledger row. The decision is `rm_tool::ledger::verdict` over injected
+  `LedgerFacts`.
+- **Refusals.** An unreachable or old daemon, or no session id, keeps today's
+  strict refusal plus `creation ledger unavailable (...)`; a path no row
+  covers adds `not created by this session`; a swapped, replaced or foreign
+  entry names what changed. A recorded directory swapped for a symlink is
+  refused, and a path through such a symlink canonicalizes away from the row,
+  so its target is never reached.
+- **Windows.** No file identity is available there without new unsafe code,
+  so the device/inode check is Unix-only and the ledger refuses on doubt:
+  Windows behaves as before, with the refusal saying the identity cannot be
+  verified.
 
 Grind profiles keep their narrower scope: `block_bad_cmd_grind_caps` still
 limits integrators to their checkout and workers/reviewers to their task

@@ -836,6 +836,8 @@ fn gc_reply_op(reply: &GcReply) -> &'static str {
         GcReply::InsertOk { .. } => "insert_ok",
         GcReply::RepoVisitOk => "repo_visit_ok",
         GcReply::RepoVisitsOk { .. } => "repo_visits_ok",
+        GcReply::CreatedInsertOk { .. } => "created_insert_ok",
+        GcReply::CreatedRowsOk { .. } => "created_rows_ok",
         GcReply::Error { .. } => "error",
     }
 }
@@ -846,6 +848,8 @@ fn should_journal_reply(reply: &GcReply) -> bool {
         GcReply::Error { .. } | GcReply::PurgeOk { .. } | GcReply::PurgeStarted { .. } => true,
         GcReply::ReconcileOk { inserted } => *inserted > 0,
         GcReply::InsertOk { inserted } => *inserted,
+        GcReply::CreatedInsertOk { .. } => true,
+        GcReply::CreatedRowsOk { .. } => false,
         GcReply::ListOk { .. } | GcReply::RepoVisitOk | GcReply::RepoVisitsOk { .. } => false,
     }
 }
@@ -1904,6 +1908,65 @@ mod tests {
             }
         ));
         assert_eq!(read_daemon_events(tmp.path()).len(), after_first.len());
+    }
+
+    /// #1666: a creation-ledger row inserted through the daemon's GC op is
+    /// answered by a path query, via the registry worker that owns redb.
+    #[test]
+    fn creation_ledger_round_trips_through_the_daemon() {
+        use super::super::types::GcOp;
+        let _guard = gc_event_test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+        let tx = test_gc_worker(tmp.path());
+        let entry = crate::gc::CreatedEntry {
+            session_id: "session-1".into(),
+            path: "/ledger/out".into(),
+            kind: crate::gc::CreatedKind::Dir,
+            role: "agent".into(),
+            created_unix: 100,
+            dev: Some(1),
+            ino: Some(2),
+            uid: Some(3),
+        };
+        // Through the JSON payload encoding the wire carries.
+        let wire = |op: GcOp| -> DaemonRequest {
+            let json = serde_json::to_string(&op).unwrap();
+            DaemonRequest::Gc {
+                payload: serde_json::from_str(&json).unwrap(),
+            }
+        };
+        let inserted = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            Some(&tx),
+            wire(GcOp::InsertCreated {
+                entry: entry.clone(),
+            }),
+        );
+        assert!(matches!(
+            inserted,
+            DaemonResponse::Gc {
+                reply: GcReply::CreatedInsertOk { inserted: true }
+            }
+        ));
+        let query = |session: &str, path: &str| -> Vec<crate::gc::CreatedEntry> {
+            let request = wire(GcOp::QueryCreated {
+                session_id: session.into(),
+                path: path.into(),
+            });
+            let reply = dispatch_daemon_request(tmp.path(), &workers, Some(&tx), request);
+            match reply {
+                DaemonResponse::Gc {
+                    reply: GcReply::CreatedRowsOk { rows },
+                } => rows,
+                other => panic!("unexpected reply: {other:?}"),
+            }
+        };
+        assert_eq!(query("session-1", "/ledger/out/a/b"), vec![entry.clone()]);
+        assert_eq!(query("session-1", "/ledger/out"), vec![entry]);
+        assert!(query("session-1", "/ledger/outside").is_empty());
+        assert!(query("session-2", "/ledger/out/a").is_empty());
     }
 
     #[test]

@@ -1020,6 +1020,56 @@ pub fn gc_client_list_repo_visits(state_dir: &Path) -> io::Result<Vec<RepoVisit>
     }
 }
 
+/// #1666 (DD-135): record one creation-ledger row. Internal API for the clud
+/// helper that performed the create (#1667); never exposed to agents.
+pub fn gc_client_insert_created(
+    state_dir: &Path,
+    entry: &crate::gc::CreatedEntry,
+) -> io::Result<bool> {
+    match send_gc(
+        state_dir,
+        GcOp::InsertCreated {
+            entry: entry.clone(),
+        },
+    )? {
+        GcReply::CreatedInsertOk { inserted } => Ok(inserted),
+        GcReply::Error { message } => Err(io::Error::other(message)),
+        other => Err(io::Error::other(format!("unexpected gc reply: {other:?}"))),
+    }
+}
+
+/// How long `safe-rm` waits for the daemon's ledger answer before refusing.
+pub const LEDGER_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// #1666: the session's creation-ledger rows naming or containing `path`.
+/// Never spawns a daemon: `safe-rm` treats an unreachable daemon, an old
+/// daemon that does not know the op, or a timeout as "ledger unavailable".
+pub fn gc_client_query_created(
+    state_dir: &Path,
+    session_id: &str,
+    path: &str,
+    timeout: Duration,
+) -> io::Result<Vec<crate::gc::CreatedEntry>> {
+    let request = DaemonRequest::Gc {
+        payload: GcOp::QueryCreated {
+            session_id: session_id.to_string(),
+            path: path.to_string(),
+        },
+    };
+    match send_daemon_request_over_tcp(state_dir, &request, Some(timeout))? {
+        DaemonResponse::Gc {
+            reply: GcReply::CreatedRowsOk { rows },
+        } => Ok(rows),
+        DaemonResponse::Gc {
+            reply: GcReply::Error { message },
+        }
+        | DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        other => Err(io::Error::other(format!(
+            "unexpected daemon response: {other:?}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 #[cfg(test)]
 #[path = "client_tests.rs"]

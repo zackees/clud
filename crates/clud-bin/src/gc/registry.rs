@@ -23,6 +23,11 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// `repos[]` array in `/state.json`.
 const REPO_VISITS: TableDefinition<&str, &[u8]> = TableDefinition::new("repo_visits");
 
+/// redb table (#1666, DD-135): `(session_id, canonical path) ->
+/// serde_json::to_vec(&CreatedEntry)`. The creation ledger: the `created`
+/// row kind. Written only through the daemon's registry worker.
+const CREATED: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("created_entries");
+
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_NEXT_ID: &str = "next_id";
 
@@ -143,6 +148,47 @@ pub struct RepoVisit {
     pub last_cwd: String,
 }
 
+/// Whether a creation-ledger row records a directory or a single file
+/// (DD-135's hybrid granularity, #1666).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CreatedKind {
+    /// clud created the directory: everything under it is the session's.
+    Dir,
+    /// clud created only this file, inside a directory it did not create.
+    File,
+}
+
+impl CreatedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dir => "dir",
+            Self::File => "file",
+        }
+    }
+}
+
+/// One creation-ledger row (the `created` row kind, #1666): a path a clud
+/// helper created for `session_id`, with the identity it had at creation.
+/// `dev`/`ino`/`uid` are `None` where the platform has no stable identity
+/// available without new unsafe code (Windows); `safe-rm` then refuses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreatedEntry {
+    pub session_id: String,
+    /// Canonical absolute path.
+    pub path: String,
+    pub kind: CreatedKind,
+    /// The creating role (`agent`, `grind-worker`, ...).
+    pub role: String,
+    pub created_unix: i64,
+    #[serde(default)]
+    pub dev: Option<u64>,
+    #[serde(default)]
+    pub ino: Option<u64>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+}
+
 /// `redb`-backed registry of tracked entries.
 ///
 /// `redb::Database` serializes writers at the file level, so we hold a
@@ -193,6 +239,8 @@ impl Registry {
             // will auto-migrate on first open — redb's `open_table` is
             // create-if-missing.
             let _ = txn.open_table(REPO_VISITS)?;
+            // #1666: the creation ledger; create-if-missing like above.
+            let _ = txn.open_table(CREATED)?;
             let mut meta = txn.open_table(META)?;
             if meta.get(META_SCHEMA_VERSION)?.is_none() {
                 meta.insert(META_SCHEMA_VERSION, 1u64)?;
@@ -254,6 +302,82 @@ impl Registry {
         }
         out.sort_by_key(|entry| std::cmp::Reverse(entry.last_visited_unix));
         Ok(out)
+    }
+
+    /// #1666: record (or replace) one creation-ledger row. A later create of
+    /// the same path in the same session carries the new identity, so the
+    /// row is overwritten. Returns `true` when no row existed before.
+    pub fn insert_created(&self, entry: &CreatedEntry) -> Result<bool, GcError> {
+        let wtxn = self.db.begin_write()?;
+        let fresh = {
+            let mut table = wtxn.open_table(CREATED)?;
+            let bytes = serde_json::to_vec(entry)?;
+            let key = (entry.session_id.as_str(), entry.path.as_str());
+            let prior = table.insert(key, bytes.as_slice())?;
+            prior.is_none()
+        };
+        wtxn.commit()?;
+        Ok(fresh)
+    }
+
+    /// #1666: the session's ledger rows that name `path` (a file or directory
+    /// row with that exact path) or contain it (a directory row above it).
+    pub fn query_created(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<Vec<CreatedEntry>, GcError> {
+        let rtxn = self.db.begin_read()?;
+        let table = rtxn.open_table(CREATED)?;
+        let target = Path::new(path);
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (k, v) = entry?;
+            let (session, recorded) = k.value();
+            if session != session_id {
+                continue;
+            }
+            if recorded.is_empty() || !target.starts_with(recorded) {
+                continue;
+            }
+            let row: CreatedEntry = serde_json::from_slice(v.value())?;
+            if row.kind == CreatedKind::File && Path::new(&row.path) != target {
+                continue;
+            }
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// #1666: drop ledger rows created before `cutoff`, with the session's
+    /// other GC state. Returns how many were removed.
+    pub fn expire_created(&self, cutoff: i64) -> Result<usize, GcError> {
+        let stale: Vec<(String, String)> = {
+            let rtxn = self.db.begin_read()?;
+            let table = rtxn.open_table(CREATED)?;
+            let mut stale = Vec::new();
+            for entry in table.iter()? {
+                let (k, v) = entry?;
+                let row: CreatedEntry = serde_json::from_slice(v.value())?;
+                if row.created_unix < cutoff {
+                    let (session, path) = k.value();
+                    stale.push((session.to_string(), path.to_string()));
+                }
+            }
+            stale
+        };
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let wtxn = self.db.begin_write()?;
+        {
+            let mut table = wtxn.open_table(CREATED)?;
+            for (session, path) in &stale {
+                table.remove((session.as_str(), path.as_str()))?;
+            }
+        }
+        wtxn.commit()?;
+        Ok(stale.len())
     }
 
     /// Insert a new entry keyed by `(kind, path)`. **No-op if a row with

@@ -38,6 +38,85 @@ fn schema_bootstraps_on_first_open() {
     // Reopening on a populated db must not error out.
 }
 
+// ---------- Issue #1666: creation ledger (`created` rows) ----------
+
+fn created(session: &str, path: &str, kind: CreatedKind, at: i64) -> CreatedEntry {
+    CreatedEntry {
+        session_id: session.to_string(),
+        path: path.to_string(),
+        kind,
+        role: "agent".to_string(),
+        created_unix: at,
+        dev: Some(1),
+        ino: Some(2),
+        uid: Some(3),
+    }
+}
+
+#[test]
+fn created_rows_answer_covering_queries_per_session() {
+    let reg = fresh_registry("created-query");
+    let dir = created("s1", "/w/out", CreatedKind::Dir, 100);
+    let file = created("s1", "/docs/report.md", CreatedKind::File, 100);
+    assert!(reg.insert_created(&dir).unwrap());
+    assert!(reg.insert_created(&file).unwrap());
+    assert_eq!(
+        reg.query_created("s1", "/w/out").unwrap(),
+        vec![dir.clone()]
+    );
+    assert_eq!(reg.query_created("s1", "/w/out/a/b").unwrap(), vec![dir]);
+    assert!(reg.query_created("s1", "/w/outside").unwrap().is_empty());
+    assert_eq!(
+        reg.query_created("s1", "/docs/report.md").unwrap(),
+        vec![file]
+    );
+    assert!(reg
+        .query_created("s1", "/docs/other.md")
+        .unwrap()
+        .is_empty());
+    assert!(reg
+        .query_created("s1", "/docs/report.md/x")
+        .unwrap()
+        .is_empty());
+    assert!(reg.query_created("s2", "/w/out/a").unwrap().is_empty());
+}
+
+#[test]
+fn created_row_reinsert_replaces_the_identity() {
+    let reg = fresh_registry("created-replace");
+    let first = created("s1", "/w/out", CreatedKind::Dir, 100);
+    let mut second = first.clone();
+    second.ino = Some(99);
+    assert!(reg.insert_created(&first).unwrap());
+    assert!(!reg.insert_created(&second).unwrap());
+    assert_eq!(reg.query_created("s1", "/w/out").unwrap(), vec![second]);
+}
+
+#[test]
+fn created_rows_survive_a_registry_reopen() {
+    let path = fresh_db_path("created-reopen");
+    let row = created("s1", "/w/out", CreatedKind::Dir, 100);
+    {
+        let reg = Registry::open_at(&path).expect("open");
+        reg.insert_created(&row).unwrap();
+    }
+    let reg = Registry::open_at(&path).expect("reopen");
+    assert_eq!(reg.query_created("s1", "/w/out/x").unwrap(), vec![row]);
+}
+
+#[test]
+fn created_rows_expire_by_age() {
+    let reg = fresh_registry("created-expire");
+    reg.insert_created(&created("s1", "/old", CreatedKind::Dir, 100))
+        .unwrap();
+    reg.insert_created(&created("s1", "/new", CreatedKind::Dir, 500))
+        .unwrap();
+    assert_eq!(reg.expire_created(200).unwrap(), 1);
+    assert!(reg.query_created("s1", "/old").unwrap().is_empty());
+    assert_eq!(reg.query_created("s1", "/new").unwrap().len(), 1);
+    assert_eq!(reg.expire_created(200).unwrap(), 0);
+}
+
 // ---------- Issue #183: repo_visits table ----------
 
 #[test]
