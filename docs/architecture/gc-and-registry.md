@@ -406,8 +406,14 @@ candidate. Deferred failures resume on a later tick. Candidate freshness scannin
 recheck precedes each destructive batch. Recent activity stops removal of the remaining tree.
 File, directory, metadata-probe, scan, and exploration failures stay queued with backoff while
 other candidates advance. A 72-hour
-period of repeated failure without progress emits a nonfatal persistent-failure signal; the
-candidate remains retryable. `daemon-events.jsonl` records per-tick examined entries, files and
+period of repeated failure without progress emits a nonfatal persistent-failure signal. An item
+that fails `MAX_ITEM_RETRIES` (8, about 36 minutes of backoff) times in a row is dropped from
+the queue and so spared; the next pass re-derives it from disk. A candidate that no longer exists
+completes instead of failing. Owner-writable read-only directories inside an idle candidate are
+made writable (`chmod u+wx`) and the unlink retried once; foreign-owned files still fail and are
+abandoned. Without the bound, one root-owned file kept the queue non-empty, a new pass never
+started, and nothing that went stale later was ever looked at (#1672,
+[DD-142](../DESIGN_DECISIONS.md#dd-142-a-session-tmp-sweep-pass-always-retires)). `daemon-events.jsonl` records per-tick examined entries, files and
 directories removed, reclaimed apparent bytes, pending phases, retry count, work age, and the
 last error path/class, current phase/path, and cursor position. An exclusive lock prevents
 concurrent daemons from overwriting the continuation queue.

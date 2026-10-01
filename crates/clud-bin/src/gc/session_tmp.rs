@@ -99,6 +99,8 @@ pub struct SweepReport {
     pub last_error_class: Option<String>,
     pub last_error_message: Option<String>,
     pub persistent_failure: bool,
+    /// Queue items dropped (spared) after repeated failures this tick (#1672).
+    pub abandoned: usize,
     /// Session directories over [`SIZE_REPORT_THRESHOLD`] that the sweep kept
     /// because they are still in use (#1148), newest-first by size.
     ///
@@ -359,6 +361,7 @@ fn report_from_tick(tick: session_tmp_continuation::TickReport, dry_run: bool) -
         last_error_class: tick.last_error_class,
         last_error_message: tick.last_error_message,
         persistent_failure: tick.persistent_failure,
+        abandoned: tick.abandoned,
         oversized: tick.oversized,
     }
 }

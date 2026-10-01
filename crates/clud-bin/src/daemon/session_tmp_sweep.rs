@@ -211,6 +211,7 @@ fn log_report(report: &session_tmp::SweepReport, state_dir: Option<&Path>) {
                 ("no_progress_secs", json!(report.no_progress_secs)),
                 ("retry_count", json!(report.retry_count)),
                 ("persistent_failure", json!(report.persistent_failure)),
+                ("abandoned", json!(report.abandoned)),
                 (
                     "last_error_path",
                     json!(report
@@ -228,6 +229,15 @@ fn log_report(report: &session_tmp::SweepReport, state_dir: Option<&Path>) {
             "[clud] session-tmp persistent failure: {} pending for {}h without progress; last error at {} ({}) — retrying",
             report.pending,
             report.no_progress_secs / 3_600,
+            report.last_error_path.as_ref().map_or_else(|| "unknown".to_string(), |path| path.display().to_string()),
+            report.last_error_class.as_deref().unwrap_or("unknown"),
+        );
+    }
+    if report.abandoned > 0 {
+        eprintln!(
+            "[clud] session-tmp: gave up on {} entr{} after repeated failures (kept, re-checked next pass); last error at {} ({})",
+            report.abandoned,
+            if report.abandoned == 1 { "y" } else { "ies" },
             report.last_error_path.as_ref().map_or_else(|| "unknown".to_string(), |path| path.display().to_string()),
             report.last_error_class.as_deref().unwrap_or("unknown"),
         );

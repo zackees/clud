@@ -19,6 +19,12 @@ use super::session_tmp::{PendingPhases, MAX_NESTED_DEPTH, SIZE_REPORT_THRESHOLD,
 const SCHEMA_VERSION: u8 = 8;
 const CANDIDATE_QUANTUM: usize = 4_096;
 const PERSISTENT_FAILURE_HORIZON_SECS: u64 = 72 * 60 * 60;
+/// Consecutive failures after which one queued item is dropped (#1672).
+/// Dropping spares the path: nothing is deleted, and the next pass
+/// re-derives it from the filesystem. Without the bound one root-owned file
+/// kept the queue non-empty, so no new pass ever started. With the
+/// one-minute-per-retry backoff, eight failures span about 36 minutes.
+pub(super) const MAX_ITEM_RETRIES: u32 = 8;
 
 #[derive(Debug, Default)]
 pub(super) struct TickReport {
@@ -185,6 +191,11 @@ fn advance_item(
     dry_run: bool,
     grant: usize,
 ) -> usize {
+    if item.retry_count() >= MAX_ITEM_RETRIES {
+        // Spare it and let the pass retire; `last_failure` keeps the cause.
+        report.abandoned += 1;
+        return 1;
+    }
     if item.deferred(now) {
         state.queue.push_back(item);
         return 0;
@@ -833,11 +844,11 @@ fn delete_candidate_batch(
         }
         delete_audit::record("gc.session-tmp", child, &super::session_tmp::stale_rule());
         if meta.is_dir() {
-            fs::remove_dir(child)?;
+            remove_allowing_read_only_parent(child, true)?;
             report.removed_dirs += 1;
             state.removed_dirs += 1;
         } else {
-            fs::remove_file(child)?;
+            remove_allowing_read_only_parent(child, false)?;
             report.removed_files += 1;
             state.removed_files += 1;
             report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(meta.len());
@@ -861,11 +872,59 @@ fn delete_candidate_batch(
         return Ok(BatchOutcome::Busy(spent.max(1)));
     }
     delete_audit::record("gc.session-tmp", path, &super::session_tmp::stale_rule());
-    fs::remove_dir(path)?;
+    remove_allowing_read_only_parent(path, true)?;
     report.removed_dirs += 1;
     state.removed_dirs += 1;
     state.last_progress_unix_secs = unix_secs(now);
     Ok(BatchOutcome::Complete(spent + 1))
+}
+
+/// Remove one already-vetted entry. A read-only parent (Go's module cache,
+/// sealed build outputs) refuses the unlink with `PermissionDenied`; make
+/// the parent owner-writable, as safe-rm does (#1573), and try once more.
+/// `chmod` changes ctime, not mtime, so the `touched_dirs` checks still
+/// hold. A foreign-owned parent stays read-only and the error surfaces.
+fn remove_allowing_read_only_parent(path: &Path, directory: bool) -> io::Result<()> {
+    let remove = || {
+        if directory {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        }
+    };
+    match remove() {
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            let Some(parent) = path.parent() else {
+                return Err(err);
+            };
+            if !make_owner_writable(parent) {
+                return Err(err);
+            }
+            remove()
+        }
+        other => other,
+    }
+}
+
+#[cfg(unix)]
+fn make_owner_writable(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return false;
+    }
+    let mode = meta.permissions().mode();
+    if mode & 0o300 == 0o300 {
+        return false;
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(mode | 0o300)).is_ok()
+}
+
+#[cfg(not(unix))]
+fn make_owner_writable(_dir: &Path) -> bool {
+    false
 }
 
 /// The whole sweep is a durable queue, not a one-shot walk. A candidate that
@@ -1064,6 +1123,17 @@ fn safe_path_now(root: &Path, path: &Path, directory: bool) -> io::Result<bool> 
 }
 
 impl WorkItem {
+    fn retry_count(&self) -> u32 {
+        match self {
+            Self::Explore { retry, .. }
+            | Self::Scan { retry, .. }
+            | Self::Recheck { retry, .. } => retry.count,
+            Self::Probe { retry_count, .. }
+            | Self::FlatFile { retry_count, .. }
+            | Self::Delete { retry_count, .. } => *retry_count,
+        }
+    }
+
     fn deferred(&self, now: SystemTime) -> bool {
         match self {
             Self::Explore { retry, .. }
@@ -1318,6 +1388,9 @@ impl ScanCursor {
         if self.dir_mtimes.is_empty() {
             let meta = match fs::symlink_metadata(&self.root) {
                 Ok(meta) => meta,
+                // Gone before we started: nothing to prove idle or delete.
+                // Busy never deletes (#1672: this was retried for 8 days).
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return ScanVerdict::Busy,
                 Err(err) => {
                     let path = self.root.clone();
                     self.capture_error(&path, &err, now);
