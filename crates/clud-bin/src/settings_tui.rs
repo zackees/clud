@@ -793,4 +793,67 @@ mod tests {
 
         assert_eq!(patch_from_menu(&menu).block_cd, Some(BlockCd::Never));
     }
+
+    /// #1608: `gc.delete_remote_branches` is a TUI toggle whose note states
+    /// the lease and merged-only scope, and an env override is surfaced.
+    #[test]
+    fn gc_delete_remote_branches_row_carries_the_lease_note() {
+        let row = gc_delete_remote_branches_item(false, None);
+        assert_eq!(row.key, "gc.delete_remote_branches");
+        assert_eq!(row.value, SettingValue::Bool(false));
+        assert!(
+            row.note.contains("--force-with-lease=<ref>:<tip>"),
+            "{}",
+            row.note
+        );
+        assert!(row.note.contains("merged"), "{}", row.note);
+        assert!(!row.note.contains("overridden"), "{}", row.note);
+
+        let overridden = gc_delete_remote_branches_item(false, Some("1"));
+        assert!(
+            overridden
+                .note
+                .contains("overridden by CLUD_GC_DELETE_REMOTE_BRANCHES"),
+            "{}",
+            overridden.note
+        );
+    }
+
+    /// #1608: flipping the row persists exactly the value the daemon GC
+    /// reads (`load_gc_delete_remote_branches_at`) and nothing else.
+    #[test]
+    fn gc_delete_remote_branches_toggle_persists_only_that_key() {
+        let home = tempfile::tempdir().unwrap();
+        let clud_dir = home.path().join(".clud");
+        std::fs::create_dir_all(&clud_dir).unwrap();
+        let settings = clud_dir.join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"gc":{"delete_remote_branches":false},"web_term":{"enabled":true},"git":{"pr_wait_fail_fast":false}}"#,
+        )
+        .unwrap();
+        assert!(!clud_settings::load_gc_delete_remote_branches_at(home.path()).unwrap());
+
+        let mut menu = Menu::new(vec![
+            item(false),
+            gc_delete_remote_branches_item(false, None),
+        ]);
+        menu.on_key(Key::Down);
+        menu.on_key(Key::Space);
+        let patch = patch_from_menu(&menu);
+        assert_eq!(
+            patch,
+            clud_settings::GlobalSettingsPatch {
+                gc_delete_remote_branches: Some(true),
+                ..clud_settings::GlobalSettingsPatch::default()
+            }
+        );
+        clud_settings::save_settings_patch_at(home.path(), patch).unwrap();
+
+        assert!(clud_settings::load_gc_delete_remote_branches_at(home.path()).unwrap());
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(doc["web_term"]["enabled"], serde_json::json!(true));
+        assert_eq!(doc["git"]["pr_wait_fail_fast"], serde_json::json!(false));
+    }
 }
