@@ -61,7 +61,9 @@ def test_passing_run_removes_read_only_worlds(pytester: pytest.Pytester) -> None
 def test_failing_run_keeps_worlds_and_prints_path(
     pytester: pytest.Pytester, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    ret, roots = _run(pytester, "\ndef test_bad(tmp_path):\n    _world(tmp_path)\n    assert False\n")
+    ret, roots = _run(
+        pytester, "\ndef test_bad(tmp_path):\n    _world(tmp_path)\n    assert False\n"
+    )
     out = capsys.readouterr().out
     assert ret == 1
     assert len(roots) == 1
