@@ -55,7 +55,9 @@ fn a_different_call_in_between_resets_the_streak() {
 
 #[test]
 fn interleaved_calls_never_build_a_streak() {
-    let keys: Vec<&str> = (0..1_000).map(|i| if i % 2 == 0 { "a" } else { "b" }).collect();
+    let keys: Vec<&str> = (0..1_000)
+        .map(|i| if i % 2 == 0 { "a" } else { "b" })
+        .collect();
     assert!(denied(&keys, 0, N).is_empty());
 }
 
@@ -64,7 +66,10 @@ fn an_idle_gap_longer_than_the_reset_window_starts_a_new_streak() {
     // A `/loop` tick every 10 minutes repeats one call indefinitely.
     assert!(denied(&["tick"; 1_000], IDLE_RESET_SECS + 1, N).is_empty());
     // At the window it still counts.
-    assert_eq!(denied(&["a"; N as usize + 1], IDLE_RESET_SECS, N), vec![N as usize + 1]);
+    assert_eq!(
+        denied(&["a"; N as usize + 1], IDLE_RESET_SECS, N),
+        vec![N as usize + 1]
+    );
 }
 
 #[test]
@@ -82,7 +87,10 @@ fn call_key_is_tool_scoped_and_ignores_object_key_order() {
     let one = json!({"command": "gh pr checks", "timeout": 5});
     let two: Value = serde_json::from_str(r#"{"timeout":5,"command":"gh pr checks"}"#).unwrap();
     assert_eq!(call_key("Bash", Some(&one)), call_key("Bash", Some(&two)));
-    assert_ne!(call_key("Bash", Some(&one)), call_key("PowerShell", Some(&one)));
+    assert_ne!(
+        call_key("Bash", Some(&one)),
+        call_key("PowerShell", Some(&one))
+    );
     assert_ne!(
         call_key("Bash", Some(&one)),
         call_key("Bash", Some(&json!({"command": "gh pr checks 1"})))
@@ -115,9 +123,15 @@ fn opt_out_token_is_whole_word() {
 fn check_at_persists_only_hashes_and_counts_per_session() {
     let tmp = tempfile::tempdir().unwrap();
     for i in 0..3 {
-        assert_eq!(check_at(tmp.path(), "sess-1", "k", 10 + i, 3), Verdict::Allow);
+        assert_eq!(
+            check_at(tmp.path(), "sess-1", "k", 10 + i, 3),
+            Verdict::Allow
+        );
     }
-    assert_eq!(check_at(tmp.path(), "sess-1", "k", 14, 3), Verdict::Deny { count: 4 });
+    assert_eq!(
+        check_at(tmp.path(), "sess-1", "k", 14, 3),
+        Verdict::Deny { count: 4 }
+    );
     // Another session has its own streak.
     assert_eq!(check_at(tmp.path(), "sess-2", "k", 14, 3), Verdict::Allow);
     let dir = tmp.path().join(DIR_NAME);

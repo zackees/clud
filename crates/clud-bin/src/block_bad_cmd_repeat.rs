@@ -56,9 +56,8 @@ pub(super) fn decide(
     now: u64,
     limit: u32,
 ) -> (Verdict, Streak) {
-    let continues = previous.is_some_and(|prev| {
-        prev.key == key && now.saturating_sub(prev.last) <= IDLE_RESET_SECS
-    });
+    let continues = previous
+        .is_some_and(|prev| prev.key == key && now.saturating_sub(prev.last) <= IDLE_RESET_SECS);
     let count = if continues {
         previous.map_or(1, |prev| prev.count.saturating_add(1))
     } else {
@@ -150,7 +149,10 @@ pub(super) fn limit_from(env: Option<&str>, settings: Option<&Value>) -> u32 {
 
 fn effective_limit() -> u32 {
     let env = std::env::var(LIMIT_ENV).ok();
-    if env.as_deref().is_some_and(|v| v.trim().parse::<u32>().is_ok()) {
+    if env
+        .as_deref()
+        .is_some_and(|v| v.trim().parse::<u32>().is_ok())
+    {
         return limit_from(env.as_deref(), None);
     }
     let settings = crate::clud_settings::home_dir_path()
