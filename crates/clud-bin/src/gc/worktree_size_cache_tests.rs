@@ -157,3 +157,80 @@ fn refresh_cache_records_a_bounded_check() {
     assert_eq!(entry.warn_bytes, 100);
     assert!(matches!(entry.check, SizeCheck::Over(b) if b > 100));
 }
+
+// ---- #1327: the same warn-only cached size check for `~/.clud/tmp` ----
+
+#[test]
+fn tmp_cache_lives_beside_tmp_not_inside_it() {
+    let home = tempdir().unwrap();
+    let tmp = crate::gc::session_tmp::session_tmp_dir_for(home.path());
+    let path = tmp_cache_path_for(home.path());
+    assert_eq!(path.parent(), tmp.parent(), "sibling of ~/.clud/tmp");
+    assert!(!path.starts_with(&tmp), "the 72 h sweep must never see it");
+    assert_ne!(
+        path,
+        cache_path_for(&crate::gc::worktree_root::worktree_root_for(home.path()))
+    );
+}
+
+#[test]
+fn tmp_banner_line_names_tmp_setting_and_says_warn_only() {
+    let root = Path::new("/h/.clud/tmp");
+    let line = tmp_banner_line(root, 30 * GIB, 20 * GIB);
+    assert!(!line.contains('\n'), "one line: {line}");
+    assert!(line.contains("30.0 GiB"), "{line}");
+    assert!(line.contains("20.0 GiB"), "{line}");
+    assert!(line.contains(&root.display().to_string()), "{line}");
+    assert!(line.contains("tmp.warn_bytes"), "{line}");
+    assert!(!line.contains("worktrees.warn_bytes"), "{line}");
+}
+
+#[test]
+fn tmp_list_warning_is_quiet_under_and_disabled() {
+    let root = Path::new("/h/.clud/tmp");
+    assert_eq!(tmp_list_warning(root, 10, SizeCheck::Under(5)), None);
+    assert_eq!(tmp_list_warning(root, 0, SizeCheck::Over(50)), None);
+    let over = tmp_list_warning(root, 10, SizeCheck::Over(50)).unwrap();
+    assert!(over.contains("tmp.warn_bytes"), "{over}");
+    assert!(over.contains("never deleted for size"), "{over}");
+    let unknown = tmp_list_warning(root, 10, SizeCheck::Unknown).unwrap();
+    assert!(unknown.contains("tmp.warn_bytes"), "{unknown}");
+}
+
+#[test]
+fn tmp_refresh_and_launch_warning_round_trip_and_never_delete() {
+    let home = tempdir().unwrap();
+    // No cache, no settings, no tmp dir: nothing, no panic.
+    assert_eq!(tmp_launch_warning_at(home.path(), NOW), None);
+    let tmp = crate::gc::session_tmp::session_tmp_dir_for(home.path());
+    std::fs::create_dir_all(tmp.join("claude-1000/proj/sess")).unwrap();
+    let blob = tmp.join("claude-1000/proj/sess/blob");
+    std::fs::write(&blob, vec![0u8; 300]).unwrap();
+    let settings = crate::clud_settings::settings_path_at(home.path());
+    std::fs::write(&settings, br#"{"tmp":{"warn_bytes":100}}"#).unwrap();
+
+    refresh_tmp_cache(home.path(), 100, NOW).unwrap();
+    let entry = read_cache(&tmp_cache_path_for(home.path())).unwrap();
+    assert_eq!(entry.checked_unix, NOW);
+    assert!(matches!(entry.check, SizeCheck::Over(b) if b > 100));
+    // Warn-only: the walk deleted nothing.
+    assert!(blob.exists());
+
+    let line = tmp_launch_warning_at(home.path(), NOW).expect("over cache warns");
+    assert!(line.contains("tmp.warn_bytes"), "{line}");
+    // The tmp-wt banner is independent: no tmp-wt cache, no tmp-wt line.
+    assert_eq!(launch_warning_at(home.path(), NOW), None);
+
+    // A stale cache stays quiet.
+    assert_eq!(
+        tmp_launch_warning_at(home.path(), NOW + MAX_CACHE_AGE_SECS + 1),
+        None
+    );
+
+    // 0 disables the banner and refresh removes the old cache.
+    std::fs::write(&settings, br#"{"tmp":{"warn_bytes":0}}"#).unwrap();
+    assert_eq!(tmp_launch_warning_at(home.path(), NOW), None);
+    refresh_tmp_cache(home.path(), 0, NOW).unwrap();
+    assert!(!tmp_cache_path_for(home.path()).exists());
+    assert!(blob.exists());
+}
