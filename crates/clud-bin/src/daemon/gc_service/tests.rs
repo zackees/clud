@@ -1471,3 +1471,61 @@ fn repo_worktree_rows_surface_in_gc_list_shape() {
     assert!(!busy_row.reclaimable);
     assert_eq!(busy_row.reason.as_deref(), Some("process inside"));
 }
+
+/// #1672: a registered trash row whose directory is already gone (evicted by
+/// the size cap, or removed by hand) is done, not a failure retried forever.
+#[test]
+fn trash_reaper_drops_row_whose_path_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::open_at(&dir.path().join("trash-gone.redb")).unwrap();
+    let gone = dir.path().join("20260101T000000Z-abcdef");
+    registry
+        .insert_if_new(&InsertInput {
+            kind: "trash".to_string(),
+            path: gone.to_string_lossy().to_string(),
+            repo_root: None,
+            branch: None,
+            agent_id: None,
+            now_unix: 100,
+        })
+        .unwrap();
+
+    let (removed, failed) = reap_trash_entries(&registry).unwrap();
+
+    assert_eq!((removed, failed), (1, 0));
+    assert!(registry.list(Some("trash")).unwrap().is_empty());
+}
+
+/// #1672: a trash entry holding a read-only tree (sealed build output) was
+/// "reaped" on every tick and never removed. The reaper now makes it
+/// writable first, as safe-rm's own purge does (#1573).
+#[cfg(unix)]
+#[test]
+fn trash_reaper_removes_read_only_trees() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Registry::open_at(&dir.path().join("trash-ro.redb")).unwrap();
+    let entry = dir.path().join("20260101T000000Z-123456");
+    let sealed = entry.join("target").join("debug");
+    std::fs::create_dir_all(&sealed).unwrap();
+    std::fs::write(sealed.join("app"), b"bin").unwrap();
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o555)).unwrap();
+    registry
+        .insert_if_new(&InsertInput {
+            kind: "trash".to_string(),
+            path: entry.to_string_lossy().to_string(),
+            repo_root: None,
+            branch: None,
+            agent_id: None,
+            now_unix: 100,
+        })
+        .unwrap();
+
+    let (removed, failed) = reap_trash_entries(&registry).unwrap();
+    if entry.exists() {
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    assert_eq!((removed, failed), (1, 0));
+    assert!(!entry.exists());
+}

@@ -1195,12 +1195,14 @@ fn run_maintenance_sweeps(warn_free_bytes: u64) {
             refresh_session_tmp_size_cache();
             crate::daemon::session_state_sweep::sweep_now();
             crate::daemon::target_sweep::sweep_now();
+            crate::daemon::trash_cap::maybe_enforce();
         }
         MaintenanceAction::RunNormal => {
             crate::daemon::session_tmp_sweep::maybe_sweep_session_tmp();
             refresh_session_tmp_size_cache();
             crate::daemon::session_state_sweep::maybe_sweep_session_state();
             crate::daemon::target_sweep::maybe_sweep_targets();
+            crate::daemon::trash_cap::maybe_enforce();
         }
         MaintenanceAction::Defer => {}
     }

@@ -52,6 +52,10 @@ pub const TRASH_MANIFEST: &str = ".clud-rm.json";
 /// hours as `~/.clud/tmp` (see `gc::session_tmp::STALE_THRESHOLD`).
 pub const TRASH_KEEP: Duration = crate::gc::session_tmp::STALE_THRESHOLD;
 
+/// Default `trash.max_bytes` (#1672): past 20 GiB the daemon evicts the
+/// oldest trash entries even inside [`TRASH_KEEP`]. `0` disables.
+pub const TRASH_MAX_BYTES_DEFAULT: u64 = 20 * 1024 * 1024 * 1024;
+
 pub const COMMAND: &str = "safe-rm";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1168,7 +1172,7 @@ pub fn run_with(
 /// Windows every file. A sealed build output (read-only `target/` trees)
 /// otherwise fails a move to the trash, or a purge, halfway (#1573). Symlinks
 /// are never followed.
-fn make_writable(path: &Path) {
+pub(crate) fn make_writable(path: &Path) {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return;
     };
