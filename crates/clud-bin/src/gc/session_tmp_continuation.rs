@@ -40,6 +40,8 @@ pub(super) struct TickReport {
     pub(super) last_error_class: Option<String>,
     pub(super) last_error_message: Option<String>,
     pub(super) persistent_failure: bool,
+    /// Items given up on after [`MAX_ITEM_RETRIES`] failures (#1672).
+    pub(super) abandoned: usize,
     pub(super) oversized: Vec<(PathBuf, u64)>,
 }
 
@@ -2205,5 +2207,134 @@ mod tests {
         let recovered =
             sweep_tick_at(&root, &work_path, now + Duration::from_secs(61), false, 4).unwrap();
         assert_eq!(recovered.pending, 0);
+    }
+
+    // #1672: on a real box the pass that started 8 days earlier never
+    // finished. 195 `Scan` items pointed at directories that no longer
+    // existed (NotFound -> Inconclusive -> retry, forever) and 50 `Delete`
+    // items hit root-owned files (EACCES -> retry, forever). A new pass only
+    // starts when the queue is empty, so no session that went stale after the
+    // pass began was ever evaluated: 1084 of 1184 session dirs were >72h old.
+
+    fn backdate(path: &Path, now: SystemTime) {
+        let old = now - STALE_THRESHOLD - Duration::from_secs(3_600);
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+    }
+
+    #[test]
+    fn vanished_scan_candidate_completes_instead_of_stalling_the_pass() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        let gone = root.join("cache").join("staging");
+        fs::create_dir_all(&gone).unwrap();
+        let now = SystemTime::now();
+        let mut state = WorkState::new(&root, now);
+        state.queue = VecDeque::from([WorkItem::Scan {
+            cursor: ScanCursor::new(&gone),
+            depth: 2,
+            eligible_for_delete: false,
+            retry: RetryState::default(),
+        }]);
+        let work_path = temp.path().join("state/work.json");
+        state.save(&work_path).unwrap();
+        fs::remove_dir(&gone).unwrap();
+
+        let report = sweep_tick_at(&root, &work_path, now, false, 16).unwrap();
+        assert_eq!(
+            report.pending, 0,
+            "a candidate that no longer exists has nothing left to do: {report:?}"
+        );
+        assert!(!work_path.exists(), "the pass must retire");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistently_failing_candidate_is_spared_and_a_new_pass_reaches_later_stale_sessions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        let failing = root.join("failing");
+        let sealed = failing.join("sealed");
+        fs::create_dir_all(&sealed).unwrap();
+        let kept = sealed.join("kept.txt");
+        fs::write(&kept, b"x").unwrap();
+        let now = SystemTime::now();
+        for path in [&kept, &sealed, &failing] {
+            backdate(path, now);
+        }
+        let mut state = WorkState::new(&root, now);
+        state.queue = VecDeque::from([WorkItem::Scan {
+            cursor: ScanCursor::new(&failing),
+            depth: 1,
+            eligible_for_delete: true,
+            retry: RetryState::default(),
+        }]);
+        let work_path = temp.path().join("state/work.json");
+        state.save(&work_path).unwrap();
+        // A session that went stale after the pass started: not in the queue.
+        let later = root.join("later");
+        fs::create_dir_all(&later).unwrap();
+        let later_file = later.join("old.txt");
+        fs::write(&later_file, b"old").unwrap();
+        backdate(&later_file, now);
+        backdate(&later, now);
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&sealed).is_ok() {
+            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+            return; // root bypasses the permission bit
+        }
+        let mut abandoned = 0;
+        for step in 0..60u64 {
+            let at = now + Duration::from_secs(step * 61 * 60);
+            let report = sweep_tick_at(&root, &work_path, at, false, 64).unwrap();
+            abandoned += report.abandoned;
+            if !later.exists() {
+                break;
+            }
+        }
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(abandoned >= 1, "the failing item must be given up on");
+        assert!(kept.exists(), "giving up on an item spares it");
+        assert!(
+            !later.exists(),
+            "a stuck item must not stop later passes from reaching new stale sessions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_directory_inside_stale_candidate_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        let candidate = root.join("session");
+        let sealed = candidate.join("pkg").join("mod@v1");
+        fs::create_dir_all(&sealed).unwrap();
+        let file = sealed.join("go.mod");
+        fs::write(&file, b"module x").unwrap();
+        let now = SystemTime::now();
+        for path in [&file, &sealed, &candidate.join("pkg"), &candidate] {
+            backdate(path, now);
+        }
+        // Go's module cache and sealed cargo outputs are 0555 trees.
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o555)).unwrap();
+        let work_path = temp.path().join("state/work.json");
+        for step in 0..20u64 {
+            let at = now + Duration::from_secs(step * 61 * 60);
+            if sweep_tick_at(&root, &work_path, at, false, 64)
+                .unwrap()
+                .pending
+                == 0
+                && !candidate.exists()
+            {
+                break;
+            }
+        }
+        if sealed.exists() {
+            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(!candidate.exists(), "a read-only tree must not be retried forever");
     }
 }
