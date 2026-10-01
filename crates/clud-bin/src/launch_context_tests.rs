@@ -3,6 +3,16 @@ use super::*;
 const SECRET_KEY: &str = "sk-or-v1-TOPSECRETKEYSHOULDNOTLEAK";
 const SESSION_ID: &str = "622e60e1-5376-44bd-be2c-059a72786a16";
 
+type Ambient = Option<Option<u64>>;
+type MaxRow = (
+    Route,
+    Ambient,
+    Option<(u32, ContextWindowSource)>,
+    Option<u32>,
+    Setting,
+);
+type CompactRow = (Route, Ambient, Option<u32>, Setting);
+
 fn facts(route: Route) -> Facts {
     Facts {
         route,
@@ -23,7 +33,7 @@ fn max_context_decision_table() {
     let served = Some((1_048_576, ContextWindowSource::Served));
     let catalog = Some((400_000, ContextWindowSource::Catalog));
     // (route, ambient, model window, codex common) -> expected
-    let rows: &[(Route, Option<Option<u64>>, _, Option<u32>, Setting)] = &[
+    let rows: &[MaxRow] = &[
         (
             Route::Direct,
             None,
@@ -110,7 +120,7 @@ fn max_context_decision_table() {
 
 #[test]
 fn compact_window_decision_table() {
-    let rows: &[(Route, Option<Option<u64>>, Option<u32>, Setting)] = &[
+    let rows: &[CompactRow] = &[
         (
             Route::Direct,
             None,
@@ -208,8 +218,7 @@ fn record_contains_no_secrets_paths_or_raw_session_ids() {
 fn bind_copies_pending_to_the_hashed_name_and_prunes() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path();
-    let mut child = Vec::new();
-    child.push((MAX_CONTEXT_ENV.to_string(), "200000".to_string()));
+    let child = vec![(MAX_CONTEXT_ENV.to_string(), "200000".to_string())];
     let record = plan_facts().at_launch(&[], &child, 7);
     let token = write_pending(state, &record).expect("pending written");
     bind(state, &token, SESSION_ID);
