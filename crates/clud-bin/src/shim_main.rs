@@ -1,5 +1,5 @@
 //! The `clud-shim` personality of the one `clud` binary: every clud PATH alias
-//! (`python`, `python3`, `gh`, `git`, `rm`, `safe-rm`) is a hardlink, symlink or copy
+//! (`python`, `python3`, `gh`, `git`, `rm`, `safe-rm`, `safe-mktemp`) is a hardlink, symlink or copy
 //! of `clud` that [`crate::multicall`] routes here by argv[0] before any other
 //! startup work (#406, #1461, #1518, #1546, #1551).
 //!
@@ -513,6 +513,7 @@ fn session_contract_is_owned_by_dispatch() {
     let libs = [
         ("rm_guard.rs", production(include_str!("rm_guard.rs"))),
         ("rm_tool.rs", production(include_str!("rm_tool.rs"))),
+        ("safe_mktemp.rs", production(include_str!("safe_mktemp.rs"))),
     ];
     let key_idents = [
         "ABI_KEY",

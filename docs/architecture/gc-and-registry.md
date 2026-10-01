@@ -128,7 +128,7 @@ path)` (`gc::CreatedEntry`: kind `dir`/`file`, role, time, Unix dev/ino/uid).
 `GcOp::insert_created` / `query_created` reach it through the same worker
 (replies `created_insert_ok` / `created_rows_ok`); the periodic tick expires
 rows older than 72h (`Registry::expire_created`). Their only reader is
-`safe-rm`; see [rm-tools.md](rm-tools.md#creation-ledger-implemented-slice-1-1666).
+`safe-rm`; see [rm-tools.md](rm-tools.md#creation-ledger).
 
 `ensure_daemon(state_dir)` (`crates/clud-bin/src/daemon/client.rs`) is the idempotent bringup
 entry point, called from `main.rs` on every clud invocation. It reads `daemon.json`, probes the

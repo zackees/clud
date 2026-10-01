@@ -5602,4 +5602,35 @@ a new multicall helper name and agent guidance, each independently
 reviewable. The common cases that motivated it (`/tmp`, `/dev/shm`, the
 scratchpad) are covered by DD-128 and DD-134 now. Slices are tracked as
 follow-up issues linked from #1621. Policy text:
-[rm-tools.md](architecture/rm-tools.md#creation-ledger-implemented-slice-1-1666).
+[rm-tools.md](architecture/rm-tools.md#creation-ledger).
+
+## DD-136: `safe-mktemp` is the only ledger writer, and undoes its `mkdir` when the insert fails
+
+**Context:** DD-135 slice 2 (#1667) needs a clud helper that creates a
+directory and records it, without ever giving an agent a way to record a path
+clud did not create. Three choices were open: what to do when the daemon
+insert fails, whether to create missing parents, and what to do on Windows,
+where the ledger cannot verify identity.
+
+**Decision:**
+
+- **One writer, no record call.** `safe-mktemp` (a multicall name, DD-121) is
+  the only caller of `gc_client_insert_created`, its writer trait is
+  crate-internal, and it records only what its own exclusive `mkdir` just
+  made. The identity comes from a handle opened `O_NOFOLLOW` on the new
+  directory, checked to be an empty directory the caller owns at the path's
+  current identity, never from a bare re-stat of the path.
+- **Insert failure undoes the create.** If the daemon is unreachable or the
+  insert fails, the helper removes the directory it made (non-recursively,
+  only while it is still that empty directory) and exits 1. Rejected: leaving
+  it and warning. An agent that reads only the exit code or the printed path
+  would treat it as deletable scratch, then meet a refusal on cleanup and
+  leave an orphan outside the roots.
+- **No parents.** Parents are never created. A created parent would either
+  be unrecorded (an orphan the session cannot remove) or recorded (widening
+  the deletable area beyond what the caller asked for).
+- **Windows fails before creating anything** (exit 2, a plain message), and
+  the generated guidance omits the helper there. Creating a directory that
+  `safe-rm` will refuse would pretend the ledger works.
+
+Policy text: [rm-tools.md](architecture/rm-tools.md#creation-ledger).
