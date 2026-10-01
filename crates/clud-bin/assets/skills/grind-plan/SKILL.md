@@ -10,6 +10,8 @@ disable-model-invocation: true
 
 # /grind-plan
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 You plan one goal; you never build, lint or test. The integrator does that
 later, one goal at a time.
 

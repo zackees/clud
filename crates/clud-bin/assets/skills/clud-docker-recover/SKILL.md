@@ -11,6 +11,8 @@ triggers:
 
 # /clud-docker-recover
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 Recover a wedged Docker Desktop the way zackees/clud#531 was recovered:
 **diagnose non-destructively, classify the failure before acting, restart on
 a bounded schedule, verify against the real daemon, and never touch a Docker

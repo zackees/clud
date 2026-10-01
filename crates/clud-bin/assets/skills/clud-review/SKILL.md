@@ -10,6 +10,8 @@ triggers:
 
 # /clud-review
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 Pre-push review gate that inventories the worktree's local diff,
 classifies the changed files by language family, gives one primary
 reviewer every non-empty bucket using the project's actual rules, and

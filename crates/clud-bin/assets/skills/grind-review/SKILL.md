@@ -9,6 +9,8 @@ disable-model-invocation: true
 
 # /grind-review
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 - Read every file the workers touched and every file they should have
   touched. Judge the change against the goal, not the task list; missing
   pieces are yours to add.

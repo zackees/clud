@@ -10,6 +10,8 @@ disable-model-invocation: true
 
 # /grind-land
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 The integrator already proved RED -> GREEN locally; you confirm it on the
 server and merge.
 

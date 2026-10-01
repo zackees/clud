@@ -10,6 +10,8 @@ triggers:
 
 # /clud-issue-triage
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 Triage GitHub issues for closeable resolution and un-addressed CodeRabbit follow-ups. Four hard rules:
 
 1. **Bias toward caution on closing.** Default action is *leave open*. Only close when the resolution is unambiguous: a merged PR landed code on the default branch and that code clearly satisfies the issue's acceptance criteria. When in doubt, don't close.

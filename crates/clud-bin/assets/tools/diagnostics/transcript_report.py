@@ -53,9 +53,44 @@ import os
 import re
 import secrets
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Bounded stdout (#1676, docs/architecture/bounded-output.md): a result over
+# STDOUT_CAP_BYTES prints its head, a truncation notice, and the path of an
+# artifact under the clud tmp dir that holds the full text.
+STDOUT_CAP_BYTES = 32 * 1024
+
+
+def _tool_output_dir() -> Path | None:
+    override = os.environ.get("CLUD_TOOL_OUTPUT_DIR")
+    if override:
+        return Path(override)
+    home = os.environ.get("USERPROFILE") or os.environ.get("HOME")
+    return Path(home) / ".clud" / "tmp" / "tool-output" if home else None
+
+
+def emit_bounded(text: str, name: str, cap: int = STDOUT_CAP_BYTES) -> None:
+    data = text.encode("utf-8")
+    if len(data) <= cap:
+        print(text)
+        return
+    try:
+        out_dir = _tool_output_dir()
+        if out_dir is None:
+            raise OSError("no home directory")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        artifact = out_dir / f"{name}-{stamp}-{os.getpid()}.txt"
+        artifact.write_bytes(data)
+        where = f"full output: {artifact}"
+    except OSError as exc:
+        where = f"full output could not be saved ({exc})"
+    print(data[:cap].decode("utf-8", "ignore"))
+    print(f"[TRUNCATED: showed {cap} of {len(data)} bytes; {where}]")
+
 
 DEFAULT_BURST_THRESHOLD = 20
 DEFAULT_JUMP_THRESHOLD = 50_000
@@ -436,7 +471,9 @@ def main(argv: list[str] | None = None) -> int:
         jump_threshold=args.jump_threshold,
         state_dir=args.state_dir or default_state_dir(),
     )
-    print(json.dumps(report, indent=2) if args.json else render_text(report))
+    emit_bounded(
+        json.dumps(report, indent=2) if args.json else render_text(report), "transcript_report"
+    )
     return 0
 
 

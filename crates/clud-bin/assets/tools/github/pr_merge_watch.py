@@ -1060,6 +1060,9 @@ def classify_failure_explained(
     return first_err, label, ""
 
 
+FIRST_ERROR_CAP_CHARS = 1000
+
+
 @dataclass
 class FailureReport:
     check: CheckRow
@@ -1079,7 +1082,15 @@ class FailureReport:
         if self.run_id:
             lines.append(f"  log probe:  gh run view {self.run_id} --log-failed | tail -100")
         if self.first_error:
-            lines.append(f"  first error: {self.first_error}")
+            first = self.first_error
+            if len(first) > FIRST_ERROR_CAP_CHARS:
+                # #1676: one minified/joined log line must not flood stdout.
+                first = (
+                    f"{first[:FIRST_ERROR_CAP_CHARS]} [TRUNCATED: showed "
+                    f"{FIRST_ERROR_CAP_CHARS} of {len(self.first_error)} chars; "
+                    "full log via the log probe above]"
+                )
+            lines.append(f"  first error: {first}")
         elif self.log_unavailable:
             lines.append(f"  log unavailable: {self.log_unavailable}")
         if self.classifier:

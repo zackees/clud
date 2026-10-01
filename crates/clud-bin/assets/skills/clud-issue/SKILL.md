@@ -11,6 +11,8 @@ triggers:
 
 # /clud-issue
 
+Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on disk, no identical repeats): https://github.com/zackees/clud/blob/main/docs/architecture/bounded-output.md
+
 File a GitHub issue informed by real research. Five hard rules:
 
 1. **Two investigation rounds, no interview** — resolve ambiguity from the code, not from the user. Never post after a single pass.
