@@ -173,8 +173,15 @@ pub struct Roots {
     /// The creation ledger consulted for a path outside every root and temp
     /// root (#1666); `None` keeps the strict roots with no ledger clause.
     ledger: Option<Arc<dyn ledger::CreationLedger>>,
-    /// Paths the ledger allowed, with the reason for the audit record.
+    /// Paths the ledger or an extra root allowed, with the reason for the
+    /// audit record.
     ledger_grants: BTreeMap<PathBuf, String>,
+    /// Human-set extra roots from `safe_rm.extra_roots` (#1668), vetted.
+    pub extra_roots: Vec<extra_roots::ExtraRoot>,
+    /// Messages for `safe_rm.extra_roots` entries dropped at load.
+    pub extra_root_warnings: Vec<String>,
+    /// Paths allowed only by an extra root (a subset of `ledger_grants`).
+    extra_grants: BTreeMap<PathBuf, String>,
 }
 
 impl Roots {
@@ -231,6 +238,9 @@ impl Roots {
             ram_roots: Vec::new(),
             ledger: None,
             ledger_grants: BTreeMap::new(),
+            extra_roots: Vec::new(),
+            extra_root_warnings: Vec::new(),
+            extra_grants: BTreeMap::new(),
         }
     }
 
@@ -239,6 +249,24 @@ impl Roots {
     pub fn with_ledger(mut self, ledger: Arc<dyn ledger::CreationLedger>) -> Self {
         self.ledger = Some(ledger);
         self
+    }
+
+    /// Honor `roots` as human-set extra roots (#1668); `warnings` are the
+    /// messages for dropped settings entries, printed by every call.
+    #[must_use]
+    pub fn with_extra_roots(
+        mut self,
+        roots: Vec<extra_roots::ExtraRoot>,
+        warnings: Vec<String>,
+    ) -> Self {
+        self.extra_roots = roots;
+        self.extra_root_warnings = warnings;
+        self
+    }
+
+    /// The override reason that allowed `path`, if only an extra root did.
+    pub fn extra_grant(&self, path: &Path) -> Option<&str> {
+        self.extra_grants.get(path).map(String::as_str)
     }
 
     /// The ledger reason that allowed `path`, if the ledger did.
@@ -1502,6 +1530,9 @@ mod clone;
 
 #[path = "rm_tool_ledger.rs"]
 pub mod ledger;
+
+#[path = "rm_tool_extra_roots.rs"]
+pub mod extra_roots;
 
 #[cfg(test)]
 #[path = "rm_tool_tests.rs"]

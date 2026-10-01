@@ -416,6 +416,18 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         payload.command
     ));
 
+    // #1668: the safe-rm root override is the user's alone. Checked before
+    // the per-call opt-out below, which the agent types itself and so must
+    // not be a way to widen its own deletion roots.
+    if event == PRE_TOOL_USE_EVENT && block_bad_cmd_gate::gates_tool(&payload.tool_name) {
+        if let Some(reason) = block_bad_cmd_rm_override::reason(&payload.command) {
+            append_log(&format!("RM-OVERRIDE-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud safe-rm] {reason}");
+            return 2;
+        }
+    }
+
     // The same switch, opted into per call: a command that carries
     // `CLUD_ALLOW_ALL_CMDS=1` (as `export …` or a `VAR=… cmd` prefix) skips
     // the checks for that call. Capped `/grind` roles cannot use it, or any
@@ -3193,6 +3205,8 @@ pub use block_bad_cmd_gate::{classify as classify_for_gate, GateClass};
 
 #[path = "block_bad_cmd_rm_identity.rs"]
 mod block_bad_cmd_rm_identity;
+#[path = "block_bad_cmd_rm_override.rs"]
+mod block_bad_cmd_rm_override;
 #[path = "block_bad_cmd_rm_redirect.rs"]
 mod block_bad_cmd_rm_redirect;
 

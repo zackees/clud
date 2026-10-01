@@ -1054,3 +1054,8 @@ fn daemon_ledger_without_a_running_daemon_is_unavailable() {
     let error = ledger::CreationLedger::lookup(&no_session, Path::new("/x")).unwrap_err();
     assert!(error.contains("no clud session id"), "{error}");
 }
+
+// ---------- #1668: human-set extra roots ----------
+
+#[path = "rm_tool_extra_roots_tests.rs"]
+mod extra_roots_tests;
