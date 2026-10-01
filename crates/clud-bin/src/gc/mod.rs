@@ -28,6 +28,7 @@ mod session_tmp_continuation;
 pub mod target_sweep;
 pub mod uv_cache;
 pub mod worktree_root;
+pub mod worktree_size_cache;
 
 pub use cli::run;
 pub use reconcile::{

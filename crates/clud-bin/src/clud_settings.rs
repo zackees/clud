@@ -856,6 +856,15 @@ pub fn load_worktrees_warn_bytes_at(home: &Path) -> Result<u64, SettingsError> {
     Ok(worktrees_warn_bytes_from(&document))
 }
 
+/// Lock-free, failure-silent read of `worktrees.warn_bytes` for the launch
+/// banner (#1610): a missing or unreadable settings file means the default.
+/// No advisory lock, so a contended settings lock can never stall a launch.
+pub fn peek_worktrees_warn_bytes_at(home: &Path) -> u64 {
+    read_settings_or_legacy(home)
+        .map(|document| worktrees_warn_bytes_from(&document))
+        .unwrap_or(crate::gc::worktree_root::DEFAULT_WARN_BYTES)
+}
+
 /// Pure reader for `worktrees.warn_bytes`.
 pub fn worktrees_warn_bytes_from(document: &Value) -> u64 {
     document
