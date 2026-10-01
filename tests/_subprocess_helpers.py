@@ -69,3 +69,20 @@ def add_windows_create_no_window(kwargs: dict) -> None:
     kwargs["creationflags"] = creationflags | getattr(
         process, "CREATE_NO_WINDOW", CREATE_NO_WINDOW
     )
+
+
+# Windows STATUS_CONTROL_C_EXIT. Python may report it unsigned (3221225786) or
+# as its signed 32-bit form (-1073741510); see issue #1679.
+STATUS_CONTROL_C_EXIT: int = 0xC000_013A
+
+
+def normalize_exit_code(rc: int) -> int:
+    """Map a process exit code onto its unsigned 32-bit representation."""
+    return rc & 0xFFFF_FFFF
+
+
+def is_ctrl_c_exit(rc: int | None) -> bool:
+    """True only for a Ctrl-C exit: POSIX 130 or Windows STATUS_CONTROL_C_EXIT."""
+    if rc is None:
+        return False
+    return rc == 130 or normalize_exit_code(rc) == STATUS_CONTROL_C_EXIT

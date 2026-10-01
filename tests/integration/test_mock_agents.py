@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from tests import process
+from tests._subprocess_helpers import is_ctrl_c_exit
 
 from ._daemon_helpers import (
     copy_launcher,
@@ -1498,7 +1499,7 @@ class TestInterruptReporting:
                 proc.wait(timeout=5)
 
         if sys.platform == "win32":
-            assert proc.returncode in (130, 3221225786)
+            assert is_ctrl_c_exit(proc.returncode), proc.returncode
         else:
             assert proc.returncode == 130
 
