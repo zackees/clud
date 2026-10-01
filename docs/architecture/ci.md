@@ -976,6 +976,18 @@ every launch, see `tests/integration/_daemon_helpers.py::run_clud`) records
 harness had to kill names the stage it was in; implementation in
 `crates/clud-bin/src/stage_trace.rs`.
 
+### pytest temp retention (#1686)
+
+`tmp_path_retention_policy = "failed"` in `pyproject.toml` removes a passing
+test's `tmp_path` at once and a passing run's base temp at session end, so
+harness worlds (repo, bare origin, Claude config) no longer pile up under
+`$TMPDIR` (`~/.clud/tmp` inside a clud session) until the 72 h sweep.
+`ci/pytest_tmp_retention.py`, loaded by `tests/conftest.py`, redoes that
+removal with a handler that clears the read-only bit (pytest's own `rmtree`
+ignores errors and leaves git object stores behind on Windows) and, on a
+failed run, prints the kept base temp's path. An explicit `--basetemp` is
+never removed. Covered by `tests/test_pytest_tmp_retention.py`.
+
 ### Two traps worth naming
 
 **Never use `uv run` in a workflow step.** `pyproject.toml` sets

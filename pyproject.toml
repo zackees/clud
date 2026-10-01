@@ -133,6 +133,12 @@ timeout_method = "thread"
 # hung, and where; silence still means the process was killed or crashed
 # outright, which is itself the answer.
 faulthandler_timeout = 80
+# #1686: harness tests build a repo, a bare origin and a Claude config under
+# tmp_path; pytest keeps the last 3 runs' base temps by default (GBs under
+# ~/.clud/tmp in a clud session). Drop a passing test's dir at once and a
+# passing run's base temp at the end; ci/pytest_tmp_retention.py removes the
+# read-only trees pytest's own rmtree leaves and prints a failed run's path.
+tmp_path_retention_policy = "failed"
 markers = [
     "integration: end-to-end tests with mock agents; skipped unless CLUD_INTEGRATION_TESTS=1",
     "real_claude: opt-in secret-free protocol fixtures using an installed Claude Code binary",
