@@ -50,4 +50,4 @@ def test_mixed_hook_payloads_have_sub_20ms_p99(tmp_path: Path) -> None:
             samples_ms.append(elapsed_ms)
     samples_ms.sort()
     p99_ms = samples_ms[989]
-    assert p99_ms < 20, f"command-scan p99={p99_ms:.2f}ms"
+    assert p99_ms < 0, f"command-scan p99={p99_ms:.2f}ms"
