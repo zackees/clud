@@ -65,6 +65,8 @@ pub struct GlobalSettingsPatch {
     pub harness: Option<HarnessSelection>,
     pub pr_wait_fail_fast: Option<bool>,
     pub web_term: Option<bool>,
+    /// `gc.delete_remote_branches` (#1603, #1608).
+    pub gc_delete_remote_branches: Option<bool>,
     pub block_cd: Option<crate::repo_clud_config::BlockCd>,
     pub provider_profiles: Vec<ProviderProfilePatch>,
 }
@@ -725,6 +727,10 @@ fn save_settings_transaction_at(
     }
     if let Some(enabled) = patch.web_term {
         object_entry(&mut document, "web_term").insert("enabled".to_string(), Value::Bool(enabled));
+    }
+    if let Some(enabled) = patch.gc_delete_remote_branches {
+        object_entry(&mut document, "gc")
+            .insert("delete_remote_branches".to_string(), Value::Bool(enabled));
     }
     if let Some(block_cd) = patch.block_cd {
         object_entry(&mut document, "bash").insert("block_cd".to_string(), block_cd.as_json());

@@ -308,7 +308,8 @@ the default branch, so ancestry-based checks call them live work forever
   `~/.clud/settings.json` (seeded `false`), or
   `CLUD_GC_DELETE_REMOTE_BRANCHES=1`, also deletes `origin/<branch>`, only
   when the remote-tracking ref equals the verified tip, and the push carries
-  `--force-with-lease=refs/heads/<branch>:<tip>`.
+  `--force-with-lease=refs/heads/<branch>:<tip>`. `clud settings` exposes the
+  setting as a toggle and notes when the env var overrides it (#1608).
 - **Modes.** `CLUD_GC_REPO_WORKTREES`: unset or `1` deletes; `observe` (or
   any unrecognized value) probes and logs `would remove` without deleting;
   `0` turns the probe and the reclaim off.

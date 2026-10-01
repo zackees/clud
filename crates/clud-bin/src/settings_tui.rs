@@ -218,7 +218,39 @@ fn setting_items() -> Vec<SettingItem> {
         note: "Uses the bundled desktop companion; disabled by default.",
         value: SettingValue::Bool(clud_settings::load_web_term_enabled().unwrap_or(false)),
     });
+    items.push(gc_delete_remote_branches_item(
+        clud_settings::load_gc_delete_remote_branches().unwrap_or(false),
+        std::env::var(GC_DELETE_REMOTE_BRANCHES_ENV).ok().as_deref(),
+    ));
     items
+}
+
+/// The daemon GC reads this env var before `gc.delete_remote_branches`
+/// (`daemon/gc_service.rs`), so the row says when the saved value is moot.
+const GC_DELETE_REMOTE_BRANCHES_ENV: &str = "CLUD_GC_DELETE_REMOTE_BRANCHES";
+
+const GC_DELETE_REMOTE_BRANCHES_NOTE: &str =
+    "When the daemon reclaims a worktree whose PR was merged, also delete its \
+     branch on origin. Leased on the verified tip \
+     (--force-with-lease=<ref>:<tip>): a branch that moved is never deleted. \
+     Off by default.";
+
+/// #1608: the `gc.delete_remote_branches` row (#1603). `env_override` is the
+/// raw `CLUD_GC_DELETE_REMOTE_BRANCHES` value, if set.
+fn gc_delete_remote_branches_item(value: bool, env_override: Option<&str>) -> SettingItem {
+    let note = match env_override {
+        Some(_) => leak_string(format!(
+            "{GC_DELETE_REMOTE_BRANCHES_NOTE} Currently overridden by \
+             {GC_DELETE_REMOTE_BRANCHES_ENV}."
+        )),
+        None => GC_DELETE_REMOTE_BRANCHES_NOTE,
+    };
+    SettingItem {
+        key: "gc.delete_remote_branches",
+        label: "Delete merged branches on origin during GC",
+        note,
+        value: SettingValue::Bool(value),
+    }
 }
 
 /// Human-readable provider name for TUI labels. Anthropic-compat providers
@@ -497,6 +529,9 @@ fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
             ("web_term.enabled", SettingValue::Bool(value)) => {
                 patch.web_term = Some(*value);
             }
+            ("gc.delete_remote_branches", SettingValue::Bool(value)) => {
+                patch.gc_delete_remote_branches = Some(*value);
+            }
             _ => {}
         }
     }
@@ -691,6 +726,7 @@ mod tests {
                 harness: Some(HarnessSelection::Claude),
                 pr_wait_fail_fast: Some(true),
                 web_term: None,
+                gc_delete_remote_branches: None,
                 provider_profiles: Vec::new(),
             }
         );
@@ -727,6 +763,7 @@ mod tests {
                 harness: None,
                 pr_wait_fail_fast: Some(true),
                 web_term: None,
+                gc_delete_remote_branches: None,
                 provider_profiles: Vec::new(),
             }
         );

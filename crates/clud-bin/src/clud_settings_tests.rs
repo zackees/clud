@@ -318,6 +318,7 @@ fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
             harness: Some(HarnessSelection::Claude),
             pr_wait_fail_fast: Some(true),
             web_term: None,
+            gc_delete_remote_branches: None,
             provider_profiles: Vec::new(),
         },
     )
