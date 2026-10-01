@@ -24,6 +24,7 @@ moves on; the RAII guards restore console mode on drop.
 | `crates/clud-bin/src/session.rs` | The pump (reader thread + writer thread + main loop, issue #538), `F3Observer`, `resize_pty`, `spawn_os_resize_watcher`, `RawTerminalGuard`. With toasts enabled (#1189) the writer thread runs the toast compositor and the stdin path the close-button mouse filter — see [toasts.md](toasts.md). |
 | `crates/clud-bin/src/session/interrupt.rs` | `interrupt_pty_process`, `reap_pty_exit`. |
 | `crates/clud-bin/src/session/bracketed_paste.rs` | `BracketedPasteNormalizer`. |
+| `crates/clud-bin/src/session/escape_gate.rs` | `EscapeSequenceGate`, owned by the normalizer: no escape sequence reaches the PTY split across two writes (#1697). |
 | `crates/clud-bin/src/console_setup.rs` | `ConsoleVtGuard` RAII for `ENABLE_VIRTUAL_TERMINAL_INPUT`. |
 | `crates/clud-bin/src/console_title.rs` | One-shot title stamp, daemon keeper thread, `OscTitleStripper` stream filter. |
 | `crates/clud-bin/src/console_input.rs` | Adapter over `running-process::TerminalInputCore`; preserves clud-specific Shift+Enter/Ctrl+V policy and forwards complete translated key events (#141/#575). |
@@ -175,6 +176,12 @@ pump's instance; the type itself is in `bracketed_paste.rs`), which
 detects `\x1b[200~ … \x1b[201~` envelopes and, when the inner content matches
 `dnd::looks_like_dropped_path`, rewrites it through `normalize_dropped_path`
 before forwarding. Non-paste bytes pass through with O(1) cost. The
+normalizer's output also passes its `EscapeSequenceGate`, which holds an
+incomplete trailing escape sequence until its final byte (or the pump's 5 ms
+idle flush). ConPTY's input parser closes whatever sequence is open at the
+end of each write, and the Windows console reader delivers a terminal's SGR
+mouse report one character per event, so without the gate each mouse
+movement reached the child as literal `35;31;18M` text (#1697). The
 normalized chunk is then written to the PTY master with `write_impl(..,
 false)`.
 
@@ -330,7 +337,8 @@ The resize-watcher thread observes the closed `resize_tx` and exits.
 | `F3Observer` struct | `crates/clud-bin/src/session.rs:93` |
 | `F3Observer::observe` | `crates/clud-bin/src/session.rs:126` |
 | `InteractiveHooks` trait | `crates/clud-bin/src/session.rs:281` |
-| `BracketedPasteNormalizer` | `crates/clud-bin/src/session/bracketed_paste.rs:25` |
+| `BracketedPasteNormalizer` | `crates/clud-bin/src/session/bracketed_paste.rs:32` |
+| `EscapeSequenceGate` | `crates/clud-bin/src/session/escape_gate.rs:19` |
 | `resize_pty` | `crates/clud-bin/src/session.rs:21` |
 | `spawn_os_resize_watcher` | `crates/clud-bin/src/session.rs:495` |
 | `interrupt_pty_process` | `crates/clud-bin/src/session/interrupt.rs:20` |

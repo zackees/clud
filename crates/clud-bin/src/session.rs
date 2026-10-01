@@ -1795,6 +1795,7 @@ where
 /// keeps the byte-stream reader so existing behavior (including
 /// `echo "prompt" | clud` and POSIX interactive use) is unchanged.
 mod bracketed_paste;
+mod escape_gate;
 
 pub use bracketed_paste::BracketedPasteNormalizer;
 #[cfg(test)]
