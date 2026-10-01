@@ -30,11 +30,15 @@ pub const COMMAND: &str = "safe-mktemp";
 /// Where a created directory is recorded. The production writer is the
 /// daemon; tests inject one. Crate-internal on purpose: no CLI form records
 /// a path, so a row can only follow `safe-mktemp`'s own `mkdir`.
+// Windows refuses before reading any of it (`create`).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) trait LedgerWriter {
     fn record(&self, entry: &CreatedEntry) -> Result<(), String>;
 }
 
 /// The daemon's GC registry (`GcOp::InsertCreated`).
+// Windows refuses before reading any of it (`create`).
+#[cfg_attr(not(unix), allow(dead_code))]
 struct DaemonWriter {
     state_dir: Option<PathBuf>,
 }
@@ -49,6 +53,8 @@ impl LedgerWriter for DaemonWriter {
 }
 
 /// Everything a call needs from its environment.
+// Windows refuses before reading any of it (`create`).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(crate) struct Request {
     pub cwd: PathBuf,

@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 /// Records every row it is asked to write; optionally fails.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Default)]
 struct FakeWriter {
     rows: RefCell<Vec<CreatedEntry>>,
