@@ -353,7 +353,17 @@ the default branch, so ancestry-based checks call them live work forever
 - **Size backstop.** `worktrees.warn_bytes` in `~/.clud/settings.json`
   (seeded 50 GiB, `0` disables): `clud gc list` prints a stderr warning when
   the root exceeds it (a bounded, early-exit walk). Warn-only: nothing is
-  deleted for size. A launch-banner warning is a follow-up.
+  deleted for size. The launch banner warns too (#1610) without walking:
+  the daemon's repo-worktree probe thread runs the same bounded walk after
+  each probe and writes `~/.clud/tmp-wt-size.json` (timestamp, limit,
+  over/under/unknown + bytes; atomic temp-file rename). At launch
+  `gc::worktree_size_cache::launch_warning` reads only that file and a
+  lock-free settings peek, and prints one line naming the size, threshold,
+  path and setting. It shows nothing when `warn_bytes` is `0`, the cache is
+  missing, corrupt, older than 6 h or future-dated, or the walk ran out of
+  entry budget (`clud gc list` still reports that case). The decision is the
+  pure `banner_decision` table. If the probe never runs (reclaim mode `off`)
+  the cache is never written and the banner stays silent.
 - **Tests.** Unit tests never read the real root: `production_worktree_root()`
   and `ensure_worktree_root()` return `None` under `cfg(test)`, and tests
   inject a tempdir root.

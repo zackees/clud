@@ -361,7 +361,8 @@ which test tier a change belongs in — lives in
   touch user data, plus the target-sweep over-match guard. `worktree_root.rs`
   owns `~/.clud/tmp-wt` (issue #1485), the agent worktree root outside the
   `session_tmp` sweep, its ordinal allocator `alloc_wt_path` (#1486), plus
-  the warn-only `worktrees.warn_bytes` size check;
+  the warn-only `worktrees.warn_bytes` size check; `worktree_size_cache.rs`
+  caches that check from the daemon probe for the launch banner (#1610);
   see [gc-and-registry.md → worktree root](../../../docs/architecture/gc-and-registry.md#the-worktree-root-cludtmp-wt-1485).
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
   `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone,
