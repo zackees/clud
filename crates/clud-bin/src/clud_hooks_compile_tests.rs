@@ -221,5 +221,8 @@ fn deletion_safety_fragment_denies_file_tool_edits_of_the_user_settings_file() {
         .filter_map(Value::as_str)
         .collect();
     assert!(deny.contains(&"Edit(~/.clud/settings.json)"), "{deny:?}");
-    assert!(deny.iter().any(|rule| rule.starts_with("Bash(")), "{deny:?}");
+    assert!(
+        deny.iter().any(|rule| rule.starts_with("Bash(")),
+        "{deny:?}"
+    );
 }

@@ -64,7 +64,11 @@ pub fn verdict(facts: &EntryFacts) -> Result<ExtraRoot, String> {
     if root.parent().is_none() {
         return refuse("is a filesystem root");
     }
-    if facts.home.as_ref().is_some_and(|home| home.starts_with(&root)) {
+    if facts
+        .home
+        .as_ref()
+        .is_some_and(|home| home.starts_with(&root))
+    {
         return refuse("is your home directory or one of its ancestors");
     }
     if root
@@ -88,7 +92,10 @@ pub fn verdict(facts: &EntryFacts) -> Result<ExtraRoot, String> {
 pub fn probe(entry: &SafeRmExtraRootEntry, home: Option<&Path>, me: Option<u32>) -> EntryFacts {
     let canonical = crate::path_norm::canonicalize_plain(Path::new(&entry.path))
         .map_err(|error| error.to_string());
-    let meta = canonical.as_ref().ok().and_then(|p| std::fs::metadata(p).ok());
+    let meta = canonical
+        .as_ref()
+        .ok()
+        .and_then(|p| std::fs::metadata(p).ok());
     EntryFacts {
         raw: entry.path.clone(),
         reason: entry.reason.clone(),

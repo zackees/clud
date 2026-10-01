@@ -171,7 +171,10 @@ fn purge_under_an_extra_root_writes_the_reason_to_the_delete_audit() {
     let gc = std::fs::read_to_string(state.path().join(crate::gc::delete_audit::AUDIT_LOG_FILE))
         .unwrap();
     let line: serde_json::Value = serde_json::from_str(gc.lines().last().unwrap()).unwrap();
-    assert!(line["rule"].as_str().unwrap().contains("nightly benchmark output"));
+    assert!(line["rule"]
+        .as_str()
+        .unwrap()
+        .contains("nightly benchmark output"));
 }
 
 #[test]
@@ -237,7 +240,10 @@ fn dropped_entries_are_reported_on_every_call() {
     );
     let (code, _, err) = run_extra(&w, &mut roots, &[target.to_str().unwrap()]);
     assert_eq!(code, 1);
-    assert!(err.contains("safe_rm.extra_roots[0] (/srv) ignored"), "{err}");
+    assert!(
+        err.contains("safe_rm.extra_roots[0] (/srv) ignored"),
+        "{err}"
+    );
     assert!(target.exists(), "an entry without a reason is not honored");
 }
 
@@ -257,12 +263,7 @@ fn load_drops_home_and_reasonless_entries_and_keeps_good_ones() {
     ];
     // SAFETY: geteuid has no preconditions.
     let me = Some(unsafe { libc::geteuid() });
-    let (roots, rejected) = extra_roots::load(
-        &entries,
-        vec!["shape".into()],
-        Some(&w.home),
-        me,
-    );
+    let (roots, rejected) = extra_roots::load(&entries, vec!["shape".into()], Some(&w.home), me);
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].root, extra);
     assert_eq!(rejected.len(), 2, "{rejected:?}");

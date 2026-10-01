@@ -347,7 +347,8 @@ impl Roots {
         if let Some(extra) = extra {
             self.check_owned_under("the safe_rm.extra_roots override", &extra.root, path)?;
             let reason = extra_roots::grant_reason(&extra);
-            self.ledger_grants.insert(path.to_path_buf(), reason.clone());
+            self.ledger_grants
+                .insert(path.to_path_buf(), reason.clone());
             self.extra_grants.insert(path.to_path_buf(), reason);
             return Ok(extra.root);
         }
