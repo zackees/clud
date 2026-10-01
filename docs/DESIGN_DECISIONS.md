@@ -5816,3 +5816,29 @@ consulted. A warning costs nothing and points the human at the culprit.
 **Consequences:** `~/.clud/tmp` can still exceed the threshold for up to the
 age-sweep window; the acceptance line "stays under a configured size" in
 #1327 is met by visibility, not enforcement.
+
+## DD-142: a session-tmp sweep pass always retires
+
+**Context:** #1672: `~/.clud/tmp` reached 162 GB. The sweep was running, but its
+pass had started 8 days earlier and never finished. 195 `Scan` items named
+directories that had since vanished (`NotFound` was treated as an inconclusive
+scan and retried), and 50 `Delete` items hit files owned by root from Docker
+bind mounts (`EACCES`, retried). A new pass starts only when the queue is
+empty, so 1084 of 1184 session directories went stale after the pass began
+and were never evaluated.
+
+**Decision:** a vanished candidate completes. An item that fails
+`MAX_ITEM_RETRIES` (8) times in a row is dropped, and dropping it spares it.
+The pass then retires, and the next one re-derives every candidate from the
+filesystem. Read-only directories the user owns are made writable before a
+retry, as safe-rm does (#1573).
+
+**Why not keep retrying (the #1260 contract):** the queue is a cache of what
+the filesystem says. Dropping an entry loses no information: the path is
+still on disk and the next pass finds it again. Keeping the entry makes one
+undeletable path block every other candidate on the machine.
+
+**Consequences:** an undeletable tree is retried roughly once per pass
+(every six hours) instead of continuously, and each give-up is logged with
+its last error. Deletion rules are unchanged: only a fully scanned, idle,
+rechecked tree is removed.

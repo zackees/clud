@@ -19,6 +19,12 @@ use super::session_tmp::{PendingPhases, MAX_NESTED_DEPTH, SIZE_REPORT_THRESHOLD,
 const SCHEMA_VERSION: u8 = 8;
 const CANDIDATE_QUANTUM: usize = 4_096;
 const PERSISTENT_FAILURE_HORIZON_SECS: u64 = 72 * 60 * 60;
+/// Consecutive failures after which one queued item is dropped (#1672).
+/// Dropping spares the path: nothing is deleted, and the next pass
+/// re-derives it from the filesystem. Without the bound one root-owned file
+/// kept the queue non-empty, so no new pass ever started. With the
+/// one-minute-per-retry backoff, eight failures span about 36 minutes.
+pub(super) const MAX_ITEM_RETRIES: u32 = 8;
 
 #[derive(Debug, Default)]
 pub(super) struct TickReport {
@@ -40,6 +46,8 @@ pub(super) struct TickReport {
     pub(super) last_error_class: Option<String>,
     pub(super) last_error_message: Option<String>,
     pub(super) persistent_failure: bool,
+    /// Items given up on after [`MAX_ITEM_RETRIES`] failures (#1672).
+    pub(super) abandoned: usize,
     pub(super) oversized: Vec<(PathBuf, u64)>,
 }
 
@@ -183,6 +191,11 @@ fn advance_item(
     dry_run: bool,
     grant: usize,
 ) -> usize {
+    if item.retry_count() >= MAX_ITEM_RETRIES {
+        // Spare it and let the pass retire; `last_failure` keeps the cause.
+        report.abandoned += 1;
+        return 1;
+    }
     if item.deferred(now) {
         state.queue.push_back(item);
         return 0;
@@ -831,11 +844,11 @@ fn delete_candidate_batch(
         }
         delete_audit::record("gc.session-tmp", child, &super::session_tmp::stale_rule());
         if meta.is_dir() {
-            fs::remove_dir(child)?;
+            remove_allowing_read_only_parent(child, true)?;
             report.removed_dirs += 1;
             state.removed_dirs += 1;
         } else {
-            fs::remove_file(child)?;
+            remove_allowing_read_only_parent(child, false)?;
             report.removed_files += 1;
             state.removed_files += 1;
             report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(meta.len());
@@ -859,11 +872,59 @@ fn delete_candidate_batch(
         return Ok(BatchOutcome::Busy(spent.max(1)));
     }
     delete_audit::record("gc.session-tmp", path, &super::session_tmp::stale_rule());
-    fs::remove_dir(path)?;
+    remove_allowing_read_only_parent(path, true)?;
     report.removed_dirs += 1;
     state.removed_dirs += 1;
     state.last_progress_unix_secs = unix_secs(now);
     Ok(BatchOutcome::Complete(spent + 1))
+}
+
+/// Remove one already-vetted entry. A read-only parent (Go's module cache,
+/// sealed build outputs) refuses the unlink with `PermissionDenied`; make
+/// the parent owner-writable, as safe-rm does (#1573), and try once more.
+/// `chmod` changes ctime, not mtime, so the `touched_dirs` checks still
+/// hold. A foreign-owned parent stays read-only and the error surfaces.
+fn remove_allowing_read_only_parent(path: &Path, directory: bool) -> io::Result<()> {
+    let remove = || {
+        if directory {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        }
+    };
+    match remove() {
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            let Some(parent) = path.parent() else {
+                return Err(err);
+            };
+            if !make_owner_writable(parent) {
+                return Err(err);
+            }
+            remove()
+        }
+        other => other,
+    }
+}
+
+#[cfg(unix)]
+fn make_owner_writable(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return false;
+    }
+    let mode = meta.permissions().mode();
+    if mode & 0o300 == 0o300 {
+        return false;
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(mode | 0o300)).is_ok()
+}
+
+#[cfg(not(unix))]
+fn make_owner_writable(_dir: &Path) -> bool {
+    false
 }
 
 /// The whole sweep is a durable queue, not a one-shot walk. A candidate that
@@ -1062,6 +1123,17 @@ fn safe_path_now(root: &Path, path: &Path, directory: bool) -> io::Result<bool> 
 }
 
 impl WorkItem {
+    fn retry_count(&self) -> u32 {
+        match self {
+            Self::Explore { retry, .. }
+            | Self::Scan { retry, .. }
+            | Self::Recheck { retry, .. } => retry.count,
+            Self::Probe { retry_count, .. }
+            | Self::FlatFile { retry_count, .. }
+            | Self::Delete { retry_count, .. } => *retry_count,
+        }
+    }
+
     fn deferred(&self, now: SystemTime) -> bool {
         match self {
             Self::Explore { retry, .. }
@@ -1316,6 +1388,9 @@ impl ScanCursor {
         if self.dir_mtimes.is_empty() {
             let meta = match fs::symlink_metadata(&self.root) {
                 Ok(meta) => meta,
+                // Gone before we started: nothing to prove idle or delete.
+                // Busy never deletes (#1672: this was retried for 8 days).
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return ScanVerdict::Busy,
                 Err(err) => {
                     let path = self.root.clone();
                     self.capture_error(&path, &err, now);
@@ -2205,5 +2280,138 @@ mod tests {
         let recovered =
             sweep_tick_at(&root, &work_path, now + Duration::from_secs(61), false, 4).unwrap();
         assert_eq!(recovered.pending, 0);
+    }
+
+    // #1672: on a real box the pass that started 8 days earlier never
+    // finished. 195 `Scan` items pointed at directories that no longer
+    // existed (NotFound -> Inconclusive -> retry, forever) and 50 `Delete`
+    // items hit root-owned files (EACCES -> retry, forever). A new pass only
+    // starts when the queue is empty, so no session that went stale after the
+    // pass began was ever evaluated: 1084 of 1184 session dirs were >72h old.
+
+    #[cfg(unix)]
+    fn backdate(path: &Path, now: SystemTime) {
+        let old = now - STALE_THRESHOLD - Duration::from_secs(3_600);
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+    }
+
+    #[test]
+    fn vanished_scan_candidate_completes_instead_of_stalling_the_pass() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        let gone = root.join("cache").join("staging");
+        fs::create_dir_all(&gone).unwrap();
+        let now = SystemTime::now();
+        let mut state = WorkState::new(&root, now);
+        state.queue = VecDeque::from([WorkItem::Scan {
+            cursor: ScanCursor::new(&gone),
+            depth: 2,
+            eligible_for_delete: false,
+            retry: RetryState::default(),
+        }]);
+        let work_path = temp.path().join("state/work.json");
+        state.save(&work_path).unwrap();
+        fs::remove_dir(&gone).unwrap();
+
+        let report = sweep_tick_at(&root, &work_path, now, false, 16).unwrap();
+        assert_eq!(
+            report.pending, 0,
+            "a candidate that no longer exists has nothing left to do: {report:?}"
+        );
+        assert!(!work_path.exists(), "the pass must retire");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistently_failing_candidate_is_spared_and_a_new_pass_reaches_later_stale_sessions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        let failing = root.join("failing");
+        let sealed = failing.join("sealed");
+        fs::create_dir_all(&sealed).unwrap();
+        let kept = sealed.join("kept.txt");
+        fs::write(&kept, b"x").unwrap();
+        let now = SystemTime::now();
+        for path in [&kept, &sealed, &failing] {
+            backdate(path, now);
+        }
+        let mut state = WorkState::new(&root, now);
+        state.queue = VecDeque::from([WorkItem::Scan {
+            cursor: ScanCursor::new(&failing),
+            depth: 1,
+            eligible_for_delete: true,
+            retry: RetryState::default(),
+        }]);
+        let work_path = temp.path().join("state/work.json");
+        state.save(&work_path).unwrap();
+        // A session that went stale after the pass started: not in the queue.
+        let later = root.join("later");
+        fs::create_dir_all(&later).unwrap();
+        let later_file = later.join("old.txt");
+        fs::write(&later_file, b"old").unwrap();
+        backdate(&later_file, now);
+        backdate(&later, now);
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&sealed).is_ok() {
+            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+            return; // root bypasses the permission bit
+        }
+        let mut abandoned = 0;
+        for step in 0..60u64 {
+            let at = now + Duration::from_secs(step * 61 * 60);
+            let report = sweep_tick_at(&root, &work_path, at, false, 64).unwrap();
+            abandoned += report.abandoned;
+            if !later.exists() {
+                break;
+            }
+        }
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(abandoned >= 1, "the failing item must be given up on");
+        assert!(kept.exists(), "giving up on an item spares it");
+        assert!(
+            !later.exists(),
+            "a stuck item must not stop later passes from reaching new stale sessions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_directory_inside_stale_candidate_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tmp");
+        let candidate = root.join("session");
+        let sealed = candidate.join("pkg").join("mod@v1");
+        fs::create_dir_all(&sealed).unwrap();
+        let file = sealed.join("go.mod");
+        fs::write(&file, b"module x").unwrap();
+        let now = SystemTime::now();
+        for path in [&file, &sealed, &candidate.join("pkg"), &candidate] {
+            backdate(path, now);
+        }
+        // Go's module cache and sealed cargo outputs are 0555 trees.
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o555)).unwrap();
+        let work_path = temp.path().join("state/work.json");
+        for step in 0..20u64 {
+            let at = now + Duration::from_secs(step * 61 * 60);
+            if sweep_tick_at(&root, &work_path, at, false, 64)
+                .unwrap()
+                .pending
+                == 0
+                && !candidate.exists()
+            {
+                break;
+            }
+        }
+        if sealed.exists() {
+            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(
+            !candidate.exists(),
+            "a read-only tree must not be retried forever"
+        );
     }
 }
