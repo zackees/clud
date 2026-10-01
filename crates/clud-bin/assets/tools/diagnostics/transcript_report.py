@@ -31,7 +31,7 @@ fingerprint keyed with a random per-invocation salt, so a fingerprint can
 only be compared within one report. The tool writes no files.
 
 Run through clud's `tool run` subcommand:
-  clud tool run diagnostics/transcript_report.py ~/.claude/projects/<p>/<id>.jsonl
+  "$CLUD_EXE" tool run diagnostics/transcript_report.py ~/.claude/projects/<p>/<id>.jsonl
 
 Exit codes:
   0  report printed
