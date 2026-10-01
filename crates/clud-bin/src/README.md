@@ -614,7 +614,8 @@ Skills and hooks:
 - `tools.rs` - `BUNDLED_TOOLS` registry of `assets/tools/` scripts, including
   `github/pr_merge_watch.py` and `github/is_meta_issue.py` (prints JSON
   `{meta, sub_issues, task_list_refs}`; errors on `gh` failure, never reports
-  "not meta"; #1404).
+  "not meta"; #1404), and `diagnostics/transcript_report.py` (#1276,
+  [DD-138](../../../docs/DESIGN_DECISIONS.md#dd-138-the-first-1276-slice-is-a-read-only-transcript-analyzer-not-a-repeated-call-guard)).
 - `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
   remediation. `codex_trust.rs` also owns `codex_project_trusted` — the
   `[projects."<key>"] trust_level = "trusted"` check against
