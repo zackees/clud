@@ -333,11 +333,7 @@ pub fn clud_cache_list_warning(root: &Path, warn_bytes: u64, check: SizeCheck) -
 
 /// Daemon side for `~/.clud/cache`. Read-only walk; deletes nothing but a
 /// stale cache file when the warning is disabled.
-pub fn refresh_clud_cache_size(
-    home: &Path,
-    warn_bytes: u64,
-    now_unix: i64,
-) -> std::io::Result<()> {
+pub fn refresh_clud_cache_size(home: &Path, warn_bytes: u64, now_unix: i64) -> std::io::Result<()> {
     refresh_cache_at(
         &clud_cache_size_path_for(home),
         &clud_cache_dir_for(home),

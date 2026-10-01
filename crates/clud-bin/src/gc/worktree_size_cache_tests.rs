@@ -259,7 +259,10 @@ fn clud_cache_banner_and_list_lines_name_cache_setting() {
     assert_eq!(clud_cache_list_warning(root, 0, SizeCheck::Over(50)), None);
     let over = clud_cache_list_warning(root, 10, SizeCheck::Over(50)).unwrap();
     assert!(over.contains("cache.warn_bytes"), "{over}");
-    assert!(over.contains("uv cache prune"), "points at upstream: {over}");
+    assert!(
+        over.contains("uv cache prune"),
+        "points at upstream: {over}"
+    );
     let unknown = clud_cache_list_warning(root, 10, SizeCheck::Unknown).unwrap();
     assert!(unknown.contains("cache.warn_bytes"), "{unknown}");
 }

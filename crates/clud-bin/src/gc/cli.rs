@@ -504,7 +504,7 @@ fn cmd_list(state_dir: &Path, json: bool, kind_filter: Option<&str>) -> i32 {
         }
         warn_if_worktree_root_oversized();
         warn_if_session_tmp_oversized();
-    warn_if_clud_cache_oversized();
+        warn_if_clud_cache_oversized();
         return 0;
     }
     print_table_from_rows(&rows);

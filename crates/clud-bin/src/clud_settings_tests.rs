@@ -128,19 +128,31 @@ fn cache_warn_bytes_defaults_and_parses() {
         load_cache_warn_bytes_at(home.path()).unwrap(),
         DEFAULT_CACHE_WARN_BYTES
     );
-    assert_eq!(peek_cache_warn_bytes_at(home.path()), DEFAULT_CACHE_WARN_BYTES);
+    assert_eq!(
+        peek_cache_warn_bytes_at(home.path()),
+        DEFAULT_CACHE_WARN_BYTES
+    );
     for (doc, want) in [
         (json!({}), DEFAULT_CACHE_WARN_BYTES),
         (json!({"cache": {"warn_bytes": 0}}), 0),
         (json!({"cache": {"warn_bytes": 1234}}), 1234),
-        (json!({"cache": {"warn_bytes": "9"}}), DEFAULT_CACHE_WARN_BYTES),
-        (json!({"cache": {"warn_bytes": -1}}), DEFAULT_CACHE_WARN_BYTES),
+        (
+            json!({"cache": {"warn_bytes": "9"}}),
+            DEFAULT_CACHE_WARN_BYTES,
+        ),
+        (
+            json!({"cache": {"warn_bytes": -1}}),
+            DEFAULT_CACHE_WARN_BYTES,
+        ),
         (json!({"tmp": {"warn_bytes": 7}}), DEFAULT_CACHE_WARN_BYTES),
     ] {
         assert_eq!(cache_warn_bytes_from(&doc), want, "{doc}");
     }
     let seeded = seeded_global_settings_document();
-    assert_eq!(seeded["cache"]["warn_bytes"], json!(DEFAULT_CACHE_WARN_BYTES));
+    assert_eq!(
+        seeded["cache"]["warn_bytes"],
+        json!(DEFAULT_CACHE_WARN_BYTES)
+    );
 }
 
 #[test]
