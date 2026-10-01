@@ -989,6 +989,20 @@ pub fn cache_warn_bytes_from(document: &Value) -> u64 {
         .unwrap_or(crate::gc::worktree_size_cache::DEFAULT_CACHE_WARN_BYTES)
 }
 
+/// `cache.max_bytes` (#1691, DD-145): when clud's uv cache grows past this,
+/// the daily uv sweep asks uv to empty it (`uv cache clean`) if no uv
+/// process is running. `0` disables; absent or malformed means the default.
+pub fn peek_cache_max_bytes_at(home: &Path) -> u64 {
+    let _ = home;
+    0
+}
+
+/// Pure reader for `cache.max_bytes`.
+pub fn cache_max_bytes_from(document: &Value) -> u64 {
+    let _ = document;
+    0
+}
+
 /// The JSON key path of the human-set safe-rm root override (#1668,
 /// DD-137): `safe_rm.extra_roots`, a list of `{"path", "reason"}` objects.
 pub const SAFE_RM_EXTRA_ROOTS_KEY: &str = "safe_rm.extra_roots";

@@ -155,6 +155,28 @@ fn cache_warn_bytes_defaults_and_parses() {
     );
 }
 
+/// #1691 (DD-145): the uv cache size cap defaults to 32 GiB, `0` disables
+/// it, a malformed value falls back to the default, and it is seeded.
+#[test]
+fn cache_max_bytes_defaults_and_parses() {
+    use crate::gc::uv_cache::DEFAULT_MAX_BYTES;
+    assert_eq!(DEFAULT_MAX_BYTES, 32 * 1024 * 1024 * 1024);
+    let home = tempdir().unwrap();
+    assert_eq!(peek_cache_max_bytes_at(home.path()), DEFAULT_MAX_BYTES);
+    for (doc, want) in [
+        (json!({}), DEFAULT_MAX_BYTES),
+        (json!({"cache": {"max_bytes": 0}}), 0),
+        (json!({"cache": {"max_bytes": 1234}}), 1234),
+        (json!({"cache": {"max_bytes": "9"}}), DEFAULT_MAX_BYTES),
+        (json!({"cache": {"max_bytes": -1}}), DEFAULT_MAX_BYTES),
+        (json!({"cache": {"warn_bytes": 7}}), DEFAULT_MAX_BYTES),
+    ] {
+        assert_eq!(cache_max_bytes_from(&doc), want, "{doc}");
+    }
+    let seeded = seeded_global_settings_document();
+    assert_eq!(seeded["cache"]["max_bytes"], json!(DEFAULT_MAX_BYTES));
+}
+
 #[test]
 fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();
