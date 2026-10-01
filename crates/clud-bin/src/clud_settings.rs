@@ -880,6 +880,76 @@ pub fn worktrees_warn_bytes_from(document: &Value) -> u64 {
         .unwrap_or(crate::gc::worktree_root::DEFAULT_WARN_BYTES)
 }
 
+/// The JSON key path of the human-set safe-rm root override (#1668,
+/// DD-137): `safe_rm.extra_roots`, a list of `{"path", "reason"}` objects.
+pub const SAFE_RM_EXTRA_ROOTS_KEY: &str = "safe_rm.extra_roots";
+
+/// One `safe_rm.extra_roots` entry as written, before any path checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeRmExtraRootEntry {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Lock-free, user-level-only read of `safe_rm.extra_roots` (#1668). Only
+/// `~/.clud/settings.json` is read, never a repo's `.clud/settings.json`: an
+/// agent can edit files in its checkout, so a repo layer would let it widen
+/// its own deletion roots (DD-137). Returns the well-formed entries and one
+/// message per rejected entry; an unreadable file is one message, no entries.
+pub fn peek_safe_rm_extra_roots_at(home: &Path) -> (Vec<SafeRmExtraRootEntry>, Vec<String>) {
+    match read_settings_or_legacy(home) {
+        Ok(document) => safe_rm_extra_roots_from(&document),
+        Err(error) => (
+            Vec::new(),
+            vec![format!(
+                "{SAFE_RM_EXTRA_ROOTS_KEY} ignored: cannot read {}: {error}",
+                settings_path_at(home).display()
+            )],
+        ),
+    }
+}
+
+/// Pure reader for `safe_rm.extra_roots`. An entry without a non-empty
+/// string `path` and a non-empty string `reason` is rejected (not honored)
+/// with a message naming its index and what is missing.
+pub fn safe_rm_extra_roots_from(document: &Value) -> (Vec<SafeRmExtraRootEntry>, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut rejected = Vec::new();
+    let Some(value) = document
+        .get("safe_rm")
+        .and_then(|item| item.get("extra_roots"))
+    else {
+        return (entries, rejected);
+    };
+    let Some(list) = value.as_array() else {
+        rejected.push(format!(
+            "{SAFE_RM_EXTRA_ROOTS_KEY} ignored: must be a list of {{\"path\", \"reason\"}} objects"
+        ));
+        return (entries, rejected);
+    };
+    for (index, item) in list.iter().enumerate() {
+        let text = |key: &str| {
+            item.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let shown = text("path").unwrap_or_else(|| "?".into());
+        match (text("path"), text("reason")) {
+            (Some(path), Some(reason)) => entries.push(SafeRmExtraRootEntry { path, reason }),
+            (None, _) => rejected.push(format!(
+                "{SAFE_RM_EXTRA_ROOTS_KEY}[{index}] ignored: missing a non-empty \"path\""
+            )),
+            (Some(_), None) => rejected.push(format!(
+                "{SAFE_RM_EXTRA_ROOTS_KEY}[{index}] ({shown}) ignored: missing a non-empty \
+                 \"reason\"; every override must say why it exists"
+            )),
+        }
+    }
+    (entries, rejected)
+}
+
 /// `bash.block_cd` as set at the user level (`~/.clud/settings.json`).
 ///
 /// The same file `repo_clud_config` reads as its user layer, so this is a

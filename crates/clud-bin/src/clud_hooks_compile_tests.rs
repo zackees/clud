@@ -208,3 +208,21 @@ fn an_overlay_without_hooks_is_a_no_op() {
 
     assert_eq!(base, before);
 }
+
+#[test]
+fn deletion_safety_fragment_denies_file_tool_edits_of_the_user_settings_file() {
+    // #1668: the safe_rm.extra_roots override lives there; only the user
+    // writes it.
+    let fragment = deletion_safety_fragment();
+    let deny: Vec<&str> = fragment["permissions"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(deny.contains(&"Edit(~/.clud/settings.json)"), "{deny:?}");
+    assert!(
+        deny.iter().any(|rule| rule.starts_with("Bash(")),
+        "{deny:?}"
+    );
+}

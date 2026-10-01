@@ -80,8 +80,9 @@ matched by device/inode at delete time. Sub-agents share the parent session's
 id and environment, so their entries serve the parent.
 
 Built: the store and the consult (slice 1, #1666) and the directory creator
-`safe-mktemp` (slice 2, #1667). Still design: recording single files clud
-creates inside pre-existing directories, and the human override (#1668).
+`safe-mktemp` (slice 2, #1667), and the human override (slice 3, #1668; see
+[below](#override-safe_rmextra_roots-1668)). Still design: recording single
+files clud creates inside pre-existing directories.
 
 - **Store.** The `created` rows live in `data.redb`'s `created_entries` table,
   keyed by `(session id, canonical path)`, each holding kind (`dir`/`file`),
@@ -126,6 +127,53 @@ creates inside pre-existing directories, and the human override (#1668).
   Windows behaves as before, with the refusal saying the identity cannot be
   verified. `safe-mktemp` therefore fails there with exit 2 before creating
   anything, and the agent guidance omits it.
+
+### Override: `safe_rm.extra_roots` (#1668)
+
+Built. The escape hatch DD-135 names for what the ledger cannot cover: a
+human-set list of extra directories, each with a required reason, in the
+**user's** `~/.clud/settings.json` only. A repo's `.clud/settings.json` is
+never read for it, and there is no environment-variable form
+([DD-137](../DESIGN_DECISIONS.md#dd-137-the-safe-rm-root-override-is-user-level-only-and-agents-cannot-write-the-settings-file)).
+To add one, edit the file by hand (agents cannot):
+
+```json
+{
+  "safe_rm": {
+    "extra_roots": [
+      { "path": "/srv/bench-out", "reason": "nightly benchmark output, safe to drop" }
+    ]
+  }
+}
+```
+
+- **Rules.** Entries strictly under an extra root are deletable under the
+  temp-root rules: never the extra root itself, the operand's parent
+  canonicalized first (a symlink that leaves the extra root is judged by its
+  target), and on Unix every existing entry from the extra root down owned by
+  the caller. Session roots and temp roots are checked first; the override
+  applies only to what they refuse.
+- **Load.** Each `safe-rm` call reads the list (`rm_tool::extra_roots::load`).
+  An entry is dropped, and a `safe-rm: safe_rm.extra_roots[...] ignored: ...`
+  line is printed on every call, when it has no non-empty `reason` or `path`,
+  is relative, does not resolve to an existing directory, is a filesystem
+  root, is HOME or an ancestor of it, holds `.git`, or (Unix) is not owned by
+  the caller. A directory inside HOME is allowed.
+- **Audit.** A deletion allowed only by the override records
+  `safe_rm.extra_roots override <root>: <reason>` as the path's `reason` in
+  the per-call rm log, and writes the reason into the GC delete audit
+  (`gc-audit.jsonl`, site `rm-tool.trash-override` or `rm-tool.purge`).
+- **Agents cannot set it.** The command-scan hook
+  (`block_bad_cmd_rm_override`) refuses any shell command that names
+  `~/.clud/settings.json` (or the `extra_roots` key) unless every statement is
+  a plain read (`cat`, `jq`, `grep`, ...) with no output redirection beyond
+  `/dev/null`: redirections, `tee`, `sed -i`, `cp`/`mv`, `python -c`,
+  `clud settings ...` and the like are refused. It runs before the per-call
+  `CLUD_ALLOW_ALL_CMDS=1` opt-out, which the agent types itself. Claude also
+  gets a generated `Edit(~/.clud/settings.json)` deny, which covers its file
+  tools. `clud settings` (the TUI) does not expose the key. Limits: a path
+  computed at run time (decoded, or assembled from pieces) is not seen by the
+  text scan, and Codex has no file-tool deny.
 
 Grind profiles keep their narrower scope: `block_bad_cmd_grind_caps` still
 limits integrators to their checkout and workers/reviewers to their task
