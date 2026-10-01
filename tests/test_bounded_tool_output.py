@@ -26,7 +26,8 @@ CAPPED = {
 def _load(name: str, path: Path):
     mod_name = f"clud_test_bounded_{name}"
     spec = importlib.util.spec_from_file_location(mod_name, path)
-    assert spec and spec.loader
+    assert spec
+    assert spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -34,7 +35,7 @@ def _load(name: str, path: Path):
 
 
 @pytest.fixture(autouse=True)
-def _temp_home(tmp_path, monkeypatch):
+def temp_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -48,14 +49,14 @@ def tool(request):
     return _load(request.param, CAPPED[request.param])
 
 
-def test_small_output_is_complete_and_byte_identical(tool, capsys, _temp_home):
+def test_small_output_is_complete_and_byte_identical(tool, capsys, temp_home):
     text = "line one\nline two ünïcode\n" * 10
     tool.emit_bounded(text, "probe")
     assert capsys.readouterr().out == text + "\n"
-    assert not (_temp_home / ".clud").exists()
+    assert not (temp_home / ".clud").exists()
 
 
-def test_oversized_output_truncates_with_notice_and_artifact(tool, capsys, _temp_home):
+def test_oversized_output_truncates_with_notice_and_artifact(tool, capsys, temp_home):
     text = "".join(f"row {i:06d} {'x' * 60}\n" for i in range(2000))
     assert len(text.encode()) > 32 * 1024
     tool.emit_bounded(text, "probe")
@@ -67,7 +68,7 @@ def test_oversized_output_truncates_with_notice_and_artifact(tool, capsys, _temp
     artifact = Path(match.group(1).strip())
     assert artifact.is_file()
     assert artifact.read_text(encoding="utf-8") == text
-    assert (_temp_home / ".clud" / "tmp") in artifact.parents
+    assert (temp_home / ".clud" / "tmp") in artifact.parents
 
 
 def test_artifact_write_failure_still_truncates(tool, capsys, tmp_path, monkeypatch):
