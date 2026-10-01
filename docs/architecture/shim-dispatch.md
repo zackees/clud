@@ -2,13 +2,13 @@
 
 `clud-shim` is the personality of the one `clud` binary behind every PATH alias
 clud installs: `python` and `python3` in `~/.clud/state/shims`, and `rm`, `gh`, `git`, <!-- python-name-lint: allow -->
-`safe-rm` in `~/.clud/state/rm-shim`. Each alias is a hardlink, symlink or copy of `clud`
+`safe-rm`, `safe-mktemp` in `~/.clud/state/rm-shim`. Each alias is a hardlink, symlink or copy of `clud`
 (hardlink first; [DD-121](../DESIGN_DECISIONS.md#dd-121-helper-executables-are-argv0-aliases-of-the-one-clud-binary))
 that `multicall::maybe_run` routes here by argv\[0\] before any other startup
 work. The code is `shim_main.rs` and `shim_main/dispatch.rs`. This doc owns the contract every alias shares (#1546). What an
 alias does *inside* a session is owned elsewhere:
 [rm-protection.md](rm-protection.md) for `rm`, [rm-tools.md](rm-tools.md) for
-`safe-rm`, [gh-watch-shim.md](gh-watch-shim.md) for `gh`, and
+`safe-rm` and `safe-mktemp`, [gh-watch-shim.md](gh-watch-shim.md) for `gh`, and
 [git-gh-telemetry-shim.md](git-gh-telemetry-shim.md) for the `git` / `gh`
 telemetry pass-through.
 
@@ -51,8 +51,9 @@ Dispatch owns three things:
    only failure is `127` with one `<name>: command not found` line when no
    real binary exists.
 
-A `Native` alias (`safe-rm`) is a clud command, not a relay. It runs its own
-out-of-session mode: roots fall back to the git checkout or the cwd.
+A `Native` alias (`safe-rm`, `safe-mktemp`) is a clud command, not a relay. It
+runs its own out-of-session mode: `safe-rm`'s roots fall back to the git
+checkout or the cwd, and `safe-mktemp` without a session id creates nothing.
 
 Handlers receive a validated `Session` and never read a session key. The
 `session_contract_is_owned_by_dispatch` test in `shim_main.rs` fails if a

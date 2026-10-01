@@ -138,7 +138,7 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
         ShimKind::Git => target(registry::GIT_TARGET_KEY).map(|target| Session::Git { target }),
         ShimKind::Rm => session_dir.map(|_| Session::Rm),
         // Native: never validated here.
-        ShimKind::SafeRm => None,
+        ShimKind::SafeRm | ShimKind::SafeMktemp => None,
     }
 }
 
@@ -172,6 +172,7 @@ fn handle(session: Session, args: &[OsString]) -> i32 {
 fn native(kind: ShimKind, args: &[OsString]) -> i32 {
     match kind {
         ShimKind::SafeRm => super::safe_rm::run(args),
+        ShimKind::SafeMktemp => crate::safe_mktemp::run(args),
         // A registry test keeps every other kind `Passthrough`.
         ShimKind::Python | ShimKind::Gh | ShimKind::Git | ShimKind::Rm => {
             unreachable!("{kind:?} is not a native shim")

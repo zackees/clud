@@ -772,9 +772,7 @@ impl Context {
             .ok()
             .map(|state| state.join("logs").join("rm"));
         let roots_env = std::env::var_os(ROOTS_ENV);
-        let session_id = ["CLUD_SESSION_ID", crate::grind_facts::SESSION_ENV]
-            .iter()
-            .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()));
+        let session_id = session_id_from_env();
         let source = ledger::DaemonLedger {
             state_dir: crate::daemon::default_state_dir().ok(),
             session_id: session_id.clone(),
@@ -798,6 +796,15 @@ impl Context {
             roots,
         ))
     }
+}
+
+/// The session id the creation ledger is keyed by: `CLUD_SESSION_ID`, else
+/// Claude Code's own session id. Sub-agents inherit the parent's env, so they
+/// resolve the same id (#1667).
+pub fn session_id_from_env() -> Option<String> {
+    ["CLUD_SESSION_ID", crate::grind_facts::SESSION_ENV]
+        .iter()
+        .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()))
 }
 
 fn home_dir() -> Option<PathBuf> {

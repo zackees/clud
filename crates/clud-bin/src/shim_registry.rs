@@ -70,6 +70,8 @@ pub enum ShimKind {
     Git,
     Rm,
     SafeRm,
+    /// `safe-mktemp` (#1667): the only creation-ledger writer.
+    SafeMktemp,
 }
 
 /// What a shim does without a valid session.
@@ -146,6 +148,13 @@ pub const SHIMS: &[ShimSpec] = &[
     ShimSpec {
         name: crate::rm_tool::COMMAND,
         kind: ShimKind::SafeRm,
+        session_keys: &[],
+        fallback: Fallback::Native,
+        dirs: &[ShimDir::Interpreter, ShimDir::Session],
+    },
+    ShimSpec {
+        name: crate::safe_mktemp::COMMAND,
+        kind: ShimKind::SafeMktemp,
         session_keys: &[],
         fallback: Fallback::Native,
         dirs: &[ShimDir::Interpreter, ShimDir::Session],
@@ -458,11 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn only_safe_rm_has_a_native_mode() {
+    fn only_clud_commands_have_a_native_mode() {
         for spec in SHIMS {
             assert_eq!(
                 spec.fallback == Fallback::Native,
-                spec.kind == ShimKind::SafeRm,
+                matches!(spec.kind, ShimKind::SafeRm | ShimKind::SafeMktemp),
                 "{}",
                 spec.name
             );

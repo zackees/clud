@@ -111,10 +111,18 @@ pub fn generate(rules: &[Rule]) -> Generated {
         }
     }
     let alias = safe_aliases.first().copied().unwrap_or("safe-rm");
-    let instructions = format!(
+    let mut instructions = format!(
         "Delete with {alias} (moves to trash; limited to this session's allowed locations). {} are unavailable.",
         unavailable.join(", ")
     );
+    // #1667: the creation ledger needs a file identity, so `safe-mktemp`
+    // refuses on Windows and the guidance is not offered there.
+    if cfg!(unix) {
+        instructions.push_str(&format!(
+            " Make scratch dirs outside those locations with `{} <path>` so `{alias} -r` can remove them.",
+            crate::safe_mktemp::COMMAND
+        ));
+    }
     Generated {
         removers,
         claude_denies,
@@ -298,6 +306,10 @@ mod tests {
         assert!(generated.safe_aliases.contains(&"safe-wipe"));
         assert!(generated.instructions.contains("safe-wipe"));
         assert!(generated.instructions.contains("wipe"));
+        assert_eq!(
+            generated.instructions.contains("`safe-mktemp <path>`"),
+            cfg!(unix)
+        );
         assert_eq!(redirect_for_in(&rules, "wipe"), Some(("safe-wipe", None)));
         assert_eq!(redirect_for_in(&rules, "rm"), None);
     }

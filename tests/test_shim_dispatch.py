@@ -96,6 +96,7 @@ def test_registry_lists_every_alias_the_session_installs() -> None:
     assert "git" in PASSTHROUGH
     assert "rm" in PASSTHROUGH
     assert "safe-rm" in NATIVE
+    assert "safe-mktemp" in NATIVE
 
 
 @pytest.mark.parametrize("name", PASSTHROUGH)
@@ -176,8 +177,17 @@ def test_native_shim_runs_its_native_mode_outside_a_session(tmp_path: Path, name
     victim = work / "victim.txt"
     victim.write_text("keep", encoding="utf-8")
     env = _base_env(tmp_path, shim.parent)
-    result = _run([str(shim), "--dry-run", str(victim)], env, work)
-    assert result.returncode == 0, result
+    env.pop("CLUD_SESSION_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    if name == "safe-mktemp":
+        # No session id: the ledger is per session, so nothing is created.
+        result = _run([str(shim), str(work / "scratch")], env, work)
+        assert result.returncode == 2, result
+        assert "session id" in result.stderr
+        assert not (work / "scratch").exists()
+    else:
+        result = _run([str(shim), "--dry-run", str(victim)], env, work)
+        assert result.returncode == 0, result
     assert victim.exists()
     assert not log.exists(), "a native shim never relays"
 

@@ -63,11 +63,13 @@ data there for 72 hours ([DD-134](../DESIGN_DECISIONS.md#dd-134-devshm-is-a-safe
 **Agent guidance.** Write scratch data under the session temp dir; use
 `/dev/shm` only when the work must stay off disk (benchmarks), and clean it up
 with `safe-rm -r`. Do not point the scratchpad at tmpfs through a symlink: its
-canonical form would leave the roots. A path a session wrote anywhere else is
+canonical form would leave the roots. Scratch that must live elsewhere is made
+with `safe-mktemp <path>` (Unix; see the creation ledger below), so `safe-rm -r`
+can remove it later. Any other path a session wrote outside the roots is
 still refused; the agent leaves it and reports the exact path to the user. Do
 not bypass `safe-rm` with another deletion route.
 
-### Creation ledger (implemented slice 1, #1666)
+### Creation ledger
 
 [DD-135](../DESIGN_DECISIONS.md#dd-135-a-creation-ledger-for-safe-rm-is-hybrid-daemon-held-and-written-only-by-clud-creating-the-path)
 records the decision: a hybrid ledger (directories clud created are deletable
@@ -77,8 +79,9 @@ registry, written only by a clud helper that performed the create itself, and
 matched by device/inode at delete time. Sub-agents share the parent session's
 id and environment, so their entries serve the parent.
 
-Slice 1 (#1666) builds the store and the consult; nothing writes rows yet. The
-creating helper is #1667 and the human override #1668.
+Built: the store and the consult (slice 1, #1666) and the directory creator
+`safe-mktemp` (slice 2, #1667). Still design: recording single files clud
+creates inside pre-existing directories, and the human override (#1668).
 
 - **Store.** The `created` rows live in `data.redb`'s `created_entries` table,
   keyed by `(session id, canonical path)`, each holding kind (`dir`/`file`),
@@ -102,10 +105,27 @@ creating helper is #1667 and the human override #1668.
   entry names what changed. A recorded directory swapped for a symlink is
   refused, and a path through such a symlink canonicalizes away from the row,
   so its target is never reached.
+- **Writer: `safe-mktemp <path>`** (#1667,
+  [DD-136](../DESIGN_DECISIONS.md#dd-136-safe-mktemp-is-the-only-ledger-writer-and-undoes-its-mkdir-when-the-insert-fails)).
+  A multicall name of `clud` (`crate::safe_mktemp`), installed beside
+  `safe-rm`, and the only caller of `gc_client_insert_created`; a source-scan
+  test keeps it that way, and no CLI form records an arbitrary path. It makes
+  exactly one directory with an exclusive `mkdir` (mode 0700): an existing
+  path of any kind, including a symlink, fails with nothing created or
+  recorded, and a missing parent fails (parents are never created, so never
+  recorded). It opens the new directory `O_NOFOLLOW`, requires it to be an
+  empty directory the caller owns whose handle identity still matches the
+  path, records that device/inode with the session id and `CLUD_RM_ROLE`
+  (default `agent`), and prints the canonical path. If the daemon insert
+  fails, it removes the directory again (only while it is still that empty
+  directory) and exits 1; with no session id it creates nothing and exits 2.
+  The generated agent guidance (`deletion_rules.rs`) tells agents to make
+  out-of-roots scratch with it.
 - **Windows.** No file identity is available there without new unsafe code,
   so the device/inode check is Unix-only and the ledger refuses on doubt:
   Windows behaves as before, with the refusal saying the identity cannot be
-  verified.
+  verified. `safe-mktemp` therefore fails there with exit 2 before creating
+  anything, and the agent guidance omits it.
 
 Grind profiles keep their narrower scope: `block_bad_cmd_grind_caps` still
 limits integrators to their checkout and workers/reviewers to their task

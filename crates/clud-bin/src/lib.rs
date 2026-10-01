@@ -149,3 +149,4 @@ pub mod deletion_policy;
 pub mod deletion_rules;
 pub mod rm_guard;
 pub mod rm_tool;
+pub mod safe_mktemp;
