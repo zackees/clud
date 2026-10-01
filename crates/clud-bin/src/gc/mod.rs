@@ -37,8 +37,8 @@ pub use reconcile::{
 };
 pub(crate) use reconcile::{reconcile_registered_dir, watch_event_may_affect_registration};
 pub use registry::{
-    default_data_db_path, GcError, InsertInput, Registry, RepoVisit, TrackedEntry, ENV_DATA_DB,
-    EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND,
+    default_data_db_path, CreatedEntry, CreatedKind, GcError, InsertInput, Registry, RepoVisit,
+    TrackedEntry, ENV_DATA_DB, EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND,
 };
 pub use scanner::watch_roots_for_current_repo;
 

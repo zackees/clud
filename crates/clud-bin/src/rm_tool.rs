@@ -1436,6 +1436,9 @@ fn is_ram_backed(_: &Path) -> bool {
 #[path = "rm_tool_clone.rs"]
 mod clone;
 
+#[path = "rm_tool_ledger.rs"]
+pub mod ledger;
+
 #[cfg(test)]
 #[path = "rm_tool_tests.rs"]
 mod tests;

@@ -143,6 +143,47 @@ pub struct RepoVisit {
     pub last_cwd: String,
 }
 
+/// Whether a creation-ledger row records a directory or a single file
+/// (DD-135's hybrid granularity, #1666).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CreatedKind {
+    /// clud created the directory: everything under it is the session's.
+    Dir,
+    /// clud created only this file, inside a directory it did not create.
+    File,
+}
+
+impl CreatedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dir => "dir",
+            Self::File => "file",
+        }
+    }
+}
+
+/// One creation-ledger row (the `created` row kind, #1666): a path a clud
+/// helper created for `session_id`, with the identity it had at creation.
+/// `dev`/`ino`/`uid` are `None` where the platform has no stable identity
+/// available without new unsafe code (Windows); `safe-rm` then refuses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreatedEntry {
+    pub session_id: String,
+    /// Canonical absolute path.
+    pub path: String,
+    pub kind: CreatedKind,
+    /// The creating role (`agent`, `grind-worker`, ...).
+    pub role: String,
+    pub created_unix: i64,
+    #[serde(default)]
+    pub dev: Option<u64>,
+    #[serde(default)]
+    pub ino: Option<u64>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+}
+
 /// `redb`-backed registry of tracked entries.
 ///
 /// `redb::Database` serializes writers at the file level, so we hold a
