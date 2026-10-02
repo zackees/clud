@@ -1649,6 +1649,47 @@ def test_a14_cancel_scope_is_the_failing_workflow_at_or_below_the_run(
     assert scoped_cancel(watcher, monkeypatch, case, verdict.failing_run_ids) == [198, 200]
 
 
+# ---- #1710: a concurrency-superseded run is not the PR's result ----
+#
+# zackees/bosn#348: `opened` + `labeled` started two runs of ci.yml in the
+# same second; concurrency cancelled the one with the HIGHER id and number.
+
+
+def test_1710_superseded_run_failures_wait_on_the_live_lower_id_run(watcher) -> None:
+    verdict = judge(watcher, load_case("superseded", "P1"))
+    assert verdict.state == "pending"
+    assert verdict.failing == []
+    assert verdict.failing_run_ids == {}
+
+
+def test_1710_live_lower_id_run_green_is_green_and_cancels_nothing(
+    watcher, tmp_path, monkeypatch
+) -> None:
+    case = load_case("superseded", "P2")
+    assert judge(watcher, case).state == "pass"
+    polls = [load_case("superseded", "P1"), case]
+    code, _polls, cancels = run_watch(watcher, tmp_path, monkeypatch, polls, case["required"])
+    assert code == watcher.EXIT_GREEN
+    assert cancels == []
+
+
+def test_1710_failures_while_the_concurrency_cancel_is_in_flight_are_pending(watcher) -> None:
+    verdict = judge(watcher, load_case("superseded", "P3"))
+    assert verdict.state == "pending"
+    assert verdict.failing == []
+
+
+def test_1710_cancel_never_takes_a_same_second_sibling_of_the_failing_run(
+    watcher, monkeypatch
+) -> None:
+    case = load_case("superseded", "P4")
+    verdict = judge(watcher, case)
+    assert verdict.state == "fail"
+    assert verdict.failing_run_ids == {CI_YML: 36970308306}
+    # 36970308260 has a lower id but the same created_at: not provably older.
+    assert scoped_cancel(watcher, monkeypatch, case, verdict.failing_run_ids) == [36970308306]
+
+
 # ---- #1449 regression ----
 
 

@@ -897,7 +897,8 @@
     "status": "in_progress",
     "conclusion": null,
     "check_suite_id": 50198,
-    "html_url": "https://github.com/zackees/clud/actions/runs/198"
+    "html_url": "https://github.com/zackees/clud/actions/runs/198",
+    "created_at": "2026-09-30T10:00:00Z"
    },
    {
     "id": 200,
@@ -911,7 +912,8 @@
     "status": "in_progress",
     "conclusion": null,
     "check_suite_id": 50200,
-    "html_url": "https://github.com/zackees/clud/actions/runs/200"
+    "html_url": "https://github.com/zackees/clud/actions/runs/200",
+    "created_at": "2026-09-30T10:05:00Z"
    },
    {
     "id": 201,
@@ -925,7 +927,8 @@
     "status": "queued",
     "conclusion": null,
     "check_suite_id": 50201,
-    "html_url": "https://github.com/zackees/clud/actions/runs/201"
+    "html_url": "https://github.com/zackees/clud/actions/runs/201",
+    "created_at": "2026-09-30T10:06:00Z"
    },
    {
     "id": 300,
@@ -939,7 +942,8 @@
     "status": "in_progress",
     "conclusion": null,
     "check_suite_id": 50300,
-    "html_url": "https://github.com/zackees/clud/actions/runs/300"
+    "html_url": "https://github.com/zackees/clud/actions/runs/300",
+    "created_at": "2026-09-30T10:05:00Z"
    }
   ]
  }
