@@ -32,6 +32,9 @@ before exiting with the test-requested code.
   - `--mock-sleep-ms <ms>` — sleep before emitting the JSON report.
   - `--mock-read-stdin-ms <ms>` — read stdin for up to N ms even on a TTY;
     puts the TTY into raw mode on Unix so non-newline bytes flush.
+  - `--mock-read-stdin-until <text>` — with `--mock-read-stdin-ms`, stop
+    reading as soon as the captured bytes contain `<text>`; the ms value is
+    then only a ceiling.
   - `--mock-stdin-raw-to <path>` — also dump captured stdin bytes to a file.
   - `--mock-report-file <path>` — duplicate the JSON report to a file (useful
     when stdout is owned by a PTY).

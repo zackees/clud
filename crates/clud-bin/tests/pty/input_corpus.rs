@@ -30,7 +30,8 @@ const CORPUS: &[(&str, &[u8])] = &[
     ("sgr mouse press/release", b"\x1b[<0;10;5M\x1b[<0;10;5m"),
     ("sgr mouse motion", b"\x1b[<35;31;18M\x1b[<35;33;20M"),
     ("sgr mouse wheel", b"\x1b[<64;5;5M\x1b[<65;5;5M"),
-    ("focus in/out", b"\x1b[I\x1b[O"),
+    ("focus in", b"\x1b[I"),
+    ("focus out", b"\x1b[O"),
     ("arrows", b"\x1b[A\x1b[B\x1b[C\x1b[D"),
     ("modified arrow", b"\x1b[1;5C"),
     ("ss3 function key", b"\x1bOP"),
@@ -47,14 +48,18 @@ const CORPUS: &[(&str, &[u8])] = &[
     ("emoji", "\u{1f600}".as_bytes()),
 ];
 
+/// Sent after the corpus; mock-agent stops reading once it sees it.
+const END: &str = "<<END>>";
+
 /// The corpus as one stream, with a visible separator so a mismatch names
-/// the entry it is in.
+/// the entry it is in, then [`END`].
 fn corpus_stream() -> Vec<u8> {
     let mut stream = Vec::new();
     for (_, bytes) in CORPUS {
         stream.extend_from_slice(bytes);
         stream.push(b'|');
     }
+    stream.extend_from_slice(END.as_bytes());
     stream
 }
 
@@ -80,6 +85,7 @@ fn chunks(chunking: Chunking) -> Vec<Vec<u8>> {
                 chunk.push(b'|');
                 chunk
             })
+            .chain(std::iter::once(END.as_bytes().to_vec()))
             .collect(),
         Chunking::PerByte => stream.chunks(1).map(<[u8]>::to_vec).collect(),
         Chunking::Stride3 => stream.chunks(3).map(<[u8]>::to_vec).collect(),
@@ -115,11 +121,11 @@ impl clud::session::InteractiveHooks for NoHooks {
     }
 }
 
-/// The pause between two chunks of input, longer than the pump's 5 ms idle
-/// flush (`INPUT_PENDING_FLUSH`): input that arrives in pieces this far apart
-/// (a slow link, a loaded machine, Windows' ~15 ms sleep granularity) must
-/// still reach the child whole. A shorter gap passed on Linux and failed
-/// only intermittently on Windows (#1717).
+/// The pause between two chunks of input, longer than the 5 ms after which a
+/// held lone Esc is released (`HUMAN_PREFIX_FLUSH`): input that arrives in
+/// pieces this far apart (a slow link, a loaded machine, Windows' ~15 ms
+/// timer granularity) must still reach the child whole. Releasing a partial
+/// report after that same 5 ms lost it on Windows (#1717).
 const INPUT_GAP: Duration = Duration::from_millis(10);
 
 /// A stdin that returns one prepared chunk per `read`, like a terminal.
@@ -152,8 +158,12 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
     let ready = tmp.path().join("ready");
     let argv = vec![
         agent.to_string_lossy().to_string(),
+        // A ceiling only: the read ends at END. One byte at a time, a loaded
+        // macOS runner overshot a fixed 8 s window.
         "--mock-read-stdin-ms".to_string(),
-        "8000".to_string(),
+        "45000".to_string(),
+        "--mock-read-stdin-until".to_string(),
+        END.to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
         "--mock-ready-file".to_string(),
@@ -212,7 +222,7 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
 /// through ConPTY too, so this is the platform's behaviour, not clud's.
 fn expected_for(name: &str, bytes: &[u8], chunking: Chunking) -> Vec<Vec<u8>> {
     let intact = through_pty_input(bytes);
-    if cfg!(windows) && name == "focus in/out" {
+    if cfg!(windows) && name.starts_with("focus") {
         return match chunking {
             Chunking::PerByte => vec![intact, Vec::new()],
             Chunking::PerEntry | Chunking::Stride3 => vec![Vec::new()],
@@ -245,7 +255,12 @@ fn first_damaged_entry(got: &[u8], chunking: Chunking) -> Option<String> {
             String::from_utf8_lossy(shown)
         ));
     }
-    None
+    (rest != END.as_bytes()).then(|| {
+        format!(
+            "after the corpus: expected {END:?}, child read {:?}",
+            String::from_utf8_lossy(rest)
+        )
+    })
 }
 
 fn assert_round_trip(path: Path, chunking: Chunking) {

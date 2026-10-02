@@ -67,6 +67,7 @@ fn main() {
     let mut write_marker_on_iter: u32 = 0;
     let mut stdin_raw_to: Option<PathBuf> = None;
     let mut ready_file: Option<PathBuf> = None;
+    let mut read_stdin_until: Option<Vec<u8>> = None;
     let mut pty_size_report_to: Option<PathBuf> = None;
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
@@ -165,6 +166,13 @@ fn main() {
         if arg == "--mock-report-file" {
             if let Some(path) = args.get(i + 1) {
                 report_file = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-read-stdin-until" {
+            if let Some(marker) = args.get(i + 1).filter(|marker| !marker.is_empty()) {
+                read_stdin_until = Some(marker.as_bytes().to_vec());
             }
             skip_next = true;
             continue;
@@ -411,7 +419,11 @@ fn main() {
     // Read stdin: either timed read (--mock-read-stdin-ms) or pipe-mode read
     let stdin_bytes: Option<Vec<u8>> = if read_stdin_ms > 0 {
         trace("stdin read start");
-        let bytes = read_stdin_timed(read_stdin_ms, ready_file.as_deref());
+        let bytes = read_stdin_timed(
+            read_stdin_ms,
+            ready_file.as_deref(),
+            read_stdin_until.as_deref(),
+        );
         trace(&format!(
             "stdin read done: {} bytes",
             bytes.as_ref().map_or(0, Vec::len)
@@ -1027,7 +1039,14 @@ fn set_stdin_raw_if_tty() {}
 
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
-fn read_stdin_timed(timeout_ms: u64, ready_file: Option<&Path>) -> Option<Vec<u8>> {
+/// Read stdin for up to `timeout_ms` after the input mode is final, or until
+/// the collected bytes contain `until` (`--mock-read-stdin-until`), so a test
+/// whose input takes a variable time to arrive needs no worst-case window.
+fn read_stdin_timed(
+    timeout_ms: u64,
+    ready_file: Option<&Path>,
+    until: Option<&[u8]>,
+) -> Option<Vec<u8>> {
     // Real TUI children (e.g., codex Ink) put their PTY slave into raw mode
     // before reading. The mock-agent must do the same when its stdin is a PTY
     // slave, otherwise the kernel's canonical line discipline holds non-
@@ -1068,7 +1087,16 @@ fn read_stdin_timed(timeout_ms: u64, ready_file: Option<&Path>) -> Option<Vec<u8
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {
-            Ok(data) => collected.extend(data),
+            Ok(data) => {
+                collected.extend(data);
+                if until.is_some_and(|marker| {
+                    collected
+                        .windows(marker.len())
+                        .any(|window| window == marker)
+                }) {
+                    break;
+                }
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
