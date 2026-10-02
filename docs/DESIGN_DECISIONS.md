@@ -435,7 +435,8 @@ Schema (v1 activation shape):
 The parser accepts both forms. Direct `rust` keys win over `optimize.rust`
 keys inside the same file; repo-level values still win over user-level values
 per field. Omitting the version is the rolling-latest policy; `"latest"` is an
-equivalent case-insensitive alias. A numeric version remains an exact pin.
+equivalent case-insensitive alias. A numeric version is a minimum, not an
+exact pin ([DD-149](#dd-149-a-configured-soldr-version-is-a-minimum-a-launch-never-downgrades-soldr)).
 
 **Rationale:**
 
@@ -6078,3 +6079,31 @@ bounded and has not been observed: all 830 intact pointers on the reporting
 host validate. Removing pointer files is a deliberate, narrow exception to
 uv's "never modify the cache" guidance. It applies only to pointers whose
 target is already unusable, and only under uv's own locks.
+
+## DD-149: a configured soldr version is a minimum; a launch never downgrades soldr
+
+**Context:** DD-014 made a numeric `rust.version` / `optimize.rust.soldr_version`
+an exact pin. `soldr_activate` reconciled it on every launch: whenever the
+installed version differed from the pin it ran
+`uv tool install --force soldr==<pin>`. A repository that still carried an old
+pin (`running-process` pins `0.7.11`) therefore downgraded the user's tool on
+every `clud` launch in that checkout: the uv receipt was rewritten to
+`==0.7.11` and `~/.local/bin/soldr` relinked, replacing a deliberately
+installed 0.9.x. 0.7.11 has no `soldr prepare`, and a tool version that
+differs from the running soldr broker fails every compile session ("broker
+refused the daemon route: backend spawn failed"). The exact `==` receipt also
+stopped a later `uv tool upgrade soldr` from ever moving forward.
+
+**Decision:** the version setting is a floor. `soldr_action` decides:
+soldr missing → install; installed and older than the minimum → upgrade;
+equal, newer, or unreadable → leave it alone. The minimum is the configured
+version raised to `MIN_SOLDR_SHIMS_VERSION` (clud needs `soldr shims`), and
+installs use `soldr>=<minimum>`, so uv resolves the newest release and records
+a floor in its receipt. The unpinned (rolling latest, DD-120) daily
+`uv tool upgrade soldr` is unchanged; it only moves forward. clud bakes in no
+blessed soldr version beyond the shims floor, per DD-120.
+
+**Consequences:** a stale repo pin can no longer break a newer soldr; at worst
+it is a no-op. A repo cannot hold contributors on an *older* soldr through
+clud any more; doing that needs the repo's own toolchain pin, not clud's
+launcher.

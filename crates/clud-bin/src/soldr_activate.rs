@@ -7,8 +7,10 @@
 //! 1. [`crate::repo_clud_config::discover_effective_clud_config`] merges
 //!    user-level `~/.clud/settings.json` under repo-level
 //!    `<repo-root>/.clud/settings.json` (repo wins per-field).
-//! 2. If `rust.install` is `true`, install a missing soldr, reconcile an
-//!    explicit version pin, or periodically refresh the rolling latest policy.
+//! 2. If `rust.install` is `true`, install a missing soldr, upgrade one older
+//!    than the configured minimum (a version setting is a floor, never an
+//!    exact pin: a newer soldr is never downgraded), or periodically refresh
+//!    the rolling latest policy.
 //! 3. If `rust.use_soldr` is `true`, spawn `soldr shims --json` and
 //!    capture the JSON.
 //! 4. Prepend the JSON's `path_entry` to `PATH` in-process. Every
@@ -26,7 +28,7 @@
 //! `rust.install` is `true` (default) and soldr is missing, this module
 //! attempts to install it via `uv tool install soldr` (preferred) or
 //! `pip install --user soldr` (fallback), honoring the optional
-//! `rust.version` pin. The install is **best-effort** — a failure
+//! `rust.version` minimum. The install is **best-effort** — a failure
 //! engages the same warn-and-continue contract above.
 
 use crate::repo_clud_config::{discover_effective_clud_config, RepoCludConfig};
@@ -105,45 +107,36 @@ pub fn activate_soldr_shims_if_requested() {
 /// [`activate_soldr_shims_if_requested`] but takes the resolved config
 /// directly so tests can stub discovery.
 fn activate_with_config(cfg: &RepoCludConfig) {
-    // First probe: does `soldr` exist on PATH?
-    let soldr_was_present = which::which("soldr").is_ok();
-    if !soldr_was_present {
-        if cfg.rust.install {
-            match install_soldr_on_demand(cfg.rust.version.as_deref(), false) {
-                Ok(()) => {
-                    // Install succeeded; fall through to the shims invocation.
-                }
-                Err(reason) => {
-                    verbose_eprintln!(
-                        "clud: failed to install soldr automatically: {reason}; .clud/settings.json directive ignored"
-                    );
-                    return;
-                }
-            }
-        } else {
+    // First probe: is soldr installed, and is it at least the minimum?
+    // A pin is a floor, never an exact target: a launch must never rewrite
+    // a newer soldr the user installed (it downgraded 0.9.x to a repo's
+    // 0.7.11 pin, which lacks `prepare` and broke the running broker).
+    let installed = probe_installed_soldr();
+    let minimum = Some(soldr_minimum(cfg.rust.version.as_deref()));
+    match soldr_action(installed, minimum) {
+        SoldrAction::Install if !cfg.rust.install => {
             verbose_eprintln!(
                 "clud: soldr not found on PATH and install is disabled; .clud/settings.json directive ignored"
             );
             return;
         }
-    } else if cfg.rust.install {
-        if let Some(version) = cfg.rust.version.as_deref() {
-            let requested = parse_first_version_triple(version);
-            let installed = installed_soldr_version().ok();
-            if requested.is_none() || requested != installed {
-                if let Err(reason) = install_soldr_on_demand(Some(version), true) {
-                    verbose_eprintln!(
-                        "clud: failed to reconcile soldr {version}: {reason}; continuing with the installed soldr"
-                    );
-                }
-            }
-        } else if claim_latest_refresh(SystemTime::now()) {
-            if let Err(reason) = upgrade_soldr_to_latest() {
+        SoldrAction::Install => {
+            if let Err(reason) = install_soldr_on_demand(minimum, false) {
                 verbose_eprintln!(
-                    "clud: failed to refresh rolling-latest soldr: {reason}; continuing with the installed soldr"
+                    "clud: failed to install soldr automatically: {reason}; .clud/settings.json directive ignored"
+                );
+                return;
+            }
+        }
+        SoldrAction::Upgrade if cfg.rust.install => {
+            if let Err(reason) = install_soldr_on_demand(minimum, true) {
+                verbose_eprintln!(
+                    "clud: failed to upgrade soldr to the minimum: {reason}; continuing with the installed soldr"
                 );
             }
         }
+        SoldrAction::Keep => refresh_rolling_latest(cfg),
+        SoldrAction::Upgrade => {}
     }
 
     // Second probe: ask soldr for the shim dir.
@@ -355,14 +348,84 @@ fn prepend_path_entry(path_entry: &Path) {
     }
 }
 
-/// Attempt to install soldr via `uv tool install soldr` (preferred) or
-/// `pip install --user soldr` (fallback). Honors the optional pinned
-/// `version` (e.g. `"0.7.55"` becomes `soldr==0.7.55`).
+/// What soldr looks like on this machine before clud touches it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstalledSoldr {
+    /// `soldr` is not on PATH.
+    Missing,
+    /// `soldr` is on PATH but `soldr --version` gave no usable version.
+    Unreadable,
+    At(VersionTriple),
+}
+
+/// What a launch does to the installed soldr.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SoldrAction {
+    Install,
+    Upgrade,
+    Keep,
+}
+
+fn probe_installed_soldr() -> InstalledSoldr {
+    if which::which("soldr").is_err() {
+        return InstalledSoldr::Missing;
+    }
+    installed_soldr_version()
+        .map(InstalledSoldr::At)
+        .unwrap_or(InstalledSoldr::Unreadable)
+}
+
+/// The version decision. A configured version is a **minimum**: install
+/// when missing, upgrade when older, and otherwise leave the user's soldr
+/// alone -- a newer one is never downgraded, and one whose version cannot
+/// be read is never clobbered.
+fn soldr_action(installed: InstalledSoldr, minimum: Option<VersionTriple>) -> SoldrAction {
+    match (installed, minimum) {
+        (InstalledSoldr::Missing, _) => SoldrAction::Install,
+        (InstalledSoldr::At(have), Some(min)) if have < min => SoldrAction::Upgrade,
+        _ => SoldrAction::Keep,
+    }
+}
+
+/// The effective minimum: the configured version, raised to the floor clud
+/// itself needs (`soldr shims`). `None`, `"latest"` and an unparseable
+/// value all mean "just the shims floor".
+fn soldr_minimum(version: Option<&str>) -> VersionTriple {
+    let requested = version.and_then(parse_first_version_triple);
+    requested.map_or(MIN_SOLDR_SHIMS_VERSION, |v| v.max(MIN_SOLDR_SHIMS_VERSION))
+}
+
+/// Once a day, move an unpinned soldr to the newest release. `uv tool
+/// upgrade` only moves forward, so this never downgrades either.
+fn refresh_rolling_latest(cfg: &RepoCludConfig) {
+    if !cfg.rust.install
+        || !is_rolling_latest(cfg.rust.version.as_deref())
+        || !claim_latest_refresh(SystemTime::now())
+    {
+        return;
+    }
+    if let Err(reason) = upgrade_soldr_to_latest() {
+        verbose_eprintln!(
+            "clud: failed to refresh rolling-latest soldr: {reason}; continuing with the installed soldr"
+        );
+    }
+}
+
+fn is_rolling_latest(version: Option<&str>) -> bool {
+    version
+        .map(str::trim)
+        .is_none_or(|v| v.is_empty() || v.eq_ignore_ascii_case("latest"))
+}
+
+/// Install soldr via `uv tool install` (preferred) or `pip install --user`
+/// (fallback), as `soldr>=<minimum>`: the resolver picks the newest release
+/// that satisfies the floor, and the uv receipt never records an exact pin
+/// that a later `uv tool upgrade soldr` could not move past.
 ///
-/// Returns `Ok(())` only if a `which::which("soldr")` succeeds after
-/// the install attempt. Returns `Err(<reason>)` otherwise.
-fn install_soldr_on_demand(version: Option<&str>, force: bool) -> Result<(), String> {
-    let pkg = soldr_package_spec(version);
+/// Returns `Ok(())` only if `soldr` is on PATH afterwards and at least
+/// `minimum`.
+fn install_soldr_on_demand(minimum: Option<VersionTriple>, force: bool) -> Result<(), String> {
+    let pkg = soldr_package_spec(minimum);
     let uv_args = if force {
         vec!["tool", "install", "--force", pkg.as_str()]
     } else {
@@ -370,38 +433,30 @@ fn install_soldr_on_demand(version: Option<&str>, force: bool) -> Result<(), Str
     };
     let pip_args = ["install", "--user", "--upgrade", pkg.as_str()];
 
-    let attempted = try_install(&[("uv", uv_args.as_slice())])
-        .or_else(|_| try_install(&[("pip", pip_args.as_slice())]));
-
-    match attempted {
-        Ok(via) => {
-            if which::which("soldr").is_ok() {
-                if let Some(expected) = version.and_then(parse_first_version_triple) {
-                    let actual = installed_soldr_version()?;
-                    if actual != expected {
-                        return Err(format!(
-                            "`{via}` completed but soldr remained at v{}.{}.{} instead of requested v{}.{}.{}",
-                            actual.0, actual.1, actual.2, expected.0, expected.1, expected.2
-                        ));
-                    }
-                }
-                verbose_eprintln!("clud: installed soldr via `{via}`");
-                Ok(())
-            } else {
-                Err(format!(
-                    "`{via}` reported success but `soldr` is still not on PATH (you may need to add your install dir to PATH manually)"
-                ))
-            }
-        }
-        Err(reason) => Err(reason),
+    let via = try_install(&[("uv", uv_args.as_slice())])
+        .or_else(|_| try_install(&[("pip", pip_args.as_slice())]))?;
+    if which::which("soldr").is_err() {
+        return Err(format!(
+            "`{via}` reported success but `soldr` is still not on PATH (you may need to add your install dir to PATH manually)"
+        ));
     }
+    if let Some(min) = minimum {
+        let actual = installed_soldr_version()?;
+        if actual < min {
+            return Err(format!(
+                "`{via}` completed but soldr is v{}.{}.{}, below the minimum v{}.{}.{}",
+                actual.0, actual.1, actual.2, min.0, min.1, min.2
+            ));
+        }
+    }
+    verbose_eprintln!("clud: installed soldr via `{via}`");
+    Ok(())
 }
 
-fn soldr_package_spec(version: Option<&str>) -> String {
-    match version.map(str::trim) {
-        None | Some("") => "soldr".to_string(),
-        Some(version) if version.eq_ignore_ascii_case("latest") => "soldr".to_string(),
-        Some(version) => format!("soldr=={version}"),
+fn soldr_package_spec(minimum: Option<VersionTriple>) -> String {
+    match minimum {
+        None => "soldr".to_string(),
+        Some(VersionTriple(major, minor, patch)) => format!("soldr>={major}.{minor}.{patch}"),
     }
 }
 
@@ -773,14 +828,6 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn install_pkg_spec_uses_double_equals_for_pinned_version() {
-        assert_eq!(soldr_package_spec(Some("0.7.55")), "soldr==0.7.55");
-        assert_eq!(soldr_package_spec(None), "soldr");
-        assert_eq!(soldr_package_spec(Some("latest")), "soldr");
-        assert_eq!(soldr_package_spec(Some("LATEST")), "soldr");
-    }
-
-    #[test]
     fn rolling_refresh_claim_is_freshness_bounded() {
         let _g = isolate_path_env();
         let temp = tempfile::tempdir().expect("temporary stamp directory");
@@ -813,6 +860,82 @@ mod tests {
             parse_first_version_triple("setup-soldr: using soldr 0.7.45"),
             Some(VersionTriple(0, 7, 45))
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Version decision: a pin is a minimum, never an exact target.
+    // A launch must never downgrade a soldr the user installed (a repo
+    // pinning 0.7.11 used to force-reinstall 0.7.11 over 0.9.x).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn missing_soldr_is_installed() {
+        assert_eq!(
+            soldr_action(InstalledSoldr::Missing, None),
+            SoldrAction::Install
+        );
+        assert_eq!(
+            soldr_action(InstalledSoldr::Missing, Some(VersionTriple(0, 9, 27))),
+            SoldrAction::Install
+        );
+    }
+
+    #[test]
+    fn soldr_older_than_minimum_is_upgraded() {
+        assert_eq!(
+            soldr_action(
+                InstalledSoldr::At(VersionTriple(0, 7, 11)),
+                Some(VersionTriple(0, 9, 27))
+            ),
+            SoldrAction::Upgrade
+        );
+    }
+
+    #[test]
+    fn soldr_at_or_above_minimum_is_left_alone() {
+        let min = Some(VersionTriple(0, 7, 11));
+        assert_eq!(
+            soldr_action(InstalledSoldr::At(VersionTriple(0, 7, 11)), min),
+            SoldrAction::Keep
+        );
+        assert_eq!(
+            soldr_action(InstalledSoldr::At(VersionTriple(0, 9, 27)), min),
+            SoldrAction::Keep,
+            "a newer installed soldr must never be downgraded to the pin"
+        );
+        assert_eq!(
+            soldr_action(InstalledSoldr::At(VersionTriple(0, 9, 27)), None),
+            SoldrAction::Keep
+        );
+    }
+
+    #[test]
+    fn unreadable_soldr_version_is_left_alone() {
+        assert_eq!(
+            soldr_action(InstalledSoldr::Unreadable, Some(VersionTriple(9, 9, 9))),
+            SoldrAction::Keep
+        );
+    }
+
+    #[test]
+    fn minimum_never_falls_below_the_shims_floor() {
+        assert_eq!(
+            soldr_minimum(Some("0.7.11")),
+            MIN_SOLDR_SHIMS_VERSION,
+            "a pin below the shims floor still needs a soldr that has `shims`"
+        );
+        assert_eq!(soldr_minimum(Some("0.9.27")), VersionTriple(0, 9, 27));
+        assert_eq!(soldr_minimum(None), MIN_SOLDR_SHIMS_VERSION);
+        assert_eq!(soldr_minimum(Some("latest")), MIN_SOLDR_SHIMS_VERSION);
+    }
+
+    #[test]
+    fn install_spec_is_a_floor_not_an_exact_pin() {
+        assert_eq!(
+            soldr_package_spec(Some(VersionTriple(0, 9, 27))),
+            "soldr>=0.9.27"
+        );
+        assert_eq!(soldr_package_spec(None), "soldr");
     }
 
     #[test]

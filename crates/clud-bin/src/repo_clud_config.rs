@@ -40,7 +40,8 @@
 //!                               // rustdoc through soldr (default: true when
 //!                               // a settings file is present).
 //!     "install":   true,        // auto-install soldr if missing (default: true).
-//!     "version":   "0.7.55"     // optional pinned version; absent = latest.
+//!     "version":   "0.7.55"     // optional minimum version (never a
+//!                               // downgrade target); absent = latest.
 //!   },
 //!   "bash": {
 //!     "block_cd": "auto"        // "auto" | true | false — pin the session
