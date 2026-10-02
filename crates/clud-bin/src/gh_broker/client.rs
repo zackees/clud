@@ -209,8 +209,12 @@ fn serve_one(mut stream: TcpStream, path: &str, rendered: &[u8]) {
 mod tests {
     use super::*;
 
-    fn get(url: &str) -> Result<(u16, Vec<u8>, Option<String>), ureq::Error> {
-        let response = ureq::get(url).call()?;
+    /// `Err` carries the HTTP status (0 for a transport error).
+    fn get(url: &str) -> Result<(u16, Vec<u8>, Option<String>), u16> {
+        let response = ureq::get(url).call().map_err(|error| match error {
+            ureq::Error::Status(code, _) => code,
+            ureq::Error::Transport(_) => 0,
+        })?;
         let status = response.status();
         let content_type = response.header("content-type").map(str::to_string);
         let mut body = Vec::new();
@@ -244,7 +248,7 @@ mod tests {
         // Served for every request on the path, never on another one.
         assert_eq!(get(&url).unwrap().1, body);
         let other = url.rsplit_once('/').unwrap().0.to_string() + "/guess";
-        assert!(matches!(get(&other), Err(ureq::Error::Status(404, _))));
+        assert_eq!(get(&other), Err(404));
     }
 
     #[test]
