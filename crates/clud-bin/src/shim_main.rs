@@ -318,7 +318,8 @@ mod gh_shim {
         }
         let code = exec(&session.target, args, recorder);
         if crate::gh_broker::classify::may_write(args) {
-            broker.invalidate();
+            let tags = crate::gh_broker::scope::write_tags(args, broker.gh_repo.as_deref());
+            broker.invalidate(tags.as_deref());
         }
         code
     }

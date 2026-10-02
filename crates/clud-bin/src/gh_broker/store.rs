@@ -10,6 +10,8 @@ use std::path::Path;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use super::collection::CollectionState;
+
 /// cache key -> JSON [`ObjectMeta`].
 const OBJECT_META: TableDefinition<&str, &[u8]> = TableDefinition::new("object_meta");
 /// cache key -> raw response body.
@@ -18,6 +20,10 @@ const OBJECT_BODY: TableDefinition<&str, &[u8]> = TableDefinition::new("object_b
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// monotonic sequence -> JSON [`LedgerEntry`].
 const LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("ledger");
+/// collection key -> JSON [`CollectionState`] (phase 2 merged reads).
+const COLLECTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("collections");
+/// invalidation tag -> stamp of the last write that named it.
+const SCOPES: TableDefinition<&str, u64> = TableDefinition::new("scopes");
 
 const INVALIDATED_AT: &str = "invalidated_at_ms";
 /// Cached objects kept before the oldest are pruned.
@@ -26,6 +32,13 @@ const PRUNE_OBJECTS: usize = 512;
 /// Ledger rows kept before the oldest are pruned.
 const MAX_LEDGER: u64 = 20_000;
 const PRUNE_LEDGER: usize = 2_000;
+/// Merged collections kept before the oldest are pruned.
+const MAX_COLLECTIONS: u64 = 1024;
+const PRUNE_COLLECTIONS: usize = 128;
+/// Invalidation tags kept. Pruned tags raise the global stamp to the newest
+/// pruned one, so dropping a tag can only make reads more conservative.
+const MAX_SCOPES: u64 = 4096;
+const PRUNE_SCOPES: usize = 512;
 
 /// Everything about a cached response except its body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +53,10 @@ pub struct ObjectMeta {
     /// body *started*, Unix ms. A fetch that began before an invalidation
     /// therefore never counts as fresh after it.
     pub fetched_at_ms: u64,
+    /// A listing whose every entry is finished (phase 2): served without
+    /// a TTL until a write invalidates it.
+    #[serde(default)]
+    pub frozen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,10 +64,13 @@ pub struct LedgerEntry {
     pub ts_ms: u64,
     pub session_id: Option<String>,
     pub key: String,
-    /// `cache`, `304`, `full`, `passthrough` or `error`.
+    /// `cache`, `304`, `incremental`, `full`, `passthrough` or `error`.
     pub outcome: String,
     pub upstream_requests: u32,
     pub rate_remaining: Option<u64>,
+    /// Merged reads: objects the upstream fetch added or changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<u32>,
 }
 
 pub struct Store {
@@ -73,6 +93,8 @@ impl Store {
             txn.open_table(OBJECT_BODY).map_err(err)?;
             txn.open_table(META).map_err(err)?;
             txn.open_table(LEDGER).map_err(err)?;
+            txn.open_table(COLLECTIONS).map_err(err)?;
+            txn.open_table(SCOPES).map_err(err)?;
         }
         txn.commit().map_err(err)?;
         Ok(Self { db })
@@ -144,6 +166,93 @@ impl Store {
         txn.commit().map_err(err)
     }
 
+    /// The newest stamp that makes a read with `tags` stale: the global
+    /// invalidation or any write that named one of its tags.
+    pub fn stale_after(&self, tags: &[String]) -> Result<u64, String> {
+        let txn = self.db.begin_read().map_err(err)?;
+        let meta = txn.open_table(META).map_err(err)?;
+        let scopes = txn.open_table(SCOPES).map_err(err)?;
+        let mut newest = meta
+            .get(INVALIDATED_AT)
+            .map_err(err)?
+            .map(|v| v.value())
+            .unwrap_or(0);
+        for tag in tags {
+            if let Some(stamp) = scopes.get(tag.as_str()).map_err(err)? {
+                newest = newest.max(stamp.value());
+            }
+        }
+        Ok(newest)
+    }
+
+    /// Stamp `tags` with `now_ms`: reads carrying any of them are stale.
+    pub fn invalidate_tags(&self, tags: &[String], now_ms: u64) -> Result<(), String> {
+        let txn = self.db.begin_write().map_err(err)?;
+        {
+            let mut scopes = txn.open_table(SCOPES).map_err(err)?;
+            for tag in tags {
+                scopes.insert(tag.as_str(), now_ms).map_err(err)?;
+            }
+            if scopes.len().map_err(err)? > MAX_SCOPES {
+                let mut ages = Vec::new();
+                for row in scopes.iter().map_err(err)? {
+                    let (k, v) = row.map_err(err)?;
+                    ages.push((v.value(), k.value().to_string()));
+                }
+                ages.sort();
+                let pruned: Vec<_> = ages.into_iter().take(PRUNE_SCOPES).collect();
+                let newest_pruned = pruned.iter().map(|(at, _)| *at).max().unwrap_or(0);
+                for (_, tag) in &pruned {
+                    scopes.remove(tag.as_str()).map_err(err)?;
+                }
+                let mut meta = txn.open_table(META).map_err(err)?;
+                let global = meta
+                    .get(INVALIDATED_AT)
+                    .map_err(err)?
+                    .map(|v| v.value())
+                    .unwrap_or(0);
+                meta.insert(INVALIDATED_AT, global.max(newest_pruned))
+                    .map_err(err)?;
+            }
+        }
+        txn.commit().map_err(err)
+    }
+
+    pub fn collection(&self, key: &str) -> Result<Option<CollectionState>, String> {
+        let txn = self.db.begin_read().map_err(err)?;
+        let table = txn.open_table(COLLECTIONS).map_err(err)?;
+        let Some(row) = table.get(key).map_err(err)? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(row.value()).map(Some).map_err(err)
+    }
+
+    pub fn put_collection(&self, key: &str, state: &CollectionState) -> Result<(), String> {
+        let bytes = serde_json::to_vec(state).map_err(err)?;
+        let txn = self.db.begin_write().map_err(err)?;
+        {
+            let mut table = txn.open_table(COLLECTIONS).map_err(err)?;
+            table.insert(key, bytes.as_slice()).map_err(err)?;
+            if table.len().map_err(err)? > MAX_COLLECTIONS {
+                let mut ages = Vec::new();
+                for row in table.iter().map_err(err)? {
+                    let (k, v) = row.map_err(err)?;
+                    let at = serde_json::from_slice::<CollectionState>(v.value())
+                        .map(|s| s.fetched_at_ms)
+                        .unwrap_or(0);
+                    ages.push((at, k.value().to_string()));
+                }
+                ages.sort();
+                for (_, old) in ages.into_iter().take(PRUNE_COLLECTIONS) {
+                    if old != key {
+                        table.remove(old.as_str()).map_err(err)?;
+                    }
+                }
+            }
+        }
+        txn.commit().map_err(err)
+    }
+
     pub fn append_ledger(&self, entry: &LedgerEntry) -> Result<(), String> {
         let bytes = serde_json::to_vec(entry).map_err(err)?;
         let mut txn = self.db.begin_write().map_err(err)?;
@@ -194,6 +303,7 @@ mod tests {
             etag: Some("\"e1\"".into()),
             last_modified: None,
             fetched_at_ms: at,
+            frozen: false,
         }
     }
 
@@ -228,6 +338,7 @@ mod tests {
                     outcome: outcome.into(),
                     upstream_requests: 0,
                     rate_remaining: None,
+                    changed: None,
                 })
                 .unwrap();
         }
@@ -238,5 +349,42 @@ mod tests {
             .map(|e| e.outcome)
             .collect();
         assert_eq!(outcomes, ["full", "cache", "304"]);
+    }
+
+    #[test]
+    fn tag_stamps_raise_staleness_and_collections_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("b.redb")).unwrap();
+        let tags = vec!["o/r#num:5".to_string(), "*#num:5".to_string()];
+        assert_eq!(store.stale_after(&tags).unwrap(), 0);
+        store.invalidate(10).unwrap();
+        store.invalidate_tags(&["*#num:5".to_string()], 20).unwrap();
+        assert_eq!(store.stale_after(&tags).unwrap(), 20);
+        assert_eq!(store.stale_after(&["run:7".to_string()]).unwrap(), 10);
+        let state = CollectionState {
+            max_id: 7,
+            fetched_at_ms: 3,
+            ..CollectionState::default()
+        };
+        store.put_collection("c", &state).unwrap();
+        assert_eq!(store.collection("c").unwrap(), Some(state));
+        assert_eq!(store.collection("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn pruned_tags_fold_into_the_global_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("b.redb")).unwrap();
+        let old: Vec<String> = (0..MAX_SCOPES).map(|i| format!("run:{i}")).collect();
+        store.invalidate_tags(&old, 100).unwrap();
+        assert_eq!(store.stale_after(&[]).unwrap(), 0);
+        store
+            .invalidate_tags(&["run:new".to_string()], 200)
+            .unwrap();
+        // Pruned tags are as stale as the newest pruned stamp: a read never
+        // turns fresher because its tag was dropped.
+        assert_eq!(store.stale_after(&[]).unwrap(), 100);
+        assert_eq!(store.stale_after(&["run:0".to_string()]).unwrap(), 100);
+        assert_eq!(store.stale_after(&["run:new".to_string()]).unwrap(), 200);
     }
 }

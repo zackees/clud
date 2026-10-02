@@ -754,8 +754,11 @@ fn run_dashboard_loop(
                 spawn_gh_read(request, Arc::clone(&gh_broker), guard);
             }
             (Method::Post, crate::gh_broker::INVALIDATE_PATH) => {
-                let _ = gh_broker.invalidate();
-                respond_json(request, 200, b"{}");
+                let mut request = request;
+                // An unreadable body still invalidates: globally.
+                let body = read_body(&mut request).unwrap_or_default();
+                let (status, bytes) = gh_broker.handle_invalidate(&body);
+                respond_json(request, status, &bytes);
             }
             // Any other GET is an SPA route — serve the dashboard so the
             // History-API router takes over (refresh + deep-links).

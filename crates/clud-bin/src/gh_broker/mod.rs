@@ -1,4 +1,4 @@
-//! The session `gh` read broker (#1743, phase 1).
+//! The session `gh` read broker (#1743, phases 1 and 2).
 //!
 //! In a clud session, `gh api <endpoint>` GETs are answered by the daemon
 //! from a durable ETag cache instead of each call spending GitHub's shared
@@ -10,12 +10,17 @@
 //!   replay server, so `--jq`, `--template` and TTY output stay `gh`'s own.
 //! - [`service`]: the daemon side. TTL, single-flight, conditional
 //!   revalidation and the ledger, over [`store`] and the [`upstream`] `gh`.
+//! - [`collection`]: phase 2 merged reads of comments and run lists
+//!   (`since=` / `created=>=` deltas) and the listings that freeze.
+//! - [`scope`]: phase 2 targeted invalidation tags for reads and writes.
 //!
 //! Every failure on the shim side falls back to the real `gh` unchanged.
 //! See `docs/architecture/gh-read-broker.md`.
 
 pub mod classify;
 pub mod client;
+pub mod collection;
+pub mod scope;
 pub mod service;
 pub mod store;
 pub mod upstream;
@@ -24,7 +29,8 @@ use serde::{Deserialize, Serialize};
 
 /// Daemon route that answers one read.
 pub const READ_PATH: &str = "/gh/read";
-/// Daemon route that marks every cached read stale after a possible write.
+/// Daemon route that marks cached reads stale after a possible write: those
+/// carrying the posted `tags`, or every read when there are none.
 pub const INVALIDATE_PATH: &str = "/gh/invalidate";
 /// The broker's store, under the daemon state dir.
 pub const STORE_FILE: &str = "gh-broker.redb";
