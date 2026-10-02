@@ -115,6 +115,13 @@ impl clud::session::InteractiveHooks for NoHooks {
     }
 }
 
+/// The pause between two chunks of input, longer than the pump's 5 ms idle
+/// flush (`INPUT_PENDING_FLUSH`): input that arrives in pieces this far apart
+/// (a slow link, a loaded machine, Windows' ~15 ms sleep granularity) must
+/// still reach the child whole. A shorter gap passed on Linux and failed
+/// only intermittently on Windows (#1717).
+const INPUT_GAP: Duration = Duration::from_millis(10);
+
 /// A stdin that returns one prepared chunk per `read`, like a terminal.
 struct ChunkedStdin {
     chunks: std::collections::VecDeque<Vec<u8>>,
@@ -132,8 +139,7 @@ impl Read for ChunkedStdin {
         if n < chunk.len() {
             self.chunks.push_front(chunk[n..].to_vec());
         }
-        // Space the reads out so the pump sees them as separate chunks.
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(INPUT_GAP);
         Ok(n)
     }
 }
@@ -147,7 +153,7 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
     let argv = vec![
         agent.to_string_lossy().to_string(),
         "--mock-read-stdin-ms".to_string(),
-        "3000".to_string(),
+        "8000".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
         "--mock-ready-file".to_string(),
@@ -164,9 +170,14 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
     match path {
         Path::ConsoleChannel => {
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
-            for piece in pieces {
-                tx.send(piece).expect("queue chunk");
-            }
+            let feeder = std::thread::spawn(move || {
+                for piece in pieces {
+                    if tx.send(piece).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(INPUT_GAP);
+                }
+            });
             let _exit = clud::session::run_raw_pty_pump_with_extra_rx(
                 &process,
                 &interrupted,
@@ -174,7 +185,7 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
                 Cursor::new(Vec::<u8>::new()),
                 Some(rx),
             );
-            drop(tx);
+            let _ = feeder.join();
         }
         Path::ByteStream => {
             let stdin = ChunkedStdin {

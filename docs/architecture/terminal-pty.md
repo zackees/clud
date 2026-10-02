@@ -88,9 +88,13 @@ at a time lost its `ESC [ <` and reached the child as typed text
 
 `EscapeSequenceGate` holds an incomplete tail (a lone ESC, `ESC O`, or
 `ESC [` followed only by parameter/intermediate bytes, at most 64 bytes)
-until its final byte arrives. The pump's idle flush (`INPUT_PENDING_FLUSH`,
-5 ms, `session.rs:1094`) releases a held tail, so a lone Esc keypress is
-never stuck. The rule is enforced on every platform, not only Windows: any
+until its final byte arrives. Held bytes are released after an idle gap that
+depends on what is held (`BracketedPasteNormalizer::flush_due_in`): a lone
+`ESC`, `ESC [` or `ESC O` (what an Esc or Alt+[ / Alt+O keypress sends) after
+5 ms, so those keys never lag, and anything longer (a terminal report or a
+partial `ESC[200~`) only after 250 ms. Releasing a partial report after 5 ms
+wrote it on its own and ConPTY dropped it whenever input arrived in pieces
+more than 5 ms apart (#1717). The rule is enforced on every platform, not only Windows: any
 new path that calls `write_impl` with user input must go through
 `forward_user_input`, or through an equivalent that keeps sequences whole.
 

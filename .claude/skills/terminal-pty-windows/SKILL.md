@@ -65,7 +65,9 @@ Read that first. This page lists only what differs on Windows.
   ordering.
 - `crates/clud-bin/src/session.rs`:
   - `forward_user_input` (`:1252`)
-  - `INPUT_PENDING_FLUSH` (`:1094`)
+  - `BracketedPasteNormalizer::flush_due_in` (`session/bracketed_paste.rs`):
+    a held lone Esc is released after 5 ms, a partial report after 250 ms
+    (#1717)
   - `should_answer_cursor_queries` (`:1084`)
   - `RawTerminalGuard` (`:316`, `Drop` at `:602`)
 - `crates/clud-bin/src/session/escape_gate.rs`: `EscapeSequenceGate`.

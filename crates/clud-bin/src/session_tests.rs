@@ -314,22 +314,26 @@ fn extra_input_f3_is_observed() {
     assert_eq!(observer.observe(&prepared).presses, 1);
 }
 
+/// Well past every release delay: held bytes are due.
+fn later() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(5)
+}
+
 #[test]
 fn local_pump_releases_lone_esc_after_short_idle_without_toast() {
     let mut paste = BracketedPasteNormalizer::new();
     let mut mouse = crate::toast::mouse::MouseFilter::new();
     let result = filter_user_input_chunk(b"\x1b", &mut paste, &mut mouse, None);
     assert!(result.bytes.is_empty());
+    let now = std::time::Instant::now();
+    let wait = pending_user_input_wait(PUMP_TICK, now, &paste, &mouse, false);
+    assert!(wait <= bracketed_paste::HUMAN_PREFIX_FLUSH, "{wait:?}");
     assert_eq!(
-        pending_user_input_wait(PUMP_TICK, &paste, &mouse, false),
-        INPUT_PENDING_FLUSH
-    );
-    assert_eq!(
-        flush_pending_user_input(&mut paste, &mut mouse, None),
+        flush_pending_user_input(later(), &mut paste, &mut mouse, None),
         b"\x1b"
     );
     assert_eq!(
-        pending_user_input_wait(PUMP_TICK, &paste, &mouse, false),
+        pending_user_input_wait(PUMP_TICK, later(), &paste, &mouse, false),
         PUMP_TICK
     );
 }
@@ -340,16 +344,76 @@ fn local_pump_releases_lone_esc_through_toast_filter() {
     let mut mouse = crate::toast::mouse::MouseFilter::new();
     let result = filter_user_input_chunk(b"\x1b", &mut paste, &mut mouse, parity_targets());
     assert!(result.bytes.is_empty());
+    let wait = pending_user_input_wait(PUMP_TICK, std::time::Instant::now(), &paste, &mouse, true);
+    assert!(wait <= INPUT_PENDING_FLUSH, "{wait:?}");
     assert_eq!(
-        pending_user_input_wait(PUMP_TICK, &paste, &mouse, true),
-        INPUT_PENDING_FLUSH
-    );
-    assert_eq!(
-        flush_pending_user_input(&mut paste, &mut mouse, parity_targets()),
+        flush_pending_user_input(later(), &mut paste, &mut mouse, parity_targets()),
         b"\x1b"
     );
     assert!(!paste.has_pending());
     assert!(!mouse.has_pending());
+}
+
+/// #1717: a partial terminal report is held well past the 5 ms a lone Esc
+/// gets, so input arriving in pieces a few milliseconds apart still reaches
+/// the PTY as whole sequences instead of a partial one ConPTY would drop.
+#[test]
+fn a_partial_report_outlasts_the_lone_esc_release_but_is_not_held_forever() {
+    for (held, short) in [
+        (&b"\x1b"[..], true),
+        (b"\x1b[", true),
+        (b"\x1bO", true),
+        (b"\x1b[<0;10;5", false),
+        (b"\x1b[20", false),
+    ] {
+        let mut paste = BracketedPasteNormalizer::new();
+        let mut mouse = crate::toast::mouse::MouseFilter::new();
+        assert!(filter_user_input_chunk(held, &mut paste, &mut mouse, None)
+            .bytes
+            .is_empty());
+        let now = std::time::Instant::now();
+        let due = paste.flush_due_in(now).expect("held");
+        if short {
+            assert!(
+                due <= bracketed_paste::HUMAN_PREFIX_FLUSH,
+                "{held:?}: {due:?}"
+            );
+        } else {
+            assert!(
+                due > bracketed_paste::HUMAN_PREFIX_FLUSH,
+                "{held:?}: {due:?}"
+            );
+            let just_after_short = now + bracketed_paste::HUMAN_PREFIX_FLUSH * 2;
+            assert!(
+                flush_pending_user_input(just_after_short, &mut paste, &mut mouse, None).is_empty(),
+                "{held:?} must not be released after a short gap"
+            );
+        }
+        assert_eq!(
+            flush_pending_user_input(later(), &mut paste, &mut mouse, None),
+            held,
+            "released once due"
+        );
+    }
+}
+
+/// #1717: a report that arrives in pieces with idle gaps between them, each
+/// gap long enough to release a lone Esc, still leaves as one write once it
+/// has started (`ESC [ <`). Only a lone `ESC` / `ESC [` / `ESC O` is released
+/// fast, because that is what an Esc or Alt keypress looks like.
+#[test]
+fn a_report_arriving_in_pieces_with_idle_gaps_is_written_whole() {
+    let mut paste = BracketedPasteNormalizer::new();
+    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    let mut writes = Vec::new();
+    for piece in [&b"\x1b[<"[..], b"0;1", b"0;5", b"m"] {
+        writes.push(filter_user_input_chunk(piece, &mut paste, &mut mouse, None).bytes);
+        // The pump's idle tick, 20 ms after this piece arrived.
+        let tick = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        writes.push(flush_pending_user_input(tick, &mut paste, &mut mouse, None));
+    }
+    writes.retain(|w| !w.is_empty());
+    assert_eq!(writes, vec![b"\x1b[<0;10;5m".to_vec()]);
 }
 
 /// #1697: SGR any-motion reports as the Windows console reader delivers them
@@ -366,7 +430,12 @@ fn pump_writes(chunks: &[&[u8]], targets: Option<ToastHitTargets>) -> Vec<Vec<u8
         .iter()
         .map(|chunk| filter_user_input_chunk(chunk, &mut paste, &mut mouse, targets).bytes)
         .collect();
-    writes.push(flush_pending_user_input(&mut paste, &mut mouse, targets));
+    writes.push(flush_pending_user_input(
+        later(),
+        &mut paste,
+        &mut mouse,
+        targets,
+    ));
     writes.retain(|write| !write.is_empty());
     writes
 }

@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use super::escape_gate::EscapeSequenceGate;
 use super::{looks_like_dropped_path, normalize_dropped_path};
 
@@ -27,8 +29,8 @@ pub(crate) const PASTE_END: &[u8] = b"\x1b[201~";
 /// Every chunk the normalizer emits also passes through an
 /// [`EscapeSequenceGate`], so no escape sequence leaves it split across two
 /// chunks (#1697). Both input paths (the local pump and the daemon attach)
-/// already route every chunk through here and honor `has_pending` /
-/// `flush_pending`, so the gate needs no plumbing of its own.
+/// already route every chunk through here and release held bytes through
+/// [`Self::flush_pending_if_due`], so the gate needs no plumbing of its own.
 pub struct BracketedPasteNormalizer {
     /// How many bytes of `PASTE_START` we've matched while outside a
     /// paste. 0..PASTE_START.len().
@@ -41,7 +43,20 @@ pub struct BracketedPasteNormalizer {
     end_match: usize,
     /// Holds an incomplete trailing escape sequence of the output (#1697).
     gate: EscapeSequenceGate,
+    /// When input last arrived while bytes are held; the release clock.
+    last_input: Option<Instant>,
 }
+
+/// How long held bytes wait for more input before they are released as they
+/// are. Only `ESC`, `ESC [` and `ESC O` can come from a person (Esc, Alt+[,
+/// Alt+O) and must not lag. Anything longer, such as `ESC[<0;10;5` or a
+/// partial `ESC[200~`, is a terminal's report or marker that will complete.
+/// Releasing it early writes a partial sequence, which ConPTY drops at the
+/// end of the write (#1697). Input arriving more than 5 ms apart (a slow link,
+/// a loaded machine, Windows' timer granularity) did exactly that (#1717).
+pub const HUMAN_PREFIX_FLUSH: Duration = Duration::from_millis(5);
+/// See [`HUMAN_PREFIX_FLUSH`].
+pub const SEQUENCE_FLUSH: Duration = Duration::from_millis(250);
 
 impl BracketedPasteNormalizer {
     pub fn new() -> Self {
@@ -50,6 +65,7 @@ impl BracketedPasteNormalizer {
             inside: None,
             end_match: 0,
             gate: EscapeSequenceGate::default(),
+            last_input: None,
         }
     }
 
@@ -110,7 +126,9 @@ impl BracketedPasteNormalizer {
                 }
             }
         }
-        self.gate.push(out)
+        let out = self.gate.push(out);
+        self.last_input = self.has_pending().then(Instant::now);
+        out
     }
 
     /// True while bytes are held outside a paste: a partial `PASTE_START`
@@ -129,7 +147,38 @@ impl BracketedPasteNormalizer {
             pending.extend_from_slice(&PASTE_START[..self.start_match]);
             self.start_match = 0;
         }
+        self.last_input = None;
         pending
+    }
+
+    /// How long until held bytes are due for release, measured from the last
+    /// input; `None` while nothing is held. See [`HUMAN_PREFIX_FLUSH`].
+    pub fn flush_due_in(&self, now: Instant) -> Option<Duration> {
+        if !self.has_pending() {
+            return None;
+        }
+        let paste_prefix = if self.inside.is_none() {
+            self.start_match
+        } else {
+            0
+        };
+        let delay = if self.gate.held_len() + paste_prefix <= 2 {
+            HUMAN_PREFIX_FLUSH
+        } else {
+            SEQUENCE_FLUSH
+        };
+        let idle = self
+            .last_input
+            .map_or(delay, |since| now.saturating_duration_since(since));
+        Some(delay.saturating_sub(idle))
+    }
+
+    /// Release the held bytes once [`Self::flush_due_in`] says they are due.
+    pub fn flush_pending_if_due(&mut self, now: Instant) -> Vec<u8> {
+        match self.flush_due_in(now) {
+            Some(left) if left.is_zero() => self.flush_pending(),
+            _ => Vec::new(),
+        }
     }
 }
 

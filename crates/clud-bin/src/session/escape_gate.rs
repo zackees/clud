@@ -8,8 +8,9 @@
 //! movement lost its `ESC [ <` and arrived as literal `35;31;18M` text.
 //!
 //! The gate holds an incomplete trailing sequence until its final byte
-//! arrives. The pump's idle flush releases it after
-//! [`super::INPUT_PENDING_FLUSH`], so a lone Esc keypress is never stuck.
+//! arrives. Its owner releases it after an idle gap that depends on what is
+//! held (`BracketedPasteNormalizer::flush_due_in`), so a lone Esc keypress is
+//! never stuck and a terminal report arriving in pieces is never cut (#1717).
 
 /// Longest incomplete sequence held. A longer one is malformed: release it
 /// rather than buffer without bound.
@@ -36,6 +37,11 @@ impl EscapeSequenceGate {
 
     pub(crate) fn has_pending(&self) -> bool {
         !self.held.is_empty()
+    }
+
+    /// How many bytes are held.
+    pub(crate) fn held_len(&self) -> usize {
+        self.held.len()
     }
 
     /// Release the held bytes as they are.

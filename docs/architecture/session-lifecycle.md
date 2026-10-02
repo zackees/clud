@@ -182,8 +182,9 @@ detects `\x1b[200~ … \x1b[201~` envelopes and, when the inner content matches
 `dnd::looks_like_dropped_path`, rewrites it through `normalize_dropped_path`
 before forwarding. Non-paste bytes pass through with O(1) cost. The
 normalizer's output also passes its `EscapeSequenceGate`, which holds an
-incomplete trailing escape sequence until its final byte (or the pump's 5 ms
-idle flush). ConPTY's input parser closes whatever sequence is open at the
+incomplete trailing escape sequence until its final byte, or an idle
+release: 5 ms for a lone `ESC` / `ESC [` / `ESC O`, 250 ms for a longer
+partial report (#1717). ConPTY's input parser closes whatever sequence is open at the
 end of each write, and the Windows console reader delivers a terminal's SGR
 mouse report one character per event, so without the gate each mouse
 movement reached the child as literal `35;31;18M` text (#1697). The
