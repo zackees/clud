@@ -128,6 +128,12 @@ jobs:
           # (RUNNER_ENVIRONMENT=github-hosted), so under act / `bosn ci` every
           # run re-downloaded ~60 MB of wheels (zackees/bosn#323 Step 2 gate).
           enable-cache: true
+          # setup-uv prunes downloaded wheels before saving (cheap to refetch
+          # on GitHub's network), which left the act cache empty: Sync took
+          # 8-36 s locally. Under act keep the wheels, under their own key so
+          # the hosted entry stays pruned and an old empty entry is not reused.
+          prune-cache: ${{ !env.ACT }}
+          cache-suffix: ${{ env.ACT && 'act-unpruned' || '' }}
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11
       - name: Setup soldr
