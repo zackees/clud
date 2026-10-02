@@ -472,6 +472,12 @@ fn updated_last_good(previous: Option<&LastGood>, choice: &Choice) -> LastGood {
     state
 }
 
+/// How long a writer waits for another's model-cache update to finish. The
+/// holder does an atomic write (temp file, fsync, rename), which took longer
+/// than the previous 250 ms on a loaded Windows runner and made a concurrent
+/// launch lose its update (#1729). Bounded, so a launch never hangs on it.
+const MODEL_CACHE_LOCK_WAIT: Duration = Duration::from_secs(5);
+
 fn persist_last_good(
     path: &Path,
     fallback: Option<&LastGood>,
@@ -486,7 +492,7 @@ fn persist_last_good(
         .truncate(false)
         .open(path.with_extension("json.lock"))
         .map_err(|error| error.to_string())?;
-    let deadline = Instant::now() + Duration::from_millis(250);
+    let deadline = Instant::now() + MODEL_CACHE_LOCK_WAIT;
     loop {
         match FileExt::try_lock_exclusive(&lock) {
             Ok(true) => break,
@@ -760,6 +766,39 @@ mod tests {
         let saved = read_last_good(&path).unwrap();
         assert_eq!(saved.sol.as_deref(), Some("gpt-7-sol"));
         assert_eq!(saved.luna.as_deref(), Some("gpt-7-luna"));
+    }
+
+    /// #1729: a writer that holds the cache lock longer than the old 250 ms
+    /// deadline (a slow atomic write on a loaded host) must not make a
+    /// concurrent update fail.
+    #[test]
+    fn a_slow_lock_holder_does_not_make_a_concurrent_update_fail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("last-good.json");
+        let old = LastGood::from_manifest(&manifest("gpt-6-sol", "gpt-6-luna"));
+        let choice = choose(
+            Some(&manifest("gpt-7-sol", "gpt-7-luna")),
+            Some(&old),
+            &["gpt-7-sol", "gpt-7-luna"].map(str::to_string),
+        );
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("json.lock"))
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            drop(lock);
+        });
+        persist_last_good(&path, Some(&old), &choice).expect("waits out the holder");
+        holder.join().unwrap();
+        assert_eq!(
+            read_last_good(&path).unwrap().sol.as_deref(),
+            Some("gpt-7-sol")
+        );
     }
 
     #[test]

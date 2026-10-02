@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 
 #: The aliases the test suites resolve by name.
@@ -45,6 +46,23 @@ def _link(source: Path, target: Path) -> None:
             continue
     staging.unlink(missing_ok=True)
     raise OSError(f"could not link or copy {source} to {target}")
+
+
+def links_allowed_beside(clud: Path, env: Mapping[str, str]) -> bool:
+    """False for a `clud` inside the exact installer candidate artifact (#1718).
+
+    The installer acceptance job points `CLUD_TEST_BINARY` at the candidate
+    binary in `CLUD_CANDIDATE_ARTIFACT`, a directory `verify_artifact` requires
+    to hold exactly the binary and its provenance. Linking the test aliases
+    there would make the artifact fail its own check.
+    """
+    artifact = env.get("CLUD_CANDIDATE_ARTIFACT")
+    if not artifact:
+        return True
+    try:
+        return clud.resolve().parent != Path(artifact).resolve()
+    except OSError:
+        return True
 
 
 def materialize(clud: Path, names: tuple[str, ...] = TEST_ALIASES) -> dict[str, Path]:

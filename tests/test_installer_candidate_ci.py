@@ -48,6 +48,29 @@ def artifact(tmp_path, *, target=TARGET, source_sha=SOURCE_SHA, payload=None):
     return metadata
 
 
+def test_session_alias_linking_leaves_the_candidate_artifact_exact(tmp_path) -> None:
+    """#1718: pytest's session start links the test aliases beside
+    `CLUD_TEST_BINARY`. In the installer job that is the candidate binary, so
+    linking there put `clud-cmd-scan` etc. into the exact artifact and every
+    `ci-full` installer run failed `verify_artifact`."""
+    from ci import aliases
+
+    metadata = artifact(tmp_path)
+    clud = tmp_path / metadata["filename"]
+    env = {"CLUD_CANDIDATE_ARTIFACT": str(tmp_path), "CLUD_TEST_BINARY": str(clud)}
+    assert not aliases.links_allowed_beside(clud, env)
+    if aliases.links_allowed_beside(clud, env):
+        aliases.materialize(clud)
+    assert verify_artifact(tmp_path, TARGET, SOURCE_SHA, VERSION) == metadata
+
+    # Outside the candidate artifact, linking stays on: and it is exactly
+    # what breaks the artifact when it lands inside it.
+    assert aliases.links_allowed_beside(clud, {})
+    aliases.materialize(clud)
+    with pytest.raises(ValueError, match="unexpected files"):
+        verify_artifact(tmp_path, TARGET, SOURCE_SHA, VERSION)
+
+
 def test_candidate_artifact_is_bound_to_pr_head_and_native_format(tmp_path) -> None:
     metadata = artifact(tmp_path)
     assert verify_artifact(tmp_path, TARGET, SOURCE_SHA, VERSION) == metadata

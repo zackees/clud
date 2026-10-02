@@ -83,6 +83,32 @@ def _pip_uninstall(venv_python: Path) -> process.CompletedProcess[str]:
     )
 
 
+#: Windows' sharing violation: another process has the file open.
+_SHARING_VIOLATION = "os error 32"
+
+
+def _pip_uninstall_after_run(venv_python: Path) -> process.CompletedProcess[str]:
+    """Uninstall right after a run, tolerating only a brief sharing violation.
+
+    The trampoline copies a fresh `clud.exe` into place on every run (see
+    windows-quirks.md (a)); a just-written executable is typically opened at
+    once by the antivirus scanner, and an uninstall in that window fails with
+    os error 32 (#1731). Retry only that error, for a few seconds, and report
+    how many attempts it took; any other failure is returned at once.
+    """
+    attempts = 0
+    deadline = time.monotonic() + 10
+    while True:
+        attempts += 1
+        result = _pip_uninstall(venv_python)
+        transient = result.returncode != 0 and _SHARING_VIOLATION in result.stderr
+        if not transient or time.monotonic() >= deadline:
+            if attempts > 1:
+                print(f"uninstall needed {attempts} attempts (sharing violation)")
+            return result
+        time.sleep(0.5)
+
+
 def _clud_exe(venv_dir: Path) -> Path:
     """Find clud binary in a venv."""
     if sys.platform == "win32":
@@ -226,7 +252,7 @@ class TestPipInstallWhileRunning:
         )
 
         # Uninstall
-        result = _pip_uninstall(python)
+        result = _pip_uninstall_after_run(python)
         assert result.returncode == 0, f"Uninstall failed: {result.stderr}"
 
         # Verify binary is gone

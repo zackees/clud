@@ -7,8 +7,10 @@ import os
 import shlex
 import shutil
 import sys
+import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from tests import process
@@ -198,17 +200,46 @@ def test_launcher_restores_shim_path_in_codex_login_shell(
     env.update(HOME=str(home), PATH=os.pathsep.join((str(bin_dir), "/usr/bin", "/bin")))
     if nounset_opt_out:
         env["CLUD_NO_BASH_NOUNSET"] = "1"
-    result = process.run(
-        [str(binary("clud")), "--codex", "-p", "probe"],
-        cwd=str(tmp_path),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = process.run(
+            [str(binary("clud")), "--codex", "-p", "probe"],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        # #1700: the launch starts a daemon whose state lives under this
+        # `HOME`. Left running, it outlived the test, kept writing into a
+        # `tmp_path` pytest had already deleted (#1695's retention policy),
+        # and recreated `home/` there once the next parametrization was
+        # handed the same directory name.
+        process.run(
+            [str(binary("clud")), "daemon", "stop"],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
     assert result.returncode == 0, result.stderr
     shim_dir = home / ".clud" / "state" / "rm-shim"
     assert f"{shim_dir}|{shim_dir / 'safe-rm'}|" in result.stdout, result.stdout
+    _assert_no_daemon_left(home)
+
+
+def _assert_no_daemon_left(home: Path) -> None:
+    """#1700: the daemon a test started under its `HOME` is gone."""
+    info = home / ".clud" / "state" / "daemon.json"
+    if not info.is_file():
+        return
+    pid = json.loads(info.read_text(encoding="utf-8"))["pid"]
+    deadline = time.monotonic() + 10
+    while psutil.pid_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not psutil.pid_exists(pid), f"daemon {pid} outlived the test"
+
 
 
 @pytest.mark.parametrize("operand", ["/", "/.", "//", "/./", "/.."])

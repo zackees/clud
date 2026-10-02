@@ -23,7 +23,7 @@ moves on; the RAII guards restore console mode on drop.
 
 | File | Role in the session |
 |---|---|
-| `crates/clud-bin/src/runner.rs` | `run_plan_pty` allocates the PTY, holds `_console_guard` + `_raw_guard` + dnd registration for the iteration, calls `run_raw_pty_pump_with_extra_rx_verbose`. |
+| `crates/clud-bin/src/runner_execution.rs` | `run_plan_pty` allocates the PTY, holds `_console_guard` + `_raw_guard` + dnd registration for the iteration, calls `run_raw_pty_pump_with_extra_rx_verbose`. |
 | `crates/clud-bin/src/session.rs` | The pump (reader thread + writer thread + main loop, issue #538), `F3Observer`, `resize_pty`, `spawn_os_resize_watcher`, `RawTerminalGuard`. With toasts enabled (#1189) the writer thread runs the toast compositor and the stdin path the close-button mouse filter — see [toasts.md](toasts.md). |
 | `crates/clud-bin/src/session/interrupt.rs` | `interrupt_pty_process`, `reap_pty_exit`. |
 | `crates/clud-bin/src/session/bracketed_paste.rs` | `BracketedPasteNormalizer`. |
@@ -42,33 +42,33 @@ moves on; the RAII guards restore console mode on drop.
 `main.rs` stamps `clud <cwd-name>` and spawns the keeper before any backend
 process exists:
 
-- `console_title::set_for_current_cwd` (`console_title.rs:48`) writes the
+- `console_title::set_for_current_cwd` (`console_title.rs:173`) writes the
   desired title to a shared `Mutex<String>` and calls `SetConsoleTitleW`.
-- `console_title::keep_setting_in_background` (`console_title.rs:70`) uses
+- `console_title::keep_setting_in_background` (`console_title.rs:198`) uses
   `OnceLock` to spawn the daemon thread at most once per process; the thread
   re-stamps the title every 750 ms if the live console title has drifted.
 
-When the PTY branch is selected, `runner::run_plan_pty` (`runner.rs:415`)
+When the PTY branch is selected, `runner::run_plan_pty` (`runner_execution.rs:102`)
 arms the per-session guards in this order before allocating the PTY:
 
-1. `_console_guard = enable_console_vt_input()` (`runner.rs:429`,
-   `console_setup.rs:26`) — sets `ENABLE_VIRTUAL_TERMINAL_INPUT` (0x0200) on
+1. `_console_guard = enable_console_vt_input()` (`runner_execution.rs:349`,
+   `console_setup.rs:140`) — sets `ENABLE_VIRTUAL_TERMINAL_INPUT` (0x0200) on
    the stdin console handle and captures the original mode. Without this bit,
    `ReadConsoleW` delivers ANSI sequences that the backend's TUI cannot parse,
    and Backspace arrives as 0x08 instead of the xterm-style 0x7f that
    Ink-based UIs expect. No-op on POSIX.
-2. The optional dnd registration (`runner.rs:436-446`) — guarded behind
+2. The optional dnd registration (`runner_execution.rs:135-145`) — guarded behind
    `--no-dnd` / `--dry-run`. Holds an `Option<ConsoleDropTargetGuard>` plus a
    `Receiver<Vec<u8>>` for the duration of the launch.
-3. `NativePtyProcess::new` (`runner.rs:482`) at the resolved
-   `get_terminal_size()` (`runner.rs:42`), then `process.set_echo(false)`
-   (`runner.rs:509`) so the library's built-in stdout writer is silent and
+3. A `NativePtyProcess` from `runtime.spawn_pty` (`runner_execution.rs:268`) at
+   the resolved `get_terminal_size()` (`runner.rs:627`), then
+   `process.set_echo(false)` (`runner_execution.rs:288`) so the library's built-in stdout writer is silent and
    the pump owns forwarding.
-4. `_raw_guard = session::enter_raw_mode_if_tty()` (`runner.rs:526`,
-   `session.rs:273`) — `crossterm::terminal::enable_raw_mode` plus
+4. `_raw_guard = session::enter_raw_mode_if_tty()` (`runner_execution.rs:350`,
+   `session.rs:466`) — `crossterm::terminal::enable_raw_mode` plus
    `PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT_FLAGS)` so the kitty
    keyboard protocol carries F3 release events through. Dropped at
-   `runner.rs:541`.
+   `runner_execution.rs:406`.
 
    **`DISAMBIGUATE_ESCAPE_CODES` is deliberately *not* in that set
    (issue #1101).** It was pushed alongside `REPORT_EVENT_TYPES` from
@@ -107,12 +107,12 @@ arms the per-session guards in this order before allocating the PTY:
 
 ## The pump loop (`run_raw_pty_pump`)
 
-The pump entry chain is `run_raw_pty_pump` (`session.rs:387`) →
-`run_raw_pty_pump_with_extra_rx` (`session.rs:408`) →
-`run_raw_pty_pump_with_extra_rx_verbose` (`session.rs:430`), which constructs
+The pump entry chain is `run_raw_pty_pump` (`session.rs:706`) →
+`run_raw_pty_pump_with_extra_rx` (`session.rs:729`) →
+`run_raw_pty_pump_with_extra_rx_verbose` (`session.rs:751`), which constructs
 the resize channel and spawns the watcher before calling
-`run_raw_pty_pump_full_verbose` (`session.rs:636`), a thin `io::stdout()`
-wrapper over `run_raw_pty_pump_full_verbose_with_writer` (`session.rs:721`).
+`run_raw_pty_pump_full_verbose` (`session.rs:1146`), a thin `io::stdout()`
+wrapper over `run_raw_pty_pump_full_verbose_with_writer` (`session.rs:1365`).
 
 **Issue #538 (2026-07-22): three threads, not one cooperative loop.** Before
 this fix, a single loop did `read_chunk_impl → OSC-strip → write_all →
@@ -127,7 +127,7 @@ and splits the work three ways:
 
 1. **Reader thread.** Loops on `process.read_chunk_impl(Some(0.05))`
    (`OUTPUT_READER_POLL_SECS`), OSC-strips each chunk through
-   `OscTitleStripper::process` (`console_title.rs:204`), then drains
+   `OscTitleStripper::process` (`console_title_osc.rs:26`), then drains
    anything else already queued with non-blocking
    `read_chunk_impl(Some(0.0))` calls and coalesces it into the same
    buffer before sending once over an *unbounded* `mpsc` channel. `send`
@@ -135,7 +135,7 @@ and splits the work three ways:
    stall this thread — it just keeps reading and the channel backlog
    grows. A `read_chunk_impl` error (child gone) sets `reader_closed` and
    exits the thread instead of returning from the pump directly.
-2. **Writer thread** (`run_output_writer`, `session.rs:667`). Blocks on
+2. **Writer thread** (`run_output_writer`, `session_output.rs:27`). Blocks on
    `rx.recv()`, then drains every other chunk already queued with
    `try_recv()` before issuing exactly one `write_all` + one `flush()` per
    wakeup — a burst of N output chunks becomes O(1) syscalls instead of N.
@@ -155,7 +155,7 @@ and splits the work three ways:
    `python -m bench.idle_cpu.harness --mode pty` ([DD-088](../DESIGN_DECISIONS.md#dd-088-the-pty-pump-blocks-on-one-event-channel-and-ci-must-prove-it-under-a-real-console)).
 
 A test-only seam, `run_raw_pty_pump_full_with_writer_for_test`
-(`session.rs:587`, `#[doc(hidden)]`), takes the destination writer as a
+(`session.rs:1023`, `#[doc(hidden)]`), takes the destination writer as a
 parameter instead of hardcoding `io::stdout()`, so integration tests can
 inject a slow or counting sink — see
 `crates/clud-bin/tests/integration/pty/pty_pump.rs::stdin_forwarding_stays_fast_while_output_sink_stalls`
@@ -163,7 +163,7 @@ and the `output_writer_*` unit tests in `session_tests.rs`.
 
 **Resize channel**: drained before stdin on the main thread so a
 late-arriving resize doesn't wait on a typing chunk. `resize_pty`
-(`session.rs:21`) unwraps `process.handles.lock()` and calls
+(`session.rs:34`) unwraps `process.handles.lock()` and calls
 `master.resize(PtySize { rows, cols, .. })` directly on Windows because
 `NativePtyProcess::resize_impl` is a deliberate no-op there; POSIX delegates
 to the library. Issue #31 T2.
@@ -176,7 +176,7 @@ bracketed-paste normalizer because the OLE callback has already canonicalized
 them.
 
 **Input side**: one chunk from `stdin_rx` per main-thread turn. The chunk
-runs through `BracketedPasteNormalizer::process` (`session.rs:801` for the
+runs through `BracketedPasteNormalizer::process` (`session.rs:1465` for the
 pump's instance; the type itself is in `bracketed_paste.rs`), which
 detects `\x1b[200~ … \x1b[201~` envelopes and, when the inner content matches
 `dnd::looks_like_dropped_path`, rewrites it through `normalize_dropped_path`
@@ -199,7 +199,7 @@ Repeats are silently dropped — they signal autorepeat, not a fresh press.
 
 **Ctrl+C cooperation**: `stdin_chunk_requests_interrupt` flags a 0x03 byte
 in the chunk. If set, or if the external `interrupted` atomic flips, the
-main thread calls `interrupt_pty_process` (`session/interrupt.rs:20`) and
+main thread calls `interrupt_pty_process` (`session/interrupt.rs:26`) and
 breaks out of its loop; the `thread::scope` block then signals
 `stop_reader` and joins the reader/writer threads before the pump returns.
 On Windows the escalation closes the PTY (ConPTY translates that into
@@ -260,23 +260,23 @@ that owns the console window:
    payload is `join_paths_for_injection(paths)` (newline-joined, trailing
    space). In the pump loop, `extra_rx` delivers an equivalent
    pre-normalized chunk via the side channel
-   (`runner.rs:438`, `session.rs:616`). The COM/IDropTarget side belongs to
+   (`runner_execution.rs:357-362`, `session.rs:1656`). The COM/IDropTarget side belongs to
    `windows-quirks.md`; this doc covers only the "bytes get written to the
    PTY master" path.
-3. **Voice** — `voice::VoiceMode` (`crates/clud-bin/src/voice/mode.rs:16`)
-   implements `InteractiveHooks` (`voice/mode.rs:194`). `on_f3_press`
+3. **Voice** — `voice::VoiceMode` (`crates/clud-bin/src/voice/mode.rs:14`)
+   implements `InteractiveHooks` (`voice/mode.rs:190`). `on_f3_press`
    starts recording, `on_f3_release` plays the stop cue and enqueues
    audio on the `VoiceWorker` thread, and `on_tick` drains
    `WorkerEvent::Transcript` and writes the transcript via
-   `process.write_impl(trimmed.as_bytes(), false)` (`voice/mode.rs:175`).
+   `sink.write_input(trimmed.as_bytes(), false)` (`voice/mode.rs:173`).
    `false` means "not a paste", so the text appears at the cursor without
    bracketed-paste markers and the backend prompt does not auto-submit.
 
 ## Title management
 
-`set_for_current_cwd` (`console_title.rs:48`) runs once at process start and
+`set_for_current_cwd` (`console_title.rs:173`) runs once at process start and
 records the desired title in a static `Mutex<String>`. The keeper thread
-spawned by `spawn_keeper_thread` (`console_title.rs:76`) polls
+spawned by `spawn_keeper_thread` (`console_title.rs:244`) polls
 `GetConsoleTitleW` every 750 ms and re-stamps when the live title has
 drifted. This is the only defense in subprocess mode, where the child
 inherits stdio handles directly and clud cannot intercept OSC bytes.
@@ -284,7 +284,7 @@ inherits stdio handles directly and clud cannot intercept OSC bytes.
 In PTY mode the pump runs every output chunk through `OscTitleStripper`
 before stdout; a daemon attach's relay does the same (#1372, see
 [daemon-ipc.md](daemon-ipc.md#attach-flow)). The stripper is a stream-resumable state machine
-(`console_title.rs:176`) with seven states (`Normal`, `AfterEsc`,
+(`console_title_osc.rs:3`) with seven states (`Normal`, `AfterEsc`,
 `InOscNumber`, `SwallowOscBody`, `SwallowAfterEsc`, `PassthroughOscBody`,
 `PassthroughAfterEsc`). It drops OSC 0 (icon + title) and OSC 2 (title only)
 sequences terminated by `BEL` (0x07) or `ST` (`ESC \\`), and passes
@@ -302,10 +302,10 @@ guarantees any output still in flight gets flushed instead of dropped:
 
 - **Child exit**: `poll_pty_process` returns `Ok(Some(code))`. The pump
   returns the code; `run_plan_pty` runs it through `normalize_exit_code`
-  (`runner.rs:79`).
+  (`runner_exit.rs:3`).
 - **Ctrl+C cooperation**: either a 0x03 byte on stdin or the external
   `interrupted` atomic flipping. The main thread calls
-  `interrupt_pty_process` (`session/interrupt.rs:20`). On Windows the
+  `interrupt_pty_process` (`session/interrupt.rs:26`). On Windows the
   helper closes the PTY (ConPTY's `CTRL_CLOSE_EVENT` path) so the child
   does not receive a second 0x03 that Ink-based TUIs interpret as
   "Ctrl+C twice = exit". On POSIX it sends SIGINT to the child's pgroup
@@ -313,7 +313,7 @@ guarantees any output still in flight gets flushed instead of dropped:
 - **PTY read error**: the reader thread's `read_chunk_impl` returning
   `Err` is treated as a child-gone signal — it sets `reader_closed` and
   exits the reader thread; the main thread observes the flag on its next
-  turn and calls `reap_pty_exit` (`session/interrupt.rs:5`), which invokes
+  turn and calls `reap_pty_exit` (`session/interrupt.rs:7`), which invokes
   `wait_impl(Some(1.0))` and returns 1 on timeout.
 
 Closing the channel between the reader and writer threads (by the reader
@@ -322,12 +322,12 @@ it does one final non-blocking drain-and-send from the reader side first,
 then the writer's `rx.recv()` returns `Err` only after that last chunk has
 been received and flushed.
 
-On every return, `_raw_guard` drops first (`runner.rs:541`), restoring
+On every return, `_raw_guard` drops first (`runner_execution.rs:406`), restoring
 crossterm raw mode and popping keyboard enhancement flags. The
 `_dnd_pty_guard` and `_console_guard` drop when the `run_plan_pty` frame
 unwinds: `ConsoleDropTargetGuard::Drop` signals the worker thread, revokes
 the `IDropTarget`, and calls `OleUninitialize`; `ConsoleVtGuard::Drop`
-(`console_setup.rs:13`) restores the captured original console mode bits.
+(`console_setup.rs:117`) restores the captured original console mode bits.
 The resize-watcher thread observes the closed `resize_tx` and exits.
 
 ## Terminal restore
@@ -368,34 +368,34 @@ and on panics, because the workspace unwinds. A forced kill (`kill -9`,
 
 | Symbol | Location |
 |---|---|
-| `run_raw_pty_pump` | `crates/clud-bin/src/session.rs:387` |
-| `run_raw_pty_pump_with_extra_rx_verbose` | `crates/clud-bin/src/session.rs:430` |
-| `run_raw_pty_pump_full_verbose` (thin `io::stdout()` wrapper) | `crates/clud-bin/src/session.rs:636` |
-| `run_raw_pty_pump_full_verbose_with_writer` (reader/writer/main-loop split) | `crates/clud-bin/src/session.rs:721` |
-| `run_raw_pty_pump_full_with_writer_for_test` (`#[doc(hidden)]` test seam) | `crates/clud-bin/src/session.rs:587` |
-| `run_output_writer` (writer-thread coalescing loop) | `crates/clud-bin/src/session.rs:667` |
-| `F3Observer` struct | `crates/clud-bin/src/session.rs:93` |
-| `F3Observer::observe` | `crates/clud-bin/src/session.rs:126` |
-| `InteractiveHooks` trait | `crates/clud-bin/src/session.rs:281` |
-| `BracketedPasteNormalizer` | `crates/clud-bin/src/session/bracketed_paste.rs:32` |
-| `EscapeSequenceGate` | `crates/clud-bin/src/session/escape_gate.rs:19` |
-| `resize_pty` | `crates/clud-bin/src/session.rs:21` |
-| `spawn_os_resize_watcher` | `crates/clud-bin/src/session.rs:495` |
-| `interrupt_pty_process` | `crates/clud-bin/src/session/interrupt.rs:20` |
-| `reap_pty_exit` | `crates/clud-bin/src/session/interrupt.rs:5` |
-| `RawTerminalGuard` | `crates/clud-bin/src/session.rs:303` |
+| `run_raw_pty_pump` | `crates/clud-bin/src/session.rs:706` |
+| `run_raw_pty_pump_with_extra_rx_verbose` | `crates/clud-bin/src/session.rs:751` |
+| `run_raw_pty_pump_full_verbose` (thin `io::stdout()` wrapper) | `crates/clud-bin/src/session.rs:1146` |
+| `run_raw_pty_pump_full_verbose_with_writer` (reader/writer/main-loop split) | `crates/clud-bin/src/session.rs:1365` |
+| `run_raw_pty_pump_full_with_writer_for_test` (`#[doc(hidden)]` test seam) | `crates/clud-bin/src/session.rs:1023` |
+| `run_output_writer` (writer-thread coalescing loop) | `crates/clud-bin/src/session_output.rs:27` |
+| `F3Observer` struct | `crates/clud-bin/src/session.rs:106` |
+| `F3Observer::observe` | `crates/clud-bin/src/session.rs:139` |
+| `InteractiveHooks` trait | `crates/clud-bin/src/session.rs:294` |
+| `BracketedPasteNormalizer` | `crates/clud-bin/src/session/bracketed_paste.rs:34` |
+| `EscapeSequenceGate` | `crates/clud-bin/src/session/escape_gate.rs:20` |
+| `resize_pty` | `crates/clud-bin/src/session.rs:34` |
+| `spawn_os_resize_watcher` | `crates/clud-bin/src/session.rs:901` |
+| `interrupt_pty_process` | `crates/clud-bin/src/session/interrupt.rs:26` |
+| `reap_pty_exit` | `crates/clud-bin/src/session/interrupt.rs:7` |
+| `RawTerminalGuard` | `crates/clud-bin/src/session.rs:316` |
 | `TerminalCapture` | `crates/clud-bin/src/capture.rs:29` |
 | `TerminalCapture::snapshot_bytes` | `crates/clud-bin/src/capture.rs:192` |
-| `ConsoleVtGuard` | `crates/clud-bin/src/console_setup.rs:8` |
-| `enable_console_vt_input` | `crates/clud-bin/src/console_setup.rs:26` |
-| `console_input::spawn_console_input_reader` | `crates/clud-bin/src/console_input.rs` |
-| `console_title::set_for_current_cwd` | `crates/clud-bin/src/console_title.rs:48` |
-| `console_title::keep_setting_in_background` | `crates/clud-bin/src/console_title.rs:70` |
-| Title keeper thread entry (Windows) | `crates/clud-bin/src/console_title.rs:76` |
-| `OscTitleStripper` | `crates/clud-bin/src/console_title.rs:176` |
-| `VoiceMode` (`InteractiveHooks` impl) | `crates/clud-bin/src/voice/mode.rs:194` |
+| `ConsoleVtGuard` | `crates/clud-bin/src/console_setup.rs:110` |
+| `enable_console_vt_input` | `crates/clud-bin/src/console_setup.rs:140` |
+| `console_input::spawn_console_input_reader` | `crates/clud-bin/src/console_input.rs:81` |
+| `console_title::set_for_current_cwd` | `crates/clud-bin/src/console_title.rs:173` |
+| `console_title::keep_setting_in_background` | `crates/clud-bin/src/console_title.rs:198` |
+| Title keeper thread entry (Windows) | `crates/clud-bin/src/console_title.rs:263` |
+| `OscTitleStripper` | `crates/clud-bin/src/console_title_osc.rs:3` |
+| `VoiceMode` (`InteractiveHooks` impl) | `crates/clud-bin/src/voice/mode.rs:190` |
 | `pty_master_injector` | `crates/clud-bin/src/dnd/injectors.rs:138` |
-| `run_plan_pty` (call site) | `crates/clud-bin/src/runner.rs:415` |
+| `run_plan_pty` (pump call site) | `crates/clud-bin/src/runner_execution.rs:383` |
 
 ## Failure modes
 
@@ -410,7 +410,7 @@ and on panics, because the workspace unwinds. A forced kill (`kill -9`,
   `capture.rs:malformed_csi_is_recovered_from`.
 - **Child crashes.** The reader thread's `read_chunk_impl` returns `Err`,
   which sets `reader_closed`; the main thread observes it on its next turn
-  and calls `reap_pty_exit` (`session/interrupt.rs:5`), which waits 1 s
+  and calls `reap_pty_exit` (`session/interrupt.rs:7`), which waits 1 s
   before returning 1. `process_tree::kill_tree` runs from the outer Ctrl+C
   path, not from a child-exit path.
 - **Hot resize during a write.** Resize events are drained before stdin on
@@ -436,7 +436,7 @@ and on panics, because the workspace unwinds. A forced kill (`kill -9`,
 - **F3 sequence split mid-buffer.** `F3Observer` keeps state across
   `observe` calls; even one-byte-at-a-time fragmentation of `\x1bOR` or
   `\x1b[13;1:3~` fires exactly one event. CSI parameter overrun is bounded
-  by `MAX_CSI_LEN = 64` (`session.rs:113`).
+  by `MAX_CSI_LEN = 64` (`session.rs:127`).
 
 ## See also
 
