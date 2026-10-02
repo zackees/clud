@@ -201,23 +201,26 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
 }
 
 /// What the child should read for one corpus entry. Besides ConPTY's LF→CR
-/// ([`through_pty_input`]), ConPTY consumes terminal focus reports
-/// (`ESC [ I` / `ESC [ O`) from its input instead of passing them to the
-/// child: observed on the Windows x64 and arm runners for every input path
-/// and chunking (#1717). Claude Code run directly under Windows Terminal goes
-/// through ConPTY too, so this is the platform's behaviour, not clud's.
-fn expected_for(name: &str, bytes: &[u8]) -> Vec<u8> {
-    if cfg!(windows) && name == "focus in/out" {
+/// ([`through_pty_input`]), ConPTY consumes a terminal focus report
+/// (`ESC [ I` / `ESC [ O`) from its input instead of passing it to the child,
+/// observed on the Windows x64 and arm runners (#1717). It does so only when
+/// the report arrives intact: one byte at a time with idle gaps, the lone
+/// `ESC` is released as an Esc keypress must be, ConPTY sees `[I` as text, and
+/// the child reads the bytes unchanged. Claude Code run directly under
+/// Windows Terminal goes through ConPTY too, so this is the platform's
+/// behaviour, not clud's.
+fn expected_for(name: &str, bytes: &[u8], chunking: Chunking) -> Vec<u8> {
+    if cfg!(windows) && name == "focus in/out" && !matches!(chunking, Chunking::PerByte) {
         return Vec::new();
     }
     through_pty_input(bytes)
 }
 
 /// The first corpus entry whose bytes the child did not get intact.
-fn first_damaged_entry(got: &[u8]) -> Option<String> {
+fn first_damaged_entry(got: &[u8], chunking: Chunking) -> Option<String> {
     let mut rest = got;
     for (name, bytes) in CORPUS {
-        let mut expected = expected_for(name, bytes);
+        let mut expected = expected_for(name, bytes, chunking);
         expected.push(b'|');
         match rest.strip_prefix(expected.as_slice()) {
             Some(after) => rest = after,
@@ -236,7 +239,7 @@ fn first_damaged_entry(got: &[u8]) -> Option<String> {
 
 fn assert_round_trip(path: Path, chunking: Chunking) {
     let got = child_reads(path, chunking);
-    if let Some(damage) = first_damaged_entry(&got) {
+    if let Some(damage) = first_damaged_entry(&got, chunking) {
         panic!("{path:?} / {chunking:?}: {damage}");
     }
 }
