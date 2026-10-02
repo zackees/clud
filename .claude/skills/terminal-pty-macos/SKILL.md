@@ -40,7 +40,7 @@ These are the same as on Linux. Start with:
   (`:1252`).
 - `crates/clud-bin/src/session/child_modes.rs` and
   `crates/clud-bin/src/session/escape_gate.rs`.
-- `crates/clud-bin/tests/pty/pty_pump.rs:378`, the #1704 restore test. On
+- `crates/clud-bin/tests/integration/pty/pty_pump.rs:378`, the #1704 restore test. On
   `cfg(unix)` (macOS included) it asserts the full mode set.
 - Any `#[cfg(target_os = "macos")]` or `#[cfg(unix)]` code that touches
   `libc` termios or PTY APIs.

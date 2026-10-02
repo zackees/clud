@@ -251,6 +251,9 @@ test = false
 [[bin]]
 name = "clud-kittyterm-paste"
 path = "src/bin/clud_kittyterm_paste.rs"
+# Its logic and tests live in `clud::paste_image` (#1726): a bin harness
+# links the whole workspace for three tests.
+test = false
 
 # Issue #464: opt-in process-sampler microbench. Behind a feature so it is
 # not compiled by `cargo clippy --all-targets`, which `bash lint` runs on all
@@ -284,8 +287,8 @@ required-features = ["bench"]
 
 # Issue #517: test-only probe binary. Installs the real production
 # `startup::install_ctrl_c_flag` handler and reports which
-# `CtrlEventKind` fired, so `tests/signals/ctrlc_signal_kinds.rs` and
-# `tests/signals/ctrlc_windows_events.rs` can drive it with real OS signals /
+# `CtrlEventKind` fired, so `tests/integration/signals/ctrlc_signal_kinds.rs` and
+# `tests/integration/signals/ctrlc_windows_events.rs` can drive it with real OS signals /
 # console-control events instead of re-implementing the handler.
 [[bin]]
 name = "clud-ctrlc-probe"

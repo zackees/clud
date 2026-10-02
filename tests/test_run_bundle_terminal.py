@@ -2,8 +2,9 @@
 
 The PTY tests used to skip silently whenever the harness's stdout was a pipe,
 which is how CI ran every harness, so Windows had no coverage of clud under a
-real console. The `pty` harness now runs inside a pseudo-terminal with
-`CLUD_REQUIRE_PTY=1`, which turns a canary failure into a red test.
+real console. Each `pty::` test now runs inside a pseudo-terminal with
+`CLUD_REQUIRE_PTY=1`, which turns a canary failure into a red test (which
+tests: `tests/test_harness_plan.py`).
 """
 
 from __future__ import annotations
@@ -14,33 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from ci.run_bundle import REQUIRE_PTY_ENV, needs_terminal, run_in_terminal
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["pty-ad3bdf1f57219854", "pty-ad3bdf1f57219854.exe", "pty-0"],
-)
-def test_pty_harness_runs_in_a_terminal(name: str) -> None:
-    assert needs_terminal(Path(name))
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "orphan_reap-1a2b3c",
-        "cli-9f8e7d.exe",
-        "pty_extra-1234",
-        "empty-pty-1234",
-        "pty",
-    ],
-)
-def test_other_harnesses_keep_piped_stdio(name: str) -> None:
-    assert not needs_terminal(Path(name))
+from ci.run_bundle import REQUIRE_PTY_ENV, run_in_terminal
 
 
 def test_require_pty_env_matches_the_rust_harness() -> None:
-    common = Path(__file__).resolve().parents[1] / "crates/clud-bin/tests/common/mod.rs"
+    root = Path(__file__).resolve().parents[1]
+    common = root / "crates/clud-bin/tests/integration/common/mod.rs"
     assert f'REQUIRE_PTY_ENV: &str = "{REQUIRE_PTY_ENV}"' in common.read_text(encoding="utf-8")
 
 

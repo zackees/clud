@@ -146,23 +146,23 @@ in [testing-tiers.md](testing-tiers.md).
   `csi_u_ctrl_c_split_at_every_offset_requests_exactly_one_interrupt`
   (`session_tests.rs:745`), and `sequences_split_across_reads_are_followed`
   in `session/child_modes.rs`.
-- **Real PTY harness.** `crates/clud-bin/tests/pty/` drives real PTYs with
+- **Real PTY harness.** `crates/clud-bin/tests/integration/pty/` drives real PTYs with
   [`mock-agent`](../../testbins/mock-agent/README.md):
   `--mock-ansi-script` (emit a byte file), `--mock-read-stdin-ms` and
   `--mock-stdin-raw-to` (capture exactly what reached the child), and
   `--mock-ready-file`. Examples include
   `a_ctrl_c_interrupted_child_has_its_terminal_modes_undone`
-  (`tests/pty/pty_pump.rs:378`) and
+  (`tests/integration/pty/pty_pump.rs:378`) and
   `stdin_forwarding_stays_fast_while_output_sink_stalls`
-  (`tests/pty/pty_pump.rs:1051`). The pump has a test entry,
+  (`tests/integration/pty/pty_pump.rs:1051`). The pump has a test entry,
   `run_raw_pty_pump_with_extras` (`session.rs:855`).
 - **Real console required.** `require_pty_or_skip!`
-  (`crates/clud-bin/tests/common/mod.rs:369`) skips a test when no real
+  (`crates/clud-bin/tests/integration/common/mod.rs:369`) skips a test when no real
   terminal is present, unless `CLUD_REQUIRE_PTY=1` is set. In that case it
-  fails. CI's `ci/run_bundle.py` runs the `pty` harness inside a
-  pseudo-terminal (`needs_terminal`, `TERMINAL_HARNESS = "pty"`,
-  `ci/run_bundle.py:197-215`) and sets `CLUD_REQUIRE_PTY=1`, so a skip there
-  becomes a red test.
+  fails. CI's `ci/run_bundle.py` runs each `pty::` test of the `integration`
+  harness in its own pseudo-terminal (`ci/harness_plan.py`,
+  `TERMINAL_CATEGORY = "pty"`; `run_terminal_test`) and sets
+  `CLUD_REQUIRE_PTY=1`, so a skip there becomes a red test.
 
 ## Validation
 

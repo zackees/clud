@@ -47,7 +47,7 @@ Read that first. This page lists only what differs on Windows.
   and the child reads the bytes unchanged, or the report assembles and is
   consumed. Each report resolves on its own; the sweep accepts exactly those
   two outcomes. Everything else in
-  `tests/pty/input_corpus.rs` must reach the child byte-for-byte; the only
+  `tests/integration/pty/input_corpus.rs` must reach the child byte-for-byte; the only
   modelled transforms are LF→CR and this one (`expected_for`).
 - **Cursor query at startup.** ConPTY sends `ESC[6n` and holds the child
   until a reply comes back (#1310). clud answers only when stdin is not an
@@ -123,17 +123,17 @@ outside act; rely on the clippy step in the CI Windows build.
 Tests that need a real console call `require_pty_or_skip!`. They skip when
 stdin is not a console, except under `CLUD_REQUIRE_PTY=1` (set by CI). To
 feed real key events, inject KEY_EVENT records with `WriteConsoleInputW`, as
-`crates/clud-bin/tests/pty/shift_enter_dual_reader.rs:62` does.
+`crates/clud-bin/tests/integration/pty/shift_enter_dual_reader.rs:62` does.
 
 ## Known behaviours and gotchas
 
 - **#1697.** `extra_rx_mouse_reports_split_per_character_reach_the_child_whole`
-  (`crates/clud-bin/tests/pty/pty_pump.rs:745`) reproduced the user's exact
+  (`crates/clud-bin/tests/integration/pty/pty_pump.rs:745`) reproduced the user's exact
   symptom on real ConPTY before the fix. The child read
   `35;31;18M\u{1b}[<35;31;19M…`. Use it as the template for any
   split-sequence regression.
 - **#1704 / #1709.** `a_ctrl_c_interrupted_child_has_its_terminal_modes_undone`
-  (`tests/pty/pty_pump.rs:378`) asserts only `?1049l`, `?2004l` and `?25h` on
+  (`tests/integration/pty/pty_pump.rs:378`) asserts only `?1049l`, `?2004l` and `?25h` on
   Windows, because ConPTY did not forward the others. Do not "fix" this test
   by asserting the POSIX set on Windows.
 - **Windows-only compile error.** `#[cfg(windows)]` placed directly on an

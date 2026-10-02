@@ -57,7 +57,7 @@ The two enforcement layers live elsewhere:
   `daemon::io_helpers::child_env_from` passes the daemon env with the session
   initiator's layered on top (#1209). Add a policy there and both get it. Opt out with
   `CLUD_GIT_BASH_COMPLETIONS=1`. Guardrail:
-  `tests/cli/shell_completion_guard.rs` asserts a real login shell's **function
+  `tests/integration/cli/shell_completion_guard.rs` asserts a real login shell's **function
   count**, not the env var, because the lever is a Git-for-Windows
   implementation detail that could change silently. Rationale:
   [DD-031](../../../../docs/DESIGN_DECISIONS.md#dd-031-git-bash-completions-are-suppressed-in-the-backends-login-shell).

@@ -12,7 +12,7 @@ test falls back to building from source:
       checked first by every Python consumer (tests/test_hello.py:58-60,
       tests/integration/conftest.py:181-200, tests/test_hook_stdin.py:36-48)
   CARGO_TARGET_DIR
-      read at *runtime* by crates/clud-bin/tests/common/mod.rs:33, so the
+      read at *runtime* by crates/clud-bin/tests/integration/common/mod.rs:33, so the
       Rust harnesses in pty_pump.rs / pty_behavior.rs / orphan_reap.rs resolve
       mock-agent without a source change
   CLUD_TEST_BIN_DIR
@@ -36,7 +36,7 @@ from pathlib import Path
 
 from running_process import PseudoTerminalProcess, RunningProcess
 
-from ci import process
+from ci import harness_plan, process
 from ci.aliases import materialize as materialize_aliases
 from ci.pytest_shard import SHARD_OPTION, applied_marker
 
@@ -192,27 +192,12 @@ def install_wheel(bundle: Path, env: dict[str, str]) -> int:
     return do_install(wheel, env=env)
 
 
-# The Rust harness whose tests drive a real PTY (crates/clud-bin/tests/pty/).
-# Cargo names its binary `pty-<hash>[.exe]`.
-TERMINAL_HARNESS = "pty"
-# Makes `require_pty_or_skip!` fail instead of skip (tests/common/mod.rs).
+# Makes `require_pty_or_skip!` fail instead of skip (tests/integration/common/mod.rs).
 REQUIRE_PTY_ENV = "CLUD_REQUIRE_PTY"
-# Upper bound on one test of the terminal harness. Each test runs in its own
-# pseudo-terminal (see `run_terminal_harness`), so a hang costs this much and
-# names the test instead of swallowing the rest of the harness.
+# Upper bound on one PTY test. Each runs in its own pseudo-terminal (see
+# `run_terminal_test`), so a hang costs this much and names the test instead
+# of swallowing the rest of the harness.
 TERMINAL_TEST_TIMEOUT_SECS = 60.0
-
-
-def needs_terminal(harness: Path) -> bool:
-    """True for the harness that must run with a terminal as its stdout.
-
-    #691: ConPTY stops relaying child output when the *spawning* process's
-    stdout is a pipe, which is what `process.run` gives every harness. The PTY
-    tests then skipped silently on Windows, so the configuration interactive
-    launches ship -- clud under a real terminal -- had no coverage there.
-    """
-    name, sep, _hash = harness.name.removesuffix(".exe").rpartition("-")
-    return bool(sep) and name == TERMINAL_HARNESS
 
 
 def run_in_terminal(
@@ -299,28 +284,41 @@ def dump_traces(name: str, trace_dir: Path) -> None:
             print(f"[pty-trace]   {line}", flush=True)
 
 
-def run_terminal_harness(argv: list[str], env: dict[str, str]) -> int:
-    """Run each test of the terminal harness in its own pseudo-terminal.
+def run_terminal_test(argv: list[str], name: str, env: dict[str, str]) -> int:
+    """Run one PTY test in its own pseudo-terminal, with mock-agent traces.
 
     #1310: one hung PTY test used to hold the whole harness until its
     timeout, and the kill discarded every earlier failure message. One test
     per terminal bounds each hang and keeps each verdict and message.
     """
+    trace_dir = LOG_DIR / "pty-trace" / name.replace("::", "__")
+    test_env = dict(env)
+    test_env["MOCK_AGENT_TRACE_DIR"] = str(trace_dir)
+    test_env["CLUD_PTY_PUMP_TRACE"] = "1"
+    rc = run_in_terminal([*argv, "--nocapture"], test_env)
+    if rc != 0:
+        dump_traces(name, trace_dir)
+    return rc
+
+
+def run_split_harness(argv: list[str], env: dict[str, str]) -> int:
+    """Run the integration harness one category per process (#1726)."""
     names = list_tests(Path(argv[0]), env)
     if not names:
         print(f"::error::{argv[0]} listed no tests", file=sys.stderr)
         return 1
-    failed = []
-    for name in names:
-        trace_dir = LOG_DIR / "pty-trace" / name.replace("::", "__")
-        test_env = dict(env)
-        test_env["MOCK_AGENT_TRACE_DIR"] = str(trace_dir)
-        test_env["CLUD_PTY_PUMP_TRACE"] = "1"
-        if run_in_terminal([*argv, "--exact", name, "--nocapture"], test_env) != 0:
-            failed.append(name)
-            dump_traces(name, trace_dir)
+    failed: list[str] = []
+    for run in harness_plan.split_runs(names):
+        run_argv = run.argv(argv)
+        if run.terminal:
+            rc = run_terminal_test(run_argv, run.tests[0], env)
+        else:
+            print(f"+ {Path(argv[0]).name}: {run.category} ({len(run.tests)} tests)", flush=True)
+            rc = process.run(run_argv, cwd=ROOT, env=env).returncode
+        if rc != 0:
+            failed.append(run.tests[0] if run.terminal else f"{run.category} (rc={rc})")
     if failed:
-        print(f"::error::failing PTY tests: {', '.join(failed)}", file=sys.stderr)
+        print(f"::error::failing integration tests: {', '.join(failed)}", file=sys.stderr)
         return 1
     return 0
 
@@ -343,8 +341,8 @@ def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
         if sys.platform == "win32":
             argv += ["--test-threads=1"]
         print(f"::group::{harness.name}", flush=True)
-        if needs_terminal(harness):
-            rc = run_terminal_harness(argv, env)
+        if harness_plan.is_split(harness):
+            rc = run_split_harness(argv, env)
         else:
             rc = process.run(argv, cwd=ROOT, env=env).returncode
         print("::endgroup::", flush=True)

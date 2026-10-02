@@ -28,7 +28,7 @@ use clud::subprocess::ManagedSubprocess;
 fn fixture_id(name: &str) -> String {
     format!(
         "{}::{name}",
-        crate::fixture_ids::libtest_module_prefix(module_path!())
+        super::fixture_ids::libtest_module_prefix(module_path!())
     )
 }
 

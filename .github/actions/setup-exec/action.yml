@@ -79,14 +79,14 @@ runs:
     # The hosted images ship Rust preinstalled, so we cannot assert `cargo` is
     # absent -- we have to actively poison it. Every cargo fallback in the test
     # suite (tests/test_hello.py:62-91, tests/integration/conftest.py:158-176,
-    # crates/clud-bin/tests/common/mod.rs:78-116) is a silent 10-minute cold
+    # crates/clud-bin/tests/integration/common/mod.rs:78-116) is a silent 10-minute cold
     # rebuild on the scarcest runners in the pool. Turning that into an
     # immediate, named failure is the whole point of the exec/build split.
     # Remove the toolchain rather than shadow it. A shim earlier on PATH is not
     # enough: Rust's own `Command::new("cargo")` resolves through Windows
     # `CreateProcess`, which only ever appends `.exe` -- a `cargo.cmd` shim would
     # be skipped and the real `cargo.exe` found. The test suite spawns cargo
-    # from Rust (crates/clud-bin/tests/common/mod.rs:78-116), so deletion is the
+    # from Rust (crates/clud-bin/tests/integration/common/mod.rs:78-116), so deletion is the
     # only reliable answer. Runner VMs are ephemeral.
     #
     # Why bother: every cargo fallback in the suite (tests/test_hello.py:62-91,

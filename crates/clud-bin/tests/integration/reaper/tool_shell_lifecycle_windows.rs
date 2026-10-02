@@ -22,7 +22,7 @@ const HELPER_NESTED: &str = "helper_spawns_nested_cmd";
 fn fixture_id(name: &str) -> String {
     format!(
         "{}::{name}",
-        crate::fixture_ids::libtest_module_prefix(module_path!())
+        super::fixture_ids::libtest_module_prefix(module_path!())
     )
 }
 const PID_PATH_ENV: &str = "CLUD_TOOL_SHELL_TEST_PID_PATH";

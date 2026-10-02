@@ -140,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     from ci.banned_python3 import main as check_banned_python3
     from ci.banned_skill_sources import main as check_banned_skill_sources
     from ci.banned_wheel_writes import main as check_banned_wheel_writes
+    from ci.harness_budget import main as check_harness_budget
 
     # Ordered cheapest-first so the common failure reds out soonest: ruff is a
     # pure-Python scan (~1s), the two banned-* scans are source greps, and only
@@ -175,6 +176,10 @@ def main(argv: list[str] | None = None) -> int:
     # #1714: a cargo target with no tests must not build a test harness; each
     # one is a full, uncached compile and link on every CI run.
     if check_banned_empty_harnesses() != 0:
+        return 1
+    # #1726: the `clud` package builds two harnesses, its lib unit tests and
+    # the one `integration` target; each extra one links the whole workspace.
+    if check_harness_budget() != 0:
         return 1
     # setup-soldr's cargo shim can otherwise omit repository discovery for
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the

@@ -160,7 +160,7 @@ fn sweep_until_selected(
 /// survival-only test while the protection did not exist.
 #[test]
 fn a_tagged_undeclared_listening_daemon_survives_the_orphan_sweep() {
-    let _guard = crate::REAPER_TEST_LOCK
+    let _guard = super::REAPER_TEST_LOCK
         .lock()
         .expect("reaper test lock poisoned");
     let temp = tempfile::tempdir().expect("tempdir");
@@ -208,7 +208,7 @@ fn a_tagged_undeclared_listening_daemon_survives_the_orphan_sweep() {
 /// separately unprotected.
 #[test]
 fn a_tagged_undeclared_listening_daemon_survives_the_on_exit_scan() {
-    let _guard = crate::REAPER_TEST_LOCK
+    let _guard = super::REAPER_TEST_LOCK
         .lock()
         .expect("reaper test lock poisoned");
     let temp = tempfile::tempdir().expect("tempdir");
@@ -241,7 +241,7 @@ fn a_tagged_undeclared_listening_daemon_survives_the_on_exit_scan() {
 /// reaped by the same sweep.
 #[test]
 fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
-    let _guard = crate::REAPER_TEST_LOCK
+    let _guard = super::REAPER_TEST_LOCK
         .lock()
         .expect("reaper test lock poisoned");
     let originator = a_dead_originator_pid();
