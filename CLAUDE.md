@@ -37,6 +37,13 @@ If Bosn, Docker, or `act` is unavailable, report the blocker rather than
 falling back to host testing. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
 
+**Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
+local act is a pre-push check, not the edit loop. Run `act-ci-linux` at most
+once per change. The PR's GitHub CI is the CI of record. Don't wait in a busy
+bosn queue: cancel your own job (`bosn job cancel --job-id N`) and push. Never
+`pkill`/`pgrep -f` bosn runs, because the pattern also kills other sessions'
+runs.
+
 ## Repository Map
 
 This is a Rust CLI (`clud`) distributed as a Python wheel via maturin (`bindings = "bin"`). The Rust source lives under `crates/` and is mirrored by a progressive-disclosure README tree:
