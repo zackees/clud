@@ -6,6 +6,9 @@
 //! since the last successful sweep, it invokes
 //! [`crate::gc::uv_cache::sweep_stale`] and updates the sentinel.
 //!
+//! The same pass then invalidates live wheel pointers whose archive was
+//! gutted ([`uv_cache_repair`], #1711) before the size cap runs.
+//!
 //! All errors are non-fatal — a sweep miss never crashes the daemon. The
 //! worst case is one extra `cargo` resolve when uv re-materializes a
 //! recently-evicted env on the next `clud tool run`.
@@ -14,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::gc::uv_cache;
+use crate::gc::{uv_cache, uv_cache_repair};
 
 /// How often the sweep is allowed to run. 24h matches the issue spec.
 pub const MIN_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -67,6 +70,19 @@ fn maybe_sweep_at_root(
     }
     let report = uv_cache::sweep_stale_at(cache_root, now, false)?;
     write_sentinel(sentinel_path, now)?;
+    // #1711 (DD-148): invalidate live pointers to gutted archives, under
+    // uv's own locks, so installs refetch instead of failing on every pin.
+    // Under `cfg(test)` only temp roots: tests that drive the daemon tick
+    // reach this with the real `~/.clud/cache/uv`.
+    if cfg!(not(test)) || cache_root != crate::tools::clud_uv_cache_dir() {
+        let repair = uv_cache_repair::repair_corrupt_wheels_at(cache_root, false);
+        if repair.corrupt_found > 0 {
+            eprintln!(
+                "[clud] uv-cache repair: {} corrupt wheel entries, {} invalidated, {} busy-skipped",
+                repair.corrupt_found, repair.repaired, repair.skipped,
+            );
+        }
+    }
     // #1691 (DD-145): size cap. Only the production root; tests that pass a
     // temp root exercise `enforce_cap_at` directly with a fake uv. Compiled
     // out of unit tests so no test can ever reach the real cache or real uv.
@@ -203,5 +219,33 @@ mod tests {
     #[test]
     fn min_interval_is_24_hours() {
         assert_eq!(MIN_INTERVAL, Duration::from_secs(24 * 60 * 60));
+    }
+
+    /// #1711: a `find -type f -atime +7 -delete` over the cache removed an
+    /// archive's `.dist-info` but kept its pointer, so every install of that
+    /// pin failed with "The wheel is invalid: Missing .dist-info directory"
+    /// until the daily sweep invalidates the pointer and uv refetches.
+    #[cfg(unix)]
+    #[test]
+    fn sweep_invalidates_a_pointer_whose_archive_lost_its_dist_info() {
+        use crate::gc::uv_cache_fixture::{link_exists, wheel};
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("cache").join("uv");
+        let bad = wheel(&root, "pydantic", "2.13.4", "UZfKIsCOzJxPSTiX");
+        let good = wheel(&root, "idna", "3.18", "12FEHyBt4cSdD5YF");
+        fs::remove_dir_all(&bad.dist_info).unwrap();
+        let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
+
+        maybe_sweep_at_root(&sentinel, &root, SystemTime::now()).unwrap();
+
+        assert!(
+            !bad.pointer.exists() && !link_exists(&bad),
+            "the pointer to the gutted archive must be invalidated so uv refetches"
+        );
+        assert!(
+            bad.archive.join("pydantic").join("__init__.py").exists(),
+            "archive contents are uv's to prune; clud never deletes them"
+        );
+        assert!(good.pointer.exists() && link_exists(&good) && good.dist_info.exists());
     }
 }

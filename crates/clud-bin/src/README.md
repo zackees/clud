@@ -378,6 +378,8 @@ which test tier a change belongs in — lives in
   and the same warn-only check for `~/.clud/tmp` behind `tmp.warn_bytes` (#1327),
   and for `~/.clud/cache` behind `cache.warn_bytes` (#1691);
   see [gc-and-registry.md → worktree root](../../../docs/architecture/gc-and-registry.md#the-worktree-root-cludtmp-wt-1485).
+  `uv_cache_repair.rs` invalidates live uv wheel pointers to gutted archives
+  under uv's own locks (#1711, DD-148).
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
   `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone,
   removes safe ones; `--dry-run` faithful. `worktrees_verdict.rs` (#1606)

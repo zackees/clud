@@ -443,6 +443,16 @@ symlink or not directly inside a real `~/.clud/cache`, or `UV_LINK_MODE=symlink`
 audited as `gc.uv-cache-cap`
 ([DD-145](../DESIGN_DECISIONS.md#dd-145-the-uv-cache-is-capped-by-uv-cache-clean-never-by-deleting-buckets)).
 
+**Corrupt wheel repair (#1711).** Before the cap, the same sweep (and
+`clud gc prune --kind uv-cache`) runs `gc::uv_cache_repair::repair_corrupt_wheels_at`. It finds
+live `wheels-v*` pointers (`<key>` symlink plus `<key>.http`/`.rev`) whose `archive-v0` target has
+no `.dist-info`, no `RECORD`, or a missing `RECORD`-listed file. Under a shared `<root>/.lock` and
+uv's exclusive `<key>.lock` it unlinks only the pointer files, so uv refetches. A busy entry, a
+running `uv cache clean`, or a pointer uv republished after the scan is skipped. The archive is never
+touched. Each removed file is audited as `gc.uv-cache-repair`. Unix-only in effect: on Windows uv
+writes `<key>` as a link file, not a symlink
+([DD-148](../DESIGN_DECISIONS.md#dd-148-a-corrupt-uv-wheel-entry-is-invalidated-under-uvs-entry-lock-not-cleaned)).
+
 **Trash retention and size cap (#1340, #1672).** `~/.clud/trash` holds `clud trash` quarantine
 entries (reaped on the next GC tick) and `safe-rm` entries (they carry `TRASH_MANIFEST`, kept for
 `rm_tool::TRASH_KEEP` = 72 h so they can be restored by hand). The tick's reaper makes a tree
