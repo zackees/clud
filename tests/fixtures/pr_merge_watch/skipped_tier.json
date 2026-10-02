@@ -1,0 +1,439 @@
+{
+ "_comment": "zackees/bosn#360, head 486bb08, labelled ci-test: the PR opened with a label, so two same-second ci.yml runs; concurrency cancelled 36982153750 and 36982154027 finished success. The required 'Full CI coverage (exact candidate SHA)' is skipped by the ci-test tier in that successful run. GitHub treats it as satisfied; the PR was ready.",
+ "B360": {
+  "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+  "head_branch": "fix/359-workspace-identity",
+  "required": [
+   "Linux (lint + unit + docker)",
+   "CI policy (no hosted macOS runners)",
+   "Rust workspace (locked tests)",
+   "Native wheel (ubuntu-latest)",
+   "Native wheel (windows-latest)",
+   "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+   "Darwin wheel (aarch64-apple-darwin, Linux-hosted Soldr)",
+   "Full CI coverage (exact candidate SHA)"
+  ],
+  "check_runs": [
+   {
+    "id": 110758855741,
+    "name": "Select CI tier",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "started_at": "2026-10-02T08:06:17Z",
+    "completed_at": "2026-10-02T08:06:18Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758855741",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758855896,
+    "name": "CI policy (no hosted macOS runners)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "started_at": "2026-10-02T08:06:17Z",
+    "completed_at": "2026-10-02T08:06:18Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758855896",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758855956,
+    "name": "Rust workspace (locked tests)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "started_at": "2026-10-02T08:06:17Z",
+    "completed_at": "2026-10-02T08:06:18Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758855956",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758861345,
+    "name": "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-10-02T08:06:21Z",
+    "completed_at": "2026-10-02T08:06:26Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758861345",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758861430,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-10-02T08:06:22Z",
+    "completed_at": "2026-10-02T08:06:26Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758861430",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758861435,
+    "name": "Native wheel (ubuntu-latest)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-10-02T08:06:21Z",
+    "completed_at": "2026-10-02T08:06:25Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758861435",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758861457,
+    "name": "Darwin wheel (aarch64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-10-02T08:06:22Z",
+    "completed_at": "2026-10-02T08:06:25Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758861457",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758861543,
+    "name": "Native wheel (windows-latest)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-10-02T08:06:21Z",
+    "completed_at": "2026-10-02T08:06:25Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758861543",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758863567,
+    "name": "Desktop widget (Linux, WebKitGTK)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "started_at": "2026-10-02T08:06:19Z",
+    "completed_at": "2026-10-02T08:06:18Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758863567",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758900531,
+    "name": "Hosted macOS wheel smoke (${{ matrix.target }})",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "started_at": "2026-10-02T08:06:26Z",
+    "completed_at": "2026-10-02T08:06:26Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758900531",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758902736,
+    "name": "CI queue timing",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:30Z",
+    "completed_at": "2026-10-02T08:06:37Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758902736",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758903720,
+    "name": "Full CI coverage (exact candidate SHA)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "started_at": "2026-10-02T08:06:27Z",
+    "completed_at": "2026-10-02T08:06:27Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982153750/job/110758903720",
+    "check_suite": {
+     "id": 100171436629
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758954604,
+    "name": "Select CI tier",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:40Z",
+    "completed_at": "2026-10-02T08:06:45Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758954604",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758954840,
+    "name": "CI policy (no hosted macOS runners)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:41Z",
+    "completed_at": "2026-10-02T08:06:51Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758954840",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758955372,
+    "name": "Rust workspace (locked tests)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:41Z",
+    "completed_at": "2026-10-02T08:08:58Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758955372",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758992390,
+    "name": "Darwin wheel (aarch64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:48Z",
+    "completed_at": "2026-10-02T08:06:51Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758992390",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758992431,
+    "name": "Native wheel (ubuntu-latest)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:48Z",
+    "completed_at": "2026-10-02T08:06:53Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758992431",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758992474,
+    "name": "Native wheel (windows-latest)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:51Z",
+    "completed_at": "2026-10-02T08:06:59Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758992474",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758992480,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:49Z",
+    "completed_at": "2026-10-02T08:13:52Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758992480",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758992544,
+    "name": "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:06:49Z",
+    "completed_at": "2026-10-02T08:06:55Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758992544",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110758994212,
+    "name": "Desktop widget (Linux, WebKitGTK)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "skipped",
+    "started_at": "2026-10-02T08:06:46Z",
+    "completed_at": "2026-10-02T08:06:45Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110758994212",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110759046009,
+    "name": "Hosted macOS wheel smoke (${{ matrix.target }})",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "skipped",
+    "started_at": "2026-10-02T08:06:56Z",
+    "completed_at": "2026-10-02T08:06:56Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110759046009",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110761135727,
+    "name": "CI queue timing",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-02T08:13:55Z",
+    "completed_at": "2026-10-02T08:13:59Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110761135727",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110761136769,
+    "name": "Full CI coverage (exact candidate SHA)",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "skipped",
+    "started_at": "2026-10-02T08:13:53Z",
+    "completed_at": "2026-10-02T08:13:52Z",
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36982154027/job/110761136769",
+    "check_suite": {
+     "id": 100171437405
+    },
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 36982153750,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 620,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "fix/359-workspace-identity",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "created_at": "2026-10-02T08:06:17Z",
+    "run_started_at": "2026-10-02T08:06:17Z",
+    "check_suite_id": 100171436629,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36982153750"
+   },
+   {
+    "id": 36982154027,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 621,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "fix/359-workspace-identity",
+    "head_sha": "486bb0834cfcb11d65b3ce2a87ff3cb9bb30f045",
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-02T08:06:17Z",
+    "run_started_at": "2026-10-02T08:06:17Z",
+    "check_suite_id": 100171437405,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36982154027"
+   }
+  ]
+ }
+}

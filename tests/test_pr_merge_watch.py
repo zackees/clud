@@ -1690,6 +1690,45 @@ def test_1710_cancel_never_takes_a_same_second_sibling_of_the_failing_run(
     assert scoped_cancel(watcher, monkeypatch, case, verdict.failing_run_ids) == [36970308306]
 
 
+# ---- a tier-skipped required check in a run that finished green ----
+#
+# zackees/bosn#360 was green and ready but never merged: its `ci-test` tier
+# skips the protected `Full CI coverage (exact candidate SHA)` job, and the
+# watcher read every skipped protected check as pending, forever. GitHub
+# treats that skip as satisfied, because the run that skipped it succeeded.
+
+FULL_CI = "Full CI coverage (exact candidate SHA)"
+LIVE_360 = 36982154027
+
+
+def _b360_with_live_run(**fields) -> dict:
+    case = load_case("skipped_tier", "B360")
+    for run in case["workflow_runs"]:
+        if run["id"] == LIVE_360:
+            run.update(fields)
+    return case
+
+
+def test_required_check_skipped_by_a_run_that_succeeded_is_green(watcher) -> None:
+    case = load_case("skipped_tier", "B360")
+    verdict = judge(watcher, case)
+    assert verdict.state == "pass"
+    (full,) = by_name(verdict, FULL_CI)
+    assert full.required
+    assert full.conclusion == "skipped"
+    assert verdict.failing == []
+
+
+def test_required_check_skipped_by_a_run_still_in_progress_is_pending(watcher) -> None:
+    case = _b360_with_live_run(status="in_progress", conclusion=None)
+    assert judge(watcher, case).state == "pending"
+
+
+def test_required_check_skipped_by_a_run_that_did_not_succeed_is_pending(watcher) -> None:
+    case = _b360_with_live_run(conclusion="failure")
+    assert judge(watcher, case).state == "pending"
+
+
 # ---- #1449 regression ----
 
 

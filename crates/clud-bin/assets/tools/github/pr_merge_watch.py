@@ -80,8 +80,10 @@ commit only, grouped by (workflow file, check name) -- never the display
     replaced the same way: a superseded run's jobs are never the PR's result;
   - `success`, `neutral` and `skipped` pass, but green needs at least one
     required check that actually ran on the head SHA, a protected check that
-    skipped reads as pending, and without branch protection every head run
-    must have completed (#1639);
+    skipped reads as pending unless the run that skipped it completed with
+    `success` (a CI tier that skips a protected job, as GitHub itself
+    accepts), and without branch protection every head run must have
+    completed (#1639);
   - a cancellation-derived failure is acted on only after re-reading the
     PR's head: if the head moved, the verdict is dropped and the watch
     continues on the new commit;
@@ -552,6 +554,15 @@ def _is_skipped(check: dict) -> bool:
     )
 
 
+def _run_succeeded(run: dict | None) -> bool:
+    """The workflow run finished, and GitHub concluded it `success`."""
+    return (
+        run is not None
+        and _lower(run.get("status")) == "completed"
+        and _lower(run.get("conclusion")) == "success"
+    )
+
+
 def _run_order(run: dict) -> tuple[float, int, int]:
     """Creation order of a workflow run: `created_at`, then `run_number` (#1710).
 
@@ -886,9 +897,15 @@ def judge_check_runs(
         # may not exist yet because it `needs:` still-queued jobs.
         state = "pending"
     elif required and require_re is None and any(
-        j.conclusion == "skipped" for j in req if j.name in required
+        j.conclusion == "skipped" and not _run_succeeded(runs_by_id.get(j.run_id))
+        for j in req
+        if j.name in required
     ):
-        state = "pending"  # a protected gate (`CI OK`) that skipped is no verdict
+        # A protected gate (`CI OK`) that skipped is no verdict, unless the run
+        # that skipped it finished green: a tier that skips a protected job
+        # (bosn's `ci-test` skips `Full CI coverage`) is satisfied, as GitHub
+        # treats it, or a ready PR is watched forever (zackees/bosn#360).
+        state = "pending"
     elif not required and require_re is None and not all_runs_done and head_runs:
         # Without branch protection every check is required, including the
         # ones a queued run has not created yet.
