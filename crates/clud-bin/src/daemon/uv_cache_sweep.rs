@@ -72,12 +72,16 @@ fn maybe_sweep_at_root(
     write_sentinel(sentinel_path, now)?;
     // #1711 (DD-148): invalidate live pointers to gutted archives, under
     // uv's own locks, so installs refetch instead of failing on every pin.
-    let repair = uv_cache_repair::repair_corrupt_wheels_at(cache_root, false);
-    if repair.corrupt_found > 0 {
-        eprintln!(
-            "[clud] uv-cache repair: {} corrupt wheel entries, {} invalidated, {} busy-skipped",
-            repair.corrupt_found, repair.repaired, repair.skipped,
-        );
+    // Under `cfg(test)` only temp roots: tests that drive the daemon tick
+    // reach this with the real `~/.clud/cache/uv`.
+    if cfg!(not(test)) || cache_root != crate::tools::clud_uv_cache_dir() {
+        let repair = uv_cache_repair::repair_corrupt_wheels_at(cache_root, false);
+        if repair.corrupt_found > 0 {
+            eprintln!(
+                "[clud] uv-cache repair: {} corrupt wheel entries, {} invalidated, {} busy-skipped",
+                repair.corrupt_found, repair.repaired, repair.skipped,
+            );
+        }
     }
     // #1691 (DD-145): size cap. Only the production root; tests that pass a
     // temp root exercise `enforce_cap_at` directly with a fake uv. Compiled

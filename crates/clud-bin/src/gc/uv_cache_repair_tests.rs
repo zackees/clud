@@ -252,10 +252,15 @@ mod unix {
 
         assert_eq!(repair_corrupt_wheels_at(&root, false).repaired, 1);
 
+        // One line per removed path: the `.http` pointer, then the link.
         let log = fs::read_to_string(state.path().join(AUDIT_LOG_FILE)).unwrap();
-        assert_eq!(log.lines().count(), 1, "{log}");
-        assert!(log.contains("\"site\":\"gc.uv-cache-repair\""), "{log}");
-        assert!(log.contains(REPAIR_RULE) && log.contains("missing .dist-info directory"));
-        assert!(log.contains(&*bad.link.to_string_lossy()), "{log}");
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "{log}");
+        for (line, path) in lines.iter().zip([&bad.pointer, &bad.link]) {
+            assert!(line.contains("\"site\":\"gc.uv-cache-repair\""), "{line}");
+            assert!(line.contains(REPAIR_RULE), "{line}");
+            assert!(line.contains("missing .dist-info directory"), "{line}");
+            assert!(line.contains(&*path.to_string_lossy()), "{line}");
+        }
     }
 }

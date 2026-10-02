@@ -6017,9 +6017,9 @@ installs nine days later.
 
 uv then sees a cache miss, re-downloads into a fresh archive id and
 republishes the pointer. The broken archive stays behind as a dangling entry
-for `uv cache prune`. Detection runs on every platform. The unlink is
-Unix-only, because on Windows uv keys the entry lock by the wheel stem, which
-the pointer name does not carry.
+for `uv cache prune`. The pass is Unix-only in effect. On Windows uv writes
+`<key>` as a plain link file rather than a symlink, and keys the entry lock by
+the wheel stem, so the scan finds nothing there.
 
 **Why not the alternatives:**
 - `uv cache clean <pkg>`: it needs the cache's exclusive lock, and every live

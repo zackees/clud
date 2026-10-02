@@ -449,7 +449,8 @@ live `wheels-v*` pointers (`<key>` symlink plus `<key>.http`/`.rev`) whose `arch
 no `.dist-info`, no `RECORD`, or a missing `RECORD`-listed file. Under a shared `<root>/.lock` and
 uv's exclusive `<key>.lock` it unlinks only the pointer files, so uv refetches. A busy entry, a
 running `uv cache clean`, or a pointer uv republished after the scan is skipped. The archive is never
-touched. Each invalidation is audited as `gc.uv-cache-repair`; Windows detects but does not unlink
+touched. Each removed file is audited as `gc.uv-cache-repair`. Unix-only in effect: on Windows uv
+writes `<key>` as a link file, not a symlink
 ([DD-148](../DESIGN_DECISIONS.md#dd-148-a-corrupt-uv-wheel-entry-is-invalidated-under-uvs-entry-lock-not-cleaned)).
 
 **Trash retention and size cap (#1340, #1672).** `~/.clud/trash` holds `clud trash` quarantine

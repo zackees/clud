@@ -26,8 +26,9 @@
 //! left as a dangling entry for `uv cache prune`, and clud never deletes
 //! archive contents (they may be hard-linked into live venvs).
 //!
-//! Detection runs everywhere. The mutation is Unix-only: on Windows uv keys
-//! the entry lock by the wheel stem, which the pointer name does not carry.
+//! The pass is Unix-only in effect. On Windows uv writes `<key>` as a plain
+//! link file (`archive-v0/<id>`) rather than a symlink, and keys the entry
+//! lock by the wheel stem, so the scan finds nothing and nothing is unlinked.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -287,14 +288,11 @@ fn invalidate(root: &Path, pointer: &WheelPointer, why: &str) -> bool {
     if resolve_archive(&pointer.link, &archive_dir).as_ref() != Some(&pointer.archive) {
         return false;
     }
-    // Audit before acting (#893).
-    super::delete_audit::record(
-        "gc.uv-cache-repair",
-        &pointer.link,
-        &format!("{REPAIR_RULE}: {why}"),
-    );
+    let rule = format!("{REPAIR_RULE}: {why}");
     let mut ok = true;
     for path in pointer.pointer_files.iter().chain([&pointer.link]) {
+        // Audit each path before acting (#893).
+        super::delete_audit::record("gc.uv-cache-repair", path, &rule);
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => {}
