@@ -396,11 +396,12 @@ pub fn run_plan_pty(
                     .map(session::RawTerminalGuard::child_keyboard_enhancement_tracker),
             },
         );
-        // The pump's scoped reader has joined by now. Remove any keyboard
-        // protocol frames the child left behind before dropping clud's own
-        // frame, preserving the terminal state that predated this session.
+        // The pump's scoped reader has joined by now. Undo the modes and
+        // keyboard protocol frames the child left on (Ctrl+C kills it before
+        // its own exit path runs) before dropping clud's own frame, keeping
+        // the terminal state that predated this session.
         if let Some(guard) = raw_guard.as_ref() {
-            guard.restore_child_keyboard_enhancements();
+            guard.restore_child_terminal_state();
         }
         drop(raw_guard);
         drop(_console_guard);

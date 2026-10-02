@@ -315,45 +315,35 @@ pub trait InteractiveHooks {
 #[derive(Debug)]
 pub struct RawTerminalGuard {
     keyboard: KeyboardEnhancementGuard,
-    /// The out-of-process restore for a force-killed clud (#1705); stood
-    /// down in `Drop` once this guard has restored the terminal itself.
-    restore_guard: Option<crate::term_guard::TermGuardLink>,
 }
 
 /// Owns clud's own kitty keyboard-enhancement stack frame for one terminal
-/// session, plus the tracker for frames the child pushes over it.
+/// session, plus the tracker for the terminal state the child leaves on:
+/// frames it pushes over clud's, and the modes [`child_modes`] follows.
 ///
 /// Every path that relays a child's output to the user's terminal holds one:
 /// the local PTY pump through [`RawTerminalGuard`], and the daemon attach
 /// (`daemon::attach::attach_to_session`) directly, because its raw-mode guard
 /// ends before its output relay does (#1363). Unwinding lives in `Drop`, so
 /// a normal exit, an interrupt, an early return and a panic all leave the
-/// terminal's pre-session keyboard state as they found it (#1221).
+/// terminal's pre-session keyboard state as they found it (#1221), and turn
+/// off what a killed child left on.
 #[derive(Debug)]
 pub struct KeyboardEnhancementGuard {
     pushed: bool,
     child: Arc<KeyboardEnhancementTracker>,
 }
 
-/// Tracks the keyboard-enhancement stack frames a child writes to the outer
-/// terminal.  A child TUI is allowed to push a frame for itself, but a forced
-/// shutdown can prevent its matching pop from reaching the terminal.  Keep
-/// this separate from the terminal's pre-existing frames: cleanup must remove
-/// only frames observed after clud started the child (issue #1221).
+/// Tracks the terminal state a child writes to the outer terminal: the
+/// keyboard-enhancement stack frames it pushes, and the modes it turns on.
+/// A child TUI may change both for itself, but Ctrl+C kills it before its
+/// own exit path can undo them. Keep this separate from the terminal's
+/// pre-existing state: cleanup must undo only what was observed after clud
+/// started the child (issues #1221, #1704).
 #[derive(Debug, Default)]
 pub struct KeyboardEnhancementTracker {
     state: Mutex<KeyboardEnhancementTrackerState>,
-    /// Told the unbalanced count whenever it changes (#1705: the restore
-    /// guard must know how many frames a force-killed session leaves).
-    on_change: std::sync::OnceLock<FrameCountListener>,
-}
-
-struct FrameCountListener(Box<dyn Fn(usize) + Send + Sync>);
-
-impl std::fmt::Debug for FrameCountListener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("FrameCountListener")
-    }
+    modes: Mutex<child_modes::ChildModes>,
 }
 
 #[derive(Debug, Default)]
@@ -364,38 +354,27 @@ struct KeyboardEnhancementTrackerState {
 }
 
 impl KeyboardEnhancementTracker {
-    /// Observe unmodified child output. Only kitty's stack operations
-    /// (`CSI > ... u` and `CSI < ... u`) affect this tracker; ordinary CSI-u
-    /// key events such as Ctrl+C are deliberately ignored.
+    /// Observe unmodified child output. Among kitty sequences only the stack
+    /// operations (`CSI > ... u` and `CSI < ... u`) count; ordinary CSI-u key
+    /// events such as Ctrl+C are deliberately ignored.
     pub fn observe(&self, bytes: &[u8]) {
         let mut state = self.state.lock().expect("keyboard tracker lock");
-        let before = state.unbalanced_pushes;
         for &byte in bytes {
             observe_keyboard_enhancement_byte(&mut state, byte);
         }
-        if state.unbalanced_pushes != before {
-            self.notify(state.unbalanced_pushes);
-        }
+        drop(state);
+        self.modes.lock().expect("child modes lock").observe(bytes);
     }
 
     fn take_unbalanced_pushes(&self) -> usize {
         let mut state = self.state.lock().expect("keyboard tracker lock");
-        let taken = std::mem::take(&mut state.unbalanced_pushes);
-        if taken != 0 {
-            self.notify(0);
-        }
-        taken
+        std::mem::take(&mut state.unbalanced_pushes)
     }
 
-    /// Call `listener` with the unbalanced count on every change. Set once.
-    fn on_change(&self, listener: impl Fn(usize) + Send + Sync + 'static) {
-        let _ = self.on_change.set(FrameCountListener(Box::new(listener)));
-    }
-
-    fn notify(&self, count: usize) {
-        if let Some(listener) = self.on_change.get() {
-            (listener.0)(count);
-        }
+    /// The bytes that turn off the modes the child left on; see
+    /// [`child_modes`].
+    fn take_mode_reset(&self) -> Vec<u8> {
+        self.modes.lock().expect("child modes lock").take_reset()
     }
 }
 
@@ -471,9 +450,9 @@ fn observe_keyboard_enhancement_byte(state: &mut KeyboardEnhancementTrackerState
 /// - mouse: `1000` `1001` `1002` `1003` `1005` `1006` `1015` `1016`
 /// - `1004` focus reporting, `2004` bracketed paste
 /// - `25` cursor visibility (set, not reset)
-pub(crate) const CHILD_TERMINAL_MODES_RESET: &[u8] = b"\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h";
+const CHILD_TERMINAL_MODES_RESET: &[u8] = b"\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h";
 
-pub(crate) fn keyboard_enhancement_pop_bytes(count: usize) -> Vec<u8> {
+fn keyboard_enhancement_pop_bytes(count: usize) -> Vec<u8> {
     // crossterm's PopKeyboardEnhancementFlags emits this one-frame pop. Do
     // not use `CSI = ... u`: that would overwrite the caller's state instead
     // of unwinding only the frames that belong to this session.
@@ -537,7 +516,10 @@ impl KeyboardEnhancementGuard {
         Self::with_pushed(pushed)
     }
 
-    pub(crate) fn with_pushed(pushed: bool) -> Self {
+    /// A guard that did (`true`) or did not push clud's own frame, without
+    /// touching the terminal. For tests that drive the restore directly.
+    #[doc(hidden)]
+    pub fn with_pushed(pushed: bool) -> Self {
         Self {
             pushed,
             child: Arc::new(KeyboardEnhancementTracker::default()),
@@ -550,26 +532,27 @@ impl KeyboardEnhancementGuard {
         Arc::clone(&self.child)
     }
 
-    /// Pop the frames the child left pushed, keeping clud's own frame.
-    /// Call it only once the child's output relay has stopped, so every
-    /// frame that reached the terminal has been observed.
-    pub fn restore_child_frames(&self) {
+    /// Undo what the child left on: turn off its modes and pop its frames,
+    /// keeping clud's own frame. Call it only once the child's output relay
+    /// has stopped, so everything that reached the terminal was observed.
+    pub fn restore_child_state(&self) {
         let mut stdout = io::stdout();
-        self.restore_child_frames_to(&mut stdout);
+        self.restore_child_state_to(&mut stdout);
         let _ = stdout.flush();
     }
 
-    fn restore_child_frames_to(&self, out: &mut dyn Write) {
+    fn restore_child_state_to(&self, out: &mut dyn Write) {
+        let _ = out.write_all(&self.child.take_mode_reset());
         let count = self.child.take_unbalanced_pushes();
         if count != 0 {
             let _ = out.write_all(&keyboard_enhancement_pop_bytes(count));
         }
     }
 
-    /// Pop the child's frames, then clud's own, in LIFO order. Idempotent:
-    /// a second call writes nothing.
-    pub(crate) fn unwind_to(&mut self, out: &mut dyn Write) {
-        self.restore_child_frames_to(out);
+    /// Undo the child's state, then pop clud's own frame, in LIFO order.
+    /// Idempotent: a second call writes nothing.
+    pub fn unwind_to(&mut self, out: &mut dyn Write) {
+        self.restore_child_state_to(out);
         if std::mem::take(&mut self.pushed) {
             let _ = out.write_all(&keyboard_enhancement_pop_bytes(1));
         }
@@ -586,36 +569,10 @@ impl Drop for KeyboardEnhancementGuard {
 
 impl RawTerminalGuard {
     pub fn enter() -> io::Result<Self> {
-        let initial = crate::term_guard::initial_modes();
         crossterm::terminal::enable_raw_mode()?;
-        let keyboard = KeyboardEnhancementGuard::push();
-        let restore_guard =
-            initial
-                .zip(crate::term_guard::current_modes())
-                .and_then(|(initial, raw)| {
-                    crate::term_guard::TermGuardLink::start(
-                        initial,
-                        raw,
-                        usize::from(keyboard.pushed),
-                    )
-                });
-        if let Some(link) = restore_guard.clone() {
-            let own = usize::from(keyboard.pushed);
-            keyboard
-                .child
-                .on_change(move |child| link.set_kitty_frames(own + child));
-        }
         Ok(Self {
-            keyboard,
-            restore_guard,
+            keyboard: KeyboardEnhancementGuard::push(),
         })
-    }
-
-    /// Wait until this session's restore guard is armed; its pid. `None`
-    /// when no guard runs. For the probe that tests the guard end to end.
-    #[doc(hidden)]
-    pub fn wait_restore_guard(&self, timeout: std::time::Duration) -> Option<u32> {
-        self.restore_guard.as_ref()?.wait_armed(timeout)
     }
 
     /// Share the child-output tracker with the PTY reader for this session.
@@ -623,19 +580,20 @@ impl RawTerminalGuard {
         self.keyboard.child_tracker()
     }
 
-    /// Unwind child-owned frames before this guard pops clud's own frame.
-    /// The pump joins its output reader before this is called, so every child
-    /// control sequence that reached the terminal has been observed.
-    pub fn restore_child_keyboard_enhancements(&self) {
-        self.keyboard.restore_child_frames();
+    /// Undo child-owned modes and frames before this guard pops clud's own
+    /// frame. The pump joins its output reader before this is called, so
+    /// every child control sequence that reached the terminal was observed.
+    pub fn restore_child_terminal_state(&self) {
+        self.keyboard.restore_child_state();
     }
 }
 
 impl RawTerminalGuard {
-    /// Everything the guard writes on the way out, in order: the child's
-    /// keyboard frames, the child-mode reset, then clud's own frame.
+    /// Everything the guard writes on the way out, in order: what the child
+    /// left on (tracked modes, then its keyboard frames), the blanket reset
+    /// of modes that are always off outside a session, then clud's own frame.
     fn write_exit_reset(&mut self, out: &mut dyn Write) {
-        self.keyboard.restore_child_frames_to(out);
+        self.keyboard.restore_child_state_to(out);
         let _ = out.write_all(CHILD_TERMINAL_MODES_RESET);
         self.keyboard.unwind_to(out);
     }
@@ -648,9 +606,6 @@ impl Drop for RawTerminalGuard {
         self.write_exit_reset(&mut stdout);
         let _ = stdout.flush();
         let _ = crossterm::terminal::disable_raw_mode();
-        if let Some(link) = self.restore_guard.take() {
-            link.finish();
-        }
     }
 }
 
@@ -891,7 +846,8 @@ pub struct PumpExtras {
     /// In-terminal toast compositor (#1189).
     pub toasts: Option<crate::toast::compositor::ToastPumpOptions>,
     /// Tracker supplied by `RawTerminalGuard` for child-owned kitty keyboard
-    /// protocol frames (#1221). None outside an interactive guarded session.
+    /// protocol frames and terminal modes (#1221, #1704). None outside an
+    /// interactive guarded session.
     pub keyboard_enhancement_tracker: Option<Arc<KeyboardEnhancementTracker>>,
 }
 
@@ -1832,6 +1788,7 @@ where
 /// keeps the byte-stream reader so existing behavior (including
 /// `echo "prompt" | clud` and POSIX interactive use) is unchanged.
 mod bracketed_paste;
+mod child_modes;
 mod escape_gate;
 
 pub use bracketed_paste::BracketedPasteNormalizer;

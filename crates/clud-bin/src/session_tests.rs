@@ -865,23 +865,26 @@ fn keyboard_guard_without_its_own_frame_still_unwinds_child_frames() {
     assert_eq!(terminal, b"\x1b[<1u");
 }
 
-/// #1701: the exit sequence turns off every input mode a child TUI enables
-/// (mouse, focus reporting, bracketed paste) and shows the cursor, between
-/// the child's keyboard frames and clud's own.
+/// #1701 / #1704: the exit sequence first undoes what the child left on
+/// (tracked modes, then its keyboard frames), then turns off every input mode
+/// that is always off outside a session and shows the cursor, then pops
+/// clud's own frame.
 #[test]
-fn exit_reset_disables_child_modes_between_child_and_clud_keyboard_frames() {
+fn exit_reset_undoes_child_state_then_resets_input_modes_then_pops_clud_frame() {
     let mut guard = RawTerminalGuard {
         keyboard: KeyboardEnhancementGuard::with_pushed(true),
-        restore_guard: None,
     };
-    guard.keyboard.child_tracker().observe(b"\x1b[>1u");
+    guard
+        .keyboard
+        .child_tracker()
+        .observe(b"\x1b[>1u\x1b[?1049h\x1b[?1h\x1b[33m");
     let mut terminal = Vec::new();
     guard.write_exit_reset(&mut terminal);
     // Not a real terminal guard: skip its Drop, which writes to stdout and
     // leaves raw mode.
     std::mem::forget(guard);
 
-    let mut expected = b"\x1b[<1u".to_vec();
+    let mut expected = b"\x1b[?1049l\x1b[?1l\x1b[0m\x1b[<1u".to_vec();
     expected.extend_from_slice(CHILD_TERMINAL_MODES_RESET);
     expected.extend_from_slice(b"\x1b[<1u");
     assert_eq!(terminal, expected);
@@ -897,6 +900,19 @@ fn exit_reset_disables_child_modes_between_child_and_clud_keyboard_frames() {
         );
     }
     assert!(CHILD_TERMINAL_MODES_RESET.ends_with(b"\x1b[?25h"));
+}
+
+/// #1704: a child that restored its own modes leaves nothing for the
+/// tracked reset, so a mode it never touched is never touched for it.
+#[test]
+fn a_child_that_cleaned_up_after_itself_needs_no_tracked_reset() {
+    let mut guard = KeyboardEnhancementGuard::with_pushed(false);
+    guard
+        .child_tracker()
+        .observe(b"\x1b[?1049h\x1b[?1h\x1b[?1l\x1b[?1049l");
+    let mut terminal = Vec::new();
+    guard.unwind_to(&mut terminal);
+    assert!(terminal.is_empty(), "{terminal:?}");
 }
 
 #[test]
