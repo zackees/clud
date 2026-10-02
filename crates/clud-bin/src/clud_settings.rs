@@ -27,6 +27,9 @@ const SHELL_DISABLE_POWERSHELL_NOTE: &str =
 const GIT_PR_WAIT_FAIL_FAST_NOTE: &str =
     "When true, session gh PR-check watches use the bundled fail-fast waiter; cmd-scan still denies run-id watches, hand-rolled polling, and native PR watches when the shim is unavailable. On by default (DD-065); toggle with `clud settings`.";
 
+const GIT_GH_READ_BROKER_NOTE: &str =
+    "When true, session `gh api` GET calls are answered by the clud daemon's read broker: a shared ETag cache with a 30-60 s TTL that revalidates with free 304s and saves the GitHub REST budget. Output stays byte-identical; any miss runs the real gh. On by default (#1743, DD-150); toggle with `clud settings`.";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GlobalLaunchPreferences {
     pub model_provider: Option<ModelProvider>,
@@ -64,6 +67,8 @@ pub struct GlobalSettingsPatch {
     pub model_provider: Option<ModelProvider>,
     pub harness: Option<HarnessSelection>,
     pub pr_wait_fail_fast: Option<bool>,
+    /// `git.gh_read_broker` (#1743).
+    pub gh_read_broker: Option<bool>,
     pub web_term: Option<bool>,
     /// `gc.delete_remote_branches` (#1603, #1608).
     pub gc_delete_remote_branches: Option<bool>,
@@ -240,6 +245,8 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
 
     if let Some(git) = seed_object_entry(document, "git") {
         git.entry("pr_wait_fail_fast".to_string())
+            .or_insert(Value::Bool(true));
+        git.entry("gh_read_broker".to_string())
             .or_insert(Value::Bool(true));
     }
 
@@ -750,6 +757,10 @@ fn save_settings_transaction_at(
         object_entry(&mut document, "git")
             .insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
     }
+    if let Some(enabled) = patch.gh_read_broker {
+        object_entry(&mut document, "git")
+            .insert("gh_read_broker".to_string(), Value::Bool(enabled));
+    }
     if let Some(enabled) = patch.web_term {
         object_entry(&mut document, "web_term").insert("enabled".to_string(), Value::Bool(enabled));
     }
@@ -844,6 +855,33 @@ pub fn save_pr_wait_fail_fast_enabled_at(home: &Path, enabled: bool) -> Result<(
         git.entry("pr_wait_fail_fast_note".to_string())
             .or_insert_with(|| Value::String(GIT_PR_WAIT_FAIL_FAST_NOTE.to_string()));
         git.insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
+    })
+}
+
+/// `git.gh_read_broker` (#1743): route session `gh api` GETs through the
+/// daemon read broker. On by default — see `GIT_GH_READ_BROKER_NOTE`.
+pub fn load_gh_read_broker_enabled() -> Result<bool, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_gh_read_broker_enabled_at(&home)
+}
+
+pub fn load_gh_read_broker_enabled_at(home: &Path) -> Result<bool, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(document
+        .get("git")
+        .and_then(|item| item.get("gh_read_broker"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true))
+}
+
+pub fn save_gh_read_broker_enabled_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let git = object_entry(document, "git");
+        git.entry("gh_read_broker_note".to_string())
+            .or_insert_with(|| Value::String(GIT_GH_READ_BROKER_NOTE.to_string()));
+        git.insert("gh_read_broker".to_string(), Value::Bool(enabled));
     })
 }
 

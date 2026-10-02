@@ -6107,3 +6107,40 @@ blessed soldr version beyond the shims floor, per DD-120.
 it is a no-op. A repo cannot hold contributors on an *older* soldr through
 clud any more; doing that needs the repo's own toolchain pin, not clud's
 launcher.
+
+## DD-150: the session `gh` read broker reruns the real `gh` over a loopback replay
+
+**Context:** #1743 routes in-session `gh api` GETs through a daemon cache so
+agent sessions stop spending the shared REST budget on repeat reads. The
+cache only helps if a brokered call prints exactly what the real `gh` would,
+including `--jq`, `--template` and TTY pretty-printing. Reimplementing those
+in clud (a jq engine, Go templates, gh's JSON colorizer) could only
+approximate `gh`, and would drift with every `gh` release. The design also
+named SQLite for the store, but clud replaced its bundled SQLite with redb
+(#73/#110).
+
+**Decision:**
+
+- The shim never formats output. It reruns the caller's own argv on the real
+  `gh`, with the endpoint replaced by a one-shot loopback URL that serves the
+  brokered body and headers. `gh api` accepts an absolute URL, sends no
+  token to a host it has none for, and Go never proxies loopback, so the
+  output is `gh`'s own over the same bytes. Flags whose output would show the
+  substitution (`-i`, `--verbose`), and anything the classifier does not
+  know, pass through unbrokered. So do non-2xx responses, so error text stays
+  `gh`'s.
+- The broker fetches through the real `gh api -i` with the caller's
+  forwarded auth env, never with a token of its own. The forwarded values are
+  hashed into the cache key.
+- The store is a daemon-owned redb file, `gh-broker.redb`, not SQLite.
+- Phase 1 caches every object under a TTL, completed runs included, and
+  invalidates the whole cache after any in-session `gh` call that may write.
+  A rerun reopens a completed run under the same id. Revalidation is a `304`,
+  which GitHub does not charge against the rate limit, so the cost is small.
+
+**Consequences:** every brokered read costs one extra local `gh` process (the
+formatting run, about 50 ms) and a loopback round trip. It saves a GitHub
+request whenever the cache is fresh. When the cache is stale, the request is
+a free `304`. Error responses cost two requests. Endpoints with `{owner}`
+placeholders, `--paginate` and porcelain commands are not brokered until
+later phases. A write outside clud sessions is seen within one TTL (30-60 s).

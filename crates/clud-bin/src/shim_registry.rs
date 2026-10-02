@@ -43,6 +43,16 @@ pub const GH_ACTIVE_KEY: &str = "CLUD_GH_SHIM_ACTIVE";
 pub const GH_FAIL_FAST_KEY: &str = "CLUD_GH_SHIM_FAIL_FAST";
 /// The clud executable the `gh` watch upgrade runs the bundled watcher with.
 pub const CLUD_EXE_KEY: &str = "CLUD_EXE";
+/// `1` routes in-session `gh api` GETs through the daemon's read broker
+/// (#1743, `git.gh_read_broker`). Absent (an older session) or anything else
+/// leaves every `gh` call on the real binary.
+pub const GH_READ_BROKER_KEY: &str = "CLUD_GH_READ_BROKER";
+/// The daemon state dir whose `daemon.json` names the broker's listener.
+pub const DAEMON_STATE_DIR_KEY: &str = "CLUD_DAEMON_STATE_DIR";
+/// The clud session id, recorded in the broker's ledger.
+pub const SESSION_ID_KEY: &str = "CLUD_SESSION_ID";
+/// `1` makes a brokered read skip its TTL (it still revalidates).
+pub const GH_FRESH_KEY: &str = "CLUD_GH_FRESH";
 
 /// Every session key a shim reads. The guard test in `shim_main.rs`
 /// refuses these names anywhere in the shim personality outside its `dispatch` module.
@@ -53,6 +63,7 @@ pub const SESSION_KEYS: &[&str] = &[
     GH_TARGET_KEY,
     GH_ACTIVE_KEY,
     GH_FAIL_FAST_KEY,
+    GH_READ_BROKER_KEY,
     GIT_TARGET_KEY,
 ];
 
@@ -127,7 +138,7 @@ pub const SHIMS: &[ShimSpec] = &[
     ShimSpec {
         name: "gh",
         kind: ShimKind::Gh,
-        session_keys: &[ABI_KEY, GH_TARGET_KEY, GH_FAIL_FAST_KEY],
+        session_keys: &[ABI_KEY, GH_TARGET_KEY, GH_FAIL_FAST_KEY, GH_READ_BROKER_KEY],
         fallback: Fallback::Passthrough,
         dirs: &[ShimDir::Session],
     },

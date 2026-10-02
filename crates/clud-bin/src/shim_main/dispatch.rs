@@ -30,6 +30,10 @@ pub struct GhSession {
     /// upgrade is skipped and the real `gh` runs the command unchanged.
     pub watcher: Option<PathBuf>,
     pub fail_fast: bool,
+    /// #1743: the daemon read broker for `gh api` GETs, when the session
+    /// enabled it (`git.gh_read_broker`). `None` runs every call on the
+    /// real `gh`.
+    pub read_broker: Option<crate::gh_broker::client::BrokerClient>,
 }
 
 pub enum Session {
@@ -128,6 +132,7 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
         }
         ShimKind::Gh => target(registry::GH_TARGET_KEY).map(|target| {
             Session::Gh(GhSession {
+                read_broker: read_broker(&target, facts),
                 target,
                 watcher: var(registry::CLUD_EXE_KEY)
                     .map(PathBuf::from)
@@ -140,6 +145,42 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
         // Native: never validated here.
         ShimKind::SafeRm | ShimKind::SafeMktemp => None,
     }
+}
+
+/// #1743: the read-broker client for a session that enabled it. The state
+/// dir follows the daemon's own rule: `CLUD_DAEMON_STATE_DIR`, else
+/// `~/.clud/state`.
+fn read_broker(
+    target: &std::path::Path,
+    facts: &Facts,
+) -> Option<crate::gh_broker::client::BrokerClient> {
+    let var = facts.var;
+    if var(registry::GH_READ_BROKER_KEY).as_deref() != Some(OsStr::new("1")) {
+        return None;
+    }
+    let state_dir = var(registry::DAEMON_STATE_DIR_KEY)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            facts
+                .home
+                .as_ref()
+                .map(|home| home.join(".clud").join("state"))
+        })?;
+    let env = crate::gh_broker::FORWARDED_ENV
+        .iter()
+        .filter_map(|key| {
+            let value = var(key)?.into_string().ok()?;
+            Some((key.to_string(), value))
+        })
+        .collect();
+    Some(crate::gh_broker::client::BrokerClient {
+        state_dir,
+        gh: target.to_path_buf(),
+        env,
+        session_id: var(registry::SESSION_ID_KEY).and_then(|id| id.into_string().ok()),
+        fresh: var(registry::GH_FRESH_KEY).as_deref() == Some(OsStr::new("1")),
+    })
 }
 
 /// The next real `name` on PATH after the shim directories.
@@ -410,6 +451,34 @@ mod tests {
         };
         assert_eq!(gh.watcher, Some(world.real("gh")));
         assert!(!gh.fail_fast);
+    }
+
+    #[test]
+    fn gh_read_broker_needs_the_session_opt_in() {
+        let world = World::new();
+        let mut vars = world.valid_session();
+        let Decision::Session(Session::Gh(gh)) = world.decide("gh", &vars) else {
+            panic!("valid gh session");
+        };
+        assert!(gh.read_broker.is_none(), "an older session has no key");
+        vars.insert(registry::GH_READ_BROKER_KEY, OsString::from("0"));
+        let Decision::Session(Session::Gh(gh)) = world.decide("gh", &vars) else {
+            panic!("valid gh session");
+        };
+        assert!(gh.read_broker.is_none());
+        vars.insert(registry::GH_READ_BROKER_KEY, OsString::from("1"));
+        vars.insert(registry::DAEMON_STATE_DIR_KEY, OsString::from("/state"));
+        vars.insert("GH_TOKEN", OsString::from("t"));
+        vars.insert("UNRELATED", OsString::from("x"));
+        vars.insert(registry::GH_FRESH_KEY, OsString::from("1"));
+        let Decision::Session(Session::Gh(gh)) = world.decide("gh", &vars) else {
+            panic!("valid gh session");
+        };
+        let broker = gh.read_broker.expect("enabled");
+        assert_eq!(broker.state_dir, PathBuf::from("/state"));
+        assert_eq!(broker.gh, world.real("gh"));
+        assert_eq!(broker.env, [("GH_TOKEN".to_string(), "t".to_string())]);
+        assert!(broker.fresh);
     }
 
     #[test]

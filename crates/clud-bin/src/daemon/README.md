@@ -48,6 +48,8 @@ and why it matters.
 - `paths.rs` — filesystem layout helpers under the daemon state dir (`default_state_dir` → `~/.clud/state`, `daemon.json`, `daemon.lock` bringup serialization, `sessions/`, `specs/`, `logs/`).
 - `rp_broker/` — the **default** RPC lane, over `running-process`'s broker v1 frame protocol. `endpoint.rs` resolves the named pipe / Unix socket and owns the `daemon-identity.json` sidecar (which lets a client skip the Hello handshake); `frame_lane.rs` is the daemon half and multiplexes frames over one connection; `mod.rs` is the client half and sends exactly one request per adopted session. `RUNNING_PROCESS_DISABLE=1` turns the whole lane off.
 - `http.rs` — the dashboard's loopback HTTP listener, on its own `dashboard_port`.
+  It also serves the `gh` read broker's `/gh/read` (one thread per request)
+  and `/gh/invalidate`; see [gh-read-broker.md](../../../../docs/architecture/gh-read-broker.md).
 - `cpu_alert_publish.rs` — #547: samples the daemon's own CPU every 2 s and
   writes `<state_dir>/metrics.json` **only when the alert-relevant state
   changes** (crosses 70%, or moves ≥10 pts while above it). Replaces one

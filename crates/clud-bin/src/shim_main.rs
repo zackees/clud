@@ -285,7 +285,9 @@ mod rm_shim {
 }
 
 mod gh_shim {
-    //! In-session `gh` relay. Only `pr checks --watch` changes behavior.
+    //! In-session `gh` relay. `pr checks --watch` is upgraded to the bundled
+    //! watcher, and `gh api` GETs may be answered by the daemon read broker
+    //! (#1743, docs/architecture/gh-read-broker.md).
 
     use std::ffi::OsString;
     use std::io::Read;
@@ -308,7 +310,35 @@ mod gh_shim {
                 Err(code) => return code,
             }
         }
-        exec(&session.target, args, recorder)
+        let Some(broker) = session.read_broker.as_ref() else {
+            return exec(&session.target, args, recorder);
+        };
+        if let Some(code) = brokered_read(&session.target, broker, args, recorder) {
+            return code;
+        }
+        let code = exec(&session.target, args, recorder);
+        if crate::gh_broker::classify::may_write(args) {
+            broker.invalidate();
+        }
+        code
+    }
+
+    /// #1743: answer a `gh api` GET from the daemon's read broker. The real
+    /// `gh` still formats the output: it reruns the caller's argv with the
+    /// endpoint swapped for a one-shot loopback URL serving the brokered
+    /// body. `None` (not a read, no daemon, any miss) runs the real `gh`.
+    fn brokered_read(
+        target: &Path,
+        broker: &crate::gh_broker::client::BrokerClient,
+        args: &[OsString],
+        recorder: &Recorder,
+    ) -> Option<i32> {
+        let read = crate::gh_broker::classify::api_read(args)?;
+        let response = broker.read(&read)?;
+        let url = crate::gh_broker::client::serve_replay(response).ok()?;
+        let mut replay = args.to_vec();
+        replay[read.endpoint_index] = url.into();
+        Some(exec(target, &replay, recorder))
     }
 
     fn watch_words(args: &[OsString]) -> Result<Option<Vec<&str>>, i32> {
@@ -524,6 +554,10 @@ fn session_contract_is_owned_by_dispatch() {
         "GH_FAIL_FAST_KEY",
         "GIT_TARGET_KEY",
         "CLUD_EXE_KEY",
+        "GH_READ_BROKER_KEY",
+        "DAEMON_STATE_DIR_KEY",
+        "SESSION_ID_KEY",
+        "GH_FRESH_KEY",
     ];
     let mut needles: Vec<String> = registry::SESSION_KEYS
         .iter()

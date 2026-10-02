@@ -207,6 +207,15 @@ fn setting_items() -> Vec<SettingItem> {
         value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(true)),
     });
     items.push(SettingItem {
+        key: "git.gh_read_broker",
+        label: "Cache session gh api reads",
+        note: "Answers session `gh api` GETs from the clud daemon's shared \
+               ETag cache (30-60 s TTL, free 304 revalidation) to save the \
+               GitHub REST budget. Output is byte-identical; any miss runs \
+               the real gh. On by default (#1743).",
+        value: SettingValue::Bool(clud_settings::load_gh_read_broker_enabled().unwrap_or(true)),
+    });
+    items.push(SettingItem {
         key: "bash.block_cd",
         label: "Pin the session cwd to the repo root",
         note: "A stray `cd` moves the cwd for every later tool call and breaks                repo-relative hooks. `auto` decides per repo from the hooks in                scope; a repo's .clud/settings.json overrides this.",
@@ -523,6 +532,9 @@ fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
             ("git.pr_wait_fail_fast", SettingValue::Bool(value)) => {
                 patch.pr_wait_fail_fast = Some(*value);
             }
+            ("git.gh_read_broker", SettingValue::Bool(value)) => {
+                patch.gh_read_broker = Some(*value);
+            }
             ("bash.block_cd", SettingValue::BlockCd(value)) => {
                 patch.block_cd = Some(*value);
             }
@@ -725,6 +737,7 @@ mod tests {
                 model_provider: Some(ModelProvider::Codex),
                 harness: Some(HarnessSelection::Claude),
                 pr_wait_fail_fast: Some(true),
+                gh_read_broker: None,
                 web_term: None,
                 gc_delete_remote_branches: None,
                 provider_profiles: Vec::new(),
@@ -762,6 +775,7 @@ mod tests {
                 model_provider: None,
                 harness: None,
                 pr_wait_fail_fast: Some(true),
+                gh_read_broker: None,
                 web_term: None,
                 gc_delete_remote_branches: None,
                 provider_profiles: Vec::new(),
