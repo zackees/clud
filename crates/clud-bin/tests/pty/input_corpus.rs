@@ -200,39 +200,50 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
     std::fs::read(&raw_stdin).unwrap_or_default()
 }
 
-/// What the child should read for one corpus entry. Besides ConPTY's LF→CR
-/// ([`through_pty_input`]), ConPTY consumes a terminal focus report
-/// (`ESC [ I` / `ESC [ O`) from its input instead of passing it to the child,
-/// observed on the Windows x64 and arm runners (#1717). It does so only when
-/// the report arrives intact: one byte at a time with idle gaps, the lone
-/// `ESC` is released as an Esc keypress must be, ConPTY sees `[I` as text, and
-/// the child reads the bytes unchanged. Claude Code run directly under
-/// Windows Terminal goes through ConPTY too, so this is the platform's
-/// behaviour, not clud's.
-fn expected_for(name: &str, bytes: &[u8], chunking: Chunking) -> Vec<u8> {
-    if cfg!(windows) && name == "focus in/out" && !matches!(chunking, Chunking::PerByte) {
-        return Vec::new();
+/// What the child may read for one corpus entry; any one of these is right.
+/// Besides ConPTY's LF→CR ([`through_pty_input`]), ConPTY consumes a terminal
+/// focus report (`ESC [ I` / `ESC [ O`) from its input instead of passing it
+/// to the child when the report arrives intact (observed on the Windows x64
+/// and arm runners, #1717). One byte at a time with idle gaps, it depends on
+/// timing (Windows timers tick at ~15.6 ms): if the lone `ESC` is released as
+/// an Esc keypress before `[` arrives, ConPTY sees `[I` as text and the child
+/// reads the bytes unchanged; otherwise the report assembles and is consumed.
+/// Both are right. Claude Code run directly under Windows Terminal goes
+/// through ConPTY too, so this is the platform's behaviour, not clud's.
+fn expected_for(name: &str, bytes: &[u8], chunking: Chunking) -> Vec<Vec<u8>> {
+    let intact = through_pty_input(bytes);
+    if cfg!(windows) && name == "focus in/out" {
+        return match chunking {
+            Chunking::PerByte => vec![intact, Vec::new()],
+            Chunking::PerEntry | Chunking::Stride3 => vec![Vec::new()],
+        };
     }
-    through_pty_input(bytes)
+    vec![intact]
 }
 
-/// The first corpus entry whose bytes the child did not get intact.
+/// The first corpus entry whose bytes the child did not get as expected.
 fn first_damaged_entry(got: &[u8], chunking: Chunking) -> Option<String> {
     let mut rest = got;
-    for (name, bytes) in CORPUS {
-        let mut expected = expected_for(name, bytes, chunking);
-        expected.push(b'|');
-        match rest.strip_prefix(expected.as_slice()) {
-            Some(after) => rest = after,
-            None => {
-                let shown = &rest[..rest.len().min(expected.len() + 8)];
-                return Some(format!(
-                    "{name}: expected {:?}, child read {:?}",
-                    String::from_utf8_lossy(&expected),
-                    String::from_utf8_lossy(shown)
-                ));
+    'entries: for (name, bytes) in CORPUS {
+        let options = expected_for(name, bytes, chunking);
+        for option in &options {
+            let mut expected = option.clone();
+            expected.push(b'|');
+            if let Some(after) = rest.strip_prefix(expected.as_slice()) {
+                rest = after;
+                continue 'entries;
             }
         }
+        let longest = options.iter().map(Vec::len).max().unwrap_or(0);
+        let shown = &rest[..rest.len().min(longest + 9)];
+        let options: Vec<_> = options
+            .iter()
+            .map(|option| String::from_utf8_lossy(option).into_owned())
+            .collect();
+        return Some(format!(
+            "{name}: expected one of {options:?} then '|', child read {:?}",
+            String::from_utf8_lossy(shown)
+        ));
     }
     None
 }
