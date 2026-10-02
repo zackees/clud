@@ -369,6 +369,82 @@ fn raw_pump_honors_ctrlc_flag() {
     );
 }
 
+/// #1704: Ctrl+C kills the child, so a TUI never runs its own exit path and
+/// whatever terminal state it set stays set. The pump must feed the child's
+/// output to the session's tracker before the interrupt, so the guard's
+/// restore turns those modes off afterwards. Drives the real pump, the real
+/// interrupt path and a real PTY child that turned modes on and then hangs.
+#[test]
+fn a_ctrl_c_interrupted_child_has_its_terminal_modes_undone() {
+    require_pty_or_skip!("a_ctrl_c_interrupted_child_has_its_terminal_modes_undone");
+
+    let agent = mock_agent_path();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let script = tmp.path().join("modes.ansi");
+    std::fs::write(
+        &script,
+        b"\x1b[?1049h\x1b[2;20r\x1b[?1h\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?25lready",
+    )
+    .expect("write ansi script");
+    let argv = vec![
+        agent.to_string_lossy().to_string(),
+        "--mock-ansi-script".to_string(),
+        script.to_string_lossy().to_string(),
+        "--mock-sleep-ms".to_string(),
+        "10000".to_string(),
+    ];
+    let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+
+    let mut keyboard = clud::session::KeyboardEnhancementGuard::with_pushed(false);
+    let interrupted = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&interrupted);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let mut hooks = CountingHooks::new(false);
+    let _exit = clud::session::run_raw_pty_pump_with_extras(
+        &process,
+        &interrupted,
+        &mut hooks,
+        Cursor::new(Vec::<u8>::new()),
+        None,
+        false,
+        clud::session::PumpExtras {
+            keyboard_enhancement_tracker: Some(keyboard.child_tracker()),
+            ..clud::session::PumpExtras::default()
+        },
+    );
+    let _ = process.close_impl();
+
+    let mut restore = Vec::new();
+    keyboard.unwind_to(&mut restore);
+    let has = |seq: &[u8]| restore.windows(seq.len()).any(|w| w == seq);
+    // ConPTY re-renders the child's output: it forwards the alternate
+    // screen, bracketed paste and cursor visibility, but answers the mouse,
+    // scroll-region and cursor-key requests itself (and turns focus
+    // reporting on of its own accord), so only POSIX checks the full set.
+    let mut expected: Vec<&[u8]> = vec![b"\x1b[?1049l", b"\x1b[?2004l", b"\x1b[?25h"];
+    if cfg!(unix) {
+        expected.extend([
+            &b"\x1b7\x1b[r\x1b8"[..],
+            b"\x1b[?1l",
+            b"\x1b[?1003l",
+            b"\x1b[?1006l",
+            b"\x1b[?1004l",
+        ]);
+    }
+    for seq in expected {
+        assert!(
+            has(seq),
+            "restore after Ctrl+C must contain {seq:?}; got {:?}",
+            String::from_utf8_lossy(&restore)
+        );
+    }
+}
+
 /// Resize events delivered through the pump's resize channel must reach
 /// `resize_pty` and propagate to the PTY master. This covers both Step 9
 /// (Unix SIGWINCH source) and Step 10 (Windows ReadConsoleInputW source)

@@ -5946,6 +5946,8 @@ always has some uv running is never cleaned; the warning still shows.
 
 ## DD-146: a force-killed session is restored by a guard process, not by a handler
 
+**Status:** Superseded by [DD-147](#dd-147-ctrlc-restores-the-terminal-in-process-forced-kills-are-out-of-scope). The guard was removed; the body below is kept as history.
+
 **Context:** #1705. `RawTerminalGuard::drop` restores the terminal on every
 exit clud controls, but `kill -9`, the OOM killer, `taskkill /F` and
 `TerminateProcess` run nothing in the process, and the child TUI dies with it.
@@ -5984,6 +5986,37 @@ reset bytes can in principle land after a fast shell's prompt has enabled
 bracketed paste; the guard acts on socket EOF, which comes before the shell
 can observe the child's exit. `CLUD_TERM_GUARD=0` opts out.
 
+## DD-147: Ctrl+C restores the terminal in-process; forced kills are out of scope
+
+**Context:** DD-146's out-of-process guard covered `kill -9`, the OOM killer and
+`TerminateProcess`, at the cost of two extra processes and a loopback protocol
+per session, for a rare case. The common case was going wrong instead: Ctrl+C
+ends a session by killing the child (`interrupt_pty_process`), so a TUI never
+runs its own exit path, and clud's `Drop` reset turned off input modes but
+left the alternate screen, scroll region, cursor-key and keypad modes, autowrap
+and colours as the dead child set them.
+
+**Decision:** keep Ctrl+C as an immediate kill and remove the guard. The
+session's child-output tracker (`KeyboardEnhancementTracker`, fed on the local
+pump and the daemon attach alike) also follows the modes the child turns on
+(`session/child_modes.rs`). On the way out, the session turns off exactly those
+that are still on, leaving the alternate screen first and saving the cursor
+around the scroll-region reset. It then sends the blanket reset of modes that
+are always off outside a session.
+
+**Why not the alternatives:**
+- A blanket reset of the stateful modes: `?1049l` on a terminal that was
+  never on the alternate screen restores a stale saved cursor, and `CSI r`
+  homes the cursor. These have to be conditional on what the child did.
+- Letting the child exit gracefully on Ctrl+C: a behaviour change to Ctrl+C
+  that was not wanted; the tracked reset makes the kill safe as it is.
+- Keeping the guard: no in-process handler can observe a forced kill, so the
+  guard was the only way to cover one. That coverage is given up deliberately.
+
+**Consequences:** a forced kill can still leave the terminal in a bad state
+(`reset` / `stty sane`, or a new tab on Windows). Every exit clud controls
+(child exit, Ctrl+C, the termination signals, a panic) undoes what the child
+left on.
 
 ## DD-148: a corrupt uv wheel entry is invalidated under uv's entry lock, not cleaned
 

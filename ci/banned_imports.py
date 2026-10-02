@@ -355,11 +355,6 @@ def main() -> int:
     # fixture must spawn a descendant before any containment is attached. The
     # production side of the same test goes through ManagedSubprocess; using it
     # for the fixture would make the test green even if the race returned.
-    # term_guard_restore.rs is exempt (#1705) — it must SIGKILL /
-    # TerminateProcess the exact probe pid and run the probe on a specific
-    # pseudo-terminal or its own console, then watch the out-of-process
-    # restore guard repair the terminal. NativeProcess would contain the probe
-    # in a Job Object and kill it as a tree, which is not the kill under test.
     # daemon_spawn_hygiene.rs is exempt (#1186) — it hands `clud` a
     # deliberately inheritable pipe fd to prove the daemon does not keep it
     # open. NativeProcess sweeps every fd above 2 in the child, which would
@@ -380,7 +375,6 @@ def main() -> int:
         "tool_shell_lifecycle_windows.rs",
         "subprocess_capture_lifecycle_windows.rs",
         "daemon_spawn_hygiene.rs",
-        "term_guard_restore.rs",
     }
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0

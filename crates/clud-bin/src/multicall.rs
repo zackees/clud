@@ -14,9 +14,7 @@
 //! hook configs and smoke tests that must not depend on argv[0]:
 //! `clud __cmd-scan [args]` and `clud __shim <name> [args]`. A third,
 //! `clud __link-aliases <dir>`, materializes every alias beside a build
-//! output (test harnesses, packaging smoke tests). A fourth,
-//! `clud __term-guard <launch|run> ...`, is the out-of-process terminal
-//! restore a session starts for itself (#1705, [`crate::term_guard`]).
+//! output (test harnesses, packaging smoke tests).
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -96,7 +94,6 @@ pub fn maybe_run(argv: &[OsString]) -> Option<i32> {
             Some(crate::shim_main::run(&shim_argv))
         }
         Some(LINK_ALIASES_SUBCOMMAND) => Some(link_aliases(argv.get(2))),
-        Some(crate::term_guard::SUBCOMMAND) => Some(crate::term_guard::run_cli(&argv[2..])),
         _ => None,
     }
 }

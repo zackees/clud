@@ -298,9 +298,10 @@ Console and terminal:
   cursor (#1701).
 - `session/escape_gate.rs` - keeps an escape sequence from reaching the PTY
   split across two writes (#1697).
-- `term_guard.rs` - the out-of-process terminal restore for a force-killed
-  clud (#1705, DD-146): the `RawTerminalGuard` link and the hidden
-  `clud __term-guard` process. See
+- `session/child_modes.rs` - the terminal modes a child TUI left on (alternate
+  screen, scroll region, cursor-key and keypad modes, colours, mouse, focus,
+  paste, cursor), so the session can undo exactly those after Ctrl+C kills it
+  (#1704, DD-147). See
   [session-lifecycle.md](../../../docs/architecture/session-lifecycle.md#terminal-restore).
 - `terminal_queries.rs` - `TerminalQueryScanner`, the stub replies to a
   child's terminal queries when no real terminal answers, shared by the local
@@ -867,8 +868,7 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `multicall.rs` — argv[0] dispatch, the first thing `main` does (#1551,
   DD-121): `clud-cmd-scan`/`clud-block-bad-cmd` → `block_bad_cmd::run`,
   `clud-shim` and every `shim_registry::SHIMS` name → `shim_main::run`, plus the
-  hidden `clud __cmd-scan`, `clud __shim <name>`, `clud __link-aliases <dir>`
-  and `clud __term-guard ...` (#1705, `term_guard.rs`).
+  hidden `clud __cmd-scan`, `clud __shim <name>` and `clud __link-aliases <dir>`.
   `alias_link.rs` creates an alias: hardlink, then symlink, then copy, never
   failing a launch, with a freshness check that relinks after an upgrade.
 - `shim_main.rs` also owns the session-local GitHub CLI relay and PR-watch translation;

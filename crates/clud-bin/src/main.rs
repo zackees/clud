@@ -20,10 +20,6 @@ fn main() {
     if let Some(code) = multicall::maybe_run(&argv) {
         std::process::exit(code);
     }
-    // #1705: pin the terminal settings from before clud touches them, for
-    // the restore guard a session starts if it is force-killed. Windows
-    // changes the console input mode well before raw mode is entered.
-    let _ = clud::term_guard::initial_modes();
     // #1374: before anything can write an escape sequence (clap's help, a
     // colored notice, a selector, a PTY session), so every launch path gets
     // VT output processing on a Windows console, not only those that happen

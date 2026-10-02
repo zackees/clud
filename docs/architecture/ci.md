@@ -595,7 +595,7 @@ only by *target triple*, which is the minimum possible:
 ```
 bundle/
   manifest.json         # triple, profile, git sha, test-binary list
-  bin/                  # clud, clud-*-probe, mock-agent, probe-*, scan_zombies
+  bin/                  # clud, clud-ctrlc-probe, mock-agent, probe-*, scan_zombies
                         # (`clud-cmd-scan`, `clud-shim` are argv[0] aliases of
                         # `clud`, linked on the exec side by ci/aliases.py)
   tests/                # every `cargo test --no-run` harness binary
@@ -778,9 +778,8 @@ reporter, and the shims currently share its whole dep tree, so publishing all
 five would put ~900 MB of near-duplicate DWARF on every release page.
 
 Maturin's binary binding includes every enabled Cargo `[[bin]]`. The wheel
-packer removes the test-only probes (`clud-ctrlc-probe`, a real-signal fixture,
-and `clud-term-guard-probe`, the force-kill fixture for the terminal-restore
-guard) after packaging; CI bundles retain them for those tests.
+packer removes `clud-ctrlc-probe` after packaging because it is a real-signal
+test fixture, not a production command; CI bundles retain it for those tests.
 
 ### The manylinux glibc floor is `--compatibility`, not `--target`
 
