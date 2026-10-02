@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import sys
@@ -1860,9 +1861,11 @@ def coderabbit_watch(
     timeout: int = 3600,
     required=frozenset({"linux"}),
     extra_rows=(),
+    suppressed: bool = False,
 ) -> dict:
     """Run `watch()` with green CI; `statuses(poll)` names the fixture each
-    statuses read returns (None = the read failed)."""
+    statuses read returns (None = the read failed). `coderabbit_wait` defaults
+    to an explicit 600 s opt-in; pass None to run with the CLI default."""
     clock = {"now": 1000.0}
     monkeypatch.setattr(watcher.time, "monotonic", lambda: clock["now"])
 
@@ -1903,6 +1906,14 @@ def coderabbit_watch(
         return None if name is None else CODERABBIT_STATUSES[name]
 
     monkeypatch.setattr(watcher, "gh_json", gh_json)
+    config_reads: list = []
+
+    def suppression(repo, ref):
+        config_reads.append((repo, ref))
+        return suppressed
+
+    monkeypatch.setattr(watcher, "fetch_coderabbit_suppressed", suppression)
+    state["config_reads"] = config_reads
     cancels: list = []
     monkeypatch.setattr(
         watcher, "cancel_pr_runs", lambda *args, **kwargs: cancels.append(args) or 1
@@ -1911,10 +1922,9 @@ def coderabbit_watch(
     opts = watcher.CancelOptions(
         {"fail", "review", "closed"}, "runs", 30, False, False, True, False
     )
+    wait = {} if coderabbit_wait is None else {"coderabbit_wait": coderabbit_wait}
     with pytest.raises(SystemExit) as exc:
-        watcher.watch(
-            527, "zackees/clud", 20, timeout, None, opts, log, coderabbit_wait=coderabbit_wait
-        )
+        watcher.watch(527, "zackees/clud", 20, timeout, None, opts, log, **wait)
     state["code"] = exc.value.code
     state["elapsed"] = clock["now"] - 1000.0
     state["cancels"] = cancels
@@ -1949,8 +1959,9 @@ def test_no_coderabbit_status_on_the_head_is_absent(watcher) -> None:
     assert watcher.newest_coderabbit_status(CODERABBIT_STATUSES["absent"]) is None
 
 
-def test_coderabbit_wait_flag_defaults_to_ten_minutes(watcher) -> None:
-    assert watcher.parse_args(["527"]).coderabbit_wait == 600
+def test_coderabbit_wait_is_an_explicit_opt_in(watcher) -> None:
+    # A missing CodeRabbit must never stall a local bosn -> act gate.
+    assert watcher.parse_args(["527"]).coderabbit_wait == 0
     assert watcher.parse_args(["527", "--coderabbit-wait", "90"]).coderabbit_wait == 90
 
 
@@ -1998,15 +2009,16 @@ def test_rate_limited_or_skipped_review_is_finished_and_green_with_a_note(
     assert state["cancels"] == []
 
 
-def test_no_coderabbit_status_within_two_minutes_goes_green(
-    watcher, tmp_path, monkeypatch
+def test_no_coderabbit_status_is_absent_at_once_with_no_grace(
+    watcher, tmp_path, monkeypatch, capsys
 ) -> None:
+    # Even under an explicit 600 s opt-in, an absent status is final.
     state = coderabbit_watch(watcher, tmp_path, monkeypatch, lambda poll: "absent")
     assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 1
+    assert state["elapsed"] == pytest.approx(0)
     assert _green_event(state)["coderabbit"] == "absent"
-    # Checked every poll, released at the 120 s mark, far below the 600 s cap.
-    assert state["status_reads"][-1] == pytest.approx(watcher.CODERABBIT_ABSENT_GRACE_SEC)
-    assert state["elapsed"] < 600
+    assert "coderabbit=absent" in capsys.readouterr().out
 
 
 def test_an_unreadable_status_is_not_mistaken_for_absent(watcher, tmp_path, monkeypatch) -> None:
@@ -2015,7 +2027,7 @@ def test_an_unreadable_status_is_not_mistaken_for_absent(watcher, tmp_path, monk
     )
     assert state["code"] == watcher.EXIT_GREEN
     assert _green_event(state)["coderabbit"] == "completed"
-    assert state["elapsed"] > watcher.CODERABBIT_ABSENT_GRACE_SEC
+    assert state["polls"] == 10
 
 
 def test_coderabbit_wait_cap_goes_green_with_timeout_and_never_cancels(
@@ -2051,7 +2063,112 @@ def test_coderabbit_not_detected_reads_no_status_and_goes_green_at_once(
     assert state["code"] == watcher.EXIT_GREEN
     assert state["polls"] == 1
     assert state["status_reads"] == []
-    assert "coderabbit" not in _green_event(state)
+    assert state["config_reads"] == []
+    assert _green_event(state)["coderabbit"] == "absent"
+
+
+# ---- CodeRabbit never stalls green (bosn -> act has no CodeRabbit) ----
+
+
+def test_suppressed_repo_is_green_with_no_wait_and_no_status_read(
+    watcher, tmp_path, monkeypatch, capsys
+) -> None:
+    # Even with an explicit opt-in and a pending status, a repo whose
+    # .coderabbit.yaml disables auto review is never waited on.
+    state = coderabbit_watch(
+        watcher, tmp_path, monkeypatch, lambda poll: "pending", suppressed=True
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 1
+    assert state["elapsed"] == pytest.approx(0)
+    assert state["status_reads"] == []
+    assert state["config_reads"] == [("zackees/clud", "main")]
+    assert _green_event(state)["coderabbit"] == "suppressed"
+    assert "coderabbit=suppressed" in capsys.readouterr().out
+
+
+def test_default_never_waits_on_a_pending_coderabbit_review(
+    watcher, tmp_path, monkeypatch, capsys
+) -> None:
+    # No --coderabbit-wait: a head whose remote jobs were skipped (attested)
+    # or a repo still running CodeRabbit goes green as soon as CI is green.
+    state = coderabbit_watch(
+        watcher, tmp_path, monkeypatch, lambda poll: "pending", coderabbit_wait=None
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 1
+    assert state["elapsed"] == pytest.approx(0)
+    assert _green_event(state)["coderabbit"] == "pending"
+    assert not [e for e in state["events"] if e["event"] == "coderabbit_wait"]
+    assert "coderabbit=pending" in capsys.readouterr().out
+
+
+def test_default_with_no_status_is_absent_at_once(watcher, tmp_path, monkeypatch) -> None:
+    state = coderabbit_watch(
+        watcher, tmp_path, monkeypatch, lambda poll: "absent", coderabbit_wait=None
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 1
+    assert _green_event(state)["coderabbit"] == "absent"
+
+
+def test_explicit_opt_in_still_waits_for_a_pending_review(
+    watcher, tmp_path, monkeypatch
+) -> None:
+    state = coderabbit_watch(
+        watcher,
+        tmp_path,
+        monkeypatch,
+        lambda poll: "pending" if poll < 4 else "completed",
+        coderabbit_wait=300,
+    )
+    assert state["code"] == watcher.EXIT_GREEN
+    assert state["polls"] == 4
+    assert state["elapsed"] == pytest.approx(60)
+    assert _green_event(state)["coderabbit"] == "completed"
+    assert [e["state"] for e in state["events"] if e["event"] == "coderabbit_wait"] == [
+        "pending"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "disabled"),
+    [
+        ("reviews:\n  auto_review:\n    enabled: false\n", True),
+        ("# fleet policy\nreviews:\n  profile: chill\n  auto_review:\n"
+         "    drafts: false\n    enabled: False  # no CodeRabbit\n", True),
+        ("reviews:\n  auto_review: { enabled: false }\n", True),
+        ("reviews:\n  auto_review:\n    enabled: true\n", False),
+        ("reviews:\n  auto_review:\n    drafts: false\n", False),
+        ("language: en-US\nchat:\n  auto_reply: true\n", False),
+        ("auto_review:\n  enabled: false\n", False),  # not under `reviews`
+        ("", False),
+    ],
+)
+def test_coderabbit_config_disables_auto_review(watcher, text: str, disabled: bool) -> None:
+    assert watcher.coderabbit_config_disables_auto_review(text) is disabled
+
+
+def test_fetch_coderabbit_suppressed_reads_the_config_on_the_base_ref(
+    watcher, monkeypatch
+) -> None:
+    body = base64.b64encode(b"reviews:\n  auto_review:\n    enabled: false\n").decode()
+    calls: list = []
+
+    def gh_json(*args):
+        calls.append(args)
+        if args[1] == "repos/o/r/contents/.coderabbit.yaml?ref=main":
+            return {"content": body, "encoding": "base64"}
+        return None
+
+    monkeypatch.setattr(watcher, "gh_json", gh_json)
+    assert watcher.fetch_coderabbit_suppressed("o/r", "main") is True
+    assert len(calls) == 1
+
+
+def test_no_coderabbit_config_is_not_suppressed(watcher, monkeypatch) -> None:
+    monkeypatch.setattr(watcher, "gh_json", lambda *args: None)
+    assert watcher.fetch_coderabbit_suppressed("o/r", "main") is False
 
 
 def test_a_pending_coderabbit_status_is_the_review_gate_not_a_ci_check(

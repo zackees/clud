@@ -575,10 +575,14 @@ The rationale is in
   `124` with `status: in-progress`; the lander watches again and never merges
   on that code. The lander passes `--timeout 540`, below its
   600 s tool cap, so the watch always exits on its own; a watch never cancels
-  runs on a head SHA it did not start on (#1418). When CodeRabbit is active,
-  green also waits for the head commit's `CodeRabbit` status to leave
-  `pending` (`--coderabbit-wait`, default 600 s, bounded by `--timeout`; it
-  always ends `0`, #1332). It judges each check by the newest run of
+  runs on a head SHA it did not start on (#1418). Green never waits for
+  CodeRabbit by default: nothing can reproduce it under the local
+  bosn -> act gate, and the fleet suppresses it with `.coderabbit.yaml`
+  (`reviews.auto_review.enabled: false`). A suppressed repo or a head with no
+  `CodeRabbit` status goes green at once with `coderabbit=suppressed` or
+  `coderabbit=absent`; there is no grace period. Waiting for a `pending`
+  review is an explicit opt-in (`--coderabbit-wait N`, bounded by
+  `--timeout`; it always ends `0`, #1332). It judges each check by the newest run of
   its workflow, so a superseded cancelled run is not a failure; the full rule
   lives in the watcher's docstring
   (`crates/clud-bin/assets/tools/github/pr_merge_watch.py`).
