@@ -204,4 +204,32 @@ mod tests {
     fn min_interval_is_24_hours() {
         assert_eq!(MIN_INTERVAL, Duration::from_secs(24 * 60 * 60));
     }
+
+    /// #1711: a `find -type f -atime +7 -delete` over the cache removed an
+    /// archive's `.dist-info` but kept its pointer, so every install of that
+    /// pin failed with "The wheel is invalid: Missing .dist-info directory"
+    /// until the daily sweep invalidates the pointer and uv refetches.
+    #[cfg(unix)]
+    #[test]
+    fn sweep_invalidates_a_pointer_whose_archive_lost_its_dist_info() {
+        use crate::gc::uv_cache_fixture::{link_exists, wheel};
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("cache").join("uv");
+        let bad = wheel(&root, "pydantic", "2.13.4", "UZfKIsCOzJxPSTiX");
+        let good = wheel(&root, "idna", "3.18", "12FEHyBt4cSdD5YF");
+        fs::remove_dir_all(&bad.dist_info).unwrap();
+        let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
+
+        maybe_sweep_at_root(&sentinel, &root, SystemTime::now()).unwrap();
+
+        assert!(
+            !bad.pointer.exists() && !link_exists(&bad),
+            "the pointer to the gutted archive must be invalidated so uv refetches"
+        );
+        assert!(
+            bad.archive.join("pydantic").join("__init__.py").exists(),
+            "archive contents are uv's to prune; clud never deletes them"
+        );
+        assert!(good.pointer.exists() && link_exists(&good) && good.dist_info.exists());
+    }
 }
