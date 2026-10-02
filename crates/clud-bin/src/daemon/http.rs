@@ -651,6 +651,10 @@ fn run_dashboard_loop(
     activity: Option<DaemonActivity>,
     api_lifecycle: Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
 ) {
+    // #1743: the session `gh` read broker. Its store opens on first use.
+    let gh_broker = Arc::new(crate::gh_broker::service::GhBroker::for_state_dir(
+        &state_dir,
+    ));
     for request in server.incoming_requests() {
         let _connection_guard = activity.as_ref().map(DaemonActivity::start_connection);
         let _activity_guard = test_activity
@@ -744,6 +748,14 @@ fn run_dashboard_loop(
             }
             (Method::Post, "/tools/event") => {
                 handle_tool_event(request, &stores.tool_telemetry);
+            }
+            (Method::Post, crate::gh_broker::READ_PATH) => {
+                let guard = activity.as_ref().map(DaemonActivity::start_connection);
+                spawn_gh_read(request, Arc::clone(&gh_broker), guard);
+            }
+            (Method::Post, crate::gh_broker::INVALIDATE_PATH) => {
+                let _ = gh_broker.invalidate();
+                respond_json(request, 200, b"{}");
             }
             // Any other GET is an SPA route — serve the dashboard so the
             // History-API router takes over (refresh + deep-links).
@@ -897,6 +909,34 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<RegistryMsg>>)
     match send_gc_op(tx, op) {
         Ok(reply) => respond_purge_reply(request, reply),
         Err(err) => respond_json(request, 500, json_error_bytes(&err).as_slice()),
+    }
+}
+
+/// #1743: answer one `gh api` read on its own thread. An upstream fetch
+/// takes seconds and concurrent readers of one key must be able to join it,
+/// so the dashboard loop never waits on the broker.
+fn spawn_gh_read(
+    mut request: Request,
+    broker: Arc<crate::gh_broker::service::GhBroker>,
+    guard: Option<super::activity::ActiveWorkGuard>,
+) {
+    let spawned = thread::Builder::new()
+        .name("clud-gh-read".to_string())
+        .spawn(move || {
+            let _guard = guard;
+            let (status, bytes) = match read_body(&mut request) {
+                Ok(body) => {
+                    let self_exe = std::env::current_exe().unwrap_or_default();
+                    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+                    let home = std::env::var_os(home_key).map(PathBuf::from);
+                    broker.handle_http(&body, &self_exe, home.as_deref())
+                }
+                Err(err) => (400, json_error_bytes(&format!("read body failed: {err}"))),
+            };
+            respond_json(request, status, &bytes);
+        });
+    if let Err(err) = spawned {
+        eprintln!("[clud] note: gh read thread spawn failed: {err}");
     }
 }
 

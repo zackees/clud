@@ -18,6 +18,8 @@ pub const RM_SHIM_DIR_KEY: &str = shim_registry::SESSION_DIR_KEY;
 pub const GH_SHIM_TARGET_KEY: &str = shim_registry::GH_TARGET_KEY;
 pub const GH_SHIM_ACTIVE_KEY: &str = shim_registry::GH_ACTIVE_KEY;
 pub const GH_SHIM_FAIL_FAST_KEY: &str = shim_registry::GH_FAIL_FAST_KEY;
+/// #1743: `git.gh_read_broker`, exported for the `gh` alias.
+pub const GH_READ_BROKER_KEY: &str = shim_registry::GH_READ_BROKER_KEY;
 /// #1486: the real `git`, for the `git` alias and clud's own spawns.
 pub const GIT_SHIM_TARGET_KEY: &str = shim_registry::GIT_TARGET_KEY;
 /// Git's terminal-prompt switch. An agent cannot answer a terminal prompt, so
@@ -99,6 +101,8 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
         GH_SHIM_FAIL_FAST_KEY,
         if fail_fast { "1" } else { "0" },
     );
+    let read_broker = crate::clud_settings::load_gh_read_broker_enabled().unwrap_or(true);
+    set_env(env, GH_READ_BROKER_KEY, if read_broker { "1" } else { "0" });
     set_env(env, GH_SHIM_ACTIVE_KEY, "0");
     let original_path = env
         .iter()

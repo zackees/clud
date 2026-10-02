@@ -28,3 +28,10 @@ Every in-session `gh` call, relayed or watched, is run as a child and
 recorded; see [git-gh-telemetry-shim.md](git-gh-telemetry-shim.md). The `git.pr_wait_fail_fast` setting gates
 the guard; disabling it leaves the alias as an ordinary relay for commands
 that are not intercepted.
+
+Ordinary commands are relayed with one exception. When `git.gh_read_broker`
+is on (`CLUD_GH_READ_BROKER=1`), a `gh api` GET may be answered by the
+daemon's read broker. The real `gh` still formats the brokered body, and
+any miss relays the call unchanged. After a call that may write, the alias
+also asks the broker to revalidate its cache; see
+[gh-read-broker.md](gh-read-broker.md).

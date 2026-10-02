@@ -178,6 +178,23 @@ fn cache_max_bytes_defaults_and_parses() {
 }
 
 #[test]
+fn gh_read_broker_defaults_on_and_round_trips() {
+    let home = tempdir().unwrap();
+    assert!(load_gh_read_broker_enabled_at(home.path()).unwrap());
+    save_gh_read_broker_enabled_at(home.path(), false).unwrap();
+    assert!(!load_gh_read_broker_enabled_at(home.path()).unwrap());
+    let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["git"]["gh_read_broker"], false);
+    assert!(json["git"]["gh_read_broker_note"]
+        .as_str()
+        .unwrap()
+        .contains("read broker"));
+    save_gh_read_broker_enabled_at(home.path(), true).unwrap();
+    assert!(load_gh_read_broker_enabled_at(home.path()).unwrap());
+}
+
+#[test]
 fn missing_settings_file_defaults_pr_wait_fail_fast_enabled() {
     let home = tempdir().unwrap();
     assert!(load_pr_wait_fail_fast_enabled_at(home.path()).unwrap());
@@ -434,6 +451,7 @@ fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
             model_provider: Some(ModelProvider::Codex),
             harness: Some(HarnessSelection::Claude),
             pr_wait_fail_fast: Some(true),
+            gh_read_broker: None,
             web_term: None,
             gc_delete_remote_branches: None,
             provider_profiles: Vec::new(),
@@ -458,6 +476,7 @@ fn partial_settings_patch_preserves_omission_and_latest_launch_preferences() {
         GlobalSettingsPatch {
             block_cd: None,
             pr_wait_fail_fast: Some(true),
+            gh_read_broker: None,
             ..GlobalSettingsPatch::default()
         },
     )
@@ -494,6 +513,7 @@ fn partial_settings_patch_preserves_omission_and_latest_launch_preferences() {
         GlobalSettingsPatch {
             block_cd: None,
             pr_wait_fail_fast: Some(false),
+            gh_read_broker: None,
             ..GlobalSettingsPatch::default()
         },
     )
