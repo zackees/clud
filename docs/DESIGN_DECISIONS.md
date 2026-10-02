@@ -5984,3 +5984,64 @@ reset bytes can in principle land after a fast shell's prompt has enabled
 bracketed paste; the guard acts on socket EOF, which comes before the shell
 can observe the child's exit. `CLUD_TERM_GUARD=0` opts out.
 
+
+## DD-148: a corrupt uv wheel entry is invalidated under uv's entry lock, not cleaned
+
+**Context:** #1711. On 2026-09-22 an agent's disk cleanup ran
+`find ~/.clud/cache/uv -type f -mtime +7 -atime +7 -delete`. That was before
+#1484 refused `find -delete`. Package files are hard-linked into live venvs,
+so imports kept their atime fresh, but `.dist-info` files are never read on
+import. The `find` removed them and kept the code. `-type f` skips symlinks,
+so 164 live wheel pointers kept pointing at gutted archives:
+- 10 had no `.dist-info`, so every install of the pin failed with "The wheel
+  is invalid: Missing .dist-info directory". `pydantic 2.13.4`,
+  `cryptography 50.0.0` and `click 8.4.2` were among them.
+- 40 had no `RECORD`.
+- 114 were missing files that `RECORD` lists. These install and then fail on
+  import.
+
+This is the failure DD-145 predicts for age-based deletion. uv trusts any
+pointer whose archive directory exists, so the damage was still breaking
+installs nine days later.
+
+**Decision:** the daily uv sweep and `clud gc prune --kind uv-cache` run
+`gc::uv_cache_repair`, which proceeds as follows:
+1. It walks the `wheels-v*` pointers: a `<key>` symlink with a `<key>.http`
+   or `<key>.rev` sibling that resolves into `archive-v0/`.
+2. It flags an archive with no top-level `.dist-info`, no `RECORD`, or a
+   missing `RECORD`-listed file.
+3. It takes a shared lock on `<root>/.lock` and then the exclusive
+   `<key>.lock`, re-checks the link, and audits the change as
+   `gc.uv-cache-repair`.
+4. It unlinks only the pointer files.
+
+uv then sees a cache miss, re-downloads into a fresh archive id and
+republishes the pointer. The broken archive stays behind as a dangling entry
+for `uv cache prune`. Detection runs on every platform. The unlink is
+Unix-only, because on Windows uv keys the entry lock by the wheel stem, which
+the pointer name does not carry.
+
+**Why not the alternatives:**
+- `uv cache clean <pkg>`: it needs the cache's exclusive lock, and every live
+  `uv run` holds the shared lock for its whole lifetime. That includes clud's
+  own bundled tools, such as `pr_merge_watch.py --timeout 1700`. On the
+  reporting host the clean waited 300 s and gave up, and that host always has
+  some uv running.
+- `uv cache clean --force <pkg>`: it skips the lock and deletes every version
+  of the package plus its now-dangling archives. Concurrent installs may be
+  hard-linking a healthy version from those archives.
+- Deleting the broken archive: its files can be hard-linked into live venvs,
+  and removing a dangling entry is what `uv cache prune` is for. DD-145 still
+  holds: clud never deletes archive contents.
+- A `uv_running` spare like the cap's: the busy host is exactly where the
+  repair is needed. The per-entry lock is the concurrency control uv itself
+  uses when it replaces that pointer, and a held lock skips the entry until
+  the next pass.
+
+**Consequences:** a gutted entry costs one re-download instead of a permanent
+install failure for every session that shares the cache. A wheel whose
+`RECORD` lists files it never shipped is re-fetched on each pass. That is
+bounded and has not been observed: all 830 intact pointers on the reporting
+host validate. Removing pointer files is a deliberate, narrow exception to
+uv's "never modify the cache" guidance. It applies only to pointers whose
+target is already unusable, and only under uv's own locks.

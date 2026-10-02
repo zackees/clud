@@ -29,6 +29,7 @@ pub mod target_sweep;
 pub mod uv_cache;
 #[cfg(all(test, unix))]
 pub(crate) mod uv_cache_fixture;
+pub mod uv_cache_repair;
 pub mod worktree_root;
 pub mod worktree_size_cache;
 

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use clap::CommandFactory;
 
 use super::registry::now_unix;
-use super::uv_cache;
+use super::{uv_cache, uv_cache_repair};
 use crate::args::{Args, GcSubcommand};
 use crate::gc::{EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND};
 use crate::worktrees;
@@ -376,12 +376,14 @@ fn cmd_list_uv_cache(json: bool) -> i32 {
     0
 }
 
-/// `clud gc prune --kind uv-cache` runs the same stale-env sweep as the
-/// daemon's daily tick. Full cache deletion lives under `purge`.
+/// `clud gc prune --kind uv-cache` runs the same stale-env sweep and
+/// corrupt-wheel repair (#1711) as the daemon's daily tick. Full cache
+/// deletion lives under `purge`.
 fn cmd_prune_uv_cache(dry_run: bool) -> i32 {
     match uv_cache::sweep_stale(SystemTime::now(), dry_run) {
         Ok(report) => {
             print_uv_cache_sweep_report(&report);
+            print_uv_cache_repair_report(&uv_cache_repair::repair_corrupt_wheels(dry_run));
             0
         }
         Err(e) => {
@@ -427,6 +429,17 @@ fn print_uv_cache_sweep_report(report: &uv_cache::SweepReport) {
         println!(
             "uv-cache: pruned {} stale env{stale_word}, {} locked-skipped.",
             report.stale_envs_removed, report.locked_envs_skipped,
+        );
+    }
+}
+
+fn print_uv_cache_repair_report(report: &uv_cache_repair::RepairReport) {
+    let (found, repaired, skipped) = (report.corrupt_found, report.repaired, report.skipped);
+    if report.dry_run {
+        println!("uv-cache: --dry-run would invalidate {repaired} corrupt wheel entries.");
+    } else {
+        println!(
+            "uv-cache: {found} corrupt wheel entries, {repaired} invalidated, {skipped} skipped."
         );
     }
 }
