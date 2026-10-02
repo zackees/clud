@@ -7,3 +7,5 @@ publish = false
 [[bin]]
 name = "probe-target"
 path = "src/main.rs"
+# No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
+test = false

@@ -245,6 +245,8 @@ winapi = { version = "0.3", features = [
 [[bin]]
 name = "clud"
 path = "src/main.rs"
+# No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
+test = false
 
 [[bin]]
 name = "clud-kittyterm-paste"
@@ -261,6 +263,8 @@ installer-ci-fixture = []
 [[bin]]
 name = "clud-bench-proc-sampler"
 path = "src/bin/clud_bench_proc_sampler.rs"
+# No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
+test = false
 required-features = ["bench"]
 
 # Issue #1067 step 2: replay recorded agent Bash commands through the command
@@ -268,6 +272,8 @@ required-features = ["bench"]
 [[bin]]
 name = "clud-bench-gate-replay"
 path = "src/bin/clud_bench_gate_replay.rs"
+# No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
+test = false
 required-features = ["bench"]
 
 # #1551: `clud` is the only executable clud ships. `clud-cmd-scan`,
@@ -284,3 +290,5 @@ required-features = ["bench"]
 [[bin]]
 name = "clud-ctrlc-probe"
 path = "src/bin/clud_ctrlc_probe.rs"
+# No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
+test = false

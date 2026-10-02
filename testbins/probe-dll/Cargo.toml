@@ -8,3 +8,5 @@ publish = false
 name = "probe_dll"
 crate-type = ["cdylib"]
 path = "src/lib.rs"
+# No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
+test = false

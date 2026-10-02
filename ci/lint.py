@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     activate()
 
     from ci.banned_cross_tools import main as check_banned_cross_tools
+    from ci.banned_empty_harnesses import main as check_banned_empty_harnesses
     from ci.banned_hook_paths import main as check_banned_hook_paths
     from ci.banned_imports import main as check_banned_imports
     from ci.banned_legacy_deletion import main as check_banned_legacy_deletion
@@ -170,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     # #1545: ci/wheel_rewrite.py is the only wheel writer, so no rewriter can
     # drop the scripts' exec bits again.
     if check_banned_wheel_writes() != 0:
+        return 1
+    # #1714: a cargo target with no tests must not build a test harness; each
+    # one is a full, uncached compile and link on every CI run.
+    if check_banned_empty_harnesses() != 0:
         return 1
     # setup-soldr's cargo shim can otherwise omit repository discovery for
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the
