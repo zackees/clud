@@ -82,7 +82,8 @@ mod unix {
 
     /// A pseudo-terminal whose output a thread collects.
     struct Pty {
-        master: OwnedFd,
+        /// Held open for the reader thread, which reads its raw descriptor.
+        _master: OwnedFd,
         slave: OwnedFd,
         output: Arc<Mutex<Vec<u8>>>,
         stop: Arc<AtomicBool>,
@@ -129,7 +130,7 @@ mod unix {
                 }
             });
             Self {
-                master,
+                _master: master,
                 slave,
                 output,
                 stop,
