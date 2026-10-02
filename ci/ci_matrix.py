@@ -26,9 +26,10 @@ Mode = Literal["minimal", "extended", "full", "windows"]
 
 FULL_TIER_LABEL = "ci-full"
 EXTENDED_TIER_LABEL = "ci-test"
-#: Windows iteration mode (#1310): static checks plus Windows x64 build and
-#: tests, nothing else. `CI OK` passes when those lanes pass; the merge queue
-#: still runs the full matrix before anything merges.
+#: Windows iteration mode (#1310, #1652): the routine Linux x64 lanes plus the
+#: Windows x64 build and suites. `CI OK` gates on all of them. There is no merge
+#: queue, so `main`'s push run is the only test of the merged tree; see
+#: docs/architecture/ci.md#current-ci-selection.
 WINDOWS_TIER_LABEL = "ci-windows"
 LEGACY_FULL_TIER_LABEL = "ci:full"
 

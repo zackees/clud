@@ -410,3 +410,31 @@ impl Drop for EnvGuard {
         }
     }
 }
+
+/// #1730: a daemon that takes 6 s to publish itself (a first exec under
+/// Gatekeeper on a slow macOS runner) is still accepted; the old 5 s bound
+/// failed the launch. A daemon that never comes is still given up on.
+#[test]
+fn a_slow_daemon_startup_is_waited_out_but_not_forever() {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    let clock = Cell::new(Duration::ZERO);
+    let ready_at = Duration::from_secs(6);
+    let result = super::await_daemon_startup(
+        || clock.get() >= ready_at,
+        || clock.get(),
+        |step| clock.set(clock.get() + step),
+    );
+    assert!(result.is_ok(), "{result:?}");
+
+    let clock = Cell::new(Duration::ZERO);
+    let result = super::await_daemon_startup(
+        || false,
+        || clock.get(),
+        |step| clock.set(clock.get() + step),
+    );
+    let error = result.expect_err("a daemon that never starts times out");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(clock.get() > super::DAEMON_STARTUP_WAIT);
+}

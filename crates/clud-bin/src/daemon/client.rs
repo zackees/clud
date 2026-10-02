@@ -232,25 +232,47 @@ pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     spawn_and_await_daemon(state_dir)
 }
 
+/// How long a launch waits for a freshly spawned daemon to publish itself.
+/// A healthy daemon answers in milliseconds; this bound only matters when the
+/// spawn is slow. The first exec of a new binary on macOS goes through
+/// Gatekeeper/XProtect assessment, which made 5 s too short on a slow hosted
+/// runner and would fail a slow machine's first launch after an upgrade (#1730).
+const DAEMON_STARTUP_WAIT: Duration = Duration::from_secs(20);
+
 fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
     spawn_detached_daemon(state_dir)?;
 
     let started = Instant::now();
     let our_pid = std::process::id();
-    loop {
-        if let Some(info) = probe_existing(state_dir) {
+    await_daemon_startup(
+        || {
             // Make sure we didn't read a stale info file from before the spawn.
-            if info.pid != our_pid && daemon_version_matches(&info) {
-                return Ok(());
-            }
+            probe_existing(state_dir)
+                .is_some_and(|info| info.pid != our_pid && daemon_version_matches(&info))
+        },
+        || started.elapsed(),
+        thread::sleep,
+    )
+}
+
+/// Poll `ready` every 25 ms until it holds or [`DAEMON_STARTUP_WAIT`] passes.
+/// The clock and the sleep are parameters so the bound is testable.
+fn await_daemon_startup(
+    mut ready: impl FnMut() -> bool,
+    elapsed: impl Fn() -> Duration,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<()> {
+    loop {
+        if ready() {
+            return Ok(());
         }
-        if started.elapsed() > Duration::from_secs(5) {
+        if elapsed() > DAEMON_STARTUP_WAIT {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timed out waiting for daemon startup",
             ));
         }
-        thread::sleep(Duration::from_millis(25));
+        sleep(Duration::from_millis(25));
     }
 }
 

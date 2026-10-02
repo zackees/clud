@@ -31,12 +31,13 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     `clud-cmd-scan`, `clud-block-bad-cmd` and `clud-shim` are names of the one
     `clud` binary, not build outputs, and the suites resolve them as siblings
     of `clud`. Linking here covers direct `pytest` runs; CI harnesses link
-    them themselves before the run. Missing or read-only builds are skipped.
+    them themselves before the run. Missing or read-only builds are skipped,
+    and so is the exact installer candidate artifact (#1718).
     """
     suffix = ".exe" if sys.platform == "win32" else ""
     value = os.environ.get("CLUD_TEST_BINARY")
     clud = Path(value) if value else _REPO_ROOT / "target" / "debug" / f"clud{suffix}"
-    if clud.is_file():
+    if clud.is_file() and aliases.links_allowed_beside(clud, os.environ):
         aliases.materialize(clud)
 
 
