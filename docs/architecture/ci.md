@@ -62,12 +62,11 @@ matrix-planning runner job.
 
 ## Local validation before remote CI
 
-GitHub Actions is the final cross-platform check, not the first test loop. For a
-code or workflow-behavior change, identify the smallest failing test or job,
-reproduce it, make the change, and rerun it to green before pushing. **All
-local tests and lint must run in the Bosn-managed `act` container**, never on
-the host or in a direct Bosn build task. Bosn mounts the checkout read-only;
-`act` runs the jobs against a snapshot. The first run may need to warm caches:
+**All local tests and lint must run in the Bosn-managed `act` container**,
+never on the host or in a direct Bosn build task. Bosn mounts the checkout
+read-only; `act` runs the jobs against a snapshot. Local act is a pre-push
+check within the [budget below](#local-ci-budget), not the edit loop: the PR's
+GitHub Actions run is the CI of record. The first run may need to warm caches:
 
 ```bash
 docker info
@@ -75,6 +74,36 @@ bosn run --task act-ci-list        # inspect supported jobs
 bosn run --task act-ci-static      # formatting, ruff, and static checks
 bosn run --task act-ci-linux       # Linux clippy, build, and unit suite
 ```
+
+### Local CI budget
+
+A full `act-ci-linux` takes 6-7 minutes on an idle machine. Every clud session
+on the machine shares one bosn daemon, and it runs one job at a time
+(zackees/bosn#358). On 2026-10-02 a one-module fix spent about 50 minutes this
+way (#1715). It waited 27 minutes behind other sessions' act jobs, spent 9
+minutes testing another checkout (#1594), and lost two runs to kills. So:
+
+- **Run `act-ci-linux` at most once per change**, before the first push. Don't
+  loop it. `act-ci-static` (about a minute) is fine for formatting and lint.
+  RED can come from that one local run or from the PR's first CI run. GREEN
+  comes from the PR's CI, which is the CI of record: after a fix, push and
+  watch the PR rather than rerunning act locally.
+- **Don't wait in the bosn queue.** If `bosn run` reports its job is queued,
+  or `act` hasn't printed its `act_ci: stdout` log path within 2 minutes,
+  another session holds the daemon. Cancel your job, push, and write "local
+  act skipped: bosn daemon busy" in the PR.
+- **Never restart a running act job because you made another commit.** Let it
+  finish, or cancel it, then push.
+- **Stop only your own run.** Use `bosn job cancel --state-dir … --job-id N`
+  (bosn prints that command once zackees/bosn#357 is released), or kill the PID
+  you started. Never use `pkill -f` or `kill $(pgrep -f "bosn run …")`. The
+  pattern matches every session's run, and on bosn 0.1.6 a killed client also
+  leaves its job and act containers running.
+- **On bosn 0.1.6, check that the container is yours.** `bosn run` prints
+  `ensured manifest stack clud_act as bosn-setup-<hash>`. If
+  `docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' bosn-setup-<hash>`
+  doesn't list your checkout, the run is testing another tree (#1594). Don't
+  count it, and don't edit `bosn.toml` to work around it; rely on the PR's CI.
 
 The Dylint job does not run under `act`: the `catthehacker/ubuntu:act-24.04`
 runner image has no `clang`, which setup-soldr's Linux linker shim execs, so
