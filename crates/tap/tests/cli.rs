@@ -37,7 +37,7 @@ struct Run {
 /// unit lanes at once with `Spawn(NotFound)`. `CLUD_TEST_BIN_DIR` is the
 /// runtime override the exec runner sets for exactly this; the compile-time
 /// constant stays as the local fallback, so a plain `cargo test` is unchanged.
-/// Same precedence as `crates/clud-bin/tests/common/exe.rs`.
+/// Same precedence as `crates/clud-bin/tests/integration/common/exe.rs`.
 fn tap_binary() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLUD_TEST_BIN_DIR") {
         let name = if cfg!(windows) { "tap.exe" } else { "tap" };

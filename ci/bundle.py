@@ -17,7 +17,7 @@ Layout produced under `--dest` after `unpack`:
     bundle/
       manifest.json                     triple, profile, sha, harness list
       target/<profile-dir>/             CARGO_TARGET_DIR points here, so
-        clud, mock-agent, ...           crates/clud-bin/tests/common/mod.rs:33
+        clud, mock-agent, ...           crates/clud-bin/tests/integration/common/mod.rs:33
         mock-agent                      resolves mock_agent_path() with no
                                         source change
       tests/                            cargo test harness binaries

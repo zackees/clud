@@ -1,12 +1,9 @@
-//! Shared helpers for `tests/pty/pty_behavior.rs` and `tests/pty/pty_pump.rs`.
-//!
-//! Cargo treats files under `tests/` as separate integration-test crates,
-//! but `tests/common/mod.rs` is brought in by each via `mod common;` and
-//! is *not* itself compiled as a test binary. Helpers live here so the
-//! two test files stay independently focused below the 1K-LOC ceiling.
+//! Shared helpers for the integration harness (`tests/integration/main.rs`):
+//! the mock-agent locator, PTY probes and `require_pty_or_skip!`. Helpers
+//! live here so the test files stay focused below the 1K-LOC ceiling.
 
-// Each test crate uses only a subset of these helpers; suppress the
-// resulting unused-code warnings rather than per-symbol `#[allow]`s.
+// Some helpers are used only on some platforms; suppress the resulting
+// unused-code warnings rather than per-symbol `#[allow]`s.
 #![allow(dead_code)]
 
 use std::path::PathBuf;

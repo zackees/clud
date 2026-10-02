@@ -241,4 +241,4 @@ runtime-cache or launch work, because Claude runs it every couple of seconds.
 | CPU hover observation, split reports, byte-exact mouse pass-through | `src/toast/mouse.rs` unit tests |
 | Banner never writes to the terminal; banner → toast events | `src/cpu_banner_tests.rs` |
 | Status-line injection into Claude settings | `src/foreground_runtime.rs` tests |
-| Real PTY sessions: kitty tier, title fallback (Linux, macOS, Windows), alternate-screen text tier (Unix) | `tests/pty/toast_pty.rs` |
+| Real PTY sessions: kitty tier, title fallback (Linux, macOS, Windows), alternate-screen text tier (Unix) | `tests/integration/pty/toast_pty.rs` |

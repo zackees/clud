@@ -33,8 +33,8 @@
 //! than panicking. On a real Windows Terminal / cmd / pwsh session, on Linux,
 //! and on macOS, the canary passes and the real assertions run.
 //!
-//! Raw-PTY-pump integration tests live in `tests/pty/pty_pump.rs`; shared
-//! harness helpers are in `tests/common/mod.rs`.
+//! Raw-PTY-pump integration tests live in `tests/integration/pty/pty_pump.rs`; shared
+//! harness helpers are in `tests/integration/common/mod.rs`.
 
 use std::time::Duration;
 

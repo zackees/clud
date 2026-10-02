@@ -97,7 +97,7 @@ impl Drop for DaemonGuard {
 fn daemon_does_not_inherit_a_launchers_non_cloexec_fds() {
     use std::os::unix::process::CommandExt;
 
-    let _serial = crate::REAPER_TEST_LOCK
+    let _serial = super::REAPER_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = tempfile::tempdir().expect("scratch dir");
@@ -172,7 +172,7 @@ fn wait_for_eof(fd: libc::c_int, timeout: Duration) -> bool {
 
 #[test]
 fn daemon_declares_itself_and_drops_the_launchers_originator_tag() {
-    let _serial = crate::REAPER_TEST_LOCK
+    let _serial = super::REAPER_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = tempfile::tempdir().expect("scratch dir");

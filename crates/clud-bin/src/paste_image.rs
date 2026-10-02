@@ -1,7 +1,7 @@
 //! Clipboard paste helpers for PTY-mode Ctrl+V interception (#328).
 
 use std::borrow::Cow;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Matches the 50 MiB upper bound checked by the WezTerm paste action.
@@ -27,6 +27,36 @@ pub fn kitty_clipboard_payload() -> io::Result<KittyPastePayload> {
         .get_text()
         .map_err(|err| io::Error::other(format!("read clipboard text or image: {err}")))?;
     kitty_text_payload(text)
+}
+
+/// Print one clipboard snapshot as a single JSON line on `stdout` for the
+/// `clud-kittyterm-paste` helper; failures go to `stderr` only. Returns the
+/// process exit code.
+pub fn write_kitty_paste(
+    read: io::Result<KittyPastePayload>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match read {
+        Ok(payload) => {
+            let json = match serde_json::to_string(&payload) {
+                Ok(json) => json,
+                Err(error) => {
+                    let _ = writeln!(stderr, "clipboard JSON failed: {error}");
+                    return 1;
+                }
+            };
+            if writeln!(stdout, "{json}").is_err() {
+                let _ = writeln!(stderr, "clipboard output failed");
+                return 1;
+            }
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "clipboard snapshot failed: {error}");
+            1
+        }
+    }
 }
 
 fn kitty_text_payload(text: String) -> io::Result<KittyPastePayload> {
@@ -269,5 +299,67 @@ mod tests {
         let error = kitty_image_payload_in(dir.path(), usize::MAX, 2, &[]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn emits_one_json_object_for_text_without_logs_on_stdout() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = write_kitty_paste(
+            Ok(KittyPastePayload {
+                kind: "text",
+                value: "hello 🦀".into(),
+                bytes: "hello 🦀".len(),
+            }),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        let payload: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(payload["kind"], "text");
+        assert_eq!(payload["value"], "hello 🦀");
+        assert_eq!(payload["bytes"], "hello 🦀".len());
+        assert_eq!(stdout.iter().filter(|&&byte| byte == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn emits_image_path_and_file_size_in_json() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = write_kitty_paste(
+            Ok(KittyPastePayload {
+                kind: "image",
+                value: "C:/Users/test/Pictures/clud-kitty-pastes/paste-1.png".into(),
+                bytes: 1234,
+            }),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        let payload: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(payload["kind"], "image");
+        assert_eq!(payload["bytes"], 1234);
+        assert_eq!(
+            payload["value"],
+            "C:/Users/test/Pictures/clud-kitty-pastes/paste-1.png"
+        );
+    }
+
+    #[test]
+    fn failure_returns_nonzero_without_stdout_json() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = write_kitty_paste(
+            Err(io::Error::new(io::ErrorKind::NotFound, "empty clipboard")),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("empty clipboard"));
     }
 }

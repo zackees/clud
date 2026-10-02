@@ -1,9 +1,8 @@
 //! Runtime resolution of workspace binaries for integration tests.
 //!
-//! Included standalone via `#[path = "../common/exe.rs"] mod exe;` in a
-//! category `main.rs` rather than through `common/mod.rs`, so a test target
-//! that needs only this helper does not drag in (and warn about) the PTY
-//! helpers next door. Members reach it as `use crate::exe;`.
+//! Included standalone via `#[path = "common/exe.rs"] mod exe;` in
+//! `integration/main.rs` rather than through `common/mod.rs`. Members reach
+//! it as `use crate::exe;`.
 //!
 //! ## Why this exists
 //!

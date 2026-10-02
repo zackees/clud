@@ -158,7 +158,7 @@ A test-only seam, `run_raw_pty_pump_full_with_writer_for_test`
 (`session.rs:587`, `#[doc(hidden)]`), takes the destination writer as a
 parameter instead of hardcoding `io::stdout()`, so integration tests can
 inject a slow or counting sink — see
-`crates/clud-bin/tests/pty/pty_pump.rs::stdin_forwarding_stays_fast_while_output_sink_stalls`
+`crates/clud-bin/tests/integration/pty/pty_pump.rs::stdin_forwarding_stays_fast_while_output_sink_stalls`
 and the `output_writer_*` unit tests in `session_tests.rs`.
 
 **Resize channel**: drained before stdin on the main thread so a
@@ -428,7 +428,7 @@ and on panics, because the workspace unwinds. A forced kill (`kill -9`,
   writes before the sink recovers), and the main thread keeps forwarding
   stdin and servicing resize/tick/exit checks without ever touching the
   writer. See
-  `crates/clud-bin/tests/pty/pty_pump.rs::stdin_forwarding_stays_fast_while_output_sink_stalls`.
+  `crates/clud-bin/tests/integration/pty/pty_pump.rs::stdin_forwarding_stays_fast_while_output_sink_stalls`.
 - **OSC sequence split mid-buffer.** Both `OscTitleStripper` and
   `BracketedPasteNormalizer` are stream-resumable; the unit tests cover
   byte-by-byte fragmentation. A title `ESC ] 0 ; … BEL` split across two

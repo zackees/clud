@@ -128,11 +128,11 @@ Windows and macOS publish no sidecar, so they are out of scope; publishing
 
 - `crash_report::tests::*` — panic-hook + rotation + sanitize + native
   signal/exception name lookup (10 unit tests).
-- `tests/diagnostics/crash_report.rs` — end-to-end panic catch in-process (2
+- `tests/integration/diagnostics/crash_report.rs` — end-to-end panic catch in-process (2
   integration tests).
 - `symbols::tests::*` — `is_resolved_frame_line`, `count_resolved_frames`,
   `is_unsymbolicated`, `list_reports_newest_first` (8 unit tests).
-- `tests/diagnostics/symbols.rs` — `clud symbols verify --all` / `clud symbols
+- `tests/integration/diagnostics/symbols.rs` — `clud symbols verify --all` / `clud symbols
   install` / bare `clud symbols` exit codes + output (4 integration
   tests spawning the real `clud` binary with `CLUD_DAEMON_STATE_DIR`
   redirected).

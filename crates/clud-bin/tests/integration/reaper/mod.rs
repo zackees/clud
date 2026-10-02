@@ -1,19 +1,10 @@
-//! Reaper and process-lifetime integration tests (#1056).
-//!
-//! Orphan sweeping, batch drain, daemon survival, subprocess capture
-//! lifetime, and the wedge watchdog. Each former top-level `tests/*.rs`
-//! file is a module here, so the category links one test executable
-//! instead of seven. Test IDs are `reaper::<module>::<test_name>`.
+//! Reaper and process-lifetime integration tests: orphan sweeping, batch
+//! drain, daemon survival, subprocess capture lifetime, and the wedge
+//! watchdog. Test IDs are `reaper::<module>::<test_name>`.
 //!
 //! Platform gates stay as the inner `#![cfg(windows)]` attribute at the
-//! top of each Windows-only file, so this target still compiles to the
-//! same set of tests on every lane.
-
-#[path = "../common/mod.rs"]
-mod common;
-
-#[path = "../common/exe.rs"]
-mod exe;
+//! top of each Windows-only file, so the harness compiles the same set of
+//! tests on every lane.
 
 mod daemon_spawn_hygiene;
 mod fixture_ids;

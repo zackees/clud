@@ -9,9 +9,9 @@
 //! must not delay stdin forwarding) via the `..._for_test` writer-injection
 //! seam.
 //!
-//! Lives separately from `tests/pty/pty_behavior.rs` so each integration-test
+//! Lives separately from `tests/integration/pty/pty_behavior.rs` so each integration-test
 //! binary stays under the 1K-LOC ceiling. Shared helpers come from
-//! `tests/common/mod.rs`.
+//! `tests/integration/common/mod.rs`.
 
 use std::io::{Cursor, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

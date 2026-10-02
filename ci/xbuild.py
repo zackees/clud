@@ -57,6 +57,7 @@ import sys
 import tempfile
 from collections.abc import MutableMapping
 from pathlib import Path
+from typing import TextIO
 
 
 def _reject_by_path_invocation() -> None:
@@ -100,7 +101,7 @@ def _reject_by_path_invocation() -> None:
 
 _reject_by_path_invocation()
 
-from ci import process  # noqa: E402 - must follow the guard above
+from ci import cargo_messages, process  # noqa: E402 - must follow the guard above
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -310,6 +311,16 @@ def cargo_target_dir(env: dict[str, str], default: Path) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _write_terminated(stream: TextIO, text: str) -> None:
+    """Write `text` ending in a newline, so the next line cannot swallow it.
+
+    soldr's refusals end without one, and act dropped such a final line.
+    """
+    if text:
+        stream.write(text if text.endswith("\n") else f"{text}\n")
+        stream.flush()
+
+
 def cmd_clippy(args: argparse.Namespace) -> int:
     env = build_env(args.target, args.strategy)
     base = cargo_argv(["clippy", "--workspace", "--all-targets"], args.target, args.strategy)
@@ -344,24 +355,22 @@ def cmd_compile(args: argparse.Namespace) -> int:
     )
     print(f"+ {' '.join(harness)}", flush=True)
     proc = process.run(harness, cwd=ROOT, env=env, capture_output=True, text=True)
-    sys.stderr.write(proc.stderr)
+    messages = cargo_messages.parse(proc.stdout or "")
+    _write_terminated(sys.stderr, proc.stderr or "")
     if proc.returncode != 0:
+        # #1726: with --message-format=json the compiler errors are records on
+        # the captured stdout; without rendering them back out a failed build
+        # said nothing at all.
+        for rendered in messages.errors:
+            _write_terminated(sys.stderr, rendered)
+        print(f"cargo test --no-run failed (exit {proc.returncode})", file=sys.stderr, flush=True)
         return 1
 
-    executables: list[str] = []
-    for line in proc.stdout.splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("reason") == "compiler-artifact" and record.get("executable"):
-            if record.get("profile", {}).get("test"):
-                executables.append(record["executable"])
-
+    executables = messages.harnesses
     out = ROOT / "target" / args.target / "test-harnesses.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(sorted(set(executables)), indent=2), encoding="utf-8")
-    print(f"recorded {len(set(executables))} test harnesses -> {out}")
+    out.write_text(json.dumps(sorted(executables), indent=2), encoding="utf-8")
+    print(f"recorded {len(executables)} test harnesses -> {out}")
     return 0
 
 

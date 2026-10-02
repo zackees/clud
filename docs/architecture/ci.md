@@ -642,7 +642,7 @@ the test code to learn a new one:
   these first (`tests/test_hello.py:58-60`, `tests/integration/conftest.py:181-200`,
   `tests/test_hook_stdin.py:36-48`), so no `cargo` fallback fires.
 - `CARGO_TARGET_DIR` → a synthesized `bundle/target/debug/` containing the
-  binaries. `crates/clud-bin/tests/common/mod.rs:33` reads `CARGO_TARGET_DIR` at
+  binaries. `crates/clud-bin/tests/integration/common/mod.rs:33` reads `CARGO_TARGET_DIR` at
   *runtime*, so `mock_agent_path()` resolves for `pty_pump.rs` (13 tests),
   `pty_behavior.rs` (6) and `orphan_reap.rs` (1) with **no source change**, and
   the zombie-scan autouse fixture (`tests/integration/conftest.py:326-355`) stops
@@ -654,10 +654,10 @@ the test code to learn a new one:
 binary at compile time, with no runtime override. That breaks 13 tests when the
 binary is executed on a different machine:
 
-- `crates/clud-bin/tests/diagnostics/symbols.rs:35` (4 tests)
-- `crates/clud-bin/tests/diagnostics/telemetry_endpoint.rs:33` (4 tests)
-- `crates/clud-bin/tests/signals/ctrlc_signal_kinds.rs:17` (4 tests, unix)
-- `crates/clud-bin/tests/signals/ctrlc_windows_events.rs:30` (1 test, windows)
+- `crates/clud-bin/tests/integration/diagnostics/symbols.rs:35` (4 tests)
+- `crates/clud-bin/tests/integration/diagnostics/telemetry_endpoint.rs:33` (4 tests)
+- `crates/clud-bin/tests/integration/signals/ctrlc_signal_kinds.rs:17` (4 tests, unix)
+- `crates/clud-bin/tests/integration/signals/ctrlc_windows_events.rs:30` (1 test, windows)
 
 Fix: a shared `common::bin_path("clud")` helper that prefers a runtime
 `CLUD_TEST_BIN_DIR` env var and falls back to the `env!` constant, so local
@@ -890,6 +890,24 @@ stub testbins, `clud-ctrlc-probe`) declares `test = false`;
 `ci/banned_empty_harnesses.py` fails `bash lint` otherwise. Bins stay built
 for `CARGO_BIN_EXE_*` and the bundle: `test = false` only drops the harness.
 
+### Two harnesses in the `clud` package (#1726)
+
+Removing the empty harnesses did not shorten the harness step: the cost was
+the harnesses that link the whole workspace. The `clud` package now builds
+two, its lib unit tests and one `integration` target
+(`crates/clud-bin/tests/integration/main.rs`, one module per category), down
+from eight (the lib, six category targets and `clud-kittyterm-paste`, whose
+logic and tests moved into `clud::paste_image`). `ci/harness_budget.py`
+fails `bash lint` on a third. `ci/run_bundle.py` keeps the old isolation: each
+category of `integration` runs in its own process, selected by exact test
+name (`ci/harness_plan.py`), and each `pty::` test in its own
+pseudo-terminal. The remaining floor is the lib's unit-test harness, a full
+compile of the 212K-line crate in test mode (about 40 s alone; type check and
+borrow check are single-threaded).
+
+When `cargo test --no-run` fails, `ci/xbuild.py` prints the rendered compiler
+errors from its JSON output and the captured stderr, newline-terminated.
+
 ### Wheel script modes and the release-wheel smoke (#1545)
 
 pip installs each `.data/scripts/*` entry with the Unix mode in its zip
@@ -1041,7 +1059,7 @@ pointing at the synced interpreter — use that. The repo's `lint` script
 **Shadowing cargo on PATH is not enough on Windows.** Rust's
 `Command::new("cargo")` goes through `CreateProcess`, which only appends
 `.exe` — a `cargo.cmd` shim is skipped and the real `cargo.exe` found. Since the
-test suite spawns cargo from Rust (`crates/clud-bin/tests/common/mod.rs:78-116`),
+test suite spawns cargo from Rust (`crates/clud-bin/tests/integration/common/mod.rs:78-116`),
 `setup-exec` deletes the toolchain binaries outright and then installs failing
 shims for the error message. Runner VMs are ephemeral, so this is safe.
 

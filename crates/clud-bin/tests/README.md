@@ -2,6 +2,18 @@
 
 Rust integration tests for the `clud-bin` crate. Unlike the `#[test]` units inside `src/`, these tests spawn the workspace `mock-agent` binary through `running_process_core::pty::NativePtyProcess` and exercise the real PTY pump used by `clud --codex`. They lock down platform-specific contracts (Windows ConPTY vs POSIX), cross-platform regressions from issues #28/#31/#46, and the voice/F3 + resize hooks implemented in `clud::session`. A `pty_canary()` probe runs first and skips the test if the host's stdout isn't a real console (typical in nested shells or captured `cargo test` runs).
 
+## Layout: one harness (#1726)
+
+Everything here compiles into **one** test binary, `integration`
+(`integration/main.rs`), with one module per category: `api/`, `cli/`,
+`diagnostics/`, `pty/`, `reaper/`, `signals/`, plus the shared `common/`.
+Test IDs are `<category>::<module>::<test_name>`. Each harness links the whole
+workspace and zccache never caches harness link products, so a new test is a
+module in a category, never a new `tests/*.rs` or `tests/<dir>/main.rs`
+target: `ci/harness_budget.py` fails `bash lint` on one. CI
+(`ci/run_bundle.py`, `ci/harness_plan.py`) still runs each category in its
+own process and each `pty::` test in its own pseudo-terminal.
+
 ## Files
 
 - `pty_behavior.rs` — End-to-end PTY checks: `respond_to_queries_impl` DSR stub (T1), `resize_impl` propagate-on-POSIX / no-op-on-Windows (T2), `session::resize_pty` updating the master size on every platform (`resize_pty_updates_master_size_on_all_platforms`, moved from the `--lib` tests by #1348 so it cannot silently skip), extreme `cols=32767` spawn safety (T3), verbatim stdin forwarding through `run_raw_pty_pump`, F3 press/release detection (xterm + kitty CSI-u), idle `on_tick` cadence, Ctrl-C flag honoring, resize channel application, prompt exit on child death, and raw-mode recovery on hook panic.
@@ -39,8 +51,8 @@ From the repo root:
 bash test                                   # Rust + Python unit tests
 bash test --integration                     # adds mock-agent integration tests
 soldr cargo test -p clud-bin                # all clud-bin tests (unit + integration)
-soldr cargo test -p clud-bin --test pty_behavior   # this file only
-soldr cargo test -p clud-bin --test pty_behavior -- --nocapture   # see canary-skip diagnostics
+soldr cargo test -p clud --test integration pty::pty_behavior   # one module
+soldr cargo test -p clud --test integration pty:: -- --nocapture   # see canary-skip diagnostics
 ```
 
 Ignored Windows probes (`wedge_watchdog_e2e`, `win32_hooking_probe`, `tier_refresh_probe`): see the manual checklist in [`docs/architecture/ci.md`](../../../docs/architecture/ci.md#manual-windows-probes-ignored-tests).

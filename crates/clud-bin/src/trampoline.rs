@@ -53,7 +53,7 @@ use crate::runtime_cache;
 /// `shim_main.rs`, and it is why both files sit in `ci/banned_imports.py`'s
 /// exempt set rather than routing through `running_process`.
 ///
-/// Covered by `tests/diagnostics/runtime_cache_hop_windows.rs`.
+/// Covered by `tests/integration/diagnostics/runtime_cache_hop_windows.rs`.
 pub fn relay_child_and_wait(program: &Path, args: &[impl AsRef<OsStr>]) -> std::io::Result<i32> {
     let mut command = std::process::Command::new(program);
     command.args(args);

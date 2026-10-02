@@ -82,7 +82,7 @@ jobs:
       #     -> honored first by every Python test
       #        (tests/test_hello.py:58, tests/integration/conftest.py:181-200)
       #   CARGO_TARGET_DIR -> read at *runtime* by
-      #        crates/clud-bin/tests/common/mod.rs:33, so mock_agent_path()
+      #        crates/clud-bin/tests/integration/common/mod.rs:33, so mock_agent_path()
       #        resolves for pty_pump/pty_behavior/orphan_reap with no source
       #        change, and the zombie-scan fixture stops no-oping.
       #   CLUD_TEST_BIN_DIR -> the runtime override for the CARGO_BIN_EXE_*
