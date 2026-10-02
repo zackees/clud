@@ -72,6 +72,15 @@ tests/                     # Python tests (unit + integration)
 
 ### How to navigate
 
+#### Terminal / PTY work
+
+Before changing or debugging anything between the user's terminal and the
+child PTY (input path, escape sequences, raw mode, ConPTY, Ctrl+C, terminal
+restore), load the platform skill: `terminal-pty-windows`,
+`terminal-pty-linux` or `terminal-pty-macos` (`.claude/skills/`). They share
+[`docs/architecture/terminal-pty.md`](docs/architecture/terminal-pty.md),
+which owns the cross-platform invariants.
+
 #### Performance benchmarks
 
 Standalone, opt-in performance harnesses live in [`bench/README.md`](bench/README.md).

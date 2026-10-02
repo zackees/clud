@@ -1,5 +1,8 @@
 # Session Lifecycle
 
+> The cross-platform invariants of this pipeline, its test tiers and the
+> per-platform agent skills are in [terminal-pty.md](terminal-pty.md).
+
 From the moment `runner::run_plan_pty` asks `NativePtyProcess::new` for a child
 PTY, clud owns the bidirectional byte stream between the user's terminal and
 the backend agent (`claude` or `codex`). `console_setup` flips the Windows
