@@ -119,6 +119,8 @@ pub(crate) mod test_env;
 
 pub mod kitty_term;
 pub mod symbols;
+pub mod term_guard;
+pub(crate) mod terminal_queries;
 pub mod test_runtime;
 pub mod toast;
 pub mod tool_cli;

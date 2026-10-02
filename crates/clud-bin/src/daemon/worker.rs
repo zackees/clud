@@ -16,6 +16,7 @@ use crate::graphics::GraphicsConfig;
 use crate::launch_log;
 use crate::process_identity::{self, ProcessIdentity};
 use crate::subprocess;
+use crate::terminal_queries::TerminalQueryScanner;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::io_helpers::{child_env_from_login_base, read_json_file};
@@ -610,20 +611,19 @@ fn start_pty_session(
     let read_handle = {
         let process = Arc::clone(&process);
         let shared = Arc::clone(shared);
-        let mut cpr = CprScanner::default();
+        let mut queries = TerminalQueryScanner::default();
         thread::spawn(move || loop {
             match process.read_chunk_impl(Some(0.1)) {
                 Ok(Some(chunk)) => {
-                    // #1366: ConPTY emits ESC[6n at startup and blocks until
-                    // it gets a cursor report. A `--detach` session has no
-                    // client to answer, so the worker answers while nobody
-                    // is attached; an attached client's pump owns the reply.
-                    let queries = cpr.scan(&chunk);
+                    // #1366 / #1702: ConPTY emits ESC[6n at startup and
+                    // blocks until it gets a cursor report, and a child TUI
+                    // may block on its own capability probes. A `--detach`
+                    // session has no client to answer, so the worker answers
+                    // while nobody is attached.
+                    let replies = detached_query_replies(&mut queries, &chunk, shared.has_client());
                     shared.push_output(chunk);
-                    if queries > 0 && !shared.has_client() {
-                        for _ in 0..queries {
-                            let _ = process.write_impl(&cpr_reply(), false);
-                        }
+                    if !replies.is_empty() {
+                        let _ = process.write_impl(&replies, false);
                     }
                 }
                 Ok(None) => {
@@ -662,41 +662,21 @@ fn start_pty_session(
     Ok(SessionRuntime::Pty(process))
 }
 
-/// Cursor-position query (DSR 6) a PTY child sends to its terminal.
-const CPR_QUERY: &[u8] = b"\x1b[6n";
-
-/// Counts complete `ESC[6n` queries across a stream of PTY output chunks.
-/// Carries at most `CPR_QUERY.len() - 1` trailing bytes (only a proper prefix
-/// of the query) so a sequence split across chunks is counted exactly once.
-#[derive(Default)]
-struct CprScanner {
-    tail: Vec<u8>,
-}
-
-impl CprScanner {
-    fn scan(&mut self, chunk: &[u8]) -> usize {
-        let mut buf = std::mem::take(&mut self.tail);
-        buf.extend_from_slice(chunk);
-        let count = buf
-            .windows(CPR_QUERY.len())
-            .filter(|w| *w == CPR_QUERY)
-            .count();
-        let max_keep = (CPR_QUERY.len() - 1).min(buf.len());
-        for keep in (1..=max_keep).rev() {
-            let suffix = &buf[buf.len() - keep..];
-            if CPR_QUERY.starts_with(suffix) {
-                self.tail = suffix.to_vec();
-                break;
-            }
-        }
-        count
+/// The stub replies a detached worker owes its child for `chunk` (#1366,
+/// #1702). The scanner sees every chunk, so a query split across reads stays
+/// tracked while a client is attached; only an unattended worker answers,
+/// since an attached client's terminal (or its pump) owns the reply.
+fn detached_query_replies(
+    scanner: &mut TerminalQueryScanner,
+    chunk: &[u8],
+    has_client: bool,
+) -> Vec<u8> {
+    let replies = scanner.replies(chunk);
+    if has_client {
+        Vec::new()
+    } else {
+        replies
     }
-}
-
-/// Reply to a cursor-position query: row 1, column 1, which is what a fresh
-/// terminal reports.
-fn cpr_reply() -> Vec<u8> {
-    b"\x1b[1;1R".to_vec()
 }
 
 /// Post-exit sequence for a PTY session: drain the reader, release the
@@ -997,39 +977,29 @@ use Write as _;
 mod tests;
 
 #[cfg(test)]
-mod cpr_tests {
-    use super::{cpr_reply, CprScanner};
+mod query_reply_tests {
+    use super::detached_query_replies;
+    use crate::terminal_queries::TerminalQueryScanner;
 
+    /// #1702: an unattended worker answers the same probes the local pump
+    /// does, not only `ESC[6n`, even when a query is split across reads.
     #[test]
-    fn cpr_scanner_detects_query_in_single_chunk() {
-        let mut s = CprScanner::default();
-        assert_eq!(s.scan(b"abc\x1b[6ndef"), 1);
+    fn a_detached_worker_answers_da1_and_cursor_queries_split_across_reads() {
+        let mut scanner = TerminalQueryScanner::default();
+        assert!(detached_query_replies(&mut scanner, b"boot\x1b[", false).is_empty());
+        assert_eq!(
+            detached_query_replies(&mut scanner, b"c\x1b[6n\x1b[6n", false),
+            b"\x1b[?1;2c\x1b[1;1R\x1b[1;1R"
+        );
     }
 
     #[test]
-    fn cpr_scanner_detects_query_split_across_chunks() {
-        let mut s = CprScanner::default();
-        assert_eq!(s.scan(b"ab\x1b["), 0);
-        assert_eq!(s.scan(b"6nzz"), 1);
-    }
-
-    #[test]
-    fn cpr_scanner_counts_multiple_and_ignores_other_csi() {
-        let mut s = CprScanner::default();
-        assert_eq!(s.scan(b"\x1b[6n\x1b[5n\x1b[6n"), 2);
-        assert_eq!(s.scan(b"\x1b[c"), 0);
-    }
-
-    #[test]
-    fn cpr_scanner_does_not_double_count_tail() {
-        let mut s = CprScanner::default();
-        assert_eq!(s.scan(b"\x1b[6n"), 1);
-        assert_eq!(s.scan(b"x"), 0);
-    }
-
-    #[test]
-    fn cpr_scanner_reply_is_row1_col1() {
-        assert_eq!(cpr_reply(), b"\x1b[1;1R".to_vec());
+    fn an_attached_client_owns_the_reply_but_the_split_stays_tracked() {
+        let mut scanner = TerminalQueryScanner::default();
+        assert!(detached_query_replies(&mut scanner, b"\x1b[", true).is_empty());
+        assert!(detached_query_replies(&mut scanner, b"c", true).is_empty());
+        // Already answered by the client: no late reply once it detaches.
+        assert!(detached_query_replies(&mut scanner, b"x", false).is_empty());
     }
 }
 

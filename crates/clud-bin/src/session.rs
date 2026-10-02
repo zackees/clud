@@ -19,10 +19,11 @@ use session_output::run_output_writer;
 use session_output::{redraw_graphics_header_for_resize, run_output_writer_composited, OutputMsg};
 #[path = "session_stdin.rs"]
 pub(crate) mod session_stdin;
+#[cfg(test)]
+use session_stdin::stdin_chunk_requests_interrupt;
 use session_stdin::{
     normalize_interactive_console_stdin_chunk, should_normalize_interactive_console_stdin,
-    should_spawn_byte_stream_stdin_reader, stdin_chunk_requests_interrupt,
-    stdin_source_is_real_stdin,
+    should_spawn_byte_stream_stdin_reader, stdin_source_is_real_stdin, InterruptScanner,
 };
 
 /// Resize the PTY. On Windows, `running_process::pty::NativePtyProcess::resize_impl`
@@ -314,6 +315,9 @@ pub trait InteractiveHooks {
 #[derive(Debug)]
 pub struct RawTerminalGuard {
     keyboard: KeyboardEnhancementGuard,
+    /// The out-of-process restore for a force-killed clud (#1705); stood
+    /// down in `Drop` once this guard has restored the terminal itself.
+    restore_guard: Option<crate::term_guard::TermGuardLink>,
 }
 
 /// Owns clud's own kitty keyboard-enhancement stack frame for one terminal
@@ -339,6 +343,17 @@ pub struct KeyboardEnhancementGuard {
 #[derive(Debug, Default)]
 pub struct KeyboardEnhancementTracker {
     state: Mutex<KeyboardEnhancementTrackerState>,
+    /// Told the unbalanced count whenever it changes (#1705: the restore
+    /// guard must know how many frames a force-killed session leaves).
+    on_change: std::sync::OnceLock<FrameCountListener>,
+}
+
+struct FrameCountListener(Box<dyn Fn(usize) + Send + Sync>);
+
+impl std::fmt::Debug for FrameCountListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FrameCountListener")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -354,14 +369,33 @@ impl KeyboardEnhancementTracker {
     /// key events such as Ctrl+C are deliberately ignored.
     pub fn observe(&self, bytes: &[u8]) {
         let mut state = self.state.lock().expect("keyboard tracker lock");
+        let before = state.unbalanced_pushes;
         for &byte in bytes {
             observe_keyboard_enhancement_byte(&mut state, byte);
+        }
+        if state.unbalanced_pushes != before {
+            self.notify(state.unbalanced_pushes);
         }
     }
 
     fn take_unbalanced_pushes(&self) -> usize {
         let mut state = self.state.lock().expect("keyboard tracker lock");
-        std::mem::take(&mut state.unbalanced_pushes)
+        let taken = std::mem::take(&mut state.unbalanced_pushes);
+        if taken != 0 {
+            self.notify(0);
+        }
+        taken
+    }
+
+    /// Call `listener` with the unbalanced count on every change. Set once.
+    fn on_change(&self, listener: impl Fn(usize) + Send + Sync + 'static) {
+        let _ = self.on_change.set(FrameCountListener(Box::new(listener)));
+    }
+
+    fn notify(&self, count: usize) {
+        if let Some(listener) = self.on_change.get() {
+            (listener.0)(count);
+        }
     }
 }
 
@@ -425,16 +459,21 @@ fn observe_keyboard_enhancement_byte(state: &mut KeyboardEnhancementTrackerState
     }
 }
 
-/// Turns off every xterm mouse-reporting mode a child may have enabled.
+/// Turns off every input mode a child TUI may have enabled and shows the
+/// cursor again.
 ///
-/// clud never enables mouse tracking itself (see `toast::mouse`), so the
-/// terminal's pre-session state is "off". A child that exits (or is killed)
-/// without sending its own disable leaves the terminal reporting motion, and
-/// the shell then echoes `35;21;8M…` on every mouse move.
-const MOUSE_TRACKING_RESET: &[u8] =
-    b"\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l";
+/// clud never enables any of these itself (see `toast::mouse`), so "off" is
+/// the terminal's pre-session state. A child that exits (or is killed)
+/// without sending its own disable leaves them on, and the shell then echoes
+/// `35;21;8M…` on every mouse move (#1383), `^[[I` / `^[[O` on every focus
+/// change, and `^[[200~` around every paste (#1701):
+///
+/// - mouse: `1000` `1001` `1002` `1003` `1005` `1006` `1015` `1016`
+/// - `1004` focus reporting, `2004` bracketed paste
+/// - `25` cursor visibility (set, not reset)
+pub(crate) const CHILD_TERMINAL_MODES_RESET: &[u8] = b"\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?25h";
 
-fn keyboard_enhancement_pop_bytes(count: usize) -> Vec<u8> {
+pub(crate) fn keyboard_enhancement_pop_bytes(count: usize) -> Vec<u8> {
     // crossterm's PopKeyboardEnhancementFlags emits this one-frame pop. Do
     // not use `CSI = ... u`: that would overwrite the caller's state instead
     // of unwinding only the frames that belong to this session.
@@ -547,10 +586,36 @@ impl Drop for KeyboardEnhancementGuard {
 
 impl RawTerminalGuard {
     pub fn enter() -> io::Result<Self> {
+        let initial = crate::term_guard::initial_modes();
         crossterm::terminal::enable_raw_mode()?;
+        let keyboard = KeyboardEnhancementGuard::push();
+        let restore_guard =
+            initial
+                .zip(crate::term_guard::current_modes())
+                .and_then(|(initial, raw)| {
+                    crate::term_guard::TermGuardLink::start(
+                        initial,
+                        raw,
+                        usize::from(keyboard.pushed),
+                    )
+                });
+        if let Some(link) = restore_guard.clone() {
+            let own = usize::from(keyboard.pushed);
+            keyboard
+                .child
+                .on_change(move |child| link.set_kitty_frames(own + child));
+        }
         Ok(Self {
-            keyboard: KeyboardEnhancementGuard::push(),
+            keyboard,
+            restore_guard,
         })
+    }
+
+    /// Wait until this session's restore guard is armed; its pid. `None`
+    /// when no guard runs. For the probe that tests the guard end to end.
+    #[doc(hidden)]
+    pub fn wait_restore_guard(&self, timeout: std::time::Duration) -> Option<u32> {
+        self.restore_guard.as_ref()?.wait_armed(timeout)
     }
 
     /// Share the child-output tracker with the PTY reader for this session.
@@ -566,15 +631,26 @@ impl RawTerminalGuard {
     }
 }
 
+impl RawTerminalGuard {
+    /// Everything the guard writes on the way out, in order: the child's
+    /// keyboard frames, the child-mode reset, then clud's own frame.
+    fn write_exit_reset(&mut self, out: &mut dyn Write) {
+        self.keyboard.restore_child_frames_to(out);
+        let _ = out.write_all(CHILD_TERMINAL_MODES_RESET);
+        self.keyboard.unwind_to(out);
+    }
+}
+
 impl Drop for RawTerminalGuard {
     fn drop(&mut self) {
         // This is intentionally in Drop so unwind cannot strand a child frame.
-        self.keyboard.restore_child_frames();
         let mut stdout = io::stdout();
-        let _ = stdout.write_all(MOUSE_TRACKING_RESET);
-        self.keyboard.unwind_to(&mut stdout);
+        self.write_exit_reset(&mut stdout);
         let _ = stdout.flush();
         let _ = crossterm::terminal::disable_raw_mode();
+        if let Some(link) = self.restore_guard.take() {
+            link.finish();
+        }
     }
 }
 
@@ -1053,44 +1129,6 @@ fn should_answer_cursor_queries(interactive_real_stdin: bool) -> bool {
     cfg!(windows) && !interactive_real_stdin
 }
 
-fn contains_cursor_query(chunk: &[u8]) -> bool {
-    chunk.windows(4).any(|window| window == b"\x1b[6n")
-}
-
-/// Stub replies for the capability probes a child TUI may block on besides
-/// `ESC[6n` (#1347, follow-up to #1310): DA1, DA2, the kitty keyboard query,
-/// and OSC 10/11 colour queries. Each pattern must match exactly at an ESC,
-/// so replies such as `ESC[?1;2c` are never mistaken for queries. The cursor
-/// query stays with `respond_to_queries_impl`.
-const TERMINAL_QUERY_REPLIES: &[(&[u8], &[u8])] = &[
-    (b"\x1b[c", b"\x1b[?1;2c"),
-    (b"\x1b[0c", b"\x1b[?1;2c"),
-    (b"\x1b[>c", b"\x1b[>0;0;0c"),
-    (b"\x1b[>0c", b"\x1b[>0;0;0c"),
-    (b"\x1b[?u", b"\x1b[?0u"),
-    (b"\x1b]10;?\x07", b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
-    (b"\x1b]10;?\x1b\\", b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
-    (b"\x1b]11;?\x07", b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
-    (b"\x1b]11;?\x1b\\", b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
-];
-
-fn terminal_query_replies(chunk: &[u8]) -> Vec<u8> {
-    let mut replies = Vec::new();
-    for (start, &byte) in chunk.iter().enumerate() {
-        if byte != 0x1b {
-            continue;
-        }
-        let rest = &chunk[start..];
-        if let Some((_, reply)) = TERMINAL_QUERY_REPLIES
-            .iter()
-            .find(|(query, _)| rest.starts_with(query))
-        {
-            replies.extend_from_slice(reply);
-        }
-    }
-    replies
-}
-
 /// Environment switch that forces the pump's verbose trace on (#1310).
 pub const PUMP_TRACE_ENV: &str = "CLUD_PTY_PUMP_TRACE";
 
@@ -1453,6 +1491,10 @@ where
     }
 
     let mut observer = F3Observer::new();
+    // #1703: one per input stream, so a CSI u Ctrl+C split across two reads
+    // of that stream is still seen.
+    let mut extra_interrupt = InterruptScanner::default();
+    let mut stdin_interrupt = InterruptScanner::default();
     // Issue #63 / #79: bracketed-paste passes through the PTY pump as
     // raw bytes. When the user drags a file onto the terminal, the
     // terminal emits `\x1b[200~ <path-shaped string> \x1b[201~`. We
@@ -1515,7 +1557,8 @@ where
         let normalize_bare_lf = options.normalize_bare_lf;
         let keyboard_enhancement_tracker = options.keyboard_enhancement_tracker.clone();
         let closed_tx = event_tx.clone();
-        let answer_cursor_queries = should_answer_cursor_queries(interactive_real_stdin);
+        let mut query_scanner = should_answer_cursor_queries(interactive_real_stdin)
+            .then(crate::terminal_queries::TerminalQueryScanner::default);
         let verbose = options.verbose;
         scope.spawn(move || {
             let mut osc_strip = OscTitleStripper::new();
@@ -1535,19 +1578,13 @@ where
                 if let Some(tracker) = &keyboard_enhancement_tracker {
                     tracker.observe(chunk);
                 }
-                // #1310: see `should_answer_cursor_queries`.
-                if answer_cursor_queries && contains_cursor_query(chunk) {
-                    if verbose {
-                        verbose_log::log("[clud] pty pump: answering child cursor query");
-                    }
-                    let _ = process.respond_to_queries_impl(chunk);
-                }
-                // #1347: DA1/DA2, kitty keyboard and OSC colour probes.
-                if answer_cursor_queries {
-                    let replies = terminal_query_replies(chunk);
+                // #1310 / #1347 / #1702: see `should_answer_cursor_queries`
+                // and `terminal_queries`.
+                if let Some(scanner) = query_scanner.as_mut() {
+                    let replies = scanner.replies(chunk);
                     if !replies.is_empty() {
                         if verbose {
-                            verbose_log::log("[clud] pty pump: answering child capability query");
+                            verbose_log::log("[clud] pty pump: answering child terminal query");
                         }
                         let _ = process.write_impl(&replies, false);
                     }
@@ -1655,7 +1692,7 @@ where
                     // callback) — never a piped test fixture — so we
                     // don't need the `interrupt_on_ctrl_c_byte` gate
                     // that skips 0x03 detection on piped stdin.
-                    let requested_interrupt = stdin_chunk_requests_interrupt(&chunk);
+                    let requested_interrupt = extra_interrupt.requests_interrupt(&chunk);
                     let chunk = extra_chunk_for_pipeline(&chunk, normalize_console_stdin);
                     forward_user_input(
                         process,
@@ -1677,7 +1714,7 @@ where
                 }
                 Ok(PumpEvent::Stdin(chunk)) => {
                     let requested_interrupt =
-                        interrupt_on_ctrl_c_byte && stdin_chunk_requests_interrupt(&chunk);
+                        interrupt_on_ctrl_c_byte && stdin_interrupt.requests_interrupt(&chunk);
                     let chunk = if interactive_real_stdin {
                         crate::paste_image::expand_ctrl_v_bytes(&chunk, || {
                             crate::paste_image::handle_clipboard().ok().flatten()

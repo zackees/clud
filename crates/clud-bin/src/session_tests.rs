@@ -739,6 +739,57 @@ fn output_writer_flushes_remaining_chunks_before_exiting() {
 // so the `ctrlc` SIGINT handler could not cover for it. The primary fix is
 // not pushing that flag; the CSI u decoder below is the backstop.
 
+/// #1703: a CSI u Ctrl+C split across two reads of one stream is still one
+/// interrupt, in every spelling; a release never counts.
+#[test]
+fn csi_u_ctrl_c_split_at_every_offset_requests_exactly_one_interrupt() {
+    for seq in [&b"\x1b[99;5u"[..], b"\x1b[99;5:1u", b"\x1b[99;5:2u"] {
+        for split in 1..seq.len() {
+            let mut scanner = session_stdin::InterruptScanner::default();
+            let (left, right) = seq.split_at(split);
+            let hits = [
+                scanner.requests_interrupt(left),
+                scanner.requests_interrupt(right),
+            ];
+            assert_eq!(
+                hits.iter().filter(|&&hit| hit).count(),
+                1,
+                "{seq:?} split at {split}: {hits:?}"
+            );
+            assert!(
+                !scanner.requests_interrupt(b"a"),
+                "no repeat after the match"
+            );
+        }
+    }
+    let release = b"\x1b[99;5:3u";
+    for split in 1..release.len() {
+        let mut scanner = session_stdin::InterruptScanner::default();
+        let (left, right) = release.split_at(split);
+        assert!(!scanner.requests_interrupt(left) && !scanner.requests_interrupt(right));
+    }
+}
+
+/// #1703: the carried prefix is bounded, and an unrelated sequence split
+/// across reads is not an interrupt.
+#[test]
+fn interrupt_scanner_ignores_other_split_sequences_and_bounds_its_carry() {
+    let mut scanner = session_stdin::InterruptScanner::default();
+    assert!(!scanner.requests_interrupt(b"\x1b[<35;31;1"));
+    assert!(!scanner.requests_interrupt(b"8M"));
+    let mut long = b"\x1b[".to_vec();
+    long.extend(std::iter::repeat_n(b'1', 64));
+    assert!(!scanner.requests_interrupt(&long));
+    assert!(
+        !scanner.requests_interrupt(b";5u"),
+        "an overlong prefix is dropped"
+    );
+    assert!(
+        scanner.requests_interrupt(b"x\x03"),
+        "legacy 0x03 is unchanged"
+    );
+}
+
 // ─── Keyboard enhancement stack cleanup (issue #1221) ──────────────────
 
 #[test]
@@ -812,6 +863,40 @@ fn keyboard_guard_without_its_own_frame_still_unwinds_child_frames() {
     let mut terminal = Vec::new();
     guard.unwind_to(&mut terminal);
     assert_eq!(terminal, b"\x1b[<1u");
+}
+
+/// #1701: the exit sequence turns off every input mode a child TUI enables
+/// (mouse, focus reporting, bracketed paste) and shows the cursor, between
+/// the child's keyboard frames and clud's own.
+#[test]
+fn exit_reset_disables_child_modes_between_child_and_clud_keyboard_frames() {
+    let mut guard = RawTerminalGuard {
+        keyboard: KeyboardEnhancementGuard::with_pushed(true),
+        restore_guard: None,
+    };
+    guard.keyboard.child_tracker().observe(b"\x1b[>1u");
+    let mut terminal = Vec::new();
+    guard.write_exit_reset(&mut terminal);
+    // Not a real terminal guard: skip its Drop, which writes to stdout and
+    // leaves raw mode.
+    std::mem::forget(guard);
+
+    let mut expected = b"\x1b[<1u".to_vec();
+    expected.extend_from_slice(CHILD_TERMINAL_MODES_RESET);
+    expected.extend_from_slice(b"\x1b[<1u");
+    assert_eq!(terminal, expected);
+    for mode in [
+        "1000", "1001", "1002", "1003", "1005", "1006", "1015", "1016", "1004", "2004",
+    ] {
+        let reset = format!("\x1b[?{mode}l");
+        assert!(
+            CHILD_TERMINAL_MODES_RESET
+                .windows(reset.len())
+                .any(|w| w == reset.as_bytes()),
+            "exit reset must turn off ?{mode}"
+        );
+    }
+    assert!(CHILD_TERMINAL_MODES_RESET.ends_with(b"\x1b[?25h"));
 }
 
 #[test]
@@ -891,49 +976,4 @@ fn malformed_csi_u_sequences_do_not_request_interrupt_or_panic() {
 fn cursor_queries_are_answered_only_without_an_interactive_console() {
     assert!(!should_answer_cursor_queries(true));
     assert_eq!(should_answer_cursor_queries(false), cfg!(windows));
-}
-
-#[test]
-fn cursor_query_detection_finds_the_sequence_anywhere_in_a_chunk() {
-    assert!(contains_cursor_query(b"\x1b[6n"));
-    assert!(contains_cursor_query(b"\x1b[?9001h\x1b[6n\x1b[?1004h"));
-    assert!(!contains_cursor_query(b"\x1b[6"));
-    assert!(!contains_cursor_query(b"\x1b[1;1R"));
-    assert!(!contains_cursor_query(b""));
-}
-
-/// #1347: capability probes other than `ESC[6n` get a stub reply too.
-#[test]
-fn terminal_query_replies_cover_da_kitty_and_osc_colour() {
-    assert_eq!(terminal_query_replies(b"\x1b[c"), b"\x1b[?1;2c");
-    assert_eq!(terminal_query_replies(b"\x1b[0c"), b"\x1b[?1;2c");
-    assert_eq!(terminal_query_replies(b"\x1b[>c"), b"\x1b[>0;0;0c");
-    assert_eq!(terminal_query_replies(b"\x1b[>0c"), b"\x1b[>0;0;0c");
-    assert_eq!(terminal_query_replies(b"\x1b[?u"), b"\x1b[?0u");
-    assert_eq!(
-        terminal_query_replies(b"\x1b]10;?\x07"),
-        b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"
-    );
-    assert_eq!(
-        terminal_query_replies(b"\x1b]11;?\x1b\\"),
-        b"\x1b]11;rgb:0000/0000/0000\x1b\\"
-    );
-    assert_eq!(
-        terminal_query_replies(b"\x1b[?9001h\x1b[c\x1b[?u"),
-        b"\x1b[?1;2c\x1b[?0u"
-    );
-    for not_a_query in [
-        &b"\x1b[6n"[..],
-        b"\x1b[?1;2c",
-        b"\x1b[?0u",
-        b"\x1b[1;1R",
-        b"\x1b[?1004h",
-        b"",
-        b"\x1b[",
-    ] {
-        assert!(
-            terminal_query_replies(not_a_query).is_empty(),
-            "{not_a_query:?}"
-        );
-    }
 }

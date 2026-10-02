@@ -51,6 +51,7 @@ WORKSPACE_BINARIES = (
     # of `clud` (#1551); `ci.aliases.materialize` creates them on the exec side.
     "clud",
     "clud-ctrlc-probe",
+    "clud-term-guard-probe",
     "daemon-stub",
     "mock-agent",
     # #1067: `crates/tap/tests/cli.rs` runs this one. Without it in the bundle

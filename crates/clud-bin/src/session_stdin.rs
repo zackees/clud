@@ -48,36 +48,67 @@ pub(crate) fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
 /// Release events (`:3`) deliberately do not count: the press or repeat
 /// that preceded them already did.
 ///
-/// Stateless by design, and therefore blind to a sequence split across two
-/// reads. That is an acceptable trade for an interrupt — a terminal writes
-/// one keystroke as one `write`, and a key held long enough to matter
-/// repeats, so a torn first chunk is followed by an intact one within
-/// milliseconds.
+/// Each input stream owns one [`InterruptScanner`], which carries an
+/// incomplete trailing CSI across reads so a sequence split between two
+/// chunks is still seen exactly once (#1703).
+#[cfg(test)]
 pub(crate) fn stdin_chunk_requests_interrupt(chunk: &[u8]) -> bool {
-    chunk.contains(&0x03) || contains_csi_u_ctrl_c(chunk)
+    InterruptScanner::default().requests_interrupt(chunk)
 }
 
-/// Scan for a kitty CSI u encoding of Ctrl+C anywhere in the chunk.
+/// Longest incomplete CSI carried to the next chunk. A kitty Ctrl+C is at
+/// most ~16 bytes; anything longer is not one.
+const MAX_CARRIED_CSI: usize = 32;
+
+/// Stream-resumable [`stdin_chunk_requests_interrupt`] for one input stream.
+#[derive(Debug, Default)]
+pub(crate) struct InterruptScanner {
+    /// An incomplete CSI (or lone ESC) that ended the previous chunk.
+    carry: Vec<u8>,
+}
+
+impl InterruptScanner {
+    /// True when `chunk`, continuing the stream, carries a keyboard
+    /// interrupt request.
+    pub(crate) fn requests_interrupt(&mut self, chunk: &[u8]) -> bool {
+        let mut buf = std::mem::take(&mut self.carry);
+        buf.extend_from_slice(chunk);
+        let (found, open) = scan_csi_u_ctrl_c(&buf);
+        if let Some(start) = open {
+            if buf.len() - start <= MAX_CARRIED_CSI {
+                self.carry = buf[start..].to_vec();
+            }
+        }
+        chunk.contains(&0x03) || found
+    }
+}
+
+/// Scan for a kitty CSI u encoding of Ctrl+C anywhere in `buf`.
 ///
 /// Walks `\x1b[` … final-byte sequences, checking the parameter bytes of
-/// every one that terminates in `u`. A truncated trailing sequence (no
-/// final byte yet) is not a match; the next chunk carries the rest.
-fn contains_csi_u_ctrl_c(chunk: &[u8]) -> bool {
-    let mut rest = chunk;
-    while let Some(start) = rest.windows(2).position(|pair| pair == b"\x1b[") {
+/// every one that terminates in `u`. Returns whether one matched, and where
+/// a trailing sequence that has not seen its final byte yet starts (a lone
+/// trailing ESC counts), so the caller can carry it into the next chunk.
+fn scan_csi_u_ctrl_c(buf: &[u8]) -> (bool, Option<usize>) {
+    let mut offset = 0;
+    loop {
+        let rest = &buf[offset..];
+        let Some(start) = rest.windows(2).position(|pair| pair == b"\x1b[") else {
+            let open = (rest.last() == Some(&0x1b)).then(|| buf.len() - 1);
+            return (false, open);
+        };
         let params = &rest[start + 2..];
         let Some(end) = params
             .iter()
             .position(|byte| super::is_csi_terminator(*byte))
         else {
-            return false;
+            return (false, Some(offset + start));
         };
         if params[end] == b'u' && csi_u_params_are_ctrl_c(&params[..end]) {
-            return true;
+            return (true, None);
         }
-        rest = &params[end + 1..];
+        offset += start + 2 + end + 1;
     }
-    false
 }
 
 /// Decide whether a CSI u parameter payload (e.g. `99;5:2`) is Ctrl+C.

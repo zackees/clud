@@ -5943,3 +5943,44 @@ venvs would break, hence that spare. A user with metered bandwidth sets `0`.
 **Consequences:** the cache is bounded to roughly `cache.max_bytes` plus one
 day of growth, deferred while any uv runs at sweep time. A busy host that
 always has some uv running is never cleaned; the warning still shows.
+
+## DD-146: a force-killed session is restored by a guard process, not by a handler
+
+**Context:** #1705. `RawTerminalGuard::drop` restores the terminal on every
+exit clud controls, but `kill -9`, the OOM killer, `taskkill /F` and
+`TerminateProcess` run nothing in the process, and the child TUI dies with it.
+The user's shell is left in raw mode with mouse tracking, focus reporting and
+bracketed paste on (#1697's post-exit screenshot).
+
+**Decision:** each raw-mode session starts `clud __term-guard`, a detached
+process that shares the terminal. It learns the session's initial and raw
+settings and its kitty frame count over an authenticated loopback socket. If
+the socket ends without a `D`, it writes the reset and restores the
+settings, but only while they still equal clud's raw settings.
+
+**Why not the alternatives:**
+- A signal handler or `atexit`: SIGKILL and `TerminateProcess` cannot be
+  caught. Only another process survives them.
+- The guard as a plain child: `taskkill /T`, a process-group kill and a Job
+  Object close all reach direct descendants. The guard is launched through a
+  launcher that exits immediately, as a `running-process` daemon (new session
+  or process group, Job breakaway), so it is in none of those sets.
+- An inherited pipe for liveness: `running-process`'s daemon spawn sanitizes
+  every handle, by design. A loopback socket gives the same EOF-on-death and
+  needs no file, so nothing is left behind to clean up.
+- Polling clud's pid: it is slower and racy against PID reuse. Socket EOF
+  arrives the moment the kernel closes clud's descriptors.
+- Restoring the settings unconditionally: by the time the guard acts, the
+  shell may already have set its own line-editor mode, and overwriting that
+  would break the prompt. Restoring only on an exact match with clud's raw
+  settings never undoes a shell's change.
+- Popping a fixed number of kitty frames: a shell such as fish pushes its own
+  frame at the prompt. The guard pops exactly the count clud last reported.
+
+**Consequences:** each session spends two short process spawns, off the
+startup path (spawn and accept run in the background). A
+guard that never connects costs nothing: clud stops listening after 10 s. The
+reset bytes can in principle land after a fast shell's prompt has enabled
+bracketed paste; the guard acts on socket EOF, which comes before the shell
+can observe the child's exit. `CLUD_TERM_GUARD=0` opts out.
+

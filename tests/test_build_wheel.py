@@ -543,9 +543,9 @@ def test_hook_rollout_target_is_a_dispatch_alias() -> None:
 
 
 #: `[[bin]]` targets that never ship as wheel scripts: the Windows-only Kitty
-#: paste helper (packed into the Kitty bundle), and the test-only probe that
+#: paste helper (packed into the Kitty bundle), and the test-only probes that
 #: `prune_nonproduction_scripts` strips. Feature-gated benches are exempt too.
-NON_SHIPPED_BINS = {"clud-kittyterm-paste", "clud-ctrlc-probe"}
+NON_SHIPPED_BINS = {"clud-kittyterm-paste", "clud-ctrlc-probe", "clud-term-guard-probe"}
 
 
 def _declared_bins() -> dict[str, str]:

@@ -20,9 +20,7 @@
 use std::io;
 use std::time::Duration;
 
-use crate::session::session_stdin::{
-    normalize_interactive_console_stdin_chunk, stdin_chunk_requests_interrupt,
-};
+use crate::session::session_stdin::{normalize_interactive_console_stdin_chunk, InterruptScanner};
 use crate::session::{BracketedPasteNormalizer, F3Events, F3Observer};
 
 /// One chunk of user input after [`RemoteInputFilter::process`].
@@ -49,6 +47,8 @@ impl FilteredInput {
 pub(super) struct RemoteInputFilter {
     paste: BracketedPasteNormalizer,
     f3: F3Observer,
+    /// Carries a CSI u Ctrl+C split across two reads (#1703).
+    interrupt: InterruptScanner,
     /// Expand a raw Ctrl+V (0x16) to the clipboard image's saved path
     /// (#1373). Set from [`RawInput::expands_ctrl_v`]: only a byte-stream
     /// source needs it, since the Windows `console_input` reader already
@@ -61,6 +61,7 @@ impl RemoteInputFilter {
         Self {
             paste: BracketedPasteNormalizer::new(),
             f3: F3Observer::new(),
+            interrupt: InterruptScanner::default(),
             expand_ctrl_v,
         }
     }
@@ -81,7 +82,7 @@ impl RemoteInputFilter {
     {
         // Ctrl+C is checked on the raw chunk, before any clipboard read,
         // exactly as the local pump's stdin branch orders it.
-        if stdin_chunk_requests_interrupt(chunk) {
+        if self.interrupt.requests_interrupt(chunk) {
             return FilteredInput {
                 interrupt: true,
                 ..FilteredInput::default()
