@@ -33,8 +33,9 @@ host or in a direct Bosn build task: those paths can interfere with the system
 `clud`. If `act` cannot represent an affected job (notably native Windows or
 macOS execution), use the relevant GitHub Actions lane for that validation and
 report the local coverage gap; never claim an `act` pass proves native behavior.
-If Bosn, Docker, or `act` is unavailable, report the blocker rather than
-falling back to host testing. The commands and limits are in
+These tasks need bosn 0.1.7 or newer (`bosn --version`); older releases can
+test another checkout's tree (#1594). If Bosn, Docker, or `act` is unavailable
+or too old, report the blocker rather than falling back to host testing. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
 
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):

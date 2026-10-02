@@ -41,8 +41,10 @@ A skill that fires on every mention of Docker becomes noise, and noise gets igno
 ## Before committing the agent to this path
 
 1. `command -v bosn` — if absent, say so and stop. Install is
-   `uv tool install git+https://github.com/zackees/bosn` (Python 3.11+; puts `bosn`
-   and `bosn-docker` on PATH). Do not install it without being asked.
+   `uv tool install 'bosn>=0.1.7'` (Python 3.11+; puts `bosn` and `bosn-docker` on
+   PATH). Do not install it without being asked. `bosn --version` below 0.1.7 can
+   run a task in another checkout's warm container (zackees/bosn#314) and runs one
+   job per machine; ask for an upgrade (`uv tool upgrade bosn`) rather than trust it.
 2. `docker info` must succeed — bosn manages a real engine, it does not replace one.
 3. **WSL is refused outright**: `bosn` exits non-zero inside WSL, because its Windows
    loopback daemon is unreachable from there. Use a native Windows shell, macOS, or
