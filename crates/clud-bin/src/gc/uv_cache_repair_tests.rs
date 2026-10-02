@@ -28,7 +28,10 @@ fn healthy_archive(dir: &Path) -> PathBuf {
 fn record_path_reads_the_path_column() {
     let cases: &[(&str, Option<&str>)] = &[
         ("pkg/a.py,sha256=x,12", Some("pkg/a.py")),
-        ("pkg-1.0.dist-info/RECORD,,", Some("pkg-1.0.dist-info/RECORD")),
+        (
+            "pkg-1.0.dist-info/RECORD,,",
+            Some("pkg-1.0.dist-info/RECORD"),
+        ),
         ("pkg/a.py,sha256=x,12\r", Some("pkg/a.py")),
         // Hash and size never contain a comma; the path may.
         ("pkg/a,b.py,sha256=x,3", Some("pkg/a,b.py")),
