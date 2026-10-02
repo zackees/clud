@@ -879,6 +879,17 @@ in which case `cross_toolchain_preflight` names the missing cross compiler at
 entry rather than letting `ring`'s build script discover it minutes later.
 Wheel sizes are then checked by `python -m ci.check_wheel_size --dist-dir dist/`.
 
+### No empty test harnesses (#1714)
+
+`cargo test --workspace --no-run` builds one harness per target whose `test`
+setting is on, and each harness statically links the whole workspace. zccache
+never caches harness link products (zackees/zccache#1525), so an empty one
+costs its full compile and link on every run and ships in every bundle. A
+target with no `#[test]` in its module tree (the `clud` bin, the probe and
+stub testbins, `clud-ctrlc-probe`) declares `test = false`;
+`ci/banned_empty_harnesses.py` fails `bash lint` otherwise. Bins stay built
+for `CARGO_BIN_EXE_*` and the bundle: `test = false` only drops the harness.
+
 ### Wheel script modes and the release-wheel smoke (#1545)
 
 pip installs each `.data/scripts/*` entry with the Unix mode in its zip
