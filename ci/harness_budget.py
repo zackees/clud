@@ -18,8 +18,9 @@ without tests. Run via `bash lint` (see `ci/lint.py`).
 from __future__ import annotations
 
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 from ci.banned_empty_harnesses import ROOT, Target, package_targets, workspace_manifests
 
