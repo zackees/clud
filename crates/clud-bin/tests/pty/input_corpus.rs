@@ -11,8 +11,8 @@
 //! channel (`extra_rx`, Windows' interactive path) and the byte-stream stdin
 //! reader (POSIX's) — whole, one byte per write, and in an awkward stride.
 //! `mock-agent` reads with VT input like Claude Code and records exactly what
-//! it got; the only transform allowed is the one ConPTY itself applies to a
-//! bare LF ([`crate::common::through_pty_input`]).
+//! it got; the only transforms allowed are ConPTY's own (LF→CR, and focus
+//! reports consumed): see [`expected_for`].
 
 use std::io::{Cursor, Read};
 use std::sync::atomic::AtomicBool;
@@ -189,11 +189,24 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
     std::fs::read(&raw_stdin).unwrap_or_default()
 }
 
+/// What the child should read for one corpus entry. Besides ConPTY's LF→CR
+/// ([`through_pty_input`]), ConPTY consumes terminal focus reports
+/// (`ESC [ I` / `ESC [ O`) from its input instead of passing them to the
+/// child: observed on the Windows x64 and arm runners for every input path
+/// and chunking (#1717). Claude Code run directly under Windows Terminal goes
+/// through ConPTY too, so this is the platform's behaviour, not clud's.
+fn expected_for(name: &str, bytes: &[u8]) -> Vec<u8> {
+    if cfg!(windows) && name == "focus in/out" {
+        return Vec::new();
+    }
+    through_pty_input(bytes)
+}
+
 /// The first corpus entry whose bytes the child did not get intact.
 fn first_damaged_entry(got: &[u8]) -> Option<String> {
     let mut rest = got;
     for (name, bytes) in CORPUS {
-        let mut expected = through_pty_input(bytes);
+        let mut expected = expected_for(name, bytes);
         expected.push(b'|');
         match rest.strip_prefix(expected.as_slice()) {
             Some(after) => rest = after,

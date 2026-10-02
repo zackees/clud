@@ -39,6 +39,11 @@ Read that first. This page lists only what differs on Windows.
   - It does **not forward** the child's mouse modes (`?1003`/`?1006`), its
     scroll region, or cursor-key mode (`?1`).
   - ConPTY itself emits `?1004h` and `?9001h` (win32-input-mode) at startup.
+- **ConPTY consumes focus reports on input.** A terminal's `ESC[I` /
+  `ESC[O` never reaches the child as bytes, for every input path and
+  chunking (observed on the x64 and arm runners, #1717). Everything else in
+  `tests/pty/input_corpus.rs` must reach the child byte-for-byte; the only
+  modelled transforms are LF→CR and this one (`expected_for`).
 - **Cursor query at startup.** ConPTY sends `ESC[6n` and holds the child
   until a reply comes back (#1310). clud answers only when stdin is not an
   interactive console (`should_answer_cursor_queries`, `session.rs:1084`).
