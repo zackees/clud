@@ -1088,9 +1088,10 @@ fn should_answer_cursor_queries(interactive_real_stdin: bool) -> bool {
 /// Environment switch that forces the pump's verbose trace on (#1310).
 pub const PUMP_TRACE_ENV: &str = "CLUD_PTY_PUMP_TRACE";
 
-/// How long a partial paste marker or SGR mouse report waits for its
-/// continuation before it is released to the child (#1189, #1445). Only
-/// armed while bytes are pending, so it never raises the idle wakeup rate.
+/// How long a partial SGR mouse report held by the toast mouse filter waits
+/// for its continuation (#1189). The paste normalizer's own held bytes follow
+/// `BracketedPasteNormalizer::flush_due_in` (#1445, #1717). Only armed while
+/// bytes are pending, so it never raises the idle wakeup rate.
 const INPUT_PENDING_FLUSH: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// One unit of work for the pump's main loop. Every producer feeds the same
@@ -1212,26 +1213,31 @@ fn filter_user_input_chunk(
 
 fn pending_user_input_wait(
     until_tick: std::time::Duration,
+    now: std::time::Instant,
     paste: &BracketedPasteNormalizer,
     mouse: &crate::toast::mouse::MouseFilter,
     toast_armed: bool,
 ) -> std::time::Duration {
-    if paste.has_pending() || (toast_armed && mouse.has_pending()) {
-        until_tick.min(INPUT_PENDING_FLUSH)
-    } else {
-        until_tick
+    let mut wait = until_tick;
+    if let Some(due) = paste.flush_due_in(now) {
+        wait = wait.min(due);
     }
+    if toast_armed && mouse.has_pending() {
+        wait = wait.min(INPUT_PENDING_FLUSH);
+    }
+    wait
 }
 
-/// Release prefixes held by the paste and mouse filters in input order.
-/// A held paste prefix must still pass through the toast mouse filter before
-/// reaching the child; its partial report is then released on this idle tick.
+/// Release what the paste and mouse filters hold, in input order, once it is
+/// due. A held paste prefix must still pass through the toast mouse filter
+/// before reaching the child; its partial report is then released here too.
 fn flush_pending_user_input(
+    now: std::time::Instant,
     paste: &mut BracketedPasteNormalizer,
     mouse: &mut crate::toast::mouse::MouseFilter,
     targets: Option<ToastHitTargets>,
 ) -> Vec<u8> {
-    let pending = paste.flush_pending();
+    let pending = paste.flush_pending_if_due(now);
     match targets {
         Some(targets) => {
             let mut bytes = mouse
@@ -1603,7 +1609,13 @@ where
         let mut next_tick = std::time::Instant::now() + PUMP_TICK;
         let exit_code = loop {
             let until_tick = next_tick.saturating_duration_since(std::time::Instant::now());
-            let wait = pending_user_input_wait(until_tick, &paste, &mouse, toast_input.is_some());
+            let wait = pending_user_input_wait(
+                until_tick,
+                std::time::Instant::now(),
+                &paste,
+                &mouse,
+                toast_input.is_some(),
+            );
             // One blocking wait covers every input source (#691). Events
             // are handled in arrival order; a keystroke, resize, or
             // drag-drop wakes the loop immediately.
@@ -1708,14 +1720,20 @@ where
                 // below acts on it.
                 Ok(PumpEvent::ReaderClosed) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // #1445: release a paste-start prefix (notably a lone
-                    // Esc) as well as any toast mouse prefix after idle.
+                    // #1445 / #1717: release a held prefix once it is due (a
+                    // lone Esc fast, a partial terminal report only after a
+                    // longer wait), and any toast mouse prefix after idle.
                     let targets = toast_input.as_ref().map(|input| ToastHitTargets {
                         close: input.close_rect(),
                         cpu: input.cpu_rect(),
                         hover_armed: input.cpu_hover_armed(),
                     });
-                    let pending = flush_pending_user_input(&mut paste, &mut mouse, targets);
+                    let pending = flush_pending_user_input(
+                        std::time::Instant::now(),
+                        &mut paste,
+                        &mut mouse,
+                        targets,
+                    );
                     if !pending.is_empty() {
                         let _ = process.write_impl(&pending, false);
                     }

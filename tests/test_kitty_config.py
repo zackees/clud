@@ -169,7 +169,7 @@ def test_windows_mock_reads_conpty_replies_without_line_buffering() -> None:
     )
     assert "ENABLE_VIRTUAL_TERMINAL_INPUT" in raw_mode
     assert mock.index("if let Some(path) = ansi_script.as_ref()") < mock.index(
-        "read_stdin_timed(read_stdin_ms, ready_file.as_deref())"
+        "let bytes = read_stdin_timed("
     )
     raw = mock.split("fn read_stdin_timed(", 1)[1]
     assert raw.index("set_stdin_raw_if_tty();") < raw.index(

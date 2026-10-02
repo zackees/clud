@@ -106,14 +106,27 @@ impl RemoteInputFilter {
         }
     }
 
-    /// True while the paste normalizer holds a partial `ESC[200~` prefix,
-    /// such as a lone Esc keypress.
+    /// True while the paste normalizer holds bytes, such as a lone Esc
+    /// keypress or an incomplete terminal report.
+    #[cfg(test)]
     pub(super) fn has_pending(&self) -> bool {
         self.paste.has_pending()
     }
 
-    /// Release held prefix bytes once input has gone idle, so a lone Esc
-    /// reaches the child instead of waiting for the next keystroke.
+    /// How long until held bytes are due for release; see
+    /// `BracketedPasteNormalizer::flush_due_in` (#1717).
+    pub(super) fn flush_due_in(&self, now: std::time::Instant) -> Option<Duration> {
+        self.paste.flush_due_in(now)
+    }
+
+    /// Release held bytes once they are due, so a lone Esc reaches the child
+    /// instead of waiting for the next keystroke, without cutting a terminal
+    /// report that is still arriving.
+    pub(super) fn flush_pending_if_due(&mut self, now: std::time::Instant) -> Vec<u8> {
+        self.paste.flush_pending_if_due(now)
+    }
+
+    /// Release everything held, due or not: the session is ending.
     pub(super) fn flush_pending(&mut self) -> Vec<u8> {
         self.paste.flush_pending()
     }

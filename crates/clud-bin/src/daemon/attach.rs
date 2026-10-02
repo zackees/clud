@@ -555,10 +555,6 @@ fn send_interrupt_fast_path(
 /// drains drag-drop chunks and checks the terminal size.
 const ATTACH_INPUT_TICK: Duration = Duration::from_millis(25);
 
-/// How long a held partial bracketed-paste prefix (usually a lone Esc)
-/// waits for its continuation before it is released to the worker.
-const ATTACH_PENDING_FLUSH: Duration = Duration::from_millis(5);
-
 fn run_remote_interactive(
     writer: Arc<Mutex<TcpStream>>,
     format: DaemonWireFormat,
@@ -740,11 +736,11 @@ fn pump_remote_input(
             }
             return LocalAttachResult::Completed(code);
         }
-        let wait = if filter.has_pending() {
-            ATTACH_PENDING_FLUSH
-        } else {
-            ATTACH_INPUT_TICK
-        };
+        // A held lone Esc is due after 5 ms, a partial terminal report only
+        // after a longer wait (#1717); see `flush_due_in`.
+        let wait = filter
+            .flush_due_in(Instant::now())
+            .map_or(ATTACH_INPUT_TICK, |due| due.min(ATTACH_INPUT_TICK));
         match io.poll_input(wait) {
             InputPoll::Chunk(chunk) => {
                 let filtered = filter.process(&chunk);
@@ -757,7 +753,7 @@ fn pump_remote_input(
                 io.f3(filtered.f3);
             }
             InputPoll::Idle => {
-                let pending = filter.flush_pending();
+                let pending = filter.flush_pending_if_due(Instant::now());
                 if !pending.is_empty() {
                     io.send_input(&pending, false);
                 }

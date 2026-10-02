@@ -14,6 +14,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod input_corpus;
 mod pty_behavior;
 mod pty_pump;
 mod shift_enter_dual_reader;

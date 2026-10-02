@@ -1,5 +1,10 @@
 # Windows Quirks
 
+> Terminal/PTY behaviour shared across platforms (input pipeline, escape
+> sequence atomicity, terminal restore) lives in
+> [terminal-pty.md](terminal-pty.md); the agent playbook for Windows is the
+> `terminal-pty-windows` skill (`.claude/skills/terminal-pty-windows/`).
+
 This doc is the inventory of every place `clud` has Windows-specific code,
 with the symptom each piece solves and the `file:line` where it lives. There
 are eleven such carve-outs today: a self-rename trampoline so `pip install`
