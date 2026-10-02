@@ -91,6 +91,9 @@ runs:
         cache: true
         # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
         save-cache: ${{ env.ACT && 'true' || inputs.save-cache }}
+        # setup-soldr#559: a failed or cancelled job saves no build outputs
+        # (its store may be partial; an exact-hit key is never re-saved).
+        job-status: ${{ job.status }}
         build-cache-mode: thin
         shims: true
         linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
