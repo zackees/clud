@@ -422,17 +422,18 @@ fn a_ctrl_c_interrupted_child_has_its_terminal_modes_undone() {
     let mut restore = Vec::new();
     keyboard.unwind_to(&mut restore);
     let has = |seq: &[u8]| restore.windows(seq.len()).any(|w| w == seq);
-    // ConPTY forwards the mouse modes to the real terminal (#1697); the
-    // others it may re-encode, so only POSIX checks the full set.
-    let mut expected: Vec<&[u8]> = vec![b"\x1b[?1003l", b"\x1b[?1006l"];
+    // ConPTY re-renders the child's output: it forwards the alternate
+    // screen, bracketed paste and cursor visibility, but answers the mouse,
+    // scroll-region and cursor-key requests itself (and turns focus
+    // reporting on of its own accord), so only POSIX checks the full set.
+    let mut expected: Vec<&[u8]> = vec![b"\x1b[?1049l", b"\x1b[?2004l", b"\x1b[?25h"];
     if cfg!(unix) {
         expected.extend([
-            &b"\x1b[?1049l"[..],
-            b"\x1b7\x1b[r\x1b8",
+            &b"\x1b7\x1b[r\x1b8"[..],
             b"\x1b[?1l",
+            b"\x1b[?1003l",
+            b"\x1b[?1006l",
             b"\x1b[?1004l",
-            b"\x1b[?2004l",
-            b"\x1b[?25h",
         ]);
     }
     for seq in expected {
