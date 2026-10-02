@@ -293,7 +293,19 @@ Console and terminal:
   the toast close-button mouse filter; see `docs/architecture/toasts.md`.
   The reader also balances child-owned kitty keyboard-enhancement frames on
   forced shutdown (#1221), without resetting terminal state that predates
-  the session.
+  the session. `RawTerminalGuard`'s exit reset turns off every input mode a
+  child enables (mouse, focus `?1004`, bracketed paste `?2004`) and shows the
+  cursor (#1701).
+- `session/escape_gate.rs` - keeps an escape sequence from reaching the PTY
+  split across two writes (#1697).
+- `term_guard.rs` - the out-of-process terminal restore for a force-killed
+  clud (#1705, DD-146): the `RawTerminalGuard` link and the hidden
+  `clud __term-guard` process. See
+  [session-lifecycle.md](../../../docs/architecture/session-lifecycle.md#terminal-restore).
+- `terminal_queries.rs` - `TerminalQueryScanner`, the stub replies to a
+  child's terminal queries when no real terminal answers, shared by the local
+  pump and the daemon worker and resumable across PTY reads (#1310, #1347,
+  #1702).
 
 Loop subsystem (`clud loop`):
 
@@ -853,7 +865,8 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `multicall.rs` — argv[0] dispatch, the first thing `main` does (#1551,
   DD-121): `clud-cmd-scan`/`clud-block-bad-cmd` → `block_bad_cmd::run`,
   `clud-shim` and every `shim_registry::SHIMS` name → `shim_main::run`, plus the
-  hidden `clud __cmd-scan`, `clud __shim <name>` and `clud __link-aliases <dir>`.
+  hidden `clud __cmd-scan`, `clud __shim <name>`, `clud __link-aliases <dir>`
+  and `clud __term-guard ...` (#1705, `term_guard.rs`).
   `alias_link.rs` creates an alias: hardlink, then symlink, then copy, never
   failing a launch, with a freshness check that relinks after an upgrade.
 - `shim_main.rs` also owns the session-local GitHub CLI relay and PR-watch translation;

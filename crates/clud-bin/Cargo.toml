@@ -284,3 +284,12 @@ required-features = ["bench"]
 [[bin]]
 name = "clud-ctrlc-probe"
 path = "src/bin/clud_ctrlc_probe.rs"
+
+# #1705: test-only probe for the out-of-process terminal-restore guard. Runs
+# the real `RawTerminalGuard` entry and dispatches `__term-guard` through
+# `multicall`, so `tests/signals/term_guard_restore.rs` can force-kill a real
+# session and watch the real guard repair its terminal. Pruned from wheels
+# like `clud-ctrlc-probe`.
+[[bin]]
+name = "clud-term-guard-probe"
+path = "src/bin/clud_term_guard_probe.rs"

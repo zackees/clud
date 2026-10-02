@@ -25,6 +25,8 @@ moves on; the RAII guards restore console mode on drop.
 | `crates/clud-bin/src/session/interrupt.rs` | `interrupt_pty_process`, `reap_pty_exit`. |
 | `crates/clud-bin/src/session/bracketed_paste.rs` | `BracketedPasteNormalizer`. |
 | `crates/clud-bin/src/session/escape_gate.rs` | `EscapeSequenceGate`, owned by the normalizer: no escape sequence reaches the PTY split across two writes (#1697). |
+| `crates/clud-bin/src/term_guard.rs` | Out-of-process terminal restore for a force-killed clud (#1705); see [Terminal restore](#terminal-restore). |
+| `crates/clud-bin/src/terminal_queries.rs` | `TerminalQueryScanner`: stub replies to a child's terminal queries when no real terminal answers, shared with the daemon worker and resumable across reads (#1702). |
 | `crates/clud-bin/src/console_setup.rs` | `ConsoleVtGuard` RAII for `ENABLE_VIRTUAL_TERMINAL_INPUT`. |
 | `crates/clud-bin/src/console_title.rs` | One-shot title stamp, daemon keeper thread, `OscTitleStripper` stream filter. |
 | `crates/clud-bin/src/console_input.rs` | Adapter over `running-process::TerminalInputCore`; preserves clud-specific Shift+Enter/Ctrl+V policy and forwards complete translated key events (#141/#575). |
@@ -323,6 +325,49 @@ unwinds: `ConsoleDropTargetGuard::Drop` signals the worker thread, revokes
 the `IDropTarget`, and calls `OleUninitialize`; `ConsoleVtGuard::Drop`
 (`console_setup.rs:13`) restores the captured original console mode bits.
 The resize-watcher thread observes the closed `resize_tx` and exits.
+
+## Terminal restore
+
+What a session changes on the user's terminal has to be undone however the
+session ends.
+
+**Every exit clud controls.** `RawTerminalGuard::drop` (`session.rs`) pops the
+child's kitty keyboard frames, writes `CHILD_TERMINAL_MODES_RESET`, pops clud's
+own frame and leaves raw mode. The reset turns off every input mode a child TUI
+enables and clud never does: all xterm mouse modes (#1383), focus reporting
+`?1004` and bracketed paste `?2004` (#1701). It also shows the cursor. `Drop`
+runs on child exit, on Ctrl+C (the handler only sets a flag), on Ctrl+Break and
+SIGTERM/SIGHUP/SIGQUIT (turned into the same flag, `startup.rs`), and on panics,
+because the workspace unwinds.
+
+**A forced kill** (`kill -9`, the OOM killer, `taskkill /F`, `TerminateProcess`)
+runs nothing in the process. `term_guard.rs` covers it from outside (#1705,
+[DD-146](../DESIGN_DECISIONS.md#dd-146-a-force-killed-session-is-restored-by-a-guard-process-not-by-a-handler)):
+
+1. `main` pins the terminal settings before clud touches them
+   (`term_guard::initial_modes`); on Windows the console reader changes the
+   input mode before raw mode is entered.
+2. `RawTerminalGuard::enter` binds a loopback port and starts
+   `clud __term-guard launch`, which starts `clud __term-guard run` and exits.
+   Both are `running-process` daemons: no console, no stdio, their own process
+   group or session, outside clud's Job Object. Once the launcher has exited,
+   no tree kill that starts at clud can reach the guard.
+3. The guard opens the session's terminal: the tty by path with `O_NOCTTY` on
+   Unix, `AttachConsole(clud pid)` on Windows, ignoring Ctrl+C and Ctrl+Break
+   there. It connects and authenticates with a per-session token. clud then
+   sends the initial and raw settings, and keeps the kitty frame count current
+   from `KeyboardEnhancementTracker`.
+4. `Drop` sends `D` after its own restore, and the guard exits without writing.
+   EOF without `D` means clud died. The guard then writes the kitty pops and
+   `CHILD_TERMINAL_MODES_RESET`, and restores the settings **only while they
+   are still exactly clud's raw settings**, so a shell that already set its own
+   is left alone. Then it exits.
+
+The daemon attach path's separate `KeyboardEnhancementGuard` frame is not part
+of the reported count. `CLUD_TERM_GUARD=0` runs a session without a guard.
+Coverage: `tests/signals/term_guard_restore.rs` force-kills a real session
+(SIGKILL on a pseudo-terminal, `TerminateProcess` on its own console) and
+checks the restore, and checks that a clean exit leaves the guard silent.
 
 ## Key types
 
