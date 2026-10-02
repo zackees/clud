@@ -249,13 +249,13 @@ lane passes `--ignored`, so nothing runs them automatically
 
 Run them on a real Windows box before cutting a release, and whenever you touch
 wedge watchdog, reaper diagnostics or process tier refresh code, or bump the
-`windows` / `sysinfo` crates. Each `tests/<dir>/main.rs` is its own test
-target, so the target is the directory name:
+`windows` / `sysinfo` crates. They are modules of the one `integration`
+test target (#1726), so the filter is the probe's module path:
 
 ```bash
-soldr cargo test -p clud --test reaper wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
-soldr cargo test -p clud --test diagnostics win32_hooking_probe -- --ignored --nocapture --test-threads=1
-soldr cargo test -p clud --test diagnostics tier_refresh_probe -- --ignored --nocapture --test-threads=1
+soldr cargo test -p clud --test integration reaper::wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
+soldr cargo test -p clud --test integration diagnostics::win32_hooking_probe -- --ignored --nocapture --test-threads=1
+soldr cargo test -p clud --test integration diagnostics::tier_refresh_probe -- --ignored --nocapture --test-threads=1
 ```
 
 Any new test file that is `#[ignore]`d and says "run manually" must be added to

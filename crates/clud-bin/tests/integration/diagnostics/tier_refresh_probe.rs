@@ -24,7 +24,7 @@
 //! Windows conclusion. Run manually:
 //!
 //! ```text
-//! soldr cargo test -p clud --test diagnostics tier_refresh_probe -- --ignored --nocapture --test-threads=1
+//! soldr cargo test -p clud --test integration diagnostics::tier_refresh_probe -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! Listed in docs/architecture/ci.md "Manual Windows probes"; keep that checklist in sync.

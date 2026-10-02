@@ -15,7 +15,7 @@
 //! `--include-ignored`). Run manually:
 //!
 //! ```bash
-//! soldr cargo test -p clud --test reaper wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
+//! soldr cargo test -p clud --test integration reaper::wedge_watchdog_e2e -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! Listed in docs/architecture/ci.md "Manual Windows probes"; keep that checklist in sync.

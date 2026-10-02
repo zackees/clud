@@ -18,21 +18,26 @@ MARKER = "<!-- manual-windows-probes -->"
 COMMAND_RE = re.compile(r"soldr cargo test -p clud --test (\S+) (\S+) -- --ignored")
 
 
-def _discover_manual_probes() -> dict[str, tuple[str, Path]]:
-    """Map file stem -> (test target, path) for manually-run ignored probes."""
-    probes: dict[str, tuple[str, Path]] = {}
+def _discover_manual_probes() -> dict[str, tuple[str, str, Path]]:
+    """Map file stem -> (test target, libtest filter, path) for manual probes.
+
+    The target is the directory under `tests/` (`integration`, #1726); the
+    filter is the probe's module path inside it (`reaper::wedge_watchdog_e2e`).
+    """
+    probes: dict[str, tuple[str, str, Path]] = {}
     for path in sorted(TESTS_DIR.rglob("*.rs")):
         text = path.read_text(encoding="utf-8")
         if "#[ignore" not in text or "run manually" not in text.lower():
             continue
         rel = path.relative_to(TESTS_DIR)
         target = rel.parts[0] if len(rel.parts) > 1 else path.stem
-        probes[path.stem] = (target, path)
+        module = "::".join([*rel.parts[1:-1], path.stem]) if len(rel.parts) > 1 else path.stem
+        probes[path.stem] = (target, module, path)
     return probes
 
 
-def _expected_command(target: str, stem: str) -> str:
-    return f"soldr cargo test -p clud --test {target} {stem} -- --ignored"
+def _expected_command(target: str, module: str) -> str:
+    return f"soldr cargo test -p clud --test {target} {module} -- --ignored"
 
 
 def test_every_run_manually_ignored_test_is_in_the_checklist() -> None:
@@ -42,8 +47,8 @@ def test_every_run_manually_ignored_test_is_in_the_checklist() -> None:
         "section for manually-run Windows probes (issue #1368)."
     )
     missing = []
-    for stem, (target, path) in _discover_manual_probes().items():
-        command = _expected_command(target, stem)
+    for target, module, path in _discover_manual_probes().values():
+        command = _expected_command(target, module)
         if command not in doc:
             missing.append(f"{path.relative_to(REPO_ROOT)}: expected `{command}`")
     assert not missing, (
@@ -65,9 +70,10 @@ def test_known_probes_are_discovered() -> None:
 def test_checklist_commands_point_at_existing_files() -> None:
     doc = CI_DOC.read_text(encoding="utf-8")
     stale = []
-    for target, stem in COMMAND_RE.findall(doc):
-        if not (TESTS_DIR / target / f"{stem}.rs").is_file():
-            stale.append(f"--test {target} {stem}")
+    for target, module in COMMAND_RE.findall(doc):
+        source = TESTS_DIR.joinpath(target, *module.split("::")).with_suffix(".rs")
+        if not source.is_file():
+            stale.append(f"--test {target} {module}")
     assert not stale, (
         f"{CI_DOC.relative_to(REPO_ROOT)} lists probes with no source file "
         f"under {TESTS_DIR.relative_to(REPO_ROOT)} (issue #1368): {stale}"

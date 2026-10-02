@@ -7,7 +7,7 @@
 //! Run manually:
 //!
 //! ```bash
-//! soldr cargo test -p clud --test diagnostics win32_hooking_probe -- --ignored --nocapture --test-threads=1
+//! soldr cargo test -p clud --test integration diagnostics::win32_hooking_probe -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! Listed in docs/architecture/ci.md "Manual Windows probes"; keep that checklist in sync.
