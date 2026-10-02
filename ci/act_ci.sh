@@ -17,8 +17,12 @@ REPO="${ACT_REPO:-zackees/clud}"
 WORKFLOW="${ACT_WORKFLOW:-ci.yml}"
 EVENT="${ACT_EVENT:-pull_request}"
 # Both live in machine-scoped bosn volumes (bosn.toml `clud_act`), so they
-# outlive this container: action checkouts, and the Actions cache server that
-# backs actions/cache, setup-uv and setup-soldr's caches.
+# outlive this container: fetched actions, and the Actions cache server that
+# backs actions/cache, setup-uv and setup-soldr's caches. bosn >= 0.1.7 runs
+# act tasks from different checkouts concurrently (zackees/bosn#358), so the
+# action cache is shared by live runs: `--use-new-action-cache` below keeps
+# each action as a bare repository read by commit SHA, never a shared working
+# tree that concurrent runs check out over each other (#1724).
 ACTION_CACHE=/root/.cache/act
 SERVER_CACHE=/root/.cache/actcache
 
@@ -142,7 +146,7 @@ run_act() {
         --rm \
         --container-options "--init --label clud.act-run=$RUN" \
         --artifact-server-path "/tmp/$RUN/artifacts" \
-        --action-cache-path "$ACTION_CACHE" \
+        --action-cache-path "$ACTION_CACHE" --use-new-action-cache \
         --cache-server-path "$SERVER_CACHE" "$@"
 }
 
