@@ -1,0 +1,521 @@
+{
+ "P1": {
+  "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+  "head_branch": "feat",
+  "required": [
+   "Linux (lint + unit + docker)",
+   "Full CI coverage (exact candidate SHA)"
+  ],
+  "check_runs": [
+   {
+    "id": 110722700001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722700001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722707400,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722707400",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722707401,
+    "name": "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722707401",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722743157,
+    "name": "Full CI coverage (exact candidate SHA)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722743157",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800002,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800002",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800003,
+    "name": "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800003",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 36970308260,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 605,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451244,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308260"
+   },
+   {
+    "id": 36970308306,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 606,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451374,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308306"
+   }
+  ]
+ },
+ "P2": {
+  "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+  "head_branch": "feat",
+  "required": [
+   "Linux (lint + unit + docker)",
+   "Full CI coverage (exact candidate SHA)"
+  ],
+  "check_runs": [
+   {
+    "id": 110722700001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722700001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722707400,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722707400",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722707401,
+    "name": "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722707401",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722743157,
+    "name": "Full CI coverage (exact candidate SHA)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722743157",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800002,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800002",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800003,
+    "name": "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800003",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800004,
+    "name": "Full CI coverage (exact candidate SHA)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800004",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 36970308260,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 605,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451244,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308260"
+   },
+   {
+    "id": 36970308306,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 606,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451374,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308306"
+   }
+  ]
+ },
+ "P3": {
+  "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+  "head_branch": "feat",
+  "required": [
+   "Linux (lint + unit + docker)",
+   "Full CI coverage (exact candidate SHA)"
+  ],
+  "check_runs": [
+   {
+    "id": 110722700001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722700001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722707400,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722707400",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722707401,
+    "name": "Darwin wheel (x86_64-apple-darwin, Linux-hosted Soldr)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722707401",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722743157,
+    "name": "Full CI coverage (exact candidate SHA)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722743157",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800001",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 36970308260,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 605,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451244,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308260"
+   },
+   {
+    "id": 36970308306,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 606,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451374,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308306"
+   }
+  ]
+ },
+ "P4": {
+  "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+  "head_branch": "feat",
+  "required": [
+   "Linux (lint + unit + docker)"
+  ],
+  "check_runs": [
+   {
+    "id": 110722800001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722800002,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "check_suite": {
+     "id": 100140451244
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308260/job/110722800002",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722900001,
+    "name": "Select CI tier",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "success",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722900001",
+    "app": {
+     "slug": "github-actions"
+    }
+   },
+   {
+    "id": 110722900002,
+    "name": "Linux (lint + unit + docker)",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {
+     "id": 100140451374
+    },
+    "details_url": "https://github.com/zackees/bosn/actions/runs/36970308306/job/110722900002",
+    "app": {
+     "slug": "github-actions"
+    }
+   }
+  ],
+  "workflow_runs": [
+   {
+    "id": 36970308260,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 605,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451244,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308260"
+   },
+   {
+    "id": 36970308306,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "workflow_id": 333919031,
+    "run_number": 606,
+    "run_attempt": 1,
+    "event": "pull_request",
+    "head_branch": "feat",
+    "head_sha": "1368153b7ccf2796cba46ea38dc06e7801ceb731",
+    "status": "in_progress",
+    "conclusion": null,
+    "created_at": "2026-10-02T05:44:39Z",
+    "run_started_at": "2026-10-02T05:44:39Z",
+    "check_suite_id": 100140451374,
+    "html_url": "https://github.com/zackees/bosn/actions/runs/36970308306"
+   }
+  ]
+ }
+}

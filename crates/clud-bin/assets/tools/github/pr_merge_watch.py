@@ -71,8 +71,13 @@ commit only, grouped by (workflow file, check name) -- never the display
     still queued or in progress;
   - a completed result is replaced only by a newer check that actually ran
     (anything but `skipped`), so a skip never hides an older real failure;
-  - a cancelled check with no replacement fails only when no newer run of
-    its workflow exists on the head commit in any state (queued included);
+  - a cancelled check with no replacement fails only when no other run of
+    its workflow on the head commit replaces it: a newer run in any state
+    (queued included), or any run that was not itself cancelled. Runs are
+    ordered by `created_at`, then run number, never by run id: concurrency
+    cancels whichever of two same-second runs entered its group first (#1710);
+  - a failure in a cancelled run, or in a run a cancellation has reached, is
+    replaced the same way: a superseded run's jobs are never the PR's result;
   - `success`, `neutral` and `skipped` pass, but green needs at least one
     required check that actually ran on the head SHA, a protected check that
     skipped reads as pending, and without branch protection every head run
@@ -80,8 +85,9 @@ commit only, grouped by (workflow file, check name) -- never the display
   - a cancellation-derived failure is acted on only after re-reading the
     PR's head: if the head moved, the verdict is dropped and the watch
     continues on the new commit;
-  - on a failure in workflow X only X's runs at or below the failing run are
-    cancelled; newer runs and other workflows are left alone.
+  - on a failure in workflow X only the failing run and X's runs created
+    strictly before it are cancelled; newer runs, same-second runs and other
+    workflows are left alone.
 `merge_group` runs and check runs for any other commit are ignored; legacy
 commit statuses keep GitHub's newest-per-context result.
 
@@ -505,7 +511,7 @@ class Verdict:
     judgments: list[CheckJudgment]
     failing: list[CheckJudgment]
     advisory_failing: list[CheckJudgment]
-    # workflow key -> highest failing run id: the cancellation scope.
+    # workflow key -> newest failing run id: the cancellation scope.
     failing_run_ids: dict[str, int]
     missing: list[str]
     notes: list[str]
@@ -544,6 +550,31 @@ def _is_skipped(check: dict) -> bool:
     return _lower(check.get("status")) == "completed" and _lower(check.get("conclusion")) == (
         "skipped"
     )
+
+
+def _run_order(run: dict) -> tuple[float, int, int]:
+    """Creation order of a workflow run: `created_at`, then `run_number` (#1710).
+
+    Never the run id alone: two runs created in one second (a PR opened with a
+    label fires `opened` and `labeled`) get ids in no reliable order.
+    """
+    return (
+        _parse_iso(run.get("created_at")) or 0.0,
+        _as_int(run.get("run_number")) or 0,
+        _as_int(run.get("id")) or 0,
+    )
+
+
+def _created_before(run: dict, anchor: dict | None) -> bool:
+    """`run` was provably created before `anchor` (#1710).
+
+    The same second, or a missing timestamp, is ambiguous: not before.
+    """
+    if anchor is None:
+        return False
+    mine = _parse_iso(run.get("created_at"))
+    theirs = _parse_iso(anchor.get("created_at"))
+    return mine is not None and theirs is not None and mine < theirs
 
 
 def _from_older_attempt(check: dict, run: dict | None) -> bool:
@@ -632,8 +663,38 @@ def judge_check_runs(
 
     head_runs = [run for run in runs_by_id.values() if on_head(run)]
 
+    def siblings(key: str, run_id: int) -> list[dict]:
+        return [r for r in head_runs if _workflow_key(r) == key and r["id"] != run_id]
+
     def newer_runs(key: str, run_id: int) -> list[dict]:
-        return [r for r in head_runs if _workflow_key(r) == key and r["id"] > run_id]
+        own = _run_order(runs_by_id[run_id])
+        return [r for r in siblings(key, run_id) if _run_order(r) > own]
+
+    def replacements(key: str, run_id: int) -> list[dict]:
+        """The runs that stand in for a cancelled run (#1710): any newer run,
+        and any sibling that was not itself cancelled. A concurrency group
+        cancels whichever run entered it first, so neither the id nor the
+        run number says which one survives; the survivor is the live one."""
+        own = _run_order(runs_by_id[run_id])
+        return [r for r in siblings(key, run_id) if not _is_cancelled(r) or _run_order(r) > own]
+
+    def resolve_replaced(key: str, run_id: int) -> str | None:
+        """pending/superseded when a replacement exists, else None."""
+        found = replacements(key, run_id)
+        if not found:
+            return None
+        return "pending" if any(_lower(r.get("status")) != "completed" for r in found) else (
+            "superseded"
+        )
+
+    # A cancelled run with a live sibling was superseded by concurrency: its
+    # checks never stand for a group the live run also reports (#1710).
+    superseded_runs = {
+        r["id"]
+        for r in head_runs
+        if _is_cancelled(r)
+        and any(not _is_cancelled(s) for s in siblings(_workflow_key(r), r["id"]))
+    }
 
     groups: dict[tuple[str, str], list[tuple[dict, dict | None]]] = {}
     for check in check_runs:
@@ -658,6 +719,14 @@ def judge_check_runs(
             key = f"app:{(check.get('app') or {}).get('slug') or 'unknown'}"
         groups.setdefault((key, name), []).append((check, run))
 
+    # Runs a cancellation has reached, even while they still read in_progress.
+    runs_with_cancelled_check = {
+        run["id"]
+        for entries in groups.values()
+        for check, run in entries
+        if run is not None and _is_cancelled(check)
+    }
+
     judgments: list[CheckJudgment] = []
     notes: list[str] = []
     for (key, name), entries in groups.items():
@@ -667,7 +736,8 @@ def judge_check_runs(
                 f"{name} ({key}) reported by runs from events {sorted(events)}; "
                 "the newest check counts"
             )
-        check, run = _effective(entries)
+        live = [e for e in entries if e[1] is None or e[1]["id"] not in superseded_runs]
+        check, run = _effective(live or entries)
         status = _lower(check.get("status"))
         conclusion = _lower(check.get("conclusion"))
         run_id = _as_int(run.get("id")) if run is not None else None
@@ -682,31 +752,27 @@ def judge_check_runs(
             state = "stale"
         elif conclusion == "cancelled":
             cancelled = True
-            newer = newer_runs(key, run_id) if run_id is not None else []
             if run is not None and _lower(run.get("status")) != "completed":
                 state = "pending"  # its own run is re-running
-            elif not newer:
-                state = "fail"
-            elif any(_lower(r.get("status")) != "completed" for r in newer):
-                state = "pending"
             else:
-                state = "superseded"
+                replaced = resolve_replaced(key, run_id) if run_id is not None else None
+                state = replaced or "fail"
         elif _from_older_attempt(check, run):
             state = "pending"  # a re-run attempt has not reported this check yet
         else:
             state = "fail"
-            # An `if: always()` gate fails because its run was cancelled; a
-            # newer run of the workflow supersedes it.
-            if run is not None and run_id is not None and _lower(run.get("conclusion")) == (
-                "cancelled"
+            # A failure in a cancelled run (an `if: always()` gate, a job that
+            # `needs:` a cancelled one) is the cancellation's, not the code's:
+            # a replacement run supersedes it. So does one in a run that is
+            # still being cancelled, while it reads in_progress (#1710).
+            if run is not None and run_id is not None and (
+                _lower(run.get("conclusion")) == "cancelled"
+                or (
+                    _lower(run.get("status")) != "completed"
+                    and run_id in runs_with_cancelled_check
+                )
             ):
-                newer = newer_runs(key, run_id)
-                if newer:
-                    state = (
-                        "pending"
-                        if any(_lower(r.get("status")) != "completed" for r in newer)
-                        else "superseded"
-                    )
+                state = resolve_replaced(key, run_id) or state
         judgments.append(
             CheckJudgment(
                 name=name,
@@ -796,8 +862,11 @@ def judge_check_runs(
     advisory = [j for j in judgments if not j.required and j.state in {"fail", "stale"}]
     failing_run_ids: dict[str, int] = {}
     for j in failing:
-        if j.run_id is not None and j.workflow not in {"status"}:
-            failing_run_ids[j.workflow] = max(failing_run_ids.get(j.workflow, 0), j.run_id)
+        if j.run_id is None or j.workflow == "status":
+            continue
+        held = failing_run_ids.get(j.workflow)
+        if held is None or _run_order(runs_by_id[j.run_id]) > _run_order(runs_by_id[held]):
+            failing_run_ids[j.workflow] = j.run_id
 
     if any(j.state == "approval_required" for j in req):
         state = "approval_required"
@@ -1762,8 +1831,9 @@ def cancel_pr_runs(
     """Cancel non-completed workflow runs on the PR's head SHA.
 
     `scope` (workflow key -> failing run id) limits cancellation to the
-    failing workflows' runs at or below the failing run: never a newer run,
-    never another workflow (#1330).
+    failing run itself and runs of its workflow provably created before it:
+    never a newer run, never another workflow (#1330), and never a run whose
+    order is ambiguous, such as one created in the same second (#1710).
 
     Returns the number of cancel attempts. Failures are surfaced as
     `CANCEL <id> status=…` lines on stdout.
@@ -1785,6 +1855,7 @@ def cancel_pr_runs(
         if log:
             log.emit("api_degraded", source="cancel_runs", reason="fetch_failed")
         return 0
+    by_id = {r["id"]: r for r in runs if isinstance(r, dict) and isinstance(r.get("id"), int)}
     attempts = 0
     for r in runs:
         if not isinstance(r, dict):
@@ -1806,7 +1877,7 @@ def cancel_pr_runs(
             continue
         if scope is not None:
             limit = scope.get(_workflow_key(r))
-            if limit is None or rid > limit:
+            if limit is None or not (rid == limit or _created_before(r, by_id.get(limit))):
                 if log:
                     log.emit(
                         "cancel_item",
@@ -2797,8 +2868,8 @@ def _act_on_verdict(
     )
     if "fail" in opts.on or "always" in opts.on:
         print(
-            "NOTE  cancelling the failing workflow's runs at or below the failing run; "
-            "newer runs and other workflows are left alone"
+            "NOTE  cancelling the failing run and older runs of its workflow; "
+            "newer or same-second runs and other workflows are left alone"
         )
     for judgment, report in zip(verdict.failing, reports):
         print(report.render())
@@ -2917,10 +2988,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "grouped by (workflow file, check name) and ordered by check-run id. A "
             "cancelled check is replaced by any newer check, even a queued one; a "
             "completed result only by a newer check that actually ran (not skipped). "
-            "A cancelled check with no newer check and no newer run of its workflow "
-            "fails. success, neutral and skipped pass. A cancellation-derived failure "
-            "is acted on only after re-reading the head; on failure only the failing "
-            "workflow's runs at or below the failing run are cancelled."
+            "A cancelled check (or a failure in a cancelled run) with no newer check, "
+            "no newer run of its workflow and no live sibling run fails; runs are "
+            "ordered by created_at, never by run id. success, neutral and skipped "
+            "pass. A cancellation-derived failure is acted on only after re-reading "
+            "the head; on failure only the failing run and older runs of its "
+            "workflow are cancelled."
         ),
     )
     p.add_argument("pr_number", type=int, help="PR number to watch")
