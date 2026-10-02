@@ -213,19 +213,22 @@ fn child_reads(path: Path, chunking: Chunking) -> Vec<u8> {
 /// What the child may read for one corpus entry; any one of these is right.
 /// Besides ConPTY's LF→CR ([`through_pty_input`]), ConPTY consumes a terminal
 /// focus report (`ESC [ I` / `ESC [ O`) from its input instead of passing it
-/// to the child when the report arrives intact (observed on the Windows x64
-/// and arm runners, #1717). One byte at a time with idle gaps, it depends on
-/// timing (Windows timers tick at ~15.6 ms): if the lone `ESC` is released as
-/// an Esc keypress before `[` arrives, ConPTY sees `[I` as text and the child
-/// reads the bytes unchanged; otherwise the report assembles and is consumed.
-/// Both are right. Claude Code run directly under Windows Terminal goes
+/// to the child when the report arrives in one write (observed on the Windows
+/// x64 and arm runners, #1717). Cut across writes with idle gaps (per-byte,
+/// or a stride that splits it), it depends on timing (Windows timers tick at
+/// ~15.6 ms): if the held `ESC` / `ESC [` is released as an Esc / Alt+[
+/// keypress before the rest arrives, ConPTY sees the rest as text and the
+/// child reads the bytes unchanged; otherwise the report assembles and is
+/// consumed. Both are right, and each report resolves on its own. Claude Code run directly under Windows Terminal goes
 /// through ConPTY too, so this is the platform's behaviour, not clud's.
 fn expected_for(name: &str, bytes: &[u8], chunking: Chunking) -> Vec<Vec<u8>> {
     let intact = through_pty_input(bytes);
     if cfg!(windows) && name.starts_with("focus") {
         return match chunking {
-            Chunking::PerByte => vec![intact, Vec::new()],
-            Chunking::PerEntry | Chunking::Stride3 => vec![Vec::new()],
+            // One write: ConPTY sees the whole report and consumes it.
+            Chunking::PerEntry => vec![Vec::new()],
+            // The report may be cut across writes; see above.
+            Chunking::PerByte | Chunking::Stride3 => vec![intact, Vec::new()],
         };
     }
     vec![intact]

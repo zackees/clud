@@ -40,12 +40,13 @@ Read that first. This page lists only what differs on Windows.
     scroll region, or cursor-key mode (`?1`).
   - ConPTY itself emits `?1004h` and `?9001h` (win32-input-mode) at startup.
 - **ConPTY consumes focus reports on input.** A terminal's `ESC[I` /
-  `ESC[O` that arrives intact never reaches the child as bytes, on either
-  input path (observed on the x64 and arm runners, #1717). Arriving one byte
-  at a time with idle gaps, the outcome depends on timing (Windows timers tick
-  at ~15.6 ms): either the lone `ESC` is released as an Esc key first and the
-  child reads the bytes unchanged, or the report assembles and is consumed.
-  The sweep accepts exactly those two outcomes. Everything else in
+  `ESC[O` that arrives in one write never reaches the child as bytes, on
+  either input path (observed on the x64 and arm runners, #1717). Cut across
+  writes with idle gaps, the outcome depends on timing (Windows timers tick at
+  ~15.6 ms): either the held prefix is released as an Esc / Alt+[ key first
+  and the child reads the bytes unchanged, or the report assembles and is
+  consumed. Each report resolves on its own; the sweep accepts exactly those
+  two outcomes. Everything else in
   `tests/pty/input_corpus.rs` must reach the child byte-for-byte; the only
   modelled transforms are LF→CR and this one (`expected_for`).
 - **Cursor query at startup.** ConPTY sends `ESC[6n` and holds the child
