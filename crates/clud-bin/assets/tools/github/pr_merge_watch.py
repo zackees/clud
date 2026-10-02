@@ -23,8 +23,8 @@ Immediately announces a durable repo-local JSONL log under
 records use monotonic seconds relative to that start.
 
 Exit codes:
-  0  all required checks green AND mergeable=MERGEABLE (after the CodeRabbit
-     gate below, when CodeRabbit is active)
+  0  all required checks green AND mergeable=MERGEABLE (after the opt-in
+     CodeRabbit wait below, when `--coderabbit-wait` is set)
   1  at least one required check failed (details on stdout)
   2  new review activity (unresolved coderabbit/human review)
   3  PR closed or merged out from under us
@@ -93,18 +93,24 @@ commit only, grouped by (workflow file, check name) -- never the display
 `merge_group` runs and check runs for any other commit are ignored; legacy
 commit statuses keep GitHub's newest-per-context result.
 
-CodeRabbit gate (#1332). When CodeRabbit is active on the repo or on this PR,
-green also waits for CodeRabbit to finish the *current head commit*: the
-newest `CodeRabbit` commit status on the head SHA must not be `pending`.
-Check runs and a review's `commit_id` are not used. The wait starts when
-required CI is green and lasts at most `--coderabbit-wait` seconds (default
-600, and never past `--timeout`). If no `CodeRabbit` status appears on the head
-within 120 s, CodeRabbit is not reviewing this commit. `Review rate limited`
-and `Review skipped` count as finished. Every outcome ends green with a
-`coderabbit=<completed|rate_limited|skipped|absent|timeout>` note: the wait
-never fails and never cancels. New CodeRabbit threads that arrive during the
-wait still exit 2. The `CodeRabbit` status itself is not a CI check unless
-branch protection requires it.
+CodeRabbit never stalls green. Nothing can reproduce CodeRabbit under a
+local bosn -> act gate, and the fleet suppresses it by policy, so by default
+GREEN is CI green plus mergeable and the watcher does not wait for CodeRabbit
+at all. Green carries a note:
+`coderabbit=<suppressed|absent|completed|rate_limited|skipped|pending|timeout>`.
+- `suppressed`: the base branch's `.coderabbit.yaml` (or `.coderabbit.yml`)
+  sets `reviews.auto_review.enabled: false`. It is read once per watch, only
+  when CodeRabbit shows up at all, and no status is read after it.
+- `absent`: CodeRabbit is not active here, or its `CodeRabbit` commit status
+  is not on the head. That is final at once; there is no grace period.
+- Otherwise the newest `CodeRabbit` status on the head SHA is reported as it
+  stands (`pending` means it was not waited for).
+`--coderabbit-wait N` opts in to waiting, for repos that still run CodeRabbit
+(#1332): once required CI is green, a `pending` status is waited for at most N
+seconds (never past `--timeout`), then green reads `coderabbit=timeout`. The
+wait never fails and never cancels. `Review rate limited` and `Review skipped`
+count as finished. New CodeRabbit threads still exit 2. The `CodeRabbit`
+status itself is not a CI check unless branch protection requires it.
 
 The exit code IS the result — do not pipe this through `tail`, `grep` or
 `head`. A pipeline reports the *last* stage's status, so every one of the
@@ -116,6 +122,7 @@ it, or run it bare.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import socket
@@ -168,9 +175,10 @@ CANCEL_MODE_CHOICES = {"runs", "jobs", "none"}
 # How often (in polls) a watch that found no CodeRabbit looks again (#1332).
 CODERABBIT_RECHECK_POLLS = 3
 # Once CI is green, how long to wait for CodeRabbit to finish the head commit
-# (#1332), and how long a head with no CodeRabbit status at all is waited for.
-DEFAULT_CODERABBIT_WAIT_SEC = 600
-CODERABBIT_ABSENT_GRACE_SEC = 120
+# (#1332). Zero by default: the wait is an explicit opt-in, so a repo without
+# CodeRabbit (or a local bosn -> act gate that cannot run it) never stalls.
+DEFAULT_CODERABBIT_WAIT_SEC = 0
+CODERABBIT_CONFIG_FILES = (".coderabbit.yaml", ".coderabbit.yml")
 CODERABBIT_STATUS_CONTEXT = "coderabbit"  # compared case-insensitively
 
 
@@ -1735,16 +1743,74 @@ def coderabbit_status_outcome(status: dict) -> str:
 def coderabbit_gate_note(
     read_ok: bool, status: dict | None, waited: float, wait_cap: float
 ) -> str | None:
-    """Pure: the note to go green with, or None to keep waiting (#1332)."""
+    """Pure: the note to go green with, or None to keep waiting (#1332).
+
+    A head with no `CodeRabbit` status is `absent` at once: no grace period.
+    Without an opt-in wait (`wait_cap <= 0`) the status is reported as it
+    stands and nothing is waited for.
+    """
     if read_ok and status is not None:
         outcome = coderabbit_status_outcome(status)
         if outcome != "pending":
             return outcome
-    elif read_ok and waited >= CODERABBIT_ABSENT_GRACE_SEC:
+    elif read_ok:
         return "absent"
+    if wait_cap <= 0:
+        return "pending" if status is not None else "unreadable"
     if waited >= wait_cap:
         return "timeout"
     return None
+
+
+_YAML_FALSE = {"false", "no", "off"}
+
+
+def coderabbit_config_disables_auto_review(text: str) -> bool:
+    """Pure: `reviews.auto_review.enabled` is false in a `.coderabbit.yaml`.
+
+    A small reader for exactly that key, block or flow style, so the script
+    needs no YAML dependency. Anything it cannot read is "not disabled".
+    """
+    path: list[tuple[int, str]] = []
+    for raw in text.splitlines():
+        line = raw.split(" #", 1)[0].rstrip()
+        if not line.strip() or line.lstrip().startswith(("#", "-")):
+            continue
+        indent = len(line) - len(line.lstrip())
+        key, sep, value = line.strip().partition(":")
+        if not sep:
+            continue
+        key = key.strip().strip("'\"")
+        value = value.strip()
+        while path and path[-1][0] >= indent:
+            path.pop()
+        keys = [k for _, k in path] + [key]
+        if keys == ["reviews", "auto_review", "enabled"]:
+            return value.strip("'\"").lower() in _YAML_FALSE
+        if keys == ["reviews", "auto_review"] and value.startswith("{"):
+            flow = re.search(r"\benabled\s*:\s*['\"]?(\w+)", value)
+            return bool(flow) and flow.group(1).lower() in _YAML_FALSE
+        if not value:
+            path.append((indent, key))
+    return False
+
+
+def fetch_coderabbit_suppressed(repo: str, ref: str) -> bool:
+    """The repo turns CodeRabbit's auto review off on `ref` (read once per watch).
+
+    A missing file or a failed read is "not suppressed"; with the default
+    no-wait policy that still never stalls green.
+    """
+    for name in CODERABBIT_CONFIG_FILES:
+        data = gh_json("api", f"repos/{repo}/contents/{name}?ref={ref}")
+        if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+            continue
+        try:
+            text = base64.b64decode(data["content"]).decode("utf-8", "replace")
+        except ValueError:
+            continue
+        return coderabbit_config_disables_auto_review(text)
+    return False
 
 
 @dataclass
@@ -2370,6 +2436,9 @@ def watch(
     green_since: float | None = None
     waiting_green: tuple[list[CheckRow], dict[str, int]] | None = None
     last_wait_state: str | None = None
+    # `.coderabbit.yaml` turns auto review off: read once, only if CodeRabbit
+    # shows up at all (None = not read yet).
+    coderabbit_suppressed: bool | None = None
     keep_coderabbit_status = bool(
         required_names and any(_is_coderabbit_context(name) for name in required_names)
     )
@@ -2643,15 +2712,24 @@ def watch(
             green_since = None
             last_wait_state = None
         if checks_green and snapshot.mergeable == "MERGEABLE":
-            coderabbit_note: str | None = None
-            if review_state.coderabbit_enabled or coderabbit_in_rollup:
-                # CodeRabbit gate (#1332): wait for it to finish the head commit.
+            coderabbit_note: str | None = "absent"
+            if (review_state.coderabbit_enabled or coderabbit_in_rollup) and (
+                coderabbit_suppressed is None
+            ):
+                coderabbit_suppressed = fetch_coderabbit_suppressed(
+                    repo_for_protection, snapshot.base_ref
+                )
+            if coderabbit_suppressed:
+                coderabbit_note = "suppressed"
+            elif review_state.coderabbit_enabled or coderabbit_in_rollup:
+                # CodeRabbit gate (#1332): report the head commit's review, and
+                # wait for it only under an explicit `--coderabbit-wait`.
                 if green_since is None:
                     green_since = poll_started
                 waited = poll_started - green_since
                 # Never wait past --timeout: the wait always ends green.
                 wait_cap = min(
-                    float(coderabbit_wait), max(0.0, deadline - interval - green_since)
+                    float(max(0, coderabbit_wait)), max(0.0, deadline - interval - green_since)
                 )
                 read_ok, status = fetch_coderabbit_status(repo_for_protection, snapshot.head_sha)
                 coderabbit_note = coderabbit_gate_note(read_ok, status, waited, wait_cap)
@@ -3045,9 +3123,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--coderabbit-wait",
         type=int,
         default=DEFAULT_CODERABBIT_WAIT_SEC,
-        help="once CI is green, seconds to wait for CodeRabbit to finish the head commit "
-        "when it is active (default 600, bounded by --timeout); the wait always ends "
-        "green, never in a failure or a cancel",
+        help="opt in: once CI is green, seconds to wait for a pending CodeRabbit review "
+        "of the head commit (default 0: never wait; bounded by --timeout). A repo whose "
+        ".coderabbit.yaml disables auto review, or a head with no CodeRabbit status, "
+        "never waits. The wait always ends green, never in a failure or a cancel",
     )
     p.add_argument(
         "--require",
