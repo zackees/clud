@@ -99,8 +99,9 @@ mod unix {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    std::ptr::null(),
+                    // `*mut` on macOS, `*const` on Linux; `*mut` fits both.
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             };
             assert_eq!(rc, 0, "openpty");
