@@ -1,5 +1,7 @@
 //! The daemon half of the read broker (#1743): TTL, single-flight,
-//! conditional revalidation, write invalidation and the ledger.
+//! conditional revalidation, write invalidation and the ledger. Phase 2
+//! adds merged collection reads ([`merged`]), frozen listings and targeted
+//! invalidation ([`super::scope`]).
 //!
 //! One [`GhBroker`] lives in the daemon's HTTP thread. Each `/gh/read`
 //! request runs on its own thread so a slow upstream never blocks the
@@ -13,9 +15,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
+use super::collection::{self, Freeze};
+use super::scope;
 use super::store::{LedgerEntry, ObjectMeta, Store};
 use super::upstream::{Response, Upstream, UpstreamRequest};
 use super::{ReadReply, ReadRequest};
+
+mod merged;
 
 /// Workflow runs and jobs change quickly while a run is live.
 pub const RUNS_TTL_MS: u64 = 30_000;
@@ -30,6 +36,10 @@ pub enum Outcome {
     Cache,
     /// Revalidated with `If-None-Match` / `If-Modified-Since`; `304`.
     NotModified,
+    /// A merged collection brought up to date with a bounded query
+    /// (`since=` / `created=>=`); the ledger records how many objects it
+    /// added or changed.
+    Incremental,
     Full,
     /// Upstream answered non-2xx; the shim reruns the call on the real
     /// `gh` so its error output is `gh`'s own.
@@ -42,6 +52,7 @@ impl Outcome {
         match self {
             Outcome::Cache => "cache",
             Outcome::NotModified => "304",
+            Outcome::Incremental => "incremental",
             Outcome::Full => "full",
             Outcome::Passthrough => "passthrough",
             Outcome::Error => "error",
@@ -53,6 +64,51 @@ impl Outcome {
 pub enum ReadError {
     Passthrough(u16),
     Failed(String),
+}
+
+impl ReadError {
+    fn outcome(&self) -> Outcome {
+        match self {
+            ReadError::Passthrough(_) => Outcome::Passthrough,
+            ReadError::Failed(_) => Outcome::Error,
+        }
+    }
+}
+
+/// One answered read and what it cost, for the ledger.
+struct Served {
+    result: Result<Response, ReadError>,
+    outcome: Outcome,
+    upstream_requests: u32,
+    rate: Option<u64>,
+    /// Merged reads: objects added or changed by the upstream fetch.
+    changed: Option<u32>,
+}
+
+impl Served {
+    fn new(
+        result: Result<Response, ReadError>,
+        outcome: Outcome,
+        upstream_requests: u32,
+        rate: Option<u64>,
+    ) -> Self {
+        Self {
+            result,
+            outcome,
+            upstream_requests,
+            rate,
+            changed: None,
+        }
+    }
+
+    fn cache(response: Response) -> Self {
+        Self::new(Ok(response), Outcome::Cache, 0, None)
+    }
+
+    fn failed(error: ReadError, upstream_requests: u32, rate: Option<u64>) -> Self {
+        let outcome = error.outcome();
+        Self::new(Err(error), outcome, upstream_requests, rate)
+    }
 }
 
 /// One validated read, as the service sees it.
@@ -78,6 +134,11 @@ impl BrokerRead<'_> {
     /// identity (forwarded env and `gh` path), so two tokens never share a
     /// cached body. Secrets are hashed, never stored.
     fn key(&self) -> String {
+        self.key_for(&self.label())
+    }
+
+    /// The store key of `label` under this read's identity.
+    fn key_for(&self, label: &str) -> String {
         let mut identity: Vec<&(String, String)> = self.env.iter().collect();
         identity.sort();
         let mut hasher = Sha256::new();
@@ -89,7 +150,7 @@ impl BrokerRead<'_> {
         }
         hasher.update(self.gh.to_string_lossy().as_bytes());
         hasher.update([0]);
-        hasher.update(self.label().as_bytes());
+        hasher.update(label.as_bytes());
         let digest = hasher.finalize();
         digest.iter().map(|b| format!("{b:02x}")).collect()
     }
@@ -189,25 +250,45 @@ impl GhBroker {
             .and_then(|s| s.ledger())
     }
 
-    /// Mark every cached read stale. In-flight fetches are detached, so a
-    /// read issued after the write never joins a fetch that began before it.
+    /// Mark every cached read stale, frozen listings included. In-flight
+    /// fetches are detached, so a read issued after the write never joins
+    /// a fetch that began before it.
     pub fn invalidate(&self) -> Result<(), String> {
         let store = self.store().map_err(|e| format!("{e:?}"))?;
         store.invalidate((self.clock)())?;
+        self.detach_flights();
+        Ok(())
+    }
+
+    /// Mark stale only the reads that carry one of `tags`
+    /// ([`scope::key_tags`]).
+    pub fn invalidate_tags(&self, tags: &[String]) -> Result<(), String> {
+        let store = self.store().map_err(|e| format!("{e:?}"))?;
+        store.invalidate_tags(tags, (self.clock)())?;
+        self.detach_flights();
+        Ok(())
+    }
+
+    fn detach_flights(&self) {
         self.flights
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
-        Ok(())
     }
 
-    fn fresh_hit(&self, store: &Store, key: &str, endpoint: &str) -> Option<Response> {
+    /// The cached body for `key` if no write since its fetch could have
+    /// changed it, and it is within its TTL (unless `fresh`) or frozen.
+    fn fresh_hit(&self, store: &Store, key: &str, endpoint: &str, fresh: bool) -> Option<Response> {
         let (meta, body) = store.get(key).ok()??;
-        let invalidated = store.invalidated_at().unwrap_or(u64::MAX);
+        let stale_after = store
+            .stale_after(&scope::key_tags(endpoint))
+            .unwrap_or(u64::MAX);
+        if meta.fetched_at_ms <= stale_after {
+            return None;
+        }
         let now = (self.clock)();
-        let fresh = meta.fetched_at_ms > invalidated
-            && now.saturating_sub(meta.fetched_at_ms) < ttl_ms(endpoint);
-        fresh.then(|| Response {
+        let within_ttl = !fresh && now.saturating_sub(meta.fetched_at_ms) < ttl_ms(endpoint);
+        (meta.frozen || within_ttl).then(|| Response {
             status: meta.status,
             headers: meta.headers,
             body: Arc::new(body),
@@ -215,76 +296,79 @@ impl GhBroker {
     }
 
     pub fn read(&self, read: &BrokerRead<'_>) -> Result<Response, ReadError> {
-        let (result, outcome, upstream_requests, rate) = self.read_inner(read);
+        let served = self.read_inner(read);
         if let Ok(store) = self.store() {
             let _ = store.append_ledger(&LedgerEntry {
                 ts_ms: (self.clock)(),
                 session_id: read.session_id.map(str::to_string),
                 key: read.label(),
-                outcome: outcome.as_str().to_string(),
-                upstream_requests,
-                rate_remaining: rate,
+                outcome: served.outcome.as_str().to_string(),
+                upstream_requests: served.upstream_requests,
+                rate_remaining: served.rate,
+                changed: served.changed,
             });
         }
-        result
+        served.result
     }
 
-    fn read_inner(
-        &self,
-        read: &BrokerRead<'_>,
-    ) -> (Result<Response, ReadError>, Outcome, u32, Option<u64>) {
+    fn read_inner(&self, read: &BrokerRead<'_>) -> Served {
         let store = match self.store() {
             Ok(store) => store,
-            Err(error) => return (Err(error), Outcome::Error, 0, None),
+            Err(error) => return Served::failed(error, 0, None),
         };
-        let key = read.key();
-        if !read.fresh {
-            if let Some(hit) = self.fresh_hit(&store, &key, read.endpoint) {
-                return (Ok(hit), Outcome::Cache, 0, None);
+        let mut spent = 0;
+        if let Some(plan) = collection::plan(read.endpoint) {
+            match self.read_collection(&store, read, &plan) {
+                merged::Merged::Served(served) => return served,
+                merged::Merged::Fallback(requests) => spent = requests,
             }
         }
-        let (flight, leader) = {
-            let mut flights = self.flights.lock().unwrap_or_else(|p| p.into_inner());
-            match flights.get(&key) {
-                Some(flight) => (Arc::clone(flight), false),
-                None => {
-                    let flight = Arc::new(Flight::default());
-                    flights.insert(key.clone(), Arc::clone(&flight));
-                    (flight, true)
-                }
+        let mut served = self.read_object(&store, read);
+        served.upstream_requests += spent;
+        served
+    }
+
+    /// Join the in-flight fetch of `key`, or become its leader (`true`).
+    fn join_flight(&self, key: &str) -> (Arc<Flight>, bool) {
+        let mut flights = self.flights.lock().unwrap_or_else(|p| p.into_inner());
+        match flights.get(key) {
+            Some(flight) => (Arc::clone(flight), false),
+            None => {
+                let flight = Arc::new(Flight::default());
+                flights.insert(key.to_string(), Arc::clone(&flight));
+                (flight, true)
             }
-        };
+        }
+    }
+
+    /// The phase-1 path: one object keyed by its exact URL.
+    fn read_object(&self, store: &Store, read: &BrokerRead<'_>) -> Served {
+        let key = read.key();
+        if let Some(hit) = self.fresh_hit(store, &key, read.endpoint, read.fresh) {
+            return Served::cache(hit);
+        }
+        let (flight, leader) = self.join_flight(&key);
         if !leader {
-            let result = flight.wait();
-            let outcome = match &result {
-                Ok(_) => Outcome::Cache,
-                Err(ReadError::Passthrough(_)) => Outcome::Passthrough,
-                Err(ReadError::Failed(_)) => Outcome::Error,
+            return match flight.wait() {
+                Ok(response) => Served::cache(response),
+                Err(error) => Served::failed(error, 0, None),
             };
-            return (result, outcome, 0, None);
         }
         let landing = Landing {
             broker: self,
             key: &key,
             flight: &flight,
         };
-        let (result, outcome, upstream_requests, rate) = self.fetch(&store, &key, read);
-        landing.finish(result.clone());
-        (result, outcome, upstream_requests, rate)
+        let served = self.fetch(store, &key, read);
+        landing.finish(served.result.clone());
+        served
     }
 
     /// The leader's work: recheck the store, then one conditional request.
-    fn fetch(
-        &self,
-        store: &Store,
-        key: &str,
-        read: &BrokerRead<'_>,
-    ) -> (Result<Response, ReadError>, Outcome, u32, Option<u64>) {
-        if !read.fresh {
-            // Another leader may have landed between our miss and our flight.
-            if let Some(hit) = self.fresh_hit(store, key, read.endpoint) {
-                return (Ok(hit), Outcome::Cache, 0, None);
-            }
+    fn fetch(&self, store: &Store, key: &str, read: &BrokerRead<'_>) -> Served {
+        // Another leader may have landed between our miss and our flight.
+        if let Some(hit) = self.fresh_hit(store, key, read.endpoint, read.fresh) {
+            return Served::cache(hit);
         }
         let cached = store.get(key).ok().flatten();
         let started = (self.clock)();
@@ -301,39 +385,30 @@ impl GhBroker {
         };
         let response = match self.upstream.fetch(&request) {
             Ok(response) => response,
-            Err(error) => return (Err(ReadError::Failed(error)), Outcome::Error, 1, None),
+            Err(error) => return Served::failed(ReadError::Failed(error), 1, None),
         };
         let rate = response
             .header("x-ratelimit-remaining")
             .and_then(|v| v.parse().ok());
         if response.status == 304 {
             let Some((mut meta, body)) = cached else {
-                return (
-                    Err(ReadError::Passthrough(304)),
-                    Outcome::Passthrough,
-                    1,
-                    rate,
-                );
+                return Served::failed(ReadError::Passthrough(304), 1, rate);
             };
             meta.fetched_at_ms = started;
             if let Some(etag) = response.header("etag") {
                 meta.etag = Some(etag.to_string());
             }
+            meta.frozen = self.freezes(read, &body, started);
             let _ = store.put(key, &meta, None);
             let served = Response {
                 status: meta.status,
                 headers: meta.headers,
                 body: Arc::new(body),
             };
-            return (Ok(served), Outcome::NotModified, 1, rate);
+            return Served::new(Ok(served), Outcome::NotModified, 1, rate);
         }
         if !(200..300).contains(&response.status) {
-            return (
-                Err(ReadError::Passthrough(response.status)),
-                Outcome::Passthrough,
-                1,
-                rate,
-            );
+            return Served::failed(ReadError::Passthrough(response.status), 1, rate);
         }
         if response.status == 200 && response.body.len() <= MAX_CACHED_BODY {
             let meta = ObjectMeta {
@@ -343,10 +418,49 @@ impl GhBroker {
                 etag: response.header("etag").map(str::to_string),
                 last_modified: response.header("last-modified").map(str::to_string),
                 fetched_at_ms: started,
+                frozen: self.freezes(read, &response.body, started),
             };
             let _ = store.put(key, &meta, Some(&response.body));
         }
-        (Ok(response), Outcome::Full, 1, rate)
+        Served::new(Ok(response), Outcome::Full, 1, rate)
+    }
+
+    /// Whether a listing may be served without a TTL until a write names
+    /// it: a run's jobs once every job and the run itself are completed; a
+    /// commit's check runs once every one has been completed for
+    /// [`collection::CHECKS_SETTLE_SECS`].
+    fn freezes(&self, read: &BrokerRead<'_>, body: &[u8], started_ms: u64) -> bool {
+        let Some(kind) = collection::freeze_kind(read.endpoint) else {
+            return false;
+        };
+        let Some(newest) = collection::all_completed(body) else {
+            return false;
+        };
+        match kind {
+            Freeze::CheckRuns => {
+                let started = i64::try_from(started_ms / 1000).unwrap_or(i64::MAX);
+                newest.saturating_add(collection::CHECKS_SETTLE_SECS) <= started
+            }
+            // Every listed job finishing is not enough: a run can still
+            // queue jobs that wait on others. Ask for the run itself.
+            Freeze::Jobs {
+                owner,
+                repo,
+                run_id,
+            } => {
+                let endpoint = format!("repos/{owner}/{repo}/actions/runs/{run_id}");
+                let run = BrokerRead {
+                    gh: read.gh,
+                    endpoint: &endpoint,
+                    hostname: read.hostname,
+                    env: read.env,
+                    session_id: read.session_id,
+                    fresh: false,
+                };
+                self.read(&run)
+                    .is_ok_and(|response| collection::run_completed(&response.body))
+            }
+        }
     }
 
     /// The daemon's `/gh/read` handler body: JSON in, `(status, JSON)` out.
@@ -406,6 +520,36 @@ impl GhBroker {
     }
 }
 
+/// Shim -> daemon `/gh/invalidate` body. No (or invalid) `tags` means
+/// every read, the phase-1 behavior an older shim still asks for.
+#[derive(serde::Deserialize)]
+struct InvalidateRequest {
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+impl GhBroker {
+    /// The daemon's `/gh/invalidate` handler body.
+    pub fn handle_invalidate(&self, body: &[u8]) -> (u16, Vec<u8>) {
+        let tags = serde_json::from_slice::<InvalidateRequest>(body)
+            .ok()
+            .and_then(|request| request.tags)
+            .filter(|tags| {
+                !tags.is_empty()
+                    && tags.len() <= scope::MAX_TAGS
+                    && tags.iter().all(|tag| scope::valid_tag(tag))
+            });
+        let result = match tags {
+            Some(tags) => self.invalidate_tags(&tags),
+            None => self.invalidate(),
+        };
+        match result {
+            Ok(()) => (200, b"{}".to_vec()),
+            Err(error) => (500, error_json(&error)),
+        }
+    }
+}
+
 fn error_json(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({ "error": message })).unwrap_or_default()
 }
@@ -444,3 +588,6 @@ impl Drop for Landing<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod phase2_tests;

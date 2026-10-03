@@ -6144,3 +6144,53 @@ request whenever the cache is fresh. When the cache is stale, the request is
 a free `304`. Error responses cost two requests. Endpoints with `{owner}`
 placeholders, `--paginate` and porcelain commands are not brokered until
 later phases. A write outside clud sessions is seen within one TTL (30-60 s).
+
+## DD-151: merged gh reads keep exact object bytes and fall back rather than approximate
+
+**Context:** phase 2 of #1743 answers comment and workflow-run-list reads by
+merging a bounded upstream delta (`since=`, `created=>=`) into a stored
+membership, and freezes job and check-run listings once they are finished.
+A merged answer is only acceptable if it equals what the caller's own query
+would return from GitHub. The design also asked for per-run ETag
+revalidation of unfinished runs in a run list, and for `pr merge`/`pr
+comment`/`run rerun` to invalidate only what they touch.
+
+**Decision:**
+
+- Members are stored as the exact JSON bytes GitHub sent (serde_json
+  `RawValue`); the merge only reorders and cuts whole objects. A page is
+  merged only if its parsed members re-render to the received bytes, so a
+  new wrapper key, whitespace or an object without id and timestamps sends
+  the collection to the phase-1 exact-URL path instead. So do caller
+  queries a membership cannot reproduce (`page` > 1, `since`, `sort`, a
+  run `status` filter, an unknown parameter).
+- The run list refreshes unfinished runs by widening its own `created>=`
+  bound to the oldest unfinished run, instead of one conditional request per
+  run. One request covers the new runs and every live one, through the same
+  list serializer whose bytes the merge reproduces; the single-run endpoint
+  is a different representation. The window is capped at five pages, after
+  which the list is fetched in full.
+- The high-water mark is the newest timestamp seen in the membership, with a
+  5 s overlap deduplicated by id; on an `updated_at` tie the later fetch
+  wins, because reaction counts and run status change without moving it.
+- Invalidation is tag-based (`gh_broker::scope`). A recognized write names
+  the issue/PR, run, run list or check tags it can change, plus `other`,
+  which every untagged read carries. An unrecognized write stays global and
+  is the only thing besides a matching tag that thaws a frozen listing. A
+  write that names a collection makes its next refresh a full fetch, since
+  `since=` cannot see the deletion `pr comment --delete-last` makes.
+- A check-run listing freezes only after it has been complete for 5
+  minutes, because apps and later workflows can add check runs to a
+  finished commit; a jobs listing freezes only once the run object itself
+  reports `completed`.
+
+**Consequences:** a merged read usually costs what the phase-1 read cost
+(one request, or a free `304` when its bound and ETag repeat) and transfers
+only changed objects. Its bounds are five pages for a delta and ten for a
+full comment fetch. A page GitHub sends in another order than the merge
+assumes makes the collection unmergeable rather than reordered. Deletions,
+and changes that do not move `updated_at` (reaction counts, outdated review
+comments), are seen at the 30-minute reconciliation;
+reruns of finished runs started outside clud are seen in a run list only
+then, and thaw a frozen jobs listing only after an in-session write names
+the run. Collections over 10 pages or 8 MiB are not merged.

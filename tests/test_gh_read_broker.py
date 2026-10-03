@@ -65,6 +65,7 @@ class FakeDaemon:
     def __init__(self, state_dir: Path, status: int = 200) -> None:
         self.reads: list[dict] = []
         self.invalidations = 0
+        self.invalidate_bodies: list[dict] = []
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -77,6 +78,7 @@ class FakeDaemon:
                     return
                 if self.path == "/gh/invalidate":
                     outer.invalidations += 1
+                    outer.invalidate_bodies.append(payload)
                     reply = b"{}"
                     code = 200
                 else:
@@ -223,6 +225,30 @@ def test_writes_pass_through_and_invalidate(tmp_path: Path) -> None:
     ]
     assert daemon.reads == []
     assert daemon.invalidations == 1
+    # `repos/o/r/issues` names no issue: every cached read is stale.
+    assert daemon.invalidate_bodies == [{}]
+
+
+def test_recognized_writes_invalidate_only_what_they_name(tmp_path: Path) -> None:
+    world = World(tmp_path)
+    world.env.pop("GH_REPO", None)
+    daemon = FakeDaemon(world.state)
+    try:
+        world.run("pr", "merge", "7", "-R", "o/r", "--squash")
+        world.run("run", "rerun", "99")
+        world.run("pr", "create", "--fill")
+    finally:
+        daemon.close()
+    assert world.calls() == [
+        "pr merge 7 -R o/r --squash",
+        "run rerun 99",
+        "pr create --fill",
+    ]
+    assert daemon.invalidate_bodies == [
+        {"tags": ["o/r#num:7", "*#num:7", "o/r#runs", "*#runs", "other"]},
+        {"tags": ["run:99", "*#runs", "*#checks", "other"]},
+        {},
+    ]
 
 
 def test_disabled_broker_never_contacts_the_daemon(tmp_path: Path) -> None:

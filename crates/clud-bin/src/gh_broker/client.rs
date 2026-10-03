@@ -43,6 +43,9 @@ pub struct BrokerClient {
     pub env: Vec<(String, String)>,
     pub session_id: Option<String>,
     pub fresh: bool,
+    /// The caller's `GH_REPO`: the repo a write without `-R` targets, for
+    /// targeted invalidation.
+    pub gh_repo: Option<String>,
 }
 
 /// A response to replay to the real `gh`.
@@ -117,9 +120,19 @@ impl BrokerClient {
         })
     }
 
-    /// Best effort: tell the broker GitHub state may have changed.
-    pub fn invalidate(&self) {
-        let _ = self.post(INVALIDATE_PATH, b"{}", INVALIDATE_TIMEOUT);
+    /// Best effort: tell the broker GitHub state may have changed. `tags`
+    /// names what changed ([`super::scope::write_tags`]); `None` means it
+    /// could be anything.
+    pub fn invalidate(&self, tags: Option<&[String]>) {
+        let body = match tags {
+            Some(tags) => serde_json::json!({ "tags": tags }),
+            None => serde_json::json!({}),
+        };
+        let _ = self.post(
+            INVALIDATE_PATH,
+            body.to_string().as_bytes(),
+            INVALIDATE_TIMEOUT,
+        );
     }
 }
 
@@ -260,6 +273,7 @@ mod tests {
             env: vec![],
             session_id: None,
             fresh: false,
+            gh_repo: None,
         };
         let read = super::super::classify::api_read(&["api".into(), "repos/o/r".into()]).unwrap();
         assert_eq!(client.read(&read), None);
@@ -275,6 +289,6 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(client.read(&read), None);
         assert!(started.elapsed() < Duration::from_secs(5));
-        client.invalidate();
+        client.invalidate(None);
     }
 }

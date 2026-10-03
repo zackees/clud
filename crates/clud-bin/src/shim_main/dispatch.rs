@@ -180,6 +180,7 @@ fn read_broker(
         env,
         session_id: var(registry::SESSION_ID_KEY).and_then(|id| id.into_string().ok()),
         fresh: var(registry::GH_FRESH_KEY).as_deref() == Some(OsStr::new("1")),
+        gh_repo: var("GH_REPO").and_then(|repo| repo.into_string().ok()),
     })
 }
 
@@ -479,6 +480,7 @@ mod tests {
         assert_eq!(broker.gh, world.real("gh"));
         assert_eq!(broker.env, [("GH_TOKEN".to_string(), "t".to_string())]);
         assert!(broker.fresh);
+        assert_eq!(broker.gh_repo, None);
     }
 
     #[test]
