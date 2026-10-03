@@ -623,7 +623,7 @@ def _verify_installed_smokes(*, env: dict[str, str], target: str | None) -> int:
     return 0
 
 
-def verify_wheel_scripts(wheel: Path) -> int:
+def verify_wheel_scripts(wheel: Path) -> int:  # noqa: C901
     with zipfile.ZipFile(wheel) as archive:
         members = {name.replace("\\", "/") for name in archive.namelist()}
     required = list(REQUIRED_SCRIPTS)

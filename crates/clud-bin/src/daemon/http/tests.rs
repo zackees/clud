@@ -125,6 +125,10 @@ fn api_discovery_routes_require_bearer_and_return_json() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn api_create_list_get_and_auth_boundary_are_request_level_contracts() {
     let dir = tempfile::tempdir().unwrap();
     let port = spawn_dashboard_with_activity(
@@ -553,6 +557,10 @@ fn wait_for_no_activity(activity: &super::super::activity::DaemonActivity) {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn authenticated_http_claude_turn_captures_identity_resumes_and_holds_activity() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("cwd");
@@ -762,6 +770,10 @@ fn authenticated_http_codex_turn_captures_thread_identity_and_resumes() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn authenticated_http_turn_idempotency_replay_conflict_replace_and_interrupt() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("cwd");

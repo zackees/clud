@@ -64,7 +64,7 @@ def get_diff(rev_left: str, rev_right: str) -> str:
     return result.stdout
 
 
-def parse_diff(diff_text: str) -> list[FileDiff]:
+def parse_diff(diff_text: str) -> list[FileDiff]:  # noqa: C901
     files: list[FileDiff] = []
     current: FileDiff | None = None
     current_hunk: Hunk | None = None

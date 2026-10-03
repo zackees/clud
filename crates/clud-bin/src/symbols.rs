@@ -438,6 +438,10 @@ pub fn install(reports: &[PathBuf]) -> i32 {
 /// fetch the sidecar, so a binary the release does not vouch for never costs
 /// an 85 MB download, and every "cannot pair" outcome is a skip (exit 0), not
 /// an error -- a local build is a normal thing to be running.
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn install_with(reports: &[PathBuf], fetch: Fetch, cache_root: &Path) -> i32 {
     let Some(report) = reports.first() else {
         println!("clud symbols: no crash reports, so no sidecar to fetch.");

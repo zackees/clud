@@ -384,7 +384,7 @@ def _strip_rust_comments(text: str) -> str:
     return _scan_rust(text)[0]
 
 
-def _scan_rust(text: str) -> tuple[str, bool]:
+def _scan_rust(text: str) -> tuple[str, bool]:  # noqa: C901
     """Blank out Rust comments, character for character.
 
     A scanner rather than a regex, because all three of the cheap regex

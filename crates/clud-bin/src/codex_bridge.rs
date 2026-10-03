@@ -892,6 +892,10 @@ impl Drop for ActiveWorker {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn handle_connection(
     mut stream: TcpStream,
     config: &BridgeConfig,
@@ -1656,6 +1660,10 @@ fn mark_auth_recheck(
 /// Route one unified request before the legacy Codex translator sees it.
 /// Synthetic IDs are resolved here, never by the legacy `claude*` fallback.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn serve_unified_messages(
     stream: &mut TcpStream,
     config: &BridgeConfig,
@@ -2293,6 +2301,10 @@ fn transport_timed_out(error: &ureq::Error) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn serve_anthropic_proxy(
     stream: &mut TcpStream,
     target: AnthropicProxyTarget<'_>,
@@ -2700,6 +2712,10 @@ fn serve_codex_discovery_messages(
 /// reported in-band by the translator's own `error` event (already appended by
 /// the pipeline) and the chunked body is simply terminated.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn serve_messages(
     stream: &mut TcpStream,
     config: &BridgeConfig,
@@ -4130,6 +4146,10 @@ mod tests {
             Self::start_with_scripted_responses(scripted, None)
         }
 
+        #[expect(
+            clippy::too_many_lines,
+            reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+        )]
         fn start_with_scripted_responses(
             scripted: Vec<Option<Vec<u8>>>,
             fallback_response: Option<Vec<u8>>,
@@ -5834,6 +5854,11 @@ Connection: close
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn unified_routes_all_five_ids_with_provider_credential_isolation() {
         let codex = FakeResponses::start();
         let claude = FakeResponses::start();
@@ -6989,6 +7014,10 @@ Connection: close
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn unified_provider_switch_reseeds_codex_and_keeps_main_and_agent_efforts_independent() {
         let anthropic = FakeResponses::start();
         let codex = FakeResponses::start();
@@ -9204,6 +9233,10 @@ Connection: close
     /// conversation. The bridge must recover the real result from that full
     /// replay rather than wedging on the final-assistant suffix boundary.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn failed_stream_recovers_pending_output_from_full_replay() {
         let failed_assistants = [
             (

@@ -15,3 +15,6 @@ libc = "0.2"
 [[bin]]
 name = "mock-agent"
 path = "src/main.rs"
+
+[lints]
+workspace = true

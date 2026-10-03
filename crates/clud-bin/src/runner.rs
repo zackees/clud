@@ -683,6 +683,10 @@ pub fn summarize_loop_outcome(exit_code: i32) -> (&'static str, Option<String>) 
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn run_plan_subprocess(
     plan: &command::LaunchPlan,
     job_tracker: Option<&crate::job_orphan_reaper::ForegroundJobTracker>,

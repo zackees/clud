@@ -58,7 +58,7 @@ def _pe_machine(data: bytes) -> int:
     return struct.unpack_from("<H", data, offset + 4)[0]
 
 
-def check_kitty_wheel(wheel: Path) -> list[str]:
+def check_kitty_wheel(wheel: Path) -> list[str]:  # noqa: C901
     """Validate the portable layout and every bundled member's RECORD entry."""
     errors: list[str] = []
     with zipfile.ZipFile(wheel) as archive:

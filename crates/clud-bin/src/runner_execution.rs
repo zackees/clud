@@ -99,6 +99,11 @@ fn emit_rendered_line(bytes: &[u8], captured_output: &mut String) {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn run_plan_pty(
     plan: &command::LaunchPlan,
     job_tracker: Option<&crate::job_orphan_reaper::ForegroundJobTracker>,

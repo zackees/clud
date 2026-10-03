@@ -1575,6 +1575,10 @@ const SPLITTER_SHORT_VALUE_FLAGS: &[&str] = &["-p", "-m", "-r"];
 /// (and are listed in `bool_flags`); `--flag=value` carries the value.
 const OPTIONAL_VALUE_FLAGS: &[&str] = &["--coauthor"];
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
     let mut known = vec![raw[0].clone()];
     let mut unknown = Vec::new();

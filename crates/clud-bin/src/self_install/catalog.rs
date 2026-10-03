@@ -214,6 +214,10 @@ impl Catalog {
         Self::parse_internal(bytes, Some(expected_version))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn parse_internal(bytes: &[u8], expected_candidate: Option<&str>) -> Result<Self, String> {
         let document = crate::server_settings::parse_strict_json(bytes, MAX_CATALOG_BYTES)?;
         let root = object(&document, "catalog")?;

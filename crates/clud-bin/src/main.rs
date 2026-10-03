@@ -48,6 +48,11 @@ fn parse_args() -> args::Args {
     args::Args::parse_with_passthrough()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn run(mut args: args::Args) {
     args.normalize_explicit_run();
     // Before provider inference and selection resolution, so `--allow-model`

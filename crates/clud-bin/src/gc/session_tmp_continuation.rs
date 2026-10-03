@@ -64,6 +64,10 @@ pub(super) fn sweep_tick_at(
     sweep_tick_with_quantum(root, work_path, now, dry_run, allowance, CANDIDATE_QUANTUM)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub(super) fn sweep_tick_with_quantum(
     root: &Path,
     work_path: &Path,
@@ -183,6 +187,11 @@ pub(super) fn sweep_tick_with_quantum(
     Ok(report)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn advance_item(
     item: WorkItem,
     state: &mut WorkState,
@@ -1358,6 +1367,10 @@ impl ScanCursor {
         self.advance_with_touched(now, allowance, &BTreeMap::new())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn advance_with_touched(
         &mut self,
         now: SystemTime,

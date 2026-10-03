@@ -327,7 +327,7 @@ def _scan_referenced_script(
     return hits
 
 
-def scan(repo_root: Path) -> list[Offender]:
+def scan(repo_root: Path) -> list[Offender]:  # noqa: C901
     """Run the full scan, returning every offender found."""
     rust_root = _is_rust_backed(repo_root)
     externs = _extern_rust_checkouts(repo_root)

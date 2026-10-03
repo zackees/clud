@@ -717,7 +717,7 @@ def cmd_doctor(_path: Path | None = None) -> int:
     return 0
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str]) -> int:  # noqa: C901
     p = argparse.ArgumentParser(prog="docker_build_soldr", add_help=False,
                                 description=USAGE)
     p.add_argument("path", nargs="?", default=".")

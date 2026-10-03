@@ -652,6 +652,10 @@ fn spare_rows(classified: &[(Shape, &Descendant)], spares: &SpareList) -> Vec<Sp
 /// PPID-descendant of something being reaped. Everything else in the tree is
 /// reachable, including descendants whose environment was rebuilt and no
 /// longer carries the originator tag (#522).
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn report_and_reap(
     descendants: Vec<Descendant>,
     header: &str,

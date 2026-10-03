@@ -26,7 +26,7 @@ ROOT = """<!doctype html>
 """
 
 
-def select_native_downloads(catalog: dict) -> list[dict[str, str]]:
+def select_native_downloads(catalog: dict) -> list[dict[str, str]]:  # noqa: C901
     """Choose verified native assets from the catalog's selected stable release."""
     version = catalog["channels"]["latest-stable"]
     release = next(

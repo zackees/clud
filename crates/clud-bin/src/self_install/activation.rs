@@ -129,6 +129,10 @@ mod posix {
     const END: &str = "# <<< clud installer PATH <<<";
     const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     pub(super) fn plan(destination: &Path) -> Result<ActivationPlan, String> {
         let bin = destination.parent().ok_or("missing install directory")?;
         if bin

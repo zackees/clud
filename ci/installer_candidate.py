@@ -40,7 +40,7 @@ def candidate_filename(version: str, target: str) -> str:
     return f"clud-{version}-{target}{TARGETS[target][3]}"
 
 
-def verify_artifact(directory: Path, target: str, source_sha: str, version: str) -> dict:
+def verify_artifact(directory: Path, target: str, source_sha: str, version: str) -> dict:  # noqa: C901
     """Require exactly one typed binary and its complete build provenance."""
     filename = candidate_filename(version, target)
     if not HEX_SHA.fullmatch(source_sha):
@@ -142,7 +142,7 @@ def build_fixture(artifacts: Path, output: Path, source_sha: str, version: str) 
     return catalog
 
 
-def require_evidence(
+def require_evidence(  # noqa: C901
     rows: list[dict], source_sha: str, version: str, artifacts: Path | None = None
 ) -> None:
     """Reject omitted, duplicate, skipped, cancelled, or mismatched host lanes."""

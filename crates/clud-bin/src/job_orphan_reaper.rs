@@ -398,6 +398,7 @@ fn classify_roles(
     roles
 }
 
+#[expect(clippy::too_many_lines, reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function")]
 pub(crate) fn plan_shell_exit(
     graph: &ProcessGraph<'_>,
     spares: &SpareList,
@@ -1608,6 +1609,10 @@ mod imp {
     ///
     /// A PID whose image name cannot be resolved is left for the kernel
     /// safety net rather than risked as a wrong kill.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn explicitly_reap_job_members(
         job: HANDLE,
         processes: &Mutex<TrackerProcesses>,
@@ -3594,6 +3599,10 @@ mod lifecycle_tests {
     /// spawning, no Job Object, no dependency on a real sccache or docker
     /// being installed.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn every_daemon_archetype_is_spared_for_the_right_reason() {
         struct Archetype {
             image: &'static str,

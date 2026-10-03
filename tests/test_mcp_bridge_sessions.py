@@ -41,7 +41,7 @@ class _DaemonState:
         self.base_url = ""
 
 
-def _make_handler(state: _DaemonState):
+def _make_handler(state: _DaemonState):  # noqa: C901
     class _Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 

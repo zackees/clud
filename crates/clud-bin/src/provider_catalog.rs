@@ -641,6 +641,10 @@ fn provider_inferred_from_catalog(entry: CatalogModel, input: &str) -> Option<Mo
 
 /// Normalize compatibility spellings at the CLI boundary. `None` preserves a
 /// provider's existing reviewed default/profile.
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn resolve(
     requested_provider: Option<ModelProvider>,
     model: Option<&str>,

@@ -106,7 +106,7 @@ def _completion_body(model: str) -> bytes:
     )
 
 
-def _handler_class(log_path: Path) -> type[BaseHTTPRequestHandler]:
+def _handler_class(log_path: Path) -> type[BaseHTTPRequestHandler]:  # noqa: C901
     """One stub instance per turn, each with its own JSON-lines request log."""
 
     class _StubHandler(BaseHTTPRequestHandler):

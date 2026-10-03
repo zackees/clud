@@ -119,6 +119,10 @@ fn state_for(spare_reasons: &SpareReasons, path: &Path) -> (RepoWorktreeState, S
 /// are kept; and a sibling that turns dirty between the probe and the delete
 /// is spared by the pool's re-verification.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn a_real_tick_reclaims_only_the_squash_merged_clean_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
@@ -328,6 +332,10 @@ fn observe_mode_never_dispatches() {
 /// is spared as `grace`, a dirty sibling survives, and the root itself is
 /// never removed.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn a_real_tick_reclaims_tmp_wt_landed_and_abandoned_empty_worktrees() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

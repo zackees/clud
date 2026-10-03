@@ -98,7 +98,7 @@ def _cmd_summary(payload: dict[str, Any]) -> str:
     return f"{tool_name}: {snippet}"
 
 
-def _read_stdin_bounded() -> str:
+def _read_stdin_bounded() -> str:  # noqa: C901
     """Read hook JSON without waiting forever for EOF on Windows hook pipes."""
     out: queue.Queue[bytes | BaseException | None] = queue.Queue()
 

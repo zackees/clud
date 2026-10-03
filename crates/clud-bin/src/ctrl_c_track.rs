@@ -682,6 +682,10 @@ pub(crate) fn reset_for_test() {
 }
 
 #[cfg(windows)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn platform_forensics(child_root_pid: Option<u32>) -> Option<CtrlCForensics> {
     use std::collections::{HashMap, HashSet};
 

@@ -473,7 +473,7 @@ def _consider(
     )
 
 
-def resolve_windows_docker_disks(
+def resolve_windows_docker_disks(  # noqa: C901
     settings: dict | None,
     probe: SystemDiskProbe,
     *,
@@ -2254,7 +2254,7 @@ def _wait_for_wsl_service_running(
     return False
 
 
-def _execute_restart(system: str, *, hard: bool) -> list[str]:
+def _execute_restart(system: str, *, hard: bool) -> list[str]:  # noqa: C901
     details: list[str] = []
     if system == "Windows":
         if hard:

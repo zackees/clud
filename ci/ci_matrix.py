@@ -79,7 +79,7 @@ SUITES: tuple[str, ...] = ("unit", "integration")
 LINUX_X64_UNIT_SHARDS: tuple[str, ...] = ("rust", "py1of2", "py2of2")
 
 
-def resolve_tier(
+def resolve_tier(  # noqa: C901
     event_name: str,
     dispatch_tier: str,
     pr_labels: str,

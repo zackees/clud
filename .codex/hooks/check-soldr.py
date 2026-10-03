@@ -72,7 +72,7 @@ def deny(reason: str) -> int:
     return 2
 
 
-def read_stdin_bounded() -> str:
+def read_stdin_bounded() -> str:  # noqa: C901
     out: queue.Queue[bytes | BaseException | None] = queue.Queue()
 
     def worker() -> None:

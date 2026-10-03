@@ -110,7 +110,7 @@ def _reasoning(row: Any, model_id: str) -> dict[str, Any]:
     }
 
 
-def normalize_row(row: Any, index: int) -> dict[str, Any]:
+def normalize_row(row: Any, index: int) -> dict[str, Any]:  # noqa: C901
     if not isinstance(row, dict):
         raise RefreshError(f"row {index} is not an object")
     model_id, name = row.get("id"), row.get("name")

@@ -151,6 +151,10 @@ impl InstallPlan {
 }
 
 /// A committed binary is still pending fresh name-based lookup by #1495.
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn execute(mut plan: InstallPlan) -> Result<(), String> {
     let parent = plan.destination.parent().ok_or("missing install parent")?;
     inspect_destination(&plan.destination, false)?;

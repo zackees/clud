@@ -234,6 +234,10 @@ fn is_transient_attach_error(err: &std::io::Error) -> bool {
     matches!(err.kind(), ConnectionReset | ConnectionAborted | BrokenPipe)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub(super) fn attach_to_session(
     state_dir: &Path,
     session: &SessionSnapshot,

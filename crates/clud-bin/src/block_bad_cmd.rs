@@ -315,6 +315,11 @@ fn command_opts_out(command: &str) -> bool {
 /// The event a bare invocation serves.
 pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     let event = invocation.event.as_str();
 
@@ -1551,6 +1556,10 @@ struct EvaluationContext<'a> {
     rust_use_soldr: bool,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn evaluate_command_into(
     command_text: &str,
     context: &EvaluationContext<'_>,

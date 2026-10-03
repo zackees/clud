@@ -38,6 +38,10 @@ fn clud_exe() -> PathBuf {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn telemetry_round_trip_via_clud_log_subprocess() {
     let dir = tempfile::tempdir().expect("tempdir");
     let telemetry = TelemetryStore::new();

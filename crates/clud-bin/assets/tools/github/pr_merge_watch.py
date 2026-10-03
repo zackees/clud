@@ -644,7 +644,7 @@ def _effective(entries: list[tuple[dict, dict | None]]) -> tuple[dict, dict | No
     return current
 
 
-def judge_check_runs(
+def judge_check_runs(  # noqa: C901
     check_runs: list[dict],
     workflow_runs: list[dict],
     head_sha: str,
@@ -1250,7 +1250,7 @@ def probe_coderabbit(repo: str) -> CodeRabbitProbe:
     return CodeRabbitProbe("not_detected", sampled)
 
 
-def classify_coderabbit(
+def classify_coderabbit(  # noqa: C901
     threads: list[dict],
     status_comments: list[dict],
 ) -> CodeRabbitObservation:
@@ -1505,7 +1505,7 @@ def _snapshot_gap(reason: str) -> None:
     return None
 
 
-def fetch_gate_snapshot(repo: str, pr: int, *, include_coderabbit: bool) -> GateSnapshot | None:
+def fetch_gate_snapshot(repo: str, pr: int, *, include_coderabbit: bool) -> GateSnapshot | None:  # noqa: C901
     _snapshot_gap("GraphQL call failed or returned no pull request")
     owner, separator, name = repo.partition("/")
     if not separator or not owner or not name:
@@ -1914,7 +1914,7 @@ class CancelOptions:
     pinned_sha: str | None = None
 
 
-def cancel_pr_runs(
+def cancel_pr_runs(  # noqa: C901
     pr: int,
     repo: str | None,
     head_sha: str,
@@ -2474,7 +2474,7 @@ def _sleep_remaining_interval(poll_started: float, interval: int) -> None:
         time.sleep(remaining)
 
 
-def watch(
+def watch(  # noqa: C901
     pr: int,
     repo: str | None,
     interval: int,
@@ -2980,7 +2980,7 @@ def _exit_if_queued_too_long(
     _finish_exit(EXIT_QUEUED, "queued", log)
 
 
-def _act_on_verdict(
+def _act_on_verdict(  # noqa: C901
     verdict: Verdict,
     pr: int,
     repo: str | None,

@@ -1341,6 +1341,10 @@ use gc_service_disk_watchdog::{
     log_disk_watchdog_purge_reply, log_periodic_purge_reply,
     purge_old_reclaimable_entries_for_roots,
 };
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn process_op(
     registry: &Registry,
     pool_tx: &mpsc::Sender<PurgeJob>,

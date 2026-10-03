@@ -300,6 +300,10 @@ impl ForegroundRuntime {
     /// Routing core, seamed on the secret-store dependency so tests can
     /// exercise the DeepSeek direct route without touching the host's real
     /// native credential vault. `start` is the sole production entry point.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn start_with_secret_store(
         plan: &LaunchPlan,
         mut env: Vec<(String, String)>,
@@ -1195,6 +1199,10 @@ fn inject_per_turn_effort(
 /// on the descriptor's own role mapping; non-empty makes the pin a cost
 /// boundary that covers the auxiliary slots and discovery too, because an
 /// OpenRouter key bills every model id sent with it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn apply_anthropic_compat_overlay(
     env: &mut Vec<(String, String)>,
     secret: &str,

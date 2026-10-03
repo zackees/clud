@@ -66,7 +66,7 @@ def is_allowed(line: str, previous_line: str = "") -> bool:
     return bool(COMMAND_IMPORT_RE.fullmatch(line) or COMMAND_BUILDER_RE.fullmatch(line))
 
 
-def _rust_code_only(content: str) -> str:
+def _rust_code_only(content: str) -> str:  # noqa: C901
     """Blank comments and string literals while preserving offsets/newlines."""
     out = list(content)
     index = 0
@@ -141,7 +141,7 @@ def _rust_code_only(content: str) -> str:
     return "".join(out)
 
 
-def scan_file(path: Path) -> list[tuple[int, str, str]]:
+def scan_file(path: Path) -> list[tuple[int, str, str]]:  # noqa: C901
     """Scan a single file for banned patterns. Returns (line_num, line, reason)."""
     violations: list[tuple[int, str, str]] = []
     try:

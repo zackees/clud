@@ -295,3 +295,6 @@ name = "clud-ctrlc-probe"
 path = "src/bin/clud_ctrlc_probe.rs"
 # No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
 test = false
+
+[lints]
+workspace = true
