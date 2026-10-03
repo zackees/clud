@@ -21,6 +21,7 @@ gates:
   rust/x86_64-unknown-linux-gnu/build: {lane: pr}      # bins, harnesses, doctests, wheel
   rust/x86_64-unknown-linux-gnu/unit: {lane: pr}       # rust + both pytest shards
 jobs:
+  ci.yml:static-checks: [general/all/static]
   ci.yml:dylint:
     - rust/x86_64-unknown-linux-gnu/dylint
     - rust/x86_64-pc-windows-msvc/dylint
