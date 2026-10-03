@@ -20,6 +20,12 @@ fn main() {
     if let Some(code) = multicall::maybe_run(&argv) {
         std::process::exit(code);
     }
+    // #1743: a session launched by an older clud keeps its alias dir until
+    // something relinks it. Its statusline, hooks and `clud tool` calls run
+    // the installed clud by path, so the first of them after an upgrade
+    // brings that session's `gh`/`git`/`rm` up to date. A few stats when
+    // nothing is stale; see docs/architecture/shim-dispatch.md.
+    clud::shim_install::refresh_running_session_aliases();
     // #1374: before anything can write an escape sequence (clap's help, a
     // colored notice, a selector, a PTY session), so every launch path gets
     // VT output processing on a Windows console, not only those that happen

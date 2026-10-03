@@ -155,7 +155,16 @@ fn read_broker(
     facts: &Facts,
 ) -> Option<crate::gh_broker::client::BrokerClient> {
     let var = facts.var;
-    if var(registry::GH_READ_BROKER_KEY).as_deref() != Some(OsStr::new("1")) {
+    let enabled = match var(registry::GH_READ_BROKER_KEY) {
+        Some(value) => value == "1",
+        // A session launched before the key existed (clud < 2.8.24) running
+        // a refreshed alias: follow the current setting, default on, like
+        // `shim_session::activate_rm` does at launch.
+        None => facts.home.as_deref().is_none_or(|home| {
+            crate::clud_settings::load_gh_read_broker_enabled_at(home).unwrap_or(true)
+        }),
+    };
+    if !enabled {
         return None;
     }
     let state_dir = var(registry::DAEMON_STATE_DIR_KEY)
@@ -282,11 +291,20 @@ mod tests {
         }
 
         fn decide(&self, name: &str, vars: &HashMap<&str, OsString>) -> Decision {
+            self.decide_in_home(name, vars, None)
+        }
+
+        fn decide_in_home(
+            &self,
+            name: &str,
+            vars: &HashMap<&str, OsString>,
+            home: Option<&Path>,
+        ) -> Decision {
             let var = |key: &str| vars.get(key).cloned();
             let facts = Facts {
                 self_exe: self.shim_dir.join(registry::file_name(name)),
                 path: std::env::join_paths([&self.shim_dir, &self.real_dir]).unwrap(),
-                home: None,
+                home: home.map(Path::to_path_buf),
                 var: &var,
             };
             decide(OsStr::new(name), &facts)
@@ -461,7 +479,10 @@ mod tests {
         let Decision::Session(Session::Gh(gh)) = world.decide("gh", &vars) else {
             panic!("valid gh session");
         };
-        assert!(gh.read_broker.is_none(), "an older session has no key");
+        assert!(
+            gh.read_broker.is_none(),
+            "no key, no home and no state dir: nowhere to find the daemon"
+        );
         vars.insert(registry::GH_READ_BROKER_KEY, OsString::from("0"));
         let Decision::Session(Session::Gh(gh)) = world.decide("gh", &vars) else {
             panic!("valid gh session");
@@ -481,6 +502,34 @@ mod tests {
         assert_eq!(broker.env, [("GH_TOKEN".to_string(), "t".to_string())]);
         assert!(broker.fresh);
         assert_eq!(broker.gh_repo, None);
+    }
+
+    /// A session launched before 2.8.24 has no `CLUD_GH_READ_BROKER`; once
+    /// its shared alias is refreshed it follows the current setting instead
+    /// of treating the missing key as off. An explicit `0` stays off.
+    #[test]
+    fn a_session_without_the_broker_key_follows_the_current_setting() {
+        let world = World::new();
+        let home = TempDir::new().unwrap();
+        let broker = |vars: &HashMap<&str, OsString>| {
+            let Decision::Session(Session::Gh(gh)) =
+                world.decide_in_home("gh", vars, Some(home.path()))
+            else {
+                panic!("valid gh session");
+            };
+            gh.read_broker
+        };
+        let mut vars = world.valid_session();
+        let enabled = broker(&vars).expect("the setting defaults to on");
+        assert_eq!(enabled.state_dir, home.path().join(".clud").join("state"));
+        assert_eq!(enabled.gh, world.real("gh"));
+
+        crate::clud_settings::save_gh_read_broker_enabled_at(home.path(), false).unwrap();
+        assert!(broker(&vars).is_none(), "the setting turned it off");
+
+        crate::clud_settings::save_gh_read_broker_enabled_at(home.path(), true).unwrap();
+        vars.insert(registry::GH_READ_BROKER_KEY, OsString::from("0"));
+        assert!(broker(&vars).is_none(), "an explicit 0 wins over the setting");
     }
 
     #[test]
