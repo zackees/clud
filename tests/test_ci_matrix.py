@@ -136,6 +136,9 @@ def test_pr_and_dispatch_source_ref_is_pinned_in_every_job():
     # 14 build/test/dylint jobs, the #1323 real-harness job, and the Linux x64
     # clippy job that runs beside the build.
     assert text.count("source_ref: ${{ needs.static.outputs.source_ref }}") == 16
+    # The static-checks lint job checks out the same pinned SHA.
+    static_checks = text.split("\n  static-checks:\n", 1)[1].split("\n\n  ", 1)[0]
+    assert "ref: ${{ needs.static.outputs.source_ref }}" in static_checks
 
 
 def test_harness_suite_runs_in_full_mode_and_is_gated():
@@ -535,7 +538,13 @@ def test_workflows_use_the_local_runner_signal_only_under_an_exception() -> None
     assert offenders == [], offenders
 
 
-ATTESTED_SKIP_JOBS = ("dylint", "lint-linux-x64", "build-linux-x64", "test-linux-x64-unit")
+ATTESTED_SKIP_JOBS = (
+    "static-checks",
+    "dylint",
+    "lint-linux-x64",
+    "build-linux-x64",
+    "test-linux-x64-unit",
+)
 
 
 def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
@@ -547,7 +556,7 @@ def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
     text = CI_YML.read_text(encoding="utf-8")
     trust = (root / "local-gate.toml").read_text(encoding="utf-8")
     attestations = (root / "ci-attestations.yml").read_text(encoding="utf-8")
-    static = text.split("\n  static:\n", 1)[1].split("\n  dylint:\n", 1)[0]
+    static = text.split("\n  static:\n", 1)[1].split("\n  static-checks:\n", 1)[0]
     assert "python -m ci_lint local-gate verify --repo . --trust --github-output" in static
     # The verifier and the documented gate command run the same ci_lint.
     pin = re.search(r"repository: zackees/ci\.yml\n\s+ref: ([0-9a-f]{40})", static)

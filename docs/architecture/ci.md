@@ -192,11 +192,19 @@ The gate refuses an uncommitted tree. It runs the same `bosn ci run --workspace
 . --trigger pr --wait` ([`local-gate.toml`](../../local-gate.toml)), and on a
 pass it amends HEAD's message (tree unchanged) with a `Local-Gate:` trailer and
 one stamped `Ci-Attestation:` per gate in
-[`ci-attestations.yml`](../../ci-attestations.yml). The static job's `Local
-gate attestation` step (`ci-lint local-gate verify --trust`) then sets
-`skip_<job>` for `dylint`, `lint-linux-x64`, `build-linux-x64` and
-`test-linux-x64-unit`, and `CI OK` counts each of those skips as success. The
-PR's critical path drops from about 5.5 minutes to the static job's ~40 s.
+[`ci-attestations.yml`](../../ci-attestations.yml). The `Local
+gate attestation` step (`ci-lint local-gate verify --trust`, in the `static`
+job, displayed as `CI mode`) then sets `skip_<job>` for `static-checks`,
+`dylint`, `lint-linux-x64`, `build-linux-x64` and `test-linux-x64-unit`, and
+`CI OK` counts each of those skips as success. The PR's critical path drops
+from about 5.5 minutes to the mode job's ~10 s.
+
+The mode job installs nothing beyond the runner's cached Python
+([zackees/ci.yml GEN-018](https://github.com/zackees/ci.yml/blob/main/docs/policy-general.md)).
+The lint (`Static checks`, job `static-checks`) runs beside the builds rather
+than ahead of them, so an unattested PR's build starts ~25 s sooner. The cost
+is that a lint failure no longer cancels the build lanes before they start;
+`CI OK` still fails.
 
 It fails closed. Every lane runs remotely, as before, when the head is
 unattested or its stamp no longer matches (any amend or rebase after the gate
@@ -290,9 +298,11 @@ remains the source of truth for the triple table and
 `tests/test_ci_matrix.py::test_ci_yml_covers_exactly_the_targets_table` fails if
 the YAML drifts from it.
 
-There is deliberately no separate `plan` job. The existing static job resolves
-the mode before builds begin, so invalid labels or a mismatched dispatch SHA
-fail before allocating cross-build runners.
+There is deliberately no separate `plan` job. The `static` job (`CI mode`)
+resolves the mode before builds begin, so invalid labels or a mismatched
+dispatch SHA fail before allocating cross-build runners. It installs nothing
+and runs no lint, so it does not delay them either; the lint is the parallel
+`Static checks` job.
 
 Three structural claims, in the order they matter:
 
@@ -442,7 +452,7 @@ Three things enforce it, because no one of them is sufficient:
 
 | Guard | Catches | Blind to |
 | --- | --- | --- |
-| `ci/banned_cross_tools.py` (runs in `bash lint` and CI's static job) | a literal command in YAML, Python, shell, PowerShell, TOML, Rust or a Dockerfile — including the argv-list form `["cargo", "xwin", ...]` and multi-line install steps | a *conditional* tool at a target held in a variable |
+| `ci/banned_cross_tools.py` (runs in `bash lint` and CI's `Static checks` job) | a literal command in YAML, Python, shell, PowerShell, TOML, Rust or a Dockerfile — including the argv-list form `["cargo", "xwin", ...]` and multi-line install steps | a *conditional* tool at a target held in a variable |
 | `ci/xbuild.py::cargo_argv` raises on `zigbuild` + an Apple/MSVC triple | the dispatch itself, whatever the target's provenance | a caller that bypasses `cargo_argv` |
 | `tests/test_ci_matrix.py` | every matrix triple's `strategy`, and the argv `cargo_argv` actually returns for it | a command path outside the matrix |
 
