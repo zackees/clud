@@ -199,52 +199,23 @@ impl GhBroker {
             requests: 0,
             rate: None,
         };
-        let mut pages = prior
+        let prior_pages = prior
             .as_ref()
             .map(|state| state.pages.clone())
             .unwrap_or_default();
-        // Whether any pass re-sent a page: a later pass of `304`s over pages
-        // an earlier pass replaced still changed the collection.
-        let mut resent_any = false;
-        let mut consistent = false;
-        let mut misfit = false;
-        for _ in 0..MAX_PASSES {
-            let step = pass(plan, &pages, width, &mut fetcher).and_then(|step| match step {
-                Pass::Done(now, true) if !verify(plan, &now, width, &mut fetcher)? => {
-                    Ok(Pass::Misfit(now))
-                }
-                other => Ok(other),
-            });
-            match step {
-                Ok(Pass::Done(now, resent)) => {
-                    pages = now;
-                    resent_any |= resent;
-                    consistent = true;
-                    break;
-                }
-                Ok(Pass::Misfit(now)) => {
-                    pages = now;
-                    resent_any = true;
-                    misfit = true;
-                }
-                Ok(Pass::Unmergeable) => {
-                    misfit = false;
-                    break;
-                }
-                Err(error) => {
-                    return Merged::Served(Served::failed(error, fetcher.requests, fetcher.rate));
-                }
-            }
-        }
-        if misfit && !consistent {
+        let (pages, resent_any) = match passes(plan, prior_pages, width, &mut fetcher) {
+            Ok(Passes::Fit(pages, resent_any)) => (pages, resent_any),
             // The collection kept changing under both passes. This read
             // takes the exact-URL path; the stored pages stay, so the next
             // refresh revalidates them as usual.
-            return Merged::Fallback(fetcher.requests);
-        }
-        if !consistent {
-            return self.give_up(store, key, started, fetcher.requests);
-        }
+            Ok(Passes::Misfit) => return Merged::Fallback(fetcher.requests),
+            Ok(Passes::Unmergeable) => {
+                return self.give_up(store, key, started, fetcher.requests);
+            }
+            Err(error) => {
+                return Merged::Served(Served::failed(error, fetcher.requests, fetcher.rate));
+            }
+        };
         let state = CollectionState {
             pages,
             width,
@@ -285,6 +256,43 @@ impl GhBroker {
         let _ = store.put_collection(key, &marker);
         Merged::Fallback(spent)
     }
+}
+
+/// What up to [`MAX_PASSES`] passes found.
+enum Passes {
+    /// Pages that fit together, and whether any pass re-sent a page (a
+    /// later pass of `304`s over pages an earlier pass replaced still
+    /// changed the collection).
+    Fit(Vec<StoredPage>, bool),
+    /// Every pass fetched pages across a change.
+    Misfit,
+    Unmergeable,
+}
+
+/// Run passes from `pages` until one fits together (a pass that re-sent a
+/// page is re-checked by [`verify`]), at most [`MAX_PASSES`].
+fn passes(
+    plan: &Plan,
+    mut pages: Vec<StoredPage>,
+    width: usize,
+    fetcher: &mut Fetcher<'_, '_>,
+) -> Result<Passes, ReadError> {
+    let mut resent_any = false;
+    for _ in 0..MAX_PASSES {
+        match pass(plan, &pages, width, fetcher)? {
+            Pass::Done(now, true) if !verify(plan, &now, width, fetcher)? => {
+                pages = now;
+                resent_any = true;
+            }
+            Pass::Done(now, resent) => return Ok(Passes::Fit(now, resent_any || resent)),
+            Pass::Misfit(now) => {
+                pages = now;
+                resent_any = true;
+            }
+            Pass::Unmergeable => return Ok(Passes::Unmergeable),
+        }
+    }
+    Ok(Passes::Misfit)
 }
 
 /// Re-send every page of the collection, each with the ETag of its stored
