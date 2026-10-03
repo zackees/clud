@@ -290,10 +290,7 @@ mod gh_shim {
     //! (#1743, docs/architecture/gh-read-broker.md).
 
     use std::ffi::OsString;
-    use std::io::Read;
     use std::path::Path;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
 
     use super::dispatch::GhSession;
     use crate::shim_telemetry::Recorder;
@@ -305,7 +302,7 @@ mod gh_shim {
     fn relay(session: &GhSession, args: &[OsString], recorder: &Recorder) -> i32 {
         if let (true, Some(watcher)) = (session.fail_fast, session.watcher.as_deref()) {
             match watch_words(args) {
-                Ok(Some(words)) => return watch(&session.target, watcher, &words, recorder),
+                Ok(Some(words)) => return watch(watcher, &words, recorder),
                 Ok(None) => {}
                 Err(code) => return code,
             }
@@ -378,7 +375,7 @@ mod gh_shim {
         positionals.starts_with(&["pr", "checks"])
     }
 
-    fn watch(target: &Path, clud: &Path, words: &[&str], recorder: &Recorder) -> i32 {
+    fn watch(clud: &Path, words: &[&str], recorder: &Recorder) -> i32 {
         let mut selector: Option<&str> = None;
         let mut repo: Option<&str> = None;
         let mut interval: Option<&str> = None;
@@ -421,83 +418,16 @@ mod gh_shim {
         if command != ["pr", "checks"] || !watch_seen {
             return invalid("ambiguous gh command");
         }
-        let number =
-            if selector.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) {
-                selector.unwrap().to_string()
-            } else {
-                let mut lookup = Command::new(target);
-                lookup.arg("pr").arg("view");
-                if let Some(value) = selector {
-                    lookup.arg(value);
-                }
-                lookup.args(["--json", "number", "--jq", ".number"]);
-                if let Some(value) = repo {
-                    lookup.args(["--repo", value]);
-                }
-                let mut child = match lookup
-                    .stderr(Stdio::inherit())
-                    .stdout(Stdio::piped())
-                    .spawn()
-                {
-                    Ok(child) => child,
-                    Err(error) => {
-                        eprintln!("clud gh shim: cannot resolve PR: {error}");
-                        return 126;
-                    }
-                };
-                let Some(stdout) = child.stdout.take() else {
-                    eprintln!("clud gh shim: cannot capture PR number");
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return 126;
-                };
-                let (sender, receiver) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let mut bytes = Vec::new();
-                    let _ = sender.send(stdout.take(129).read_to_end(&mut bytes).map(|_| bytes));
-                });
-                let deadline = Instant::now() + Duration::from_secs(15);
-                let status = loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break status,
-                        Ok(None) if Instant::now() < deadline => {
-                            std::thread::sleep(Duration::from_millis(25));
-                        }
-                        Ok(None) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            eprintln!("clud gh shim: PR lookup timed out");
-                            return 124;
-                        }
-                        Err(error) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            eprintln!("clud gh shim: PR lookup failed: {error}");
-                            return 126;
-                        }
-                    }
-                };
-                if !status.success() {
-                    return status.code().unwrap_or(1);
-                }
-                let bytes = match receiver.recv_timeout(Duration::from_secs(2)) {
-                    Ok(Ok(bytes)) if bytes.len() <= 128 => bytes,
-                    _ => {
-                        eprintln!("clud gh shim: PR lookup output was too large or did not close");
-                        return 2;
-                    }
-                };
-                let value = String::from_utf8_lossy(&bytes).trim().to_string();
-                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-                    eprintln!("clud gh shim: gh pr view did not return a PR number");
-                    return 2;
-                }
-                value
-            };
         let mut args: Vec<OsString> = ["tool", "run", "github/pr_merge_watch.py"]
             .map(OsString::from)
             .to_vec();
-        args.push(number.into());
+        // Refs #1741: a branch, URL or omitted selector goes to the watcher
+        // as is. It resolves the PR on `--repo`, else on origin, with the same
+        // helper it uses for the watch itself. A bare `gh pr view <branch>`
+        // here resolved to the parent repository in a fork.
+        if let Some(value) = selector.filter(|value| !value.is_empty()) {
+            args.push(value.into());
+        }
         // #1742: the upgrade is fail-fast only. The watcher's default also
         // cancels on review activity and on close, which turned an open
         // CodeRabbit thread into a cancelled matrix. On a failure the watcher

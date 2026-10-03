@@ -101,7 +101,9 @@ degraded poll, retried, and never a cancel; three in a row exit 10.
 Without `--repo`, the watch targets the repo of `git remote get-url origin`
 and passes it to every gh call (#1741): a bare gh call in a fork resolves to
 the parent repository. gh's default repo is used only when origin is not a
-github.com URL.
+github.com URL. The PR may be a number, a branch, a PR URL, or omitted for
+the current branch; a branch is looked up on that same repo, and a URL names
+its own.
 
 CodeRabbit never stalls green. Nothing can reproduce CodeRabbit under a
 local bosn -> act gate, and the fleet suppresses it by policy, so by default
@@ -2082,10 +2084,27 @@ def github_repo_from_url(url: str) -> str | None:
     return f"{match.group(1)}/{match.group(2)}" if match else None
 
 
+_GITHUB_PR_URL = re.compile(
+    r"^https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+def github_pr_from_url(url: str) -> tuple[str, int] | None:
+    """(`owner/name`, number) of a github.com pull-request URL, or None."""
+    match = _GITHUB_PR_URL.match(url.strip())
+    return (f"{match.group(1)}/{match.group(2)}", int(match.group(3))) if match else None
+
+
 def _git_origin_url() -> str | None:
+    return _git_line("remote", "get-url", "origin")
+
+
+def _git_line(*args: str) -> str | None:
+    """The trimmed stdout of a git command, or None when it fails."""
     try:
         res = RunningProcess.run(
-            ["git", "remote", "get-url", "origin"],
+            ["git", *args],
             capture_output=True,
             stderr=PIPE,
             text=True,
@@ -2120,6 +2139,36 @@ def _resolve_origin_repo() -> str | None:
 
 
 # ---------- main poll loop ----------------------------------------------------
+
+
+def resolve_pr_selector(
+    selector: str | None, repo: str | None
+) -> tuple[str, int] | tuple[int, str]:
+    """(`owner/name`, PR number) for a PR selector, or (exit code, why).
+
+    The selector is what `gh pr checks` accepts: a number, a branch, a PR URL,
+    or nothing for the current branch. A URL names its own repository. Every
+    other selector resolves on `--repo`, else on origin (#1741): a bare
+    `gh pr view <branch>` in a fork looks the branch up on the parent.
+    """
+    if selector:
+        from_url = github_pr_from_url(selector)
+        if from_url:
+            return from_url
+    repo = repo or _resolve_origin_repo()
+    if not repo:
+        return EXIT_GITHUB_UNREACHABLE, "no repository: pass --repo or add an `origin` remote"
+    if selector and selector.isdigit():
+        return repo, int(selector)
+    branch = selector or _git_line("rev-parse", "--abbrev-ref", "HEAD")
+    if not branch or branch == "HEAD":
+        return EXIT_USAGE, "no PR selector and no current branch (detached HEAD?)"
+    res = gh("pr", "view", branch, "--repo", repo, "--json", "number", "--jq", ".number")
+    number = res.stdout.strip()
+    if not res.ok or not number.isdigit():
+        detail = res.stderr.strip() or f"gh returned {number[:80]!r}"
+        return EXIT_GITHUB_UNREACHABLE, f"no PR for {branch!r} in {repo}: {detail}"
+    return repo, int(number)
 
 
 def _exit_after_cancel(
@@ -3143,7 +3192,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "workflow are cancelled."
         ),
     )
-    p.add_argument("pr_number", type=int, help="PR number to watch")
+    p.add_argument(
+        "pr",
+        nargs="?",
+        default=None,
+        help="PR to watch: a number, a branch, or a PR URL (default: the current "
+        "branch's PR). Anything but a URL resolves on --repo",
+    )
     p.add_argument(
         "--repo",
         help="owner/name (default: the repo of `git remote get-url origin`, so a fork "
@@ -3267,11 +3322,16 @@ def _resolve_cancel_options(ns: argparse.Namespace) -> CancelOptions:
 def main(argv: list[str] | None = None) -> int:
     ns = parse_args(argv if argv is not None else sys.argv[1:])
     opts = _resolve_cancel_options(ns)
-    log = WatchLog.create(ns.pr_number, ns.repo)
+    resolved = resolve_pr_selector(ns.pr, ns.repo)
+    if isinstance(resolved[0], int):
+        print(f"UNRESOLVED  {resolved[1]}", file=sys.stderr)
+        return resolved[0]
+    repo, pr_number = resolved
+    log = WatchLog.create(pr_number, repo)
     # Honor an env override for testing.
     if os.environ.get("CLUD_PR_MERGE_WATCH_DRY_RUN") == "1":
         print(
-            f"DRY-RUN pr={ns.pr_number} repo={ns.repo or 'origin'} "
+            f"DRY-RUN pr={pr_number} repo={repo} "
             f"timeout={ns.timeout} "
             f"require={ns.require or 'branch-protection'} cancel_on={sorted(opts.on)}"
         )
@@ -3282,8 +3342,8 @@ def main(argv: list[str] | None = None) -> int:
     install_kill_handlers()
     try:
         code = watch(
-            ns.pr_number,
-            ns.repo,
+            pr_number,
+            repo,
             ns.interval,
             ns.timeout,
             ns.require,
