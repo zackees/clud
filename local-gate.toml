@@ -24,7 +24,7 @@ tools = ["bosn", "docker"]
 
 # GATE-008: an attested PR head skips the remote routine Linux lanes. They
 # would rerun exactly the bosn plan that just passed, about 5 minutes of PR
-# latency. The static job decides with `ci-lint local-gate verify --trust`,
+# latency. The `static` (CI mode) job decides with `ci-lint local-gate verify --trust`,
 # reading THIS file from the PR's base. It fails closed: a fork or
 # non-writer author, a ci-test/ci-windows/ci-full label, a head not
 # attested for its exact tree, a change to a surface (this file, the
@@ -34,12 +34,13 @@ tools = ["bosn", "docker"]
 [gate.trust]
 mode = "enforce"
 skip = [
+  "ci.yml:static-checks",
   "ci.yml:dylint",
   "ci.yml:lint-linux-x64",
   "ci.yml:build-linux-x64",
   "ci.yml:test-linux-x64-unit",
 ]
-covered-by = { "ci.yml:dylint" = ["pr"], "ci.yml:lint-linux-x64" = ["pr"], "ci.yml:build-linux-x64" = ["pr"], "ci.yml:test-linux-x64-unit" = ["pr"] }
+covered-by = { "ci.yml:static-checks" = ["pr"], "ci.yml:dylint" = ["pr"], "ci.yml:lint-linux-x64" = ["pr"], "ci.yml:build-linux-x64" = ["pr"], "ci.yml:test-linux-x64-unit" = ["pr"] }
 # Labels that select lanes the local plan does not run.
 full-labels = ["ci-test", "ci-windows", "ci-full", "ci:full"]
 # The CI helpers only the skipped jobs run.

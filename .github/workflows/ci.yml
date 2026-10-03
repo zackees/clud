@@ -50,13 +50,16 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------- static --
-  # Everything platform-independent, once, on the cheapest runner. Previously
-  # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
-  # inside ci/lint.py so a ruff error reds out in well under a minute.
+  # The mode job every other job needs. It installs nothing beyond the
+  # runner's cached Python (zackees/ci.yml GEN-018): it pins the source SHA,
+  # resolves the CI mode and decides attested skips, in about 10 s. The lint
+  # itself is `static-checks` below, which runs beside the builds instead of
+  # ahead of them. The job id stays `static` so every `needs.static.outputs`
+  # consumer (and local-gate.toml's `verify`) is unchanged.
   static:
-    name: Static checks
+    name: CI mode
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     outputs:
       mode: ${{ steps.mode.outputs.tier }}
       source_ref: ${{ steps.source.outputs.ref }}
@@ -69,6 +72,7 @@ jobs:
       skip_lint-linux-x64: ${{ steps.gate.outputs.skip_lint-linux-x64 }}
       skip_build-linux-x64: ${{ steps.gate.outputs.skip_build-linux-x64 }}
       skip_test-linux-x64-unit: ${{ steps.gate.outputs.skip_test-linux-x64-unit }}
+      skip_static-checks: ${{ steps.gate.outputs.skip_static-checks }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,12 +125,26 @@ jobs:
         id: gate
         if: github.event_name == 'pull_request'
         run: PYTHONPATH=.ci-lint python -m ci_lint local-gate verify --repo . --trust --github-output
-      # actions/checkout only writes inside the workspace, and ci_lint is not
-      # clud code: the static checks below (banned_imports, ruff) would scan
-      # it. Drop it before they run.
-      - name: Drop ci_lint checkout
-        if: always() && github.event_name == 'pull_request'
-        run: rm -rf .ci-lint
+
+  # Everything platform-independent, once, on the cheapest runner. Previously
+  # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
+  # inside ci/lint.py so a ruff error reds out in well under a minute. The
+  # display name is pinned by ci/release_gate.py.
+  static-checks:
+    name: Static checks
+    needs: static
+    if: needs.static.outputs.skip_static-checks != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ needs.static.outputs.source_ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.12.19"
@@ -418,6 +436,7 @@ jobs:
     if: always()
     needs:
       - static
+      - static-checks
       - dylint
       - lint-linux-x64
       - build-linux-x64
@@ -458,6 +477,7 @@ jobs:
             ${{ needs.test-windows-x64.result }}
           MINIMAL: >-
             ${{ needs.static.result }}
+            ${{ needs.static.outputs.skip_static-checks == 'true' && needs.static-checks.result == 'skipped' && 'success' || needs.static-checks.result }}
             ${{ needs.static.outputs.skip_dylint == 'true' && needs.dylint.result == 'skipped' && 'success' || needs.dylint.result }}
             ${{ needs.static.outputs.skip_lint-linux-x64 == 'true' && needs.lint-linux-x64.result == 'skipped' && 'success' || needs.lint-linux-x64.result }}
             ${{ needs.static.outputs.skip_build-linux-x64 == 'true' && needs.build-linux-x64.result == 'skipped' && 'success' || needs.build-linux-x64.result }}
