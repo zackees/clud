@@ -308,6 +308,17 @@ run is the only test of the merged tree. Manual full CI pins every job to a veri
 candidate SHA. See
 [`ci.md`](docs/architecture/ci.md#current-ci-selection).
 
+**Choose labels from the changed implementation, not the callers.** Business
+logic calling a platform API stays on routine CI. Do not add `ci-full` for a
+shared PTY pump refactor, helper extraction, unchanged OS calls/branches, or
+because a local run failed to complete. Reserve native tiers for changes to
+platform adapters, native API/FFI handling, OS-specific behavior or platform
+runtime contracts. Name that change and what the extra native lanes prove in
+the PR body; choose the smallest tier covering the affected platforms
+(`ci-windows` for Windows-only implementation changes, `ci-full` when macOS
+or the full platform set is affected). Release validation remains full.
+See [label selection](docs/architecture/ci.md#when-to-add-native-ci-labels).
+
 | File | Role |
 | --- | --- |
 | `.github/actions/setup-build/action.yml` | python + uv + soldr + cross tooling. Build side only. |

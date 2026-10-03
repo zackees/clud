@@ -346,6 +346,29 @@ the macOS Dylint cross-target pass runs in every mode. Routine events use
 Linux x64 for fast feedback. Nothing runs the complete matrix before merge
 unless the PR carries `ci-full`; see below.
 
+### When to add native CI labels
+
+`ci-full` is for changes involving platform implementation code, not business
+logic calling platform code. Inspect the diff, not the filename: native
+API/FFI handling, platform adapters/selectors, changed OS branches and
+platform-specific runtime contracts need the affected native lanes. Shared
+orchestration, stream parsing, helper extraction and calls to unchanged
+platform APIs use routine CI. Moving an existing OS branch unchanged into a
+helper is not a platform implementation change.
+
+Before adding a label, identify the changed implementation and the native
+behavior the selected lanes validate in the PR body. Use `ci-windows` for
+Windows-only implementation changes; use `ci-full` for macOS or platform
+changes requiring the complete matrix. An incomplete local test run does
+not justify expanding coverage: routine remote CI supplies that evidence.
+
+PR #1769's shared pump helper extraction is the negative example: it called
+existing platform code and preserved OS branches, so it should have used
+routine CI. Changing termios, ConPTY, native console handling or the OS
+contract itself is a positive example. Release/candidate full validation
+is unchanged. The matrix script honors explicit labels; it does not classify
+source diffs, so agents and reviewers apply this selection rule.
+
 ### What protects `main` today
 
 Verified 2026-09-30 (#1651): `gh api repos/zackees/clud/rulesets` returns
