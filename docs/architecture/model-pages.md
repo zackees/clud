@@ -8,9 +8,13 @@ source, and check time. It is not the installer `manifest.json` catalog.
 `models/publish.py` reads OpenRouter's public OpenAI namespace and
 models.dev's public OpenAI catalog; no key is needed. Only exact stable
 `gpt-N[.N]-sol` and `gpt-N[.N]-luna` IDs can be selected. New observations
-are merged monotonically with the last published document, so one or both
-catalogs disappearing cannot erase a family or fail the model check. A first
+are merged with the last published document, so one or both catalogs
+disappearing cannot erase a family or fail the model check. A first
 publication has reviewed GPT-6 Sol/Luna baseline IDs. The nightly
+publisher also applies `models/selection-policy.json`: a model rejected by
+the ChatGPT Codex backend is excluded even if public catalogs and the previous
+manifest still list it. This permits a Pages rollback for installed clients;
+public API availability alone does not prove ChatGPT backend availability. The
 workflow skips when a successful manual publication is less than 24 hours old;
 manual dispatch always checks. An unchanged selection does not redeploy. A
 failed installer-site fetch or invalid prior document also leaves Pages
@@ -35,6 +39,9 @@ an unavailable Luna cannot downgrade Sol. Explicit CLI and saved provider
 selections continue to outrank this default. The stable Claude discovery ID
 `clud-claude-codex-sol` maps to the current wire ID; the Claude argv remains
 synthetic while bridge requests and native Codex argv carry the real model.
+The direct Claude bridge preserves the launch's resolved wire ID when Claude
+sends that selection's discovery ID, so `--model` does not get replaced by a
+later dynamic family lookup.
 `--dry-run` includes the selected family's actual `codex_model_source` for a
 dynamic Sol or Luna selection.
 

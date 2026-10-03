@@ -92,11 +92,17 @@ def merge_manifest(
     *,
     checked_at: str,
     trigger: str,
+    blocked_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Only advance stable family IDs; a missing catalog row never erases one."""
+    """Advance stable IDs except models rejected by the ChatGPT backend."""
     baseline = previous["families"] if previous else {}
+    blocked = set(blocked_ids)
     return build_manifest(
-        [*BUILT_IN_FAMILIES.values(), *baseline.values(), *observed_ids],
+        [
+            model_id
+            for model_id in [*BUILT_IN_FAMILIES.values(), *baseline.values(), *observed_ids]
+            if model_id not in blocked
+        ],
         checked_at=checked_at,
         trigger=trigger,
         source=SOURCE,

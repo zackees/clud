@@ -103,6 +103,7 @@ Entry and orchestration:
   #898/#899's unified Claude/Codex/DeepSeek multiplexer: ephemeral listener +
   per-launch bearer, deterministic `/v1/models`, provider catalog routing,
   strict credential isolation, request-time effort mapping, route epochs,
+  preservation of the launch wire-model pin when Claude sends its discovery ID,
   native Claude token counting, bounded parser/workers/timeouts, authenticated
   context compact/finalize/clear lifecycle controls, and joined shutdown.
   Per-phase header/body deadlines and a per-frame idle timeout preserve chunked

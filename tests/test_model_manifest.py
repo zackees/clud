@@ -90,6 +90,33 @@ def test_source_outages_never_remove_published_families(
     assert retained["families"] == previous["families"]
 
 
+def test_blocked_chatgpt_model_rolls_back_even_when_catalogs_and_previous_list_it() -> None:
+    previous = build_manifest(["gpt-6.1-sol", "gpt-6-luna"], checked_at="2026-09-30T11:13:37Z")
+    document = merge_manifest(
+        previous,
+        ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"],
+        checked_at="2026-10-03T21:00:00Z",
+        trigger="manual",
+        blocked_ids=["gpt-6.1-sol"],
+    )
+    assert document["families"] == {"sol": "gpt-6-sol", "luna": "gpt-6-luna"}
+    assert document["defaults"]["codex"]["model"] == "gpt-6-sol"
+
+
+def test_model_stage_applies_server_policy_to_existing_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    previous = build_manifest(["gpt-6.1-sol", "gpt-6-luna"], checked_at="2026-09-30T11:13:37Z")
+    monkeypatch.setattr(publish, "_previous_document", lambda: previous)
+    monkeypatch.setattr(publish, "observed_model_ids", lambda: {"gpt-6.1-sol", "gpt-6-luna"})
+    monkeypatch.setattr(publish, "fetch", lambda _: b"preserved installer")
+    assert publish.stage_site(
+        tmp_path, trigger="manual", now=datetime(2026, 10, 3, 21, tzinfo=timezone.utc)
+    ) == "publish"
+    staged = json.loads((tmp_path / "models" / "manifest.json").read_text())
+    assert staged["families"]["sol"] == "gpt-6-sol"
+
+
 def test_reviewed_baseline_upgrades_legacy_family_during_outage() -> None:
     previous = build_manifest(["gpt-5.6-sol", "gpt-5.6-luna"], checked_at="2026-09-25T21:00:00Z")
     merged = merge_manifest(previous, [], checked_at="2026-09-26T21:00:00Z", trigger="manual")

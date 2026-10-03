@@ -1,0 +1,5 @@
+{
+  "blocked_chatgpt_backend_models": [
+    "gpt-6.1-sol"
+  ]
+}
