@@ -91,7 +91,7 @@ helpers. Linux-only implementation changes need no full matrix.
 Linux is the one platform agents can fully validate locally:
 
 ```bash
-bosn ci run --workspace . --trigger pr --job static --wait
+bosn ci run --workspace . --trigger pr --job static-checks --wait
 uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run   # bosn PR plan + stamp (attested skip)
 ```
 

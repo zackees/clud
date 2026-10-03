@@ -74,7 +74,8 @@ not the edit loop: the PR's GitHub Actions run is the CI of record.
 ```bash
 docker info
 bosn ci run --workspace . --trigger pr --wait              # the PR's jobs: static, build, clippy, dylint, Linux unit
-bosn ci run --workspace . --trigger pr --job static --wait # formatting, ruff and static checks only
+bosn ci run --workspace . --trigger pr --job static-checks --wait # formatting, ruff and static guards
+bosn ci run --workspace . --trigger pr --job lint-linux-x64 --wait # Clippy and doc-tests
 bosn ci run --workspace . --trigger pr --mode test --wait  # adds the ci-test lanes act can run (Linux integration)
 bosn ci report RUN                                         # verdict and the first failure
 bosn ci logs RUN --follow                                  # live output; --job/--step narrow it
@@ -121,7 +122,7 @@ slows every other one. On 2026-10-02 a one-module fix spent about 50 minutes
 in the old local act path (#1715). So:
 
 - **Run the full PR plan at most once per change**, before the first push.
-  Don't loop it. `--job static` (a few minutes) is fine for formatting and
+  Don't loop it. `--job static-checks` (a few minutes) is fine for formatting and
   lint. RED can come from that one local run or from the PR's first CI run.
   GREEN comes from the PR's CI, which is the CI of record: after a fix, push
   and watch the PR rather than rerunning locally.
@@ -252,6 +253,11 @@ accepted that stamp but reran the routine jobs because the workflow changed
 failed during Docker container removal before unit execution
 ([ci.yml#250](https://github.com/zackees/ci.yml/issues/250)) and earned no
 stamp. A successful build alone does not justify attesting a skipped suite.
+
+[The ordinary attested PR #1782](https://github.com/zackees/clud/pull/1782)
+[passed in 20 s](https://github.com/zackees/clud/actions/runs/37110407536):
+all five routine job groups skipped, and `CI OK` accepted their verified
+local proof. Its own local gate had executed every selected check in 473 s.
 
 When inspecting `bosn ci report`, also inspect the expanded matrix children
 in `bosn ci show RUN` and their logs: the report can list the unexpanded
