@@ -2768,6 +2768,7 @@ def watch(  # noqa: C901
     no_checks_grace: int = DEFAULT_NO_CHECKS_GRACE_SEC,
     max_queued: int | None = None,
     coderabbit_wait: int = DEFAULT_CODERABBIT_WAIT_SEC,
+    broker_wait: bool = True,
 ) -> int:
     deadline = time.monotonic() + timeout
     snapshot: PRSnapshot | None = None
@@ -2833,7 +2834,7 @@ def watch(  # noqa: C901
     require_re = re.compile(require_pattern) if require_pattern else None
     # In a clud session with the read broker, wait on it between polls
     # instead of sleeping (#1743 phase 3).
-    subscription = BrokerSubscription.from_env()
+    subscription = BrokerSubscription.from_env() if broker_wait else None
     if log:
         log.emit("subscription", outcome="available" if subscription else "polling")
 
@@ -3556,6 +3557,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="exit 11 when a run has waited this many seconds for a runner (default: off)",
     )
     p.add_argument(
+        "--no-broker-wait",
+        dest="broker_wait",
+        action="store_false",
+        help="in a clud session with the gh read broker, poll at --interval instead of "
+        "waiting on the broker for a change between polls (#1743)",
+    )
+    p.add_argument(
         "--coderabbit-wait",
         type=int,
         default=DEFAULT_CODERABBIT_WAIT_SEC,
@@ -3676,6 +3684,7 @@ def main(argv: list[str] | None = None) -> int:
             no_checks_grace=ns.no_checks_grace,
             max_queued=ns.max_queued,
             coderabbit_wait=ns.coderabbit_wait,
+            broker_wait=ns.broker_wait,
         )
     except WatchKilled as killed:
         print(f"KILLED  {killed}", file=sys.stderr)

@@ -198,7 +198,7 @@ def gate(watcher, rows: list, *, mergeable: str = "MERGEABLE"):
     )
 
 
-def drive(watcher, tmp_path, monkeypatch, polls: list, sub, *, max_queued=None):
+def drive(watcher, tmp_path, monkeypatch, polls: list, sub, *, max_queued=None, broker_wait=True):
     """Run `watch()` over scripted gate snapshots with `sub` as the broker."""
     log = watcher.WatchLog.create(527, "o/r", root=tmp_path)
     monkeypatch.setattr(
@@ -228,7 +228,9 @@ def drive(watcher, tmp_path, monkeypatch, polls: list, sub, *, max_queued=None):
     monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
     opts = watcher.CancelOptions({"fail"}, "runs", 30, False, False, True, False)
     with pytest.raises(SystemExit) as exc:
-        watcher.watch(527, "o/r", 20, 3600, None, opts, log, max_queued=max_queued)
+        watcher.watch(
+            527, "o/r", 20, 3600, None, opts, log, max_queued=max_queued, broker_wait=broker_wait
+        )
     return exc.value.code, seen["polls"], sleeps
 
 
@@ -371,3 +373,20 @@ def test_rest_reads_in_a_broker_session_go_through_the_broker(watcher, monkeypat
     assert watcher.gh_json("api", "repos/o/r/pulls/1/reviews?per_page=100") == []
     # A plain read: the shim brokers it (an `-i` or `-H` read it would not).
     assert calls == [("api", "repos/o/r/pulls/1/reviews?per_page=100")]
+
+
+def test_no_broker_wait_polls_at_the_interval(watcher, tmp_path, monkeypatch) -> None:
+    sub = FakeSubscription()
+    code, _polls, sleeps = drive(
+        watcher,
+        tmp_path,
+        monkeypatch,
+        [lambda w: gate(w, PENDING), lambda w: gate(w, FAILED)],
+        sub,
+        broker_wait=False,
+    )
+    assert code == watcher.EXIT_REQUIRED_FAIL
+    assert sleeps
+    assert not sub.waits
+    assert watcher.parse_args(["527", "--no-broker-wait"]).broker_wait is False
+    assert watcher.parse_args(["527"]).broker_wait is True

@@ -276,7 +276,7 @@ fn a_deferred_subscription_sleeps_to_the_reset_and_says_so() {
     below_floor(&w);
     // One more fetch learns the low window.
     w.now.fetch_add(RUNS_TTL_MS, Ordering::SeqCst);
-    w.read(RUN, true);
+    assert!(w.read(RUN, true).0.is_ok());
     w.now.fetch_add(RUNS_TTL_MS, Ordering::SeqCst);
     let start = w.elapsed();
     let reply = w
