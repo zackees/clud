@@ -92,7 +92,7 @@ Linux is the one platform agents can fully validate locally:
 
 ```bash
 bosn ci run --workspace . --trigger pr --job static --wait
-bosn ci run --workspace . --trigger pr --wait   # Linux clippy, build, Rust + Python unit suites
+uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run   # bosn PR plan + stamp (attested skip)
 ```
 
 - Never run host `cargo`, `bash lint` or `bash test`.

@@ -106,7 +106,7 @@ Read that first. This page lists only what differs on Windows.
 There is no local Windows, and `act` cannot run Windows.
 
 1. Run the shared Linux checks first:
-   `bosn ci run --workspace . --trigger pr --wait`. See terminal-pty.md
+   `ci-lint local-gate run` (the bosn PR plan plus a stamp; see CLAUDE.md). See terminal-pty.md
    § Validation for what it covers.
 2. Add `ci-windows` only when the diff changes Windows platform
    implementation or its native runtime contract: ConPTY/Win32 API
