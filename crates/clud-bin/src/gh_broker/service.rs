@@ -514,6 +514,24 @@ impl GhBroker {
     }
 }
 
+impl GhBroker {
+    /// The daemon's `/gh/ledger` handler body: the newest
+    /// [`super::LEDGER_ROWS`] rows, oldest first.
+    pub fn handle_ledger(&self) -> (u16, Vec<u8>) {
+        match self.ledger() {
+            Ok(mut rows) => {
+                let skip = rows.len().saturating_sub(super::LEDGER_ROWS);
+                rows.drain(..skip);
+                match serde_json::to_vec(&rows) {
+                    Ok(bytes) => (200, bytes),
+                    Err(error) => (500, error_json(&error.to_string())),
+                }
+            }
+            Err(error) => (500, error_json(&error)),
+        }
+    }
+}
+
 fn error_json(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({ "error": message })).unwrap_or_default()
 }

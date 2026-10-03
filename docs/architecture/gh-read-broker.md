@@ -277,7 +277,9 @@ page was a `304`), `incremental` (a merged read re-sent at least one page;
 `changed` counts the objects added or changed, `removed` those deleted
 upstream), `full` (an exact-URL fetch, or a merged collection's first fetch
 or a re-fetch at a wider width), `passthrough` or `error`.
-`upstream_requests` counts every request, free `304`s included. Objects are pruned oldest-first above 4,096, merged
+`upstream_requests` counts every request, free `304`s included. `GET /gh/ledger` on the daemon's
+dashboard listener (capability cookie, like `/gh/read`) returns the newest
+1,000 rows as JSON, oldest first. Objects are pruned oldest-first above 4,096, merged
 collections above 1,024, tags above 4,096 (a pruned tag raises the global
 stamp to its own, so pruning never makes a read fresher) and ledger rows
 above 20,000. Calls the shim
@@ -316,7 +318,7 @@ stays off. So after an upgrade such a session's next statusline tick or
 | `crates/clud-bin/src/gh_broker/upstream.rs` | `gh api -i` transport and parser |
 | `crates/clud-bin/src/shim_main.rs` | `gh_shim::brokered_read`, invalidation after writes |
 | `crates/clud-bin/src/shim_main/dispatch.rs` | builds the `BrokerClient` from the session env, or from the setting when the key is absent |
-| `crates/clud-bin/src/daemon/http.rs` | `/gh/read` (own thread) and `/gh/invalidate` routes |
+| `crates/clud-bin/src/daemon/http.rs` | `/gh/read` (own thread), `/gh/invalidate` and `/gh/ledger` routes |
 
 Tests: `gh_broker` unit tests cover classification, TTL hits with zero
 upstream requests, `304` revalidation, single-flight, invalidation, identity

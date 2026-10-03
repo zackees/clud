@@ -738,3 +738,19 @@ fn the_invalidate_route_takes_valid_tags_or_falls_back_to_global() {
         assert!(store.stale_after(&other).unwrap() > stamp, "{body:?}");
     }
 }
+
+#[test]
+fn the_ledger_route_returns_rows_with_removed_counts() {
+    let w = world(three_comments());
+    w.read(COMMENTS);
+    w.server().comments.remove(0);
+    w.advance(DEFAULT_TTL_MS);
+    w.read(COMMENTS);
+    let (status, body) = w.broker.handle_ledger();
+    assert_eq!(status, 200);
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1]["outcome"], "incremental");
+    assert_eq!(rows[1]["removed"], 1);
+    assert!(rows[0].get("removed").is_none());
+}

@@ -32,6 +32,11 @@ pub const READ_PATH: &str = "/gh/read";
 /// Daemon route that marks cached reads stale after a possible write: those
 /// carrying the posted `tags`, or every read when there are none.
 pub const INVALIDATE_PATH: &str = "/gh/invalidate";
+/// Daemon route (GET) that returns the newest ledger rows, oldest first, as
+/// a JSON array: what each brokered read cost upstream.
+pub const LEDGER_PATH: &str = "/gh/ledger";
+/// Rows the ledger route returns at most.
+pub const LEDGER_ROWS: usize = 1000;
 /// The broker's store, under the daemon state dir.
 pub const STORE_FILE: &str = "gh-broker.redb";
 
