@@ -175,7 +175,8 @@ def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
     assert "suite: unit" in unit
     assert "suite: integration" in integration
     assert "if: needs.static.outputs.mode != 'minimal'" in integration
-    assert "${{ needs.test-linux-x64-unit.result }}" in gate
+    # Wrapped in the attested-skip mapping (GATE-008/010), not a bare result.
+    assert "needs.test-linux-x64-unit.result" in gate
     assert "${{ needs.test-linux-x64-integration.result }}" in gate
     minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
     extended = gate.split("EXTENDED: >-", 1)[1].split("FULL: >-", 1)[0]
