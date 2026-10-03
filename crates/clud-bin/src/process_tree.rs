@@ -653,9 +653,7 @@ mod tests {
         }
         let Some(mut holder) = holder else {
             kill_tree(orphan.pid);
-            eprintln!(
-                "inconclusive: PID {stale_parent} was not recycled after {attempts} spawns"
-            );
+            eprintln!("inconclusive: PID {stale_parent} was not recycled after {attempts} spawns");
             return;
         };
         eprintln!("PID {stale_parent} recycled after {attempts} spawns");
