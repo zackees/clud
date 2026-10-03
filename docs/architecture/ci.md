@@ -235,6 +235,25 @@ never read attestations. The gate runs in `shadow` mode: an unattested head is
 reported, never failed. Plain `bosn ci run` remains valid; it just earns no
 skip.
 
+### Default-branch reuse evidence (GEN-021)
+
+The `CI mode` job probes `main` pushes with the pinned checker's
+`ci-lint reuse-check --mode shadow` ([zackees/ci.yml#157](https://github.com/zackees/ci.yml/issues/157)).
+It compares the merged tree with its associated PR head and requires a recent
+successful PR run containing all seven routine check cells: static checks,
+Dylint, Clippy, build, and the three unit shards. Attested PR jobs that were
+skipped do not count as successful executed jobs for this probe.
+
+The mode job records the reason, tree, proving PR/run and API-call count in
+its summary; `CI OK` repeats the provenance. No job condition consumes this
+decision, so all selected `main` jobs still run. API errors or missing proof
+report no reuse. PR and release events do not run the probe.
+
+Promotion to skipping requires the upstream measurement window (at least
+14 days and 100 decisive runs, with no unexplained false reuse), plus a
+separate implementation of the enforced gate. Compare `reuse-report` against
+the actual executed job names before promotion; renames fail closed.
+
 ### Manual Windows probes (ignored tests)
 
 <!-- manual-windows-probes -->
