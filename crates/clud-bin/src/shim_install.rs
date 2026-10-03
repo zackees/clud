@@ -542,35 +542,24 @@ mod tests {
             std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
         );
         replace_file(&clud, b"newest install");
-        let refused: [(&str, Box<dyn Fn(&mut std::collections::HashMap<_, _>)>); 4] = [
-            (
-                "not this session's installed clud",
-                Box::new(|v| {
-                    v.insert(shim_registry::CLUD_EXE_KEY, newer.clone().into_os_string());
-                }),
-            ),
+        let session = || running_session(home.path(), &clud);
+        let mut foreign_exe = session();
+        foreign_exe.insert(shim_registry::CLUD_EXE_KEY, newer.clone().into_os_string());
+        let mut other_abi = session();
+        other_abi.insert(shim_registry::ABI_KEY, "0".into());
+        let mut no_abi = session();
+        no_abi.remove(shim_registry::ABI_KEY);
+        let mut other_dir = session();
+        other_dir.insert(shim_registry::SESSION_DIR_KEY, bin.path().into());
+        for (label, vars) in [
+            ("not this session's installed clud", foreign_exe),
             (
                 "another shim ABI: the refreshed alias would fail open",
-                Box::new(|v| {
-                    v.insert(shim_registry::ABI_KEY, "0".into());
-                }),
+                other_abi,
             ),
-            (
-                "no ABI stamp",
-                Box::new(|v| {
-                    v.remove(shim_registry::ABI_KEY);
-                }),
-            ),
-            (
-                "a session dir that is not the shared one",
-                Box::new(|v| {
-                    v.insert(shim_registry::SESSION_DIR_KEY, bin.path().into());
-                }),
-            ),
-        ];
-        for (label, edit) in refused {
-            let mut vars = running_session(home.path(), &clud);
-            edit(&mut vars);
+            ("no ABI stamp", no_abi),
+            ("a session dir that is not the shared one", other_dir),
+        ] {
             assert!(!refresh(home.path(), &clud, &vars), "{label}");
             assert!(links_to(&newer, &alias), "{label}");
         }
