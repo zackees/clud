@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from tests import process
@@ -79,6 +81,101 @@ def _cleanup_daemon(state_dir: Path) -> None:
     if pid_is_alive(pid):
         kill_process(pid)
         wait_for_pids_to_exit([pid], timeout=15)
+
+
+def _mark_daemon_newer(state_dir: Path) -> None:
+    info_path = state_dir / "daemon.json"
+    info = _read_daemon_info(state_dir)
+    info["version"] = "999.0.0"
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+
+def test_daemon_stop_and_restart_recover_from_newer_version(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    env = managed_env(mock_env, state_dir)
+
+    try:
+        started = _run_restart(clud_binary, env)
+        assert started.returncode == 0, started.stderr
+        first_pid = int(_read_daemon_info(state_dir)["pid"])
+        _mark_daemon_newer(state_dir)
+
+        stopped = _run_stop(clud_binary, env)
+        assert stopped.returncode == 0, stopped.stderr
+        wait_for_pids_to_exit([first_pid], timeout=15)
+        assert not (state_dir / "daemon.json").exists()
+
+        started = _run_restart(clud_binary, env)
+        assert started.returncode == 0, started.stderr
+        second_pid = int(_read_daemon_info(state_dir)["pid"])
+        _mark_daemon_newer(state_dir)
+
+        restarted = _run_restart(clud_binary, env)
+        assert restarted.returncode == 0, restarted.stderr
+        wait_for_pids_to_exit([second_pid], timeout=15)
+        replacement_pid = int(_read_daemon_info(state_dir)["pid"])
+        assert replacement_pid != second_pid
+        assert pid_is_alive(replacement_pid)
+    finally:
+        _cleanup_daemon(state_dir)
+
+
+def test_daemon_stop_falls_back_when_old_daemon_rejects_shutdown(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    state_dir.mkdir()
+    env = managed_env(mock_env, state_dir)
+    env["CLUD_DAEMON_WIRE"] = "json"
+    port_file = tmp_path / "port"
+    peer = process.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import socket,sys,pathlib\n"
+            "listener=socket.socket()\n"
+            "listener.bind(('127.0.0.1',0))\n"
+            "listener.listen(1)\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(listener.getsockname()[1]))\n"
+            "conn,_=listener.accept()\n"
+            "with conn:\n"
+            "    conn.recv(65536)\n"
+            "    conn.sendall(b'{\"op\":\"error\",\"message\":\"old client refused\"}\\n')\n"
+            "import time; time.sleep(60)\n",
+            str(port_file),
+        ],
+        stdout=process.PIPE,
+        stderr=process.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not port_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert port_file.exists(), "fake daemon failed to start"
+        assert peer.pid is not None
+        (state_dir / "daemon.json").write_text(
+            json.dumps(
+                {
+                    "pid": peer.pid,
+                    "pid_start": int(psutil.Process(peer.pid).create_time()),
+                    "port": int(port_file.read_text()),
+                    "version": "999.0.0",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        stopped = _run_stop(clud_binary, env)
+        assert stopped.returncode == 0, stopped.stderr
+        wait_for_pids_to_exit([peer.pid], timeout=15)
+        assert not (state_dir / "daemon.json").exists()
+    finally:
+        if peer.poll() is None:
+            peer.kill()
+        peer.wait(timeout=10)
 
 
 def test_daemon_restart_replaces_pid_and_restores_dashboard_listener(
