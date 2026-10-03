@@ -30,6 +30,8 @@
 //! `CTRL_BREAK_EVENT` to the child's console process group so a
 //! well-behaved agent can flush state before the hard `kill_tree` follows.
 
+use std::collections::HashMap;
+
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
 use crate::process_identity::ProcessIdentity;
@@ -269,67 +271,233 @@ fn is_console_host(process: &sysinfo::Process) -> bool {
     is_console_host_image(&process.name().to_string_lossy())
 }
 
+/// Parent → children index of a snapshot, keeping only links that can be real.
+///
+/// Every kill-path tree walk goes through this, never through a raw
+/// `process.parent()` map (#1738). Windows never rewrites a process's parent
+/// PID when the parent exits, and it recycles PIDs, so a process whose parent
+/// died looks like a child of whatever later process is handed that PID. On a
+/// GitHub runner some ancestor of the pytest process has a dead parent; when a
+/// clud daemon was handed that PID, killing the daemon's tree walked *up* into
+/// the runner and killed pytest. On a desktop the same walk reaches
+/// `explorer.exe`, whose parent `userinit.exe` exits at logon.
+///
+/// A real child is never older than its parent, so a child that started before
+/// the process now holding its parent PID is dropped. A child with an unknown
+/// start time is dropped too: nothing proves the link. sysinfo's start times
+/// are whole seconds, and a PID is often recycled within the second its orphan
+/// was created, so on Windows a same-second link is settled by the exact
+/// creation times and dropped if either cannot be read.
+pub(crate) fn children_index(system: &System) -> HashMap<Pid, Vec<Pid>> {
+    let rows = system.processes().iter().map(|(pid, process)| {
+        (
+            pid.as_u32(),
+            process.parent().map(Pid::as_u32),
+            process.start_time(),
+        )
+    });
+    index_children_with(rows, &same_second_link_is_real)
+        .into_iter()
+        .map(|(parent, children)| {
+            (
+                Pid::from_u32(parent),
+                children.into_iter().map(Pid::from_u32).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Settle a link whose parent and child started in the same whole second.
+#[cfg(windows)]
+fn same_second_link_is_real(parent: u32, child: u32) -> bool {
+    use crate::process_identity::creation_ticks;
+    matches!(
+        (creation_ticks(parent), creation_ticks(child)),
+        (Some(parent), Some(child)) if child >= parent
+    )
+}
+
+/// POSIX re-parents orphans, so a same-second parent link is always real.
+#[cfg(not(windows))]
+fn same_second_link_is_real(_parent: u32, _child: u32) -> bool {
+    true
+}
+
+/// Pure core of [`children_index`] over `(pid, parent_pid, start_time)` rows,
+/// keeping every same-second link.
+#[cfg(test)]
+pub(crate) fn index_children<I>(rows: I) -> HashMap<u32, Vec<u32>>
+where
+    I: IntoIterator<Item = (u32, Option<u32>, u64)>,
+{
+    index_children_with(rows, &|_, _| true)
+}
+
+/// [`index_children`] with `same_second(parent, child)` deciding the links
+/// whose whole-second start times are equal.
+pub(crate) fn index_children_with<I>(
+    rows: I,
+    same_second: &dyn Fn(u32, u32) -> bool,
+) -> HashMap<u32, Vec<u32>>
+where
+    I: IntoIterator<Item = (u32, Option<u32>, u64)>,
+{
+    let rows: Vec<(u32, Option<u32>, u64)> = rows.into_iter().collect();
+    let start_times: HashMap<u32, u64> = rows
+        .iter()
+        .map(|&(pid, _, start_time)| (pid, start_time))
+        .collect();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(pid, parent, start_time) in &rows {
+        let Some(parent) = parent.filter(|&parent| parent != pid) else {
+            continue;
+        };
+        if start_time == crate::process_identity::UNKNOWN_START_TIME {
+            continue;
+        }
+        let parent_start = start_times.get(&parent).copied();
+        if !crate::process_scan::parent_is_plausible(parent_start, start_time) {
+            continue;
+        }
+        if parent_start == Some(start_time) && !same_second(parent, pid) {
+            continue;
+        }
+        children.entry(parent).or_default().push(pid);
+    }
+    children
+}
+
+/// Depth-first walk of `children` from `root`, pruning every subtree whose
+/// root `admit` rejects. Each PID is visited once, so a cycle of same-second
+/// parent links cannot loop forever.
+fn walk_descendants(
+    children: &HashMap<Pid, Vec<Pid>>,
+    root: Pid,
+    admit: &mut dyn FnMut(Pid) -> bool,
+) -> Vec<Pid> {
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut stack = vec![root];
+    let mut descendants = Vec::new();
+    while let Some(current) = stack.pop() {
+        for &child in children.get(&current).map(Vec::as_slice).unwrap_or(&[]) {
+            if !seen.insert(child) || !admit(child) {
+                continue;
+            }
+            descendants.push(child);
+            stack.push(child);
+        }
+    }
+    descendants
+}
+
 #[cfg(windows)]
 fn descendant_identities_filtered(
     system: &System,
     root: Pid,
     may_kill: &dyn Fn(u32) -> bool,
 ) -> Vec<ProcessIdentity> {
-    let mut children: std::collections::HashMap<Pid, Vec<Pid>> = std::collections::HashMap::new();
-    for (pid, process) in system.processes() {
-        if let Some(parent) = process.parent() {
-            children.entry(parent).or_default().push(*pid);
-        }
-    }
-
-    let mut stack = vec![root];
-    let mut descendants = Vec::new();
-    while let Some(current) = stack.pop() {
-        if let Some(next) = children.get(&current) {
-            for child in next {
-                let Some(process) = system.process(*child) else {
-                    continue;
-                };
-                if !may_kill(child.as_u32()) || is_console_host(process) {
-                    continue;
-                }
-                descendants.push(ProcessIdentity::new(child.as_u32(), process.start_time()));
-                stack.push(*child);
-            }
-        }
-    }
-    descendants
+    let children = children_index(system);
+    walk_descendants(&children, root, &mut |child| {
+        system
+            .process(child)
+            .is_some_and(|process| may_kill(child.as_u32()) && !is_console_host(process))
+    })
+    .into_iter()
+    .filter_map(|child| {
+        system
+            .process(child)
+            .map(|process| ProcessIdentity::new(child.as_u32(), process.start_time()))
+    })
+    .collect()
 }
 
-/// BFS the parent-to-child graph from `root`, pruning any subtree whose root
-/// `may_kill` rejects.
+/// Walk the parent-to-child graph from `root`, pruning any subtree whose root
+/// `may_kill` rejects. Pruned, not just skipped: an exempt process keeps its
+/// own descendants, so the walk never descends past it.
 fn descendant_pids_filtered(
     system: &System,
     root: Pid,
     may_kill: &dyn Fn(u32) -> bool,
 ) -> Vec<Pid> {
-    let mut children: std::collections::HashMap<Pid, Vec<Pid>> = std::collections::HashMap::new();
-    for (pid, process) in system.processes() {
-        if let Some(parent) = process.parent() {
-            children.entry(parent).or_default().push(*pid);
-        }
+    walk_descendants(&children_index(system), root, &mut |child| {
+        may_kill(child.as_u32())
+    })
+}
+
+/// Every descendant of `root` in `system`, through [`children_index`].
+pub(crate) fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
+    walk_descendants(&children_index(system), root, &mut |_| true)
+}
+
+#[cfg(test)]
+mod stale_parent_tests {
+    use super::{index_children, index_children_with};
+
+    // (pid, parent, start_time)
+    const RUNNER: u32 = 100;
+    const PYTEST: u32 = 101;
+    const RECYCLED: u32 = 50;
+
+    #[test]
+    fn child_older_than_the_pid_holder_is_not_its_child() {
+        // The runner's real parent (PID 50) died long ago. A clud daemon
+        // started at t=900 was handed PID 50.
+        let rows = [
+            (RUNNER, Some(RECYCLED), 100),
+            (PYTEST, Some(RUNNER), 200),
+            (RECYCLED, Some(PYTEST), 900),
+        ];
+        let children = index_children(rows);
+        assert_eq!(children.get(&RECYCLED), None, "{children:?}");
+        assert_eq!(children.get(&RUNNER), Some(&vec![PYTEST]));
+        assert_eq!(children.get(&PYTEST), Some(&vec![RECYCLED]));
     }
-    let mut stack = vec![root];
-    let mut descendants = Vec::new();
-    while let Some(current) = stack.pop() {
-        if let Some(next) = children.get(&current) {
-            for child in next {
-                // Pruned, not just skipped: an exempt process keeps its own
-                // descendants, so we never descend past it.
-                if !may_kill(child.as_u32()) {
-                    continue;
-                }
-                descendants.push(*child);
-                stack.push(*child);
-            }
-        }
+
+    #[test]
+    fn child_started_in_the_same_second_as_its_parent_is_kept() {
+        let children = index_children([(10, None, 500), (11, Some(10), 500)]);
+        assert_eq!(children.get(&10), Some(&vec![11]));
     }
-    descendants
+
+    #[test]
+    fn same_second_link_is_settled_by_the_tie_breaker() {
+        let rows = [(10, None, 500), (11, Some(10), 500), (12, Some(10), 501)];
+        let children = index_children_with(rows, &|_, child| child != 11);
+        assert_eq!(children.get(&10), Some(&vec![12]));
+    }
+
+    #[test]
+    fn child_with_unknown_start_time_is_not_linked() {
+        let children = index_children([(10, None, 500), (11, Some(10), 0)]);
+        assert_eq!(children.get(&10), None);
+    }
+
+    #[test]
+    fn child_of_a_dead_parent_is_not_linked() {
+        let children = index_children([(11, Some(10), 500)]);
+        assert!(children.is_empty(), "{children:?}");
+    }
+
+    #[test]
+    fn self_parented_process_is_not_its_own_child() {
+        let children = index_children([(4, Some(4), 500)]);
+        assert!(children.is_empty(), "{children:?}");
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::{walk_descendants, Pid};
+    use std::collections::HashMap;
+
+    #[test]
+    fn same_second_parent_cycle_terminates() {
+        let mut children = HashMap::new();
+        children.insert(Pid::from_u32(1), vec![Pid::from_u32(2)]);
+        children.insert(Pid::from_u32(2), vec![Pid::from_u32(1)]);
+        let out = walk_descendants(&children, Pid::from_u32(1), &mut |_| true);
+        assert_eq!(out, vec![Pid::from_u32(2)]);
+    }
 }
 
 /// Whether Ctrl+C teardown should start with a cooperative Ctrl+Break.
@@ -567,6 +735,111 @@ mod tests {
             start.elapsed() < Duration::from_secs(5),
             "kill_tree took too long: {:?}",
             start.elapsed()
+        );
+    }
+
+    /// Start time of `pid` if it is alive, from a fresh minimal snapshot.
+    #[cfg(windows)]
+    fn live_start_time(pid: u32) -> Option<u64> {
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        system.process(Pid::from_u32(pid)).map(|p| p.start_time())
+    }
+
+    /// #1738: Windows never rewrites a process's parent PID when the parent
+    /// exits, and it recycles PIDs. A process whose parent died therefore
+    /// looks like a child of whatever later process is handed that PID. A tree
+    /// kill rooted at the recycled PID must not take the older process with it.
+    ///
+    /// The CI shape that hit this: some ancestor of the pytest runner has a
+    /// dead parent; a clud daemon is later handed that PID; the daemon's tree
+    /// kill then walks *up* into the runner and kills pytest.
+    #[cfg(windows)]
+    #[test]
+    fn kill_tree_spares_older_process_whose_parent_pid_was_recycled() {
+        use std::process::{Command, Stdio};
+
+        // `start /b` makes ping.exe a child of this cmd.exe, which then exits
+        // and leaves ping.exe with a parent PID that names a dead process.
+        let mut launcher = Command::new("cmd")
+            .args(["/c", "start", "", "/b", "ping", "-n", "120", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cmd /c start /b ping");
+        let stale_parent = launcher.id();
+        launcher.wait().expect("wait for launcher cmd.exe");
+        // Close our handle: Windows keeps a PID reserved while any handle to
+        // the dead process is open.
+        drop(launcher);
+
+        let mut orphan = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while orphan.is_none() && std::time::Instant::now() < deadline {
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            orphan = system.processes().iter().find_map(|(pid, process)| {
+                (process.parent() == Some(Pid::from_u32(stale_parent))
+                    && process.name().eq_ignore_ascii_case("ping.exe"))
+                .then(|| ProcessIdentity::new(pid.as_u32(), process.start_time()))
+            });
+            if orphan.is_none() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        let orphan = orphan.expect("ping.exe launched by `start /b` never appeared");
+
+        // Recycle the dead parent's PID onto a fresh process. Non-matching
+        // candidates are released at once; Windows hands freed PIDs back out.
+        let mut holder = None;
+        let mut attempts = 0u32;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            attempts += 1;
+            let mut candidate = Command::new("ping")
+                .args(["-n", "120", "127.0.0.1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn recycling candidate");
+            if candidate.id() == stale_parent {
+                holder = Some(candidate);
+                break;
+            }
+            let _ = candidate.kill();
+            let _ = candidate.wait();
+        }
+        let Some(mut holder) = holder else {
+            kill_tree(orphan.pid);
+            eprintln!("inconclusive: PID {stale_parent} was not recycled after {attempts} spawns");
+            return;
+        };
+        eprintln!("PID {stale_parent} recycled after {attempts} spawns");
+
+        kill_tree(holder.id());
+        std::thread::sleep(Duration::from_millis(500));
+        let survived = live_start_time(orphan.pid) == Some(orphan.start_time);
+
+        let _ = holder.kill();
+        let _ = holder.wait();
+        if survived {
+            kill_tree(orphan.pid);
+        }
+        assert!(
+            survived,
+            "kill_tree({stale_parent}) killed PID {} (started {}), which predates the root \
+             and only names it as parent because Windows recycled the PID",
+            orphan.pid, orphan.start_time
         );
     }
 

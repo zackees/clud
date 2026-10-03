@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
 use crate::process_identity::ProcessIdentity;
@@ -90,22 +88,9 @@ fn signal_tree_in(system: &System, root: Pid, signal: Signal) {
     }
 }
 
+/// Descendants of `root`, through the start-time-gated index every clud tree
+/// walk shares (`process_tree::children_index`, #1738): a stale parent PID that
+/// Windows recycled onto `root` must not pull an older process into the kill.
 pub(super) fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
-    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-    for (pid, process) in system.processes() {
-        if let Some(parent) = process.parent() {
-            children.entry(parent).or_default().push(*pid);
-        }
-    }
-    let mut stack = vec![root];
-    let mut descendants = Vec::new();
-    while let Some(current) = stack.pop() {
-        if let Some(next) = children.get(&current) {
-            for child in next {
-                descendants.push(*child);
-                stack.push(*child);
-            }
-        }
-    }
-    descendants
+    crate::process_tree::descendant_pids(system, root)
 }

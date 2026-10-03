@@ -8,9 +8,12 @@ suite needs while delegating every launch and stream drain to running-process.
 from __future__ import annotations
 
 import signal
+from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import psutil
 from running_process import (
     CREATE_NEW_PROCESS_GROUP,
     DEVNULL,
@@ -20,7 +23,6 @@ from running_process import (
     PseudoTerminalProcess,
     RunningProcess,
     TimeoutExpired,
-    terminate_process_tree,
 )
 
 # Win32 constants accepted by running-process's ``creationflags`` argument.
@@ -212,6 +214,70 @@ class RunningChild:
 
 # Preserve familiar test call sites without importing the banned stdlib module.
 Popen = RunningChild
+
+
+def index_children(
+    rows: Iterable[tuple[int, int | None, float | None]],
+) -> dict[int, list[int]]:
+    """Parent -> children over `(pid, ppid, create_time)` rows, real links only.
+
+    Windows never rewrites a parent PID when the parent exits, and it recycles
+    PIDs, so a process whose parent died names whatever later process holds
+    that PID as its parent. A real child is never older than its parent; a
+    child that is, or whose age cannot be read, is not linked (#1738).
+    """
+    table = {pid: (ppid, created) for pid, ppid, created in rows}
+    children: dict[int, list[int]] = defaultdict(list)
+    for pid, (ppid, created) in table.items():
+        if ppid is None or ppid == pid or ppid not in table or created is None:
+            continue
+        parent_created = table[ppid][1]
+        if parent_created is not None and created >= parent_created:
+            children[ppid].append(pid)
+    return dict(children)
+
+
+def descendants(children: dict[int, list[int]], root: int) -> list[int]:
+    """Every PID below `root` in `children`, each parent before its children."""
+    order: list[int] = []
+    seen = {root}
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in seen:
+                seen.add(child)
+                order.append(child)
+                stack.append(child)
+    return order
+
+
+def terminate_process_tree(pid: int, timeout_seconds: float = 3.0) -> bool:
+    """Kill `pid` and its descendants, leaves first; True once all are gone.
+
+    Not `running_process.terminate_process_tree`: that walks raw parent PIDs.
+    When a clud daemon was handed the recycled PID of a dead ancestor of the
+    pytest runner, that walk went up into the runner and killed pytest itself,
+    which exited 1 with no summary (#1738). This walk goes through
+    `index_children`, which only links a child no older than its parent.
+    """
+    procs = {proc.pid: proc for proc in psutil.process_iter(["ppid", "create_time"])}
+    root = procs.get(pid)
+    if root is None:
+        return True
+    children = index_children(
+        (child, proc.info["ppid"], proc.info["create_time"]) for child, proc in procs.items()
+    )
+    targets = [procs[child] for child in reversed(descendants(children, pid))]
+    targets.append(root)
+    for target in targets:
+        try:
+            # psutil re-checks the creation time it cached during the walk,
+            # so a PID recycled since then is refused instead of killed.
+            target.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _gone, alive = psutil.wait_procs(targets, timeout=timeout_seconds)
+    return not alive
 
 
 def run(*args: Any, **kwargs: Any) -> CompletedProcess[Any]:
