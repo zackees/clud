@@ -14,6 +14,14 @@ fn test_prompt_flag() {
 }
 
 #[test]
+fn unsafe_is_a_clud_flag_and_conflicts_with_safe() {
+    let args = parse(&["clud", "--unsafe", "-p", "hello"]);
+    assert!(args.unsafe_mode);
+    assert!(args.passthrough.is_empty());
+    assert!(Args::try_parse_from(["clud", "--safe", "--unsafe"]).is_err());
+}
+
+#[test]
 fn test_message_flag() {
     let args = parse(&["clud", "-m", "fix the bug"]);
     assert_eq!(args.message.as_deref(), Some("fix the bug"));

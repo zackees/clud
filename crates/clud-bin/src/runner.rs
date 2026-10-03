@@ -136,6 +136,14 @@ fn lease_shared_rx(
 /// same list rather than restating it (#1209).
 pub const WINDOWS_STDIO_KEYS: &[&str] = &["PYTHONIOENCODING", "PYTHONUTF8"];
 
+/// Set only by a parsed `clud --unsafe` launch; helpers inherit it from the
+/// session rather than interpreting a user's ambient environment themselves.
+pub const UNSAFE_MODE_ENV: &str = "CLUD_UNSAFE_MODE";
+
+pub fn unsafe_mode_enabled() -> bool {
+    std::env::var(UNSAFE_MODE_ENV).ok().as_deref() == Some("1")
+}
+
 /// Every environment key the child-env policy owns, in one list.
 ///
 /// The Windows stdio pair is included on **every** platform on purpose:
@@ -146,6 +154,7 @@ pub const WINDOWS_STDIO_KEYS: &[&str] = &["PYTHONIOENCODING", "PYTHONUTF8"];
 /// whatever the base carried rather than owning the value.
 pub fn child_env_policy_keys() -> Vec<&'static str> {
     let mut keys = vec!["IN_CLUD", "CLUD_EXE", running_process::ORIGINATOR_ENV_VAR];
+    keys.push(UNSAFE_MODE_ENV);
     keys.extend(crate::gc::session_tmp::OVERRIDDEN_KEYS.iter().copied());
     keys.push(crate::shell::completion_guard::SUPPRESS_KEY);
     keys.push(crate::shell::nounset::BASH_ENV_KEY);
@@ -223,7 +232,11 @@ fn apply_child_env_policy_with_nounset_opt_out(
 ) -> Vec<(String, String)> {
     let originator_key = running_process::ORIGINATOR_ENV_VAR;
 
-    let mut strip_keys: Vec<&str> = vec!["IN_CLUD", "CLUD_EXE", originator_key];
+    let unsafe_mode = base
+        .iter()
+        .any(|(key, value)| key == UNSAFE_MODE_ENV && value == "1");
+
+    let mut strip_keys: Vec<&str> = vec!["IN_CLUD", "CLUD_EXE", originator_key, UNSAFE_MODE_ENV];
     if windows_stdio {
         strip_keys.extend(WINDOWS_STDIO_KEYS.iter().copied());
     }
@@ -234,6 +247,9 @@ fn apply_child_env_policy_with_nounset_opt_out(
         .collect();
 
     env.push(("IN_CLUD".to_string(), "1".to_string()));
+    if unsafe_mode {
+        env.push((UNSAFE_MODE_ENV.to_string(), "1".to_string()));
+    }
 
     // Internal hooks and bundled instructions must use this executable, not
     // a second `clud` resolved from PATH (which may be a different uvx copy).
@@ -282,6 +298,7 @@ fn apply_child_env_policy_with_nounset_opt_out(
     // explicit escape hatch must clear that inherited policy; otherwise Bash
     // still sources it even though this launch declined to install nounset.
     // Do not clear a user-owned BASH_ENV: it remains stock shell behavior.
+    let nounset_opted_out = nounset_opted_out || unsafe_mode;
     let inherited_clud_nounset = nounset_opted_out
         && env
             .iter()
@@ -301,8 +318,12 @@ fn apply_child_env_policy_with_nounset_opt_out(
 
     // Issue #1067 step 3: opt-in (`CLUD_CMD_GATE_AUTO=1`) command gate, set
     // only when the wrapper resolves on this env's PATH. See shell::cmd_gate.
-    for (key, value) in crate::shell::cmd_gate::env_overrides(&env) {
-        push_or_replace(&mut env, &key, &value);
+    if unsafe_mode {
+        env.retain(|(key, _)| key != crate::shell::cmd_gate::GATE_KEY);
+    } else {
+        for (key, value) in crate::shell::cmd_gate::env_overrides(&env) {
+            push_or_replace(&mut env, &key, &value);
+        }
     }
 
     // Issue #1340: the session's deletion roots. The launch directory is the

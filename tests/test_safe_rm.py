@@ -17,6 +17,7 @@ def _run(
     *args: str,
     session_roots: bool = True,
     cwd: Path | None = None,
+    unsafe_mode: bool = False,
 ):
     binary = Path(os.environ["CLUD_TEST_BINARY"])
     home = tmp_path / "home"
@@ -26,6 +27,8 @@ def _run(
     env.pop("CLUD_RM_ROOTS", None)
     if session_roots:
         env["CLUD_RM_ROOTS"] = str(tmp_path / "work")
+    if unsafe_mode:
+        env["CLUD_UNSAFE_MODE"] = "1"
     return process.run(
         [str(binary), "safe-rm", *args],
         cwd=cwd or (tmp_path if session_roots else tmp_path / "work"),
@@ -44,6 +47,23 @@ def test_missing_operand_matches_rm_force_semantics(tmp_path: Path) -> None:
     assert "missing operand" in missing.stderr
     forced = _run(tmp_path, "-f")
     assert forced.returncode == 0, forced
+
+
+def test_explicit_safe_rm_keeps_its_roots_in_unsafe_mode(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("keep", encoding="utf-8")
+    refused = _run(tmp_path, str(outside), unsafe_mode=True)
+    assert refused.returncode != 0, refused
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+    inside = work / "remove"
+    inside.write_text("trash", encoding="utf-8")
+    accepted = _run(tmp_path, str(inside), unsafe_mode=True)
+    assert accepted.returncode == 0, accepted
+    assert not inside.exists()
+    assert any((tmp_path / "home" / ".clud" / "trash").iterdir())
 
 
 @pytest.mark.parametrize("flags", [(), ("-r",), ("-rf",), ("-fr",), ("-R",), ("--recursive",)])

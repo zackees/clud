@@ -1872,10 +1872,12 @@ fn compose_launch_settings_document(
     plan: &LaunchPlan,
     mut settings: serde_json::Value,
 ) -> Result<(serde_json::Value, bool), BridgeError> {
-    let safety = crate::clud_hooks_compile::deletion_safety_fragment();
-    crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
-        .map_err(BridgeError::Settings)?;
-    merge_deletion_denies(&mut settings, &safety)?;
+    if !plan.unsafe_mode {
+        let safety = crate::clud_hooks_compile::deletion_safety_fragment();
+        crate::clud_hooks_compile::merge_hook_settings(&mut settings, &safety)
+            .map_err(BridgeError::Settings)?;
+        merge_deletion_denies(&mut settings, &safety)?;
+    }
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
         return Ok((settings, false));
     };
@@ -2150,6 +2152,7 @@ mod tests {
 
     fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         LaunchPlan {
+            unsafe_mode: false,
             command: vec![harness.executable_name().to_string()],
             iterations: 1,
             backend: harness,
@@ -4416,6 +4419,22 @@ mod tests {
             "clud-cmd-scan --event Stop"
         );
         assert!(lookup(runtime.env(), crate::clud_hooks_compile::DISPATCH_ENV).is_some());
+    }
+
+    #[test]
+    fn unsafe_claude_settings_keep_user_hooks_without_clud_deletion_denies() {
+        let mut launch = plan(ModelProvider::Claude, Backend::Claude);
+        launch.unsafe_mode = true;
+        let user_hook = serde_json::json!({
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "user-check"}]}]}
+        });
+        let (settings, _) = compose_launch_settings_document(&launch, user_hook).unwrap();
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "user-check"
+        );
+        assert!(settings.pointer("/permissions/deny").is_none());
     }
 
     #[test]

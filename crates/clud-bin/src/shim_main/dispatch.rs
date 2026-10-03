@@ -141,6 +141,11 @@ fn session(kind: ShimKind, facts: &Facts) -> Option<Session> {
             })
         }),
         ShimKind::Git => target(registry::GIT_TARGET_KEY).map(|target| Session::Git { target }),
+        // `--unsafe` opts this session out of clud's catastrophe floor. The
+        // normal passthrough path resolves the real rm after the shim dir.
+        ShimKind::Rm if var(crate::runner::UNSAFE_MODE_ENV).as_deref() == Some(OsStr::new("1")) => {
+            None
+        }
         ShimKind::Rm => session_dir.map(|_| Session::Rm),
         // Native: never validated here.
         ShimKind::SafeRm | ShimKind::SafeMktemp => None,
@@ -453,6 +458,25 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    #[test]
+    fn unsafe_session_passes_rm_through_but_safe_rm_stays_native() {
+        let world = World::new();
+        let mut vars = world.valid_session();
+        assert!(matches!(
+            world.decide("rm", &vars),
+            Decision::Session(Session::Rm)
+        ));
+        vars.insert(crate::runner::UNSAFE_MODE_ENV, OsString::from("1"));
+        assert!(matches!(
+            world.decide("rm", &vars),
+            Decision::Passthrough(_)
+        ));
+        assert!(matches!(
+            world.decide("safe-rm", &vars),
+            Decision::Native(ShimKind::SafeRm)
+        ));
     }
 
     #[test]

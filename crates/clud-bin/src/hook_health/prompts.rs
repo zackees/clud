@@ -226,6 +226,7 @@ fn backend_prompt_launch_plan(
         demo_gfx_sixel: false,
         model: args.model.clone(),
         safe: args.safe,
+        unsafe_mode: args.unsafe_mode,
         unattended: args.unattended,
         allow_plan_mode: args.allow_plan_mode,
         last: args.last,

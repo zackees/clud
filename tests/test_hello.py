@@ -220,10 +220,7 @@ def _shutdown_daemon(state_dir: Path) -> None:
     except OSError:
         return
     deadline = time.monotonic() + 10
-    while (
-        (info_path.exists() or _pid_is_alive(pid))
-        and time.monotonic() < deadline
-    ):
+    while (info_path.exists() or _pid_is_alive(pid)) and time.monotonic() < deadline:
         time.sleep(0.05)
 
 
@@ -468,6 +465,22 @@ def test_dry_run_prompt() -> None:
     assert data["effective_harness"] == "claude"
     assert data["provider_source"] == "built_in_default"
     assert data["harness_source"] == "built_in_default"
+
+
+def test_unsafe_dry_run_is_explicit_and_does_not_inherit_a_marker() -> None:
+    inherited = _run("--dry-run", "-p", "hello", env_overrides={"CLUD_UNSAFE_MODE": "1"})
+    assert inherited.returncode == 0, inherited
+    assert json.loads(inherited.stdout)["unsafe_mode"] is False
+
+    for provider in ("--claude", "--codex"):
+        result = _run("--dry-run", provider, "--unsafe", "-p", "hello")
+        assert result.returncode == 0, result
+        data = json.loads(result.stdout)
+        assert data["unsafe_mode"] is True
+        assert "safe-rm" not in json.dumps(data["command"])
+
+    conflicting = _run("--dry-run", "--safe", "--unsafe", "-p", "hello")
+    assert conflicting.returncode != 0
 
 
 def _dry_run_coauthor(*args: str, env_value: str | None = None) -> dict:
@@ -841,10 +854,7 @@ def test_dry_run_openrouter_is_keyless_and_uses_stable_provider_identity() -> No
     assert data["effective_harness"] == "claude"
     assert data["model_selection"]["provider"] == "openrouter"
     assert data["model_selection"]["model"] == "openrouter-claude-sonnet"
-    assert (
-        data["model_selection"]["wire_model"]
-        == "~anthropic/claude-sonnet-latest"
-    )
+    assert data["model_selection"]["wire_model"] == "~anthropic/claude-sonnet-latest"
     assert "sk-or-" not in result.stdout
     assert "sk-or-" not in result.stderr
 
@@ -975,21 +985,13 @@ def test_dry_run_reports_independent_provider_and_harness() -> None:
 
 
 @pytest.mark.parametrize("harness", ["codex", "claude"])
-def test_saved_codex_profile_overrides_sol_low_default(
-    tmp_path: Path, harness: str
-) -> None:
+def test_saved_codex_profile_overrides_sol_low_default(tmp_path: Path, harness: str) -> None:
     home = tmp_path / harness / "home"
     state_dir = tmp_path / harness / "state"
     settings_dir = home / ".clud"
     settings_dir.mkdir(parents=True)
     (settings_dir / "settings.json").write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "codex": {"model": "codex-terra", "effort": "high"}
-                }
-            }
-        ),
+        json.dumps({"providers": {"codex": {"model": "codex-terra", "effort": "high"}}}),
         encoding="utf-8",
     )
     with _copied_clud_tempdir() as temp_dir:
@@ -1293,9 +1295,7 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
         timeout=20,
     )
 
-    assert terminal_before.read_text(encoding="utf-8") == terminal_after.read_text(
-        encoding="utf-8"
-    )
+    assert terminal_before.read_text(encoding="utf-8") == terminal_after.read_text(encoding="utf-8")
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
@@ -1422,8 +1422,7 @@ def test_dry_run_rejects_unsupported_claude_provider_via_codex_harness() -> None
     )
     assert result.returncode != 0
     assert (
-        "unsupported launch target: Claude provider cannot use the Codex harness"
-        in result.stderr
+        "unsupported launch target: Claude provider cannot use the Codex harness" in result.stderr
     )
 
 
@@ -1437,8 +1436,7 @@ def test_fix_hooks_rejects_unsupported_claude_provider_via_codex_harness() -> No
     )
     assert result.returncode == 2
     assert (
-        "unsupported launch target: Claude provider cannot use the Codex harness"
-        in result.stderr
+        "unsupported launch target: Claude provider cannot use the Codex harness" in result.stderr
     )
 
 
@@ -1498,10 +1496,7 @@ def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
-    assert (
-        'project_doc_fallback_filenames=["CODEX.md"]'
-        in data["command"]
-    )
+    assert 'project_doc_fallback_filenames=["CODEX.md"]' in data["command"]
 
 
 def test_dry_run_pty_override() -> None:
@@ -1555,9 +1550,7 @@ def test_dry_run_openrouter_default_is_pinned_and_inherited() -> None:
 def test_dry_run_explicit_model_is_a_typed_boundary_not_an_inherited_pin() -> None:
     """The #1257 repro: an uncataloged OpenRouter id resolves, becomes the
     whole boundary, and is not reported as an inherited pin."""
-    result = _run(
-        "--dry-run", "--openrouter", "--model", "xiaomi/mimo-v2.6-flash", "-p", "hello"
-    )
+    result = _run("--dry-run", "--openrouter", "--model", "xiaomi/mimo-v2.6-flash", "-p", "hello")
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["model_selection"]["wire_model"] == "xiaomi/mimo-v2.6-flash"
@@ -1684,7 +1677,9 @@ def _run_do_with_kind(kind: str | None, target: str) -> process.CompletedProcess
 def test_dry_run_do_seeds_goal_grind_for_a_meta_issue() -> None:
     result = _run_do_with_kind("meta", "https://github.com/o/r/issues/1")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["command"][-1] == "/goal /grind https://github.com/o/r/issues/1"
+    assert (
+        json.loads(result.stdout)["command"][-1] == "/goal /grind https://github.com/o/r/issues/1"
+    )
 
 
 def test_do_refuses_when_it_cannot_tell_whether_an_issue_is_meta() -> None:
@@ -1695,7 +1690,6 @@ def test_do_refuses_when_it_cannot_tell_whether_an_issue_is_meta() -> None:
     assert result.stdout == ""
     assert "cannot tell whether" in result.stderr
     assert "CLUD_DO_KIND" in result.stderr
-
 
 
 def test_dry_run_fix() -> None:
@@ -1732,9 +1726,7 @@ def test_dry_run_loop() -> None:
     assert ".clud/loop/BLOCKED" in normalized_prompt
     assert data["loop_markers"] is not None
     assert data["loop_markers"]["done_path"].replace("\\", "/").endswith(".clud/loop/DONE")
-    assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith(
-        ".clud/loop/BLOCKED"
-    )
+    assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith(".clud/loop/BLOCKED")
 
 
 def test_dry_run_loop_no_done() -> None:

@@ -84,7 +84,7 @@ pub(super) fn changes_deletion_environment(command: &str) -> bool {
             .next()
             .unwrap_or_default()
             .trim_end_matches('+');
-        matches!(name, "PATH" | "CLUD_RM_ROOTS" | "CLUD_RM_ROLE")
+        matches!(name, "PATH" | "CLUD_RM_ROOTS" | "CLUD_RM_ROLE" | "CLUD_UNSAFE_MODE")
             // The system temp directories are deletion roots too (#1622).
             || (word.contains('=') && matches!(name, "TMPDIR" | "TEMP" | "TMP"))
     })

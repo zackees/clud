@@ -40,11 +40,14 @@ fn session_base_from(
     login_env: Vec<(String, String)>,
     client_env: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let base = if login_env.is_empty() {
+    let mut base: Vec<(String, String)> = if login_env.is_empty() {
         std::env::vars().collect()
     } else {
         login_env
     };
+    // A daemon may have been started by an unsafe launch. Its ambient marker
+    // must never become the default for a later, unrelated client session.
+    base.retain(|(key, _)| key != crate::runner::UNSAFE_MODE_ENV);
     merge_env(base, client_env)
 }
 
@@ -702,6 +705,21 @@ mod tests {
         assert_eq!(value_of(&merged, "PATH"), Some("/fresh/bin"));
         assert_eq!(value_of(&merged, "HOME"), Some("/home/user"));
         assert_eq!(value_of(&merged, "VIRTUAL_ENV"), None);
+    }
+
+    #[test]
+    fn daemon_unsafe_marker_only_comes_from_the_new_client() {
+        let login = pairs(&[(crate::runner::UNSAFE_MODE_ENV, "1"), ("PATH", "/login")]);
+        let safe = session_base_from(login.clone(), &pairs(&[("PATH", "/client")]));
+        assert_eq!(value_of(&safe, crate::runner::UNSAFE_MODE_ENV), None);
+        let unsafe_client =
+            session_base_from(login, &pairs(&[(crate::runner::UNSAFE_MODE_ENV, "1")]));
+        assert_eq!(
+            value_of(&unsafe_client, crate::runner::UNSAFE_MODE_ENV),
+            Some("1")
+        );
+        let child = child_env_with_base(unsafe_client);
+        assert_eq!(value_of(&child, crate::runner::UNSAFE_MODE_ENV), Some("1"));
     }
 
     /// Later client entries win over earlier ones for the same key, so a

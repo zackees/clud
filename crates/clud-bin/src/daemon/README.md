@@ -11,6 +11,9 @@ are owned by
 [docs/architecture/provider-selection.md](../../../../docs/architecture/provider-selection.md).
 Daemon worker environment layering and refresh are owned by
 [docs/architecture/daemon-environment.md](../../../../docs/architecture/daemon-environment.md).
+An unsafe session's marker is client-owned and removed from the daemon
+baseline before the next client merges; see
+[unsafe-mode.md](../../../../docs/architecture/unsafe-mode.md).
 
 Always-on background service for every `clud` invocation (issue #135). One long-lived daemon process per user owns two distinct concerns, served over the RPC lanes below:
 

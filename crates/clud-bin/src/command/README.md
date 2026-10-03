@@ -3,6 +3,8 @@
 Builds the `LaunchPlan` that downstream runners execute: effective-harness-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`, `do`, `grind`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring for `clud loop`, and Claude `stream-json` progress injection for subprocess-mode loops.
 
 The `LaunchPlan` contract (construction pipeline, consumers, `--dry-run` JSON) is documented at [docs/architecture/launch-plan.md](../../../../docs/architecture/launch-plan.md); the DONE/BLOCKED contract and `--repeat` no-overlap scheduler at [docs/architecture/loop-subsystem.md](../../../../docs/architecture/loop-subsystem.md).
+The per-launch `unsafe_mode` field and its prompt behavior are specified in
+[unsafe-mode.md](../../../../docs/architecture/unsafe-mode.md).
 `grind` is distinct: its intended contract is one normal interactive PTY prompt
 seeded with `/loop`, after which the harness owns repetition. It must not use
 the clud loop marker contract, a headless launch, an iteration ceiling, or
