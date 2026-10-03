@@ -40,9 +40,14 @@ blocker rather than falling back to host testing. The workflows carry no
 act-only workarounds (zackees/ci.yml ACT-003): a local gap is filed in
 zackees/ci.yml, not patched here. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
-Running that one pass through `ci-lint local-gate run` instead stamps the
-commit, and the PR then skips the routine Linux lanes
-([attested skip](docs/architecture/ci.md#attested-skip-gate-008010)).
+**Run the pre-push full PR pass through the local gate**, which wraps that
+same bosn run and, on a pass, stamps the commit so the PR skips the routine
+Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
+commit everything, then
+`uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run`
+and `git push --force-with-lease`. Don't amend or rebase after stamping: that
+invalidates the stamp and the PR simply runs every lane. Plain `bosn ci run`
+stays valid for `--job static` and focused jobs.
 
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
 local CI is a pre-push check, not the edit loop. Run the full PR plan at most
