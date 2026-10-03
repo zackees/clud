@@ -36,9 +36,8 @@ pub enum Outcome {
     Cache,
     /// Revalidated with `If-None-Match` / `If-Modified-Since`; `304`.
     NotModified,
-    /// A merged collection brought up to date with a bounded query
-    /// (`since=` / `created=>=`); the ledger records how many objects it
-    /// added or changed.
+    /// A merged collection where at least one page was re-sent (`200`);
+    /// the ledger records the objects it added or changed and removed.
     Incremental,
     Full,
     /// Upstream answered non-2xx; the shim reruns the call on the real
@@ -518,15 +517,12 @@ impl GhBroker {
     /// The daemon's `/gh/ledger` handler body: the newest
     /// [`super::LEDGER_ROWS`] rows, oldest first.
     pub fn handle_ledger(&self) -> (u16, Vec<u8>) {
-        match self.ledger() {
-            Ok(mut rows) => {
-                let skip = rows.len().saturating_sub(super::LEDGER_ROWS);
-                rows.drain(..skip);
-                match serde_json::to_vec(&rows) {
-                    Ok(bytes) => (200, bytes),
-                    Err(error) => (500, error_json(&error.to_string())),
-                }
-            }
+        let rows = self
+            .store()
+            .map_err(|e| format!("{e:?}"))
+            .and_then(|store| store.ledger_tail(super::LEDGER_ROWS));
+        match rows.and_then(|rows| serde_json::to_vec(&rows).map_err(|e| e.to_string())) {
+            Ok(bytes) => (200, bytes),
             Err(error) => (500, error_json(&error)),
         }
     }

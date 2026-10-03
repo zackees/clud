@@ -207,6 +207,7 @@ impl GhBroker {
         // an earlier pass replaced still changed the collection.
         let mut resent_any = false;
         let mut consistent = false;
+        let mut misfit = false;
         for _ in 0..MAX_PASSES {
             let step = pass(plan, &pages, width, &mut fetcher).and_then(|step| match step {
                 Pass::Done(now, true) if !verify(plan, &now, width, &mut fetcher)? => {
@@ -224,12 +225,22 @@ impl GhBroker {
                 Ok(Pass::Misfit(now)) => {
                     pages = now;
                     resent_any = true;
+                    misfit = true;
                 }
-                Ok(Pass::Unmergeable) => break,
+                Ok(Pass::Unmergeable) => {
+                    misfit = false;
+                    break;
+                }
                 Err(error) => {
                     return Merged::Served(Served::failed(error, fetcher.requests, fetcher.rate));
                 }
             }
+        }
+        if misfit && !consistent {
+            // The collection kept changing under both passes. This read
+            // takes the exact-URL path; the stored pages stay, so the next
+            // refresh revalidates them as usual.
+            return Merged::Fallback(fetcher.requests);
         }
         if !consistent {
             return self.give_up(store, key, started, fetcher.requests);

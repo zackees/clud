@@ -289,6 +289,22 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// The newest `limit` ledger rows, oldest first. A row that does not
+    /// parse is skipped, so one bad row never hides the rest.
+    pub fn ledger_tail(&self, limit: usize) -> Result<Vec<LedgerEntry>, String> {
+        let txn = self.db.begin_read().map_err(err)?;
+        let ledger = txn.open_table(LEDGER).map_err(err)?;
+        let mut out = Vec::new();
+        for row in ledger.iter().map_err(err)?.rev().take(limit) {
+            let (_, v) = row.map_err(err)?;
+            if let Ok(entry) = serde_json::from_slice(v.value()) {
+                out.push(entry);
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

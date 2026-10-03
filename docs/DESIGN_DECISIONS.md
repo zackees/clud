@@ -6273,8 +6273,8 @@ endpoint involved returns a `304` to its own ETag.
   the last is re-checked with its new ETag. A deletion between two page
   requests shifts the later pages, and pages from both sides of it would
   lose an object. A re-check that is not a `304`, or a joined membership out
-  of order, runs the pass once more; a second misfit falls back to the
-  exact-URL read.
+  of order, runs the pass once more; a second misfit answers that read
+  from the exact URL and keeps the stored pages for the next refresh.
 - The delta query is removed, not kept alongside. It cost the same charged
   request for a change and then a second charged `200` on the next refresh,
   because the moved bound made a new URL with no ETag; the page re-send

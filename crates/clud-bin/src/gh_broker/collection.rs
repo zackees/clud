@@ -30,7 +30,8 @@ pub const RUN_WIDTHS: &[usize] = &[10, 30, UPSTREAM_PER_PAGE];
 
 /// Run-list filters that name immutable properties of a run, so a merged
 /// membership stays exact. `status` and `created` are not among them: a
-/// run's status changes, and `created` is the broker's own rewrite.
+/// run's status changes, and a `created` window is a different membership.
+/// The planner refuses both, and the read takes the exact-URL path.
 const RUN_FILTERS: &[&str] = &[
     "actor",
     "branch",

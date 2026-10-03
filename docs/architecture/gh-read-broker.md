@@ -146,8 +146,11 @@ shifts the later pages: without the re-check the stored copy of page 1 would
 keep the deleted comment, and the comment that moved onto page 1 would be in
 neither copy. Any re-check that is not a `304`, and any joined membership out
 of natural order or with an id twice, runs the pass again from the pages just
-received. If the second pass does not fit either, the collection takes the
-exact-URL path.
+received. If the second pass does not fit either, that read takes the
+exact-URL path; the stored pages are kept, so the next refresh revalidates
+them as usual. (A page the merge cannot parse, a short page that announces
+another, or more than 10 pages instead mark the collection unmergeable for
+30 minutes, below.)
 
 **Cost.** A quiet collection costs one free `304` per page per TTL. A change
 costs one charged `200` per changed page, plus free re-checks. The phase-2

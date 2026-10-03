@@ -55,13 +55,6 @@ struct Server {
     hook: Option<Hook>,
 }
 
-fn decode(value: &str) -> String {
-    value
-        .replace("%3A", ":")
-        .replace("%3E", ">")
-        .replace("%3D", "=")
-}
-
 fn page_of<T: Clone>(items: &[T], params: &HashMap<&str, &str>) -> (Vec<T>, bool) {
     let per_page: usize = params.get("per_page").map_or(30, |v| v.parse().unwrap());
     let page: usize = params.get("page").map_or(1, |v| v.parse().unwrap());
@@ -99,12 +92,7 @@ impl Server {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         match path {
             "repos/o/r/issues/5/comments" => {
-                let since = params.get("since").map(|v| parse_ts(&decode(v)).unwrap());
-                let mut items: Vec<&Comment> = self
-                    .comments
-                    .iter()
-                    .filter(|c| since.is_none_or(|since| c.updated >= since))
-                    .collect();
+                let mut items: Vec<&Comment> = self.comments.iter().collect();
                 items.sort_by_key(|c| c.id);
                 let (shown, more) = page_of(&items, &params);
                 let body = shown
@@ -125,14 +113,10 @@ impl Server {
                 (200, format!("[{body}]").into_bytes(), more)
             }
             "repos/o/r/actions/runs" => {
-                let created = params
-                    .get("created")
-                    .map(|v| parse_ts(decode(v).strip_prefix(">=").unwrap()).unwrap());
                 let mut items: Vec<&Run> = self
                     .runs
                     .iter()
                     .filter(|r| params.get("branch").is_none_or(|b| r.branch == *b))
-                    .filter(|r| created.is_none_or(|at| r.created >= at))
                     .collect();
                 items.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
                 let (shown, more) = page_of(&items, &params);
@@ -532,6 +516,65 @@ fn a_deletion_in_the_middle_of_a_pass_is_caught_before_it_is_served() {
     // The re-check of page 1 fails, so the pass runs again.
     assert_eq!(w.requests()[3..], [SEED, PAGE2, SEED, SEED, PAGE2, SEED]);
     assert_eq!(w.outcomes(), ["full", "incremental"]);
+}
+
+#[test]
+fn a_collection_that_keeps_changing_under_both_passes_reads_the_exact_url() {
+    let w = world(many_comments(150));
+    w.read(SEED);
+    w.server().comments[120].reactions = 1;
+    // Every request for page 2 deletes the first comment left on page 1,
+    // so neither pass fits together.
+    w.server().hook = Some(Box::new(|server: &mut Server, endpoint: &str| {
+        if endpoint.ends_with("page=2") {
+            server.comments.remove(0);
+        }
+    }));
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(SEED), w.full(SEED));
+    w.server().hook = None;
+    // The answer came from the exact URL, and the stored pages were kept:
+    // the next refresh revalidates them instead of starting over.
+    let requests = w.requests();
+    assert_eq!(requests[3..9], [SEED, PAGE2, SEED, SEED, PAGE2, SEED]);
+    assert_eq!(requests[9], SEED);
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(SEED), w.full(SEED));
+    assert!(w.log()[10].1.is_some(), "revalidated, not re-seeded");
+    assert_eq!(w.outcomes()[2], "incremental");
+}
+
+#[test]
+fn a_waiter_wider_than_the_leaders_page_reads_the_exact_url() {
+    let mut server = Server::default();
+    for i in 0..40u64 {
+        server.runs.push(run(
+            200 + i,
+            &format_ts(ts("2026-10-02T09:00:00Z") + i as i64 * 60),
+            "completed",
+            "main",
+        ));
+    }
+    let w = world(server);
+    let narrow = "repos/o/r/actions/runs?per_page=5";
+    let wide = "repos/o/r/actions/runs?per_page=50";
+    let (entered, in_upstream) = std::sync::mpsc::channel();
+    w.server().hook = Some(Box::new(move |_: &mut Server, endpoint: &str| {
+        if endpoint.ends_with("per_page=10") {
+            let _ = entered.send(());
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+    }));
+    std::thread::scope(|scope| {
+        let leader = scope.spawn(|| w.read(narrow));
+        in_upstream.recv().unwrap();
+        // Joins the narrow leader's flight; its 10 stored runs cannot
+        // answer `per_page=50`.
+        let waiter = scope.spawn(|| w.read(wide));
+        assert_eq!(leader.join().unwrap(), w.full(narrow));
+        assert_eq!(waiter.join().unwrap(), w.full(wide));
+    });
+    assert!(w.requests().contains(&wide.to_string()));
 }
 
 #[test]
