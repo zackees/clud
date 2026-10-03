@@ -928,12 +928,12 @@ coverage rather than a reduction.
 
 ## Template inventory
 
-Deliberately small, to keep the ~60 lines of soldr/uv/mold boilerplate that is
+Deliberately small, to keep the ~60 lines of soldr/uv boilerplate that is
 currently copy-pasted four times in exactly one place.
 
 | File | Role |
 | --- | --- |
-| `.github/actions/setup-build/action.yml` | composite: python + uv + venv cache + mold + `setup-soldr` + `uv sync`. Used only by build-side jobs. |
+| `.github/actions/setup-build/action.yml` | composite: python + uv + venv cache + `setup-soldr` + `uv sync`. Used only by build-side jobs. |
 | `.github/actions/setup-exec/action.yml` | composite: python + uv + `uv sync --group test`, then **deletes** the Rust toolchain. Used by exec jobs. |
 | `.github/workflows/_build-target.yml` | reusable: one triple → one bundle (+ optional wheel/sdist artifact). Called by `ci.yml` and `auto-release.yml`. |
 | `.github/workflows/_run-tests.yml` | reusable: one triple × one suite → test execution. |
