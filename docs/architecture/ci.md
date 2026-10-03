@@ -108,13 +108,12 @@ checkout or session never share containers, names or an action checkout.
 
 ### Local CI budget
 
-`bosn ci` needs bosn 0.1.8 or newer (`uv tool install 'bosn>=0.1.8'`; check
+`bosn ci` needs bosn 0.1.10 or newer (`uv tool install 'bosn>=0.1.10'`; check
 with `bosn --version`). Older releases run stock nektos/act, which lacks the
-runner parity and overlay above. bosn sizes each engine's storage from host
-RAM. If a run reports "the engine's storage ran low", raise it in
-`~/.local/state/bosn/config.toml` (`[engine]` `storage_gib = 72` covers
-clud's minimal PR run; [zackees/bosn#425](https://github.com/zackees/bosn/issues/425)
-tracks a default that needs no override).
+runner parity and overlay above, or an act2 that rejects `concurrency.queue`
+and cannot run the Pages jobs. Each engine's build storage is a disk-backed
+volume sized from free disk (zackees/bosn#425), so clud's PR run needs no
+`storage_gib` override.
 
 A full minimal PR run takes about 25 minutes cold and less warm. Every clud
 session on the machine shares one bosn daemon and its CPU, so each extra run
@@ -142,11 +141,29 @@ bosn ci run --workspace . --workflow .github/workflows/installer-check.yml --job
 bosn ci run --workspace . --workflow .github/workflows/installer-check.yml --job catalog-unit --mode full --wait
 ```
 
-The published-candidate lane (`public-host`) needs workflow inputs and a
-matrix filter, which `bosn ci` cannot pass yet
-([zackees/bosn#430](https://github.com/zackees/bosn/issues/430)). Validate it
-on GitHub, where the release workflow checks every required host and guest
-before promotion.
+The published-candidate lane runs one matrix leg against the version in
+`pyproject.toml`, once that candidate is published
+([zackees/bosn#430](https://github.com/zackees/bosn/issues/430)):
+
+```bash
+V=$(sed -n 's/^version = "\([0-9][^"]*\)"/\1/p' pyproject.toml | head -n 1)
+bosn ci run --workspace . --workflow .github/workflows/installer-check.yml --job public-host \
+  --event workflow_call --input release_tag=$V --input mode=candidate \
+  --matrix target:x86_64-unknown-linux-musl --env PYTEST_ADDOPTS=-s --wait
+```
+
+It requires a passed pytest and matching public evidence. The release workflow
+still checks every required host and guest before promotion.
+
+The Pages build jobs run locally too (zackees/bosn#438): bosn stubs
+`actions/configure-pages` with the project site's URL, and
+`upload-pages-artifact` uploads to act's artifact server. Only the deploy job
+is GitHub-only.
+
+```bash
+bosn ci run --workspace . --workflow .github/workflows/install-pages.yml --job build-site --trigger pr --wait
+bosn ci run --workspace . --workflow .github/workflows/model-pages.yml --job build-site --trigger pr --wait
+```
 
 For a focused test, run the job that contains it. Do not switch to a direct
 `bash test`/`bash lint` or a host toolchain. act cannot execute native Windows
@@ -174,7 +191,7 @@ negative/mutation case to any policy checker. If a job approaches its timeout,
 measure the slow step or cell and split work where possible instead of simply
 raising the timeout.
 
-If Docker or bosn is unavailable, or bosn is older than 0.1.8, report the local validation blocker;
+If Docker or bosn is unavailable, or bosn is older than 0.1.10, report the local validation blocker;
 do not fall back to host or direct Bosn tests. Do not auto-install tools or
 prune Docker resources. See the bundled `clud-bosn` skill for prerequisites.
 

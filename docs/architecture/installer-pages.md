@@ -51,9 +51,9 @@ generated catalog.
 `.github/workflows/install-pages.yml` runs the unit suite and upstream
 `manifest-validate` on PRs, then publishes only on `main` or manual dispatch.
 It fetches all three public URLs anonymously after deployment and verifies the
-published page against the published catalog. Its build job uses
-`actions/configure-pages`, which `bosn ci` reports as GitHub-only (GATE-012)
-rather than running, so it is validated on the PR's GitHub run.
+published page against the published catalog. The build job runs locally with
+`bosn ci run --workspace . --workflow .github/workflows/install-pages.yml --job build-site --trigger pr --wait`
+(bosn stubs `actions/configure-pages`); only the deployment API needs GitHub.
 The full-history verification downloads about 5.5 GB across the 27 releases
 present when this flow was introduced, so its build job has a 30-minute limit.
 

@@ -10,7 +10,7 @@ point at it.
 
 Local CI now runs through `bosn ci` -> act2 (#1740): one isolated engine per
 run, so concurrent runs share no containers or action checkouts, and bosn
-0.1.8 is the first release that runs act2.
+0.1.10 is the first release whose act2 runs every local lane clud documents.
 """
 
 from __future__ import annotations
@@ -54,9 +54,9 @@ def test_claude_md_points_agents_at_the_budget() -> None:
 
 
 def test_docs_require_a_bosn_that_runs_act2() -> None:
-    # bosn < 0.1.8 runs stock nektos/act: no runner parity, no overlay (#1740).
-    assert "bosn>=0.1.8" in _flat(CI_MD)
-    assert "bosn 0.1.8 or newer" in _flat(CLAUDE_MD)
+    # bosn < 0.1.10: stock act or an act2 that rejects concurrency.queue (#1740).
+    assert "bosn>=0.1.10" in _flat(CI_MD)
+    assert "bosn 0.1.10 or newer" in _flat(CLAUDE_MD)
 
 
 def test_the_private_act_wrapper_is_gone() -> None:
