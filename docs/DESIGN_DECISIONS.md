@@ -6195,6 +6195,9 @@ reruns of finished runs started outside clud are seen in a run list only
 then, and thaw a frozen jobs listing only after an in-session write names
 the run. Collections over 10 pages or 8 MiB are not merged.
 
+Superseded in part by DD-153: the delta query, the 30-minute reconciliation
+and frozen listings are gone.
+
 ## DD-152: a running session's aliases are relinked by the installed clud, not self-delegated
 
 **Context:** a session keeps the alias directory it launched with
@@ -6243,3 +6246,57 @@ bump still waits for one. The session's `clud-cmd-scan` hook alias in
 `helper-bin` is not refreshed here; the next launch relinks it. Every
 `clud` CLI start costs a few `stat` calls, and each `gh` call in a
 pre-2.8.24 session takes the settings lock once.
+
+## DD-153: merged gh reads revalidate every page instead of querying a delta
+
+**Context:** phase 2 of #1743 (DD-151) refreshed merged collections with a
+bounded delta (`since=` for comments, `created>=` for run lists), reconciled
+in full every 30 minutes, and froze finished job and check-run listings until
+an in-session write named them. So a deleted comment or run, a change that
+does not move `updated_at` (a reaction count, a review comment going
+outdated), a rerun of a finished run started outside clud, and a check run
+added late to a finished commit were seen only at reconciliation or never.
+Measured on 2026-10-02: an authorized `304` does not count against the rate
+limit (15 conditional requests moved `X-RateLimit-Used` by the same
+background drift as 15 calls to the free `rate_limit` endpoint), and every
+endpoint involved returns a `304` to its own ETag.
+
+**Decision:**
+
+- A merged collection is stored as the upstream pages it last received, each
+  with its ETag. Every refresh re-sends every page with `If-None-Match`. A
+  `304` keeps the page; a `200` replaces it. GitHub's ETag covers the whole
+  body, so this sees deletions, reactions, outdated review comments and
+  reruns on the next refresh. Only a short page ends a collection: a new
+  comment can open a page without changing the full page before it.
+- When a pass replaced a page of a multi-page collection, every page before
+  the last is re-checked with its new ETag. A deletion between two page
+  requests shifts the later pages, and pages from both sides of it would
+  lose an object. A re-check that is not a `304`, or a joined membership out
+  of order, runs the pass once more; a second misfit falls back to the
+  exact-URL read.
+- The delta query is removed, not kept alongside. It cost the same charged
+  request for a change and then a second charged `200` on the next refresh,
+  because the moved bound made a new URL with no ETag; the page re-send
+  costs a free `304` there. A count check (the issue's `comments`) was
+  considered for multi-page collections and rejected: the issue object's
+  ETag changes with every new comment, so the check would be a second
+  charged request per change, and it still could not see a reaction on a
+  later page.
+- A run list keeps only its newest page, at the narrowest of 10, 30 and 100
+  that covers the widest caller seen. A changed run list is re-sent whole,
+  and 100 runs are about 1.2 MB on a busy repo.
+- Job and check-run listings no longer freeze. Any check that could thaw
+  them (the run object's `run_attempt` and `updated_at`, the commit's run
+  list) costs the same one free `304` as revalidating the listing itself,
+  and only the listing's own ETag also sees a check run another app adds to
+  a finished commit.
+
+**Consequences:** every change outside clud sessions to a merged collection
+or listing is seen within one TTL, at no rate-limit cost while nothing
+changed. A quiet multi-page collection costs one free request per page per
+refresh instead of one, and a finished listing a free request per TTL
+instead of none: wall time and local `gh` processes, not budget. A change
+re-sends the whole page it is on, where the delta sent only the changed
+objects. The ledger records `removed` (objects deleted upstream) beside
+`changed`, and a merged `304` means every page was a `304`.

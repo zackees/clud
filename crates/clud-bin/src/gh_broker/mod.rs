@@ -1,4 +1,4 @@
-//! The session `gh` read broker (#1743, phases 1 and 2).
+//! The session `gh` read broker (#1743).
 //!
 //! In a clud session, `gh api <endpoint>` GETs are answered by the daemon
 //! from a durable ETag cache instead of each call spending GitHub's shared
@@ -10,8 +10,8 @@
 //!   replay server, so `--jq`, `--template` and TTY output stay `gh`'s own.
 //! - [`service`]: the daemon side. TTL, single-flight, conditional
 //!   revalidation and the ledger, over [`store`] and the [`upstream`] `gh`.
-//! - [`collection`]: phase 2 merged reads of comments and run lists
-//!   (`since=` / `created=>=` deltas) and the listings that freeze.
+//! - [`collection`]: merged reads of comments and run lists, kept as the
+//!   upstream pages and revalidated page by page with their ETags.
 //! - [`scope`]: phase 2 targeted invalidation tags for reads and writes.
 //!
 //! Every failure on the shim side falls back to the real `gh` unchanged.

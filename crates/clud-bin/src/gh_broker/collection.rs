@@ -1,37 +1,32 @@
-//! Incremental rewrites and merged collections (#1743, phase 2).
+//! Merged collections (#1743).
 //!
 //! A collection read (issue or PR comments, review comments, a workflow-run
 //! list) is keyed by its path and the caller's filters, not by its exact URL.
-//! The broker keeps the collection's members and brings them up to date with
-//! the narrowest upstream query (`since=` or `created=>=`, bounded by the
-//! newest timestamp it has *seen*, minus a 5 s overlap), then rebuilds the
-//! response the caller's own query would have returned.
+//! The broker keeps the collection as the upstream pages it last received,
+//! each with its ETag, and brings it up to date by re-sending every page
+//! conditionally: a `304` (free) proves the page is byte-identical, a `200`
+//! replaces it. The response the caller's own query would have returned is
+//! rebuilt from those pages.
 //!
 //! Everything here is pure: parsing the caller's endpoint into a [`Plan`],
 //! the upstream URLs, parsing pages into [`Member`]s with their exact bytes,
-//! the upsert, and rendering. A shape this module cannot reproduce exactly
+//! ordering checks, the change count, and rendering. A shape this module cannot reproduce exactly
 //! returns `None`, and the broker answers the read the phase-1 way (an ETag
 //! on the exact URL).
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-/// Overlap below the high-water mark, for clock skew between GitHub's
-/// writers. Duplicates it returns are removed by id.
-pub const OVERLAP_SECS: i64 = 5;
-/// Page size of every upstream query the broker makes.
+/// Page size of every upstream comment query, and the widest run list.
 pub const UPSTREAM_PER_PAGE: usize = 100;
 /// GitHub's page size when the caller sets none.
 pub const DEFAULT_PER_PAGE: usize = 30;
 /// A comment collection with more pages than this is not merged.
 pub const MAX_SEED_PAGES: usize = 10;
-/// An incremental query needing more pages than this reseeds instead.
-pub const MAX_DELTA_PAGES: usize = 5;
-/// Newest runs kept per run-list key: the most a caller's page can show.
-pub const MAX_RUN_MEMBERS: usize = 100;
-/// Check runs must have been complete this long before a key freezes:
-/// another app or a later workflow can still add a check run to the commit.
-pub const CHECKS_SETTLE_SECS: i64 = 300;
+/// Upstream page sizes of a run list. A run list keeps only its newest
+/// page, as wide as the widest caller needs, so a `per_page=5` reader of a
+/// busy repo does not re-download 100 runs (about 1.2 MB) on every change.
+pub const RUN_WIDTHS: &[usize] = &[10, 30, UPSTREAM_PER_PAGE];
 
 /// Run-list filters that name immutable properties of a run, so a merged
 /// membership stays exact. `status` and `created` are not among them: a
@@ -142,11 +137,6 @@ pub fn plan(endpoint: &str) -> Option<Plan> {
     })
 }
 
-/// `2026-10-02T23:18:20Z` -> `2026-10-02T23%3A18%3A20Z`.
-fn encode_ts(ts: &str) -> String {
-    ts.replace(':', "%3A")
-}
-
 impl Plan {
     /// Path plus filters: the membership's identity, independent of the
     /// caller's page size.
@@ -167,39 +157,43 @@ impl Plan {
             .join("&")
     }
 
-    fn url(&self, extra: Option<String>, page: usize) -> String {
+    /// Upstream page `page` of the collection at page size `width`: the
+    /// caller's filters, no bound, so the answer is the whole truth and its
+    /// ETag can prove the stored copy current.
+    pub fn seed_url(&self, page: usize, width: usize) -> String {
         let mut query: Vec<String> = Vec::new();
         if !self.filters.is_empty() {
             query.push(self.filter_query());
         }
-        query.extend(extra);
-        query.push(format!("per_page={UPSTREAM_PER_PAGE}"));
+        query.push(format!("per_page={width}"));
         if page > 1 {
             query.push(format!("page={page}"));
         }
         format!("{}?{}", self.path, query.join("&"))
     }
 
-    /// The full collection, page `page` (comments page through all of it;
-    /// a run list keeps only its newest page).
-    pub fn seed_url(&self, page: usize) -> String {
-        self.url(None, page)
+    /// The upstream page size this caller needs: comments always page
+    /// through at 100; a run list keeps one page, the narrowest of
+    /// [`RUN_WIDTHS`] that covers the caller's `per_page`.
+    pub fn width(&self) -> usize {
+        if self.kind.is_comments() {
+            return UPSTREAM_PER_PAGE;
+        }
+        RUN_WIDTHS
+            .iter()
+            .copied()
+            .find(|width| *width >= self.per_page)
+            .unwrap_or(UPSTREAM_PER_PAGE)
     }
 
-    /// Everything at or after `bound` (`YYYY-MM-DDTHH:MM:SSZ`).
-    pub fn delta_url(&self, bound: &str, page: usize) -> String {
-        let bound = encode_ts(bound);
-        let extra = if self.kind.is_comments() {
-            format!("since={bound}")
+    /// Upstream pages a collection may span: comments up to
+    /// [`MAX_SEED_PAGES`], a run list only its newest page.
+    pub fn max_pages(&self) -> usize {
+        if self.kind.is_comments() {
+            MAX_SEED_PAGES
         } else {
-            format!("created=%3E%3D{bound}")
-        };
-        self.url(Some(extra), page)
-    }
-
-    /// Whether a seed pages past page 1. A run list keeps its newest page.
-    pub fn seeds_all_pages(&self) -> bool {
-        self.kind.is_comments()
+            1
+        }
     }
 }
 
@@ -208,9 +202,6 @@ impl Plan {
 pub struct Member {
     pub id: u64,
     pub created_at: i64,
-    pub updated_at: i64,
-    /// Workflow runs only.
-    pub status: Option<String>,
     pub raw: String,
 }
 
@@ -221,13 +212,13 @@ pub struct Page {
     pub total_count: Option<u64>,
 }
 
+/// The fields every member must carry. `updated_at` is required only so a
+/// shape the merge was not built for is refused.
 #[derive(Deserialize)]
 struct Probe {
     id: u64,
     created_at: String,
     updated_at: String,
-    #[serde(default)]
-    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -236,20 +227,12 @@ struct RunsBody {
     workflow_runs: Vec<Box<RawValue>>,
 }
 
-fn member(raw: &RawValue, kind: Kind) -> Option<Member> {
+fn member(raw: &RawValue) -> Option<Member> {
     let probe: Probe = serde_json::from_str(raw.get()).ok()?;
-    if kind == Kind::Runs && probe.status.is_none() {
-        return None;
-    }
+    parse_ts(&probe.updated_at)?;
     Some(Member {
         id: probe.id,
         created_at: parse_ts(&probe.created_at)?,
-        updated_at: parse_ts(&probe.updated_at)?,
-        status: if kind == Kind::Runs {
-            probe.status
-        } else {
-            None
-        },
         raw: raw.get().to_string(),
     })
 }
@@ -262,10 +245,7 @@ pub fn parse_page(kind: Kind, body: &[u8]) -> Option<Page> {
     let page = if kind.is_comments() {
         let raws: Vec<Box<RawValue>> = serde_json::from_slice(body).ok()?;
         Page {
-            members: raws
-                .iter()
-                .map(|raw| member(raw, kind))
-                .collect::<Option<_>>()?,
+            members: raws.iter().map(|raw| member(raw)).collect::<Option<_>>()?,
             total_count: None,
         }
     } else {
@@ -274,7 +254,7 @@ pub fn parse_page(kind: Kind, body: &[u8]) -> Option<Page> {
             members: runs
                 .workflow_runs
                 .iter()
-                .map(|raw| member(raw, kind))
+                .map(|raw| member(raw))
                 .collect::<Option<_>>()?,
             total_count: Some(runs.total_count),
         }
@@ -283,15 +263,17 @@ pub fn parse_page(kind: Kind, body: &[u8]) -> Option<Page> {
     (rebuilt == body).then_some(page)
 }
 
-/// Whether a full-fetch page is in the order [`sort`] produces. The merge
-/// re-sorts every answer into that order, so a seed page GitHub sent in
-/// another order means a merged answer would differ from a full fetch.
-/// Incremental pages are not checked: GitHub orders a `created`-filtered run
-/// list differently (same-second runs by workflow), and the merge re-sorts.
+/// Whether `members` are in the endpoint's natural order ([`sort`]) with
+/// no id twice. A page, or a membership joined from pages, that breaks it
+/// is not served: GitHub sent another order than the merge assumes, or the
+/// pages were fetched across a change and do not fit together.
 pub fn in_natural_order(kind: Kind, members: &[Member]) -> bool {
     let mut sorted = members.to_vec();
     sort(kind, &mut sorted);
-    sorted == members
+    let mut ids: Vec<u64> = members.iter().map(|m| m.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    sorted == members && ids.len() == members.len()
 }
 
 /// The endpoint's natural order: comments by id ascending; runs newest
@@ -306,37 +288,6 @@ pub fn sort(kind: Kind, members: &mut [Member]) {
                 .then_with(|| b.id.cmp(&a.id))
         });
     }
-}
-
-/// Upsert `incoming` into `members` by id; the copy with the newer
-/// `updated_at` wins, and on a tie the later fetch wins (its non-timestamped
-/// fields, such as reaction counts, are newer). Returns how many objects
-/// were added or changed, and the ids that were new. Leaves `members` in the
-/// endpoint's natural order.
-pub fn upsert(kind: Kind, members: &mut Vec<Member>, incoming: Vec<Member>) -> (u32, Vec<u64>) {
-    let mut index: std::collections::HashMap<u64, usize> =
-        members.iter().enumerate().map(|(i, m)| (m.id, i)).collect();
-    let mut changed = 0u32;
-    let mut added = Vec::new();
-    for object in incoming {
-        match index.get(&object.id) {
-            Some(&i) => {
-                let stored = &mut members[i];
-                if object.updated_at >= stored.updated_at && object.raw != stored.raw {
-                    *stored = object;
-                    changed += 1;
-                }
-            }
-            None => {
-                index.insert(object.id, members.len());
-                added.push(object.id);
-                members.push(object);
-                changed += 1;
-            }
-        }
-    }
-    sort(kind, members);
-    (changed, added)
 }
 
 /// Rebuild the body GitHub returns for the first `per_page` members.
@@ -371,59 +322,64 @@ pub fn render(
     out
 }
 
-/// The lower bound of the next incremental query: the high-water mark
-/// minus the overlap. Comments: the newest `updated_at` seen (an edit moves
-/// it). Runs: the newest `created_at` seen, or the oldest `live` run's
-/// `created_at` if that is older, so the same one query also refreshes every
-/// run that has not finished. `None` for an empty membership (reseed).
-pub fn delta_bound(
-    kind: Kind,
-    members: &[Member],
-    live: impl Fn(&Member) -> bool,
-) -> Option<String> {
-    let mark = if kind.is_comments() {
-        members.iter().map(|m| m.updated_at).max()?
-    } else {
-        let newest = members.iter().map(|m| m.created_at).max()?;
-        members
-            .iter()
-            .filter(|m| live(m))
-            .map(|m| m.created_at)
-            .min()
-            .map_or(newest, |oldest_live| oldest_live.min(newest))
-    };
-    Some(format_ts(mark - OVERLAP_SECS))
-}
-
 /// Whether a response says another page follows.
 pub fn has_next_page(link: Option<&str>) -> bool {
     link.is_some_and(|link| link.contains("rel=\"next\""))
 }
 
-/// A collection's durable state, one redb row per key.
+/// One upstream page as last received: its ETag, members and headers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CollectionState {
+pub struct StoredPage {
+    /// Sent as `If-None-Match` on the next refresh; a `304` keeps the page.
+    pub etag: Option<String>,
     pub members: Vec<Member>,
     /// Run lists: GitHub's `total_count` for the caller's filters.
     pub total_count: Option<u64>,
-    /// The highest id ever seen; a run with a higher id is new.
-    pub max_id: u64,
-    /// Headers of the newest upstream page, minus transfer and paging ones.
+    /// Response headers, minus transfer and paging ones.
     pub headers: Vec<(String, String)>,
-    /// ETag of a single-page seed, for a free `304` reconciliation.
-    pub seed_etag: Option<String>,
-    /// The last incremental URL and its ETag: an unchanged bound repeats the
-    /// URL, and a `304` costs nothing.
-    pub delta_url: Option<String>,
-    pub delta_etag: Option<String>,
+}
+
+/// A collection's durable state, one redb row per key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionState {
+    /// Upstream pages in order. Their members, joined, are the membership
+    /// in the endpoint's natural order.
+    pub pages: Vec<StoredPage>,
+    /// The upstream page size the pages were fetched at.
+    pub width: usize,
     /// Start of the last upstream refresh (Unix ms).
     pub fetched_at_ms: u64,
-    /// Start of the last full fetch (seed or reconciliation).
-    pub reconciled_at_ms: u64,
     /// Set when the collection cannot be merged (too many pages, a body
-    /// the merge cannot rebuild); reads use the exact-URL path until a
-    /// reconciliation interval has passed.
+    /// the merge cannot rebuild); reads use the exact-URL path until the
+    /// retry interval has passed.
     pub unmergeable_at_ms: Option<u64>,
+}
+
+impl CollectionState {
+    /// The membership: every page's members, in order.
+    pub fn members(&self) -> Vec<Member> {
+        self.pages
+            .iter()
+            .flat_map(|page| page.members.iter().cloned())
+            .collect()
+    }
+}
+
+/// Objects added or changed (new id, or other bytes) and objects removed,
+/// from `before` to `after`.
+pub fn diff(before: &[Member], after: &[Member]) -> (u32, u32) {
+    let old: std::collections::HashMap<u64, &str> =
+        before.iter().map(|m| (m.id, m.raw.as_str())).collect();
+    let new: std::collections::HashSet<u64> = after.iter().map(|m| m.id).collect();
+    let changed = after
+        .iter()
+        .filter(|m| old.get(&m.id) != Some(&m.raw.as_str()))
+        .count();
+    let removed = before.iter().filter(|m| !new.contains(&m.id)).count();
+    (
+        u32::try_from(changed).unwrap_or(u32::MAX),
+        u32::try_from(removed).unwrap_or(u32::MAX),
+    )
 }
 
 /// Headers kept on a rebuilt response: not paging, validators or length,
@@ -438,98 +394,6 @@ pub fn kept_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
         })
         .cloned()
         .collect()
-}
-
-/// A single-object listing that can freeze once everything in it is done.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Freeze {
-    /// `repos/{o}/{r}/actions/runs/{id}/jobs`: frozen once every job and
-    /// the run itself are completed.
-    Jobs {
-        owner: String,
-        repo: String,
-        run_id: String,
-    },
-    /// `repos/{o}/{r}/commits/{sha}/check-runs`: frozen once every check run
-    /// has been completed for [`CHECKS_SETTLE_SECS`]. Only a full 40-hex
-    /// SHA; a branch name moves.
-    CheckRuns,
-}
-
-/// Whether `endpoint` is a listing that may freeze. Only the unfiltered
-/// listing (page size and `filter` aside); a status or name filter can make
-/// "everything completed" vacuously true.
-pub fn freeze_kind(endpoint: &str) -> Option<Freeze> {
-    let (path, params) = split_query(endpoint)?;
-    let plain = params.iter().all(|(key, value)| match *key {
-        "per_page" => per_page(value).is_some(),
-        "page" => *value == "1",
-        "filter" => matches!(*value, "latest" | "all"),
-        _ => false,
-    });
-    if !plain {
-        return None;
-    }
-    let segments: Vec<&str> = path.split('/').collect();
-    match segments.as_slice() {
-        ["repos", owner, repo, "actions", "runs", id, "jobs"] if is_number(id) => {
-            Some(Freeze::Jobs {
-                owner: owner.to_string(),
-                repo: repo.to_string(),
-                run_id: id.to_string(),
-            })
-        }
-        ["repos", _, _, "commits", sha, "check-runs"]
-            if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) =>
-        {
-            Some(Freeze::CheckRuns)
-        }
-        _ => None,
-    }
-}
-
-#[derive(Deserialize)]
-struct Listing {
-    total_count: u64,
-    #[serde(default)]
-    jobs: Option<Vec<StatusProbe>>,
-    #[serde(default)]
-    check_runs: Option<Vec<StatusProbe>>,
-}
-
-#[derive(Deserialize)]
-struct StatusProbe {
-    status: String,
-    #[serde(default)]
-    completed_at: Option<String>,
-}
-
-/// For a non-empty, single-page listing whose every entry is `completed`,
-/// the newest `completed_at` (Unix seconds). `None` otherwise.
-pub fn all_completed(body: &[u8]) -> Option<i64> {
-    let listing: Listing = serde_json::from_slice(body).ok()?;
-    let entries = listing.jobs.or(listing.check_runs)?;
-    if entries.is_empty() || listing.total_count != entries.len() as u64 {
-        return None;
-    }
-    let mut newest = i64::MIN;
-    for entry in &entries {
-        if entry.status != "completed" {
-            return None;
-        }
-        let at = parse_ts(entry.completed_at.as_deref()?)?;
-        newest = newest.max(at);
-    }
-    Some(newest)
-}
-
-/// Whether a single workflow run object is `completed`.
-pub fn run_completed(body: &[u8]) -> bool {
-    #[derive(Deserialize)]
-    struct Run {
-        status: String,
-    }
-    serde_json::from_slice::<Run>(body).is_ok_and(|run| run.status == "completed")
 }
 
 /// Parse GitHub's `YYYY-MM-DDTHH:MM:SSZ` into Unix seconds.

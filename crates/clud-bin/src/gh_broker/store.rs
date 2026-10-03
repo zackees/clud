@@ -53,10 +53,6 @@ pub struct ObjectMeta {
     /// body *started*, Unix ms. A fetch that began before an invalidation
     /// therefore never counts as fresh after it.
     pub fetched_at_ms: u64,
-    /// A listing whose every entry is finished (phase 2): served without
-    /// a TTL until a write invalidates it.
-    #[serde(default)]
-    pub frozen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,7 +303,6 @@ mod tests {
             etag: Some("\"e1\"".into()),
             last_modified: None,
             fetched_at_ms: at,
-            frozen: false,
         }
     }
 
@@ -367,7 +362,7 @@ mod tests {
         assert_eq!(store.stale_after(&tags).unwrap(), 20);
         assert_eq!(store.stale_after(&["run:7".to_string()]).unwrap(), 10);
         let state = CollectionState {
-            max_id: 7,
+            width: 7,
             fetched_at_ms: 3,
             ..CollectionState::default()
         };

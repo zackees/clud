@@ -82,23 +82,21 @@ fn plans_accept_only_queries_a_merge_reproduces() {
 }
 
 #[test]
-fn upstream_urls_keep_the_callers_filters_and_bound_the_query() {
+fn upstream_urls_keep_the_callers_filters_at_the_needed_width() {
     let p = plan("repos/o/r/actions/runs?branch=main&per_page=5").unwrap();
+    assert_eq!((p.width(), p.max_pages()), (10, 1));
     assert_eq!(
-        p.seed_url(1),
-        "repos/o/r/actions/runs?branch=main&per_page=100"
+        p.seed_url(1, p.width()),
+        "repos/o/r/actions/runs?branch=main&per_page=10"
     );
+    for (per_page, width) in [(10, 10), (11, 30), (30, 30), (31, 100), (100, 100)] {
+        let p = plan(&format!("repos/o/r/actions/runs?per_page={per_page}")).unwrap();
+        assert_eq!(p.width(), width, "{per_page}");
+    }
+    let c = plan("repos/o/r/issues/5/comments?per_page=5").unwrap();
+    assert_eq!((c.width(), c.max_pages()), (100, MAX_SEED_PAGES));
     assert_eq!(
-        p.delta_url("2026-10-02T23:18:15Z", 2),
-        "repos/o/r/actions/runs?branch=main&created=%3E%3D2026-10-02T23%3A18%3A15Z&per_page=100&page=2"
-    );
-    let c = plan("repos/o/r/issues/5/comments").unwrap();
-    assert_eq!(
-        c.delta_url("2026-10-02T23:18:15Z", 1),
-        "repos/o/r/issues/5/comments?since=2026-10-02T23%3A18%3A15Z&per_page=100"
-    );
-    assert_eq!(
-        c.seed_url(3),
+        c.seed_url(3, c.width()),
         "repos/o/r/issues/5/comments?per_page=100&page=3"
     );
 }
@@ -113,8 +111,8 @@ fn pages_parse_only_when_they_rebuild_byte_for_byte() {
     let page = parse_page(Kind::IssueComments, body.as_bytes()).unwrap();
     assert_eq!(page.members.len(), 2);
     assert_eq!(
-        page.members[1].updated_at,
-        parse_ts("2026-10-02T12:00:00Z").unwrap()
+        page.members[1].created_at,
+        parse_ts("2026-10-02T11:00:00Z").unwrap()
     );
     assert_eq!(
         render(Kind::IssueComments, &page.members, None, 100),
@@ -151,7 +149,7 @@ fn pages_parse_only_when_they_rebuild_byte_for_byte() {
     );
     let page = parse_page(Kind::Runs, runs.as_bytes()).unwrap();
     assert_eq!(page.total_count, Some(42));
-    assert_eq!(page.members[0].status.as_deref(), Some("queued"));
+    assert_eq!(page.members[0].id, 9);
     // An extra wrapper key would be dropped by the rebuild, so it is refused.
     // A page in another order than the merge assumes is detected.
     let swapped = format!(
@@ -161,127 +159,55 @@ fn pages_parse_only_when_they_rebuild_byte_for_byte() {
     );
     let swapped = parse_page(Kind::IssueComments, swapped.as_bytes()).unwrap();
     assert!(!in_natural_order(Kind::IssueComments, &swapped.members));
+    // So is the same id twice: pages joined across a change.
+    let twice = [page.members.clone(), page.members.clone()].concat();
+    assert!(!in_natural_order(Kind::Runs, &twice));
     assert!(in_natural_order(Kind::Runs, &page.members));
     let extra = runs.replacen("{\"total_count\":42,", "{\"total_count\":42,\"x\":1,", 1);
     assert_eq!(parse_page(Kind::Runs, extra.as_bytes()), None);
 }
 
 #[test]
-fn upsert_dedupes_by_id_and_newer_updated_at_wins() {
-    // One page per item: an upsert batch need not be in natural order.
-    let parse = |items: &[String]| {
-        items
-            .iter()
-            .flat_map(|item| {
-                parse_page(Kind::IssueComments, format!("[{item}]").as_bytes())
-                    .unwrap()
-                    .members
-            })
-            .collect::<Vec<_>>()
-    };
-    let mut members = parse(&[
-        comment(1, "2026-10-02T10:00:00Z", "2026-10-02T10:00:00Z"),
-        comment(3, "2026-10-02T10:02:00Z", "2026-10-02T10:05:00Z"),
-    ]);
-    let edited = comment(1, "2026-10-02T10:00:00Z", "2026-10-02T10:09:00Z").replace("c1", "edited");
-    let older = comment(3, "2026-10-02T10:02:00Z", "2026-10-02T10:01:00Z").replace("c3", "stale");
-    let (changed, added) = upsert(
-        Kind::IssueComments,
-        &mut members,
-        parse(&[
-            edited.clone(),
-            older,
-            comment(2, "2026-10-02T10:01:00Z", "2026-10-02T10:01:00Z"),
-            // The overlap window returns an unchanged copy: not a change.
-            comment(3, "2026-10-02T10:02:00Z", "2026-10-02T10:05:00Z"),
-        ]),
-    );
-    assert_eq!((changed, added), (2, vec![2]));
-    let ids: Vec<u64> = members.iter().map(|m| m.id).collect();
-    assert_eq!(ids, [1, 2, 3]);
-    assert_eq!(members[0].raw, edited);
-    assert!(members[2].raw.contains("\"c3\""));
-}
-
-#[test]
-fn runs_sort_newest_first_and_the_bound_covers_live_runs() {
+fn runs_sort_newest_first_then_by_id() {
     let body = format!(
         "{{\"total_count\":3,\"workflow_runs\":[{},{},{}]}}",
         run(30, "2026-10-02T12:00:00Z", "completed"),
         run(20, "2026-10-02T11:00:00Z", "in_progress"),
-        run(10, "2026-10-02T10:00:00Z", "completed")
+        run(10, "2026-10-02T11:00:00Z", "completed")
     );
     let mut members = parse_page(Kind::Runs, body.as_bytes()).unwrap().members;
+    assert!(in_natural_order(Kind::Runs, &members));
     members.reverse();
     sort(Kind::Runs, &mut members);
     assert_eq!(
         members.iter().map(|m| m.id).collect::<Vec<_>>(),
         [30, 20, 10]
     );
-    let live = |m: &Member| m.status.as_deref() != Some("completed");
-    assert_eq!(
-        delta_bound(Kind::Runs, &members, live).as_deref(),
-        Some("2026-10-02T10:59:55Z")
-    );
-    assert_eq!(
-        delta_bound(Kind::Runs, &members, |_| false).as_deref(),
-        Some("2026-10-02T11:59:55Z")
-    );
-    assert_eq!(delta_bound(Kind::Runs, &[], live), None);
 }
 
 #[test]
-fn only_unfiltered_job_and_sha_check_listings_freeze() {
-    let sha = "0123456789abcdef0123456789abcdef01234567";
-    assert_eq!(
-        freeze_kind("repos/o/r/actions/runs/7/jobs?per_page=100"),
-        Some(Freeze::Jobs {
-            owner: "o".into(),
-            repo: "r".into(),
-            run_id: "7".into()
-        })
-    );
-    assert_eq!(
-        freeze_kind(&format!(
-            "/repos/o/r/commits/{sha}/check-runs?filter=latest"
-        )),
-        Some(Freeze::CheckRuns)
-    );
-    for endpoint in [
-        "repos/o/r/commits/main/check-runs".to_string(),
-        format!("repos/o/r/commits/{sha}/check-runs?status=completed"),
-        format!("repos/o/r/commits/{sha}/check-runs?check_name=x"),
-        "repos/o/r/actions/runs/7/jobs?page=2".to_string(),
-        "repos/o/r/actions/runs/7".to_string(),
-        "repos/o/r/actions/runs/7/attempts/1/jobs".to_string(),
-    ] {
-        assert_eq!(freeze_kind(&endpoint), None, "{endpoint}");
-    }
-}
-
-#[test]
-fn listings_are_complete_only_when_every_entry_finished_on_one_page() {
-    let job = |status: &str, at: &str| format!(r#"{{"status":"{status}","completed_at":{at}}}"#);
-    let done = job("completed", "\"2026-10-02T10:00:00Z\"");
-    let later = job("completed", "\"2026-10-02T10:05:00Z\"");
-    let body = format!(r#"{{"total_count":2,"jobs":[{done},{later}]}}"#);
-    assert_eq!(
-        all_completed(body.as_bytes()),
-        parse_ts("2026-10-02T10:05:00Z")
-    );
-    let checks = format!(r#"{{"total_count":1,"check_runs":[{done}]}}"#);
-    assert!(all_completed(checks.as_bytes()).is_some());
-    for bad in [
-        format!(
-            r#"{{"total_count":2,"jobs":[{done},{}]}}"#,
-            job("in_progress", "null")
-        ),
-        format!(r#"{{"total_count":3,"jobs":[{done},{later}]}}"#),
-        r#"{"total_count":0,"jobs":[]}"#.to_string(),
-        r#"{"total_count":0,"check_runs":[]}"#.to_string(),
-    ] {
-        assert_eq!(all_completed(bad.as_bytes()), None, "{bad}");
-    }
-    assert!(run_completed(br#"{"id":7,"status":"completed"}"#));
-    assert!(!run_completed(br#"{"id":7,"status":"in_progress"}"#));
+fn diff_counts_added_changed_and_removed_objects() {
+    let parse = |items: &[String]| {
+        parse_page(
+            Kind::IssueComments,
+            format!("[{}]", items.join(",")).as_bytes(),
+        )
+        .unwrap()
+        .members
+    };
+    let before = parse(&[
+        comment(1, "2026-10-02T10:00:00Z", "2026-10-02T10:00:00Z"),
+        comment(2, "2026-10-02T10:01:00Z", "2026-10-02T10:01:00Z"),
+        comment(3, "2026-10-02T10:02:00Z", "2026-10-02T10:02:00Z"),
+    ]);
+    // A reaction changes the bytes, not `updated_at`.
+    let reacted = comment(1, "2026-10-02T10:00:00Z", "2026-10-02T10:00:00Z")
+        .replace("\"c1\"", "\"c1\",\"reactions\":1");
+    let after = parse(&[
+        reacted,
+        comment(3, "2026-10-02T10:02:00Z", "2026-10-02T10:02:00Z"),
+        comment(4, "2026-10-02T10:03:00Z", "2026-10-02T10:03:00Z"),
+    ]);
+    assert_eq!(diff(&before, &after), (2, 1));
+    assert_eq!(diff(&before, &before), (0, 0));
 }
