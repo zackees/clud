@@ -892,10 +892,6 @@ impl Drop for ActiveWorker {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
 fn handle_connection(
     mut stream: TcpStream,
     config: &BridgeConfig,
@@ -925,25 +921,67 @@ fn handle_connection(
         return;
     }
 
-    let parsed = match read_headers(
+    let Some(parsed) = admit_request(
         &mut stream,
-        config.max_header_bytes,
-        header_deadline,
+        config,
+        bearer_token,
         shutdown,
-    ) {
+        log,
+        header_deadline,
+    ) else {
+        return;
+    };
+    let conversation_key = conversation_key_from_headers(
+        parsed.session_id.as_deref(),
+        parsed.agent_id.as_deref(),
+        fallback_root,
+    );
+    let connection = ConnectionContext {
+        config,
+        shutdown,
+        conversations,
+        log,
+        fallback_root,
+        cache_health,
+    };
+    route_request(&mut stream, &connection, parsed, &conversation_key);
+}
+
+/// The per-connection state every route handler reads.
+struct ConnectionContext<'a> {
+    config: &'a BridgeConfig,
+    shutdown: &'a AtomicBool,
+    conversations: &'a ConversationStore,
+    log: Option<&'a SharedBridgeLog>,
+    fallback_root: &'a str,
+    cache_health: &'a SharedCacheHealth,
+}
+
+/// Read the request headers and admit the request: size and credential
+/// checks. A refusal is recorded and answered here; `None` means the
+/// connection is done.
+fn admit_request(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    bearer_token: &str,
+    shutdown: &AtomicBool,
+    log: Option<&SharedBridgeLog>,
+    header_deadline: Instant,
+) -> Option<ParsedRequest> {
+    let parsed = match read_headers(stream, config.max_header_bytes, header_deadline, shutdown) {
         Ok(parsed) => parsed,
-        Err(ABANDON) => return,
+        Err(ABANDON) => return None,
         Err(status) => {
             record_rejection(log, status, "request_headers");
-            let _ = write_error(&mut stream, status);
-            return;
+            let _ = write_error(stream, status);
+            return None;
         }
     };
 
     if parsed.content_length > config.max_body_bytes {
         record_rejection(log, 413, "request_body_too_large");
-        let _ = write_error(&mut stream, 413);
-        return;
+        let _ = write_error(stream, 413);
+        return None;
     }
     if !request_is_authenticated(&parsed, bearer_token, &config.gateway_mode) {
         let reason = match config.gateway_mode {
@@ -951,15 +989,20 @@ fn handle_connection(
             GatewayMode::Unified(_) => "gateway_token_mismatch",
         };
         record_rejection(log, 401, reason);
-        let _ = write_error(&mut stream, 401);
-        return;
+        let _ = write_error(stream, 401);
+        return None;
     }
-    let conversation_key = conversation_key_from_headers(
-        parsed.session_id.as_deref(),
-        parsed.agent_id.as_deref(),
-        fallback_root,
-    );
+    Some(parsed)
+}
 
+/// Dispatch one admitted request to its route handler.
+fn route_request(
+    stream: &mut TcpStream,
+    connection: &ConnectionContext<'_>,
+    mut parsed: ParsedRequest,
+    conversation_key: &ConversationKey,
+) {
+    let (config, log) = (connection.config, connection.log);
     // Route on the path alone. Claude Code sends `POST /v1/messages?beta=true`,
     // so matching the raw request target 404s a request that is perfectly
     // valid -- a defect only a live client surfaces, since the mock probe
@@ -970,216 +1013,65 @@ fn handle_connection(
         .next()
         .unwrap_or(parsed.path.as_str())
         .to_string();
-    match (parsed.method.as_str(), route.as_str()) {
+    let method = parsed.method.clone();
+    match (method.as_str(), route.as_str()) {
         ("POST", "/_clud/context/compact") => {
-            let body_deadline = Instant::now() + config.body_timeout;
-            match read_context_control_body(
-                &mut stream,
-                parsed.body_prefix,
-                parsed.content_length,
-                body_deadline,
-                shutdown,
-                ContextControl::Compact,
-                fallback_root,
-            ) {
-                Ok(body_key) => serve_context_compact(
-                    &mut stream,
+            let control = ContextControl::Compact;
+            if let Some(key) =
+                read_context_key(stream, connection, &mut parsed, control, conversation_key)
+            {
+                serve_context_compact(
+                    stream,
                     config,
-                    shutdown,
-                    conversations,
+                    connection.shutdown,
+                    connection.conversations,
                     log,
-                    body_key.unwrap_or_else(|| conversation_key.clone()),
-                    cache_health,
-                ),
-                Err(ABANDON) => {}
-                Err(status) => {
-                    record_rejection(log, status, "context_control_body");
-                    let _ = write_error(&mut stream, status);
-                }
+                    key,
+                    connection.cache_health,
+                );
             }
         }
         ("POST", "/_clud/context/clear") => {
-            let body_deadline = Instant::now() + config.body_timeout;
-            match read_context_control_body(
-                &mut stream,
-                parsed.body_prefix,
-                parsed.content_length,
-                body_deadline,
-                shutdown,
-                ContextControl::Clear,
-                fallback_root,
-            ) {
-                Ok(body_key) => serve_context_clear(
-                    &mut stream,
-                    conversations,
-                    body_key.unwrap_or_else(|| conversation_key.clone()),
-                    cache_health,
-                ),
-                Err(ABANDON) => {}
-                Err(status) => {
-                    record_rejection(log, status, "context_control_body");
-                    let _ = write_error(&mut stream, status);
-                }
+            let control = ContextControl::Clear;
+            if let Some(key) =
+                read_context_key(stream, connection, &mut parsed, control, conversation_key)
+            {
+                serve_context_clear(
+                    stream,
+                    connection.conversations,
+                    key,
+                    connection.cache_health,
+                );
             }
         }
         ("POST", "/_clud/context/compact-finished") => {
-            let body_deadline = Instant::now() + config.body_timeout;
-            match read_context_control_body(
-                &mut stream,
-                parsed.body_prefix,
-                parsed.content_length,
-                body_deadline,
-                shutdown,
-                ContextControl::CompactFinished,
-                fallback_root,
-            ) {
-                Ok(body_key) => serve_context_compact_finished(
-                    &mut stream,
-                    conversations,
-                    log,
-                    body_key.unwrap_or_else(|| conversation_key.clone()),
-                ),
-                Err(ABANDON) => {}
-                Err(status) => {
-                    record_rejection(log, status, "context_control_body");
-                    let _ = write_error(&mut stream, status);
-                }
+            let control = ContextControl::CompactFinished;
+            if let Some(key) =
+                read_context_key(stream, connection, &mut parsed, control, conversation_key)
+            {
+                serve_context_compact_finished(stream, connection.conversations, log, key);
             }
         }
         ("GET", "/v1/models") => match &config.gateway_mode {
-            GatewayMode::Codex => serve_codex_catalog(&mut stream, config, log),
-            GatewayMode::Unified(_) => serve_unified_catalog(&mut stream, config, log),
+            GatewayMode::Codex => serve_codex_catalog(stream, config, log),
+            GatewayMode::Unified(_) => serve_unified_catalog(stream, config, log),
         },
         ("GET", "/_clud/route/status") => match &config.gateway_mode {
-            GatewayMode::Unified(unified) => serve_route_status(&mut stream, unified),
+            GatewayMode::Unified(unified) => serve_route_status(stream, unified),
             GatewayMode::Codex => {
                 record_rejection(log, 404, "route_status_unsupported");
-                let _ = write_error(&mut stream, 404);
+                let _ = write_error(stream, 404);
             }
         },
-        ("POST", "/_clud/route/clear") => {
-            let body_deadline = Instant::now() + config.body_timeout;
-            match read_body(
-                &mut stream,
-                parsed.body_prefix,
-                parsed.content_length,
-                body_deadline,
-                shutdown,
-            ) {
-                Ok(body) => match &config.gateway_mode {
-                    GatewayMode::Unified(unified) => serve_route_clear(&mut stream, unified, &body),
-                    GatewayMode::Codex => {
-                        record_rejection(log, 404, "route_clear_unsupported");
-                        let _ = write_error(&mut stream, 404);
-                    }
-                },
-                Err(ABANDON) => {}
-                Err(status) => {
-                    record_rejection(log, status, "route_control_body");
-                    let _ = write_error(&mut stream, status);
-                }
-            }
-        }
+        ("POST", "/_clud/route/clear") => route_clear(stream, connection, &mut parsed),
         ("HEAD", "/v1/messages") => {
-            let _ = write_response(&mut stream, 200, "application/json", b"", true);
+            let _ = write_response(stream, 200, "application/json", b"", true);
         }
         ("POST", "/v1/messages/count_tokens") => {
-            if !matches!(config.gateway_mode, GatewayMode::Unified(_)) {
-                record_rejection(log, 404, "token_counting_unsupported");
-                let _ = write_response(
-                    &mut stream,
-                    404,
-                    "application/json",
-                    br#"{"error":{"type":"not_found_error","message":"token counting is not supported by the Codex bridge"}}"#,
-                    false,
-                );
-                return;
-            }
-            let body_deadline = Instant::now() + config.body_timeout;
-            let body = match read_body(
-                &mut stream,
-                parsed.body_prefix,
-                parsed.content_length,
-                body_deadline,
-                shutdown,
-            ) {
-                Ok(body) => body,
-                Err(ABANDON) => return,
-                Err(status) => {
-                    record_rejection(log, status, "request_body");
-                    let _ = write_error(&mut stream, status);
-                    return;
-                }
-            };
-            serve_unified_count_tokens(
-                &mut stream,
-                config,
-                shutdown,
-                conversations,
-                &body,
-                &conversation_key,
-                &parsed.headers,
-                cache_health,
-            );
+            route_count_tokens(stream, connection, &mut parsed, conversation_key);
         }
         ("POST", "/v1/messages") => {
-            // Counted before the body is read, so a turn the bridge later
-            // refuses still counts as "the harness talked to us" (#998). The
-            // discovery route's own refusals are the bridge log's story; the
-            // classification this feeds is only for total silence.
-            config.turn_requests.fetch_add(1, Ordering::Release);
-            let body_deadline = Instant::now() + config.body_timeout;
-            let body = match read_body(
-                &mut stream,
-                parsed.body_prefix,
-                parsed.content_length,
-                body_deadline,
-                shutdown,
-            ) {
-                Ok(body) => body,
-                Err(ABANDON) => return,
-                Err(status) => {
-                    record_rejection(log, status, "request_body");
-                    let _ = write_error(&mut stream, status);
-                    return;
-                }
-            };
-            let json: serde_json::Value = match serde_json::from_slice(&body) {
-                Ok(json) => json,
-                Err(_) => {
-                    record_rejection(log, 400, "invalid_json");
-                    let _ = write_error(&mut stream, 400);
-                    return;
-                }
-            };
-            record_request_effort(&config.status_usage, &json, parsed.agent_id.is_some());
-            let streaming = json.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
-            if matches!(config.gateway_mode, GatewayMode::Unified(_)) {
-                serve_unified_messages(
-                    &mut stream,
-                    config,
-                    shutdown,
-                    conversations,
-                    &body,
-                    streaming,
-                    &conversation_key,
-                    &parsed.headers,
-                    log,
-                    cache_health,
-                );
-            } else {
-                serve_codex_discovery_messages(
-                    &mut stream,
-                    config,
-                    shutdown,
-                    conversations,
-                    &body,
-                    streaming,
-                    &conversation_key,
-                    log,
-                    cache_health,
-                );
-            }
+            route_messages(stream, connection, &mut parsed, conversation_key);
         }
         _ => {
             if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
@@ -1189,8 +1081,169 @@ fn handle_connection(
                 );
             }
             record_rejection(log, 404, "unrouted_request");
-            let _ = write_error(&mut stream, 404);
+            let _ = write_error(stream, 404);
         }
+    }
+}
+
+/// Read a request body under the body budget. A failure is recorded under
+/// `reason` and answered here; `None` means the connection is done.
+fn read_request_body(
+    stream: &mut TcpStream,
+    connection: &ConnectionContext<'_>,
+    parsed: &mut ParsedRequest,
+    reason: &'static str,
+) -> Option<Vec<u8>> {
+    let body_deadline = Instant::now() + connection.config.body_timeout;
+    match read_body(
+        stream,
+        std::mem::take(&mut parsed.body_prefix),
+        parsed.content_length,
+        body_deadline,
+        connection.shutdown,
+    ) {
+        Ok(body) => Some(body),
+        Err(ABANDON) => None,
+        Err(status) => {
+            record_rejection(connection.log, status, reason);
+            let _ = write_error(stream, status);
+            None
+        }
+    }
+}
+
+/// Read a `/_clud/context/*` body and resolve the conversation it names,
+/// falling back to the one the request headers name.
+fn read_context_key(
+    stream: &mut TcpStream,
+    connection: &ConnectionContext<'_>,
+    parsed: &mut ParsedRequest,
+    control: ContextControl,
+    conversation_key: &ConversationKey,
+) -> Option<ConversationKey> {
+    let body_deadline = Instant::now() + connection.config.body_timeout;
+    match read_context_control_body(
+        stream,
+        std::mem::take(&mut parsed.body_prefix),
+        parsed.content_length,
+        body_deadline,
+        connection.shutdown,
+        control,
+        connection.fallback_root,
+    ) {
+        Ok(body_key) => Some(body_key.unwrap_or_else(|| conversation_key.clone())),
+        Err(ABANDON) => None,
+        Err(status) => {
+            record_rejection(connection.log, status, "context_control_body");
+            let _ = write_error(stream, status);
+            None
+        }
+    }
+}
+
+/// `POST /_clud/route/clear`: unified gateway only.
+fn route_clear(
+    stream: &mut TcpStream,
+    connection: &ConnectionContext<'_>,
+    parsed: &mut ParsedRequest,
+) {
+    let Some(body) = read_request_body(stream, connection, parsed, "route_control_body") else {
+        return;
+    };
+    match &connection.config.gateway_mode {
+        GatewayMode::Unified(unified) => serve_route_clear(stream, unified, &body),
+        GatewayMode::Codex => {
+            record_rejection(connection.log, 404, "route_clear_unsupported");
+            let _ = write_error(stream, 404);
+        }
+    }
+}
+
+/// `POST /v1/messages/count_tokens`: unified gateway only.
+fn route_count_tokens(
+    stream: &mut TcpStream,
+    connection: &ConnectionContext<'_>,
+    parsed: &mut ParsedRequest,
+    conversation_key: &ConversationKey,
+) {
+    if !matches!(connection.config.gateway_mode, GatewayMode::Unified(_)) {
+        record_rejection(connection.log, 404, "token_counting_unsupported");
+        let _ = write_response(
+            stream,
+            404,
+            "application/json",
+            br#"{"error":{"type":"not_found_error","message":"token counting is not supported by the Codex bridge"}}"#,
+            false,
+        );
+        return;
+    }
+    let Some(body) = read_request_body(stream, connection, parsed, "request_body") else {
+        return;
+    };
+    serve_unified_count_tokens(
+        stream,
+        connection.config,
+        connection.shutdown,
+        connection.conversations,
+        &body,
+        conversation_key,
+        &parsed.headers,
+        connection.cache_health,
+    );
+}
+
+/// `POST /v1/messages`: one model turn, through the unified gateway or the
+/// Codex discovery translator.
+fn route_messages(
+    stream: &mut TcpStream,
+    connection: &ConnectionContext<'_>,
+    parsed: &mut ParsedRequest,
+    conversation_key: &ConversationKey,
+) {
+    let (config, log) = (connection.config, connection.log);
+    // Counted before the body is read, so a turn the bridge later
+    // refuses still counts as "the harness talked to us" (#998). The
+    // discovery route's own refusals are the bridge log's story; the
+    // classification this feeds is only for total silence.
+    config.turn_requests.fetch_add(1, Ordering::Release);
+    let Some(body) = read_request_body(stream, connection, parsed, "request_body") else {
+        return;
+    };
+    let json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(json) => json,
+        Err(_) => {
+            record_rejection(log, 400, "invalid_json");
+            let _ = write_error(stream, 400);
+            return;
+        }
+    };
+    record_request_effort(&config.status_usage, &json, parsed.agent_id.is_some());
+    let streaming = json.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
+    if matches!(config.gateway_mode, GatewayMode::Unified(_)) {
+        serve_unified_messages(
+            stream,
+            config,
+            connection.shutdown,
+            connection.conversations,
+            &body,
+            streaming,
+            conversation_key,
+            &parsed.headers,
+            log,
+            connection.cache_health,
+        );
+    } else {
+        serve_codex_discovery_messages(
+            stream,
+            config,
+            connection.shutdown,
+            connection.conversations,
+            &body,
+            streaming,
+            conversation_key,
+            log,
+            connection.cache_health,
+        );
     }
 }
 
@@ -1658,12 +1711,7 @@ fn mark_auth_recheck(
 }
 
 /// Route one unified request before the legacy Codex translator sees it.
-/// Synthetic IDs are resolved here, never by the legacy `claude*` fallback.
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
 fn serve_unified_messages(
     stream: &mut TcpStream,
     config: &BridgeConfig,
@@ -1693,60 +1741,9 @@ fn serve_unified_messages(
             return;
         }
     };
-    let exact_catalog = provider_catalog::model_by_discovery_id(model);
-    // A Codex discovery selection may retain the bridge's legacy
-    // `<model>@<effort>` override. Resolve the reserved base ID before the
-    // translator sees its `claude` substring, then carry the suffix onto the
-    // reviewed wire model so `effort_for` remains the sole precedence owner.
-    let mut codex_effort_suffix = None;
-    let catalog = exact_catalog
-        .or_else(|| {
-            let (base, effort) = model.rsplit_once('@')?;
-            let entry = provider_catalog::model_by_discovery_id(base).or_else(|| {
-                provider_catalog::non_claude_model_by_any_id(base)
-                    .filter(|entry| entry.provider == ModelProvider::Codex)
-            })?;
-            (entry.provider == ModelProvider::Codex).then(|| {
-                codex_effort_suffix = Some(effort);
-                entry
-            })
-        })
-        // A persisted or continued session can still name a known provider by
-        // wire ID or CLI alias instead of its discovery ID. Resolve those
-        // through the shared catalog so they route to their own provider
-        // rather than leaking to Anthropic as an "ordinary Claude" model.
-        .or_else(|| provider_catalog::non_claude_model_by_any_id(model));
-    if model.starts_with("clud-claude-") && catalog.is_none() {
-        let ids = unified_catalog_ids(unified).join(", ");
-        // #1010 item 2: this route kept #1000's single message after #1009
-        // gave the direct route two cases and made it quote the offending ID.
-        // Only the quoting carries over.
-        //
-        // The direct route's second case -- "clud knows this model, but this
-        // gateway is not serving it" -- is unreachable here, and adding it
-        // would be dead code.
-        //
-        // `exact_catalog` above resolves any discovery ID with no provider
-        // filter, and the fallback resolves anything else by cli id, wire id,
-        // or legacy alias for every provider except Claude and OpenRouter. So
-        // reaching this branch with an ID clud knows would need a
-        // `clud-claude-*` alias on a *Claude or OpenRouter* row that is not
-        // that row's discovery ID. No such row exists today -- note that
-        // `clud-claude-deepseek-v4-pro` is such an alias but on a DeepSeek
-        // row, which the fallback resolves, so it never lands here.
-        //
-        // `only_a_claude_or_openrouter_alias_would_make_the_unified_second_
-        // case_reachable` in provider_catalog fails if one is ever added.
-        record_model_rejection(log, 400, "unknown_model", model);
-        let body = serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": "invalid_request_error",
-                "message": format!("unknown clud gateway model '{model}'; available IDs: {ids}"),
-            }
-        })
-        .to_string();
-        let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+    let resolved = resolve_unified_catalog(model);
+    if model.starts_with("clud-claude-") && resolved.entry.is_none() {
+        refuse_unknown_gateway_model(stream, log, unified, model);
         return;
     }
     // #1257: a known model that the launch's allowlist does not admit is the
@@ -1755,41 +1752,17 @@ fn serve_unified_messages(
     if refuse_if_outside_allowlist(stream, log, &config.allowed_models, model) {
         return;
     }
-    // What one descent step will send. `model` is `None` only for an ordinary
-    // Claude ID, which stays byte-for-byte caller owned.
-    struct Attempt {
-        provider: ModelProvider,
-        route: ConversationRoute,
-        model: Option<String>,
-        spec: Option<String>,
-    }
-
-    let mut attempt = match catalog {
-        None => Attempt {
-            provider: ModelProvider::Claude,
-            route: ConversationRoute::Claude,
-            model: None,
-            spec: None,
-        },
-        Some(entry) => {
-            let requested_base = model.split_once('@').map_or(model, |(base, _)| base);
-            let target = if entry.provider == ModelProvider::Codex
-                && requested_base.eq_ignore_ascii_case(entry.wire_id)
-            {
-                requested_base.to_string()
-            } else {
-                crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
-            };
-            Attempt {
-                provider: entry.provider,
-                route: conversation_route_for(entry.provider),
-                model: Some(
-                    codex_effort_suffix
-                        .map_or_else(|| target.clone(), |effort| format!("{target}@{effort}")),
-                ),
-                spec: None,
-            }
-        }
+    let mut attempt = UnifiedAttempt::initial(&resolved, model);
+    let turn = UnifiedTurn {
+        config,
+        unified,
+        shutdown,
+        conversations,
+        streaming,
+        conversation_key,
+        headers,
+        log,
+        cache_health,
     };
 
     // Descend the ladder. Probing is enabled only while a further rung exists,
@@ -1806,86 +1779,7 @@ fn serve_unified_messages(
         let fallback = unified.next_rung(attempt.spec.as_deref(), attempt.route);
         let probe = fallback.is_some();
 
-        let outcome = match attempt.provider {
-            ModelProvider::Claude => serve_unified_anthropic_proxy(
-                stream,
-                conversations,
-                conversation_key,
-                ConversationRoute::Claude,
-                &unified.anthropic_base_url,
-                "/v1/messages",
-                &payload,
-                headers,
-                None,
-                config.stream_idle_timeout,
-                shutdown,
-                probe,
-                cache_health,
-                &config.status_usage,
-            ),
-            provider @ (ModelProvider::DeepSeek
-            | ModelProvider::Kimi
-            | ModelProvider::OpenRouter)
-                if unified.route_for(provider).is_some() =>
-            {
-                let route = unified
-                    .route_for(provider)
-                    .expect("guarded by route_for above");
-                serve_unified_anthropic_proxy(
-                    stream,
-                    conversations,
-                    conversation_key,
-                    attempt.route,
-                    &route.base_url,
-                    "/v1/messages",
-                    &payload,
-                    headers,
-                    Some(&route.api_key),
-                    config.stream_idle_timeout,
-                    shutdown,
-                    probe,
-                    cache_health,
-                    &config.status_usage,
-                )
-            }
-            ModelProvider::Codex if unified.codex_available => {
-                // Codex is a valid destination but never a probe source: its
-                // pipeline commits through a different path, so a descent that
-                // lands here stops here.
-                serve_messages(
-                    stream,
-                    config,
-                    shutdown,
-                    conversations,
-                    &payload,
-                    streaming,
-                    conversation_key,
-                    Some(ConversationRoute::Codex),
-                    log,
-                    cache_health,
-                );
-                ProxyOutcome::local(200)
-            }
-            // Only a registry provider whose key this launch lacks, or Codex
-            // without credentials, reaches here. Defense in depth: such routes
-            // are omitted from discovery, but a stale picker must not reach any
-            // paid model.
-            ModelProvider::DeepSeek
-            | ModelProvider::Kimi
-            | ModelProvider::OpenRouter
-            | ModelProvider::Codex => {
-                let body = serde_json::json!({
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": "the selected provider is not configured; run `clud auth status`",
-                    }
-                })
-                .to_string();
-                let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
-                ProxyOutcome::local(400)
-            }
-        };
+        let outcome = dispatch_unified_attempt(stream, &turn, &attempt, &payload, probe);
 
         match outcome {
             ProxyOutcome::Committed { status } => {
@@ -1907,7 +1801,6 @@ fn serve_unified_messages(
                     // probing off so the client receives the real upstream
                     // status instead of a silent hang.
                     warn_route_exhausted(attempt.route, verdict, state, None);
-                    attempt.spec = None;
                     return finish_without_failover(
                         stream,
                         config,
@@ -1922,13 +1815,233 @@ fn serve_unified_messages(
                     );
                 };
                 warn_route_exhausted(attempt.route, verdict, state, Some(&rung));
-                attempt = Attempt {
+                attempt = UnifiedAttempt {
                     provider: rung.provider,
                     route: rung.route,
                     model: Some(rung.wire_id.clone()),
                     spec: Some(rung.spec.clone()),
                 };
             }
+        }
+    }
+}
+
+/// The catalog row a unified request's model names, plus the legacy
+/// `<model>@<effort>` suffix a Codex discovery selection may carry.
+struct UnifiedCatalogMatch<'a> {
+    entry: Option<provider_catalog::CatalogModel>,
+    codex_effort_suffix: Option<&'a str>,
+}
+
+fn resolve_unified_catalog(model: &str) -> UnifiedCatalogMatch<'_> {
+    let exact_catalog = provider_catalog::model_by_discovery_id(model);
+    // A Codex discovery selection may retain the bridge's legacy
+    // `<model>@<effort>` override. Resolve the reserved base ID before the
+    // translator sees its `claude` substring, then carry the suffix onto the
+    // reviewed wire model so `effort_for` remains the sole precedence owner.
+    let mut codex_effort_suffix = None;
+    let entry = exact_catalog
+        .or_else(|| {
+            let (base, effort) = model.rsplit_once('@')?;
+            let entry = provider_catalog::model_by_discovery_id(base).or_else(|| {
+                provider_catalog::non_claude_model_by_any_id(base)
+                    .filter(|entry| entry.provider == ModelProvider::Codex)
+            })?;
+            (entry.provider == ModelProvider::Codex).then(|| {
+                codex_effort_suffix = Some(effort);
+                entry
+            })
+        })
+        // A persisted or continued session can still name a known provider by
+        // wire ID or CLI alias instead of its discovery ID. Resolve those
+        // through the shared catalog so they route to their own provider
+        // rather than leaking to Anthropic as an "ordinary Claude" model.
+        .or_else(|| provider_catalog::non_claude_model_by_any_id(model));
+    UnifiedCatalogMatch {
+        entry,
+        codex_effort_suffix,
+    }
+}
+
+/// Answer a `clud-claude-*` ID the catalog does not know with 400, quoting
+/// the offending ID and the IDs this gateway serves.
+fn refuse_unknown_gateway_model(
+    stream: &mut TcpStream,
+    log: Option<&SharedBridgeLog>,
+    unified: &UnifiedGatewayConfig,
+    model: &str,
+) {
+    let ids = unified_catalog_ids(unified).join(", ");
+    // #1010 item 2: this route kept #1000's single message after #1009
+    // gave the direct route two cases and made it quote the offending ID.
+    // Only the quoting carries over.
+    //
+    // The direct route's second case -- "clud knows this model, but this
+    // gateway is not serving it" -- is unreachable here, and adding it
+    // would be dead code.
+    //
+    // `exact_catalog` in `resolve_unified_catalog` resolves any discovery ID
+    // with no provider filter, and the fallback resolves anything else by cli
+    // id, wire id, or legacy alias for every provider except Claude and
+    // OpenRouter. So reaching this branch with an ID clud knows would need a
+    // `clud-claude-*` alias on a *Claude or OpenRouter* row that is not
+    // that row's discovery ID. No such row exists today -- note that
+    // `clud-claude-deepseek-v4-pro` is such an alias but on a DeepSeek
+    // row, which the fallback resolves, so it never lands here.
+    //
+    // `only_a_claude_or_openrouter_alias_would_make_the_unified_second_
+    // case_reachable` in provider_catalog fails if one is ever added.
+    record_model_rejection(log, 400, "unknown_model", model);
+    let body = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": format!("unknown clud gateway model '{model}'; available IDs: {ids}"),
+        }
+    })
+    .to_string();
+    let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+}
+
+/// What one descent step will send. `model` is `None` only for an ordinary
+/// Claude ID, which stays byte-for-byte caller owned.
+struct UnifiedAttempt {
+    provider: ModelProvider,
+    route: ConversationRoute,
+    model: Option<String>,
+    spec: Option<String>,
+}
+
+impl UnifiedAttempt {
+    /// The first rung: the route the request's own model names.
+    fn initial(resolved: &UnifiedCatalogMatch<'_>, model: &str) -> Self {
+        let Some(entry) = resolved.entry else {
+            return Self {
+                provider: ModelProvider::Claude,
+                route: ConversationRoute::Claude,
+                model: None,
+                spec: None,
+            };
+        };
+        let requested_base = model.split_once('@').map_or(model, |(base, _)| base);
+        let target = if entry.provider == ModelProvider::Codex
+            && requested_base.eq_ignore_ascii_case(entry.wire_id)
+        {
+            requested_base.to_string()
+        } else {
+            crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
+        };
+        Self {
+            provider: entry.provider,
+            route: conversation_route_for(entry.provider),
+            model: Some(
+                resolved
+                    .codex_effort_suffix
+                    .map_or_else(|| target.clone(), |effort| format!("{target}@{effort}")),
+            ),
+            spec: None,
+        }
+    }
+}
+
+/// The request-scoped state every unified descent step reads.
+struct UnifiedTurn<'a> {
+    config: &'a BridgeConfig,
+    unified: &'a UnifiedGatewayConfig,
+    shutdown: &'a AtomicBool,
+    conversations: &'a ConversationStore,
+    streaming: bool,
+    conversation_key: &'a ConversationKey,
+    headers: &'a [(String, String)],
+    log: Option<&'a SharedBridgeLog>,
+    cache_health: &'a SharedCacheHealth,
+}
+
+/// Send one descent step to its provider.
+fn dispatch_unified_attempt(
+    stream: &mut TcpStream,
+    turn: &UnifiedTurn<'_>,
+    attempt: &UnifiedAttempt,
+    payload: &[u8],
+    probe: bool,
+) -> ProxyOutcome {
+    let (config, unified) = (turn.config, turn.unified);
+    match attempt.provider {
+        ModelProvider::Claude => serve_unified_anthropic_proxy(
+            stream,
+            turn.conversations,
+            turn.conversation_key,
+            ConversationRoute::Claude,
+            &unified.anthropic_base_url,
+            "/v1/messages",
+            payload,
+            turn.headers,
+            None,
+            config.stream_idle_timeout,
+            turn.shutdown,
+            probe,
+            turn.cache_health,
+            &config.status_usage,
+        ),
+        provider @ (ModelProvider::DeepSeek | ModelProvider::Kimi | ModelProvider::OpenRouter)
+            if unified.route_for(provider).is_some() =>
+        {
+            let route = unified
+                .route_for(provider)
+                .expect("guarded by route_for above");
+            serve_unified_anthropic_proxy(
+                stream,
+                turn.conversations,
+                turn.conversation_key,
+                attempt.route,
+                &route.base_url,
+                "/v1/messages",
+                payload,
+                turn.headers,
+                Some(&route.api_key),
+                config.stream_idle_timeout,
+                turn.shutdown,
+                probe,
+                turn.cache_health,
+                &config.status_usage,
+            )
+        }
+        ModelProvider::Codex if unified.codex_available => {
+            // Codex is a valid destination but never a probe source: its
+            // pipeline commits through a different path, so a descent that
+            // lands here stops here.
+            serve_messages(
+                stream,
+                config,
+                turn.shutdown,
+                turn.conversations,
+                payload,
+                turn.streaming,
+                turn.conversation_key,
+                Some(ConversationRoute::Codex),
+                turn.log,
+                turn.cache_health,
+            );
+            ProxyOutcome::local(200)
+        }
+        // Only a registry provider whose key this launch lacks, or Codex
+        // without credentials, reaches here. Defense in depth: such routes
+        // are omitted from discovery, but a stale picker must not reach any
+        // paid model.
+        ModelProvider::DeepSeek
+        | ModelProvider::Kimi
+        | ModelProvider::OpenRouter
+        | ModelProvider::Codex => {
+            let body = serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "the selected provider is not configured; run `clud auth status`",
+                }
+            })
+            .to_string();
+            let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+            ProxyOutcome::local(400)
         }
     }
 }
@@ -2301,10 +2414,6 @@ fn transport_timed_out(error: &ureq::Error) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
 fn serve_anthropic_proxy(
     stream: &mut TcpStream,
     target: AnthropicProxyTarget<'_>,
@@ -2315,76 +2424,10 @@ fn serve_anthropic_proxy(
     probe: bool,
     usage: &mut StreamingUsage,
 ) -> ProxyOutcome {
-    // #1263: byte-idle, not a whole-request deadline. `Request::timeout()` is
-    // documented as covering "reading the response body" and *takes precedence
-    // over* `timeout_read()`, so the budget this hop is handed
-    // (`stream_idle_timeout`, DD-028) was really a total one: a healthy stream
-    // that simply ran longer than it -- which is ordinary for a model that
-    // thinks for minutes and keeps emitting deltas -- was cut off mid-turn,
-    // while a socket that had gone quiet was only noticed after the same
-    // absolute wall-clock had elapsed. The sibling Codex upstream hop has
-    // always read this way (`codex_upstream`); the proxy hop was the outlier,
-    // and this is the shape the constant's own doc comment claims.
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(idle_timeout)
-        .timeout_read(idle_timeout)
-        .timeout_write(idle_timeout)
-        .build();
-    let mut request = agent
-        .post(&format!(
-            "{}{}",
-            target.base_url.trim_end_matches('/'),
-            target.path
-        ))
-        .set("Content-Type", "application/json");
-    for (name, value) in headers {
-        let forwarded = name.eq_ignore_ascii_case("authorization")
-            || name.eq_ignore_ascii_case("x-api-key")
-            || name.eq_ignore_ascii_case("anthropic-version")
-            || name.to_ascii_lowercase().starts_with("anthropic-")
-            || name.eq_ignore_ascii_case("accept");
-        let hop_by_hop = name.eq_ignore_ascii_case("host")
-            || name.eq_ignore_ascii_case("connection")
-            || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case(UNIFIED_GATEWAY_TOKEN_HEADER);
-        let caller_credential =
-            name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key");
-        if forwarded && !hop_by_hop && (target.injected_api_key.is_none() || !caller_credential) {
-            request = request.set(name, value);
-        }
-    }
-    if let Some(api_key) = target.injected_api_key {
-        request = request.set("Authorization", &format!("Bearer {api_key}"));
-    }
-    let response = match request.send_bytes(body) {
+    let request = build_proxy_request(&target, headers, idle_timeout);
+    let response = match send_proxy_request(stream, request, body) {
         Ok(response) => response,
-        Err(ureq::Error::Status(_, response)) => response,
-        Err(error) if transport_timed_out(&error) => {
-            // #1263: a *timeout* is not a broken gateway hop. Answering it 502
-            // told the harness "this route is dead" when the honest answer is
-            // "retry me": 502 is not retried, 504 `timeout_error` is, and the
-            // mapping already existed for every other timeout the bridge
-            // raises. Nothing has been written yet, so the status is still
-            // ours to choose (DD-029).
-            let _ = write_response(
-                stream,
-                504,
-                "application/json",
-                br#"{"error":{"type":"timeout_error","message":"upstream request timed out"}}"#,
-                false,
-            );
-            return ProxyOutcome::local(504);
-        }
-        Err(_) => {
-            let _ = write_response(
-                stream,
-                502,
-                "application/json",
-                br#"{"error":{"type":"api_error","message":"gateway upstream unavailable"}}"#,
-                false,
-            );
-            return ProxyOutcome::local(502);
-        }
+        Err(outcome) => return outcome,
     };
     let status = response.status();
     let content_type = response
@@ -2414,59 +2457,221 @@ fn serve_anthropic_proxy(
     // sees that a provider declined. A prefix that does not read as
     // route-terminal falls through and is re-emitted below, so the probe costs
     // the client nothing.
-    let mut prefix = Vec::new();
-    if probe && may_be_route_terminal(status) {
-        let mut window = [0_u8; 1024];
-        while prefix.len() < FAILURE_PREFIX_BYTES {
-            match reader.read(&mut window) {
-                Ok(0) | Err(_) => break,
-                Ok(count) => prefix.extend_from_slice(&window[..count]),
-            }
+    let prefix = if probe && may_be_route_terminal(status) {
+        match probe_route_prefix(reader.as_mut(), status, &probe_headers) {
+            Ok(prefix) => prefix,
+            Err(verdict) => return ProxyOutcome::Declined(verdict),
         }
-        let text = String::from_utf8_lossy(&prefix);
-        let failure = UpstreamFailure::from_parts(
-            status,
-            |name| {
-                probe_headers
-                    .iter()
-                    .find(|(header, _)| header.eq_ignore_ascii_case(name))
-                    .map(|(_, value)| value.clone())
-            },
-            &text,
-            crate::route_health::MAX_COOLDOWN,
-        );
-        let verdict = RouteVerdict::from_failure(&failure);
-        if verdict.fails_over() {
-            return ProxyOutcome::Declined(verdict);
+    } else {
+        Vec::new()
+    };
+
+    let head = ProxyResponseHead {
+        status,
+        content_type: &content_type,
+        retry_after,
+        request_id,
+    };
+    if !write_proxy_head(stream, &head, &prefix, idle_timeout) {
+        return ProxyOutcome::Committed { status };
+    }
+    usage.feed(&prefix);
+    let relayed = relay_proxy_body(stream, reader.as_mut(), shutdown, usage);
+    if let Some(error) = relayed.stalled {
+        report_proxy_stall(stream, &error, relayed.forwarded, &content_type);
+    }
+    let _ = stream.write_all(b"0\r\n\r\n");
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Both);
+    ProxyOutcome::Committed { status }
+}
+
+/// The upstream request for one proxy hop: byte-idle timeouts, and only the
+/// caller headers the upstream should see.
+fn build_proxy_request(
+    target: &AnthropicProxyTarget<'_>,
+    headers: &[(String, String)],
+    idle_timeout: Duration,
+) -> ureq::Request {
+    // #1263: byte-idle, not a whole-request deadline. `Request::timeout()` is
+    // documented as covering "reading the response body" and *takes precedence
+    // over* `timeout_read()`, so the budget this hop is handed
+    // (`stream_idle_timeout`, DD-028) was really a total one: a healthy stream
+    // that simply ran longer than it -- which is ordinary for a model that
+    // thinks for minutes and keeps emitting deltas -- was cut off mid-turn,
+    // while a socket that had gone quiet was only noticed after the same
+    // absolute wall-clock had elapsed. The sibling Codex upstream hop has
+    // always read this way (`codex_upstream`); the proxy hop was the outlier,
+    // and this is the shape the constant's own doc comment claims.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(idle_timeout)
+        .timeout_read(idle_timeout)
+        .timeout_write(idle_timeout)
+        .build();
+    let mut request = agent
+        .post(&format!(
+            "{}{}",
+            target.base_url.trim_end_matches('/'),
+            target.path
+        ))
+        .set("Content-Type", "application/json");
+    for (name, value) in headers {
+        if proxy_forwards_header(name, target.injected_api_key.is_some()) {
+            request = request.set(name, value);
         }
     }
+    if let Some(api_key) = target.injected_api_key {
+        request = request.set("Authorization", &format!("Bearer {api_key}"));
+    }
+    request
+}
 
+/// Whether one caller header is forwarded upstream. A caller credential is
+/// dropped when the gateway injects its own.
+fn proxy_forwards_header(name: &str, injects_api_key: bool) -> bool {
+    let forwarded = name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("x-api-key")
+        || name.eq_ignore_ascii_case("anthropic-version")
+        || name.to_ascii_lowercase().starts_with("anthropic-")
+        || name.eq_ignore_ascii_case("accept");
+    let hop_by_hop = name.eq_ignore_ascii_case("host")
+        || name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case(UNIFIED_GATEWAY_TOKEN_HEADER);
+    let caller_credential =
+        name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key");
+    forwarded && !hop_by_hop && (!injects_api_key || !caller_credential)
+}
+
+/// Send the request. A transport failure is answered here, while nothing has
+/// been written, and returned as the outcome.
+fn send_proxy_request(
+    stream: &mut TcpStream,
+    request: ureq::Request,
+    body: &[u8],
+) -> Result<ureq::Response, ProxyOutcome> {
+    match request.send_bytes(body) {
+        Ok(response) => Ok(response),
+        Err(ureq::Error::Status(_, response)) => Ok(response),
+        Err(error) if transport_timed_out(&error) => {
+            // #1263: a *timeout* is not a broken gateway hop. Answering it 502
+            // told the harness "this route is dead" when the honest answer is
+            // "retry me": 502 is not retried, 504 `timeout_error` is, and the
+            // mapping already existed for every other timeout the bridge
+            // raises. Nothing has been written yet, so the status is still
+            // ours to choose (DD-029).
+            let _ = write_response(
+                stream,
+                504,
+                "application/json",
+                br#"{"error":{"type":"timeout_error","message":"upstream request timed out"}}"#,
+                false,
+            );
+            Err(ProxyOutcome::local(504))
+        }
+        Err(_) => {
+            let _ = write_response(
+                stream,
+                502,
+                "application/json",
+                br#"{"error":{"type":"api_error","message":"gateway upstream unavailable"}}"#,
+                false,
+            );
+            Err(ProxyOutcome::local(502))
+        }
+    }
+}
+
+/// Read a bounded prefix of a possibly route-terminal response and classify
+/// it. `Err` carries the verdict when the route should fail over; `Ok` the
+/// consumed prefix, which the caller must re-emit.
+fn probe_route_prefix(
+    reader: &mut dyn Read,
+    status: u16,
+    probe_headers: &[(String, String)],
+) -> Result<Vec<u8>, RouteVerdict> {
+    let mut prefix = Vec::new();
+    let mut window = [0_u8; 1024];
+    while prefix.len() < FAILURE_PREFIX_BYTES {
+        match reader.read(&mut window) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => prefix.extend_from_slice(&window[..count]),
+        }
+    }
+    let text = String::from_utf8_lossy(&prefix);
+    let failure = UpstreamFailure::from_parts(
+        status,
+        |name| {
+            probe_headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        },
+        &text,
+        crate::route_health::MAX_COOLDOWN,
+    );
+    let verdict = RouteVerdict::from_failure(&failure);
+    if verdict.fails_over() {
+        return Err(verdict);
+    }
+    Ok(prefix)
+}
+
+/// The upstream response metadata the proxy relays to the client.
+struct ProxyResponseHead<'a> {
+    status: u16,
+    content_type: &'a str,
+    retry_after: Option<String>,
+    request_id: Option<String>,
+}
+
+/// Commit the response: status line, headers, and any probed prefix as the
+/// first chunk. `false` means the client went away.
+fn write_proxy_head(
+    stream: &mut TcpStream,
+    head: &ProxyResponseHead<'_>,
+    prefix: &[u8],
+    idle_timeout: Duration,
+) -> bool {
+    let (status, content_type) = (head.status, head.content_type);
     let _ = stream.set_write_timeout(Some(idle_timeout));
     let _ = write!(
         stream,
         "HTTP/1.1 {status} Upstream\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\nConnection: close\r\n"
     );
-    if let Some(retry_after) = retry_after {
+    if let Some(retry_after) = &head.retry_after {
         let _ = write!(stream, "Retry-After: {retry_after}\r\n");
     }
-    if let Some(request_id) = request_id {
+    if let Some(request_id) = &head.request_id {
         let _ = write!(stream, "request-id: {request_id}\r\n");
     }
     if stream.write_all(b"\r\n").is_err() || stream.flush().is_err() {
-        return ProxyOutcome::Committed { status };
+        return false;
     }
     // Anything the probe already consumed has to go out first, or the client
     // would receive a truncated error envelope.
-    if !prefix.is_empty()
-        && (write!(stream, "{:x}\r\n", prefix.len())
-            .and_then(|()| stream.write_all(&prefix))
+    prefix.is_empty()
+        || write!(stream, "{:x}\r\n", prefix.len())
+            .and_then(|()| stream.write_all(prefix))
             .and_then(|()| stream.write_all(b"\r\n"))
-            .and_then(|()| stream.flush()))
-        .is_err()
-    {
-        return ProxyOutcome::Committed { status };
-    }
-    usage.feed(&prefix);
+            .and_then(|()| stream.flush())
+            .is_ok()
+}
+
+/// How the upstream body relay ended.
+struct ProxyRelay {
+    forwarded: usize,
+    stalled: Option<io::Error>,
+}
+
+/// Relay the upstream body to the client as chunks until it ends, the client
+/// goes away, or the bridge shuts down.
+fn relay_proxy_body(
+    stream: &mut TcpStream,
+    reader: &mut dyn Read,
+    shutdown: &AtomicBool,
+    usage: &mut StreamingUsage,
+) -> ProxyRelay {
     let mut chunk = [0_u8; 8192];
     let mut forwarded = 0_usize;
     let mut stalled: Option<io::Error> = None;
@@ -2494,48 +2699,52 @@ fn serve_anthropic_proxy(
             }
         }
     }
-    if let Some(error) = stalled {
-        // #1263, DD-029: the status line went out with the first frame, so the
-        // only channel left for a mid-stream failure is in-band. This arm used
-        // to write the terminating chunk and close, which on the wire is
-        // byte-identical to a stream that ended because the model finished --
-        // a client still waiting on its `message_stop` saw a truncated turn
-        // with no reason attached, and nothing anywhere said the upstream had
-        // gone quiet. That is the silent stall DD-029 exists to prevent, and
-        // it is what a byte-idle read (above) now reports instead of hiding.
-        let timed_out = matches!(
-            error.kind(),
-            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ProxyRelay { forwarded, stalled }
+}
+
+/// Report an upstream read failure after the response was committed.
+fn report_proxy_stall(
+    stream: &mut TcpStream,
+    error: &io::Error,
+    forwarded: usize,
+    content_type: &str,
+) {
+    // #1263, DD-029: the status line went out with the first frame, so the
+    // only channel left for a mid-stream failure is in-band. This arm used
+    // to write the terminating chunk and close, which on the wire is
+    // byte-identical to a stream that ended because the model finished --
+    // a client still waiting on its `message_stop` saw a truncated turn
+    // with no reason attached, and nothing anywhere said the upstream had
+    // gone quiet. That is the silent stall DD-029 exists to prevent, and
+    // it is what a byte-idle read (above) now reports instead of hiding.
+    let timed_out = matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    );
+    eprintln!(
+        "[clud] codex bridge: upstream stream {} after {forwarded} bytes: {error}",
+        if timed_out { "stalled" } else { "failed" }
+    );
+    if content_type.starts_with("text/event-stream") {
+        let frame = crate::codex_sse::anthropic_frame(
+            "error",
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": if timed_out { "timeout_error" } else { "api_error" },
+                    "message": if timed_out {
+                        "model request stalled: no upstream bytes arrived before the idle timeout"
+                    } else {
+                        "upstream stream ended before the model finished"
+                    },
+                }
+            }),
         );
-        eprintln!(
-            "[clud] codex bridge: upstream stream {} after {forwarded} bytes: {error}",
-            if timed_out { "stalled" } else { "failed" }
-        );
-        if content_type.starts_with("text/event-stream") {
-            let frame = crate::codex_sse::anthropic_frame(
-                "error",
-                serde_json::json!({
-                    "type": "error",
-                    "error": {
-                        "type": if timed_out { "timeout_error" } else { "api_error" },
-                        "message": if timed_out {
-                            "model request stalled: no upstream bytes arrived before the idle timeout"
-                        } else {
-                            "upstream stream ended before the model finished"
-                        },
-                    }
-                }),
-            );
-            let _ = write!(stream, "{:x}\r\n", frame.len())
-                .and_then(|()| stream.write_all(frame.as_bytes()))
-                .and_then(|()| stream.write_all(b"\r\n"))
-                .and_then(|()| stream.flush());
-        }
+        let _ = write!(stream, "{:x}\r\n", frame.len())
+            .and_then(|()| stream.write_all(frame.as_bytes()))
+            .and_then(|()| stream.write_all(b"\r\n"))
+            .and_then(|()| stream.flush());
     }
-    let _ = stream.write_all(b"0\r\n\r\n");
-    let _ = stream.flush();
-    let _ = stream.shutdown(Shutdown::Both);
-    ProxyOutcome::Committed { status }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2712,10 +2921,6 @@ fn serve_codex_discovery_messages(
 /// reported in-band by the translator's own `error` event (already appended by
 /// the pipeline) and the chunked body is simply terminated.
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
 fn serve_messages(
     stream: &mut TcpStream,
     config: &BridgeConfig,
@@ -2737,18 +2942,64 @@ fn serve_messages(
         }
     };
     let message_id = new_message_id();
+    let turn = MessagesTurn {
+        config,
+        shutdown,
+        conversations,
+        body,
+        conversation_key,
+        unified_route,
+        log,
+        cache_health,
+        pipeline: &pipeline,
+        message_id: &message_id,
+    };
 
     if streaming {
-        let mut writer = EventStreamWriter::new(stream, config);
-        let streamed = conversations.with_history(&conversation_key.id, |history| {
-            if let Some(route) = unified_route {
-                if history.enter_route(route) {
-                    lock_cache_health(cache_health).mark_boundary(&conversation_key.id);
-                }
-            }
-            if lock_cache_health(cache_health).health(&conversation_key.id)
-                == CacheHealth::FuseTripped
-            {
+        serve_messages_streaming(stream, &turn);
+    } else {
+        serve_messages_complete(stream, &turn);
+    }
+}
+
+/// One `POST /v1/messages` turn, once its pipeline is built.
+struct MessagesTurn<'a> {
+    config: &'a BridgeConfig,
+    shutdown: &'a AtomicBool,
+    conversations: &'a ConversationStore,
+    body: &'a [u8],
+    conversation_key: &'a ConversationKey,
+    unified_route: Option<ConversationRoute>,
+    log: Option<&'a SharedBridgeLog>,
+    cache_health: &'a SharedCacheHealth,
+    pipeline: &'a Pipeline<ResolvedCredentials>,
+    message_id: &'a str,
+}
+
+/// Enter the turn's unified route, marking a cache boundary on a switch, and
+/// report whether the conversation's cache fuse has tripped. Runs inside the
+/// conversation lock.
+fn cache_fuse_tripped_on_entry(
+    history: &mut crate::codex_history::ConversationHistory,
+    turn: &MessagesTurn<'_>,
+) -> bool {
+    let conversation_id = &turn.conversation_key.id;
+    if let Some(route) = turn.unified_route {
+        if history.enter_route(route) {
+            lock_cache_health(turn.cache_health).mark_boundary(conversation_id);
+        }
+    }
+    lock_cache_health(turn.cache_health).health(conversation_id) == CacheHealth::FuseTripped
+}
+
+/// The streaming (`"stream": true`) half of `serve_messages`.
+fn serve_messages_streaming(stream: &mut TcpStream, turn: &MessagesTurn<'_>) {
+    let (config, log, conversation_key) = (turn.config, turn.log, turn.conversation_key);
+    let mut writer = EventStreamWriter::new(stream, config);
+    let streamed = turn
+        .conversations
+        .with_history(&conversation_key.id, |history| {
+            if cache_fuse_tripped_on_entry(history, turn) {
                 return Ok(None);
             }
             let streamed = {
@@ -2757,7 +3008,13 @@ fn serve_messages(
                         .write_frame(frame)
                         .map_err(|_| UpstreamError::Downstream("client write failed"))
                 };
-                pipeline.stream_with_history(body, &message_id, shutdown, &mut sink, history)
+                turn.pipeline.stream_with_history(
+                    turn.body,
+                    turn.message_id,
+                    turn.shutdown,
+                    &mut sink,
+                    history,
+                )
             };
             if let Ok(summary) = &streamed {
                 if summary.history_append_rejected && writer.started() {
@@ -2767,7 +3024,7 @@ fn serve_messages(
                 // This remains inside the conversation lock: a queued sibling
                 // must observe a newly armed fuse before it can reach upstream.
                 record_cache_usage(
-                    cache_health,
+                    turn.cache_health,
                     &config.status_usage,
                     conversation_key,
                     &summary.model,
@@ -2777,120 +3034,131 @@ fn serve_messages(
             }
             Ok(Some(streamed))
         });
-        match streamed {
-            Ok(Some(Ok(summary))) => {
-                if summary.authentication_failure {
-                    mark_auth_recheck(&config.auth_recheck, &pipeline);
-                }
-                if summary.orphaned_outputs_repaired > 0 {
-                    log_orphaned_outputs_repaired(log, summary.orphaned_outputs_repaired);
-                }
-                if summary.pending_outputs_recovered > 0 {
-                    log_pending_outputs_recovered(
-                        log,
-                        conversation_key,
-                        summary.pending_outputs_recovered,
-                    );
-                }
-                if let Some(failure) = summary.in_band_failure.as_ref() {
-                    log_in_band_failure(log, failure, request_phase(body), summary.request_shape);
-                }
-                // A quota failure delivered inside a 200 SSE stream used to
-                // produce HTTP 200, no log line even under
-                // `CLUD_CODEX_BRIDGE_DEBUG=1`, and an abruptly truncated turn.
-                // The status is committed by now, but silence is not forced.
-                // The translator also marks authentication failures as
-                // account-level, but they are not quota exhaustion: the next
-                // turn may recover them under the credential lock.
-                if summary.terminal_account_failure && !summary.authentication_failure {
-                    let error = PipelineError::Provider(ProviderFailure {
-                        kind: "billing_error".to_string(),
-                        message: IN_BAND_QUOTA_MESSAGE.to_string(),
-                        diagnostic: None,
-                    });
-                    log_pipeline_error(&error, log);
-                    warn_once_on_terminal_failure(&error);
-                }
-                if !summary.history_append_rejected {
-                    let _ = writer.finish();
-                }
+    match streamed {
+        Ok(Some(Ok(summary))) => {
+            report_stream_summary(turn, &summary);
+            if !summary.history_append_rejected {
+                let _ = writer.finish();
             }
-            Ok(Some(Err(error))) => {
-                log_continuation_invariant(&error, conversation_key, log);
-                if writer.started() {
-                    // Committed: the pipeline has already emitted a sanitized
-                    // `error` event, so just close the body cleanly.
-                    log_pipeline_error(&error, log);
-                    // ...but a drained account still deserves the banner. This
-                    // is the same failure as the pre-commit case; the only
-                    // difference is that a frame had already gone out, which
-                    // changes the status we can send and nothing else.
-                    warn_once_on_terminal_failure(&error);
-                    let _ = writer.finish();
-                } else {
-                    let _ = write_pipeline_error(stream, &error, log);
-                }
-            }
-            Err(error) => {
-                let failure = PipelineError::Translate(
-                    crate::codex_translate::TranslateError::Invalid(error.to_string()),
-                );
-                let _ = write_pipeline_error(stream, &failure, log);
-            }
-            Ok(None) => write_cache_fuse_refusal(stream, log, conversation_key),
         }
-        return;
+        Ok(Some(Err(error))) => {
+            log_continuation_invariant(&error, conversation_key, log);
+            if writer.started() {
+                // Committed: the pipeline has already emitted a sanitized
+                // `error` event, so just close the body cleanly.
+                log_pipeline_error(&error, log);
+                // ...but a drained account still deserves the banner. This
+                // is the same failure as the pre-commit case; the only
+                // difference is that a frame had already gone out, which
+                // changes the status we can send and nothing else.
+                warn_once_on_terminal_failure(&error);
+                let _ = writer.finish();
+            } else {
+                let _ = write_pipeline_error(stream, &error, log);
+            }
+        }
+        Err(error) => {
+            let failure = PipelineError::Translate(
+                crate::codex_translate::TranslateError::Invalid(error.to_string()),
+            );
+            let _ = write_pipeline_error(stream, &failure, log);
+        }
+        Ok(None) => write_cache_fuse_refusal(stream, log, conversation_key),
     }
+}
 
-    match conversations.with_history(&conversation_key.id, |history| {
-        if let Some(route) = unified_route {
-            if history.enter_route(route) {
-                lock_cache_health(cache_health).mark_boundary(&conversation_key.id);
+/// Log what a completed stream reported: credential rechecks, repaired or
+/// recovered outputs, and in-band failures.
+fn report_stream_summary(turn: &MessagesTurn<'_>, summary: &crate::codex_pipeline::StreamSummary) {
+    let log = turn.log;
+    if summary.authentication_failure {
+        mark_auth_recheck(&turn.config.auth_recheck, turn.pipeline);
+    }
+    if summary.orphaned_outputs_repaired > 0 {
+        log_orphaned_outputs_repaired(log, summary.orphaned_outputs_repaired);
+    }
+    if summary.pending_outputs_recovered > 0 {
+        log_pending_outputs_recovered(
+            log,
+            turn.conversation_key,
+            summary.pending_outputs_recovered,
+        );
+    }
+    if let Some(failure) = summary.in_band_failure.as_ref() {
+        log_in_band_failure(
+            log,
+            failure,
+            request_phase(turn.body),
+            summary.request_shape.clone(),
+        );
+    }
+    // A quota failure delivered inside a 200 SSE stream used to
+    // produce HTTP 200, no log line even under
+    // `CLUD_CODEX_BRIDGE_DEBUG=1`, and an abruptly truncated turn.
+    // The status is committed by now, but silence is not forced.
+    // The translator also marks authentication failures as
+    // account-level, but they are not quota exhaustion: the next
+    // turn may recover them under the credential lock.
+    if summary.terminal_account_failure && !summary.authentication_failure {
+        let error = PipelineError::Provider(ProviderFailure {
+            kind: "billing_error".to_string(),
+            message: IN_BAND_QUOTA_MESSAGE.to_string(),
+            diagnostic: None,
+        });
+        log_pipeline_error(&error, log);
+        warn_once_on_terminal_failure(&error);
+    }
+}
+
+/// The non-streaming half of `serve_messages`: one complete JSON response.
+fn serve_messages_complete(stream: &mut TcpStream, turn: &MessagesTurn<'_>) {
+    let (config, log, conversation_key) = (turn.config, turn.log, turn.conversation_key);
+    match turn
+        .conversations
+        .with_history(&conversation_key.id, |history| {
+            if cache_fuse_tripped_on_entry(history, turn) {
+                return Ok(None);
             }
-        }
-        if lock_cache_health(cache_health).health(&conversation_key.id) == CacheHealth::FuseTripped
-        {
-            return Ok(None);
-        }
-        let completed = pipeline
-            .complete_with_history(body, &message_id, shutdown, history)
-            .map(|completion| {
-                if completion.pending_outputs_recovered > 0 {
-                    log_pending_outputs_recovered(
-                        log,
+            let completed = turn
+                .pipeline
+                .complete_with_history(turn.body, turn.message_id, turn.shutdown, history)
+                .map(|completion| {
+                    if completion.pending_outputs_recovered > 0 {
+                        log_pending_outputs_recovered(
+                            log,
+                            conversation_key,
+                            completion.pending_outputs_recovered,
+                        );
+                    }
+                    let rendered = serde_json::to_vec(&completion.message).unwrap_or_default();
+                    if write_response(stream, 200, "application/json", &rendered, false).is_ok() {
+                        completion.clear_history_after_client_commit(history);
+                    }
+                    // Keep health accounting ordered with the history mutation so a
+                    // queued sibling rechecks the fuse after this turn completes.
+                    record_cache_usage(
+                        turn.cache_health,
+                        &config.status_usage,
                         conversation_key,
-                        completion.pending_outputs_recovered,
+                        &completion.model,
+                        completion.usage,
+                        log,
                     );
-                }
-                let rendered = serde_json::to_vec(&completion.message).unwrap_or_default();
-                if write_response(stream, 200, "application/json", &rendered, false).is_ok() {
-                    completion.clear_history_after_client_commit(history);
-                }
-                // Keep health accounting ordered with the history mutation so a
-                // queued sibling rechecks the fuse after this turn completes.
-                record_cache_usage(
-                    cache_health,
-                    &config.status_usage,
-                    conversation_key,
-                    &completion.model,
-                    completion.usage,
-                    log,
-                );
-            });
-        Ok(Some(completed))
-    }) {
+                });
+            Ok(Some(completed))
+        }) {
         Ok(Some(Ok(()))) => {}
         Ok(Some(Err(error))) => {
             log_continuation_invariant(&error, conversation_key, log);
             if let PipelineError::Provider(failure) = &error {
                 if failure.kind == "authentication_error" {
-                    mark_auth_recheck(&config.auth_recheck, &pipeline);
+                    mark_auth_recheck(&config.auth_recheck, turn.pipeline);
                 }
                 if let Some(diagnostic) = &failure.diagnostic {
                     log_in_band_failure(
                         log,
                         &diagnostic.failure,
-                        request_phase(body),
+                        request_phase(turn.body),
                         diagnostic.request_shape.clone(),
                     );
                 }
