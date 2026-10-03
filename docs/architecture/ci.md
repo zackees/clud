@@ -175,6 +175,38 @@ If Docker or bosn is unavailable, or bosn is older than 0.1.8, report the local 
 do not fall back to host or direct Bosn tests. Do not auto-install tools or
 prune Docker resources. See the bundled `clud-bosn` skill for prerequisites.
 
+### Attested skip (GATE-008/010)
+
+The one local run above can stand in for the routine Linux lanes on the PR.
+Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/docs/ci-attestations.md)
+local gate instead of calling bosn directly:
+
+```bash
+uvx --from git+https://github.com/zackees/ci.yml@7edeb8dc318c1530ee3bf770029cb2e8b639e6f5 ci-lint local-gate run
+git push --force-with-lease
+```
+
+The gate refuses an uncommitted tree. It runs the same `bosn ci run --workspace
+. --trigger pr --wait` ([`local-gate.toml`](../../local-gate.toml)), and on a
+pass it amends HEAD's message (tree unchanged) with a `Local-Gate:` trailer and
+one stamped `Ci-Attestation:` per gate in
+[`ci-attestations.yml`](../../ci-attestations.yml). The static job's `Local
+gate attestation` step (`ci-lint local-gate verify --trust`) then sets
+`skip_<job>` for `dylint`, `lint-linux-x64`, `build-linux-x64` and
+`test-linux-x64-unit`, and `CI OK` counts each of those skips as success. The
+PR's critical path drops from about 5.5 minutes to the static job's ~40 s.
+
+It fails closed. Every lane runs remotely, as before, when the head is
+unattested or its stamp no longer matches (any amend or rebase after the gate
+ran), on a fork or a non-writer author, with a `ci-test`/`ci-windows`/`ci-full`
+label, when the PR touches a surface (`ci/**`, either declaration, the
+workflows and the local actions they use), and for the 1-in-10 audit sample.
+The policy is read from the PR's **base**, so a PR cannot loosen its own gate.
+Pushes to `main` never skip (the post-merge catch), and release dispatches
+never read attestations. The gate runs in `shadow` mode: an unattested head is
+reported, never failed. Plain `bosn ci run` remains valid; it just earns no
+skip.
+
 ### Manual Windows probes (ignored tests)
 
 <!-- manual-windows-probes -->
