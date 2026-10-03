@@ -60,6 +60,15 @@ jobs:
     outputs:
       mode: ${{ steps.mode.outputs.tier }}
       source_ref: ${{ steps.source.outputs.ref }}
+      # zackees/ci.yml GATE-008/010: 'true' only on a PR whose head carries a
+      # stamp-valid `Ci-Attestation:` for every gate ci-attestations.yml maps
+      # to the job, inside local-gate.toml's [gate.trust] policy as committed
+      # on the base. Never 'true' on push or dispatch. See
+      # docs/architecture/ci.md#attested-skip-gate-008010.
+      skip_dylint: ${{ steps.gate.outputs.skip_dylint }}
+      skip_lint-linux-x64: ${{ steps.gate.outputs.skip_lint-linux-x64 }}
+      skip_build-linux-x64: ${{ steps.gate.outputs.skip_build-linux-x64 }}
+      skip_test-linux-x64-unit: ${{ steps.gate.outputs.skip_test-linux-x64-unit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -96,6 +105,22 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           PROVENANCE_VERIFIED: ${{ env.PROVENANCE_VERIFIED }}
         run: python -m ci.ci_matrix
+      # Pinned like local-gate.toml's uvx command. Stdlib only: nothing to
+      # install, and it reads the base commit's policy from the full history
+      # checked out above. It fails closed (every skip_* stays unset) on any
+      # reason code but `trusted`.
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          repository: zackees/ci.yml
+          ref: 7edeb8dc318c1530ee3bf770029cb2e8b639e6f5
+          path: .ci-lint
+          persist-credentials: false
+          sparse-checkout: ci_lint
+      - name: Local gate attestation
+        id: gate
+        if: github.event_name == 'pull_request'
+        run: PYTHONPATH=.ci-lint python -m ci_lint local-gate verify --repo . --trust --github-output
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.12.19"
@@ -135,6 +160,7 @@ jobs:
   dylint:
     name: Dylint
     needs: static
+    if: needs.static.outputs.skip_dylint != 'true'
     uses: ./.github/workflows/_dylint.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -157,7 +183,7 @@ jobs:
     needs: static
     # windows mode keeps these routine lanes too (#1652): without a merge
     # queue, CI OK green must imply Linux passed on the same head SHA.
-    if: needs.static.outputs.mode != ''
+    if: needs.static.outputs.mode != '' && needs.static.outputs.skip_lint-linux-x64 != 'true'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -174,7 +200,7 @@ jobs:
     needs: static
     # windows mode keeps these routine lanes too (#1652): without a merge
     # queue, CI OK green must imply Linux passed on the same head SHA.
-    if: needs.static.outputs.mode != ''
+    if: needs.static.outputs.mode != '' && needs.static.outputs.skip_build-linux-x64 != 'true'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -192,6 +218,7 @@ jobs:
   test-linux-x64-unit:
     name: Test linux-x64 (unit)
     needs: [static, build-linux-x64]
+    if: needs.static.outputs.skip_test-linux-x64-unit != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -408,7 +435,10 @@ jobs:
       # `needs` would otherwise skip this job and leave the check pending
       # forever rather than reporting red.
       #
-      # Skips are permitted only outside the resolved mode's required cells.
+      # Skips are permitted only outside the resolved mode's required cells,
+      # plus a MINIMAL lane the static job skipped as attested (GATE-008/010):
+      # MINIMAL maps exactly that case to success. WINDOWS and FULL read raw
+      # results, and full labels never trust, so they cannot see one.
       # Explicit result lists ensure a malformed condition cannot green a
       # run that never built or tested a required target.
       - name: Check results
@@ -422,10 +452,10 @@ jobs:
             ${{ needs.test-windows-x64.result }}
           MINIMAL: >-
             ${{ needs.static.result }}
-            ${{ needs.dylint.result }}
-            ${{ needs.lint-linux-x64.result }}
-            ${{ needs.build-linux-x64.result }}
-            ${{ needs.test-linux-x64-unit.result }}
+            ${{ needs.static.outputs.skip_dylint == 'true' && needs.dylint.result == 'skipped' && 'success' || needs.dylint.result }}
+            ${{ needs.static.outputs.skip_lint-linux-x64 == 'true' && needs.lint-linux-x64.result == 'skipped' && 'success' || needs.lint-linux-x64.result }}
+            ${{ needs.static.outputs.skip_build-linux-x64 == 'true' && needs.build-linux-x64.result == 'skipped' && 'success' || needs.build-linux-x64.result }}
+            ${{ needs.static.outputs.skip_test-linux-x64-unit == 'true' && needs.test-linux-x64-unit.result == 'skipped' && 'success' || needs.test-linux-x64-unit.result }}
           EXTENDED: >-
             ${{ needs.test-linux-x64-integration.result }}
             ${{ needs.build-windows-x64.result }}

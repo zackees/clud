@@ -1,0 +1,30 @@
+# ci-attestations (zackees/ci.yml GATE-010). See
+# docs/architecture/ci.md#attested-skip-gate-008010.
+#
+# Each gate is one check a routine PR lane runs, named
+# <ecosystem>/<platform>/<check>. `lane` is the local-gate.toml lane whose
+# pass proves it: `ci-lint local-gate run` writes one `Ci-Attestation:`
+# trailer per gate into the commit message (never into the tree). A gate
+# with no trailer was not run locally, so CI runs it.
+#
+# `jobs` maps each remote job to its gates. On a PR, the static job skips a
+# job only when every one of its gates is attested and stamp-valid AND the
+# head passes [gate.trust]. This file is read from the PR's base and is a
+# trust surface. Pushes to main always run every job.
+version: 1
+gates:
+  general/all/static: {lane: pr}                       # ci/lint.py --static-only
+  rust/x86_64-unknown-linux-gnu/clippy: {lane: pr}
+  rust/x86_64-unknown-linux-gnu/dylint: {lane: pr}     # host pass
+  rust/x86_64-pc-windows-msvc/dylint: {lane: pr}       # cross-target pass
+  rust/aarch64-apple-darwin/dylint: {lane: pr}         # cross-target pass
+  rust/x86_64-unknown-linux-gnu/build: {lane: pr}      # bins, harnesses, doctests, wheel
+  rust/x86_64-unknown-linux-gnu/unit: {lane: pr}       # rust + both pytest shards
+jobs:
+  ci.yml:dylint:
+    - rust/x86_64-unknown-linux-gnu/dylint
+    - rust/x86_64-pc-windows-msvc/dylint
+    - rust/aarch64-apple-darwin/dylint
+  ci.yml:lint-linux-x64: [rust/x86_64-unknown-linux-gnu/clippy]
+  ci.yml:build-linux-x64: [rust/x86_64-unknown-linux-gnu/build]
+  ci.yml:test-linux-x64-unit: [rust/x86_64-unknown-linux-gnu/unit]
