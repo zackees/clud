@@ -145,10 +145,10 @@ def test_pinned_codex_installer_in_clud_child_environment(
     try:
         if prior == "complete":
             first = _run_installer(tmp_path, env, route)
-            assert first.returncode == 0, first.stderr
+            assert first.returncode == 0, f"stdout:\n{first.stdout}\nstderr:\n{first.stderr}"
 
         result = _run_installer(tmp_path, env, route)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         target = releases / f"{VERSION}-{TARGET}"
         assert (standalone / "current").resolve() == target.resolve()
         assert (bin_dir / "codex").resolve() == (target / "bin" / "codex").resolve()

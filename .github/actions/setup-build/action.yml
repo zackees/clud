@@ -31,7 +31,7 @@ inputs:
     description: >
       setup-soldr save-cache policy (auto | true | false). A job that shares
       another job's cache-key-suffix passes false so only one of them writes
-      the immutable key. Overridden to true under act (local bosn runs).
+      the immutable key.
     required: false
     default: auto
 runs:
@@ -89,8 +89,7 @@ runs:
       with:
         toolchain: ${{ inputs.toolchain }}
         cache: true
-        # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
-        save-cache: ${{ env.ACT && 'true' || inputs.save-cache }}
+        save-cache: ${{ inputs.save-cache }}
         # setup-soldr#559: a failed or cancelled job saves no build outputs
         # (its store may be partial; an exact-hit key is never re-saved).
         job-status: ${{ job.status }}

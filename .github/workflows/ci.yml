@@ -19,31 +19,6 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('CI full {0}', 
 # The triple -> {build host, cross strategy, exec runner} mapping is still
 # owned by ci/ci_matrix.py; tests/test_ci_matrix.py asserts this file has not
 # drifted from it.
-#
-# ## Why every setup-soldr step overrides save-cache under act
-#
-# setup-soldr's default `save-cache: auto` skips every durable cache save on
-# `pull_request` events (setup-soldr#527), and the zackees/zccache action's
-# `save-cache` is only true/false, which repos gate to main pushes. Both are
-# right on GitHub: a PR cache entry is scoped to refs/pull/N/merge and counts
-# against the 10 GB repo budget.
-#
-# Locally it hurts. `bosn run --task act-ci-*` runs this workflow under act as
-# a `pull_request` event on purpose, so PR labels select the jobs, and act's
-# local cache server has no ref scoping and no budget. Every local run
-# restored and never saved, so every local Rust build was cold (observed: 0/3
-# caches saved, 317 zccache misses).
-#
-# Stopgap: each setup-soldr step sets
-# `save-cache: ${{ env.ACT && 'true' || 'auto' }}`. act sets ACT=true; on
-# GitHub `env.ACT` is empty, so hosted behavior is unchanged. Gotcha: the
-# `env` context is NOT allowed in a reusable-workflow call's `with:`, so put
-# the override on the step itself (or inside a composite action), never on a
-# `uses: ./.github/workflows/...` call.
-#
-# The real fixes are a runner-aware `auto` in zackees/setup-soldr#537 and
-# zackees/zccache#1783, tracked under zackees/bosn#309. When they ship, delete
-# the per-step overrides and this block.
 
 on:
   pull_request:
@@ -124,14 +99,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.12.19"
-          # Explicit: the default `auto` caches only on GitHub-hosted runners
-          # (RUNNER_ENVIRONMENT=github-hosted), so under act / `bosn ci` every
-          # run re-downloaded ~60 MB of wheels (zackees/bosn#323 Step 2 gate).
-          enable-cache: true
-          # setup-uv prunes downloaded wheels before saving (cheap to refetch
-          # on GitHub's network), which left the act cache empty: Sync took
-          # 8-36 s locally. Under act keep the wheels, under their own key so
-          # the hosted entry stays pruned and an old empty entry is not reused.
+          # Local-runner signal (ACT=true; act2 keeps RUNNER_ENVIRONMENT
+          # github-hosted, so caching itself needs no override). setup-uv
+          # prunes wheels before saving, cheap on GitHub's network but it
+          # empties a local cache, and it has no runner-aware knob: exception
+          # zackees/ci.yml#226. Separate key so the hosted entry stays pruned.
           prune-cache: ${{ !env.ACT }}
           cache-suffix: ${{ env.ACT && 'act-unpruned' || '' }}
       - name: Sync
@@ -142,8 +114,6 @@ jobs:
           SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           cache: true
-          # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
-          save-cache: ${{ env.ACT && 'true' || 'auto' }}
           # setup-soldr#559: a failed or cancelled job saves no build outputs
           # (its store may be partial; an exact-hit key is never re-saved).
           job-status: ${{ job.status }}

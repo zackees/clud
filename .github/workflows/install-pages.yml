@@ -7,8 +7,6 @@ on:
       - tests/test_installer_catalog.py
       - tests/test_installer_verify_site.py
       - .github/workflows/install-pages.yml
-      - ci/act_ci.sh
-      - bosn.toml
   push:
     branches: [main]
     paths:

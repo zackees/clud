@@ -9,8 +9,8 @@ Guidance for Claude Code when working in this repository.
 ### Essential Commands
 
 The commands below describe what the CI jobs execute. Agents must run local
-lint and tests only through `bosn run --task act-ci-static` and
-`bosn run --task act-ci-linux`; never invoke these commands on the host.
+lint and tests only through `bosn ci run --workspace . --trigger pr`
+(`--job static` for lint alone); never invoke these commands on the host.
 Windows-only behavior requires the native `ci-windows` PR lane, including PTY
 tests.
 
@@ -27,21 +27,24 @@ Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --glob
 
 ### Local validation before GitHub Actions
 
-**Mandatory for agents: run all local tests and lint through the Bosn-managed
-`act` container (`bosn run --task act-ci-*`).** Do not run tests or lint on the
-host or in a direct Bosn build task: those paths can interfere with the system
-`clud`. If `act` cannot represent an affected job (notably native Windows or
-macOS execution), use the relevant GitHub Actions lane for that validation and
-report the local coverage gap; never claim an `act` pass proves native behavior.
-These tasks need bosn 0.1.7 or newer (`bosn --version`); older releases can
-test another checkout's tree (#1594). If Bosn, Docker, or `act` is unavailable
-or too old, report the blocker rather than falling back to host testing. The commands and limits are in
+**Mandatory for agents: run all local tests and lint through `bosn ci`**
+(`bosn ci run --workspace . --trigger pr --wait`), which replays the workflow
+under act2 in an isolated engine. Do not run tests or lint on the host or in a
+direct Bosn build task: those paths can interfere with the system `clud`. If
+act cannot represent an affected job (notably native Windows or macOS
+execution), use the relevant GitHub Actions lane for that validation and
+report the local coverage gap; never claim a local pass proves native
+behavior. This needs bosn 0.1.8 or newer (`bosn --version`), the first release
+that runs act2. If bosn or Docker is unavailable or too old, report the
+blocker rather than falling back to host testing. The workflows carry no
+act-only workarounds (zackees/ci.yml ACT-003): a local gap is filed in
+zackees/ci.yml, not patched here. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
 
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
-local act is a pre-push check, not the edit loop. Run `act-ci-linux` at most
+local CI is a pre-push check, not the edit loop. Run the full PR plan at most
 once per change. The PR's GitHub CI is the CI of record. Don't wait in a busy
-bosn queue: cancel your own job (`bosn job cancel --job-id N`) and push. Never
+bosn queue: cancel your own run (`bosn ci cancel RUN`) and push. Never
 `pkill`/`pgrep -f` bosn runs, because the pattern also kills other sessions'
 runs.
 
@@ -154,8 +157,8 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 
 ## Code Quality Standards
 
-For agents, the lint requirement below is fulfilled by the Bosn-managed
-`act-ci-static` and `act-ci-linux` jobs. Direct host execution is prohibited.
+For agents, the lint requirement below is fulfilled by `bosn ci run --job
+static` and the full PR plan. Direct host execution is prohibited.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 

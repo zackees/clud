@@ -580,8 +580,14 @@ pub(super) fn extern_repo_purge_verdict(
     if !path.is_dir() {
         return extern_repo_purge_decision(false, false, false, GitWorkState::Unknown);
     }
-    let age =
-        most_recent_mtime(path).and_then(|mtime| SystemTime::now().duration_since(mtime).ok());
+    // A future mtime (fine-grained file timestamps ahead of this clock read,
+    // or skew) means "touched just now": age zero. `.ok()` would turn it into
+    // "age unknown", which no window can ever call idle.
+    let age = most_recent_mtime(path).map(|mtime| {
+        SystemTime::now()
+            .duration_since(mtime)
+            .unwrap_or(Duration::ZERO)
+    });
     let idle = age.map(|age| age >= stale_after).unwrap_or(false);
     let merged_idle = age
         .map(|age| age >= merged_stale_after(stale_after))
@@ -623,6 +629,33 @@ fn most_recent_mtime(path: &Path) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory's mtime can read slightly ahead of `SystemTime::now()`
+    /// (fine-grained file timestamps on a fast machine, or plain clock
+    /// skew). That is "touched just now", age zero, not "age unknown": with
+    /// a zero window it must not read as recently active, and with a real
+    /// window it must still be spared.
+    #[test]
+    fn a_future_mtime_is_age_zero_not_recently_active_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("extern");
+        std::fs::create_dir(&repo).unwrap();
+        let future = SystemTime::now() + Duration::from_secs(2);
+        filetime::set_file_mtime(&repo, filetime::FileTime::from_system_time(future)).unwrap();
+        let entry = TrackedEntry {
+            id: 1,
+            kind: "extern-repo".into(),
+            path: repo.to_string_lossy().into_owned(),
+            repo_root: None,
+            branch: None,
+            agent_id: None,
+            created_unix: 0,
+        };
+        let zero = extern_repo_purge_verdict(&entry, Duration::ZERO);
+        assert_ne!(zero.reason, "spared: recently active", "{zero:?}");
+        let day = extern_repo_purge_verdict(&entry, Duration::from_secs(86_400));
+        assert_eq!(day.reason, "spared: recently active", "{day:?}");
+    }
 
     /// Assert **spare + reason**, not just the outcome: the reason is what
     /// makes a pinned row distinguishable from uncollected garbage.

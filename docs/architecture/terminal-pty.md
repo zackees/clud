@@ -166,29 +166,21 @@ in [testing-tiers.md](testing-tiers.md).
 
 ## Validation
 
-**Local (agents).** Run tests and lint only through the Bosn-managed `act`
-container ([ci.md § Local validation](ci.md#local-validation-before-remote-ci)):
+**Local (agents).** Run tests and lint only through `bosn ci`, which replays
+the workflow under act2 in an isolated engine
+([ci.md § Local validation](ci.md#local-validation-before-remote-ci)):
 
 ```bash
-bosn run --task act-ci-list     # confirm it lists THIS repo's jobs
-bosn run --task act-ci-static   # fmt, ruff, static checks
-bosn run --task act-ci-linux    # Linux clippy, build, Rust + Python unit suites
+bosn ci run --workspace . --trigger pr --job static --wait  # fmt, ruff, static checks
+bosn ci run --workspace . --trigger pr --wait               # adds Linux clippy, build, Rust + Python unit suites
 ```
 
-Never run host `cargo`, `bash lint` or `bash test`. `act` cannot run Windows
-or macOS.
-
-- Known act-only false failures, which pass on GitHub CI:
-  `tests/test_act_ci_logs.py` (the snapshot excludes `.clud/act-logs`) and
-  six `tests/test_codex_installer_rm.py` cases (Codex model/list
-  unavailable).
-- bosn reuses one `clud_act` container machine-wide, keyed by a hash of the
-  setup content, so it may have **another checkout** mounted at
-  `/workspace`. Check the mounts with
-  `docker inspect <id> --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'`,
-  and confirm `act-ci-list` shows this repo's jobs (for example, no
-  "Resolve fleet CI mode"). If the container is wrong and idle,
-  `docker rm -f` it so bosn recreates it.
+Never run host `cargo`, `bash lint` or `bash test`. act cannot run Windows
+or macOS. Each run snapshots this checkout into its own engine, so it cannot
+test another checkout's tree, and the old act-only false failures are fixed:
+the wrapper's log test is gone with the wrapper, and the six
+`tests/test_codex_installer_rm.py` cases were a real symlinked-alias bug in
+the rm guard (#1746).
 
 **Remote.** See [ci.md § Current CI selection](ci.md#current-ci-selection).
 

@@ -217,64 +217,6 @@ cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv
 stack = "clud_1044_final_retry"
 cmd = "cd /workspace && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && .venv/bin/python -m ci.build_wheel --dev && CLUD_INTEGRATION_TESTS=1 CLUD_NO_UNLOCK=1 CLUD_TEST_BINARY=/build/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/build/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/build/target/debug/mock-agent .venv/bin/python -m pytest -m integration -v"
 
-# `act` for .github/workflows/ci.yml's Linux jobs. See "Local validation
-# before remote CI" in docs/architecture/ci.md. act runs in this small
-# container and drives the host Docker engine through the mounted socket, so
-# the job containers it starts are siblings, not nested ones, and sit outside
-# bosn's managed registry. ci/act_ci.sh passes --rm so they don't pile up.
-[stack.clud_act]
-dockerfile = "bosn/act.Dockerfile"
-workdir = "/workspace"
-
-[stack.clud_act.mounts.source]
-source = "."
-destination = "/workspace"
-readonly = true
-
-[stack.clud_act.mounts.docker]
-source = "/var/run/docker.sock"
-destination = "/var/run/docker.sock"
-
-# Host-visible act logs (#1548): ci/act_ci.sh tees act's output here, so it
-# can be followed with `tail -f .clud/act-logs/<run>-<job>.log` while a job
-# runs and survives a timeout, Ctrl-C or container removal. `.clud/*` is
-# gitignored, and the script keeps the directory user-only.
-[stack.clud_act.mounts.act-logs]
-source = ".clud/act-logs"
-destination = "/act-logs"
-
-[stack.clud_act.volumes.act-cache]
-scope = "machine"
-destination = "/root/.cache/act"
-
-# act's built-in Actions cache server (`--cache-server-path` in
-# ci/act_ci.sh). Every `actions/cache`, setup-uv and setup-soldr cache the jobs
-# save lands here, so the next run restores the venv, the Rust toolchain and
-# soldr's zccache build cache instead of starting cold.
-[stack.clud_act.volumes.act-server-cache]
-scope = "machine"
-destination = "/root/.cache/actcache"
-
-[task.act-ci-list]
-stack = "clud_act"
-cmd = "sh /workspace/ci/act_ci.sh --list"
-github_api = "proxy"
-
-[task.act-ci-static]
-stack = "clud_act"
-cmd = "sh /workspace/ci/act_ci.sh static"
-github_api = "proxy"
-
-[task.act-ci-linux]
-stack = "clud_act"
-cmd = "sh /workspace/ci/act_ci.sh test-linux-x64-unit"
-github_api = "proxy"
-
-[task.act-rm-protection]
-stack = "clud_act"
-cmd = "sed 's@act pull_request -W .github/workflows/ci.yml -j@act workflow_dispatch -W .github/workflows/rm-protection-docker.yml -j@' /workspace/ci/act_ci.sh | sh -s rm-protection"
-github_api = "proxy"
-
 # A real musl/BusyBox lane for #1461. Build output and toolchain state remain
 # in bosn-managed volumes; source and bind-mount probe are read-only.
 [stack.clud_rm_alpine]
@@ -412,30 +354,3 @@ cmd = "cd /workspace && soldr cargo build -p mock-agent && (uv sync --frozen --g
 [task.rm-pytest-full-verify]
 stack = "clud_rm_verify"
 cmd = "cd /workspace && soldr cargo build -p clud -p mock-agent --bins && /build/target/debug/clud __link-aliases /build/target/debug && (uv sync --frozen --group dev --no-install-project || uv sync --group dev --no-install-project) && CLUD_TEST_BINARY=/build/target/debug/clud CLUD_TEST_BLOCK_BAD_CMD_BINARY=/build/target/debug/clud-block-bad-cmd CLUD_TEST_MOCK_AGENT_BINARY=/build/target/debug/mock-agent /workspace/.venv/bin/python -m pytest -p no:cacheprovider -m 'not integration'"
-
-[task.act-installer-pages]
-stack = "clud_act"
-cmd = "ACT_WORKFLOW=install-pages.yml sh /workspace/ci/act_ci.sh build-site"
-github_api = "proxy"
-
-[task.act-installer-catalog]
-stack = "clud_act"
-cmd = "ACT_WORKFLOW=installer-check.yml ACT_CI_FULL=1 sh /workspace/ci/act_ci.sh catalog-unit"
-github_api = "proxy"
-
-[task.act-installer-resolver]
-stack = "clud_act"
-cmd = "ACT_WORKFLOW=installer-check.yml ACT_CI_FULL=1 sh /workspace/ci/act_ci.sh resolver-unit"
-github_api = "proxy"
-
-# Runs the current pyproject.toml version's published candidate on Linux x64.
-# The task fails if Act skips pytest or the host emits no matching evidence.
-[task.act-installer-public-linux-x64]
-stack = "clud_act"
-cmd = "ACT_WORKFLOW=installer-check.yml ACT_EVENT=workflow_call ACT_PUBLIC_X64=1 sh /workspace/ci/act_ci.sh public-host"
-github_api = "proxy"
-
-[task.act-model-pages]
-stack = "clud_act"
-cmd = "ACT_WORKFLOW=model-pages.yml sh /workspace/ci/act_ci.sh build-site"
-github_api = "proxy"

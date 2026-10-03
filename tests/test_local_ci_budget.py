@@ -1,4 +1,4 @@
-"""Local act runs are one pre-push check, not the edit loop (#1715).
+"""Local CI runs are one pre-push check, not the edit loop (#1715).
 
 On 2026-10-02 a one-module fix spent about 50 minutes in
 `bosn run --task act-ci-linux`. It waited about 27 minutes behind other
@@ -8,9 +8,9 @@ kills, one of them a cross-session `pkill`-style kill (zackees/bosn#357).
 The policy has to bound how agents use local act, and CLAUDE.md has to
 point at it.
 
-bosn 0.1.7 fixes all three (concurrent runner slots, per-checkout setup
-containers, cancel on a dead client), so the docs require it, and concurrent
-act runs need act's race-free action cache (#1724).
+Local CI now runs through `bosn ci` -> act2 (#1740): one isolated engine per
+run, so concurrent runs share no containers or action checkouts, and bosn
+0.1.8 is the first release that runs act2.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ACT_CI = ROOT / "ci" / "act_ci.sh"
 CI_MD = ROOT / "docs" / "architecture" / "ci.md"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 
@@ -36,8 +35,8 @@ def test_ci_doc_states_the_local_act_budget() -> None:
         "at most once per change",
         "CI of record",
         "Don't wait in the bosn queue",
-        "bosn job cancel",
-        "Never restart a running act job",
+        "bosn ci cancel",
+        "Never restart a running run",
         "pkill",
     ):
         assert rule in text, f"ci.md lost the local CI budget rule {rule!r}"
@@ -54,14 +53,13 @@ def test_claude_md_points_agents_at_the_budget() -> None:
     assert "pkill" in text
 
 
-def test_docs_require_a_bosn_with_the_checkout_fix() -> None:
-    # bosn < 0.1.7 can run a task in another checkout's container (#1594).
-    assert "bosn>=0.1.7" in _flat(CI_MD)
-    assert "bosn 0.1.7 or newer" in _flat(CLAUDE_MD)
+def test_docs_require_a_bosn_that_runs_act2() -> None:
+    # bosn < 0.1.8 runs stock nektos/act: no runner parity, no overlay (#1740).
+    assert "bosn>=0.1.8" in _flat(CI_MD)
+    assert "bosn 0.1.8 or newer" in _flat(CLAUDE_MD)
 
 
-def test_concurrent_act_runs_do_not_share_an_action_checkout() -> None:
-    # #1724: act's default action cache is a working tree per action, which
-    # concurrent runs on the shared act-cache volume check out over each other.
-    run_act = ACT_CI.read_text(encoding="utf-8")
-    assert '--action-cache-path "$ACTION_CACHE" --use-new-action-cache' in run_act
+def test_the_private_act_wrapper_is_gone() -> None:
+    # bosn ci owns act, its pin and its caches; a per-repo wrapper drifts (#1740).
+    assert not (ROOT / "ci" / "act_ci.sh").exists()
+    assert "clud_act" not in (ROOT / "bosn.toml").read_text(encoding="utf-8")

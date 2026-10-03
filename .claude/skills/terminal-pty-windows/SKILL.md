@@ -105,9 +105,9 @@ Read that first. This page lists only what differs on Windows.
 
 There is no local Windows, and `act` cannot run Windows.
 
-1. Run the shared Linux checks first: `bosn run --task act-ci-static` and
-   `bosn run --task act-ci-linux`. See terminal-pty.md § Validation for the
-   container gotchas.
+1. Run the shared Linux checks first:
+   `bosn ci run --workspace . --trigger pr --wait`. See terminal-pty.md
+   § Validation for what it covers.
 2. Add the `ci-windows` label to the PR. It runs static checks plus the
    Windows x64 build (with clippy), unit and integration lanes.
 3. For a bug fix, push a **tests-only commit first** so Windows records RED,

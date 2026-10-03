@@ -57,8 +57,8 @@ resumable scanners, and restore from `Drop`. In addition:
 ## How to validate a change
 
 1. Run the shared Linux checks locally:
-   `bosn run --task act-ci-static` and `bosn run --task act-ci-linux`. See
-   terminal-pty.md § Validation for the container gotchas.
+   `bosn ci run --workspace . --trigger pr --wait`. See terminal-pty.md
+   § Validation for what it covers.
 2. Push. On routine PRs the **Dylint** job also compiles check-only for
    `aarch64-apple-darwin`. It caught a macOS-only compile error while #1709
    was in progress, so read its result before anything else.
@@ -69,7 +69,7 @@ resumable scanners, and restore from `Drop`. In addition:
    failing job with
    `gh api --allow-escape-sequences repos/zackees/clud/actions/jobs/<job_id>/logs`.
 
-Report honestly: a green `act-ci-linux` run does not prove macOS behaviour,
+Report honestly: a green local `bosn ci` run does not prove macOS behaviour,
 and Dylint proves only that the code compiles for macOS.
 
 ## Known behaviours and gotchas

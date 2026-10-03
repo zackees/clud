@@ -84,16 +84,13 @@ this POSIX code; see [terminal-pty-macos](../terminal-pty-macos/SKILL.md).
 Linux is the one platform agents can fully validate locally:
 
 ```bash
-bosn run --task act-ci-list     # confirm it lists THIS repo's jobs
-bosn run --task act-ci-static
-bosn run --task act-ci-linux    # Linux clippy, build, Rust + Python unit suites
+bosn ci run --workspace . --trigger pr --job static --wait
+bosn ci run --workspace . --trigger pr --wait   # Linux clippy, build, Rust + Python unit suites
 ```
 
 - Never run host `cargo`, `bash lint` or `bash test`.
-- Read terminal-pty.md § Validation for the shared-`clud_act`-container
-  gotcha and the known act-only false failures (`test_act_ci_logs.py`, six
-  `test_codex_installer_rm.py` cases).
-- openpty-based tests work in the act container.
+- Read terminal-pty.md § Validation for what a local run covers.
+- openpty-based tests work in act2's job containers.
 - Routine PRs run Linux x64 on GitHub. The `ci-test` label adds Linux
   integration.
 - Watch a PR with

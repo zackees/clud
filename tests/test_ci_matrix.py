@@ -508,4 +508,23 @@ def test_linux_x64_clippy_runs_beside_the_build_not_inside_it():
     setup = (CI_YML.parent.parent / "actions" / "setup-build" / "action.yml").read_text(
         encoding="utf-8"
     )
-    assert "env.ACT && 'true' || inputs.save-cache" in setup
+    assert "save-cache: ${{ inputs.save-cache }}" in setup
+
+
+def test_workflows_use_the_local_runner_signal_only_under_an_exception() -> None:
+    """zackees/ci.yml ACT-003: stock actions work under bosn ci -> act2 as
+    written. `ACT=true` is the local-runner signal for tuning a cache (size,
+    pruning, compression), and actions read it themselves. A workflow may
+    branch on it only where an action has no such knob, under a filed
+    zackees/ci.yml exception named in the comment just above (#1740)."""
+    github = CI_YML.parent.parent
+    offenders = []
+    for path in sorted(github.rglob("*.y*ml")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if "env.ACT" not in line:
+                continue
+            context = "\n".join(lines[max(0, index - 8) : index])
+            if "zackees/ci.yml#" not in context:
+                offenders.append(f"{path.relative_to(github)}:{index + 1}")
+    assert offenders == [], offenders
