@@ -33,26 +33,36 @@ You hold the run's build lock, so nothing else builds while you do.
 3. **RED -> GREEN.** Run the goal's focused regression test and show it
    fails without the fix (check out the test alone on the base, or cite the
    reproduction), then passes with it.
-3b. **Cross-check every target the project's CI tests**, before any host
-   lint or test (Rust repos only; #1430). A code error can hide on the host
-   and fail only on another OS's CI, for example a `#[cfg(test)]` helper whose
-   only caller is behind `#[cfg(target_os = "linux")]`. Run
-   `clud tool run git/ci_targets.py --host <host triple>`: it prints the
-   triples the repo's CI runs (from `runs-on:`, explicit `--target`, and
-   `rust-toolchain.toml`) as `targets`, and lists every triple soldr cannot
-   cross-check under `skipped` with a reason; print each skipped triple and
-   its reason, never drop one silently. A repo that is not Rust prints one
-   line, `not a Rust project`: skip this stage. Then, per target, cheapest
-   first, each in its own `CARGO_TARGET_DIR`, with warnings denied:
-   - `soldr cargo check --workspace --all-targets --target <triple>`
-     (`--all-targets` evaluates `cfg(test)`, bench and example code). Use the
-     repo's CI feature set when it declares one.
-   - `soldr cargo clippy --workspace --all-targets --target <triple>` with
-     the repo's clippy flags.
-   - `cargo dylint` for the target when the repo configures dylint.
-   A cross-check failure is fixed like any verify failure (edit, commit,
-   rerun); it is never skipped or weakened. Host lint and test (step 4) run
-   only after every target passes.
+3b. **Cross-check every target the project's CI tests** only when the diff
+   changes platform implementation code (Rust repos; scopes #1430).
+   First inspect the changed code: native API/FFI handling, OS-specific
+   branches, platform adapters/selectors and native runtime contracts
+   qualify. Shared business logic, callers of unchanged platform APIs,
+   helper extraction and moving OS code unchanged do not. For those changes,
+   proceed to step 4 without adding cross-target passes or native CI labels.
+   Keep the repository's declared routine lint/check/test gate.
+
+   For a platform implementation change, run
+   `clud tool run git/ci_targets.py --host <host triple>` to inventory
+   available targets, then select only targets exercising the changed
+   platform implementation. The inventory includes release-only targets;
+   it is not a requirement to run them all. Record the implementation,
+   selected targets and native behavior being checked. A non-Rust repo
+   prints `not a Rust project`: skip this stage. Report an affected target
+   under `skipped` and its reason rather than claiming coverage.
+
+   Per affected target, use the repository's isolated validation runner and
+   declared platform-crate commands, with warnings denied. If the platform
+   implementation is in a mixed workspace without a narrower check, the
+   command is `soldr cargo check --workspace --all-targets --target <triple>`;
+   otherwise scope it to the platform crate with `-p <platform-crate>`.
+   Use the repo's CI feature set and lint flags. Do not duplicate its
+   routine Dylint/cross-target checks with a second ad hoc loop.
+   Here "every target" means every affected selected target, not every
+   target found in the inventory. Host lint and test (step 4) run only after every target passes.
+   A failure must be fixed or reported with evidence, never silently dropped.
+   Apply the same implementation-based selection to `ci-windows`/`ci-full`;
+   a local coverage gap or a platform caller alone never justifies a label.
 4. **Verify.** Run the plan's lint, build and test commands. Fix failures by
    editing, commit, and rerun until green. Do not skip or weaken a test.
    **Run must_verify.** The reviewer cannot run anything, so the checks it
@@ -88,6 +98,10 @@ You hold the run's build lock, so nothing else builds while you do.
    in `bosn` or start containers yourself. This is the only CI a "skip CI"
    choice skips: never put `[skip ci]` (or any skip marker) in a commit or
    PR text, and never remove a CI-lane label; remote CI always runs.
+   This does not mean adding optional native coverage to every PR. Select
+   platform labels only by the changed implementation described in step 3b.
+   If an existing label contradicts that selection, report the mismatch
+   for owner correction; do not add further labels to compensate.
 6. **Review gate.** Run `/clud-review` on source-code changes.
 7. **Push and PR.** `git push -u origin <branch>`, then `gh pr create` with
    `Closes #<id>` for an issue goal only when the PR's base is the

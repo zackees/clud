@@ -127,3 +127,12 @@ server and merge.
    integrator and calls you again, up to 10 rounds. Each fix round goes back
    through the integrator, which reruns the run's lint and test scripts
    before pushing.
+
+## Platform coverage selection
+
+Native PR coverage follows the changed platform implementation: native API/FFI
+handling, OS branches, adapters/selectors or native runtime contracts. Shared
+business logic and callers of unchanged platform code use the routine gate.
+Name the implementation and select only affected targets; target inventories,
+helper extraction and local coverage gaps do not justify `ci-full` or
+`ci-windows`. Preserve routine checks and full release validation.

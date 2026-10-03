@@ -81,6 +81,13 @@ this POSIX code; see [terminal-pty-macos](../terminal-pty-macos/SKILL.md).
 
 ## How to validate a change
 
+Shared business logic and callers of unchanged platform APIs use routine
+Linux validation. A change to the POSIX platform implementation itself
+(termios, native PTY APIs, signals or OS contracts) selects affected native
+lanes using [CI label selection](../../../docs/architecture/ci.md#when-to-add-native-ci-labels).
+Do not infer a macOS/Windows change from sharing `session.rs` or extracting
+helpers. Linux-only implementation changes need no full matrix.
+
 Linux is the one platform agents can fully validate locally:
 
 ```bash

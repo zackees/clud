@@ -150,7 +150,8 @@ before promotion.
 
 For a focused test, run the job that contains it. Do not switch to a direct
 `bash test`/`bash lint` or a host toolchain. act cannot execute native Windows
-or macOS. For Windows-only code, use the `ci-windows` PR label for the Windows
+or macOS. For changes to Windows platform implementations or OS contracts, use the
+`ci-windows` PR label for the Windows
 build, unit and integration suites after the local run, and keep Windows PTY
 tests enabled. There is no merge queue; a `ci-windows` run still includes the
 routine Linux x64 lanes but no macOS

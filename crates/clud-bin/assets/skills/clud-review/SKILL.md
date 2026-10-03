@@ -31,6 +31,15 @@ Where the originating issue's focused test is discoverable, the
 review explicitly runs it and reports pass/fail (RED -> GREEN
 validation at the local level).
 
+## Platform coverage selection
+
+Native PR coverage follows the changed platform implementation: native API/FFI
+handling, OS branches, adapters/selectors or native runtime contracts. Shared
+business logic and callers of unchanged platform code use the routine gate.
+Name the implementation and select only affected targets; target inventories,
+helper extraction and local coverage gaps do not justify `ci-full` or
+`ci-windows`. Preserve routine checks and full release validation.
+
 ## Invocation-wide agent budget (non-negotiable)
 
 `agent_budget=1`. A `/clud-review` invocation launches exactly one primary

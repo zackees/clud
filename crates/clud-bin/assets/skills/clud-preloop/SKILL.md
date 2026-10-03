@@ -22,6 +22,15 @@ green."* That is a decision to spend a full remote matrix on a question a local 
 answers. Cross-platform failures — a path literal that is absolute on one OS and not
 another — are the class this catches cheapest.
 
+## Platform coverage selection
+
+Native PR coverage follows the changed platform implementation: native API/FFI
+handling, OS branches, adapters/selectors or native runtime contracts. Shared
+business logic and callers of unchanged platform code use the routine gate.
+Name the implementation and select only affected targets; target inventories,
+helper extraction and local coverage gaps do not justify `ci-full` or
+`ci-windows`. Preserve routine checks and full release validation.
+
 ## Code Change Rule
 
 If the workflow is being changed to fix a bug or add behavior, use RED -> GREEN:

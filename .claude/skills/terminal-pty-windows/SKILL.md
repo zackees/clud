@@ -108,10 +108,18 @@ There is no local Windows, and `act` cannot run Windows.
 1. Run the shared Linux checks first:
    `bosn ci run --workspace . --trigger pr --wait`. See terminal-pty.md
    § Validation for what it covers.
-2. Add the `ci-windows` label to the PR. It runs static checks plus the
-   Windows x64 build (with clippy), unit and integration lanes.
-3. For a bug fix, push a **tests-only commit first** so Windows records RED,
-   then push the fix.
+2. Add `ci-windows` only when the diff changes Windows platform
+   implementation or its native runtime contract: ConPTY/Win32 API
+   handling, console adapters, or Windows-specific branches. Identify the
+   changed implementation and what the native lane proves in the PR body.
+   Shared pump logic, stream parsers, helper extraction, and callers of
+   unchanged platform APIs stay on routine CI. Moving unchanged OS code
+   into helpers does not qualify. See [label selection](../../../docs/architecture/ci.md#when-to-add-native-ci-labels).
+   When warranted, it adds Windows x64 build, unit and integration lanes
+   alongside the routine Linux gate.
+3. For a Windows platform implementation bug fix, push a **tests-only
+   commit first** so Windows records RED, then push the fix. Reproduce shared
+   business-logic regressions through the routine Linux gate instead.
 4. Watch the run with
    `clud tool run github/pr_merge_watch.py -- <PR> [--no-cancel]`. Read a
    failing job with

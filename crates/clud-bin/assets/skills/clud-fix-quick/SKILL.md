@@ -26,6 +26,15 @@ CI. Use
 `/clud-fix-quick` when you already know what to change and want it on
 main / your branch in seconds.
 
+## Platform coverage selection
+
+Native PR coverage follows the changed platform implementation: native API/FFI
+handling, OS branches, adapters/selectors or native runtime contracts. Shared
+business logic and callers of unchanged platform code use the routine gate.
+Name the implementation and select only affected targets; target inventories,
+helper extraction and local coverage gaps do not justify `ci-full` or
+`ci-windows`. Preserve routine checks and full release validation.
+
 ## Input
 
 - A GitHub issue URL or number — the task to implement.

@@ -11,8 +11,10 @@ Guidance for Claude Code when working in this repository.
 The commands below describe what the CI jobs execute. Agents must run local
 lint and tests only through `bosn ci run --workspace . --trigger pr`
 (`--job static` for lint alone); never invoke these commands on the host.
-Windows-only behavior requires the native `ci-windows` PR lane, including PTY
-tests.
+Changes to Windows platform implementations or native runtime contracts
+require `ci-windows`, including the relevant PTY tests. Shared business logic
+calling unchanged Windows APIs stays on routine CI; inspect the changed code
+before selecting native coverage.
 
 - **Build**: `bash build` — dev wheel (Rust binary + Python package)
 - **Lint**: `bash lint` — `cargo fmt`, `cargo clippy`, `ruff` (**MANDATORY** after any code edit). `bash lint --windows` also runs clippy for `x86_64-pc-windows-msvc` through soldr — run it before pushing Windows-only code ([ci.md](docs/architecture/ci.md#local-validation-before-remote-ci))
