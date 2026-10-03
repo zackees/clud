@@ -135,7 +135,11 @@ runs, the most a page can show. The rebuilt response drops `Link`, `ETag`,
 
 **Exact or not at all.** A page is merged only if its parsed objects
 re-render to exactly the bytes GitHub sent (no whitespace, no unknown wrapper
-key, every object with an id and timestamps). Otherwise the collection is
+key, every object with an id and timestamps). A full-fetch page must also
+already be in the natural order above, since that is the order a caller's
+own fetch returns. Incremental pages are not held to it: GitHub orders a
+`created`-filtered run list's same-second runs by workflow rather than by
+id, and the merge re-sorts them anyway. Otherwise the collection is
 marked unmergeable for 30 minutes and the read takes the phase-1 exact-URL
 path, as do the queries a merge cannot reproduce: `page` > 1, `per_page`
 outside 1-100, `since`, `sort`, `direction`, a run-list `status` or `created`
