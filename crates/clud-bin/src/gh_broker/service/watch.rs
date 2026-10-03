@@ -169,6 +169,16 @@ impl GhBroker {
                 None => now + WATCH_TICK_MS,
             };
             (self.sleep)(next.min(deadline).saturating_sub(now));
+            if (self.clock)() >= deadline {
+                // Slept to the deadline: nothing changed in this call, and
+                // a last round of reads would only re-defer (or re-hit the
+                // cache) for no answer.
+                return WatchReply {
+                    digests,
+                    changed: Vec::new(),
+                    deferred_until_s,
+                };
+            }
         }
     }
 }
