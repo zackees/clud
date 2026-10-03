@@ -306,6 +306,7 @@ impl GhBroker {
                 upstream_requests: served.upstream_requests,
                 rate_remaining: served.rate,
                 changed: served.changed,
+                removed: None,
             });
         }
         served.result

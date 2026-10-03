@@ -71,6 +71,10 @@ pub struct LedgerEntry {
     /// Merged reads: objects the upstream fetch added or changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed: Option<u32>,
+    /// Merged reads: objects that dropped out of the collection (deleted
+    /// upstream) on this refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
 }
 
 pub struct Store {
@@ -339,6 +343,7 @@ mod tests {
                     upstream_requests: 0,
                     rate_remaining: None,
                     changed: None,
+                    removed: None,
                 })
                 .unwrap();
         }

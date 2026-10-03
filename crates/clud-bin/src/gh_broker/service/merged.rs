@@ -20,6 +20,7 @@ use crate::gh_broker::upstream::{Response, UpstreamRequest};
 
 /// A live collection is re-fetched in full at most this often.
 pub const RECONCILE_MS: u64 = 30 * 60 * 1000;
+pub const UNMERGEABLE_RETRY_MS: u64 = RECONCILE_MS;
 /// A merged state larger than this is not kept.
 const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
 /// The flight result that sends waiters to the exact-URL path too.
