@@ -11,8 +11,8 @@ docs/architecture/shim-dispatch.md ("Running sessions after an upgrade").
 from __future__ import annotations
 
 import os
-import sys
 import shutil
+import sys
 from pathlib import Path
 
 import pytest

@@ -17,9 +17,7 @@ from tests import process
 
 @functools.cache
 def _registry(shim: str) -> dict:
-    result = process.run(
-        [shim, "--registry"], capture_output=True, text=True, timeout=30
-    )
+    result = process.run([shim, "--registry"], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result
     return json.loads(result.stdout)
 
