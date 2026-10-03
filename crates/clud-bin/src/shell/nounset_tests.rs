@@ -332,9 +332,17 @@ fn bash_under(env: Vec<(String, String)>, script: &str) -> (i32, String) {
             ReadStatus::Eof => break,
         }
     }
+    // Exit is not end of output: an unterminated last line (`printf '%s'`)
+    // is emitted only at pipe EOF, which can trail the exit code on a loaded
+    // machine. `wait` runs running-process's bounded capture drain, so the
+    // queue is complete once it returns.
     let code = process
         .wait(Some(Duration::from_secs(30)))
         .expect("bash must exit");
+    for event in process.drain_combined() {
+        buf.extend_from_slice(&event.line);
+        buf.push(b'\n');
+    }
     (code, String::from_utf8_lossy(&buf).trim().to_string())
 }
 

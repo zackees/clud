@@ -169,15 +169,7 @@ pub(super) fn probe_cmd_streams(
             ReadStatus::Timeout => {}
         }
         match process.poll() {
-            Ok(Some(_)) => {
-                // Drain whatever is still buffered before leaving.
-                while let ReadStatus::Line(event) =
-                    process.read_combined(Some(Duration::from_millis(5)))
-                {
-                    push(&mut text, event);
-                }
-                break;
-            }
+            Ok(Some(_)) => break,
             Ok(None) => {}
             Err(_) => return None,
         }
@@ -188,10 +180,19 @@ pub(super) fn probe_cmd_streams(
         }
     }
 
-    process
-        .wait(Some(Duration::from_secs(1)))
-        .ok()
-        .map(|code| (code, text, err))
+    // Exit is not end of output. The reader threads may still be
+    // delivering the child's last bytes, and an unterminated last line is
+    // only emitted at pipe EOF. `wait` runs running-process's bounded
+    // capture drain (it waits for EOF, and stops waiting if a grandchild
+    // holds the pipe), so everything the child wrote is queued once it
+    // returns. A fixed few-millisecond drain here used to drop output on a
+    // loaded machine, turning `git rev-list --count` into an empty string
+    // and a landed worktree into `unverifiable`.
+    let code = process.wait(Some(Duration::from_secs(1))).ok()?;
+    for event in process.drain_combined() {
+        push(&mut text, event);
+    }
+    Some((code, text, err))
 }
 
 /// The remote default branch to compare against, e.g. `origin/main`.
@@ -843,6 +844,27 @@ mod tests {
         // real hooks, would otherwise fail `git commit` here.
         git(root, &["config", "commit.gpgsign", "false"]);
         git(root, &["config", "core.hooksPath", ""]);
+    }
+
+    /// Exit is not end of output. The background `sleep` keeps the pipe open
+    /// after `sh` exits, so the unterminated `tail` reaches the queue only at
+    /// pipe EOF, a second after the exit code. That is the loaded-machine
+    /// race made deterministic: the old fixed 5 ms drain after exit returned
+    /// an empty stdout here, which is how `git rev-list --count` read as
+    /// nothing and a landed worktree was pinned as `unverifiable`.
+    #[cfg(unix)]
+    #[test]
+    fn probe_cmd_keeps_output_that_arrives_after_the_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (code, out) = probe_cmd(
+            "sh",
+            tmp.path(),
+            &["-c", "printf 'head\\ntail'; sleep 1 &"],
+            Duration::from_secs(10),
+        )
+        .expect("sh must run");
+        assert_eq!(code, 0);
+        assert_eq!(out, "head\ntail\n");
     }
 
     #[test]

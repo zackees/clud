@@ -144,10 +144,12 @@ pub(super) fn ls_files_pass(root: &Path) -> Option<Vec<(PathBuf, u32)>> {
         }
         match process.poll() {
             Ok(Some(_)) => {
-                // Drain whatever is still buffered before leaving.
-                while let ReadStatus::Line(event) =
-                    process.read_combined(Some(Duration::from_millis(5)))
-                {
+                // Exit is not end of output: `wait` runs running-process's
+                // bounded capture drain, so every line git wrote is queued
+                // once it returns. A fixed few-millisecond drain dropped
+                // output on a loaded machine.
+                let _ = process.wait(Some(Duration::from_secs(1)));
+                for event in process.drain_combined() {
                     text.push_str(&String::from_utf8_lossy(&event.line));
                     text.push('\n');
                 }
