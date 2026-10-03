@@ -130,6 +130,7 @@ def test_daemon_stop_falls_back_when_old_daemon_rejects_shutdown(
     env = managed_env(mock_env, state_dir)
     env["CLUD_DAEMON_WIRE"] = "json"
     port_file = tmp_path / "port"
+    requests_file = tmp_path / "requests"
     peer = process.Popen(
         [
             sys.executable,
@@ -139,12 +140,15 @@ def test_daemon_stop_falls_back_when_old_daemon_rejects_shutdown(
             "listener.bind(('127.0.0.1',0))\n"
             "listener.listen(1)\n"
             "pathlib.Path(sys.argv[1]).write_text(str(listener.getsockname()[1]))\n"
-            "conn,_=listener.accept()\n"
-            "with conn:\n"
-            "    conn.recv(65536)\n"
-            "    conn.sendall(b'{\"op\":\"error\",\"message\":\"old client refused\"}\\n')\n"
-            "import time; time.sleep(60)\n",
+            "while True:\n"
+            "    conn,_=listener.accept()\n"
+            "    with conn:\n"
+            "        request=conn.recv(65536)\n"
+            "        with pathlib.Path(sys.argv[2]).open('ab') as received:\n"
+            "            received.write(request)\n"
+            "        conn.sendall(b'{\"op\":\"error\",\"message\":\"old client refused\"}\\n')\n",
             str(port_file),
+            str(requests_file),
         ],
         stdout=process.PIPE,
         stderr=process.PIPE,
@@ -170,6 +174,7 @@ def test_daemon_stop_falls_back_when_old_daemon_rejects_shutdown(
 
         stopped = _run_stop(clud_binary, env)
         assert stopped.returncode == 0, stopped.stderr
+        assert b"shutdown" in requests_file.read_bytes()
         wait_for_pids_to_exit([peer.pid], timeout=15)
         assert not (state_dir / "daemon.json").exists()
     finally:
