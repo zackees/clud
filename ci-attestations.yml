@@ -14,11 +14,11 @@
 version: 1
 gates:
   general/all/static: {lane: pr}                       # ci/lint.py --static-only
-  rust/x86_64-unknown-linux-gnu/clippy: {lane: pr}
+  rust/x86_64-unknown-linux-gnu/clippy: {lane: pr}     # clippy + doc-tests
   rust/x86_64-unknown-linux-gnu/dylint: {lane: pr}     # host pass
   rust/x86_64-pc-windows-msvc/dylint: {lane: pr}       # cross-target pass
   rust/aarch64-apple-darwin/dylint: {lane: pr}         # cross-target pass
-  rust/x86_64-unknown-linux-gnu/build: {lane: pr}      # bins, harnesses, doctests, wheel
+  rust/x86_64-unknown-linux-gnu/build: {lane: pr}      # bins, harnesses, wheel
   rust/x86_64-unknown-linux-gnu/unit: {lane: pr}       # rust + both pytest shards
 jobs:
   ci.yml:static-checks: [general/all/static]
