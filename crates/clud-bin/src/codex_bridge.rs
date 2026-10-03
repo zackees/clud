@@ -2899,16 +2899,7 @@ fn serve_codex_discovery_messages(
         record_model_substitution(log, base, &served);
     }
     if let Some(entry) = discovered {
-        let target = if config.selected_model_cli_id.as_deref() == Some(entry.cli_id) {
-            config.default_model.as_ref().map_or_else(
-                || crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id),
-                |model| model.model.clone(),
-            )
-        } else if base.eq_ignore_ascii_case(entry.wire_id) {
-            base.to_string()
-        } else {
-            crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
-        };
+        let target = codex_discovery_wire_model(config, entry, base);
         let wire_model =
             effort.map_or_else(|| target.clone(), |effort| format!("{target}@{effort}"));
         request["model"] = serde_json::Value::String(wire_model);
@@ -2926,6 +2917,22 @@ fn serve_codex_discovery_messages(
         log,
         cache_health,
     );
+}
+
+fn codex_discovery_wire_model(
+    config: &BridgeConfig,
+    entry: provider_catalog::CatalogModel,
+    requested: &str,
+) -> String {
+    if config.selected_model_cli_id.as_deref() == Some(entry.cli_id) {
+        if let Some(model) = &config.default_model {
+            return model.model.clone();
+        }
+    }
+    if requested.eq_ignore_ascii_case(entry.wire_id) {
+        return requested.to_string();
+    }
+    crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
 }
 
 /// Serve one `POST /v1/messages`.
