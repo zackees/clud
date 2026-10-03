@@ -295,6 +295,7 @@ def test_a_session_without_the_key_follows_the_setting(tmp_path: Path) -> None:
         daemon.close()
     for result in (brokered, off, explicit_off):
         assert result.returncode == 0, result
-    assert brokered.stdout == BODY
+    # The real gh formatted the brokered body (see the first test).
+    assert Path(str(world.log) + ".replayed").read_bytes() == BODY
     assert [read["endpoint"] for read in daemon.reads] == ["repos/o/r"]
     assert world.calls()[-2:] == ["api repos/o/r/off", "api repos/o/r/explicit-off"]
