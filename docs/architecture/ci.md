@@ -235,6 +235,9 @@ never read attestations. The gate runs in `shadow` mode: an unattested head is
 reported, never failed. Plain `bosn ci run` remains valid; it just earns no
 skip.
 
+To check a PR's decision, read the `Local gate attestation` step of its `CI
+mode` job: it prints the GATE-003/008/010 verdict and each lane's skip/run.
+
 ### Manual Windows probes (ignored tests)
 
 <!-- manual-windows-probes -->
