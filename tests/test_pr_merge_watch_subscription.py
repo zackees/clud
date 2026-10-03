@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -142,7 +143,10 @@ def test_a_dead_daemon_falls_back_to_polling(watcher, tmp_path: Path, monkeypatc
     assert sub.wait(["k1"], 30) == "unavailable"
     slept: list = []
     monkeypatch.setattr(watcher, "_sleep_remaining_interval", lambda *args: slept.append(args))
-    watcher._await_next_poll(sub, ["k1"], 0.0, 20, 10_000.0, None)
+    # The deadline is on time.monotonic(), which counts from host boot: an
+    # absolute 10_000.0 is already past on any host up for ~3 h (act shares
+    # the host's clock), turning the wait into 0 s and skipping the fallback.
+    watcher._await_next_poll(sub, ["k1"], 0.0, 20, time.monotonic() + 10_000.0, None)
     assert slept, "unavailable means the ordinary interval sleep"
 
 
