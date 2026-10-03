@@ -12,8 +12,7 @@
 //!   carries [`OTHER`].
 //! - [`write_tags`]: a write the parser recognizes names the tags it may
 //!   change, plus [`OTHER`]. Anything else returns `None`: the shim then
-//!   asks for the phase-1 global invalidation, which also covers frozen
-//!   keys.
+//!   asks for the phase-1 global invalidation.
 //!
 //! So a recognized write still refreshes every untagged read, exactly as in
 //! phase 1, but leaves alone the tagged reads of other issues, PRs and runs.

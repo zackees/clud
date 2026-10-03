@@ -757,6 +757,10 @@ fn run_dashboard_loop(
                 let guard = activity.as_ref().map(DaemonActivity::start_connection);
                 spawn_gh_read(request, Arc::clone(&gh_broker), guard);
             }
+            (Method::Get, crate::gh_broker::LEDGER_PATH) => {
+                let (status, bytes) = gh_broker.handle_ledger();
+                respond_json(request, status, &bytes);
+            }
             (Method::Post, crate::gh_broker::INVALIDATE_PATH) => {
                 let mut request = request;
                 // An unreadable body still invalidates: globally.

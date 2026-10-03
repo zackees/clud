@@ -1,4 +1,4 @@
-# Session `gh` read broker (#1743, phases 1-2)
+# Session `gh` read broker (#1743)
 
 One agent session with a few subagents can spend GitHub's shared 5,000/hour
 REST budget on its own: watchers, `gh api` polls and status checks re-fetch
@@ -10,13 +10,14 @@ does not charge an authorized `304 Not Modified` against the rate limit.
 
 The broker answers **only `gh api <endpoint>` GETs**. Phase 1 is a
 read-through ETag cache keyed by the exact URL. Phase 2 adds
-[merged collections](#merged-collections-phase-2): comment and run-list reads
-fetch only what changed since the newest object the broker has seen, and are
-rebuilt in the shape the caller's query returns. It also adds
-[frozen listings](#frozen-listings) and
-[targeted invalidation](#write-invalidation). Porcelain commands (`gh pr view`,
-`gh run view`, ...), subscriptions and the budget floor are later phases of
-#1743.
+[merged collections](#merged-collections): comment and run-list reads share
+one stored membership across page sizes and are rebuilt in the shape the
+caller's query returns, and [targeted invalidation](#write-invalidation).
+Every refresh of a merged collection re-sends its upstream pages with their
+ETags, so a deletion, a reaction or a rerun is seen on the next refresh at no
+rate-limit cost ([DD-153](../DESIGN_DECISIONS.md#dd-153-merged-gh-reads-revalidate-every-page-instead-of-querying-a-delta)).
+Porcelain commands (`gh pr view`, `gh run view`, ...), subscriptions and the
+budget floor are later phases of #1743.
 
 ## Path of one read
 
@@ -102,77 +103,96 @@ never share a body. Tokens are hashed into the key and never stored or
 logged. The route is behind the dashboard capability cookie and Host check,
 like `/telemetry/log`.
 
-## Merged collections (phase 2)
+## Merged collections
 
 `gh_broker::collection::plan` recognizes three collection endpoints. They are
 keyed by path and membership filters, not by the exact URL, so `per_page=5`
 and `per_page=100` share one membership:
 
-| Endpoint | Full fetch (seed) | Incremental query | Natural order |
-| --- | --- | --- | --- |
-| `repos/{o}/{r}/issues/{n}/comments` | `?per_page=100`, every page (at most 10) | `?since=<hwm - 5 s>&per_page=100` | id ascending |
-| `repos/{o}/{r}/pulls/{n}/comments` | same | same | id ascending |
-| `repos/{o}/{r}/actions/runs` | the caller's filters `&per_page=100`, newest page only | the caller's filters `&created=>=<bound - 5 s>&per_page=100` | `created_at` descending, then id |
+| Endpoint | Upstream pages | Natural order |
+| --- | --- | --- |
+| `repos/{o}/{r}/issues/{n}/comments` | `?per_page=100`, every page (at most 10) | id ascending |
+| `repos/{o}/{r}/pulls/{n}/comments` | same | id ascending |
+| `repos/{o}/{r}/actions/runs` | the caller's filters `&per_page=<width>`, the newest page only | `created_at` descending, then id |
 
-The high-water mark (HWM) is the newest timestamp the broker has **seen** in
-the membership, never the wall clock: `updated_at` for comments (an edit moves
-it), `created_at` for runs. For a run list the bound reaches back to the
-oldest run that has not finished if that run is older, so the same one query
-also refreshes every live run, through the same list serializer. The 5 s
-overlap covers clock skew. Its duplicates are removed by id. The incremental
-query pages until GitHub sends no `rel="next"` (at most five pages, else a
-full fetch).
+A run list's width is the narrowest of 10, 30 and 100 that covers the
+caller's `per_page` (default 30). A wider caller re-fetches the list at its
+width; the width never shrinks, so a narrower caller is cut from the wider
+page. One page of 100 runs is about 1.2 MB on a busy repo, so a `per_page=5`
+reader re-downloads 10 runs rather than 100 when the list changes.
 
-**Merge.** Objects are upserted by id. A copy with a newer `updated_at` wins.
-On a tie the later fetch wins, because fields without a timestamp (reaction
-counts, a run's status) can still change. The response is rebuilt from the
-membership in the endpoint's natural order, cut to the caller's `per_page`
-(default 30), with the stored objects' exact bytes. A run list's
-`total_count` is the seed's count plus every new run (an id higher than any
-seen; run ids grow with creation), and the membership keeps the newest 100
-runs, the most a page can show. The rebuilt response drops `Link`, `ETag`,
-`Last-Modified` and `Content-Length`, which describe one upstream transfer.
+**Refresh: every page, conditionally.** The broker stores each upstream page
+as it last received it, with its ETag. After the TTL it re-sends every page
+with `If-None-Match`:
+
+- `304`: the page is byte-identical to the stored copy. GitHub does not count
+  an authorized `304` against the rate limit; measured on 2026-10-02, 15
+  conditional requests moved `X-RateLimit-Used` by the same background
+  drift as 15 calls to the free `rate_limit` endpoint.
+- `200`: the page is replaced. GitHub's ETag covers the whole body, so a
+  deletion, an edit, a reaction count, a review comment going outdated and a
+  rerun (`run_attempt`, `status`) all change it, whether or not they move
+  `updated_at`.
+
+A page ends the collection only when it holds fewer objects than the page
+size. A full page that is a `304` is followed by the next page anyway: a new
+comment can open page 2 without changing page 1. A collection of exactly 100
+comments therefore keeps an empty page 2, which costs one free `304`.
+
+**Pages that do not fit together.** If a pass replaced any page of a
+multi-page collection, the broker re-checks every page before the last with
+the ETag it just received. A deletion that lands between two page requests
+shifts the later pages: without the re-check the stored copy of page 1 would
+keep the deleted comment, and the comment that moved onto page 1 would be in
+neither copy. Any re-check that is not a `304`, and any joined membership out
+of natural order or with an id twice, runs the pass again from the pages just
+received. If the second pass does not fit either, that read takes the
+exact-URL path; the stored pages are kept, so the next refresh revalidates
+them as usual. (A page the merge cannot parse, a short page that announces
+another, or more than 10 pages instead mark the collection unmergeable for
+30 minutes, below.)
+
+**Cost.** A quiet collection costs one free `304` per page per TTL. A change
+costs one charged `200` per changed page, plus free re-checks. The phase-2
+delta query (`since=`, `created>=`) cost the same charged request for the
+change and then a second charged `200` on the refresh after it, because the
+moved bound made a new URL with no ETag; it also could not see deletions,
+reactions or reruns of finished runs. It is gone ([DD-153](../DESIGN_DECISIONS.md#dd-153-merged-gh-reads-revalidate-every-page-instead-of-querying-a-delta)).
+What the delta saved was bytes: a changed page is re-sent whole.
+
+**Rendering.** The response is rebuilt from the joined pages, cut to the
+caller's `per_page` (default 30), with the stored objects' exact bytes and
+`total_count` from the first page. The rebuilt response drops `Link`,
+`ETag`, `Last-Modified` and `Content-Length`, which describe one upstream
+transfer.
 
 **Exact or not at all.** A page is merged only if its parsed objects
 re-render to exactly the bytes GitHub sent (no whitespace, no unknown wrapper
-key, every object with an id and timestamps). A full-fetch page must also
-already be in the natural order above, since that is the order a caller's
-own fetch returns. Incremental pages are not held to it: GitHub orders a
-`created`-filtered run list's same-second runs by workflow rather than by
-id, and the merge re-sorts them anyway. Otherwise the collection is
+key, every object with an id and timestamps) and are in the natural order
+above, since that is the order a caller's own fetch returns. A short page
+that announces a next page is refused too. Otherwise the collection is
 marked unmergeable for 30 minutes and the read takes the phase-1 exact-URL
 path, as do the queries a merge cannot reproduce: `page` > 1, `per_page`
 outside 1-100, `since`, `sort`, `direction`, a run-list `status` or `created`
 filter, and any parameter the planner does not know. A collection over 10
 pages, or a merged state over 8 MiB, is not merged either. Why the merge
-keeps exact bytes and widens the run-list bound instead of revalidating runs
-one by one: [DD-151](../DESIGN_DECISIONS.md#dd-151-merged-gh-reads-keep-exact-object-bytes-and-fall-back-rather-than-approximate).
+keeps exact bytes: [DD-151](../DESIGN_DECISIONS.md#dd-151-merged-gh-reads-keep-exact-object-bytes-and-fall-back-rather-than-approximate).
 
-**Freshness and reconciliation.** Within the TTL (comments 60 s, runs 30 s)
-a merged read costs nothing. After it, the incremental query runs. An
-unchanged bound repeats the last incremental URL with its ETag, so a quiet
-collection costs a free `304`. `since=` cannot see a deletion, so a live
-collection is fetched in full again at most every 30 minutes; a single-page
-seed sends its ETag, and an unchanged collection is a `304`. A write that
-names the collection, or a global invalidation, also forces that full fetch,
-so `gh pr comment --delete-last` is reflected at once.
+**Freshness.** Within the TTL (comments 60 s, runs 30 s) a merged read costs
+nothing. A write that names the collection, or a global invalidation, makes
+the next read refresh at once, so `gh pr comment --delete-last` is reflected
+immediately.
 
-## Frozen listings
+## Listings of finished runs and checks
 
-Two listings stop changing once everything in them is finished. They are
-then served without a TTL (`CLUD_GH_FRESH=1` included) until a write names
-them:
-
-- `repos/{o}/{r}/actions/runs/{id}/jobs` once every job is `completed`, the
-  listing fits one page, and the run itself is `completed`. The broker reads
-  `actions/runs/{id}` (through its own cache) to check, because a run can
-  still queue jobs that wait on finished ones.
-- `repos/{o}/{r}/commits/{sha}/check-runs` for a full 40-hex SHA (a branch
-  name moves) once every check run has been `completed` for 5 minutes: another
-  app or a later workflow can still add a check run to the commit.
-
-Only the unfiltered listing freezes (`per_page`, `page=1` and `filter` aside):
-a `status` or `check_name` filter can make "all completed" vacuously true.
+`repos/{o}/{r}/actions/runs/{id}/jobs` and
+`repos/{o}/{r}/commits/{sha}/check-runs` are ordinary exact-URL reads: after
+their TTL they are revalidated with their ETag. Phase 2 froze them once
+everything in them had finished and served them with no request until a
+write in a session named them. Revalidating costs a free `304` while nothing
+changed, the same as any check that could tell whether to thaw them, and it
+also sees a rerun started outside clud and a check run another app adds to
+a finished commit. So they no longer freeze.
 
 ## Freshness
 
@@ -181,10 +201,10 @@ a `status` or `check_name` filter can make "all completed" vacuously true.
 | `.../actions/runs...`, `.../actions/jobs...` | 30 s |
 | everything else | 60 s |
 
-`CLUD_GH_FRESH=1` skips the TTL but still revalidates. Completed workflow
-runs are **not** cached forever: `gh run rerun` reopens a completed run
-under the same id, and a `304` revalidation is free, so phase 1 gives every
-object a TTL.
+`CLUD_GH_FRESH=1` skips the TTL but still revalidates. Nothing is cached
+forever, completed workflow runs and their job and check listings included:
+`gh run rerun` reopens a completed run under the same id, and a `304`
+revalidation is free, so every object has a TTL.
 
 ### Write invalidation
 
@@ -229,22 +249,17 @@ The selector must be the word right after the subcommand (`gh pr comment 5
 --body x`), so a flag value is never mistaken for it. Every other write
 (`pr create`, `workflow run`, `run rerun --job`, a `gh api` write to an
 untagged path or a job, `graphql`, an unknown flag shape) sends no tags,
-which is the phase-1 global invalidation. That one also thaws frozen
-listings. So a recognized write refreshes every untagged read, as in phase 1,
-but leaves the tagged reads of other issues, PRs and runs alone, and a frozen
-listing thaws only for a write that names it. An older daemon ignores the
-tags and invalidates globally.
+which is the phase-1 global invalidation. So a recognized write refreshes
+every untagged read, as in phase 1, but leaves the tagged reads of other
+issues, PRs and runs alone. An older daemon ignores the tags and invalidates
+globally.
 
 Writes made outside clud sessions (the web UI, CI, another machine) are seen
-within one TTL, with four phase-2 exceptions: a deleted comment or run is
-seen at the next reconciliation (at most 30 minutes), and so is a change
-that does not move `updated_at` on an object below the high-water mark (a
-reaction count, a review comment going outdated after a push); a rerun of a finished
-run is seen in a run list only at the next reconciliation, and its frozen
-jobs listing only after a write in a session names the run; and a check run
-added more than 5 minutes after the rest finished is not seen until a write
-names the commit's checks. `pr merge` closing a linked issue leaves that
-issue's cached reads fresh for their TTL.
+within one TTL: merged collections and listings alike, deletions, reaction
+counts, outdated review comments, reruns of finished runs and check runs
+added to a finished commit included. The one exception is `pr merge`
+closing a linked issue, which leaves that issue's cached reads fresh for
+their TTL.
 
 ## Store and ledger
 
@@ -253,17 +268,21 @@ owned by the daemon:
 
 | Table | Row |
 | --- | --- |
-| `object_meta` | key → label, status, headers, ETag, Last-Modified, `fetched_at_ms`, `frozen` |
+| `object_meta` | key → label, status, headers, ETag, Last-Modified, `fetched_at_ms` |
 | `object_body` | key → raw body (≤ 2 MiB; larger bodies are served, not cached) |
-| `collections` | merged key → members (id, timestamps, run status, exact bytes), `total_count`, highest id seen, headers, seed and incremental ETags, `fetched_at_ms`, `reconciled_at_ms`, unmergeable mark |
+| `collections` | merged key → upstream pages (ETag, members' ids, `created_at` and exact bytes, `total_count`, headers), page width, `fetched_at_ms`, unmergeable mark |
 | `scopes` | tag → stamp of the last write that named it |
 | `meta` | `invalidated_at_ms` |
-| `ledger` | seq → `ts_ms`, `session_id`, `key` (`host/endpoint`), `outcome`, `upstream_requests`, `rate_remaining`, `changed` |
+| `ledger` | seq → `ts_ms`, `session_id`, `key` (`host/endpoint`), `outcome`, `upstream_requests`, `rate_remaining`, `changed`, `removed` |
 
-`outcome` is `cache` (no upstream request), `304`, `incremental` (a merged
-read's bounded query; `changed` counts the objects it added or changed),
-`full` (an exact-URL fetch, or a merged collection's seed or reconciliation),
-`passthrough` or `error`. Objects are pruned oldest-first above 4,096, merged
+`outcome` is `cache` (no upstream request), `304` (for a merged read: every
+page was a `304`), `incremental` (a merged read re-sent at least one page;
+`changed` counts the objects added or changed, `removed` those deleted
+upstream), `full` (an exact-URL fetch, or a merged collection's first fetch
+or a re-fetch at a wider width), `passthrough` or `error`.
+`upstream_requests` counts every request, free `304`s included. `GET /gh/ledger` on the daemon's
+dashboard listener (capability cookie, like `/gh/read`) returns the newest
+1,000 rows as JSON, oldest first. Objects are pruned oldest-first above 4,096, merged
 collections above 1,024, tags above 4,096 (a pruned tag raises the global
 stamp to its own, so pruning never makes a read fresher) and ledger rows
 above 20,000. Calls the shim
@@ -294,26 +313,27 @@ stays off. So after an upgrade such a session's next statusline tick or
 | --- | --- |
 | `crates/clud-bin/src/gh_broker/classify.rs` | `api_read`, `may_write` |
 | `crates/clud-bin/src/gh_broker/client.rs` | shim side: daemon request, replay server |
-| `crates/clud-bin/src/gh_broker/service.rs` | TTL, single-flight, revalidation, frozen listings, invalidation, ledger, `/gh/read` and `/gh/invalidate` bodies |
-| `crates/clud-bin/src/gh_broker/service/merged.rs` | merged reads: seed, incremental query, reconciliation, fallback |
-| `crates/clud-bin/src/gh_broker/collection.rs` | collection plans, upstream URLs, page parsing, upsert, rendering, freeze checks |
+| `crates/clud-bin/src/gh_broker/service.rs` | TTL, single-flight, revalidation, invalidation, ledger, `/gh/read` and `/gh/invalidate` bodies |
+| `crates/clud-bin/src/gh_broker/service/merged.rs` | merged reads: the conditional pass over every page, the re-check, fallback |
+| `crates/clud-bin/src/gh_broker/collection.rs` | collection plans, page URLs and widths, page parsing, order checks, change counts, rendering |
 | `crates/clud-bin/src/gh_broker/scope.rs` | invalidation tags of reads and writes |
 | `crates/clud-bin/src/gh_broker/store.rs` | redb tables |
 | `crates/clud-bin/src/gh_broker/upstream.rs` | `gh api -i` transport and parser |
 | `crates/clud-bin/src/shim_main.rs` | `gh_shim::brokered_read`, invalidation after writes |
 | `crates/clud-bin/src/shim_main/dispatch.rs` | builds the `BrokerClient` from the session env, or from the setting when the key is absent |
-| `crates/clud-bin/src/daemon/http.rs` | `/gh/read` (own thread) and `/gh/invalidate` routes |
+| `crates/clud-bin/src/daemon/http.rs` | `/gh/read` (own thread), `/gh/invalidate` and `/gh/ledger` routes |
 
 Tests: `gh_broker` unit tests cover classification, TTL hits with zero
 upstream requests, `304` revalidation, single-flight, invalidation, identity
 separation, error passthrough, and the real `gh api -i` transport against a
 fake `gh`. `service/phase2_tests.rs` runs merged reads against a fake GitHub
-that answers `since`, `created`, `branch`, `per_page`, `page` and
-`If-None-Match` itself, and compares every merged answer byte for byte with
-that fake's full answer to the caller's exact URL: the `since=` and
-`created>=` deltas, page-size emulation, multi-page seeds, the exact-URL
-fallback, reconciliation, frozen jobs and check runs, and targeted
-invalidation. `tests/test_gh_read_broker.py` drives the real alias against a
+that answers `branch`, `per_page`, `page` and `If-None-Match` itself (its
+ETag hashes the body, as GitHub's does), and compares every merged answer
+byte for byte with that fake's full answer to the caller's exact URL: edits,
+reactions and deletions on any page, reruns of finished runs in a run list
+and a jobs listing, a late check run, a deletion that lands between two page
+requests, run-list widths, page-size emulation, the exact-URL fallback and
+targeted invalidation. `tests/test_gh_read_broker.py` drives the real alias against a
 fake daemon and a fake `gh`. It checks byte-identical output, the fallbacks
 (no daemon, a daemon miss, the setting off) and the invalidation each write
 posts, and that a session without the key follows the setting.

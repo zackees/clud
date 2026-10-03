@@ -1,10 +1,13 @@
-//! Phase 2 (#1743): merged collections, frozen listings and targeted
-//! invalidation, against a fake GitHub that answers each query (`since`,
-//! `created`, `branch`, `per_page`, `page`, `If-None-Match`) the way the
-//! REST API does. Every merged answer is compared with the fake's own full
-//! answer to the caller's exact URL.
+//! Merged collections, listings and targeted invalidation (#1743), against a
+//! fake GitHub that answers each query (`branch`, `per_page`, `page`,
+//! `If-None-Match`) the way the REST API does. Every merged answer is
+//! compared with the fake's own full answer to the caller's exact URL.
+//!
+//! The fake's ETag is a hash of the body, as GitHub's is, so a `304` proves
+//! the page is byte-identical to the stored one: deletions, reactions and
+//! reruns that do not move `updated_at` all change it.
 
-use super::merged::RECONCILE_MS;
+use super::merged::UNMERGEABLE_RETRY_MS;
 use super::*;
 use crate::gh_broker::collection::{format_ts, parse_ts, split_query};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +18,8 @@ struct Comment {
     created: i64,
     updated: i64,
     body: String,
+    /// Reaction count: GitHub changes it without moving `updated_at`.
+    reactions: u32,
 }
 
 #[derive(Clone)]
@@ -24,6 +29,7 @@ struct Run {
     updated: i64,
     status: &'static str,
     branch: &'static str,
+    attempt: u32,
 }
 
 #[derive(Clone)]
@@ -32,25 +38,21 @@ struct Step {
     completed_at: Option<i64>,
 }
 
+/// Mutates the server when a request for a matching endpoint arrives,
+/// before it is answered: a change that lands in the middle of a refresh.
+type Hook = Box<dyn FnMut(&mut Server, &str) + Send>;
+
 #[derive(Default)]
 struct Server {
     comments: Vec<Comment>,
     runs: Vec<Run>,
     jobs: Vec<Step>,
     checks: Vec<Step>,
-    /// Status of the single run object `repos/o/r/actions/runs/7`.
-    run7: &'static str,
     /// Bodies served verbatim for an exact endpoint.
     raw: HashMap<String, Vec<u8>>,
     /// Every upstream request: endpoint and `If-None-Match`.
     log: Vec<(String, Option<String>)>,
-}
-
-fn decode(value: &str) -> String {
-    value
-        .replace("%3A", ":")
-        .replace("%3E", ">")
-        .replace("%3D", "=")
+    hook: Option<Hook>,
 }
 
 fn page_of<T: Clone>(items: &[T], params: &HashMap<&str, &str>) -> (Vec<T>, bool) {
@@ -90,24 +92,20 @@ impl Server {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         match path {
             "repos/o/r/issues/5/comments" => {
-                let since = params.get("since").map(|v| parse_ts(&decode(v)).unwrap());
-                let mut items: Vec<&Comment> = self
-                    .comments
-                    .iter()
-                    .filter(|c| since.is_none_or(|since| c.updated >= since))
-                    .collect();
+                let mut items: Vec<&Comment> = self.comments.iter().collect();
                 items.sort_by_key(|c| c.id);
                 let (shown, more) = page_of(&items, &params);
                 let body = shown
                     .iter()
                     .map(|c| {
                         format!(
-                            r#"{{"id":{},"node_id":"IC_{}","body":"{}","created_at":"{}","updated_at":"{}"}}"#,
+                            r#"{{"id":{},"node_id":"IC_{}","body":"{}","created_at":"{}","updated_at":"{}","reactions":{{"total_count":{}}}}}"#,
                             c.id,
                             c.id,
                             c.body,
                             format_ts(c.created),
-                            format_ts(c.updated)
+                            format_ts(c.updated),
+                            c.reactions
                         )
                     })
                     .collect::<Vec<_>>()
@@ -115,33 +113,21 @@ impl Server {
                 (200, format!("[{body}]").into_bytes(), more)
             }
             "repos/o/r/actions/runs" => {
-                let created = params
-                    .get("created")
-                    .map(|v| parse_ts(decode(v).strip_prefix(">=").unwrap()).unwrap());
                 let mut items: Vec<&Run> = self
                     .runs
                     .iter()
                     .filter(|r| params.get("branch").is_none_or(|b| r.branch == *b))
-                    .filter(|r| created.is_none_or(|at| r.created >= at))
                     .collect();
-                // Like GitHub, a `created`-filtered list orders same-second
-                // runs differently from the full list.
-                items.sort_by(|a, b| {
-                    let tie = if created.is_some() {
-                        a.id.cmp(&b.id)
-                    } else {
-                        b.id.cmp(&a.id)
-                    };
-                    b.created.cmp(&a.created).then(tie)
-                });
+                items.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
                 let (shown, more) = page_of(&items, &params);
                 let body = shown
                     .iter()
                     .map(|r| {
                         format!(
-                            r#"{{"id":{},"head_branch":"{}","status":"{}","created_at":"{}","updated_at":"{}"}}"#,
+                            r#"{{"id":{},"head_branch":"{}","run_attempt":{},"status":"{}","created_at":"{}","updated_at":"{}"}}"#,
                             r.id,
                             r.branch,
+                            r.attempt,
                             r.status,
                             format_ts(r.created),
                             format_ts(r.updated)
@@ -163,11 +149,6 @@ impl Server {
                 );
                 (200, body.into_bytes(), false)
             }
-            "repos/o/r/actions/runs/7" => (
-                200,
-                format!(r#"{{"id":7,"status":"{}"}}"#, self.run7).into_bytes(),
-                false,
-            ),
             _ if path == format!("repos/o/r/commits/{sha}/check-runs") => {
                 let body = format!(
                     r#"{{"total_count":{},"check_runs":[{}]}}"#,
@@ -190,6 +171,10 @@ impl Upstream for FakeGitHub {
             request.endpoint.to_string(),
             request.if_none_match.map(str::to_string),
         ));
+        if let Some(mut hook) = server.hook.take() {
+            hook(&mut server, request.endpoint);
+            server.hook = Some(hook);
+        }
         let (status, body, more) = server.respond(request.endpoint);
         let digest = Sha256::digest(&body);
         let etag = format!(
@@ -298,6 +283,13 @@ impl World {
             .collect()
     }
 
+    fn outcomes(&self) -> Vec<String> {
+        self.ledger()
+            .into_iter()
+            .map(|(outcome, _, _)| outcome)
+            .collect()
+    }
+
     fn server(&self) -> std::sync::MutexGuard<'_, Server> {
         self.server.lock().unwrap()
     }
@@ -309,6 +301,7 @@ fn comment(id: u64, created: &str) -> Comment {
         created: ts(created),
         updated: ts(created),
         body: format!("c{id}"),
+        reactions: 0,
     }
 }
 
@@ -323,14 +316,28 @@ fn three_comments() -> Server {
     }
 }
 
+/// `n` comments one minute apart, ids 1..=n.
+fn many_comments(n: u64) -> Server {
+    let mut server = Server::default();
+    for id in 1..=n {
+        server.comments.push(comment(
+            id,
+            &format_ts(ts("2026-10-01T00:00:00Z") + id as i64 * 60),
+        ));
+    }
+    server
+}
+
 const COMMENTS: &str = "repos/o/r/issues/5/comments";
+const SEED: &str = "repos/o/r/issues/5/comments?per_page=100";
+const PAGE2: &str = "repos/o/r/issues/5/comments?per_page=100&page=2";
 
 fn entry(outcome: &str, requests: u32, changed: Option<u32>) -> (String, u32, Option<u32>) {
     (outcome.to_string(), requests, changed)
 }
 
 #[test]
-fn a_comment_reread_fetches_only_the_since_delta_and_equals_a_full_fetch() {
+fn a_comment_reread_revalidates_its_page_and_equals_a_full_fetch() {
     let w = world(three_comments());
     assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
     {
@@ -343,14 +350,11 @@ fn a_comment_reread_fetches_only_the_since_delta_and_equals_a_full_fetch() {
     let merged = w.read(COMMENTS);
     assert_eq!(merged, w.full(COMMENTS));
     assert!(String::from_utf8_lossy(&merged).contains("edited"));
-    // Seeded once, then bounded by the newest updated_at seen minus 5 s.
-    assert_eq!(
-        w.requests(),
-        [
-            "repos/o/r/issues/5/comments?per_page=100",
-            "repos/o/r/issues/5/comments?since=2026-10-02T10%3A01%3A55Z&per_page=100",
-        ]
-    );
+    // The refresh re-sends the seed with its ETag; the 200 is the whole
+    // truth for a one-page collection.
+    let log = w.log();
+    assert_eq!(w.requests(), [SEED, SEED]);
+    assert!(log[0].1.is_none() && log[1].1.is_some());
     // Within the TTL, any page size is cut from the merged membership.
     for endpoint in [
         "repos/o/r/issues/5/comments?per_page=2",
@@ -371,36 +375,73 @@ fn a_comment_reread_fetches_only_the_since_delta_and_equals_a_full_fetch() {
 }
 
 #[test]
-fn an_unchanged_delta_repeats_its_url_and_costs_a_free_304() {
+fn a_quiet_collection_costs_only_free_304s_even_right_after_a_change() {
     let w = world(three_comments());
     w.read(COMMENTS);
+    w.server().comments.push(comment(4, "2026-10-02T11:00:00Z"));
     w.advance(DEFAULT_TTL_MS);
     w.read(COMMENTS);
     w.advance(DEFAULT_TTL_MS);
     assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
-    let log = w.log();
-    assert_eq!(log[1].0, log[2].0);
-    assert!(log[2].1.is_some(), "the repeat carries If-None-Match");
+    // The refresh after a change carries the ETag of the page it got, so
+    // nothing new costs a 304, not another charged 200.
+    assert!(w.log()[2].1.is_some());
     assert_eq!(
         w.ledger(),
         [
             entry("full", 1, None),
-            entry("incremental", 1, Some(0)),
+            entry("incremental", 1, Some(1)),
             entry("304", 1, Some(0)),
         ]
     );
 }
 
 #[test]
-fn a_multi_page_collection_is_seeded_in_full_and_pages_are_emulated() {
-    let mut server = Server::default();
-    for id in 1..=150 {
-        server.comments.push(comment(
-            id,
-            &format_ts(ts("2026-10-01T00:00:00Z") + id as i64 * 60),
-        ));
-    }
-    let w = world(server);
+fn a_reaction_that_does_not_move_updated_at_is_seen_on_the_next_refresh() {
+    let w = world(three_comments());
+    w.read(COMMENTS);
+    w.server().comments[0].reactions = 1;
+    w.advance(DEFAULT_TTL_MS);
+    let merged = w.read(COMMENTS);
+    assert_eq!(merged, w.full(COMMENTS));
+    assert!(String::from_utf8_lossy(&merged).contains(r#""reactions":{"total_count":1}"#));
+    assert_eq!(w.ledger()[1], entry("incremental", 1, Some(1)));
+}
+
+#[test]
+fn a_deleted_comment_drops_out_on_the_next_refresh() {
+    let w = world(three_comments());
+    w.read(COMMENTS);
+    w.server().comments.remove(1);
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
+    let removed = w.broker.ledger().unwrap()[1].removed;
+    assert_eq!(removed, Some(1));
+    // Brought back byte for byte: the next refresh is a free 304.
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
+    assert_eq!(w.outcomes(), ["full", "incremental", "304"]);
+}
+
+#[test]
+fn a_write_that_names_the_collection_refreshes_it_inside_the_ttl() {
+    let w = world(three_comments());
+    w.read(COMMENTS);
+    w.server().comments.remove(0);
+    w.broker
+        .invalidate_tags(&["o/r#num:6".to_string()])
+        .unwrap();
+    w.advance(1);
+    assert_ne!(w.read(COMMENTS), w.full(COMMENTS), "another issue's write");
+    w.broker.invalidate_tags(&["*#num:5".to_string()]).unwrap();
+    w.advance(1);
+    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
+    assert_eq!(w.outcomes(), ["full", "cache", "incremental"]);
+}
+
+#[test]
+fn every_page_of_a_multi_page_collection_is_revalidated_for_free() {
+    let w = world(many_comments(150));
     for endpoint in [
         "repos/o/r/issues/5/comments?per_page=100",
         COMMENTS,
@@ -408,25 +449,137 @@ fn a_multi_page_collection_is_seeded_in_full_and_pages_are_emulated() {
     ] {
         assert_eq!(w.read(endpoint), w.full(endpoint), "{endpoint}");
     }
-    assert_eq!(
-        w.requests(),
-        [
-            "repos/o/r/issues/5/comments?per_page=100",
-            "repos/o/r/issues/5/comments?per_page=100&page=2",
-        ]
-    );
+    // The seed pages through, then re-checks the pages before the last, so
+    // a deletion between two page requests cannot drop a comment.
+    assert_eq!(w.requests(), [SEED, PAGE2, SEED]);
+    // Unchanged: one free 304 per page.
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
+    let log = w.log();
+    assert_eq!(w.requests()[3..], [SEED, PAGE2]);
+    assert!(log[3].1.is_some() && log[4].1.is_some());
+    assert_eq!(w.ledger()[3], entry("304", 2, Some(0)));
+}
+
+#[test]
+fn a_reaction_or_deletion_on_any_page_is_seen_on_the_next_refresh() {
+    let endpoint = "repos/o/r/issues/5/comments?per_page=100";
+    let w = world(many_comments(150));
+    w.read(endpoint);
+    // A reaction on page 2 only: page 1 is a 304, page 2 a 200.
+    w.server().comments[120].reactions = 3;
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(endpoint), w.full(endpoint));
+    // A deletion on page 1 shifts page 2 too.
+    w.server().comments.remove(10);
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(endpoint), w.full(endpoint));
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(endpoint), w.full(endpoint));
+    assert_eq!(w.outcomes(), ["full", "incremental", "incremental", "304"]);
+}
+
+#[test]
+fn a_full_last_page_is_followed_so_a_new_page_is_not_missed() {
+    let w = world(many_comments(100));
+    assert_eq!(w.read(SEED), w.full(SEED));
+    // Page 1 is full, so the seed asks for page 2 (empty) to know it is
+    // last, then re-checks page 1.
+    assert_eq!(w.requests(), [SEED, PAGE2, SEED]);
+    // A new comment opens page 2 and leaves page 1 byte-identical: a 304
+    // on a full page never ends the pass.
+    w.server()
+        .comments
+        .push(comment(101, "2026-10-02T11:00:00Z"));
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(SEED), w.full(SEED));
+    assert_eq!(w.requests()[3..], [SEED, PAGE2, SEED]);
+    assert_eq!(w.ledger()[1], entry("incremental", 3, Some(1)));
+}
+
+#[test]
+fn a_deletion_in_the_middle_of_a_pass_is_caught_before_it_is_served() {
+    let w = world(many_comments(150));
+    w.read(SEED);
+    w.server().comments[120].reactions = 1;
+    // While the refresh asks for page 2, comment 11 (on page 1, already
+    // revalidated) is deleted: page 2 shifts and comment 101 moves to
+    // page 1. Without the re-check the answer would still hold comment 11
+    // and miss comment 101.
+    w.server().hook = Some(Box::new(|server: &mut Server, endpoint: &str| {
+        if endpoint.ends_with("page=2") && server.comments[10].id == 11 {
+            server.comments.remove(10);
+        }
+    }));
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(SEED), w.full(SEED));
+    // The re-check of page 1 fails, so the pass runs again.
+    assert_eq!(w.requests()[3..], [SEED, PAGE2, SEED, SEED, PAGE2, SEED]);
+    assert_eq!(w.outcomes(), ["full", "incremental"]);
+}
+
+#[test]
+fn a_collection_that_keeps_changing_under_both_passes_reads_the_exact_url() {
+    let w = world(many_comments(150));
+    w.read(SEED);
+    w.server().comments[120].reactions = 1;
+    // Every request for page 2 deletes the first comment left on page 1,
+    // so neither pass fits together.
+    w.server().hook = Some(Box::new(|server: &mut Server, endpoint: &str| {
+        if endpoint.ends_with("page=2") {
+            server.comments.remove(0);
+        }
+    }));
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(SEED), w.full(SEED));
+    w.server().hook = None;
+    // The answer came from the exact URL, and the stored pages were kept:
+    // the next refresh revalidates them instead of starting over.
+    let requests = w.requests();
+    assert_eq!(requests[3..9], [SEED, PAGE2, SEED, SEED, PAGE2, SEED]);
+    assert_eq!(requests[9], SEED);
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(SEED), w.full(SEED));
+    assert!(w.log()[10].1.is_some(), "revalidated, not re-seeded");
+    assert_eq!(w.outcomes()[2], "incremental");
+}
+
+#[test]
+fn a_waiter_wider_than_the_leaders_page_reads_the_exact_url() {
+    let mut server = Server::default();
+    for i in 0..40u64 {
+        server.runs.push(run(
+            200 + i,
+            &format_ts(ts("2026-10-02T09:00:00Z") + i as i64 * 60),
+            "completed",
+            "main",
+        ));
+    }
+    let w = world(server);
+    let narrow = "repos/o/r/actions/runs?per_page=5";
+    let wide = "repos/o/r/actions/runs?per_page=50";
+    let (entered, in_upstream) = std::sync::mpsc::channel();
+    w.server().hook = Some(Box::new(move |_: &mut Server, endpoint: &str| {
+        if endpoint.ends_with("per_page=10") {
+            let _ = entered.send(());
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+    }));
+    std::thread::scope(|scope| {
+        let leader = scope.spawn(|| w.read(narrow));
+        in_upstream.recv().unwrap();
+        // Joins the narrow leader's flight; its 10 stored runs cannot
+        // answer `per_page=50`.
+        let waiter = scope.spawn(|| w.read(wide));
+        assert_eq!(leader.join().unwrap(), w.full(narrow));
+        assert_eq!(waiter.join().unwrap(), w.full(wide));
+    });
+    assert!(w.requests().contains(&wide.to_string()));
 }
 
 #[test]
 fn a_query_the_merge_cannot_reproduce_reads_the_exact_url() {
-    let mut server = Server::default();
-    for id in 1..=40 {
-        server.comments.push(comment(
-            id,
-            &format_ts(ts("2026-10-01T00:00:00Z") + id as i64),
-        ));
-    }
-    let w = world(server);
+    let w = world(many_comments(40));
     let endpoint = "repos/o/r/issues/5/comments?page=2";
     assert_eq!(w.read(endpoint), w.full(endpoint));
     assert_eq!(w.requests(), [endpoint]);
@@ -440,12 +593,15 @@ fn run(id: u64, created: &str, status: &'static str, branch: &'static str) -> Ru
         updated: ts(created),
         status,
         branch,
+        attempt: 1,
     }
 }
 
-#[test]
-fn a_run_list_merges_new_and_finishing_runs_under_the_callers_filters() {
-    let w = world(Server {
+const RUNS: &str = "repos/o/r/actions/runs?per_page=3&branch=main";
+const RUNS_SEED: &str = "repos/o/r/actions/runs?branch=main&per_page=10";
+
+fn four_runs() -> Server {
+    Server {
         runs: vec![
             run(100, "2026-10-02T09:00:00Z", "completed", "main"),
             run(101, "2026-10-02T10:00:00Z", "in_progress", "main"),
@@ -453,9 +609,13 @@ fn a_run_list_merges_new_and_finishing_runs_under_the_callers_filters() {
             run(103, "2026-10-02T10:40:00Z", "completed", "dev"),
         ],
         ..Server::default()
-    });
-    let endpoint = "repos/o/r/actions/runs?per_page=3&branch=main";
-    assert_eq!(w.read(endpoint), w.full(endpoint));
+    }
+}
+
+#[test]
+fn a_run_list_seeds_only_the_width_its_callers_need_and_merges_changes() {
+    let w = world(four_runs());
+    assert_eq!(w.read(RUNS), w.full(RUNS));
     {
         let mut server = w.server();
         server.runs[1].status = "completed";
@@ -468,31 +628,60 @@ fn a_run_list_merges_new_and_finishing_runs_under_the_callers_filters() {
             .push(run(105, "2026-10-02T11:10:00Z", "queued", "main"));
     }
     w.advance(RUNS_TTL_MS);
-    let merged = w.read(endpoint);
-    assert_eq!(merged, w.full(endpoint));
+    let merged = w.read(RUNS);
+    assert_eq!(merged, w.full(RUNS));
     assert!(String::from_utf8_lossy(&merged).starts_with("{\"total_count\":5,"));
-    // The bound reaches back to the oldest run that had not finished, so one
-    // query refreshes it and finds the new run.
-    assert_eq!(
-        w.requests(),
-        [
-            "repos/o/r/actions/runs?branch=main&per_page=100",
-            "repos/o/r/actions/runs?branch=main&created=%3E%3D2026-10-02T09%3A59%3A55Z&per_page=100",
-        ]
-    );
+    // A caller's `per_page=3` needs the newest 10 runs at most, not 100.
+    assert_eq!(w.requests(), [RUNS_SEED, RUNS_SEED]);
     assert_eq!(
         w.ledger(),
         [entry("full", 1, None), entry("incremental", 1, Some(3))]
     );
-    // Once nothing is live the bound is the newest run seen.
-    w.server().runs[4].status = "completed";
+}
+
+#[test]
+fn a_rerun_of_a_finished_run_is_seen_in_the_run_list_on_the_next_refresh() {
+    let w = world(four_runs());
+    w.read(RUNS);
+    {
+        // `gh run rerun 100` from another machine: same id and created_at,
+        // a new attempt, queued again.
+        let mut server = w.server();
+        server.runs[0].status = "queued";
+        server.runs[0].attempt = 2;
+        server.runs[0].updated = ts("2026-10-02T11:59:00Z");
+    }
     w.advance(RUNS_TTL_MS);
-    w.read(endpoint);
-    w.advance(RUNS_TTL_MS);
-    assert_eq!(w.read(endpoint), w.full(endpoint));
+    let merged = w.read(RUNS);
+    assert_eq!(merged, w.full(RUNS));
+    let wide = "repos/o/r/actions/runs?branch=main";
+    assert_eq!(w.read(wide), w.full(wide));
+    assert!(String::from_utf8_lossy(&w.read(wide)).contains(r#""run_attempt":2"#));
+}
+
+#[test]
+fn a_wider_caller_reseeds_a_narrow_run_list() {
+    let mut server = Server::default();
+    for i in 0..40u64 {
+        server.runs.push(run(
+            200 + i,
+            &format_ts(ts("2026-10-02T09:00:00Z") + i as i64 * 60),
+            "completed",
+            "main",
+        ));
+    }
+    let w = world(server);
+    let narrow = "repos/o/r/actions/runs?per_page=5";
+    let wide = "repos/o/r/actions/runs?per_page=40";
+    assert_eq!(w.read(narrow), w.full(narrow));
+    assert_eq!(w.read(wide), w.full(wide));
+    assert_eq!(w.read(narrow), w.full(narrow));
     assert_eq!(
-        w.requests()[3],
-        "repos/o/r/actions/runs?branch=main&created=%3E%3D2026-10-02T11%3A09%3A55Z&per_page=100"
+        w.requests(),
+        [
+            "repos/o/r/actions/runs?per_page=10",
+            "repos/o/r/actions/runs?per_page=100",
+        ]
     );
 }
 
@@ -500,17 +689,11 @@ fn a_run_list_merges_new_and_finishing_runs_under_the_callers_filters() {
 fn a_body_the_merge_cannot_rebuild_falls_back_to_the_exact_url() {
     let pretty = b"[\n  {\"id\": 1}\n]".to_vec();
     let mut server = Server::default();
-    server.raw.insert(
-        "repos/o/r/issues/5/comments?per_page=100".into(),
-        pretty.clone(),
-    );
+    server.raw.insert(SEED.into(), pretty.clone());
     server.raw.insert(COMMENTS.into(), pretty.clone());
     let w = world(server);
     assert_eq!(w.read(COMMENTS), pretty);
-    assert_eq!(
-        w.requests(),
-        ["repos/o/r/issues/5/comments?per_page=100", COMMENTS]
-    );
+    assert_eq!(w.requests(), [SEED, COMMENTS]);
     // The collection is marked unmergeable: later reads go straight to the
     // phase-1 path, which is within its TTL here.
     assert_eq!(w.read(COMMENTS), pretty);
@@ -519,60 +702,12 @@ fn a_body_the_merge_cannot_rebuild_falls_back_to_the_exact_url() {
         w.ledger(),
         [entry("full", 2, None), entry("cache", 0, None)]
     );
-}
-
-#[test]
-fn deletions_drop_out_at_reconciliation_and_after_a_write_that_names_the_issue() {
-    let w = world(three_comments());
-    w.read(COMMENTS);
-    w.server().comments.remove(1);
-    w.advance(DEFAULT_TTL_MS);
-    // `since=` cannot see a deletion.
-    assert_ne!(w.read(COMMENTS), w.full(COMMENTS));
-    w.advance(RECONCILE_MS);
+    // After the retry interval the merge is tried again.
+    w.server().raw.clear();
+    w.server().comments = three_comments().comments;
+    w.advance(UNMERGEABLE_RETRY_MS);
     assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
-    // The next reconciliation of an unchanged collection is a free 304.
-    w.advance(RECONCILE_MS);
-    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
-    let log = w.log();
-    assert_eq!(log[2].0, "repos/o/r/issues/5/comments?per_page=100");
-    assert_eq!(log[3].0, log[2].0);
-    assert!(log[3].1.is_some());
-    // A write naming the issue reseeds inside the TTL; one naming another
-    // issue does not.
-    w.server().comments.remove(0);
-    w.broker
-        .invalidate_tags(&["o/r#num:6".to_string()])
-        .unwrap();
-    w.advance(1);
-    assert_ne!(w.read(COMMENTS), w.full(COMMENTS));
-    w.broker.invalidate_tags(&["*#num:5".to_string()]).unwrap();
-    w.advance(1);
-    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
-    assert_eq!(
-        w.ledger()
-            .into_iter()
-            .map(|(outcome, _, _)| outcome)
-            .collect::<Vec<_>>(),
-        ["full", "incremental", "full", "304", "cache", "full"]
-    );
-}
-
-#[test]
-fn a_deleted_object_a_delta_added_is_dropped_at_reconciliation() {
-    let w = world(three_comments());
-    w.read(COMMENTS);
-    w.server().comments.push(comment(4, "2026-10-02T11:00:00Z"));
-    w.advance(DEFAULT_TTL_MS);
-    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
-    // Deleting it makes the collection byte-identical to the seed: the
-    // seed's ETag must not be sent, or GitHub would answer 304.
-    w.server().comments.pop();
-    w.advance(RECONCILE_MS);
-    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
-    let log = w.log();
-    assert_eq!(log[2].0, "repos/o/r/issues/5/comments?per_page=100");
-    assert_eq!(log[2].1, None);
+    assert_eq!(w.requests()[2], SEED);
 }
 
 const JOBS: &str = "repos/o/r/actions/runs/7/jobs";
@@ -585,101 +720,43 @@ fn done(at: &str) -> Step {
 }
 
 #[test]
-fn finished_jobs_freeze_until_a_write_names_their_run() {
+fn a_rerun_outside_clud_is_seen_in_a_finished_jobs_listing_after_its_ttl() {
     let w = world(Server {
         jobs: vec![done("2026-10-02T11:00:00Z"), done("2026-10-02T11:05:00Z")],
-        run7: "completed",
         ..Server::default()
     });
     assert_eq!(w.read(JOBS), w.full(JOBS));
-    // The run itself was checked once, through the broker.
-    assert_eq!(w.requests(), [JOBS, "repos/o/r/actions/runs/7"]);
-    w.advance(100 * RUNS_TTL_MS);
-    w.read(JOBS);
-    w.broker.invalidate_tags(&["run:8".to_string()]).unwrap();
-    w.broker
-        .invalidate_tags(&["*#num:7".to_string(), scope::OTHER.to_string()])
-        .unwrap();
-    w.advance(1);
-    w.read(JOBS);
-    assert_eq!(w.requests().len(), 2, "frozen: no upstream request");
-    // `gh run rerun 7` names the run: revalidate (a free 304 here).
-    w.broker.invalidate_tags(&["run:7".to_string()]).unwrap();
-    w.advance(1);
-    assert_eq!(w.read(JOBS), w.full(JOBS));
-    assert_eq!(w.requests().len(), 4);
-    assert!(w.log()[2].1.is_some());
-    // A write the shim could not classify thaws it too.
-    w.broker.invalidate().unwrap();
-    w.advance(1);
-    w.read(JOBS);
-    assert_eq!(w.requests().len(), 6);
-}
-
-#[test]
-fn jobs_of_a_run_still_in_progress_do_not_freeze() {
-    let w = world(Server {
-        jobs: vec![done("2026-10-02T11:00:00Z")],
-        run7: "in_progress",
-        ..Server::default()
-    });
-    w.read(JOBS);
+    // No write names the run: still revalidated once its TTL passes, for
+    // free while nothing changed.
     w.advance(RUNS_TTL_MS);
-    w.read(JOBS);
-    assert_eq!(
-        w.requests(),
-        [
-            JOBS,
-            "repos/o/r/actions/runs/7",
-            JOBS,
-            "repos/o/r/actions/runs/7"
-        ]
-    );
-    let unfinished = world(Server {
-        jobs: vec![
-            done("2026-10-02T11:00:00Z"),
-            Step {
-                status: "in_progress",
-                completed_at: None,
-            },
-        ],
-        run7: "completed",
-        ..Server::default()
-    });
-    unfinished.read(JOBS);
-    unfinished.advance(RUNS_TTL_MS);
-    unfinished.read(JOBS);
-    // Not all jobs completed: the run is never even asked for.
-    assert_eq!(unfinished.requests(), [JOBS, JOBS]);
+    assert_eq!(w.read(JOBS), w.full(JOBS));
+    w.server().jobs[1] = Step {
+        status: "queued",
+        completed_at: None,
+    };
+    w.advance(RUNS_TTL_MS);
+    assert_eq!(w.read(JOBS), w.full(JOBS));
+    assert_eq!(w.requests(), [JOBS, JOBS, JOBS]);
+    assert_eq!(w.outcomes(), ["full", "304", "full"]);
 }
 
 #[test]
-fn check_runs_freeze_only_after_they_have_settled() {
+fn a_check_run_added_after_the_rest_finished_is_seen_after_the_ttl() {
     let checks = "repos/o/r/commits/0123456789abcdef0123456789abcdef01234567/check-runs";
     let w = world(Server {
-        // Completed one minute before the first read.
-        checks: vec![done("2026-10-02T11:59:00Z")],
+        checks: vec![done("2026-10-02T11:00:00Z")],
         ..Server::default()
     });
-    assert_eq!(w.read(checks), w.full(checks));
-    w.advance(DEFAULT_TTL_MS);
-    w.read(checks);
-    assert_eq!(
-        w.requests().len(),
-        2,
-        "a just-finished commit can still gain checks"
-    );
-    w.advance(5 * 60 * 1000);
     w.read(checks);
     w.advance(100 * DEFAULT_TTL_MS);
     w.read(checks);
-    assert_eq!(
-        w.requests().len(),
-        3,
-        "settled: frozen after the third read"
-    );
-    let outcomes: Vec<String> = w.ledger().into_iter().map(|e| e.0).collect();
-    assert_eq!(outcomes, ["full", "304", "304", "cache"]);
+    w.server().checks.push(Step {
+        status: "queued",
+        completed_at: None,
+    });
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(checks), w.full(checks));
+    assert_eq!(w.outcomes(), ["full", "304", "full"]);
 }
 
 #[test]
@@ -703,4 +780,20 @@ fn the_invalidate_route_takes_valid_tags_or_falls_back_to_global() {
         assert_eq!(w.broker.handle_invalidate(body).0, 200);
         assert!(store.stale_after(&other).unwrap() > stamp, "{body:?}");
     }
+}
+
+#[test]
+fn the_ledger_route_returns_rows_with_removed_counts() {
+    let w = world(three_comments());
+    w.read(COMMENTS);
+    w.server().comments.remove(0);
+    w.advance(DEFAULT_TTL_MS);
+    w.read(COMMENTS);
+    let (status, body) = w.broker.handle_ledger();
+    assert_eq!(status, 200);
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1]["outcome"], "incremental");
+    assert_eq!(rows[1]["removed"], 1);
+    assert!(rows[0].get("removed").is_none());
 }

@@ -876,8 +876,8 @@ Agent deletion (`safe-rm`, trash, roots, the hook redirect): [rm tools](../../..
 - `gh_broker/` — the session `gh api` read broker (#1743): `classify.rs`
   (which argv is a brokerable read or a possible write), `client.rs` (shim
   side and loopback replay), `service.rs` (daemon side: TTL, single-flight,
-  304 revalidation, frozen listings, ledger), `service/merged.rs` (merged
-  collection reads), `collection.rs` (incremental rewrites and merge),
+  304 revalidation, ledger), `service/merged.rs` (merged collection reads:
+  every page revalidated by ETag), `collection.rs` (plans, pages, merge),
   `scope.rs` (targeted invalidation tags), `store.rs` (redb), `upstream.rs`
   (`gh api -i`).
   See [gh-read-broker.md](../../../docs/architecture/gh-read-broker.md).

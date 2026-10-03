@@ -1,7 +1,7 @@
 //! The daemon half of the read broker (#1743): TTL, single-flight,
-//! conditional revalidation, write invalidation and the ledger. Phase 2
-//! adds merged collection reads ([`merged`]), frozen listings and targeted
-//! invalidation ([`super::scope`]).
+//! conditional revalidation, write invalidation and the ledger, plus merged
+//! collection reads ([`merged`]) and targeted invalidation
+//! ([`super::scope`]).
 //!
 //! One [`GhBroker`] lives in the daemon's HTTP thread. Each `/gh/read`
 //! request runs on its own thread so a slow upstream never blocks the
@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
-use super::collection::{self, Freeze};
+use super::collection;
 use super::scope;
 use super::store::{LedgerEntry, ObjectMeta, Store};
 use super::upstream::{Response, Upstream, UpstreamRequest};
@@ -36,9 +36,8 @@ pub enum Outcome {
     Cache,
     /// Revalidated with `If-None-Match` / `If-Modified-Since`; `304`.
     NotModified,
-    /// A merged collection brought up to date with a bounded query
-    /// (`since=` / `created=>=`); the ledger records how many objects it
-    /// added or changed.
+    /// A merged collection where at least one page was re-sent (`200`);
+    /// the ledger records the objects it added or changed and removed.
     Incremental,
     Full,
     /// Upstream answered non-2xx; the shim reruns the call on the real
@@ -83,6 +82,8 @@ struct Served {
     rate: Option<u64>,
     /// Merged reads: objects added or changed by the upstream fetch.
     changed: Option<u32>,
+    /// Merged reads: objects that dropped out (deleted upstream).
+    removed: Option<u32>,
 }
 
 impl Served {
@@ -98,6 +99,7 @@ impl Served {
             upstream_requests,
             rate,
             changed: None,
+            removed: None,
         }
     }
 
@@ -250,7 +252,7 @@ impl GhBroker {
             .and_then(|s| s.ledger())
     }
 
-    /// Mark every cached read stale, frozen listings included. In-flight
+    /// Mark every cached read stale. In-flight
     /// fetches are detached, so a read issued after the write never joins
     /// a fetch that began before it.
     pub fn invalidate(&self) -> Result<(), String> {
@@ -277,7 +279,7 @@ impl GhBroker {
     }
 
     /// The cached body for `key` if no write since its fetch could have
-    /// changed it, and it is within its TTL (unless `fresh`) or frozen.
+    /// changed it, and it is within its TTL (unless `fresh`).
     fn fresh_hit(&self, store: &Store, key: &str, endpoint: &str, fresh: bool) -> Option<Response> {
         let (meta, body) = store.get(key).ok()??;
         let stale_after = store
@@ -288,7 +290,7 @@ impl GhBroker {
         }
         let now = (self.clock)();
         let within_ttl = !fresh && now.saturating_sub(meta.fetched_at_ms) < ttl_ms(endpoint);
-        (meta.frozen || within_ttl).then(|| Response {
+        within_ttl.then(|| Response {
             status: meta.status,
             headers: meta.headers,
             body: Arc::new(body),
@@ -306,6 +308,7 @@ impl GhBroker {
                 upstream_requests: served.upstream_requests,
                 rate_remaining: served.rate,
                 changed: served.changed,
+                removed: served.removed,
             });
         }
         served.result
@@ -398,7 +401,6 @@ impl GhBroker {
             if let Some(etag) = response.header("etag") {
                 meta.etag = Some(etag.to_string());
             }
-            meta.frozen = self.freezes(read, &body, started);
             let _ = store.put(key, &meta, None);
             let served = Response {
                 status: meta.status,
@@ -418,49 +420,10 @@ impl GhBroker {
                 etag: response.header("etag").map(str::to_string),
                 last_modified: response.header("last-modified").map(str::to_string),
                 fetched_at_ms: started,
-                frozen: self.freezes(read, &response.body, started),
             };
             let _ = store.put(key, &meta, Some(&response.body));
         }
         Served::new(Ok(response), Outcome::Full, 1, rate)
-    }
-
-    /// Whether a listing may be served without a TTL until a write names
-    /// it: a run's jobs once every job and the run itself are completed; a
-    /// commit's check runs once every one has been completed for
-    /// [`collection::CHECKS_SETTLE_SECS`].
-    fn freezes(&self, read: &BrokerRead<'_>, body: &[u8], started_ms: u64) -> bool {
-        let Some(kind) = collection::freeze_kind(read.endpoint) else {
-            return false;
-        };
-        let Some(newest) = collection::all_completed(body) else {
-            return false;
-        };
-        match kind {
-            Freeze::CheckRuns => {
-                let started = i64::try_from(started_ms / 1000).unwrap_or(i64::MAX);
-                newest.saturating_add(collection::CHECKS_SETTLE_SECS) <= started
-            }
-            // Every listed job finishing is not enough: a run can still
-            // queue jobs that wait on others. Ask for the run itself.
-            Freeze::Jobs {
-                owner,
-                repo,
-                run_id,
-            } => {
-                let endpoint = format!("repos/{owner}/{repo}/actions/runs/{run_id}");
-                let run = BrokerRead {
-                    gh: read.gh,
-                    endpoint: &endpoint,
-                    hostname: read.hostname,
-                    env: read.env,
-                    session_id: read.session_id,
-                    fresh: false,
-                };
-                self.read(&run)
-                    .is_ok_and(|response| collection::run_completed(&response.body))
-            }
-        }
     }
 
     /// The daemon's `/gh/read` handler body: JSON in, `(status, JSON)` out.
@@ -545,6 +508,21 @@ impl GhBroker {
         };
         match result {
             Ok(()) => (200, b"{}".to_vec()),
+            Err(error) => (500, error_json(&error)),
+        }
+    }
+}
+
+impl GhBroker {
+    /// The daemon's `/gh/ledger` handler body: the newest
+    /// [`super::LEDGER_ROWS`] rows, oldest first.
+    pub fn handle_ledger(&self) -> (u16, Vec<u8>) {
+        let rows = self
+            .store()
+            .map_err(|e| format!("{e:?}"))
+            .and_then(|store| store.ledger_tail(super::LEDGER_ROWS));
+        match rows.and_then(|rows| serde_json::to_vec(&rows).map_err(|e| e.to_string())) {
+            Ok(bytes) => (200, bytes),
             Err(error) => (500, error_json(&error)),
         }
     }

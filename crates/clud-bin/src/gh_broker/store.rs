@@ -53,10 +53,6 @@ pub struct ObjectMeta {
     /// body *started*, Unix ms. A fetch that began before an invalidation
     /// therefore never counts as fresh after it.
     pub fetched_at_ms: u64,
-    /// A listing whose every entry is finished (phase 2): served without
-    /// a TTL until a write invalidates it.
-    #[serde(default)]
-    pub frozen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +67,10 @@ pub struct LedgerEntry {
     /// Merged reads: objects the upstream fetch added or changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed: Option<u32>,
+    /// Merged reads: objects that dropped out of the collection (deleted
+    /// upstream) on this refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
 }
 
 pub struct Store {
@@ -289,6 +289,22 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// The newest `limit` ledger rows, oldest first. A row that does not
+    /// parse is skipped, so one bad row never hides the rest.
+    pub fn ledger_tail(&self, limit: usize) -> Result<Vec<LedgerEntry>, String> {
+        let txn = self.db.begin_read().map_err(err)?;
+        let ledger = txn.open_table(LEDGER).map_err(err)?;
+        let mut out = Vec::new();
+        for row in ledger.iter().map_err(err)?.rev().take(limit) {
+            let (_, v) = row.map_err(err)?;
+            if let Ok(entry) = serde_json::from_slice(v.value()) {
+                out.push(entry);
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -303,7 +319,6 @@ mod tests {
             etag: Some("\"e1\"".into()),
             last_modified: None,
             fetched_at_ms: at,
-            frozen: false,
         }
     }
 
@@ -339,6 +354,7 @@ mod tests {
                     upstream_requests: 0,
                     rate_remaining: None,
                     changed: None,
+                    removed: None,
                 })
                 .unwrap();
         }
@@ -362,7 +378,7 @@ mod tests {
         assert_eq!(store.stale_after(&tags).unwrap(), 20);
         assert_eq!(store.stale_after(&["run:7".to_string()]).unwrap(), 10);
         let state = CollectionState {
-            max_id: 7,
+            width: 7,
             fetched_at_ms: 3,
             ..CollectionState::default()
         };
