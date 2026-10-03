@@ -1362,10 +1362,6 @@ fn forward_user_input<H: InteractiveHooks>(
 /// disconnects, i.e. after the reader has stopped and sent everything
 /// it read.
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
 fn run_raw_pty_pump_full_verbose_with_writer<H, R, W>(
     process: &NativePtyProcess,
     interrupted: &AtomicBool,
@@ -1390,7 +1386,124 @@ where
     let interactive_real_stdin = stdin_source_is_real_stdin::<R>() && terminals_are_interactive();
     let normalize_console_stdin =
         should_normalize_interactive_console_stdin(interactive_real_stdin);
-    let interrupt_on_ctrl_c_byte = interactive_real_stdin;
+    start_pump_input_sources(
+        stdin_source,
+        resize_rx,
+        extra_rx,
+        &event_tx,
+        interactive_real_stdin,
+        normalize_console_stdin,
+        options.verbose,
+    );
+
+    // Issue #538: output reading/filtering/writing now happens on two
+    // dedicated threads (reader + writer) instead of inline in this
+    // loop, so a slow terminal `flush()` can never delay stdin
+    // forwarding below. `thread::scope` borrows `process` safely (it's
+    // `&NativePtyProcess`, not an owned `Arc`) and joins both threads
+    // before returning — which is also what guarantees the writer
+    // flushes any remaining chunks before the pump exits.
+    let stop_reader = AtomicBool::new(false);
+    let reader_closed = AtomicBool::new(false);
+
+    let exit_code = std::thread::scope(|scope| {
+        let (output_tx, output_rx) = mpsc::channel::<OutputMsg>();
+        // #1189: the compositor lives on the writer thread; the stdin path
+        // shares its close-button hit rect and the hub for dismissal.
+        let compositor = options
+            .toasts
+            .clone()
+            .map(crate::toast::compositor::Compositor::new);
+        let mut input = PumpInputState::new(
+            compositor.as_ref().map(|c| c.input()),
+            options
+                .toasts
+                .as_ref()
+                .map(|toasts| std::sync::Arc::clone(&toasts.hub)),
+            output_tx.clone(),
+            interactive_real_stdin,
+            normalize_console_stdin,
+        );
+        let stop_reader = &stop_reader;
+        let reader_closed = &reader_closed;
+
+        // Writer thread: coalesces every chunk already queued into one
+        // write_all + one flush per wakeup (see `run_output_writer`).
+        // Exits once `output_tx` is dropped AND the queue is drained —
+        // i.e. after the reader thread has stopped and sent everything
+        // it had. That ordering is the "flush remaining chunks first"
+        // shutdown guarantee.
+        scope.spawn(move || {
+            run_output_writer_composited(output_rx, writer, compositor);
+        });
+
+        // Reader thread: never blocks the writer or the main loop.
+        // `output_tx.send` on an unbounded channel never blocks, so a
+        // stalled terminal write on the writer thread cannot delay
+        // this thread from continuing to read, and cannot delay the
+        // main thread's stdin forwarding (which no longer touches
+        // output at all). See `PtyOutputReader`.
+        let reader = PtyOutputReader::new(process, &options, interactive_real_stdin);
+        let closed_tx = event_tx.clone();
+        scope.spawn(move || reader.run(stop_reader, reader_closed, &output_tx, &closed_tx));
+
+        // The main thread holds `event_tx` for the whole loop, so the channel
+        // never disconnects: after stdin EOF `recv_timeout` still waits out
+        // its timeout instead of returning at once and spinning a core.
+        let _event_channel_open = &event_tx;
+        // #1310: stop the reader even when a hook panics out of this loop.
+        // `thread::scope` joins the reader before re-raising the panic, and
+        // on Windows ConPTY never closes its pipe, so a reader that is never
+        // told to stop would keep the unwind waiting forever.
+        let _stop_reader_on_unwind = StopReaderOnDrop(stop_reader);
+        let mut next_tick = std::time::Instant::now() + PUMP_TICK;
+        let exit_code = loop {
+            let until_tick = next_tick.saturating_duration_since(std::time::Instant::now());
+            let wait = input.wait_for(until_tick);
+            // One blocking wait covers every input source (#691). Events
+            // are handled in arrival order; a keystroke, resize, or
+            // drag-drop wakes the loop immediately.
+            let event = event_rx.recv_timeout(wait);
+            if let Some(code) = input.handle_event(event, process, hooks, interrupted, &options) {
+                break code;
+            }
+            if std::time::Instant::now() >= next_tick {
+                next_tick = std::time::Instant::now() + PUMP_TICK;
+            }
+            if let Some(code) =
+                tick_and_check_pump_exit(process, hooks, reader_closed, interrupted, &options)
+            {
+                break code;
+            }
+        };
+
+        stop_reader.store(true, Ordering::Release);
+        if options.verbose {
+            verbose_log::log(format_args!(
+                "[clud] pty pump: loop exited code {exit_code}; joining reader/writer"
+            ));
+        }
+        exit_code
+    });
+    if options.verbose {
+        verbose_log::log(format_args!("[clud] pty pump: returned {exit_code}"));
+    }
+    exit_code
+}
+
+/// Wire every input source into the pump's event channel: the byte-stream
+/// stdin reader (when it is the keyboard source), resize, and `extra_rx`.
+fn start_pump_input_sources<R>(
+    stdin_source: R,
+    resize_rx: std::sync::mpsc::Receiver<(u16, u16)>,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    event_tx: &std::sync::mpsc::Sender<PumpEvent>,
+    interactive_real_stdin: bool,
+    normalize_console_stdin: bool,
+    verbose: bool,
+) where
+    R: std::io::Read + Send + 'static,
+{
     // Issue #188: when an `extra_rx` is wired and we're on Windows with
     // an interactive real-stdin console, the `console_input`
     // `ReadConsoleInputW` reader is feeding that channel and is the
@@ -1401,7 +1514,7 @@ where
     // it in that exact case so `console_input` is the sole consumer.
     let spawn_byte_stream_stdin_reader =
         should_spawn_byte_stream_stdin_reader(interactive_real_stdin, extra_rx.is_some());
-    if options.verbose {
+    if verbose {
         verbose_log::log(format_args!(
             "[clud] pty pump: start interactive_stdin={} normalize_console_stdin={} \
              spawn_byte_stream_stdin_reader={}",
@@ -1409,31 +1522,12 @@ where
         ));
     }
 
-    // Detached reader: pumps `stdin_source` → channel until EOF or error.
-    // Detached (not joined) so a blocked `read()` on real stdin doesn't
-    // wedge shutdown when the child exits — the process is terminating
-    // anyway. See Step 12.
     if spawn_byte_stream_stdin_reader {
-        let stdin_tx = event_tx.clone();
-        std::thread::spawn(move || {
-            let mut reader = stdin_source;
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        let mut chunk = buf[..n].to_vec();
-                        if normalize_console_stdin {
-                            normalize_interactive_console_stdin_chunk(&mut chunk);
-                        }
-                        if stdin_tx.send(PumpEvent::Stdin(chunk)).is_err() {
-                            break; // Main thread dropped the receiver → exit.
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        spawn_byte_stream_stdin_reader_thread(
+            stdin_source,
+            event_tx.clone(),
+            normalize_console_stdin,
+        );
     } else {
         // `console_input` is the sole consumer via `extra_rx`; nothing
         // reads the byte-stream source.
@@ -1455,346 +1549,417 @@ where
             PumpEvent::Extra,
         );
     }
+}
 
-    let mut observer = F3Observer::new();
+/// Detached reader: pumps `stdin_source` → channel until EOF or error.
+/// Detached (not joined) so a blocked `read()` on real stdin doesn't
+/// wedge shutdown when the child exits — the process is terminating
+/// anyway. See Step 12.
+fn spawn_byte_stream_stdin_reader_thread<R>(
+    stdin_source: R,
+    stdin_tx: std::sync::mpsc::Sender<PumpEvent>,
+    normalize_console_stdin: bool,
+) where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut reader = stdin_source;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    let mut chunk = buf[..n].to_vec();
+                    if normalize_console_stdin {
+                        normalize_interactive_console_stdin_chunk(&mut chunk);
+                    }
+                    if stdin_tx.send(PumpEvent::Stdin(chunk)).is_err() {
+                        break; // Main thread dropped the receiver → exit.
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Sets the pump's reader-stop flag when dropped, including on unwind (#1310).
+struct StopReaderOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopReaderOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// The PTY output reader thread's state (#538).
+///
+/// Calls `read_chunk_impl` in a loop and filters each chunk before it
+/// reaches the terminal. Strip OSC 0/2 (window-title) sequences from the
+/// child's output before they reach the terminal — the library also keeps an
+/// un-stripped copy in its own `chunks` queue (used by callers like
+/// capture/replay), but only the bytes sent here actually reach the user's
+/// terminal. `main.rs` set `process.set_echo(false)` so the library's
+/// built-in stdout writer is silent — we own forwarding now.
+struct PtyOutputReader<'p> {
+    process: &'p NativePtyProcess,
+    osc_strip: OscTitleStripper,
+    /// Codex-only (#1181): rewrites bare LF to CRLF after the OSC strip.
+    /// `None` for every other backend so the filter can never touch a TUI
+    /// that relies on bare LF inside a scroll region.
+    lf_normalize: Option<crate::codex_lf::CodexLfNormalizer>,
+    keyboard_enhancement_tracker: Option<Arc<KeyboardEnhancementTracker>>,
+    /// #1310 / #1347 / #1702: see `should_answer_cursor_queries` and
+    /// `terminal_queries`.
+    query_scanner: Option<crate::terminal_queries::TerminalQueryScanner>,
+    verbose: bool,
+}
+
+impl<'p> PtyOutputReader<'p> {
+    fn new(
+        process: &'p NativePtyProcess,
+        options: &PumpOptions,
+        interactive_real_stdin: bool,
+    ) -> Self {
+        Self {
+            process,
+            osc_strip: OscTitleStripper::new(),
+            lf_normalize: options
+                .normalize_bare_lf
+                .then(crate::codex_lf::CodexLfNormalizer::new),
+            keyboard_enhancement_tracker: options.keyboard_enhancement_tracker.clone(),
+            query_scanner: should_answer_cursor_queries(interactive_real_stdin)
+                .then(crate::terminal_queries::TerminalQueryScanner::default),
+            verbose: options.verbose,
+        }
+    }
+
+    fn observe_and_filter(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if let Some(tracker) = &self.keyboard_enhancement_tracker {
+            tracker.observe(chunk);
+        }
+        if let Some(scanner) = self.query_scanner.as_mut() {
+            let replies = scanner.replies(chunk);
+            if !replies.is_empty() {
+                if self.verbose {
+                    verbose_log::log("[clud] pty pump: answering child terminal query");
+                }
+                let _ = self.process.write_impl(&replies, false);
+            }
+        }
+        let stripped = self.osc_strip.process(chunk);
+        match self.lf_normalize.as_mut() {
+            Some(lf) => lf.process(&stripped),
+            None => stripped,
+        }
+    }
+
+    fn run(
+        mut self,
+        stop_reader: &AtomicBool,
+        reader_closed: &AtomicBool,
+        output_tx: &std::sync::mpsc::Sender<OutputMsg>,
+        closed_tx: &std::sync::mpsc::Sender<PumpEvent>,
+    ) {
+        let process = self.process;
+        loop {
+            if stop_reader.load(Ordering::Acquire) {
+                // Final non-blocking drain so a chunk that arrived
+                // right before shutdown isn't lost.
+                while let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.0)) {
+                    let filtered = self.observe_and_filter(&chunk);
+                    if !filtered.is_empty() {
+                        let _ = output_tx.send(OutputMsg::Child(filtered));
+                    }
+                }
+                break;
+            }
+            match process.read_chunk_impl(Some(OUTPUT_READER_POLL_SECS)) {
+                Ok(Some(chunk)) => {
+                    let mut filtered = self.observe_and_filter(&chunk);
+                    // Coalesce clud-side: drain whatever else is
+                    // already queued without blocking, so a
+                    // chatty child's burst becomes one send (and,
+                    // downstream, one write+flush) instead of one
+                    // per chunk.
+                    while let Ok(Some(more)) = process.read_chunk_impl(Some(0.0)) {
+                        filtered.extend_from_slice(&self.observe_and_filter(&more));
+                    }
+                    if !filtered.is_empty() {
+                        let _ = output_tx.send(OutputMsg::Child(filtered));
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    reader_closed.store(true, Ordering::Release);
+                    // Wake the main loop now rather than at its next tick.
+                    let _ = closed_tx.send(PumpEvent::ReaderClosed);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// The pump main thread's user-input state: everything a [`PumpEvent`]
+/// handler reads or mutates between wakeups.
+struct PumpInputState {
+    observer: F3Observer,
     // #1703: one per input stream, so a CSI u Ctrl+C split across two reads
     // of that stream is still seen.
-    let mut extra_interrupt = InterruptScanner::default();
-    let mut stdin_interrupt = InterruptScanner::default();
+    extra_interrupt: InterruptScanner,
+    stdin_interrupt: InterruptScanner,
     // Issue #63 / #79: bracketed-paste passes through the PTY pump as
     // raw bytes. When the user drags a file onto the terminal, the
     // terminal emits `\x1b[200~ <path-shaped string> \x1b[201~`. We
     // normalize that path BEFORE forwarding so all backends see a
     // canonical form, regardless of which terminal produced the drop.
-    let mut paste = BracketedPasteNormalizer::new();
+    paste: BracketedPasteNormalizer,
     // #1189: swallows clicks on a visible toast's close button; a byte-exact
     // pass-through whenever no toast is armed.
-    let mut mouse = crate::toast::mouse::MouseFilter::new();
+    mouse: crate::toast::mouse::MouseFilter,
+    toast_input: Option<Arc<crate::toast::compositor::ToastInput>>,
+    toast_hub: Option<Arc<crate::toast::ToastHub>>,
+    resize_out: std::sync::mpsc::Sender<OutputMsg>,
+    interactive_real_stdin: bool,
+    normalize_console_stdin: bool,
+    interrupt_on_ctrl_c_byte: bool,
+}
 
-    // Issue #538: output reading/filtering/writing now happens on two
-    // dedicated threads (reader + writer) instead of inline in this
-    // loop, so a slow terminal `flush()` can never delay stdin
-    // forwarding below. `thread::scope` borrows `process` safely (it's
-    // `&NativePtyProcess`, not an owned `Arc`) and joins both threads
-    // before returning — which is also what guarantees the writer
-    // flushes any remaining chunks before the pump exits.
-    let stop_reader = AtomicBool::new(false);
-    let reader_closed = AtomicBool::new(false);
-
-    let exit_code = std::thread::scope(|scope| {
-        let (output_tx, output_rx) = mpsc::channel::<OutputMsg>();
-        // #1189: the compositor lives on the writer thread; the stdin path
-        // shares its close-button hit rect and the hub for dismissal.
-        let compositor = options
-            .toasts
-            .clone()
-            .map(crate::toast::compositor::Compositor::new);
-        let toast_input = compositor.as_ref().map(|c| c.input());
-        let toast_hub = options
-            .toasts
-            .as_ref()
-            .map(|toasts| std::sync::Arc::clone(&toasts.hub));
-        let resize_out = output_tx.clone();
-        let stop_reader = &stop_reader;
-        let reader_closed = &reader_closed;
-
-        // Writer thread: coalesces every chunk already queued into one
-        // write_all + one flush per wakeup (see `run_output_writer`).
-        // Exits once `output_tx` is dropped AND the queue is drained —
-        // i.e. after the reader thread has stopped and sent everything
-        // it had. That ordering is the "flush remaining chunks first"
-        // shutdown guarantee.
-        scope.spawn(move || {
-            run_output_writer_composited(output_rx, writer, compositor);
-        });
-
-        // Reader thread: never blocks the writer or the main loop.
-        // `output_tx.send` on an unbounded channel never blocks, so a
-        // stalled terminal write on the writer thread cannot delay
-        // this thread from continuing to read, and cannot delay the
-        // main thread's stdin forwarding (which no longer touches
-        // output at all). Strip OSC 0/2 (window-title) sequences from
-        // the child's output before they reach the terminal — the
-        // library also keeps an un-stripped copy in its own `chunks`
-        // queue (used by callers like capture/replay), but only the
-        // bytes sent here actually reach the user's terminal. `main.rs`
-        // set `process.set_echo(false)` so the library's built-in
-        // stdout writer is silent — we own forwarding now.
-        let normalize_bare_lf = options.normalize_bare_lf;
-        let keyboard_enhancement_tracker = options.keyboard_enhancement_tracker.clone();
-        let closed_tx = event_tx.clone();
-        let mut query_scanner = should_answer_cursor_queries(interactive_real_stdin)
-            .then(crate::terminal_queries::TerminalQueryScanner::default);
-        let verbose = options.verbose;
-        scope.spawn(move || {
-            let mut osc_strip = OscTitleStripper::new();
-            // Codex-only (#1181): rewrites bare LF to CRLF after the OSC
-            // strip. `None` for every other backend so the filter can
-            // never touch a TUI that relies on bare LF inside a scroll
-            // region.
-            let mut lf_normalize = normalize_bare_lf.then(crate::codex_lf::CodexLfNormalizer::new);
-            let mut filter = move |chunk: &[u8]| -> Vec<u8> {
-                let stripped = osc_strip.process(chunk);
-                match lf_normalize.as_mut() {
-                    Some(lf) => lf.process(&stripped),
-                    None => stripped,
-                }
-            };
-            let mut observe_and_filter = |chunk: &[u8]| {
-                if let Some(tracker) = &keyboard_enhancement_tracker {
-                    tracker.observe(chunk);
-                }
-                // #1310 / #1347 / #1702: see `should_answer_cursor_queries`
-                // and `terminal_queries`.
-                if let Some(scanner) = query_scanner.as_mut() {
-                    let replies = scanner.replies(chunk);
-                    if !replies.is_empty() {
-                        if verbose {
-                            verbose_log::log("[clud] pty pump: answering child terminal query");
-                        }
-                        let _ = process.write_impl(&replies, false);
-                    }
-                }
-                filter(chunk)
-            };
-            loop {
-                if stop_reader.load(Ordering::Acquire) {
-                    // Final non-blocking drain so a chunk that arrived
-                    // right before shutdown isn't lost.
-                    while let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.0)) {
-                        let filtered = observe_and_filter(&chunk);
-                        if !filtered.is_empty() {
-                            let _ = output_tx.send(OutputMsg::Child(filtered));
-                        }
-                    }
-                    break;
-                }
-                match process.read_chunk_impl(Some(OUTPUT_READER_POLL_SECS)) {
-                    Ok(Some(chunk)) => {
-                        let mut filtered = observe_and_filter(&chunk);
-                        // Coalesce clud-side: drain whatever else is
-                        // already queued without blocking, so a
-                        // chatty child's burst becomes one send (and,
-                        // downstream, one write+flush) instead of one
-                        // per chunk.
-                        while let Ok(Some(more)) = process.read_chunk_impl(Some(0.0)) {
-                            filtered.extend_from_slice(&observe_and_filter(&more));
-                        }
-                        if !filtered.is_empty() {
-                            let _ = output_tx.send(OutputMsg::Child(filtered));
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        reader_closed.store(true, Ordering::Release);
-                        // Wake the main loop now rather than at its next tick.
-                        let _ = closed_tx.send(PumpEvent::ReaderClosed);
-                        break;
-                    }
-                }
-            }
-        });
-
-        // The main thread holds `event_tx` for the whole loop, so the channel
-        // never disconnects: after stdin EOF `recv_timeout` still waits out
-        // its timeout instead of returning at once and spinning a core.
-        let _event_channel_open = &event_tx;
-        // #1310: stop the reader even when a hook panics out of this loop.
-        // `thread::scope` joins the reader before re-raising the panic, and
-        // on Windows ConPTY never closes its pipe, so a reader that is never
-        // told to stop would keep the unwind waiting forever.
-        struct StopReaderOnDrop<'a>(&'a AtomicBool);
-        impl Drop for StopReaderOnDrop<'_> {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::Release);
-            }
+impl PumpInputState {
+    fn new(
+        toast_input: Option<Arc<crate::toast::compositor::ToastInput>>,
+        toast_hub: Option<Arc<crate::toast::ToastHub>>,
+        resize_out: std::sync::mpsc::Sender<OutputMsg>,
+        interactive_real_stdin: bool,
+        normalize_console_stdin: bool,
+    ) -> Self {
+        Self {
+            observer: F3Observer::new(),
+            extra_interrupt: InterruptScanner::default(),
+            stdin_interrupt: InterruptScanner::default(),
+            paste: BracketedPasteNormalizer::new(),
+            mouse: crate::toast::mouse::MouseFilter::new(),
+            toast_input,
+            toast_hub,
+            resize_out,
+            interactive_real_stdin,
+            normalize_console_stdin,
+            interrupt_on_ctrl_c_byte: interactive_real_stdin,
         }
-        let _stop_reader_on_unwind = StopReaderOnDrop(stop_reader);
-        let mut next_tick = std::time::Instant::now() + PUMP_TICK;
-        let exit_code = loop {
-            let until_tick = next_tick.saturating_duration_since(std::time::Instant::now());
-            let wait = pending_user_input_wait(
-                until_tick,
-                std::time::Instant::now(),
-                &paste,
-                &mouse,
-                toast_input.is_some(),
-            );
-            // One blocking wait covers every input source (#691). Events
-            // are handled in arrival order; a keystroke, resize, or
-            // drag-drop wakes the loop immediately.
-            match event_rx.recv_timeout(wait) {
-                Ok(PumpEvent::Resize(rows, cols)) => {
-                    let pty_rows = options
-                        .graphics
-                        .as_ref()
-                        .map(|config| {
-                            redraw_graphics_header_for_resize(config, rows, cols, options.verbose)
-                        })
-                        .unwrap_or(rows);
-                    if let Err(err) = resize_pty(process, pty_rows, cols) {
-                        eprintln!("[clud] warning: failed to resize pty: {}", err);
-                    }
-                    if toast_input.is_some() {
-                        let _ = resize_out.send(OutputMsg::Resize {
-                            rows: pty_rows,
-                            cols,
-                        });
-                    }
-                }
-                // A side-channel chunk (Windows `console_input` keyboard or
-                // the drag-drop OLE callback). Issue #1350: on Windows this
-                // is the *only* keyboard source, so it runs the same
-                // `forward_user_input` pipeline as stdin (Backspace
-                // normalization, bracketed paste, toast mouse filter, F3).
-                // Ctrl+V image expansion stays stdin-only.
-                //
-                // The 0x03 byte check is required on Windows: when the
-                // `console_input` reader (issue #141 / PR #144) is active,
-                // it turns off `ENABLE_PROCESSED_INPUT` so the OS no
-                // longer fires a `CTRL_C_EVENT` for Ctrl-C. The press
-                // arrives instead as a KEY_EVENT whose translated 0x03
-                // byte is delivered via this channel — without the check,
-                // clud forwards it to the child but never observes the
-                // interrupt itself.
-                Ok(PumpEvent::Extra(chunk)) => {
-                    // Unlike stdin, extra_rx is by construction
-                    // always user-driven (keyboard via
-                    // console_input_rx on Windows, or OLE drag-drop
-                    // callback) — never a piped test fixture — so we
-                    // don't need the `interrupt_on_ctrl_c_byte` gate
-                    // that skips 0x03 detection on piped stdin.
-                    let requested_interrupt = extra_interrupt.requests_interrupt(&chunk);
-                    let chunk = extra_chunk_for_pipeline(&chunk, normalize_console_stdin);
-                    forward_user_input(
-                        process,
-                        hooks,
-                        &mut observer,
-                        &mut paste,
-                        &mut mouse,
-                        toast_input.as_deref(),
-                        toast_hub.as_deref(),
-                        &chunk,
-                        "console input",
-                    );
-                    if requested_interrupt {
-                        if options.verbose {
-                            verbose_log::log("[clud] pty pump: interrupt via extra_rx Ctrl+C byte");
-                        }
-                        break interrupt_pty_process(process, options.verbose);
-                    }
-                }
-                Ok(PumpEvent::Stdin(chunk)) => {
-                    let requested_interrupt =
-                        interrupt_on_ctrl_c_byte && stdin_interrupt.requests_interrupt(&chunk);
-                    let chunk = if interactive_real_stdin {
-                        crate::paste_image::expand_ctrl_v_bytes(&chunk, || {
-                            crate::paste_image::handle_clipboard().ok().flatten()
-                        })
-                    } else {
-                        std::borrow::Cow::Borrowed(chunk.as_slice())
-                    };
-                    forward_user_input(
-                        process,
-                        hooks,
-                        &mut observer,
-                        &mut paste,
-                        &mut mouse,
-                        toast_input.as_deref(),
-                        toast_hub.as_deref(),
-                        chunk.as_ref(),
-                        "stdin",
-                    );
-
-                    if requested_interrupt || interrupted.load(Ordering::SeqCst) {
-                        if options.verbose {
-                            let source = if requested_interrupt {
-                                "stdin Ctrl+C byte"
-                            } else {
-                                "interrupt flag"
-                            };
-                            verbose_log::log(format_args!(
-                                "[clud] pty pump: interrupt via {source}"
-                            ));
-                        }
-                        break interrupt_pty_process(process, options.verbose);
-                    }
-                }
-                // The reader already set `reader_closed`; the exit check
-                // below acts on it.
-                Ok(PumpEvent::ReaderClosed) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // #1445 / #1717: release a held prefix once it is due (a
-                    // lone Esc fast, a partial terminal report only after a
-                    // longer wait), and any toast mouse prefix after idle.
-                    let targets = toast_input.as_ref().map(|input| ToastHitTargets {
-                        close: input.close_rect(),
-                        cpu: input.cpu_rect(),
-                        hover_armed: input.cpu_hover_armed(),
-                    });
-                    let pending = flush_pending_user_input(
-                        std::time::Instant::now(),
-                        &mut paste,
-                        &mut mouse,
-                        targets,
-                    );
-                    if !pending.is_empty() {
-                        let _ = process.write_impl(&pending, false);
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // Unreachable while `_event_channel_open` holds a
-                    // sender; sleep rather than spin if that ever changes.
-                    std::thread::sleep(PUMP_TICK);
-                }
-            }
-            if std::time::Instant::now() >= next_tick {
-                next_tick = std::time::Instant::now() + PUMP_TICK;
-            }
-
-            {
-                let mut sink = NativePtyProcessSink::new(process);
-                if let Err(err) = hooks.on_tick(&mut sink) {
-                    eprintln!("[clud] warning: interactive hook tick failed: {}", err);
-                }
-            }
-
-            if reader_closed.load(Ordering::Acquire) {
-                if options.verbose {
-                    verbose_log::log("[clud] pty pump: output reader observed pty closed");
-                }
-                break reap_pty_exit(process);
-            }
-
-            if let Ok(Some(code)) =
-                running_process::pty::poll_pty_process(&process.handles, &process.returncode)
-            {
-                if options.verbose {
-                    verbose_log::log(format_args!("[clud] pty pump: child exited code {code}"));
-                }
-                break code;
-            }
-
-            if interrupted.load(Ordering::SeqCst) {
-                if options.verbose {
-                    verbose_log::log("[clud] pty pump: interrupt flag observed");
-                }
-                break interrupt_pty_process(process, options.verbose);
-            }
-        };
-
-        stop_reader.store(true, Ordering::Release);
-        if options.verbose {
-            verbose_log::log(format_args!(
-                "[clud] pty pump: loop exited code {exit_code}; joining reader/writer"
-            ));
-        }
-        exit_code
-    });
-    if options.verbose {
-        verbose_log::log(format_args!("[clud] pty pump: returned {exit_code}"));
     }
-    exit_code
+
+    fn wait_for(&self, until_tick: std::time::Duration) -> std::time::Duration {
+        pending_user_input_wait(
+            until_tick,
+            std::time::Instant::now(),
+            &self.paste,
+            &self.mouse,
+            self.toast_input.is_some(),
+        )
+    }
+
+    /// Handle one wakeup of the main loop; `Some(code)` ends the pump.
+    fn handle_event<H: InteractiveHooks>(
+        &mut self,
+        event: Result<PumpEvent, std::sync::mpsc::RecvTimeoutError>,
+        process: &NativePtyProcess,
+        hooks: &mut H,
+        interrupted: &AtomicBool,
+        options: &PumpOptions,
+    ) -> Option<i32> {
+        use std::sync::mpsc::RecvTimeoutError;
+        match event {
+            Ok(PumpEvent::Resize(rows, cols)) => self.on_resize(process, rows, cols, options),
+            Ok(PumpEvent::Extra(chunk)) => {
+                return self.on_extra(process, hooks, &chunk, options.verbose);
+            }
+            Ok(PumpEvent::Stdin(chunk)) => {
+                return self.on_stdin(process, hooks, &chunk, interrupted, options.verbose);
+            }
+            // The reader already set `reader_closed`; the exit check
+            // below acts on it.
+            Ok(PumpEvent::ReaderClosed) => {}
+            Err(RecvTimeoutError::Timeout) => self.flush_due_input(process),
+            Err(RecvTimeoutError::Disconnected) => {
+                // Unreachable while `_event_channel_open` holds a
+                // sender; sleep rather than spin if that ever changes.
+                std::thread::sleep(PUMP_TICK);
+            }
+        }
+        None
+    }
+
+    fn on_resize(&self, process: &NativePtyProcess, rows: u16, cols: u16, options: &PumpOptions) {
+        let pty_rows = options
+            .graphics
+            .as_ref()
+            .map(|config| redraw_graphics_header_for_resize(config, rows, cols, options.verbose))
+            .unwrap_or(rows);
+        if let Err(err) = resize_pty(process, pty_rows, cols) {
+            eprintln!("[clud] warning: failed to resize pty: {}", err);
+        }
+        if self.toast_input.is_some() {
+            let _ = self.resize_out.send(OutputMsg::Resize {
+                rows: pty_rows,
+                cols,
+            });
+        }
+    }
+
+    fn forward<H: InteractiveHooks>(
+        &mut self,
+        process: &NativePtyProcess,
+        hooks: &mut H,
+        chunk: &[u8],
+        source: &str,
+    ) {
+        forward_user_input(
+            process,
+            hooks,
+            &mut self.observer,
+            &mut self.paste,
+            &mut self.mouse,
+            self.toast_input.as_deref(),
+            self.toast_hub.as_deref(),
+            chunk,
+            source,
+        );
+    }
+
+    /// A side-channel chunk (Windows `console_input` keyboard or
+    /// the drag-drop OLE callback). Issue #1350: on Windows this
+    /// is the *only* keyboard source, so it runs the same
+    /// `forward_user_input` pipeline as stdin (Backspace
+    /// normalization, bracketed paste, toast mouse filter, F3).
+    /// Ctrl+V image expansion stays stdin-only.
+    ///
+    /// The 0x03 byte check is required on Windows: when the
+    /// `console_input` reader (issue #141 / PR #144) is active,
+    /// it turns off `ENABLE_PROCESSED_INPUT` so the OS no
+    /// longer fires a `CTRL_C_EVENT` for Ctrl-C. The press
+    /// arrives instead as a KEY_EVENT whose translated 0x03
+    /// byte is delivered via this channel — without the check,
+    /// clud forwards it to the child but never observes the
+    /// interrupt itself.
+    fn on_extra<H: InteractiveHooks>(
+        &mut self,
+        process: &NativePtyProcess,
+        hooks: &mut H,
+        chunk: &[u8],
+        verbose: bool,
+    ) -> Option<i32> {
+        // Unlike stdin, extra_rx is by construction
+        // always user-driven (keyboard via
+        // console_input_rx on Windows, or OLE drag-drop
+        // callback) — never a piped test fixture — so we
+        // don't need the `interrupt_on_ctrl_c_byte` gate
+        // that skips 0x03 detection on piped stdin.
+        let requested_interrupt = self.extra_interrupt.requests_interrupt(chunk);
+        let chunk = extra_chunk_for_pipeline(chunk, self.normalize_console_stdin);
+        self.forward(process, hooks, &chunk, "console input");
+        if !requested_interrupt {
+            return None;
+        }
+        if verbose {
+            verbose_log::log("[clud] pty pump: interrupt via extra_rx Ctrl+C byte");
+        }
+        Some(interrupt_pty_process(process, verbose))
+    }
+
+    fn on_stdin<H: InteractiveHooks>(
+        &mut self,
+        process: &NativePtyProcess,
+        hooks: &mut H,
+        chunk: &[u8],
+        interrupted: &AtomicBool,
+        verbose: bool,
+    ) -> Option<i32> {
+        let requested_interrupt =
+            self.interrupt_on_ctrl_c_byte && self.stdin_interrupt.requests_interrupt(chunk);
+        let chunk = if self.interactive_real_stdin {
+            crate::paste_image::expand_ctrl_v_bytes(chunk, || {
+                crate::paste_image::handle_clipboard().ok().flatten()
+            })
+        } else {
+            std::borrow::Cow::Borrowed(chunk)
+        };
+        self.forward(process, hooks, chunk.as_ref(), "stdin");
+
+        if !(requested_interrupt || interrupted.load(Ordering::SeqCst)) {
+            return None;
+        }
+        if verbose {
+            let source = if requested_interrupt {
+                "stdin Ctrl+C byte"
+            } else {
+                "interrupt flag"
+            };
+            verbose_log::log(format_args!("[clud] pty pump: interrupt via {source}"));
+        }
+        Some(interrupt_pty_process(process, verbose))
+    }
+
+    /// #1445 / #1717: release a held prefix once it is due (a
+    /// lone Esc fast, a partial terminal report only after a
+    /// longer wait), and any toast mouse prefix after idle.
+    fn flush_due_input(&mut self, process: &NativePtyProcess) {
+        let targets = self.toast_input.as_ref().map(|input| ToastHitTargets {
+            close: input.close_rect(),
+            cpu: input.cpu_rect(),
+            hover_armed: input.cpu_hover_armed(),
+        });
+        let pending = flush_pending_user_input(
+            std::time::Instant::now(),
+            &mut self.paste,
+            &mut self.mouse,
+            targets,
+        );
+        if !pending.is_empty() {
+            let _ = process.write_impl(&pending, false);
+        }
+    }
+}
+
+/// Run the hooks' tick, then check every exit condition the event channel
+/// cannot signal; `Some(code)` ends the pump.
+fn tick_and_check_pump_exit<H: InteractiveHooks>(
+    process: &NativePtyProcess,
+    hooks: &mut H,
+    reader_closed: &AtomicBool,
+    interrupted: &AtomicBool,
+    options: &PumpOptions,
+) -> Option<i32> {
+    {
+        let mut sink = NativePtyProcessSink::new(process);
+        if let Err(err) = hooks.on_tick(&mut sink) {
+            eprintln!("[clud] warning: interactive hook tick failed: {}", err);
+        }
+    }
+
+    if reader_closed.load(Ordering::Acquire) {
+        if options.verbose {
+            verbose_log::log("[clud] pty pump: output reader observed pty closed");
+        }
+        return Some(reap_pty_exit(process));
+    }
+
+    if let Ok(Some(code)) =
+        running_process::pty::poll_pty_process(&process.handles, &process.returncode)
+    {
+        if options.verbose {
+            verbose_log::log(format_args!("[clud] pty pump: child exited code {code}"));
+        }
+        return Some(code);
+    }
+
+    if interrupted.load(Ordering::SeqCst) {
+        if options.verbose {
+            verbose_log::log("[clud] pty pump: interrupt flag observed");
+        }
+        return Some(interrupt_pty_process(process, options.verbose));
+    }
+    None
 }
 
 /// `extra_rx` already wired, the `console_input::ReadConsoleInputW`
