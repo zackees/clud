@@ -29,12 +29,42 @@ watcher._build_failure_report = lambda check, *_args: watcher.FailureReport(
 )
 
 
-def cancel(pr, _repo, sha, _opts, _log=None):
+def cancel(pr, _repo, sha, _opts, _log=None, **_scope):
     cancel_log.write_text(f"{pr} {sha}\n", encoding="utf-8")
     return 1
 
 
 watcher.cancel_pr_runs = cancel
+watcher._rerun_since_verdict = lambda *_args: None
+
+
+def _check(check_id, name, status, conclusion):
+    return {
+        "id": check_id,
+        "name": name,
+        "head_sha": "abc123",
+        "status": status,
+        "conclusion": conclusion,
+        "details_url": f"https://github.com/zackees/clud/actions/runs/900/job/{check_id}",
+    }
+
+
+# A failure verdict needs REST check runs (#1742): the rollup alone never decides one.
+FAILING_HEAD = watcher.HeadChecks(
+    [_check(1, "linux", "completed", "failure"), _check(2, "macos", "in_progress", None)],
+    [
+        {
+            "id": 900,
+            "run_number": 1,
+            "path": ".github/workflows/ci.yml",
+            "head_sha": "abc123",
+            "event": "pull_request",
+            "status": "in_progress",
+            "conclusion": None,
+            "created_at": "2026-10-02T00:00:00Z",
+        }
+    ],
+)
 
 
 def gate(*_args, **_kwargs):
@@ -58,6 +88,7 @@ def gate(*_args, **_kwargs):
         human_review_ids=frozenset(),
         coderabbit_probe=watcher.CodeRabbitProbe("not_detected", 0),
         coderabbit=coderabbit,
+        head_checks=FAILING_HEAD if scenario == "fail" else None,
     )
 
 

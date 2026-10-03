@@ -44,8 +44,9 @@ Exit codes:
   9  CONFLICT: `mergeable=CONFLICTING` / `mergeStateStatus=DIRTY`, or
      `mergeable` stayed `UNKNOWN` for too many polls while checks were green
  10  GITHUB_UNREACHABLE: gh failed (auth, rate limit, network) for several
-     polls in a row, or no repository could be resolved; the final event
-     carries gh's stderr
+     polls in a row, a required failure could not be judged for lack of
+     check-run data for several polls, or no repository could be resolved;
+     the final event carries gh's stderr
  11  QUEUED: a run waited longer than `--max-queued` to start (off by default)
  64  USAGE: a bad flag or argument (argparse's own error). The caller's mistake,
      never a verdict: fix the command and run it again (#1331)
@@ -92,6 +93,15 @@ commit only, grouped by (workflow file, check name) -- never the display
     workflows are left alone.
 `merge_group` runs and check runs for any other commit are ignored; legacy
 commit statuses keep GitHub's newest-per-context result.
+The PR's check rollup never decides a failure on its own (#1742): it mixes
+every run on the head, superseded ones included, with no run order. When a
+poll has no REST check-run data, a required failure in the rollup is a
+degraded poll, retried, and never a cancel; three in a row exit 10.
+
+Without `--repo`, the watch targets the repo of `git remote get-url origin`
+and passes it to every gh call (#1741): a bare gh call in a fork resolves to
+the parent repository. gh's default repo is used only when origin is not a
+github.com URL.
 
 CodeRabbit never stalls green. Nothing can reproduce CodeRabbit under a
 local bosn -> act gate, and the fleet suppresses it by policy, so by default
@@ -2059,7 +2069,47 @@ def _report_cancel(
             )
 
 
+_GITHUB_REMOTE = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]+@)?github\.com(?::\d+)?[:/]"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def github_repo_from_url(url: str) -> str | None:
+    """`owner/name` of a github.com remote URL (https, ssh, scp-style), or None."""
+    match = _GITHUB_REMOTE.match(url.strip())
+    return f"{match.group(1)}/{match.group(2)}" if match else None
+
+
+def _git_origin_url() -> str | None:
+    try:
+        res = RunningProcess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            stderr=PIPE,
+            text=True,
+            timeout=GH_CALL_TIMEOUT_SEC,
+        )
+    except (OSError, TimeoutError, TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    return (res.stdout or "").strip() or None
+
+
 def _resolve_origin_repo() -> str | None:
+    """The repository a watch without `--repo` targets (#1741).
+
+    `origin` wins: a bare `gh pr view N` in a fork without `gh repo
+    set-default` resolves to the *parent*, which watched nektos/act#1 instead
+    of zackees/act2#1. gh's default repo is asked only when origin is not a
+    github.com URL.
+    """
+    origin = _git_origin_url()
+    repo = github_repo_from_url(origin) if origin else None
+    if repo:
+        return repo
     res = gh("repo", "view", "--json", "nameWithOwner")
     if not res.ok:
         return None
@@ -2391,6 +2441,13 @@ def watch(
     deadline = time.monotonic() + timeout
     snapshot: PRSnapshot | None = None
     required_names: set[str] | None = None
+    # Resolve the repository once, up front, and pass it to every gh call: a
+    # bare call in a fork resolves to the parent repository (#1741). Without
+    # a repository every poll would fail, so that is fatal (#1418).
+    repo = repo or _resolve_origin_repo()
+    if not repo:
+        _exit_unreachable("no repository: pass --repo or add an `origin` remote", log)
+        return EXIT_GITHUB_UNREACHABLE
     # Initial snapshot — bail fast if the PR isn't open. A failed fetch is
     # GitHub being unreachable, never "closed" (#1418).
     for attempt in range(1, MAX_CONSECUTIVE_API_FAILURES + 1):
@@ -2413,12 +2470,8 @@ def watch(
         label = "merged" if snapshot.state == "MERGED" else "closed"
         _exit_after_cancel(code, label, pr, repo, snapshot.head_sha, opts, log)
 
-    # Resolve required check names (best-effort). Without a repository every
-    # poll would fail, so that is fatal up front (#1418).
-    repo_for_protection = repo or _resolve_origin_repo()
-    if not repo_for_protection:
-        _exit_unreachable("no repository: pass --repo or add an `origin` remote", log)
-        return EXIT_GITHUB_UNREACHABLE
+    # Resolve required check names (best-effort).
+    repo_for_protection = repo
     required_names = fetch_required_check_names(repo_for_protection, snapshot.base_ref)
     opts = replace(opts, pinned_sha=snapshot.head_sha)
     seen_head = snapshot.head_sha
@@ -2426,6 +2479,9 @@ def watch(
     idle_since: float | None = None
     no_checks_reasons: dict[str, str | None] = {}
     api_failures = 0
+    # Consecutive polls whose rollup showed a required failure but no REST
+    # check-run data to judge it by (#1742).
+    unjudged_polls = 0
     unknown_polls = 0
 
     review_state = ReviewState()
@@ -2626,41 +2682,35 @@ def watch(
                 continue
             failing = [j.as_check_row() for j in verdict.advisory_failing]
         else:
-            # Classify each failing check as required or advisory.
-            for c in failing:
-                if not _is_required(c, required_names, require_re):
-                    continue
-                # First failing required check → bail.
+            # Rollup fallback: no REST check-run data this poll. The rollup
+            # carries every run's checks on the head, including runs that
+            # concurrency superseded, and names no run order, so it cannot
+            # tell a stale aggregate's `failure` from a live one. A failure
+            # verdict (and any cancel) comes only from `judge_check_runs`
+            # (#1742): an unjudgeable required failure is a degraded poll.
+            unjudged = [c for c in failing if _is_required(c, required_names, require_re)]
+            if unjudged:
+                unjudged_polls += 1
+                why = "check runs unavailable; a rollup failure is never judged without them"
+                print(
+                    f"NOTE  {unjudged[0].name} reads {unjudged[0].state or 'failed'} in the "
+                    f"rollup, but {why}; retrying",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 if log:
                     log.emit(
-                        "required_failure",
-                        check={
-                            "name": c.name,
-                            "state": c.state or c.bucket,
-                            "link": c.link,
-                        },
+                        "api_degraded",
+                        source="head_checks",
+                        reason="rollup_failure_unjudged",
+                        check=unjudged[0].name,
+                        consecutive=unjudged_polls,
                     )
-                # Diagnose first, then cancel. The probe is one bounded request
-                # against the failing *job*, so the matrix minutes this costs are
-                # seconds; cancelling first raced the log's availability and left
-                # the caller with a bare "FAIL <name>" and nothing to act on,
-                # which is the opposite of what failing fast is for.
-                report = _build_failure_report(c, repo_for_protection)
-                _cancel_for_exit("fail", pr, repo, snapshot.head_sha, opts, log)
-                if "fail" in opts.on or "always" in opts.on:
-                    print(
-                        f"NOTE  {len(pending)} check(s) still running on this head SHA; "
-                        "cancelling this PR's remaining runs — push a fix to supersede them"
-                    )
-                print(report.render())
-                if log and (report.first_error or report.classifier):
-                    log.emit(
-                        "failure_diagnostic",
-                        check_name=c.name,
-                        first_error=report.first_error,
-                        classifier=report.classifier,
-                    )
-                _finish_exit(EXIT_REQUIRED_FAIL, "fail", log)
+                if unjudged_polls >= MAX_CONSECUTIVE_API_FAILURES:
+                    _exit_unreachable(f"{unjudged_polls} consecutive polls: {why}", log)
+                _sleep_remaining_interval(poll_started, interval)
+                continue
+        unjudged_polls = 0
 
         # A conflict never resolves by waiting (#1418).
         if snapshot.mergeable == "CONFLICTING" or snapshot.merge_state == "DIRTY":
@@ -2952,7 +3002,9 @@ def _act_on_verdict(
                 "workflow": first.workflow,
             },
         )
-    # Diagnose first, then cancel (see the rollup path for why).
+    # Diagnose first, then cancel. The probe is one bounded request against
+    # the failing *job*; cancelling first raced the log's availability and
+    # left the caller a bare "FAIL <name>" with nothing to act on.
     reports = [_build_failure_report(first.as_check_row(), repo_for_reports)]
     reports += [
         FailureReport(j.as_check_row(), str(j.run_id) if j.run_id else None, "", None)
@@ -3092,7 +3144,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument("pr_number", type=int, help="PR number to watch")
-    p.add_argument("--repo", help="owner/name (defaults to current repo's origin)")
+    p.add_argument(
+        "--repo",
+        help="owner/name (default: the repo of `git remote get-url origin`, so a fork "
+        "watches its own PR, not the parent's; gh's default repo only when origin is "
+        "not a github.com URL). Every gh call carries it explicitly",
+    )
     p.add_argument(
         "--interval",
         type=int,
