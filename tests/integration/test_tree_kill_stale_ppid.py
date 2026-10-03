@@ -10,7 +10,6 @@ went *up* into the runner and killed pytest itself (exit 1, no summary).
 
 from __future__ import annotations
 
-import gc
 import os
 import sys
 import time
@@ -76,50 +75,49 @@ def _wait_until(predicate, timeout: float) -> bool:
     return predicate()
 
 
-def _launch_and_exit() -> int:
-    """Run `cmd /c start /b ping`, wait for cmd.exe to exit, return its PID.
+def _orphan_with_stale_parent() -> tuple[process.RunningChild, int, psutil.Process]:
+    """Leave a ping.exe whose parent PID names an exited cmd.exe.
 
-    The child object goes out of scope on return, closing our handle on the
-    dead cmd.exe: Windows keeps a PID reserved while any handle is open.
+    Returns `(keeper, dead parent PID, orphan)`. The outer cmd.exe (the
+    keeper) runs `start /b cmd /c start /b ping` and then a ping of its own,
+    so it stays alive: running-process holds each child in a kill-on-close
+    job, and dropping a child that exited would take the orphan with it. The
+    inner cmd.exe exits at once, and nothing of ours ever held a handle to it,
+    so its PID is free to be recycled.
     """
-    # No captured pipes: ping would inherit them, and draining them to EOF
-    # would wait for ping. Its output goes to NUL instead.
-    launcher = process.Popen(
-        # No empty title argument: an argv "" does not survive quoting intact.
-        ["cmd", "/d", "/c", "start", "/b", "ping", "-n", "120", "127.0.0.1", ">NUL", "2>&1"],
+    started = time.time()
+    keeper = process.Popen(
+        [
+            "cmd", "/d", "/c",
+            "start", "/b", "cmd", "/d", "/c", "start", "/b", "ping", "-n", "120", "127.0.0.1",
+            ">NUL", "2>&1", "&",
+            "ping", "-n", "120", "127.0.0.1", ">NUL", "2>&1",
+        ],
     )
-    pid = launcher.pid
-    assert pid is not None
-    assert _wait_until(lambda: launcher.poll() is not None, 10), "cmd.exe launcher did not exit"
-    return pid
-
-
-def _orphan_with_stale_parent() -> tuple[int, psutil.Process]:
-    """Start ping.exe through a cmd.exe that then exits; return (dead ppid, ping)."""
-    stale_parent = _launch_and_exit()
-    gc.collect()
     orphan: list[psutil.Process] = []
 
     def find() -> bool:
-        for candidate in psutil.process_iter(["ppid", "name"]):
-            if candidate.info["ppid"] == stale_parent and (
-                (candidate.info["name"] or "").lower() == "ping.exe"
+        for candidate in psutil.process_iter(["ppid", "name", "create_time"]):
+            info = candidate.info
+            if (
+                (info["name"] or "").lower() == "ping.exe"
+                and (info["create_time"] or 0) >= started - 1
+                and info["ppid"] not in (None, keeper.pid)
+                and not psutil.pid_exists(info["ppid"])
             ):
                 orphan.append(candidate)
                 return True
         return False
 
     if not _wait_until(find, 10):
-        survivors = [
-            f"{p.pid}:{p.info['name']}"
-            for p in psutil.process_iter(["ppid", "name"])
-            if p.info["ppid"] == stale_parent
+        keeper.kill()
+        tree = [
+            f"{p.pid}:{p.info['name']}<-{p.info['ppid']}"
+            for p in psutil.process_iter(["ppid", "name", "create_time"])
+            if (p.info["create_time"] or 0) >= started - 1
         ]
-        pytest.fail(
-            "ping.exe started by `start /b` never appeared; "
-            f"children of {stale_parent}: {survivors}"
-        )
-    return stale_parent, orphan[0]
+        pytest.fail(f"no ping.exe with an exited parent appeared; recent processes: {tree}")
+    return keeper, orphan[0].ppid(), orphan[0]
 
 
 def _recycle(pid: int) -> process.RunningChild | None:
@@ -140,7 +138,7 @@ def _recycle(pid: int) -> process.RunningChild | None:
 
 
 def test_tree_kill_spares_older_process_whose_parent_pid_was_recycled() -> None:
-    stale_parent, orphan = _orphan_with_stale_parent()
+    keeper, stale_parent, orphan = _orphan_with_stale_parent()
     orphan_created = orphan.create_time()
     holder = None
     try:
@@ -166,3 +164,4 @@ def test_tree_kill_spares_older_process_whose_parent_pid_was_recycled() -> None:
             orphan.kill()
         except psutil.Error:
             pass
+        process.terminate_process_tree(keeper.pid)
