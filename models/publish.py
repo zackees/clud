@@ -18,6 +18,7 @@ PAGES = "https://zackees.github.io/clud"
 OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models"
 MODELS_DEV = "https://models.dev/api.json"
 MAX_RESPONSE = 8_000_000
+POLICY_PATH = Path(__file__).with_name("selection-policy.json")
 
 
 def fetch(url: str) -> bytes:
@@ -92,8 +93,13 @@ def stage_site(destination: Path, *, trigger: str, now: datetime) -> str:
     if not should_publish(previous, now=now, trigger=trigger):
         return "recent-manual"
     checked_at = now.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+    blocked_ids = policy["blocked_chatgpt_backend_models"]
+    if not isinstance(blocked_ids, list) or not all(isinstance(value, str) for value in blocked_ids):
+        raise ValueError("invalid blocked ChatGPT backend model policy")
     document = merge_manifest(
-        previous, observed_model_ids(), checked_at=checked_at, trigger=trigger
+        previous, observed_model_ids(), checked_at=checked_at, trigger=trigger,
+        blocked_ids=blocked_ids,
     )
     validate_manifest(document)
     if previous and previous.get("families") == document["families"]:

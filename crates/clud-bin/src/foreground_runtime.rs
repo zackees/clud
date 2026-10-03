@@ -422,6 +422,11 @@ impl ForegroundRuntime {
             let bridge = BridgeHandle::start(
                 BridgeConfig::default()
                     .with_default_model(selection.clone())
+                    .with_selected_model_cli_id(
+                        plan.model_selection
+                            .as_ref()
+                            .and_then(|selection| selection.model.clone()),
+                    )
                     .with_allowed_models(codex_via_claude_bridge_allowlist(plan)),
             )?;
             apply_cross_route_overlay(&mut env, &bridge)?;

@@ -338,6 +338,7 @@ pub struct BridgeConfig {
     /// keeps the built-in default. A request that names its own model still
     /// wins over this.
     default_model: Option<ModelSpec>,
+    selected_model_cli_id: Option<String>,
     /// Every model a request may name on this bridge (#1257). Empty means
     /// unconstrained -- byte-for-byte the pre-#1257 behavior. The
     /// codex-via-claude route folds in its own injected role rows when it
@@ -376,6 +377,7 @@ impl Default for BridgeConfig {
             first_frame_timeout: DEFAULT_FIRST_FRAME_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             default_model: None,
+            selected_model_cli_id: None,
             allowed_models: Vec::new(),
             gateway_mode: GatewayMode::Codex,
             history_limits: HistoryLimits::default(),
@@ -399,6 +401,13 @@ impl BridgeConfig {
     /// Pin the selection used when a request carries no model of its own.
     pub fn with_default_model(mut self, model: Option<ModelSpec>) -> Self {
         self.default_model = model;
+        self
+    }
+
+    /// Catalog row selected at launch. The discovery ID for this row must
+    /// retain the resolved launch wire ID, including an explicit --model pin.
+    pub fn with_selected_model_cli_id(mut self, cli_id: Option<String>) -> Self {
+        self.selected_model_cli_id = cli_id;
         self
     }
 
@@ -2890,11 +2899,7 @@ fn serve_codex_discovery_messages(
         record_model_substitution(log, base, &served);
     }
     if let Some(entry) = discovered {
-        let target = if base.eq_ignore_ascii_case(entry.wire_id) {
-            base.to_string()
-        } else {
-            crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
-        };
+        let target = codex_discovery_wire_model(config, entry, base);
         let wire_model =
             effort.map_or_else(|| target.clone(), |effort| format!("{target}@{effort}"));
         request["model"] = serde_json::Value::String(wire_model);
@@ -2912,6 +2917,22 @@ fn serve_codex_discovery_messages(
         log,
         cache_health,
     );
+}
+
+fn codex_discovery_wire_model(
+    config: &BridgeConfig,
+    entry: provider_catalog::CatalogModel,
+    requested: &str,
+) -> String {
+    if config.selected_model_cli_id.as_deref() == Some(entry.cli_id) {
+        if let Some(model) = &config.default_model {
+            return model.model.clone();
+        }
+    }
+    if requested.eq_ignore_ascii_case(entry.wire_id) {
+        return requested.to_string();
+    }
+    crate::codex_runtime::wire_id(entry.cli_id, entry.wire_id)
 }
 
 /// Serve one `POST /v1/messages`.
@@ -9269,6 +9290,27 @@ Connection: close
         let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
         assert_eq!(json["model"], "gpt-6-sol");
         assert_eq!(json["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn discovery_id_preserves_launch_pin_instead_of_reresolving_remote_default() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_default_model(Some(ModelSpec::parse("gpt-5.6-sol@low").unwrap()))
+                .with_selected_model_cli_id(Some("codex-sol".to_string())),
+        )
+        .unwrap();
+        let body = PROBE_BODY.replace("claude-x", "clud-claude-codex-sol");
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &body),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        let sent = upstream.requests().remove(0);
+        let body: serde_json::Value =
+            serde_json::from_str(sent.split("\r\n\r\n").nth(1).expect("request body")).unwrap();
+        assert_eq!(body["model"], "gpt-5.6-sol");
     }
 
     #[test]
