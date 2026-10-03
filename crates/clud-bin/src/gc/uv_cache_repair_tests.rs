@@ -166,7 +166,18 @@ mod unix {
         assert_eq!(report.repaired, 0);
         assert!(intact(&bad));
         drop(uv_lock);
-        assert_eq!(repair_corrupt_wheels_at(&root, false).repaired, 1);
+        // flock belongs to the open file description, and a sibling test
+        // forking a child at this instant holds a duplicate of our fd until
+        // that child execs. The lock is then still held for a moment after
+        // the drop, so poll briefly instead of asserting on one pass.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while repair_corrupt_wheels_at(&root, false).repaired == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "entry lock never released"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(invalidated(&bad));
     }
 
