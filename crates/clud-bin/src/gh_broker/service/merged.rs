@@ -32,6 +32,14 @@ pub(super) enum Merged {
     Fallback(u32),
 }
 
+/// The first page of an incremental query: its URL and ETag (for the next
+/// repeat) and headers (for the rebuilt response).
+struct FirstPage {
+    url: String,
+    etag: Option<String>,
+    headers: Vec<(String, String)>,
+}
+
 enum Refresh {
     Done(Box<CollectionState>, Outcome, Option<u32>),
     /// A delta too large to page through: fetch the collection in full.
@@ -330,7 +338,7 @@ fn delta(
         return Ok(Refresh::Reseed);
     };
     let mut incoming = Vec::new();
-    let mut first: Option<(String, Option<String>, Vec<(String, String)>)> = None;
+    let mut first: Option<FirstPage> = None;
     for page in 1..=collection::MAX_DELTA_PAGES {
         let url = plan.delta_url(&bound, page);
         // An unchanged bound repeats the last URL: revalidate it.
@@ -359,7 +367,11 @@ fn delta(
             let etag = (!more)
                 .then(|| response.header("etag").map(str::to_string))
                 .flatten();
-            first = Some((url, etag, collection::kept_headers(&response.headers)));
+            first = Some(FirstPage {
+                url,
+                etag,
+                headers: collection::kept_headers(&response.headers),
+            });
         }
         incoming.extend(parsed.members);
         if more {
@@ -381,10 +393,10 @@ fn delta(
             // again and bring that object back.
             state.seed_etag = None;
         }
-        if let Some((url, etag, headers)) = first {
-            state.delta_url = Some(url);
-            state.delta_etag = etag;
-            state.headers = headers;
+        if let Some(page) = first {
+            state.delta_url = Some(page.url);
+            state.delta_etag = page.etag;
+            state.headers = page.headers;
         }
         state.fetched_at_ms = started;
         return Ok(Refresh::Done(

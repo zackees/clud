@@ -166,13 +166,16 @@ fn pages_parse_only_when_they_rebuild_byte_for_byte() {
 
 #[test]
 fn upsert_dedupes_by_id_and_newer_updated_at_wins() {
+    // One page per item: an upsert batch need not be in natural order.
     let parse = |items: &[String]| {
-        parse_page(
-            Kind::IssueComments,
-            format!("[{}]", items.join(",")).as_bytes(),
-        )
-        .unwrap()
-        .members
+        items
+            .iter()
+            .flat_map(|item| {
+                parse_page(Kind::IssueComments, format!("[{item}]").as_bytes())
+                    .unwrap()
+                    .members
+            })
+            .collect::<Vec<_>>()
     };
     let mut members = parse(&[
         comment(1, "2026-10-02T10:00:00Z", "2026-10-02T10:00:00Z"),
