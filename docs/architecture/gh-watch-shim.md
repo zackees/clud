@@ -16,7 +16,11 @@ instead parsed against a deliberately narrow flag contract. Numeric PRs go
 directly to the bundled watcher; omitted, branch, and URL selectors are
 resolved by the real executable's `pr view` command. The watcher runs through
 the pinned `CLUD_EXE tool run github/pr_merge_watch.py` path; without a
-valid `CLUD_EXE` the watch runs on the real executable unchanged. Unsupported
+valid `CLUD_EXE` the watch runs on the real executable unchanged. The
+upgrade is fail-fast only: it passes `--cancel-on fail`, so review activity
+or a closed PR ends the watch without cancelling anything, and a failure
+cancels only the failing run and older runs of its workflow, judged by the
+watcher's supersession rule (#1742). Unsupported
 flags fail explicitly so the shim cannot silently change a future CLI's
 output or wait contract.
 

@@ -498,6 +498,11 @@ mod gh_shim {
             .map(OsString::from)
             .to_vec();
         args.push(number.into());
+        // #1742: the upgrade is fail-fast only. The watcher's default also
+        // cancels on review activity and on close, which turned an open
+        // CodeRabbit thread into a cancelled matrix. On a failure the watcher
+        // cancels only the failing run and older runs of its workflow.
+        args.extend(["--cancel-on", "fail"].map(OsString::from));
         if let Some(value) = repo {
             args.extend([OsString::from("--repo"), value.into()]);
         }

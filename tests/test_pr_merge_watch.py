@@ -39,6 +39,7 @@ def gate_snapshot(
     probe=None,
     coderabbit=None,
     human_review_ids: frozenset[int] = frozenset(),
+    rest: bool = False,
 ):
     return watcher.GateSnapshot(
         pr=watcher.PRSnapshot(527, state, mergeable, "abc123", "main"),
@@ -46,7 +47,40 @@ def gate_snapshot(
         human_review_ids=human_review_ids,
         coderabbit_probe=probe or watcher.CodeRabbitProbe("not_detected", 0),
         coderabbit=coderabbit or watcher.CodeRabbitObservation("quiet"),
+        head_checks=head_checks_for(watcher, checks) if rest else None,
     )
+
+
+def head_checks_for(watcher, rows: list):
+    """The REST check runs behind rollup `rows`, all in one in-progress run.
+
+    A required failure is judged only from REST data (#1742); the rollup
+    alone never decides one.
+    """
+    check_runs = []
+    for number, row in enumerate(rows, start=1):
+        done = row.bucket != "pending"
+        check_runs.append(
+            {
+                "id": number,
+                "name": row.name,
+                "head_sha": "abc123",
+                "status": "completed" if done else "in_progress",
+                "conclusion": row.state.lower() if done else None,
+                "details_url": f"https://github.com/zackees/clud/actions/runs/900/job/{number}",
+            }
+        )
+    run = {
+        "id": 900,
+        "run_number": 1,
+        "path": ".github/workflows/ci.yml",
+        "head_sha": "abc123",
+        "event": "pull_request",
+        "status": "in_progress",
+        "conclusion": None,
+        "created_at": "2026-10-02T00:00:00Z",
+    }
+    return watcher.HeadChecks(check_runs, [run])
 
 
 def test_tool_watchdog_cap_clamps_default_and_explicit_timeout(
@@ -389,10 +423,12 @@ def test_required_red_logs_then_cancels_without_another_poll(
                 watcher.CheckRow("windows", "pending", "IN_PROGRESS"),
             ],
             mergeable="UNKNOWN",
+            rest=True,
         )
 
     monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
     monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
+    monkeypatch.setattr(watcher, "_rerun_since_verdict", lambda *args: None)
     monkeypatch.setattr(
         watcher,
         "_build_failure_report",
@@ -402,7 +438,7 @@ def test_required_red_logs_then_cancels_without_another_poll(
     monkeypatch.setattr(
         watcher,
         "cancel_pr_runs",
-        lambda _pr, _repo, sha, _opts, _log=None: cancellations.append(sha) or 1,
+        lambda _pr, _repo, sha, _opts, _log=None, **_kw: cancellations.append(sha) or 1,
     )
     opts = watcher.CancelOptions(
         on={"fail"},
@@ -454,10 +490,12 @@ def test_empty_required_set_fails_fast_instead_of_waiting_for_the_matrix(
                 watcher.CheckRow("macos arm64", "pending", "IN_PROGRESS"),
             ],
             mergeable="UNKNOWN",
+            rest=True,
         )
 
     monkeypatch.setattr(watcher, "fetch_gate_snapshot", gates)
     monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
+    monkeypatch.setattr(watcher, "_rerun_since_verdict", lambda *args: None)
     monkeypatch.setattr(
         watcher,
         "_build_failure_report",
@@ -466,7 +504,7 @@ def test_empty_required_set_fails_fast_instead_of_waiting_for_the_matrix(
     monkeypatch.setattr(
         watcher,
         "cancel_pr_runs",
-        lambda _pr, _repo, _sha, _opts, _log=None: 1,
+        lambda _pr, _repo, _sha, _opts, _log=None, **_kw: 1,
     )
     opts = watcher.CancelOptions(
         on={"fail"},
@@ -553,9 +591,11 @@ def test_required_red_diagnoses_before_cancelling(
             watcher,
             [watcher.CheckRow("linux", "fail", "FAILURE")],
             mergeable="UNKNOWN",
+            rest=True,
         ),
     )
     monkeypatch.setattr(watcher, "emit_progress_report", lambda *args: None)
+    monkeypatch.setattr(watcher, "_rerun_since_verdict", lambda *args: None)
     order: list[str] = []
     monkeypatch.setattr(
         watcher,

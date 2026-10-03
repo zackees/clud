@@ -89,7 +89,7 @@ def test_pr_checks_watch_routes_to_bundled_watcher_and_preserves_exit(tmp_path: 
     assert result.returncode == 4, result
     assert not real_gh_log.exists()
     assert clud_log.read_text(encoding="utf-8").splitlines() == [
-        "tool", "run", "github/pr_merge_watch.py", "123",
+        "tool", "run", "github/pr_merge_watch.py", "123", "--cancel-on", "fail",
         "--repo", "zackees/clud", "--interval", "7",
     ]
 
@@ -149,7 +149,8 @@ def test_watch_resolves_non_numeric_selector(tmp_path: Path, selector: str) -> N
     expected_lookup += ["--json", "number", "--jq", ".number", "--repo", "zackees/clud"]
     assert lookup_log.read_text(encoding="utf-8").splitlines() == expected_lookup
     assert watcher_log.read_text(encoding="utf-8").splitlines() == [
-        "tool", "run", "github/pr_merge_watch.py", "42", "--repo", "zackees/clud",
+        "tool", "run", "github/pr_merge_watch.py", "42", "--cancel-on", "fail",
+        "--repo", "zackees/clud",
     ]
 
 
@@ -297,7 +298,9 @@ def test_shim_reaches_real_bundled_watcher(tmp_path: Path) -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell fixture")
 @pytest.mark.parametrize(
     ("scenario", "exit_code", "should_cancel"),
-    [("fail", 1, True), ("review", 2, True), ("no_checks", 8, False)],
+    # #1742: the upgrade is fail-fast only. A review exit (the FastLED/fbuild#1624
+    # incident: an open CodeRabbit thread) must never cancel the PR's CI.
+    [("fail", 1, True), ("review", 2, False), ("no_checks", 8, False)],
 )
 def test_shim_preserves_real_watcher_outcomes(
     tmp_path: Path, scenario: str, exit_code: int, should_cancel: bool
@@ -351,5 +354,5 @@ def test_windows_gh_alias_dispatches_watch_and_relay(tmp_path: Path) -> None:
     )
     assert watched.returncode == 0, watched
     assert json.loads(recorded.read_text(encoding="utf-8")) == [
-        "tool", "run", "github/pr_merge_watch.py", "123",
+        "tool", "run", "github/pr_merge_watch.py", "123", "--cancel-on", "fail",
     ]
