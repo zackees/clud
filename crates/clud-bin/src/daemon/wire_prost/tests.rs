@@ -13,6 +13,7 @@ use super::session::to_json_vec;
 fn sample_launch_spec() -> WorkerLaunchSpec {
     WorkerLaunchSpec {
         plan: LaunchPlan {
+            unsafe_mode: true,
             command: vec!["claude".to_string()],
             iterations: 1,
             backend: Backend::Claude,
@@ -215,6 +216,7 @@ fn daemon_create_roundtrip_preserves_resolved_launch_metadata() {
     assert_eq!(spec.plan.model_provider, Some(ModelProvider::Codex));
     assert_eq!(spec.plan.requested_harness, Some(HarnessSelection::Claude));
     assert_eq!(spec.plan.effective_harness, Some(Backend::Claude));
+    assert!(spec.plan.unsafe_mode);
     assert_eq!(
         spec.login_env,
         vec![("PATH".to_string(), "C:\\Windows\\System32".to_string())]

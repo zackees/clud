@@ -303,8 +303,12 @@ pub(crate) fn build_launch_plan_at(
     build_launch_plan_for_target_at(args, target, backend_path, cwd)
 }
 
-fn merge_claude_append_prompt(passthrough: &[String]) -> (String, Vec<String>) {
-    let mut prompt = crate::deletion_rules::generated().instructions;
+fn merge_claude_append_prompt(passthrough: &[String], unsafe_mode: bool) -> (String, Vec<String>) {
+    let mut prompt = if unsafe_mode {
+        String::new()
+    } else {
+        crate::deletion_rules::generated().instructions
+    };
     let mut remaining = Vec::new();
     let mut index = 0;
     while index < passthrough.len() {
@@ -315,7 +319,9 @@ fn merge_claude_append_prompt(passthrough: &[String]) -> (String, Vec<String>) {
             argument.strip_prefix("--append-system-prompt=")
         };
         if let Some(value) = value {
-            prompt.push_str("\n\n");
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
             prompt.push_str(value);
             index += if argument == "--append-system-prompt" {
                 2
@@ -372,7 +378,7 @@ fn build_launch_plan_for_target_at(
     let backend = target.effective_harness;
     let mut cmd = vec![backend_path.to_string()];
     let (deletion_instructions, mut passthrough) = if backend == Backend::Claude {
-        merge_claude_append_prompt(&args.passthrough)
+        merge_claude_append_prompt(&args.passthrough, args.unsafe_mode)
     } else {
         (String::new(), args.passthrough.clone())
     };
@@ -432,7 +438,7 @@ fn build_launch_plan_for_target_at(
         }
     }
 
-    if matches!(backend, Backend::Claude) {
+    if matches!(backend, Backend::Claude) && !deletion_instructions.is_empty() {
         cmd.push("--append-system-prompt".into());
         cmd.push(deletion_instructions);
     }
@@ -449,20 +455,31 @@ fn build_launch_plan_for_target_at(
         let scan = "clud-cmd-scan";
         cmd.extend(["-c".into(), format!("hooks.PreToolUse=[{{matcher=\"Bash\",hooks=[{{type=\"command\",command=\"{scan}\"}}]}}]")]);
         cmd.extend(["-c".into(), format!("hooks.state={{\"/<session-flags>/config.toml:pre_tool_use:0:0\"={{trusted_hash=\"{}\"}}}}", codex_hook_hash(scan))]);
+        let has_passthrough_instructions = codex_passthrough_instructions.is_some();
+        let existing_instructions = if has_passthrough_instructions {
+            None
+        } else {
+            existing_codex_instructions(args)
+        };
+        let has_user_instructions = has_passthrough_instructions || existing_instructions.is_some();
         let mut instructions = codex_passthrough_instructions
-            .or_else(|| existing_codex_instructions(args))
+            .or(existing_instructions)
             .unwrap_or_default();
-        if !instructions.is_empty() {
-            instructions.push_str("\n\n");
+        if !args.unsafe_mode {
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(&crate::deletion_rules::generated().instructions);
         }
-        instructions.push_str(&crate::deletion_rules::generated().instructions);
-        cmd.extend([
-            "-c".into(),
-            format!(
-                "developer_instructions={}",
-                toml::Value::String(instructions)
-            ),
-        ]);
+        if !instructions.is_empty() || has_user_instructions {
+            cmd.extend([
+                "-c".into(),
+                format!(
+                    "developer_instructions={}",
+                    toml::Value::String(instructions)
+                ),
+            ]);
+        }
     }
 
     if !args.safe {
@@ -795,6 +812,7 @@ fn build_launch_plan_for_target_at(
     }
 
     LaunchPlan {
+        unsafe_mode: args.unsafe_mode,
         command: cmd,
         iterations,
         backend,

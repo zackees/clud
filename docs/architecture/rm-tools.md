@@ -1,5 +1,9 @@
 # Agent deletion: `safe-rm`
 
+An explicit `clud --unsafe` launch disables clud's generated deletion policy;
+an explicit `safe-rm` call still follows the behavior documented here. See
+[unsafe-mode.md](unsafe-mode.md).
+
 `safe-rm` is the agent-facing deletion command. It accepts familiar `rm`
 options: `-r`/`-R` for directories, `-d` for an empty directory, `-f` for
 missing operands, and `-v` for removal messages. It moves accepted paths to

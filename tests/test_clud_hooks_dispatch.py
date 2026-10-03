@@ -61,6 +61,7 @@ def _run(
     *,
     payload: dict,
     argv_extra: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> process.CompletedProcess[str]:
     """Invoke cmd-scan with `payload` on stdin.
 
@@ -77,6 +78,8 @@ def _run(
     # tests want the walk-up path exercised instead.
     env.pop("CLAUDE_PROJECT_DIR", None)
     env.pop("CLUD_BAD_CMD_OVERRIDE", None)
+    if extra_env:
+        env.update(extra_env)
     argv = [str(_cmd_scan_binary()), *(argv_extra or [])]
     return process.run(
         argv,
@@ -111,6 +114,24 @@ def test_a_declared_pretooluse_hook_can_block_the_call(tmp_path: Path) -> None:
 
     assert result.returncode == 2, result.stdout + result.stderr
     assert "run bash lint first" in result.stdout + result.stderr
+
+
+def test_unsafe_mode_still_runs_a_declared_project_hook(tmp_path: Path) -> None:
+    repo = _make_repo(
+        tmp_path,
+        {
+            "PreToolUse": [
+                {"matcher": "Bash", "command": _python_hook(tmp_path / "block.py", BLOCKING_HOOK)}
+            ]
+        },
+    )
+    result = _run(
+        tmp_path,
+        payload={"tool_name": "Bash", "cwd": str(repo), "tool_input": {"command": "rm -rf build"}},
+        extra_env={"CLUD_UNSAFE_MODE": "1"},
+    )
+    assert result.returncode == 2, result
+    assert "permissionDecision" in result.stdout
 
 
 def test_a_declared_hook_runs_rooted_at_the_repo_despite_a_drifted_cwd(
@@ -160,8 +181,7 @@ def test_the_payload_is_forwarded_to_the_hook_unchanged(tmp_path: Path) -> None:
                 {
                     "command": _python_hook(
                         tmp_path / "echo.py",
-                        "import sys\n"
-                        f'open(r"{seen.as_posix()}", "w").write(sys.stdin.read())\n',
+                        f'import sys\nopen(r"{seen.as_posix()}", "w").write(sys.stdin.read())\n',
                     )
                 }
             ]
@@ -182,9 +202,7 @@ def test_a_matcher_scopes_the_hook_to_its_tool(tmp_path: Path) -> None:
             "PreToolUse": [
                 {
                     "matcher": "Edit",
-                    "command": _python_hook(
-                        tmp_path / "edit_only.py", "import sys\nsys.exit(2)\n"
-                    ),
+                    "command": _python_hook(tmp_path / "edit_only.py", "import sys\nsys.exit(2)\n"),
                 }
             ]
         },
@@ -280,6 +298,7 @@ def test_a_broken_hook_fails_open_rather_than_wedging_the_session(
 
     assert result.returncode == 0, result.stdout + result.stderr
 
+
 # ---------------------------------------------------------------------
 # #967 Phase 3: containment decides whose hooks fire.
 # ---------------------------------------------------------------------
@@ -291,15 +310,7 @@ def test_parent_hooks_do_not_fire_for_an_extern_repo_path(tmp_path: Path) -> Non
     # root, which is exactly how a subagent reports an edit in a sub-repo.
     repo = _make_repo(
         tmp_path,
-        {
-            "PreToolUse": [
-                {
-                    "command": _python_hook(
-                        tmp_path / "guard.py", BLOCKING_HOOK
-                    )
-                }
-            ]
-        },
+        {"PreToolUse": [{"command": _python_hook(tmp_path / "guard.py", BLOCKING_HOOK)}]},
     )
     extern = repo / ".extern-repos" / "dep"
     (extern / ".git").mkdir(parents=True)
@@ -329,15 +340,7 @@ def test_parent_hooks_do_fire_for_a_declared_child_path(tmp_path: Path) -> None:
     # A declared child is part of the parent's world, unlike a visitor.
     repo = _make_repo(
         tmp_path,
-        {
-            "PreToolUse": [
-                {
-                    "command": _python_hook(
-                        tmp_path / "child_guard.py", BLOCKING_HOOK
-                    )
-                }
-            ]
-        },
+        {"PreToolUse": [{"command": _python_hook(tmp_path / "child_guard.py", BLOCKING_HOOK)}]},
     )
     child = repo / "packages" / "core"
     (child / ".git").mkdir(parents=True)
@@ -366,9 +369,7 @@ def test_a_cd_into_an_extern_repo_moves_containment_with_it(tmp_path: Path) -> N
             "PreToolUse": [
                 {
                     "matcher": "Bash",
-                    "command": _python_hook(
-                        tmp_path / "bash_guard.py", BLOCKING_HOOK
-                    ),
+                    "command": _python_hook(tmp_path / "bash_guard.py", BLOCKING_HOOK),
                 }
             ]
         },

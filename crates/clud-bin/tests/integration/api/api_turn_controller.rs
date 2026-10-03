@@ -26,6 +26,7 @@ fn plan(
     exit_code: i32,
 ) -> LaunchPlan {
     LaunchPlan {
+        unsafe_mode: false,
         command: vec![
             executable.to_string_lossy().into_owned(),
             "--mock-stream-json".to_string(),

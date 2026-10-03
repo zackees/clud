@@ -705,6 +705,25 @@ mod tests {
         env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 
+    #[test]
+    fn unsafe_child_env_preserves_marker_and_removes_clud_shell_guards() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        let base = env_pairs(&[
+            ("HOME", home_str.as_str()),
+            ("PATH", "/base/bin"),
+            (crate::runner::UNSAFE_MODE_ENV, "1"),
+            (crate::shell::cmd_gate::GATE_KEY, "1"),
+        ]);
+        let env = apply_child_env_policy_with(base, false);
+        assert_eq!(value_of(&env, crate::runner::UNSAFE_MODE_ENV), Some("1"));
+        assert_eq!(value_of(&env, crate::shell::cmd_gate::GATE_KEY), None);
+        if let Some(script) = value_of(&env, crate::shell::nounset::BASH_ENV_KEY) {
+            let body = std::fs::read_to_string(script).unwrap();
+            assert!(!body.contains("then set -u;"));
+        }
+    }
+
     /// #1209 RED, platform-neutral: the Windows UTF-8 stdio pair existed only
     /// in the runner's copy of the policy, so Windows daemon sessions spawned
     /// without it. `windows_stdio` is injected rather than read from `cfg!`

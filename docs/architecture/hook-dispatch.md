@@ -33,6 +33,9 @@ in #50960 and #42282 was closed NOT_PLANNED).
 
 ## Two layers
 
+An explicit `clud --unsafe` launch bypasses Tier A while keeping Tier B; see
+[unsafe-mode.md](unsafe-mode.md).
+
 **Tier A — clud policy.** Built-in rules plus `bad_commands` / `bad_pipelines`,
 evaluated in-process on every tool call. No trust gate: it is clud's own code,
 and it self-roots per path via `discover_effective_clud_config`. This is what

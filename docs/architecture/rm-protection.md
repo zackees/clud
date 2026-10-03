@@ -1,5 +1,8 @@
 # The child `rm` catastrophe floor
 
+For the per-launch `--unsafe` bypass of this floor, see
+[unsafe-mode.md](unsafe-mode.md).
+
 The session puts a `clud` alias (hardlink, symlink or copy) named `rm` first on the child's PATH. This
 shim is for commands run *by scripts*, including build tools and installers.
 The floor applies only inside a valid clud session; outside one the alias is

@@ -89,6 +89,7 @@ clud -p "refactor the auth layer" # Run with a prompt, exit when done
 clud -m "what does this do?"      # Send a one-off message
 clud --model opus -p "review PR"  # Choose a model
 clud --safe -p "drop the table"   # Disable YOLO mode (keeps permission prompts)
+clud --unsafe -p "clean build"    # Disable clud's agent safety rules for this launch
 clud --dry-run -p "hello"         # Print what would run without executing
 echo "explain this error" | clud  # Pipe mode: read prompt from stdin
 clud -- --verbose --debug         # Pass extra flags through to the backend
@@ -121,6 +122,7 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--transcript <PATH>` | Tee daemon-managed session output bytes to a transcript file |
 | `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
 | `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
+| `--unsafe` | Disable clud's agent safety rules for this launch ([policy](docs/architecture/unsafe-mode.md)); conflicts with `--safe` |
 | `-c`, `--continue` | At a terminal, pick one of this directory's Claude-harness sessions (newest first, with provider, context estimate and compact checkpoints) to resume; without a terminal, Claude's native `--continue` |
 | `--last` | Resume this directory's newest Claude-harness session without the picker |
 | `--resume-mode <auto\|native\|portable>` | How `-c`/`--last` resumes: `native` is Claude's own resume, `portable` starts a new session from a compact summary plus the newest turns that fit, `auto` (default) picks native when safe |
