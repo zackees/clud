@@ -41,8 +41,10 @@ suite is CPU-bound (every test launches real `clud` processes) and a hosted
 per-test slowdown from contention); separate machines do not contend, so the
 split costs only the extra jobs' setup. `ci/release_gate.py` requires one
 cell per shard. Refresh the weights from a run's `logs/pytest-unit.xml` when
-the balance drifts; a stale or missing entry only costs balance, never
-coverage. All other lanes run the whole suite in one job (`--shard all`).
+the balance drifts, or from the shard jobs' timestamped logs (`gh run view
+--log --job`: each pytest progress line's timestamp minus the previous one's
+is that file's time). Average at least two runs. A stale or missing entry
+only costs balance, never coverage. All other lanes run the whole suite in one job (`--shard all`).
 
 The release workflow's `full-ci-gate` checks for a completed successful manual
 `CI full <candidate SHA>` run before any release build or publisher starts. It
