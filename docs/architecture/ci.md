@@ -235,6 +235,29 @@ never read attestations. The gate runs in `shadow` mode: an unattested head is
 reported, never failed. Plain `bosn ci run` remains valid; it just earns no
 skip.
 
+#### Validation evidence (2026-10-03)
+
+The warm local gate on tree `586af3c573ea` completed in **419 s** using
+bosn 0.1.10 and act2 `0.2.89-act2.2` (run
+`81614bb8-d59f-4a22-b5d0-2694d236b5ae`). Static checks, Clippy/doc-tests,
+all three Dylint target passes, the build, the Rust and both Python unit
+shards, and `CI OK` executed successfully. The gate wrote `Local-Gate:` and
+all seven `Ci-Attestation:` trailers. This is one warm measurement, not a
+cold-build estimate or a native Windows/macOS test result.
+
+[PR #1781](https://github.com/zackees/clud/pull/1781)'s
+[remote run](https://github.com/zackees/clud/actions/runs/37109292374)
+accepted that stamp but reran the routine jobs because the workflow changed
+(`surface-changed`); it passed in 5 min 37 s. An earlier local baseline
+failed during Docker container removal before unit execution
+([ci.yml#250](https://github.com/zackees/ci.yml/issues/250)) and earned no
+stamp. A successful build alone does not justify attesting a skipped suite.
+
+When inspecting `bosn ci report`, also inspect the expanded matrix children
+in `bosn ci show RUN` and their logs: the report can list the unexpanded
+`test-linux-x64-unit` planning node as skipped even when its three children
+executed. Require each actual shard and `CI OK` to pass.
+
 ### Default-branch reuse evidence (GEN-021)
 
 The `CI mode` job probes `main` pushes with the pinned checker's
