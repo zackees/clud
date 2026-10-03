@@ -85,8 +85,8 @@ def _launch_and_exit() -> int:
     # No captured pipes: ping would inherit them, and draining them to EOF
     # would wait for ping. Its output goes to NUL instead.
     launcher = process.Popen(
-        # One string, handed to CreateProcess as-is, so cmd parses the redirect.
-        'cmd /d /c start "" /b ping -n 120 127.0.0.1 >NUL 2>&1',
+        # No empty title argument: an argv "" does not survive quoting intact.
+        ["cmd", "/d", "/c", "start", "/b", "ping", "-n", "120", "127.0.0.1", ">NUL", "2>&1"],
     )
     pid = launcher.pid
     assert pid is not None
