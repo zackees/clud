@@ -264,3 +264,38 @@ def test_disabled_broker_never_contacts_the_daemon(tmp_path: Path) -> None:
     assert world.calls() == ["api repos/o/r", "pr merge 1"]
     assert daemon.reads == []
     assert daemon.invalidations == 0
+
+
+def _write_clud_settings(home: Path, document: dict) -> None:
+    """The test home's clud settings document (never the real user's)."""
+    path = home / ".clud" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def test_a_session_without_the_key_follows_the_setting(tmp_path: Path) -> None:
+    """A session launched before the key existed (clud < 2.8.24) runs a
+    refreshed alias with no `CLUD_GH_READ_BROKER`. It follows the current
+    `git.gh_read_broker` setting (default on) instead of treating the missing
+    key as off; an explicit `0` stays off."""
+    world = World(tmp_path)
+    del world.env["CLUD_GH_READ_BROKER"]
+    home = tmp_path / "home"
+    home.mkdir()
+    world.env["HOME"] = str(home)
+    daemon = FakeDaemon(world.state)
+    try:
+        brokered = world.run("api", "repos/o/r")
+        _write_clud_settings(home, {"git": {"gh_read_broker": False}})
+        off = world.run("api", "repos/o/r/off")
+        _write_clud_settings(home, {})
+        world.env["CLUD_GH_READ_BROKER"] = "0"
+        explicit_off = world.run("api", "repos/o/r/explicit-off")
+    finally:
+        daemon.close()
+    for result in (brokered, off, explicit_off):
+        assert result.returncode == 0, result
+    # The real gh formatted the brokered body (see the first test).
+    assert Path(str(world.log) + ".replayed").read_bytes() == BODY
+    assert [read["endpoint"] for read in daemon.reads] == ["repos/o/r"]
+    assert world.calls()[-2:] == ["api repos/o/r/off", "api repos/o/r/explicit-off"]

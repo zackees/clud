@@ -199,6 +199,18 @@ fn purge_stale_aliases(dir: &Path, expected: &[String]) -> std::io::Result<()> {
 /// Python relays off PATH. A separate directory also avoids activating
 /// previously extracted Python aliases.
 pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
+    install_rm_with(home, source, &alias_link::DEFAULT_ORDER, &|_| true)
+        .map(|installed| installed.unwrap_or_else(|| home.join(shim_registry::SESSION_SUBDIR)))
+}
+
+/// [`install_rm_at`] with the link methods to try and a precondition checked
+/// on the alias dir under the install lock; `Ok(None)` when it refused.
+fn install_rm_with(
+    home: &Path,
+    source: &Path,
+    order: &[alias_link::Method],
+    proceed: &dyn Fn(&Path) -> bool,
+) -> std::io::Result<Option<PathBuf>> {
     use fs4::fs_std::FileExt;
     use std::fs::OpenOptions;
     use std::sync::Mutex;
@@ -220,15 +232,117 @@ pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::other("packaged shim is empty"));
     }
     let dir = home.join(shim_registry::SESSION_SUBDIR);
+    if !proceed(&dir) {
+        return Ok(None);
+    }
     std::fs::create_dir_all(&dir)?;
     let expected = rm_alias_names();
     purge_stale_aliases(&dir, &expected)?;
     for name in expected {
         // A stale or replaced entry is renamed over atomically, so concurrent
         // installers never see a partial alias and never write through one.
-        alias_link::install_alias(source, &dir.join(name))?;
+        alias_link::install_alias_with(source, &dir.join(name), order)?;
     }
-    Ok(dir)
+    Ok(Some(dir))
+}
+
+/// Refresh the shared session aliases from a `clud` started inside a
+/// running session (#1743). A session keeps its launch-time alias dir, so
+/// after an upgrade its `gh`, `git` and `rm` run the old binary until the
+/// next launch relinks them. The session's statusline, hooks and `clud tool`
+/// calls run the installed `clud` by path, so `main` calls this on every CLI
+/// start and the first one after an upgrade relinks the dir. Best effort and
+/// silent: a failure leaves the dir for the next launch.
+pub fn refresh_running_session_aliases() {
+    let (Some(home), Ok(exe)) = (home_dir(), std::env::current_exe()) else {
+        return;
+    };
+    let var = |key: &str| std::env::var_os(key);
+    let _ = refresh_running_session_aliases_at(&home, &exe, &var);
+}
+
+/// [`refresh_running_session_aliases`] for an injected env; `Ok(true)` when it
+/// relinked. It acts only when every gate holds:
+///
+/// - `current_exe` is the session's own installed `clud` (`CLUD_EXE`), so a
+///   dev build or another install run by hand never takes over the dir;
+/// - the session's `CLUD_SHIM_ABI` is this binary's, so the relinked aliases
+///   keep validating this session instead of failing open;
+/// - the session's alias dir is the shared one under `home`, and exists;
+/// - some alias is stale, and none is newer than `current_exe` (by mtime), so
+///   two installs never take the dir back and forth.
+///
+/// Only hardlinks and symlinks are tried: a failure is cheap to retry on the
+/// next call, unlike a full copy of `clud`. Each alias is still replaced by
+/// rename under the install lock, never truncated in place.
+pub fn refresh_running_session_aliases_at(
+    home: &Path,
+    current_exe: &Path,
+    var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::io::Result<bool> {
+    if !is_clud_exe(current_exe)
+        || var(shim_registry::ABI_KEY).as_deref()
+            != Some(std::ffi::OsStr::new(shim_registry::SHIM_ABI))
+    {
+        return Ok(false);
+    }
+    let canonical = |path: PathBuf| std::fs::canonicalize(path).ok();
+    let Some(source) = canonical(current_exe.to_path_buf()) else {
+        return Ok(false);
+    };
+    if var(shim_registry::CLUD_EXE_KEY)
+        .map(PathBuf::from)
+        .and_then(canonical)
+        .as_ref()
+        != Some(&source)
+    {
+        return Ok(false);
+    }
+    let dir = home.join(shim_registry::SESSION_SUBDIR);
+    let Some(shared) = canonical(dir.clone()) else {
+        return Ok(false);
+    };
+    if var(shim_registry::SESSION_DIR_KEY)
+        .map(PathBuf::from)
+        .and_then(canonical)
+        .as_ref()
+        != Some(&shared)
+    {
+        return Ok(false);
+    }
+    let source_modified = std::fs::metadata(&source)?.modified()?;
+    let behind = |dir: &Path| aliases_behind(dir, &source, source_modified);
+    if !behind(&dir) {
+        return Ok(false);
+    }
+    // Checked again under the lock: a newer launch may have relinked since.
+    let installed = install_rm_with(
+        home,
+        &source,
+        &[alias_link::Method::Hardlink, alias_link::Method::Symlink],
+        &behind,
+    )?;
+    Ok(installed.is_some())
+}
+
+/// Whether some session alias in `dir` is not `source` and none of those is
+/// as new as `source` (mtime): the dir belongs to an older install.
+fn aliases_behind(dir: &Path, source: &Path, source_modified: std::time::SystemTime) -> bool {
+    let mut stale = false;
+    for name in rm_alias_names() {
+        let alias = dir.join(name);
+        if alias_link::is_fresh(source, &alias) {
+            continue;
+        }
+        stale = true;
+        if std::fs::metadata(&alias)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified >= source_modified)
+        {
+            return false;
+        }
+    }
+    stale
 }
 
 #[cfg(test)]
@@ -335,6 +449,133 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// The env a running session hands every `clud` it starts: its own
+    /// installed `clud`, the ABI stamp and the shared alias dir.
+    fn running_session(
+        home: &Path,
+        clud: &Path,
+    ) -> std::collections::HashMap<&'static str, std::ffi::OsString> {
+        std::collections::HashMap::from([
+            (shim_registry::CLUD_EXE_KEY, clud.as_os_str().to_owned()),
+            (shim_registry::ABI_KEY, shim_registry::SHIM_ABI.into()),
+            (
+                shim_registry::SESSION_DIR_KEY,
+                home.join(shim_registry::SESSION_SUBDIR).into_os_string(),
+            ),
+        ])
+    }
+
+    fn refresh(
+        home: &Path,
+        clud: &Path,
+        vars: &std::collections::HashMap<&'static str, std::ffi::OsString>,
+    ) -> bool {
+        let var = |key: &str| vars.get(key).cloned();
+        refresh_running_session_aliases_at(home, clud, &var).unwrap()
+    }
+
+    fn links_to(source: &Path, alias: &Path) -> bool {
+        alias_link::is_fresh(&fs::canonicalize(source).unwrap(), alias)
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    /// An upgraded `clud`, run from inside a session launched by an older
+    /// one (its statusline, a hook, `clud tool`), relinks the shared alias
+    /// dir so that session's `gh`/`rm` run current code (#1743).
+    #[test]
+    fn an_upgraded_clud_refreshes_a_running_sessions_aliases() {
+        let home = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        let clud = bin.path().join(shim_registry::file_name("clud"));
+        fs::write(&clud, b"v1").unwrap();
+        let dir = install_rm_at(home.path(), &clud).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        set_mtime(&clud, old);
+        replace_file(&clud, b"v2 is different");
+        let vars = running_session(home.path(), &clud);
+
+        assert!(refresh(home.path(), &clud, &vars));
+        for name in rm_alias_names() {
+            assert!(links_to(&clud, &dir.join(&name)), "{name}");
+        }
+        assert!(!refresh(home.path(), &clud, &vars), "fresh aliases stay");
+    }
+
+    #[test]
+    fn a_running_session_refresh_never_downgrades_or_strays() {
+        let home = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        let clud = bin.path().join(shim_registry::file_name("clud"));
+        let newer = bin
+            .path()
+            .join("newer")
+            .join(shim_registry::file_name("clud"));
+        fs::create_dir_all(newer.parent().unwrap()).unwrap();
+        fs::write(&clud, b"older install").unwrap();
+        fs::write(&newer, b"newer install").unwrap();
+        set_mtime(
+            &clud,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
+        let dir = install_rm_at(home.path(), &newer).unwrap();
+        let alias = dir.join(&rm_alias_names()[0]);
+        let vars = running_session(home.path(), &clud);
+        assert!(
+            !refresh(home.path(), &clud, &vars),
+            "a newer install's aliases are not replaced by an older clud"
+        );
+        assert!(links_to(&newer, &alias));
+
+        // Make `clud` the newest so only the gate under test can refuse.
+        set_mtime(
+            &newer,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+        );
+        replace_file(&clud, b"newest install");
+        let session = || running_session(home.path(), &clud);
+        let mut foreign_exe = session();
+        foreign_exe.insert(shim_registry::CLUD_EXE_KEY, newer.clone().into_os_string());
+        let mut other_abi = session();
+        other_abi.insert(shim_registry::ABI_KEY, "0".into());
+        let mut no_abi = session();
+        no_abi.remove(shim_registry::ABI_KEY);
+        let mut other_dir = session();
+        other_dir.insert(shim_registry::SESSION_DIR_KEY, bin.path().into());
+        for (label, vars) in [
+            ("not this session's installed clud", foreign_exe),
+            (
+                "another shim ABI: the refreshed alias would fail open",
+                other_abi,
+            ),
+            ("no ABI stamp", no_abi),
+            ("a session dir that is not the shared one", other_dir),
+        ] {
+            assert!(!refresh(home.path(), &clud, &vars), "{label}");
+            assert!(links_to(&newer, &alias), "{label}");
+        }
+        assert!(
+            refresh(home.path(), &clud, &running_session(home.path(), &clud)),
+            "the control: every gate open"
+        );
+        assert!(links_to(&clud, &alias));
+
+        let empty = TempDir::new().unwrap();
+        let vars = running_session(empty.path(), &clud);
+        assert!(!refresh(empty.path(), &clud, &vars));
+        assert!(
+            !empty.path().join(shim_registry::SESSION_SUBDIR).exists(),
+            "no session ever ran here: nothing is created"
+        );
     }
 
     #[test]

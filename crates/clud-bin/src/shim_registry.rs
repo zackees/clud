@@ -44,8 +44,9 @@ pub const GH_FAIL_FAST_KEY: &str = "CLUD_GH_SHIM_FAIL_FAST";
 /// The clud executable the `gh` watch upgrade runs the bundled watcher with.
 pub const CLUD_EXE_KEY: &str = "CLUD_EXE";
 /// `1` routes in-session `gh api` GETs through the daemon's read broker
-/// (#1743, `git.gh_read_broker`). Absent (an older session) or anything else
-/// leaves every `gh` call on the real binary.
+/// (#1743, `git.gh_read_broker`). Any other value leaves every `gh` call on
+/// the real binary. Absent (a session launched before the key) defers to the
+/// current setting (DD-152).
 pub const GH_READ_BROKER_KEY: &str = "CLUD_GH_READ_BROKER";
 /// The daemon state dir whose `daemon.json` names the broker's listener.
 pub const DAEMON_STATE_DIR_KEY: &str = "CLUD_DAEMON_STATE_DIR";

@@ -77,6 +77,37 @@ passes through to the real binary. Bump `SHIM_ABI` only when a key changes
 meaning. A new alias or key needs no bump, because an older session simply
 lacks the key.
 
+## Running sessions after an upgrade
+
+A session keeps the alias directory it launched with, so after an upgrade
+its aliases would run the old binary until some later launch relinked them.
+`main` calls `shim_install::refresh_running_session_aliases` on every `clud`
+CLI start, before clap. The session's statusline (every 2 s in Claude Code),
+session hooks and `clud tool` calls run the installed `clud` by absolute
+path, so the first of them after an upgrade relinks `rm-shim` to the new
+binary. It relinks only when all of these hold:
+
+- the running `clud` is the session's own `CLUD_EXE`;
+- the session's `CLUD_SHIM_ABI` is the binary's `SHIM_ABI`, so the relinked
+  aliases still validate this session (an ABI bump waits for a launch);
+- the session's `CLUD_RM_SHIM_DIR` is the shared `~/.clud/state/rm-shim`,
+  and it exists (nothing is created);
+- some alias is stale, and none is as new as or newer (mtime) than the
+  running `clud`, so two installs never take the directory back and forth.
+  The check is repeated under the install lock.
+
+The relink is the launch installer's: under `.rm-shim.lock`, each alias is
+staged and renamed over the old one, never truncated, so a running alias
+keeps its old inode and the next call gets the new one. It tries hardlink,
+then symlink, never a copy, and any failure is silent and retried on the
+next call. Where neither can be made (a home on another volume than `clud`
+and no symlink privilege on Windows), that retry fails every time and the
+session waits for its next launch, as before. The session's env does not change: a behavior that needs a new
+key reads a setting when the key is absent, as the `gh` read broker does
+([gh-read-broker.md](gh-read-broker.md#setting)). Why the aliases are
+relinked rather than delegating to `$CLUD_EXE`:
+[DD-152](../DESIGN_DECISIONS.md#dd-152-a-running-sessions-aliases-are-relinked-by-the-installed-clud-not-self-delegated).
+
 ## Defense in depth for git credentials
 
 `activate_rm` sets `GIT_TERMINAL_PROMPT=0` and, unless the caller chose

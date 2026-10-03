@@ -17,9 +17,7 @@ from tests import process
 
 @functools.cache
 def _registry(shim: str) -> dict:
-    result = process.run(
-        [shim, "--registry"], capture_output=True, text=True, timeout=30
-    )
+    result = process.run([shim, "--registry"], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result
     return json.loads(result.stdout)
 
@@ -32,7 +30,13 @@ def registry(shim: Path) -> dict:
 def session_env(shim: Path, shim_dir: Path) -> dict[str, str]:
     """The keys every in-session alias needs: the ABI stamp and alias dir."""
     info = registry(shim)
-    return {info["abi_key"]: info["abi"], info["session_dir_key"]: str(shim_dir)}
+    return {
+        info["abi_key"]: info["abi"],
+        info["session_dir_key"]: str(shim_dir),
+        # A session without this key reads the user's settings and reaches
+        # the user's own daemon (#1743); a test opts in explicitly.
+        "CLUD_GH_READ_BROKER": "0",
+    }
 
 
 def session_key_names(shim: Path) -> set[str]:

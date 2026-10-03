@@ -71,8 +71,8 @@ exit codes are `gh`'s own. That costs a second request for errors only.
 
 Every shim-side miss runs the real `gh` with the original argv:
 
-- the setting is off, or the session predates it (`CLUD_GH_READ_BROKER` is
-  absent or not `1`);
+- the setting is off (`CLUD_GH_READ_BROKER` is set and not `1`, or it is
+  absent and `git.gh_read_broker` is `false`; see [Setting](#setting));
 - `daemon.json` is missing or names a dead port (500 ms connect timeout);
 - an older daemon without the route answers 404;
 - the broker answers non-200: upstream non-2xx (409), a store or transport
@@ -279,6 +279,15 @@ in `clud settings`). `shim_session::activate_rm` exports it at launch as
 `CLUD_GH_READ_BROKER=1|0`; a running session keeps the value it launched
 with.
 
+A session launched before 2.8.24 has no key. Its `gh` alias runs the
+current binary once the installed `clud` has relinked the shared alias
+directory ([shim-dispatch.md](shim-dispatch.md#running-sessions-after-an-upgrade)),
+and that alias then reads `git.gh_read_broker` itself (default on) instead
+of treating the missing key as off. An explicit `CLUD_GH_READ_BROKER=0`
+stays off. So after an upgrade such a session's next statusline tick or
+`clud` call turns the broker on, with no restart
+([DD-152](../DESIGN_DECISIONS.md#dd-152-a-running-sessions-aliases-are-relinked-by-the-installed-clud-not-self-delegated)).
+
 ## Code
 
 | File | Role |
@@ -292,7 +301,7 @@ with.
 | `crates/clud-bin/src/gh_broker/store.rs` | redb tables |
 | `crates/clud-bin/src/gh_broker/upstream.rs` | `gh api -i` transport and parser |
 | `crates/clud-bin/src/shim_main.rs` | `gh_shim::brokered_read`, invalidation after writes |
-| `crates/clud-bin/src/shim_main/dispatch.rs` | builds the `BrokerClient` from the session env |
+| `crates/clud-bin/src/shim_main/dispatch.rs` | builds the `BrokerClient` from the session env, or from the setting when the key is absent |
 | `crates/clud-bin/src/daemon/http.rs` | `/gh/read` (own thread) and `/gh/invalidate` routes |
 
 Tests: `gh_broker` unit tests cover classification, TTL hits with zero
@@ -307,4 +316,4 @@ fallback, reconciliation, frozen jobs and check runs, and targeted
 invalidation. `tests/test_gh_read_broker.py` drives the real alias against a
 fake daemon and a fake `gh`. It checks byte-identical output, the fallbacks
 (no daemon, a daemon miss, the setting off) and the invalidation each write
-posts.
+posts, and that a session without the key follows the setting.

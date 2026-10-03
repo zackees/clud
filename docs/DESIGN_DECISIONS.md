@@ -6194,3 +6194,52 @@ comments), are seen at the 30-minute reconciliation;
 reruns of finished runs started outside clud are seen in a run list only
 then, and thaw a frozen jobs listing only after an in-session write names
 the run. Collections over 10 pages or 8 MiB are not merged.
+
+## DD-152: a running session's aliases are relinked by the installed clud, not self-delegated
+
+**Context:** a session keeps the alias directory it launched with
+(`~/.clud/state/rm-shim`), so after an upgrade its `gh`, `git` and `rm` keep
+running the old binary until some later launch relinks the shared directory.
+That left the #1743 read broker (2.8.24) out of every session launched
+before it, which also lacks the `CLUD_GH_READ_BROKER` key the launch
+exports. Two mechanisms could bring such a session's aliases up to date:
+the alias could delegate to `$CLUD_EXE` when that binary is newer, or the
+shared directory could be relinked from the new binary.
+
+**Decision:**
+
+- Relink, from the installed `clud`. `main` calls
+  `shim_install::refresh_running_session_aliases` on every CLI start, before
+  clap. A session's statusline (every 2 s in Claude Code), its session hooks
+  and its `clud tool` calls all run the installed `clud` by absolute path, so
+  the first of them after an upgrade relinks the directory. Self-delegation
+  was rejected: an already-deployed binary cannot learn to delegate, so it
+  would only help sessions launched after a second upgrade; it would let an
+  environment variable pick the code behind the `rm` catastrophe floor; and
+  it would add an exec to every shim call (Windows has no exec).
+- The refresh acts only when the running `clud` is the session's own
+  `CLUD_EXE`, the session's `CLUD_SHIM_ABI` equals the binary's `SHIM_ABI`,
+  the session's alias dir is the shared one and exists, and no stale alias
+  is as new as or newer (by mtime) than the running `clud`, checked again
+  under the install lock. A dev build run by hand never takes the shared
+  directory, an ABI change never makes this session's aliases fail open,
+  and two installed versions never relink it back and forth.
+- It reuses the launch installer's lock and rename-over replacement, so no
+  alias is ever truncated in place or seen half-written, limited to hardlink
+  and symlink: a failure (a Windows alias busy running) is retried on the
+  next call cheaply instead of copying all of `clud` every 2 s.
+- The daemon does not refresh. It restarts only under a launch, `clud gc`
+  or a `clud daemon`/`clud ui` call, and a launch relinks anyway; the CLI
+  start already covers every session.
+- A `gh` alias in a session without `CLUD_GH_READ_BROKER` reads
+  `git.gh_read_broker` from the settings (default on) instead of treating
+  the missing key as off. An explicit `0` stays off.
+
+**Consequences:** a running session picks up shim fixes within one
+statusline tick of an upgrade, with no restart. Its env stays the one it
+launched with, so only behavior keyed off settings or absent keys changes;
+a change that needs a new session key still needs a new launch, and an ABI
+bump still waits for one. The session's `clud-cmd-scan` hook alias in
+`helper-bin` is not refreshed here; the next launch relinks it. Every
+`clud` CLI start costs a few `stat` calls, and each `gh` call in a
+pre-2.8.24 session takes the settings lock once.
