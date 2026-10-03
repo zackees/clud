@@ -12,8 +12,11 @@ Usage:
 A code error can hide on the host and surface only on another OS's CI: a
 `#[cfg(test)]` helper whose only caller sits behind `#[cfg(target_os =
 "linux")]` compiles clean on Linux and fails `-D warnings` on Windows. The
-grind integrator cross-checks every target the project's CI runs, before host
-lint and test. This tool finds those targets; it runs nothing.
+grind integrator uses this inventory only when platform implementations
+change, and selects targets exercising those changes. Shared business logic
+calling unchanged platform code stays on the routine gate. This tool finds
+available targets (including release-only targets); it runs nothing and does
+not select PR coverage.
 
 Targets come from what the project's CI tests, never from a fixed list:
   * `runs-on:` runner names in `.github/workflows/*.yml|yaml` (ubuntu /
