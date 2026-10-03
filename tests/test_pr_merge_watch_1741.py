@@ -48,8 +48,9 @@ class FakeProcesses:
     """Stands in for `RunningProcess`: a git with one origin, and a gh that
     resolves any call without `--repo` to the fork's parent, as gh does."""
 
-    def __init__(self, origin: str | None) -> None:
+    def __init__(self, origin: str | None, branch: str = "feat-x") -> None:
         self.origin = origin
+        self.branch = branch
         self.gh_calls: list[list[str]] = []
 
     def run(self, argv, **_kwargs) -> Result:
@@ -59,12 +60,18 @@ class FakeProcesses:
                 if self.origin is None:
                     return Result(2, "", "error: No such remote 'origin'\n")
                 return Result(0, self.origin + "\n", "")
+            if argv[1:] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                return Result(0, self.branch + "\n", "")
             return Result(128, "", "fatal: not a git repository\n")
         if argv[:1] != ["gh"]:
             return Result(127, "", f"unexpected command {argv}\n")
         args = argv[1:]
         self.gh_calls.append(args)
         repo = args[args.index("--repo") + 1] if "--repo" in args else GH_DEFAULT_REPO
+        if args[:2] == ["pr", "view"] and "--jq" in args:
+            # A selector lookup: the fork's branch is its PR #7; the parent
+            # has an unrelated #1 under the same branch name.
+            return Result(0, "1\n" if repo == GH_DEFAULT_REPO else "7\n", "")
         if args[:2] == ["pr", "view"]:
             # The parent's #1 is long closed; the fork's own #1 was merged.
             state = "CLOSED" if repo == GH_DEFAULT_REPO else "MERGED"
@@ -160,3 +167,70 @@ def test_help_says_origin_is_the_default(watcher, capsys) -> None:
         watcher.parse_args(["--help"])
     out = " ".join(capsys.readouterr().out.split())
     assert "git remote get-url origin" in out
+
+
+# ---- Refs #1741: a branch, URL or omitted selector resolves on origin too ----
+
+
+def _main(
+    watcher, monkeypatch, tmp_path, argv: list[str], origin: str
+) -> tuple[int, FakeProcesses]:
+    fake = FakeProcesses(origin)
+    monkeypatch.setattr(watcher, "RunningProcess", fake)
+    monkeypatch.setattr(watcher, "install_kill_handlers", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        watcher.main([*argv, "--no-cancel"])
+    return exc.value.code, fake
+
+
+def _assert_every_gh_call_targets(fake: FakeProcesses, repo: str) -> None:
+    assert fake.gh_calls, "the watcher made no gh call"
+    for args in fake.gh_calls:
+        assert "--repo" in args, args
+        assert args[args.index("--repo") + 1] == repo, args
+
+
+@pytest.mark.parametrize("selector", [["feat-x"], []], ids=["branch", "omitted"])
+def test_fork_selector_is_looked_up_on_origin_not_the_parent(
+    watcher, monkeypatch, tmp_path, selector: list[str]
+) -> None:
+    code, fake = _main(
+        watcher, monkeypatch, tmp_path, selector, "git@github.com:zackees/act2.git"
+    )
+
+    _assert_every_gh_call_targets(fake, "zackees/act2")
+    # An omitted selector means the current branch, as `gh pr checks` reads it.
+    assert ["pr", "view", "feat-x", "--repo", "zackees/act2", "--json", "number",
+            "--jq", ".number"] in fake.gh_calls
+    assert fake.gh_calls[-1][:3] == ["pr", "view", "7"]
+    assert code == watcher.EXIT_GREEN
+
+
+def test_pr_url_selector_names_its_own_repo_and_number(watcher, monkeypatch, tmp_path) -> None:
+    code, fake = _main(
+        watcher,
+        monkeypatch,
+        tmp_path,
+        ["https://github.com/zackees/act2/pull/7"],
+        "https://github.com/someone/else.git",
+    )
+
+    _assert_every_gh_call_targets(fake, "zackees/act2")
+    assert not any("--jq" in args for args in fake.gh_calls), "a PR URL needs no lookup"
+    assert fake.gh_calls[0][:3] == ["pr", "view", "7"]
+    assert code == watcher.EXIT_GREEN
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://github.com/zackees/act2/pull/7", ("zackees/act2", 7)),
+        ("https://github.com/zackees/act2/pull/7/files", ("zackees/act2", 7)),
+        ("https://github.com/zackees/act2/pull/7#issuecomment-1", ("zackees/act2", 7)),
+        ("https://github.com/zackees/act2/issues/7", None),
+        ("my-branch", None),
+    ],
+)
+def test_pr_urls_parse_to_repo_and_number(watcher, url: str, expected) -> None:
+    assert watcher.github_pr_from_url(url) == expected

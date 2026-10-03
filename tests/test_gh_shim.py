@@ -114,7 +114,13 @@ def test_non_watch_gh_relays_arguments_and_exit(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "selector", ["", "my-branch", "pr", "checks", "https://github.com/zackees/clud/pull/9"],
 )
-def test_watch_resolves_non_numeric_selector(tmp_path: Path, selector: str) -> None:
+@pytest.mark.parametrize("repo", [["-R", "zackees/clud"], []], ids=["repo", "no-repo"])
+def test_watch_hands_a_non_numeric_selector_to_the_watcher(
+    tmp_path: Path, selector: str, repo: list[str]
+) -> None:
+    """Refs #1741: the shim does not look the PR up with a bare `gh pr view`,
+    which in a fork resolves to the parent repository. The watcher resolves
+    the selector against origin, with the one origin helper it already uses."""
     alias = _alias(tmp_path)
     lookup_log = tmp_path / "lookup-args"
     real_gh = tmp_path / "real-gh"
@@ -138,20 +144,19 @@ def test_watch_resolves_non_numeric_selector(tmp_path: Path, selector: str) -> N
     args = [str(alias), "pr", "checks"]
     if selector:
         args.append(selector)
-    args.extend(["--watch", "-R", "zackees/clud"])
+    args.extend(["--watch", *repo])
     result = process.run(
         args, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 5, result
-    expected_lookup = ["pr", "view"]
+    assert not lookup_log.exists(), "the shim ran its own repo-less PR lookup"
+    expected = ["tool", "run", "github/pr_merge_watch.py"]
     if selector:
-        expected_lookup.append(selector)
-    expected_lookup += ["--json", "number", "--jq", ".number", "--repo", "zackees/clud"]
-    assert lookup_log.read_text(encoding="utf-8").splitlines() == expected_lookup
-    assert watcher_log.read_text(encoding="utf-8").splitlines() == [
-        "tool", "run", "github/pr_merge_watch.py", "42", "--cancel-on", "fail",
-        "--repo", "zackees/clud",
-    ]
+        expected.append(selector)
+    expected += ["--cancel-on", "fail"]
+    if repo:
+        expected += ["--repo", "zackees/clud"]
+    assert watcher_log.read_text(encoding="utf-8").splitlines() == expected
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
@@ -247,22 +252,6 @@ def test_valid_target_that_cannot_exec_reports_exec_failure(tmp_path: Path) -> N
     )
     assert result.returncode == 126, result
     assert "failed to exec" in result.stderr
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX recording fixtures")
-def test_pr_lookup_output_is_bounded(tmp_path: Path) -> None:
-    alias = _alias(tmp_path)
-    real_gh = tmp_path / "real-gh"
-    real_gh.write_text("#!/bin/sh\nprintf '%0200d\\n' 1\n", encoding="utf-8")
-    real_gh.chmod(0o755)
-    env = os.environ.copy() | _session(alias)
-    env.update(CLUD_GH_SHIM_TARGET=str(real_gh), CLUD_EXE=str(real_gh))
-    result = process.run(
-        [str(alias), "pr", "checks", "--watch"],
-        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
-    )
-    assert result.returncode == 2, result
-    assert "output was too large" in result.stderr
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell fixture")
