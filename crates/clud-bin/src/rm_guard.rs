@@ -284,9 +284,24 @@ fn names_current_or_parent(raw: &str) -> bool {
 /// in-session floor refuses rather than guess when its own directory is
 /// missing from PATH.
 pub fn find_handoff(path: &str, shim_exe: &Path) -> Result<PathBuf, String> {
+    let session_dir = std::env::var_os(crate::shim_registry::SESSION_DIR_KEY).map(PathBuf::from);
+    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var_os(home_key).map(PathBuf::from);
+    find_handoff_with(path, shim_exe, session_dir.as_deref(), home.as_deref())
+}
+
+/// [`find_handoff`] over an injected session shim directory and home.
+pub fn find_handoff_with(
+    path: &str,
+    shim_exe: &Path,
+    session_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<PathBuf, String> {
     use crate::shim_registry::{self as registry, NextOnPathError};
     let executable = registry::file_name(concat!("r", "m"));
-    let dirs = registry::shim_dirs(shim_exe, None, None);
+    // A symlinked alias runs as `clud` (#1746), so its own directory is not
+    // an alias directory; the session and home shim directories are.
+    let dirs = registry::shim_dirs(shim_exe, session_dir, home);
     registry::next_on_path(
         &executable,
         std::ffi::OsStr::new(path),
@@ -510,6 +525,38 @@ mod tests {
             Path::new("/tmp/other"),
             mountinfo
         ));
+    }
+
+    /// #1746: an alias that had to be a symlink (binary and session shim
+    /// directory on different filesystems) runs as `clud`, so only the
+    /// session shim directory on PATH marks where the real binary search
+    /// starts. Strict mode must find it there, and still refuse without it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_alias_finds_its_session_shim_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let bin_dir = temp.path().join("venv-bin");
+        let shim_dir = temp.path().join("session-shims");
+        let real_dir = temp.path().join("usr-bin");
+        for dir in [&bin_dir, &shim_dir, &real_dir] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let clud = bin_dir.join(crate::shim_registry::file_name("clud"));
+        std::fs::write(&clud, b"clud").unwrap();
+        let real = real_dir.join(concat!("r", "m"));
+        std::fs::write(&real, b"real").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
+        let path = path.to_string_lossy();
+        assert_eq!(
+            find_handoff_with(&path, &clud, Some(&shim_dir), None).unwrap(),
+            real
+        );
+        assert!(
+            find_handoff_with(&path, &clud, None, None).is_err(),
+            "strict mode still refuses when no shim directory is known"
+        );
     }
 
     #[cfg(unix)]

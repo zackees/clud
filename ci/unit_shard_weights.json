@@ -22,7 +22,6 @@
   "tests/harness_codex/test_rm.py": 0.0,
   "tests/integration/test_orphan_handover_registry.py": 0.0,
   "tests/integration/test_orphan_status_command.py": 0.0,
-  "tests/test_act_ci_logs.py": 0.0,
   "tests/test_banned_cross_tools.py": 1.37,
   "tests/test_banned_hook_paths.py": 0.01,
   "tests/test_banned_imports.py": 0.01,

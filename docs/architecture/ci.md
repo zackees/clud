@@ -62,171 +62,97 @@ matrix-planning runner job.
 
 ## Local validation before remote CI
 
-**All local tests and lint must run in the Bosn-managed `act` container**,
-never on the host or in a direct Bosn build task. Bosn mounts the checkout
-read-only; `act` runs the jobs against a snapshot. Local act is a pre-push
-check within the [budget below](#local-ci-budget), not the edit loop: the PR's
-GitHub Actions run is the CI of record. The first run may need to warm caches:
+**All local tests and lint run through `bosn ci`**, which replays the
+workflow under [act2](https://github.com/zackees/act2) in an isolated engine,
+never on the host and never in a direct Bosn build task. bosn snapshots the
+checkout (uncommitted work included), so each run tests exactly the tree you
+have. Local CI is a pre-push check within the [budget below](#local-ci-budget),
+not the edit loop: the PR's GitHub Actions run is the CI of record.
 
 ```bash
 docker info
-bosn run --task act-ci-list        # inspect supported jobs
-bosn run --task act-ci-static      # formatting, ruff, and static checks
-bosn run --task act-ci-linux       # Linux clippy, build, and unit suite
+bosn ci run --workspace . --trigger pr --wait              # the PR's jobs: static, build, clippy, dylint, Linux unit
+bosn ci run --workspace . --trigger pr --job static --wait # formatting, ruff and static checks only
+bosn ci run --workspace . --trigger pr --mode test --wait  # adds the ci-test lanes act can run (Linux integration)
+bosn ci report RUN                                         # verdict and the first failure
+bosn ci logs RUN --follow                                  # live output; --job/--step narrow it
 ```
+
+`--trigger pr` builds the same `pull_request` payload GitHub would, and
+`--mode test`/`full` select the job set that the `ci-test` and `ci-full` labels
+select. Jobs that need a native runner (Windows, macOS, arm) are reported
+`unsupported`, not run.
+
+**Stock workflows, no local special cases ([zackees/ci.yml ACT-003](https://github.com/zackees/ci.yml/blob/main/docs/policy-general.md)).**
+`.github/` runs under act2 exactly as written. act2 sets
+`RUNNER_ENVIRONMENT=github-hosted`, so actions' hosted defaults (setup-uv's
+cache) engage. It also runs job containers with an init that reaps orphans, so
+daemon shutdown tests see exited PIDs. bosn's own workflow rewrites
+(checkout localisation, output flushing) go to an overlay act reads, never
+into the tree a job checks out, so tests that read `.github/` see this repo's
+files. `ACT=true` is the local-runner signal: actions read it to tune their
+caches (setup-soldr's `save-cache: auto` saves fully, and on `v0` since
+setup-soldr#563). A workflow reads it only under a tracked exception;
+`tests/test_ci_matrix.py` fails on any `env.ACT` without a `zackees/ci.yml#`
+link above it. The one exception today is setup-uv's `prune-cache`
+([ci.yml#226](https://github.com/zackees/ci.yml/issues/226)). A new local gap
+gets an issue in zackees/ci.yml cross-referenced with zackees/act2 and
+zackees/bosn, not a workaround here.
+
+Caches live in bosn's machine-scoped cache volume (the Actions cache server,
+fetched actions, the runner image), so the second run of a job restores what
+the first saved. Each run gets its own engine, so concurrent runs from any
+checkout or session never share containers, names or an action checkout.
 
 ### Local CI budget
 
-These tasks need bosn 0.1.7 or newer (`uv tool install 'bosn>=0.1.7'`, or
-`uv tool upgrade bosn`; check with `bosn --version`). Older releases admit one
-job per machine (zackees/bosn#358) and can run a task in another checkout's
-warm `clud_act` container (zackees/bosn#314, #1594); don't count a local result
-from them.
+`bosn ci` needs bosn 0.1.8 or newer (`uv tool install 'bosn>=0.1.8'`; check
+with `bosn --version`). Older releases run stock nektos/act, which lacks the
+runner parity and overlay above. bosn sizes each engine's storage from host
+RAM. If a run reports "the engine's storage ran low", raise it in
+`~/.local/state/bosn/config.toml` (`[engine]` `storage_gib = 72` covers
+clud's minimal PR run; [zackees/bosn#425](https://github.com/zackees/bosn/issues/425)
+tracks a default that needs no override).
 
-A full `act-ci-linux` takes 6-7 minutes on an idle machine. Every clud session
-on the machine shares one bosn daemon. Since 0.1.7 it runs task jobs from
-different checkouts in parallel runner slots, so concurrent sessions no longer
-queue behind each other, but they do share the machine's CPU, so each extra
-run slows every other one. On 2026-10-02, on bosn 0.1.6, a one-module fix spent
-about 50 minutes in local act (#1715): 27 minutes queued behind other sessions,
-9 minutes testing another checkout (#1594), and two runs lost to kills. So:
+A full minimal PR run takes about 25 minutes cold and less warm. Every clud
+session on the machine shares one bosn daemon and its CPU, so each extra run
+slows every other one. On 2026-10-02 a one-module fix spent about 50 minutes
+in the old local act path (#1715). So:
 
-- **Run `act-ci-linux` at most once per change**, before the first push. Don't
-  loop it. `act-ci-static` (about a minute) is fine for formatting and lint.
-  RED can come from that one local run or from the PR's first CI run. GREEN
-  comes from the PR's CI, which is the CI of record: after a fix, push and
-  watch the PR rather than rerunning act locally.
-- **Don't wait in the bosn queue.** If `bosn run` reports its job is queued
-  (every runner slot is busy; `bosn jobs` shows them), or `act` hasn't printed
-  its `act_ci: stdout` log path within 2 minutes, the daemon is saturated.
-  Cancel your job, push, and write "local act skipped: bosn daemon busy" in
-  the PR.
-- **Never restart a running act job because you made another commit.** Let it
+- **Run the full PR plan at most once per change**, before the first push.
+  Don't loop it. `--job static` (a few minutes) is fine for formatting and
+  lint. RED can come from that one local run or from the PR's first CI run.
+  GREEN comes from the PR's CI, which is the CI of record: after a fix, push
+  and watch the PR rather than rerunning locally.
+- **Don't wait in the bosn queue.** If `bosn ci show RUN` stays `queued` for
+  2 minutes (`bosn ci runners` shows every slot busy), the daemon is
+  saturated. Cancel your run, push, and write "local CI skipped: bosn daemon
+  busy" in the PR.
+- **Never restart a running run because you made another commit.** Let it
   finish, or cancel it, then push.
-- **Stop only your own run.** Use the `bosn job cancel --state-dir … --job-id N`
-  command `bosn run` prints, or interrupt the `bosn run` you started (since
-  0.1.7 a dead client cancels its job, zackees/bosn#357). Never use `pkill -f`
-  or `kill $(pgrep -f "bosn run …")`: the pattern matches every session's run.
-- **If a run's tree looks wrong, check that the container is yours.** `bosn run`
-  prints `ensured manifest stack clud_act as bosn-setup-<hash>`. If
-  `docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' bosn-setup-<hash>`
-  doesn't list your checkout, the run is testing another tree (#1594, fixed in
-  bosn 0.1.7). Don't count it, and don't edit `bosn.toml` to work around it;
-  upgrade bosn and rely on the PR's CI.
+- **Stop only your own run** with `bosn ci cancel RUN`. Never use `pkill -f`
+  or `kill $(pgrep -f bosn …)`: the pattern matches every session's run.
 
-The Dylint job does not run under `act`: the `catthehacker/ubuntu:act-24.04`
-runner image has no `clang`, which setup-soldr's Linux linker shim execs, so
-the first link fails with `exec: clang: not found`. Validate Dylint changes on
-the PR's GitHub run.
-
-For installer changes, use the focused jobs first:
+For installer changes, run the focused jobs:
 
 ```bash
-bosn run --task act-installer-resolver          # native self-installer Rust tests
-bosn run --task act-installer-catalog           # catalog and release wiring tests
-bosn run --task act-installer-public-linux-x64  # published candidate on Ubuntu x64
+bosn ci run --workspace . --workflow .github/workflows/installer-check.yml --job resolver-unit --mode full --wait
+bosn ci run --workspace . --workflow .github/workflows/installer-check.yml --job catalog-unit --mode full --wait
 ```
 
-The public job uses the version in `pyproject.toml`, so run it after that
-candidate is published. It requires a passed pytest and matching public
-evidence; a skipped test fails the local task. The `clud_act` stack mounts
-machine-scoped `act-cache` and `act-server-cache` volumes, so repeated runs
-reuse actions and the Actions cache server. The public release workflow still
-checks every required host and guest before promotion.
+The published-candidate lane (`public-host`) needs workflow inputs and a
+matrix filter, which `bosn ci` cannot pass yet
+([zackees/bosn#430](https://github.com/zackees/bosn/issues/430)). Validate it
+on GitHub, where the release workflow checks every required host and guest
+before promotion.
 
-For a focused test, run it in an applicable `act` job, or use a temporary
-local-only act workflow step and remove that step before committing. Do not
-switch to `bosn run --task focused-test`, direct `bash test`/`bash lint`, or a
-host toolchain. `act` cannot execute native Windows or macOS; for Windows-only
-code, use the `ci-windows` PR label for the Windows build, unit, and integration
-suites after local act checks. Keep Windows PTY tests enabled. There is no merge queue; a
-`ci-windows` run still includes the routine Linux x64 lanes but no macOS
+For a focused test, run the job that contains it. Do not switch to a direct
+`bash test`/`bash lint` or a host toolchain. act cannot execute native Windows
+or macOS. For Windows-only code, use the `ci-windows` PR label for the Windows
+build, unit and integration suites after the local run, and keep Windows PTY
+tests enabled. There is no merge queue; a `ci-windows` run still includes the
+routine Linux x64 lanes but no macOS
 ([What protects `main` today](#what-protects-main-today)).
-
-These tasks use the `clud_act` stack (`bosn/act.Dockerfile`), which carries
-only the `act` and `docker` clients and drives the host engine through the
-mounted socket. `ci/act_ci.sh` works around three things act can't handle
-directly:
-
-- **Git metadata:** the checkout is mounted read-only, and a worktree's `.git`
-  points outside the mount. The script snapshots the tree into a throwaway
-  one-commit repo.
-- **Checkout:** act skips `actions/checkout` only when its `ref` matches
-  `github.ref`, and `ci.yml` pins `ref` to a SHA. The script swaps checkout
-  for a local action that unpacks the snapshot.
-- **Container names:** act names job containers from the workflow and job
-  names alone, so two concurrent runs on one host would remove each other's
-  containers. The script gives every workflow a per-run name. (bosn 0.1.7's
-  per-job Docker proxy also suffixes and scopes them, zackees/bosn#376.)
-- **Action cache:** concurrent runs share the `act-cache` volume, and act's
-  default action cache keeps one working-tree checkout per action there, which
-  concurrent runs check out over each other. The script passes
-  `--use-new-action-cache`, which keeps each action as a bare repository and
-  reads it by commit SHA (#1724).
-
-Caches persist across runs in two machine-scoped Bosn volumes:
-- `act-cache` (`/root/.cache/act`) holds the fetched actions, as bare
-  `<action>.git` repositories (`--use-new-action-cache`).
-- `act-server-cache` (`/root/.cache/actcache`) backs act's Actions cache
-  server (`--cache-server-path`), so what `actions/cache`, setup-uv and
-  setup-soldr save is restored by the next run. That includes the venv, the
-  solo Rust toolchain and soldr's zccache build cache. Before that volume
-  existed, the server lived in the container and every run started cold.
-
-**Live, durable act logs (#1548, #1549).** bosn buffers a task's output until
-it exits and removes the container on a timeout or Ctrl-C, so `ci/act_ci.sh`
-also writes act's output to the host (the `clud_act` stack binds
-`.clud/act-logs` at `/act-logs`; it is tracked only as an empty directory whose
-own `.gitignore` ignores the logs). Three files per run, paths printed first,
-before act starts:
-
-```
-tail -f .clud/act-logs/<run>-<job>.stdout.log   # act's stdout, live
-tail -f .clud/act-logs/<run>-<job>.stderr.log   # act's stderr, live
-cat     .clud/act-logs/<run>-<job>.status.jsonl # one record per step
-```
-
-stdout and stderr stay separate (a failing step's stderr appears only in the
-stderr file). Each `status.jsonl` record is `{"job","step","conclusion","time"}`,
-taken from act's own `Success - ` / `Failure - ` lines, and a timeout or Ctrl-C
-appends `{"event":"cancelled"}`. At the end the script prints how many steps
-failed, the first one, and where its stderr is. POSIX sh has no `pipefail`, so
-act's own exit status is kept and the evidence greps read the merged files;
-lines carry a job-id prefix so parallel jobs stay readable. The files survive a
-timeout, Ctrl-C and container removal, are owned by the host user with mode
-`0600`, in a `0700` directory. Not yet done: a `seq`/timestamp index in bosn#306's
-schema and redaction of `bosn.toml` env values beyond act's own secret masking.
-Once bosn streams logs itself (zackees/bosn#305-#307) this tee is deleted.
-
-**Native bosn and the GitHub API proxy.** These tasks need native Rust bosn
-(0.1.7+; zackees/bosn#312 added it), which provides `bosn run --task` and refuses
-tag-only Dockerfile `FROM` lines, so every `bosn/*Dockerfile` pins its base
-image by digest. Every `act-*` task declares `github_api = "proxy"`: for each
-run, bosn starts a loopback GitHub API proxy on the host that forwards only
-allowlisted `GET`/`HEAD` reads, adds the credential itself (the host's
-`gh auth token`, else a stored `github_token` secret, else anonymous), caches
-by ETag, and hands the task `GITHUB_API_URL`. `ci/act_ci.sh` passes that to
-act, whose host-networked job containers reach it directly. No token enters a
-container and nothing needs minting. setup-soldr's default path makes no REST
-calls at all (it installs its built-in soldr version, zackees/setup-soldr#542),
-and its remaining calls honour `GITHUB_API_URL`. Never put a token in
-`bosn.toml`, which is tracked.
-
-The runner image is reused (`--pull=false`). Job containers carry a
-`clud.act-run=<run>` label, and the script's exit trap removes them, along
-with the per-run job volumes, after a crash or interrupt.
-
-setup-soldr's saves follow its `save-cache` policy. The `v0` pin used here
-saves on every event. Starting with setup-soldr#527, `save-cache: auto`
-skips durable saves on `pull_request` events, which is how `act_ci.sh`
-drives `ci.yml`. When `v0` moves past it, local act runs will restore but
-no longer refresh the soldr caches. Give `save-cache` an act-only value then;
-this `v0` pin has no such input.
-
-The `clud_act` stack and `ci/act_ci.sh` exist only because bosn has no act
-support of its own. [zackees/bosn#302](https://github.com/zackees/bosn/issues/302)
-tracks making act and its caches a first-class bosn capability, so a task is
-a single `cmd`. Once that lands, delete them.
 
 `act --dryrun` is useful for planning/validation but does not run action code.
 Its Docker runner is not a native macOS or Windows runner, and this workflow's
@@ -245,7 +171,7 @@ negative/mutation case to any policy checker. If a job approaches its timeout,
 measure the slow step or cell and split work where possible instead of simply
 raising the timeout.
 
-If Docker, Bosn, or `act` is unavailable, report the local validation blocker;
+If Docker or bosn is unavailable, or bosn is older than 0.1.8, report the local validation blocker;
 do not fall back to host or direct Bosn tests. Do not auto-install tools or
 prune Docker resources. See the bundled `clud-bosn` skill for prerequisites.
 

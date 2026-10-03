@@ -38,7 +38,8 @@ synthetic while bridge requests and native Codex argv carry the real model.
 `--dry-run` includes the selected family's actual `codex_model_source` for a
 dynamic Sol or Luna selection.
 
-For local verification, run `bosn run --task model-manifest-test`,
-`bosn run --task codex-all-lib-test`, and `bosn run --task act-model-pages`.
-The final command checks the Pages build job under `act`; only GitHub can test
-the real Pages deployment API.
+For local verification, run `bosn run --task model-manifest-test` and
+`bosn run --task codex-all-lib-test`. The Pages build job uses
+`actions/configure-pages`, which `bosn ci` reports as GitHub-only (GATE-012)
+rather than running, so the build and the deployment API are validated on the
+PR's and `main`'s GitHub runs.
