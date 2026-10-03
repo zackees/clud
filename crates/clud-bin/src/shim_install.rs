@@ -199,14 +199,18 @@ fn purge_stale_aliases(dir: &Path, expected: &[String]) -> std::io::Result<()> {
 /// Python relays off PATH. A separate directory also avoids activating
 /// previously extracted Python aliases.
 pub fn install_rm_at(home: &Path, source: &Path) -> std::io::Result<PathBuf> {
-    install_rm_with(home, source, &alias_link::DEFAULT_ORDER)
+    install_rm_with(home, source, &alias_link::DEFAULT_ORDER, &|_| true)
+        .map(|installed| installed.unwrap_or_else(|| home.join(shim_registry::SESSION_SUBDIR)))
 }
 
+/// [`install_rm_at`] with the link methods to try and a precondition checked
+/// on the alias dir under the install lock; `Ok(None)` when it refused.
 fn install_rm_with(
     home: &Path,
     source: &Path,
     order: &[alias_link::Method],
-) -> std::io::Result<PathBuf> {
+    proceed: &dyn Fn(&Path) -> bool,
+) -> std::io::Result<Option<PathBuf>> {
     use fs4::fs_std::FileExt;
     use std::fs::OpenOptions;
     use std::sync::Mutex;
@@ -228,6 +232,9 @@ fn install_rm_with(
         return Err(std::io::Error::other("packaged shim is empty"));
     }
     let dir = home.join(shim_registry::SESSION_SUBDIR);
+    if !proceed(&dir) {
+        return Ok(None);
+    }
     std::fs::create_dir_all(&dir)?;
     let expected = rm_alias_names();
     purge_stale_aliases(&dir, &expected)?;
@@ -236,7 +243,7 @@ fn install_rm_with(
         // installers never see a partial alias and never write through one.
         alias_link::install_alias_with(source, &dir.join(name), order)?;
     }
-    Ok(dir)
+    Ok(Some(dir))
 }
 
 /// Refresh the shared session aliases from a `clud` started inside a
@@ -304,10 +311,27 @@ pub fn refresh_running_session_aliases_at(
         return Ok(false);
     }
     let source_modified = std::fs::metadata(&source)?.modified()?;
+    let behind = |dir: &Path| aliases_behind(dir, &source, source_modified);
+    if !behind(&dir) {
+        return Ok(false);
+    }
+    // Checked again under the lock: a newer launch may have relinked since.
+    let installed = install_rm_with(
+        home,
+        &source,
+        &[alias_link::Method::Hardlink, alias_link::Method::Symlink],
+        &behind,
+    )?;
+    Ok(installed.is_some())
+}
+
+/// Whether some session alias in `dir` is not `source` and none of those is
+/// as new as `source` (mtime): the dir belongs to an older install.
+fn aliases_behind(dir: &Path, source: &Path, source_modified: std::time::SystemTime) -> bool {
     let mut stale = false;
     for name in rm_alias_names() {
         let alias = dir.join(name);
-        if alias_link::is_fresh(&source, &alias) {
+        if alias_link::is_fresh(source, &alias) {
             continue;
         }
         stale = true;
@@ -315,18 +339,10 @@ pub fn refresh_running_session_aliases_at(
             .and_then(|meta| meta.modified())
             .is_ok_and(|modified| modified >= source_modified)
         {
-            return Ok(false);
+            return false;
         }
     }
-    if !stale {
-        return Ok(false);
-    }
-    install_rm_with(
-        home,
-        &source,
-        &[alias_link::Method::Hardlink, alias_link::Method::Symlink],
-    )?;
-    Ok(true)
+    stale
 }
 
 #[cfg(test)]
@@ -500,7 +516,10 @@ mod tests {
         let home = TempDir::new().unwrap();
         let bin = TempDir::new().unwrap();
         let clud = bin.path().join(shim_registry::file_name("clud"));
-        let newer = bin.path().join("newer").join(shim_registry::file_name("clud"));
+        let newer = bin
+            .path()
+            .join("newer")
+            .join(shim_registry::file_name("clud"));
         fs::create_dir_all(newer.parent().unwrap()).unwrap();
         fs::write(&clud, b"older install").unwrap();
         fs::write(&newer, b"newer install").unwrap();

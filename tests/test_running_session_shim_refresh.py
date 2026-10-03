@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
-import time
+import shutil
 from pathlib import Path
 
 import pytest
@@ -41,8 +41,8 @@ def _old_aliases(home: Path) -> Path:
     old = alias_dir / ".old-clud"
     old.write_bytes(b"older clud")
     old.chmod(0o755)
-    an_hour_ago = time.time() - 3600
-    os.utime(old, (an_hour_ago, an_hour_ago))
+    # Older than any build of the binary under test, however stale its mtime.
+    os.utime(old, (1_000_000_000, 1_000_000_000))
     for name in ("gh", "git", "rm", "safe-rm", "safe-mktemp"):
         os.link(old, alias_dir / name)
     old.unlink()
@@ -85,7 +85,10 @@ def test_another_clud_leaves_the_session_aliases_alone(tmp_path: Path) -> None:
     home = tmp_path / "home"
     alias_dir = _old_aliases(home)
     env = _session_env(home, clud, alias_dir)
-    env["CLUD_EXE"] = str(tmp_path / "some-other-clud")
+    other = tmp_path / "other" / "clud"
+    other.parent.mkdir()
+    shutil.copy2(clud, other)
+    env["CLUD_EXE"] = str(other)
     result = process.run([str(clud), "--version"], env=env, capture_output=True, timeout=60)
     assert result.returncode == 0, result
     assert (alias_dir / "gh").read_bytes() == b"older clud"

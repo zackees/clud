@@ -92,14 +92,17 @@ binary. It relinks only when all of these hold:
   aliases still validate this session (an ABI bump waits for a launch);
 - the session's `CLUD_RM_SHIM_DIR` is the shared `~/.clud/state/rm-shim`,
   and it exists (nothing is created);
-- some alias is stale, and none is newer (mtime) than the running `clud`, so
-  two installs never take the directory back and forth.
+- some alias is stale, and none is as new as or newer (mtime) than the
+  running `clud`, so two installs never take the directory back and forth.
+  The check is repeated under the install lock.
 
 The relink is the launch installer's: under `.rm-shim.lock`, each alias is
 staged and renamed over the old one, never truncated, so a running alias
 keeps its old inode and the next call gets the new one. It tries hardlink,
 then symlink, never a copy, and any failure is silent and retried on the
-next call. The session's env does not change: a behavior that needs a new
+next call. Where neither can be made (a home on another volume than `clud`
+and no symlink privilege on Windows), that retry fails every time and the
+session waits for its next launch, as before. The session's env does not change: a behavior that needs a new
 key reads a setting when the key is absent, as the `gh` read broker does
 ([gh-read-broker.md](gh-read-broker.md#setting)). Why the aliases are
 relinked rather than delegating to `$CLUD_EXE`:

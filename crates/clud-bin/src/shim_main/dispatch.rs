@@ -529,7 +529,10 @@ mod tests {
 
         crate::clud_settings::save_gh_read_broker_enabled_at(home.path(), true).unwrap();
         vars.insert(registry::GH_READ_BROKER_KEY, OsString::from("0"));
-        assert!(broker(&vars).is_none(), "an explicit 0 wins over the setting");
+        assert!(
+            broker(&vars).is_none(),
+            "an explicit 0 wins over the setting"
+        );
     }
 
     #[test]

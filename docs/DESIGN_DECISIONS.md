@@ -6220,10 +6220,10 @@ shared directory could be relinked from the new binary.
 - The refresh acts only when the running `clud` is the session's own
   `CLUD_EXE`, the session's `CLUD_SHIM_ABI` equals the binary's `SHIM_ABI`,
   the session's alias dir is the shared one and exists, and no stale alias
-  is newer (by mtime) than the running `clud`. A dev build run by hand never
-  takes the shared directory, an ABI change never makes this session's
-  aliases fail open, and two installed versions never relink it back and
-  forth.
+  is as new as or newer (by mtime) than the running `clud`, checked again
+  under the install lock. A dev build run by hand never takes the shared
+  directory, an ABI change never makes this session's aliases fail open,
+  and two installed versions never relink it back and forth.
 - It reuses the launch installer's lock and rename-over replacement, so no
   alias is ever truncated in place or seen half-written, limited to hardlink
   and symlink: a failure (a Windows alias busy running) is retried on the
