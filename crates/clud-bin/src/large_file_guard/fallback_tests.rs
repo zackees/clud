@@ -126,22 +126,83 @@ fn classifying_a_hundred_thousand_entries_stays_inside_the_budget() {
         })
         .collect();
 
-    let start = std::time::Instant::now();
+    // This thread's CPU time, not wall-clock time. The classifier is pure
+    // in-process CPU work, so wall time on a shared runner mostly measures
+    // how long the scheduler kept this thread off a core: a loaded local act
+    // run saw 471 ms of wall time where GitHub sees well under the limit.
+    // CPU time counts only the work itself, so the same bound means the same
+    // thing on every machine.
+    let start = thread_cpu_time();
     let out = super::index_pass::classify_entries(entries.into_iter());
-    let elapsed = start.elapsed();
+    let cpu = thread_cpu_time().saturating_sub(start);
 
     assert!(
         !out.qualifying.is_empty(),
         "the fixture must produce work, or the timing is meaningless"
     );
-    // Generous against the 25 ms budget: CI runners are slower and shared, and
-    // a flaky perf assertion is worse than a loose one. An order-of-magnitude
-    // regression still trips it, which is what the budget is protecting.
+    // Generous against the 25 ms budget for an unoptimized test build. An
+    // order-of-magnitude regression still trips it, and a quadratic one (10^10
+    // steps at 100k entries) overshoots it by orders of magnitude.
     assert!(
-        elapsed < std::time::Duration::from_millis(250),
-        "classifying 100k entries took {elapsed:?}; #556 budgets 25 ms for the \
-         whole pass on a real index"
+        cpu < std::time::Duration::from_millis(250),
+        "classifying 100k entries took {cpu:?} of CPU; #556 budgets 25 ms for \
+         the whole pass on a real index"
     );
+}
+
+/// The budget's clock must not count time this thread spends off the CPU.
+/// A sleep is the clearest stand-in for a thread the scheduler preempted on
+/// a busy machine: wall time passes, this thread's CPU time does not.
+#[test]
+fn the_budget_clock_ignores_time_spent_off_cpu() {
+    let start = thread_cpu_time();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let cpu = thread_cpu_time().saturating_sub(start);
+    assert!(
+        cpu < std::time::Duration::from_millis(100),
+        "a 300 ms sleep consumed {cpu:?} of thread CPU time"
+    );
+}
+
+/// CPU time consumed so far by the calling thread.
+#[cfg(unix)]
+fn thread_cpu_time() -> std::time::Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable `timespec` for the duration of the
+    // call, and CLOCK_THREAD_CPUTIME_ID is supported on every unix target.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    assert_eq!(rc, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID) failed");
+    std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// CPU time (kernel + user) consumed so far by the calling thread.
+#[cfg(windows)]
+fn thread_cpu_time() -> std::time::Duration {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: `GetCurrentThread` returns a pseudo-handle that needs no
+    // closing, and all four out-pointers are stack `FILETIME`s valid for the
+    // duration of the call.
+    unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .expect("GetThreadTimes on the current thread");
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    // FILETIME counts 100 ns intervals.
+    std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
 }
 
 /// The parser and the classifier agree on what a racily-clean entry means: a
