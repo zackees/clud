@@ -419,6 +419,10 @@ the codebase stays portable.
   printing `Terminate batch job (Y/N)?` and waiting on stdin. The hard
   `kill_tree` step still runs for both Claude and Codex, so the wrapper and
   backend descendants are reaped without prompting.
+  The walk skips any "child" that started before its recorded parent:
+  Windows keeps a dead parent's PID in the orphan and recycles PIDs, so a
+  raw parent map can walk into an unrelated older tree (#1738; see
+  [process-reaping.md](process-reaping.md#parent-links-go-stale-too)).
 
 - **File**: `crates/clud-bin/src/process_tree.rs:46` (`kill_tree`); `:75`
   (`descendant_pids`); `should_cooperative_break`; `:113`

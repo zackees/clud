@@ -67,6 +67,24 @@ to re-check only the root and then kill descendants straight from the snapshot
 on a bare PID; #688 closed that, generalizing what Windows'
 `kill_tree_filtered_automatic` already did.
 
+### Parent links go stale too
+
+Windows never rewrites a process's parent PID when the parent exits. Once that
+PID is recycled, the orphan names the new holder as its parent, so a raw
+`parent()` map makes an older, unrelated process look like a child. #1738: an
+ancestor of the CI pytest runner had a dead parent, a clud daemon was later
+handed that PID, and the integration suite's tree kill of the daemon walked up
+into the runner and killed pytest (exit 1, no summary). On a desktop the same
+walk reaches `explorer.exe`, whose parent `userinit.exe` exits at logon.
+
+Every kill-path walk therefore builds its index through
+`process_tree::children_index`, which links a child only when it started no
+earlier than the process now holding its parent PID (and drops a child whose
+start time cannot be read). The daemon's `signal_process_tree` and the test
+suite's `tests/process.py::terminate_process_tree` use the same rule. Start
+times have one-second resolution, so a PID recycled within the second its
+orphan was created can still pass the check.
+
 ---
 
 ## Daemon-sparing: OS signals first, marker second, whitelist last

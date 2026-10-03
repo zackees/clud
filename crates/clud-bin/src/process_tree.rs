@@ -30,6 +30,8 @@
 //! `CTRL_BREAK_EVENT` to the child's console process group so a
 //! well-behaved agent can flush state before the hard `kill_tree` follows.
 
+use std::collections::HashMap;
+
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
 use crate::process_identity::ProcessIdentity;
@@ -269,67 +271,191 @@ fn is_console_host(process: &sysinfo::Process) -> bool {
     is_console_host_image(&process.name().to_string_lossy())
 }
 
+/// Parent → children index of a snapshot, keeping only links that can be real.
+///
+/// Every kill-path tree walk goes through this, never through a raw
+/// `process.parent()` map (#1738). Windows never rewrites a process's parent
+/// PID when the parent exits, and it recycles PIDs, so a process whose parent
+/// died looks like a child of whatever later process is handed that PID. On a
+/// GitHub runner some ancestor of the pytest process has a dead parent; when a
+/// clud daemon was handed that PID, killing the daemon's tree walked *up* into
+/// the runner and killed pytest. On a desktop the same walk reaches
+/// `explorer.exe`, whose parent `userinit.exe` exits at logon.
+///
+/// A real child is never older than its parent, so a child that started before
+/// the process now holding its parent PID is dropped. A child with an unknown
+/// start time is dropped too: nothing proves the link. Start times have
+/// one-second resolution, so a PID recycled within the second its orphan was
+/// created can still slip through; the gate removes the long-lived-ancestor
+/// case that killed the runner.
+pub(crate) fn children_index(system: &System) -> HashMap<Pid, Vec<Pid>> {
+    let rows = system.processes().iter().map(|(pid, process)| {
+        (
+            pid.as_u32(),
+            process.parent().map(Pid::as_u32),
+            process.start_time(),
+        )
+    });
+    index_children(rows)
+        .into_iter()
+        .map(|(parent, children)| {
+            (
+                Pid::from_u32(parent),
+                children.into_iter().map(Pid::from_u32).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Pure core of [`children_index`] over `(pid, parent_pid, start_time)` rows.
+pub(crate) fn index_children<I>(rows: I) -> HashMap<u32, Vec<u32>>
+where
+    I: IntoIterator<Item = (u32, Option<u32>, u64)>,
+{
+    let rows: Vec<(u32, Option<u32>, u64)> = rows.into_iter().collect();
+    let start_times: HashMap<u32, u64> = rows
+        .iter()
+        .map(|&(pid, _, start_time)| (pid, start_time))
+        .collect();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(pid, parent, start_time) in &rows {
+        let Some(parent) = parent.filter(|&parent| parent != pid) else {
+            continue;
+        };
+        if start_time == crate::process_identity::UNKNOWN_START_TIME {
+            continue;
+        }
+        if crate::process_scan::parent_is_plausible(start_times.get(&parent).copied(), start_time) {
+            children.entry(parent).or_default().push(pid);
+        }
+    }
+    children
+}
+
+/// Depth-first walk of `children` from `root`, pruning every subtree whose
+/// root `admit` rejects. Each PID is visited once, so a cycle of same-second
+/// parent links cannot loop forever.
+fn walk_descendants(
+    children: &HashMap<Pid, Vec<Pid>>,
+    root: Pid,
+    admit: &mut dyn FnMut(Pid) -> bool,
+) -> Vec<Pid> {
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut stack = vec![root];
+    let mut descendants = Vec::new();
+    while let Some(current) = stack.pop() {
+        for &child in children.get(&current).map(Vec::as_slice).unwrap_or(&[]) {
+            if !seen.insert(child) || !admit(child) {
+                continue;
+            }
+            descendants.push(child);
+            stack.push(child);
+        }
+    }
+    descendants
+}
+
 #[cfg(windows)]
 fn descendant_identities_filtered(
     system: &System,
     root: Pid,
     may_kill: &dyn Fn(u32) -> bool,
 ) -> Vec<ProcessIdentity> {
-    let mut children: std::collections::HashMap<Pid, Vec<Pid>> = std::collections::HashMap::new();
-    for (pid, process) in system.processes() {
-        if let Some(parent) = process.parent() {
-            children.entry(parent).or_default().push(*pid);
-        }
-    }
-
-    let mut stack = vec![root];
-    let mut descendants = Vec::new();
-    while let Some(current) = stack.pop() {
-        if let Some(next) = children.get(&current) {
-            for child in next {
-                let Some(process) = system.process(*child) else {
-                    continue;
-                };
-                if !may_kill(child.as_u32()) || is_console_host(process) {
-                    continue;
-                }
-                descendants.push(ProcessIdentity::new(child.as_u32(), process.start_time()));
-                stack.push(*child);
-            }
-        }
-    }
-    descendants
+    let children = children_index(system);
+    walk_descendants(&children, root, &mut |child| {
+        system
+            .process(child)
+            .is_some_and(|process| may_kill(child.as_u32()) && !is_console_host(process))
+    })
+    .into_iter()
+    .filter_map(|child| {
+        system
+            .process(child)
+            .map(|process| ProcessIdentity::new(child.as_u32(), process.start_time()))
+    })
+    .collect()
 }
 
-/// BFS the parent-to-child graph from `root`, pruning any subtree whose root
-/// `may_kill` rejects.
+/// Walk the parent-to-child graph from `root`, pruning any subtree whose root
+/// `may_kill` rejects. Pruned, not just skipped: an exempt process keeps its
+/// own descendants, so the walk never descends past it.
 fn descendant_pids_filtered(
     system: &System,
     root: Pid,
     may_kill: &dyn Fn(u32) -> bool,
 ) -> Vec<Pid> {
-    let mut children: std::collections::HashMap<Pid, Vec<Pid>> = std::collections::HashMap::new();
-    for (pid, process) in system.processes() {
-        if let Some(parent) = process.parent() {
-            children.entry(parent).or_default().push(*pid);
-        }
+    walk_descendants(&children_index(system), root, &mut |child| {
+        may_kill(child.as_u32())
+    })
+}
+
+/// Every descendant of `root` in `system`, through [`children_index`].
+pub(crate) fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
+    walk_descendants(&children_index(system), root, &mut |_| true)
+}
+
+#[cfg(test)]
+mod stale_parent_tests {
+    use super::index_children;
+
+    // (pid, parent, start_time)
+    const RUNNER: u32 = 100;
+    const PYTEST: u32 = 101;
+    const RECYCLED: u32 = 50;
+
+    #[test]
+    fn child_older_than_the_pid_holder_is_not_its_child() {
+        // The runner's real parent (PID 50) died long ago. A clud daemon
+        // started at t=900 was handed PID 50.
+        let rows = [
+            (RUNNER, Some(RECYCLED), 100),
+            (PYTEST, Some(RUNNER), 200),
+            (RECYCLED, Some(PYTEST), 900),
+        ];
+        let children = index_children(rows);
+        assert_eq!(children.get(&RECYCLED), None, "{children:?}");
+        assert_eq!(children.get(&RUNNER), Some(&vec![PYTEST]));
+        assert_eq!(children.get(&PYTEST), Some(&vec![RECYCLED]));
     }
-    let mut stack = vec![root];
-    let mut descendants = Vec::new();
-    while let Some(current) = stack.pop() {
-        if let Some(next) = children.get(&current) {
-            for child in next {
-                // Pruned, not just skipped: an exempt process keeps its own
-                // descendants, so we never descend past it.
-                if !may_kill(child.as_u32()) {
-                    continue;
-                }
-                descendants.push(*child);
-                stack.push(*child);
-            }
-        }
+
+    #[test]
+    fn child_started_in_the_same_second_as_its_parent_is_kept() {
+        let children = index_children([(10, None, 500), (11, Some(10), 500)]);
+        assert_eq!(children.get(&10), Some(&vec![11]));
     }
-    descendants
+
+    #[test]
+    fn child_with_unknown_start_time_is_not_linked() {
+        let children = index_children([(10, None, 500), (11, Some(10), 0)]);
+        assert_eq!(children.get(&10), None);
+    }
+
+    #[test]
+    fn child_of_a_dead_parent_is_not_linked() {
+        let children = index_children([(11, Some(10), 500)]);
+        assert!(children.is_empty(), "{children:?}");
+    }
+
+    #[test]
+    fn self_parented_process_is_not_its_own_child() {
+        let children = index_children([(4, Some(4), 500)]);
+        assert!(children.is_empty(), "{children:?}");
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::{walk_descendants, Pid};
+    use std::collections::HashMap;
+
+    #[test]
+    fn same_second_parent_cycle_terminates() {
+        let mut children = HashMap::new();
+        children.insert(Pid::from_u32(1), vec![Pid::from_u32(2)]);
+        children.insert(Pid::from_u32(2), vec![Pid::from_u32(1)]);
+        let out = walk_descendants(&children, Pid::from_u32(1), &mut |_| true);
+        assert_eq!(out, vec![Pid::from_u32(2)]);
+    }
 }
 
 /// Whether Ctrl+C teardown should start with a cooperative Ctrl+Break.
