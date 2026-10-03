@@ -124,7 +124,16 @@ impl Server {
                     .filter(|r| params.get("branch").is_none_or(|b| r.branch == *b))
                     .filter(|r| created.is_none_or(|at| r.created >= at))
                     .collect();
-                items.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+                // Like GitHub, a `created`-filtered list orders same-second
+                // runs differently from the full list.
+                items.sort_by(|a, b| {
+                    let tie = if created.is_some() {
+                        a.id.cmp(&b.id)
+                    } else {
+                        b.id.cmp(&a.id)
+                    };
+                    b.created.cmp(&a.created).then(tie)
+                });
                 let (shown, more) = page_of(&items, &params);
                 let body = shown
                     .iter()
@@ -454,11 +463,14 @@ fn a_run_list_merges_new_and_finishing_runs_under_the_callers_filters() {
         server
             .runs
             .push(run(104, "2026-10-02T11:10:00Z", "queued", "main"));
+        server
+            .runs
+            .push(run(105, "2026-10-02T11:10:00Z", "queued", "main"));
     }
     w.advance(RUNS_TTL_MS);
     let merged = w.read(endpoint);
     assert_eq!(merged, w.full(endpoint));
-    assert!(String::from_utf8_lossy(&merged).starts_with("{\"total_count\":4,"));
+    assert!(String::from_utf8_lossy(&merged).starts_with("{\"total_count\":5,"));
     // The bound reaches back to the oldest run that had not finished, so one
     // query refreshes it and finds the new run.
     assert_eq!(
@@ -470,7 +482,7 @@ fn a_run_list_merges_new_and_finishing_runs_under_the_callers_filters() {
     );
     assert_eq!(
         w.ledger(),
-        [entry("full", 1, None), entry("incremental", 1, Some(2))]
+        [entry("full", 1, None), entry("incremental", 1, Some(3))]
     );
     // Once nothing is live the bound is the newest run seen.
     w.server().runs[4].status = "completed";

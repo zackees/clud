@@ -290,7 +290,9 @@ fn seed(
                 Some(0),
             ));
         }
-        let Some(parsed) = collection::parse_page(plan.kind, &response.body) else {
+        let Some(parsed) = collection::parse_page(plan.kind, &response.body)
+            .filter(|page| collection::in_natural_order(plan.kind, &page.members))
+        else {
             return Ok(Refresh::Unmergeable);
         };
         let more = plan.seeds_all_pages() && collection::has_next_page(response.header("link"));

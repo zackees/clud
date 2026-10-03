@@ -279,15 +279,19 @@ pub fn parse_page(kind: Kind, body: &[u8]) -> Option<Page> {
             total_count: Some(runs.total_count),
         }
     };
-    // The merge re-sorts into the order assumed here; a page GitHub sent in
-    // another order would make a merged answer differ from a full fetch.
-    let mut sorted = page.members.clone();
-    sort(kind, &mut sorted);
-    if sorted != page.members {
-        return None;
-    }
     let rebuilt = render(kind, &page.members, page.total_count, usize::MAX);
     (rebuilt == body).then_some(page)
+}
+
+/// Whether a full-fetch page is in the order [`sort`] produces. The merge
+/// re-sorts every answer into that order, so a seed page GitHub sent in
+/// another order means a merged answer would differ from a full fetch.
+/// Incremental pages are not checked: GitHub orders a `created`-filtered run
+/// list differently (same-second runs by workflow), and the merge re-sorts.
+pub fn in_natural_order(kind: Kind, members: &[Member]) -> bool {
+    let mut sorted = members.to_vec();
+    sort(kind, &mut sorted);
+    sorted == members
 }
 
 /// The endpoint's natural order: comments by id ascending; runs newest
