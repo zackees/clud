@@ -57,7 +57,7 @@ resumable scanners, and restore from `Drop`. In addition:
 ## How to validate a change
 
 1. Run the shared Linux checks locally:
-   `bosn ci run --workspace . --trigger pr --wait`. See terminal-pty.md
+   `ci-lint local-gate run` (the bosn PR plan plus a stamp; see CLAUDE.md). See terminal-pty.md
    § Validation for what it covers.
 2. Push. On routine PRs the **Dylint** job also compiles check-only for
    `aarch64-apple-darwin`. It caught a macOS-only compile error while #1709
