@@ -40,6 +40,9 @@ blocker rather than falling back to host testing. The workflows carry no
 act-only workarounds (zackees/ci.yml ACT-003): a local gap is filed in
 zackees/ci.yml, not patched here. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
+Running that one pass through `ci-lint local-gate run` instead stamps the
+commit, and the PR then skips the routine Linux lanes
+([attested skip](docs/architecture/ci.md#attested-skip-gate-008010)).
 
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
 local CI is a pre-push check, not the edit loop. Run the full PR plan at most

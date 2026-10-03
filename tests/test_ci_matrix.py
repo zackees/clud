@@ -75,7 +75,8 @@ def test_release_keeps_six_wheels_and_builds_two_separate_static_linux_assets() 
     musl = static_musl_matrix()["include"]
     assert len(wheels) == 6
     assert {row["target"] for row in musl} == {
-        "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
     }
     assert all(row["strategy"] == "soldr" for row in musl)
     assert all(row["artifact"].startswith("standalone-musl-") for row in musl)
@@ -174,7 +175,8 @@ def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
     assert "suite: unit" in unit
     assert "suite: integration" in integration
     assert "if: needs.static.outputs.mode != 'minimal'" in integration
-    assert "${{ needs.test-linux-x64-unit.result }}" in gate
+    # Wrapped in the attested-skip mapping (GATE-008/010), not a bare result.
+    assert "needs.test-linux-x64-unit.result" in gate
     assert "${{ needs.test-linux-x64-integration.result }}" in gate
     minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
     extended = gate.split("EXTENDED: >-", 1)[1].split("FULL: >-", 1)[0]
@@ -528,3 +530,41 @@ def test_workflows_use_the_local_runner_signal_only_under_an_exception() -> None
             if "zackees/ci.yml#" not in context:
                 offenders.append(f"{path.relative_to(github)}:{index + 1}")
     assert offenders == [], offenders
+
+
+ATTESTED_SKIP_JOBS = ("dylint", "lint-linux-x64", "build-linux-x64", "test-linux-x64-unit")
+
+
+def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
+    """zackees/ci.yml GATE-008/010: an attested PR head skips exactly the
+    routine Linux lanes the local bosn plan runs. Each skip job consumes its
+    static `skip_<job>` output, and `CI OK` maps an attested skip to success
+    in MINIMAL only, so a skip elsewhere still fails closed."""
+    root = CI_YML.parent.parent.parent
+    text = CI_YML.read_text(encoding="utf-8")
+    trust = (root / "local-gate.toml").read_text(encoding="utf-8")
+    attestations = (root / "ci-attestations.yml").read_text(encoding="utf-8")
+    static = text.split("\n  static:\n", 1)[1].split("\n  dylint:\n", 1)[0]
+    assert "python -m ci_lint local-gate verify --repo . --trust --github-output" in static
+    # The verifier and the documented gate command run the same ci_lint.
+    pin = re.search(r"repository: zackees/ci\.yml\n\s+ref: ([0-9a-f]{40})", static)
+    assert pin, "ci_lint checkout must be pinned to a commit"
+    assert f"zackees/ci.yml@{pin.group(1)} ci-lint local-gate run" in trust
+    gate = text.split("\n  ci-ok:\n", 1)[1]
+    minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
+    rest = gate.split("MINIMAL: >-", 1)[0] + gate.split("EXTENDED: >-", 1)[1]
+    for job in ATTESTED_SKIP_JOBS:
+        output = f"skip_{job}: ${{{{ steps.gate.outputs.skip_{job} }}}}"
+        assert output in static, job
+        block = text.split(f"\n  {job}:\n", 1)[1].split("\n\n  ", 1)[0]
+        assert f"needs.static.outputs.skip_{job} != 'true'" in block, job
+        assert f'"ci.yml:{job}"' in trust, job
+        assert f"ci.yml:{job}:" in attestations, job
+        assert (
+            f"needs.static.outputs.skip_{job} == 'true' && needs.{job}.result == 'skipped'"
+            f" && 'success' || needs.{job}.result" in minimal
+        ), job
+        assert f"skip_{job}" not in rest, job
+    # A label that selects lanes the local plan does not run must never trust.
+    for label in ("ci-test", "ci-windows", "ci-full", "ci:full"):
+        assert f'"{label}"' in trust.split("full-labels", 1)[1].split("\n", 1)[0], label

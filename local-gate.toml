@@ -1,0 +1,46 @@
+# clud's local gate (zackees/ci.yml GATE-001..010). See
+# docs/architecture/ci.md#attested-skip-gate-008010.
+#
+# Before pushing, from a clean, committed tree:
+#
+#   uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run
+#
+# runs the PR plan once under bosn ci -> act2 (the same run CLAUDE.md
+# already requires) and, on success, amends HEAD's message with a tree-bound
+# `Local-Gate:` trailer plus one `Ci-Attestation:` per gate in
+# ci-attestations.yml. The static job then lets the routine Linux lanes skip.
+[gate]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait"]
+verify = "ci.yml:static"
+# Opt-in: an unattested PR head is reported, never failed. It simply runs
+# every lane remotely, as before.
+mode = "shadow"
+
+# One lane: the bosn run replays the whole routine plan at once. It reads
+# every input the remote lanes read, so nothing is excluded.
+[gate.lanes.pr]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait"]
+tools = ["bosn", "docker"]
+
+# GATE-008: an attested PR head skips the remote routine Linux lanes. They
+# would rerun exactly the bosn plan that just passed, about 5 minutes of PR
+# latency. The static job decides with `ci-lint local-gate verify --trust`,
+# reading THIS file from the PR's base. It fails closed: a fork or
+# non-writer author, a ci-test/ci-windows/ci-full label, a head not
+# attested for its exact tree, a change to a surface (this file, the
+# workflows and the local actions they use), or the 1-in-10 audit sample
+# all run the lanes as before. Pushes to main always run them (the
+# post-merge catch), and release dispatches never read attestations.
+[gate.trust]
+mode = "enforce"
+skip = [
+  "ci.yml:dylint",
+  "ci.yml:lint-linux-x64",
+  "ci.yml:build-linux-x64",
+  "ci.yml:test-linux-x64-unit",
+]
+covered-by = { "ci.yml:dylint" = ["pr"], "ci.yml:lint-linux-x64" = ["pr"], "ci.yml:build-linux-x64" = ["pr"], "ci.yml:test-linux-x64-unit" = ["pr"] }
+# Labels that select lanes the local plan does not run.
+full-labels = ["ci-test", "ci-windows", "ci-full", "ci:full"]
+# The CI helpers only the skipped jobs run.
+surfaces = ["ci/**"]
