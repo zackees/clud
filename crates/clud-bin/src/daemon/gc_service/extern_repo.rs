@@ -583,8 +583,11 @@ pub(super) fn extern_repo_purge_verdict(
     // A future mtime (fine-grained file timestamps ahead of this clock read,
     // or skew) means "touched just now": age zero. `.ok()` would turn it into
     // "age unknown", which no window can ever call idle.
-    let age = most_recent_mtime(path)
-        .map(|mtime| SystemTime::now().duration_since(mtime).unwrap_or(Duration::ZERO));
+    let age = most_recent_mtime(path).map(|mtime| {
+        SystemTime::now()
+            .duration_since(mtime)
+            .unwrap_or(Duration::ZERO)
+    });
     let idle = age.map(|age| age >= stale_after).unwrap_or(false);
     let merged_idle = age
         .map(|age| age >= merged_stale_after(stale_after))
