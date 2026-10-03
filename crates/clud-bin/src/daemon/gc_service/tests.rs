@@ -1179,6 +1179,9 @@ fn worker_side_ops_never_compute_an_extern_verdict() {
 /// re-checks on the purge-pool thread, immediately before deleting.
 #[test]
 fn a_stale_reclaimable_verdict_does_not_authorize_a_delete() {
+    // ENV_GC_EXTERN_REPO_MAX_AGE_SECS is process-global and other tests set it
+    // (to 0); without the lock a parallel test makes the pool skip the veto.
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("extern");
     fs::create_dir_all(&repo).unwrap();
@@ -1216,6 +1219,9 @@ fn a_stale_reclaimable_verdict_does_not_authorize_a_delete() {
 /// and come back marked spared.
 #[test]
 fn the_purge_pool_refuses_a_delete_the_recheck_vetoes() {
+    // ENV_GC_EXTERN_REPO_MAX_AGE_SECS is process-global and other tests set it
+    // (to 0); without the lock a parallel test makes the pool skip the veto.
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("extern-live-again");
     fs::create_dir_all(&repo).unwrap();
