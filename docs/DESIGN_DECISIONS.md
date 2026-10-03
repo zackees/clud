@@ -2316,17 +2316,20 @@ the capability; only daemon-state mutation is gated. `--no-daemon` remains the
 explicit CLI opt-out. This supersedes the `CLUD_NO_DAEMON` portions of DD-011
 and DD-012.
 
-Daemon shutdown is independently generation- and version-guarded. A shutdown
-request carries the caller version and the expected daemon PID plus start time;
-the daemon rejects legacy/unversioned callers, older callers, and requests for
-a different generation.
+Daemon shutdown is an explicit recovery action and accepts callers regardless
+of version. A shutdown request normally carries the expected daemon PID and
+start time; the daemon rejects a different generation, but accepts legacy
+requests that omit this field. If an older daemon rejects the request, the
+client terminates only the recorded process identity. Implicit daemon creation
+still refuses a newer daemon and explains how to stop or restart it explicitly.
 
 **Consequences:** Adding a new subcommand cannot accidentally gain daemon-spawn
 authority. `clud tool` and hook chains cannot inherit it. A utility mode may
 talk to an already-running compatible daemon but gets a local permission error
 if its operation would need to create or replace one. An older client that
-encounters a newer daemon leaves it untouched, emits the yellow compatibility
-error, and exits 1.
+encounters a newer daemon during normal launch leaves it untouched, emits the
+yellow compatibility error, and exits 1. Explicit stop and restart can recover
+from that version skew.
 
 ## DD-052: hook applicability is decided by a root's relationship to the session, not by path geometry
 
