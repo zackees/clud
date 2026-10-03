@@ -2618,22 +2618,19 @@ SUBSCRIPTION_HEARTBEAT_POLLS = 6
 
 
 def broker_watch_keys(repo: str, pr: int, head_sha: str) -> list[str]:
-    """The REST reads whose change should wake the watch: the PR, its
-    reviews and comments, and the head commit's checks, runs and statuses.
-    The check-run and run URLs are the ones `paginate` reads first, so for
-    those two the first baseline is of the very body the poll judged. The
-    others the poll reads through GraphQL: a change between that poll and
-    the first baseline of a new key set (the first poll, a moved head) is
-    seen at the heartbeat. Later waits keep the digests of the last wake, so
-    a change during a poll wakes the next wait at once."""
+    """The REST reads whose change should wake the watch, kept to the ones
+    that carry verdicts, since every key costs a (free) revalidation per
+    TTL: the PR (state, head, mergeability, and its `updated_at` moves with
+    review and comment activity), the head commit's check runs (at the URL
+    `paginate` reads first, so its first baseline is of the very body the
+    poll judged) and its commit statuses. Anything else a poll reads only
+    through GraphQL (review threads, CodeRabbit's comments) is caught at the
+    heartbeat. Later waits keep the digests of the last wake, so a change
+    during a poll wakes the next wait at once."""
     return [
         f"repos/{repo}/pulls/{pr}",
         f"repos/{repo}/commits/{head_sha}/check-runs?filter=all&per_page={PER_PAGE}&page=1",
-        f"repos/{repo}/actions/runs?head_sha={head_sha}&per_page={PER_PAGE}&page=1",
         f"repos/{repo}/commits/{head_sha}/statuses?per_page={PER_PAGE}",
-        f"repos/{repo}/pulls/{pr}/reviews?per_page={PER_PAGE}",
-        f"repos/{repo}/issues/{pr}/comments?per_page={PER_PAGE}",
-        f"repos/{repo}/pulls/{pr}/comments?per_page={PER_PAGE}",
     ]
 
 

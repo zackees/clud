@@ -293,14 +293,15 @@ copies, and the call sleeps to the reset (or its deadline) in one step.
 `pr_merge_watch.py` is the first waiter. In a session with the broker
 (`CLUD_GH_READ_BROKER=1` and the daemon's `daemon.json`), it blocks on the
 subscription between steady-state polls, at most six intervals (a heartbeat,
-for GraphQL-only state such as review threads). It watches seven reads:
+for GraphQL-only state such as review threads). Every watched key costs a
+free revalidation per TTL, so it watches only the three reads that carry
+verdicts:
 
-- the PR;
-- the head commit's check runs and workflow runs, at the exact URLs its own
-  `paginate` reads first, so the baseline digest is of the body the poll
-  just judged;
-- the head commit's statuses;
-- the PR's reviews, issue comments and review comments.
+- the PR: its state, head and mergeability, and its `updated_at` moves with
+  review and comment activity;
+- the head commit's check runs, at the exact URL its own `paginate` reads
+  first, so the first baseline is of the body the poll just judged;
+- the head commit's statuses.
 
 A poll still decides everything, with the same exit codes: a required
 failure exits 1 on the poll right after the wake, review activity exits 2,
