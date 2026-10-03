@@ -121,6 +121,12 @@ jobs:
         id: gate
         if: github.event_name == 'pull_request'
         run: PYTHONPATH=.ci-lint python -m ci_lint local-gate verify --repo . --trust --github-output
+      # actions/checkout only writes inside the workspace, and ci_lint is not
+      # clud code: the static checks below (banned_imports, ruff) would scan
+      # it. Drop it before they run.
+      - name: Drop ci_lint checkout
+        if: always() && github.event_name == 'pull_request'
+        run: rm -rf .ci-lint
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.12.19"
