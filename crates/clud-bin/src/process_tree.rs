@@ -284,10 +284,10 @@ fn is_console_host(process: &sysinfo::Process) -> bool {
 ///
 /// A real child is never older than its parent, so a child that started before
 /// the process now holding its parent PID is dropped. A child with an unknown
-/// start time is dropped too: nothing proves the link. Start times have
-/// one-second resolution, so a PID recycled within the second its orphan was
-/// created can still slip through; the gate removes the long-lived-ancestor
-/// case that killed the runner.
+/// start time is dropped too: nothing proves the link. sysinfo's start times
+/// are whole seconds, and a PID is often recycled within the second its orphan
+/// was created, so on Windows a same-second link is settled by the exact
+/// creation times and dropped if either cannot be read.
 pub(crate) fn children_index(system: &System) -> HashMap<Pid, Vec<Pid>> {
     let rows = system.processes().iter().map(|(pid, process)| {
         (
@@ -296,7 +296,7 @@ pub(crate) fn children_index(system: &System) -> HashMap<Pid, Vec<Pid>> {
             process.start_time(),
         )
     });
-    index_children(rows)
+    index_children_with(rows, &same_second_link_is_real)
         .into_iter()
         .map(|(parent, children)| {
             (
@@ -307,8 +307,38 @@ pub(crate) fn children_index(system: &System) -> HashMap<Pid, Vec<Pid>> {
         .collect()
 }
 
-/// Pure core of [`children_index`] over `(pid, parent_pid, start_time)` rows.
+/// Settle a link whose parent and child started in the same whole second.
+#[cfg(windows)]
+fn same_second_link_is_real(parent: u32, child: u32) -> bool {
+    use crate::process_identity::creation_ticks;
+    matches!(
+        (creation_ticks(parent), creation_ticks(child)),
+        (Some(parent), Some(child)) if child >= parent
+    )
+}
+
+/// POSIX re-parents orphans, so a same-second parent link is always real.
+#[cfg(not(windows))]
+fn same_second_link_is_real(_parent: u32, _child: u32) -> bool {
+    true
+}
+
+/// Pure core of [`children_index`] over `(pid, parent_pid, start_time)` rows,
+/// keeping every same-second link.
+#[cfg(test)]
 pub(crate) fn index_children<I>(rows: I) -> HashMap<u32, Vec<u32>>
+where
+    I: IntoIterator<Item = (u32, Option<u32>, u64)>,
+{
+    index_children_with(rows, &|_, _| true)
+}
+
+/// [`index_children`] with `same_second(parent, child)` deciding the links
+/// whose whole-second start times are equal.
+pub(crate) fn index_children_with<I>(
+    rows: I,
+    same_second: &dyn Fn(u32, u32) -> bool,
+) -> HashMap<u32, Vec<u32>>
 where
     I: IntoIterator<Item = (u32, Option<u32>, u64)>,
 {
@@ -325,9 +355,14 @@ where
         if start_time == crate::process_identity::UNKNOWN_START_TIME {
             continue;
         }
-        if crate::process_scan::parent_is_plausible(start_times.get(&parent).copied(), start_time) {
-            children.entry(parent).or_default().push(pid);
+        let parent_start = start_times.get(&parent).copied();
+        if !crate::process_scan::parent_is_plausible(parent_start, start_time) {
+            continue;
         }
+        if parent_start == Some(start_time) && !same_second(parent, pid) {
+            continue;
+        }
+        children.entry(parent).or_default().push(pid);
     }
     children
 }
@@ -396,7 +431,7 @@ pub(crate) fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
 
 #[cfg(test)]
 mod stale_parent_tests {
-    use super::index_children;
+    use super::{index_children, index_children_with};
 
     // (pid, parent, start_time)
     const RUNNER: u32 = 100;
@@ -422,6 +457,13 @@ mod stale_parent_tests {
     fn child_started_in_the_same_second_as_its_parent_is_kept() {
         let children = index_children([(10, None, 500), (11, Some(10), 500)]);
         assert_eq!(children.get(&10), Some(&vec![11]));
+    }
+
+    #[test]
+    fn same_second_link_is_settled_by_the_tie_breaker() {
+        let rows = [(10, None, 500), (11, Some(10), 500), (12, Some(10), 501)];
+        let children = index_children_with(rows, &|_, child| child != 11);
+        assert_eq!(children.get(&10), Some(&vec![12]));
     }
 
     #[test]

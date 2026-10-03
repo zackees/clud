@@ -81,9 +81,10 @@ Every kill-path walk therefore builds its index through
 `process_tree::children_index`, which links a child only when it started no
 earlier than the process now holding its parent PID (and drops a child whose
 start time cannot be read). The daemon's `signal_process_tree` and the test
-suite's `tests/process.py::terminate_process_tree` use the same rule. Start
-times have one-second resolution, so a PID recycled within the second its
-orphan was created can still pass the check.
+suite's `tests/process.py::terminate_process_tree` use the same rule. sysinfo
+start times are whole seconds and a PID is often recycled within the second, so
+on Windows a same-second link is settled by exact creation times
+(`process_identity::creation_ticks`).
 
 ---
 
