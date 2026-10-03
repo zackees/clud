@@ -250,6 +250,8 @@ impl World {
             env: &[],
             session_id: None,
             fresh: false,
+            interactive: false,
+            quiet: false,
         };
         self.broker.read(&read).unwrap().body.to_vec()
     }

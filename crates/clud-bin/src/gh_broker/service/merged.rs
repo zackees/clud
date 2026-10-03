@@ -52,15 +52,17 @@ impl Fetcher<'_, '_> {
         self.requests += 1;
         let response = self
             .broker
-            .upstream
-            .fetch(&UpstreamRequest {
-                gh: self.read.gh,
-                endpoint,
-                hostname: self.read.hostname,
-                env: self.read.env,
-                if_none_match: etag,
-                if_modified_since: None,
-            })
+            .fetch_upstream(
+                self.read,
+                &UpstreamRequest {
+                    gh: self.read.gh,
+                    endpoint,
+                    hostname: self.read.hostname,
+                    env: self.read.env,
+                    if_none_match: etag,
+                    if_modified_since: None,
+                },
+            )
             .map_err(ReadError::Failed)?;
         if let Some(rate) = response
             .header("x-ratelimit-remaining")
@@ -139,6 +141,21 @@ impl GhBroker {
             if !read.fresh && self.collection_fresh(store, &state, &tags, plan) {
                 return Merged::Served(Served::cache(render(plan, &state)));
             }
+        }
+        if let Some(window) = self.deferral(read) {
+            // Below the rate-limit floor: the stored pages, marked stale.
+            // Without them the exact-URL path defers (or runs the real
+            // `gh`) in turn.
+            return match store.collection(&key).ok().flatten() {
+                Some(state) if state.unmergeable_at_ms.is_none() && state.width >= plan.width() => {
+                    Merged::Served(Served::deferred(
+                        render(plan, &state),
+                        state.fetched_at_ms,
+                        window,
+                    ))
+                }
+                _ => Merged::Fallback(0),
+            };
         }
         let (flight, leader) = self.join_flight(&key);
         if !leader {

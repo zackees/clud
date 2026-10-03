@@ -142,6 +142,7 @@ import re
 import signal
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -373,6 +374,13 @@ class GhResult:
 
 LAST_GH_ERROR = ""
 
+# The clud session read broker prints this on stderr when, below the
+# rate-limit reserve, it answers a read from its cache instead of
+# refreshing it (#1743). A poll that read any such copy never decides a
+# verdict: the gate waits for fresh data rather than act on a cached one.
+BROKER_STALE_MARKER = "clud: gh read broker: rate-limit reserve"
+STALE_READS = 0
+
 
 def gh_error_note(text: str) -> None:
     """Remember the latest gh failure, for the final unreachable report."""
@@ -406,6 +414,9 @@ def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResul
         return GhResult(124, "", message)
     stdout = res.stdout or ""
     stderr = res.stderr or ""
+    if BROKER_STALE_MARKER in stderr:
+        global STALE_READS
+        STALE_READS += 1
     if res.returncode != 0:
         gh_error_note(stderr or f"gh {' '.join(args)} exited {res.returncode}")
     if check and res.returncode != 0:
@@ -413,15 +424,86 @@ def gh(*args: str, check: bool = False, timeout: float | None = None) -> GhResul
     return GhResult(res.returncode, stdout, stderr)
 
 
-def gh_json(*args: str) -> object | None:
-    """Run gh and parse stdout as JSON; return None on any failure."""
-    r = gh(*args)
+def broker_reads() -> bool:
+    """Whether this process's `gh api` GETs go through the clud session
+    read broker (#1743), which revalidates them by ETag for every reader."""
+    return os.environ.get("CLUD_GH_READ_BROKER") == "1" and bool(
+        os.environ.get("CLUD_GH_SHIM_TARGET")
+    )
+
+
+# REST GETs this process sent outside a broker: path -> (ETag, parsed body).
+_CONDITIONAL_CACHE: dict[str, tuple[str, object]] = {}
+
+
+def _split_include(text: str) -> tuple[int, dict[str, str], str]:
+    """`gh api -i` output -> (status, lower-case headers, body). Output with
+    no status line (a fake, an older gh) reads as a plain 200 body."""
+    if not text.startswith("HTTP/"):
+        return 200, {}, text
+    head, _, body = text.replace("\r\n", "\n").partition("\n\n")
+    lines = head.split("\n")
+    parts = lines[0].split()
+    status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    headers = {}
+    for line in lines[1:]:
+        name, sep, value = line.partition(":")
+        if sep:
+            headers[name.strip().lower()] = value.strip()
+    return status, headers, body
+
+
+def api_get(path: str) -> object | None:
+    """One REST GET, parsed; None on any failure. It is always conditional:
+    in a clud session the read broker revalidates it with the ETag it holds
+    (and shares the answer with every other reader); otherwise this process
+    sends its own `If-None-Match`, and an unchanged resource is a `304`,
+    which GitHub does not count against the rate limit."""
+    if broker_reads():
+        r = gh("api", path)  # ci-lint: allow GHAPI-001 brokered: the session read broker revalidates it by ETag
+        return _parse_json(r)
+    cached = _CONDITIONAL_CACHE.get(path)
+    noted = LAST_GH_ERROR
+    if cached is None:
+        r = gh("api", "-i", path)
+    else:
+        r = gh("api", "-i", path, "-H", f"If-None-Match: {cached[0]}")
+    status, headers, body = _split_include(r.stdout)
+    if status == 304 and cached is not None:
+        # gh exits 1 on a 304; it is not a failure to report.
+        _restore_gh_error(noted)
+        return cached[1]
+    if not r.ok or status != 200:
+        return None
+    data = _parse_json(GhResult(0, body, ""))
+    etag = headers.get("etag")
+    if etag and data is not None:
+        _CONDITIONAL_CACHE[path] = (etag, data)
+    return data
+
+
+def _restore_gh_error(text: str) -> None:
+    global LAST_GH_ERROR
+    LAST_GH_ERROR = text
+
+
+def _parse_json(r: GhResult) -> object | None:
     if not r.ok or not r.stdout.strip():
         return None
     try:
         return json.loads(r.stdout)
     except json.JSONDecodeError:
         return None
+
+
+def gh_json(*args: str) -> object | None:
+    """Run gh and parse stdout as JSON; return None on any failure. A plain
+    REST GET (`gh_json("api", path)`) is sent conditionally ([`api_get`])."""
+    if len(args) == 2 and args[0] == "api" and not args[1].startswith("-") and (
+        args[1] != "graphql"
+    ):
+        return api_get(args[1])
+    return _parse_json(gh(*args))
 
 
 @dataclass
@@ -940,7 +1022,7 @@ def paginate(path: str, key: str) -> list[dict] | None:
     sep = "&" if "?" in path else "?"
     items: list[dict] = []
     for page in range(1, MAX_PAGES + 1):
-        data = gh_json("api", f"{path}{sep}per_page={PER_PAGE}&page={page}")
+        data = gh_json("api", f"{path}{sep}per_page={PER_PAGE}&page={page}")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
         if not isinstance(data, dict) or not isinstance(data.get(key), list):
             return None
         batch = [item for item in data[key] if isinstance(item, dict)]
@@ -1154,7 +1236,7 @@ def classify_failure_explained(
     repo: str, run_id: str | None, job_id: str | None
 ) -> tuple[str, str | None, str]:
     """`classify_failure` plus why the log was unavailable (`""` if read)."""
-    sample, unavailable = fetch_failure_log_explained(repo, run_id, job_id)
+    sample, unavailable = fetch_failure_log_explained(repo, run_id, job_id)  # ci-lint: allow GHAPI-001 on exit only: the failing job's log for the report
     if not sample:
         return "", None, unavailable
     first_err = first_error_line(sample)
@@ -1398,7 +1480,7 @@ def _all_rollup_contexts(
         cursor = page_info.get("endCursor")
         if has_next is not True or not isinstance(cursor, str) or not cursor or not head_sha:
             return None
-        data = gh_json(
+        data = gh_json(  # ci-lint: allow GHAPI-001 GraphQL (no ETag; own budget): one gate snapshot per poll, and polls wait on the broker subscription in a session
             "api",
             "graphql",
             "-f",
@@ -1487,7 +1569,7 @@ def _all_node_connection(
             or not node_id
         ):
             return None
-        data = gh_json(
+        data = gh_json(  # ci-lint: allow GHAPI-001 GraphQL (no ETag; own budget): one gate snapshot per poll, and polls wait on the broker subscription in a session
             "api", "graphql", "-f", f"query={query}", "-f", f"id={node_id}", "-f", f"after={cursor}"
         )
         node = ((data or {}).get("data") or {}).get("node") if isinstance(data, dict) else None
@@ -1540,7 +1622,7 @@ query($owner:String!,$name:String!,$number:Int!,$includeCoderabbit:Boolean!){
   }
 }
 """
-    data = gh_json(
+    data = gh_json(  # ci-lint: allow GHAPI-001 GraphQL (no ETag; own budget): one gate snapshot per poll, and polls wait on the broker subscription in a session
         "api",
         "graphql",
         "-f",
@@ -1691,7 +1773,7 @@ query($owner:String!,$name:String!,$number:Int!){
   }
 }
 """
-    thread_data = gh_json(
+    thread_data = gh_json(  # ci-lint: allow GHAPI-001 GraphQL (no ETag; own budget): one gate snapshot per poll, and polls wait on the broker subscription in a session
         "api",
         "graphql",
         "-f",
@@ -1703,7 +1785,7 @@ query($owner:String!,$name:String!,$number:Int!){
         "-F",
         f"number={pr}",
     )
-    comments = gh_json("api", f"repos/{repo}/issues/{pr}/comments?per_page=100")
+    comments = gh_json("api", f"repos/{repo}/issues/{pr}/comments?per_page=100")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
     if not isinstance(thread_data, dict) or not isinstance(comments, list):
         return CodeRabbitObservation("degraded", reason="api_error")
     threads = (
@@ -1733,7 +1815,7 @@ def newest_coderabbit_status(statuses: list[dict]) -> dict | None:
 
 def fetch_coderabbit_status(repo: str, sha: str) -> tuple[bool, dict | None]:
     """(read ok, newest `CodeRabbit` status) on one commit (#1332)."""
-    data = gh_json("api", f"repos/{repo}/commits/{sha}/statuses?per_page=100")
+    data = gh_json("api", f"repos/{repo}/commits/{sha}/statuses?per_page=100")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
     if not isinstance(data, list):
         return False, None
     return True, newest_coderabbit_status(data)
@@ -1814,7 +1896,7 @@ def fetch_coderabbit_suppressed(repo: str, ref: str) -> bool:
     no-wait policy that still never stalls green.
     """
     for name in CODERABBIT_CONFIG_FILES:
-        data = gh_json("api", f"repos/{repo}/contents/{name}?ref={ref}")
+        data = gh_json("api", f"repos/{repo}/contents/{name}?ref={ref}")  # ci-lint: allow GHAPI-001 once per watch: the .coderabbit.yaml read is cached in coderabbit_suppressed
         if not isinstance(data, dict) or not isinstance(data.get("content"), str):
             continue
         try:
@@ -1843,7 +1925,7 @@ class ReviewState:
             if log:
                 log.emit("api_degraded", source="reviews", reason="repo_unresolved")
             return False
-        reviews = gh_json("api", f"repos/{repo_arg}/pulls/{pr}/reviews?per_page=100")
+        reviews = gh_json("api", f"repos/{repo_arg}/pulls/{pr}/reviews?per_page=100")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
         human_ids: set[int] = set()
         if isinstance(reviews, list):
             for review in reviews:
@@ -1992,7 +2074,7 @@ def cancel_pr_runs(  # noqa: C901
             cancel = gh("api", "-X", "POST", f"repos/{repo_arg}/actions/runs/{rid}/cancel")
             _report_cancel(rid, cancel, opts, log, "runs")
         elif opts.mode == "jobs":
-            jobs_resp = gh_json("api", f"repos/{repo_arg}/actions/runs/{rid}/jobs?per_page=100")
+            jobs_resp = gh_json("api", f"repos/{repo_arg}/actions/runs/{rid}/jobs?per_page=100")  # ci-lint: allow GHAPI-001 on exit only: the jobs of a run being cancelled
             if not isinstance(jobs_resp, dict):
                 if log:
                     log.emit(
@@ -2251,7 +2333,7 @@ def install_kill_handlers() -> None:
 def fetch_workflow_presence(repo: str, ref: str) -> bool | None:
     """True/False when the base branch does/doesn't have workflow files;
     None when GitHub could not be asked."""
-    res = gh("api", f"repos/{repo}/contents/.github/workflows?ref={ref}")
+    res = gh("api", f"repos/{repo}/contents/.github/workflows?ref={ref}")  # ci-lint: allow GHAPI-001 once per head commit: memoized in no_checks_reasons
     if not res.ok:
         return False if "HTTP 404" in res.stderr else None
     try:
@@ -2267,7 +2349,7 @@ def fetch_workflow_presence(repo: str, ref: str) -> bool | None:
 
 
 def fetch_head_commit_message(repo: str, sha: str) -> str | None:
-    data = gh_json("api", f"repos/{repo}/commits/{sha}")
+    data = gh_json("api", f"repos/{repo}/commits/{sha}")  # ci-lint: allow GHAPI-001 once per head commit: memoized in no_checks_reasons
     if not isinstance(data, dict):
         return None
     message = (data.get("commit") or {}).get("message")
@@ -2290,7 +2372,7 @@ def immediate_no_checks_reason(repo: str, snapshot: PRSnapshot) -> str | None:
 
 
 def fetch_queued_jobs(repo: str, run_id: int) -> list[dict]:
-    data = gh_json("api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
+    data = gh_json("api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
     jobs = data.get("jobs") if isinstance(data, dict) else None
     return [
         {"name": str(j.get("name", "?")), "labels": list(j.get("labels") or [])}
@@ -2324,24 +2406,46 @@ def _parse_iso(ts: str | None) -> float | None:
 
 
 def fetch_run_jobs(run_id: str, repo: str | None) -> dict | None:
-    """Call gh run view --json jobs,status,conclusion,createdAt,updatedAt
-    for the given run; return the parsed dict or None on error."""
-    args = [
-        "run",
-        "view",
-        str(run_id),
-        "--json",
-        "jobs,status,conclusion,createdAt,updatedAt,workflowName",
-    ]
-    if repo:
-        args.extend(["--repo", repo])
-    res = gh(*args)
-    if not res.ok:
+    """One run and its jobs, in the shape `gh run view --json
+    jobs,status,conclusion,createdAt,updatedAt,workflowName` prints, read
+    through two REST calls the session broker revalidates by ETag (the
+    porcelain view is never brokered). None on any error."""
+    if not repo:
         return None
-    try:
-        return json.loads(res.stdout)
-    except json.JSONDecodeError:
+    run = gh_json("api", f"repos/{repo}/actions/runs/{run_id}")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
+    jobs = paginate(f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs")
+    if not isinstance(run, dict) or jobs is None:
         return None
+
+    def step(raw: dict) -> dict:
+        return {
+            "name": raw.get("name"),
+            "number": raw.get("number"),
+            "status": raw.get("status"),
+            "conclusion": raw.get("conclusion"),
+            "startedAt": raw.get("started_at"),
+            "completedAt": raw.get("completed_at"),
+        }
+
+    return {
+        "status": run.get("status"),
+        "conclusion": run.get("conclusion") or "",
+        "createdAt": run.get("created_at"),
+        "updatedAt": run.get("updated_at"),
+        "workflowName": run.get("name"),
+        "jobs": [
+            {
+                "name": job.get("name"),
+                "status": job.get("status"),
+                "conclusion": job.get("conclusion") or "",
+                "startedAt": job.get("started_at"),
+                "completedAt": job.get("completed_at"),
+                "steps": [step(raw) for raw in job.get("steps") or [] if isinstance(raw, dict)],
+            }
+            for job in jobs
+            if isinstance(job, dict)
+        ],
+    }
 
 
 def aggregate_jobs(run_info: dict) -> dict:
@@ -2468,6 +2572,184 @@ def emit_progress_report(
             print(f"    WARN: {w}", file=sys.stderr)
 
 
+# --- Session read-broker subscription (#1743 phase 3) ----------------------
+#
+# Inside a clud session whose gh reads go through the daemon's read broker,
+# the watch blocks on `POST /gh/watch` between polls instead of sleeping: the
+# broker re-reads the PR's REST state at its own cadence (its TTL, shared by
+# every reader, free `304`s while nothing changed) and returns the moment a
+# body changes. The poll that follows judges exactly as before. Outside a
+# session, or when the daemon does not answer, the watch polls as it always
+# did.
+
+# Mirrors `gh_broker::FORWARDED_ENV` (crates/clud-bin/src/gh_broker/mod.rs):
+# the identity, and so the cache keys, of this process's brokered reads.
+# tests/test_pr_merge_watch_subscription.py fails if the two drift.
+BROKER_FORWARDED_ENV = (
+    "GH_HOST",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
+BROKER_WATCH_PATH = "/gh/watch"
+# One daemon call blocks at most this long (the daemon caps it at 55 s).
+BROKER_WAIT_SEC = 50
+# Even with nothing changed, a full poll runs at least every this many
+# intervals: GraphQL-only state (review threads, mergeability) has no REST
+# key to watch.
+SUBSCRIPTION_HEARTBEAT_POLLS = 6
+
+
+def broker_watch_keys(repo: str, pr: int, head_sha: str) -> list[str]:
+    """The REST reads whose change should wake the watch, kept to the ones
+    that carry verdicts, since every key costs a (free) revalidation per
+    TTL: the PR (state, head, mergeability, and its `updated_at` moves with
+    review and comment activity), the head commit's check runs (at the URL
+    `paginate` reads first, so its first baseline is of the very body the
+    poll judged) and its commit statuses. Anything else a poll reads only
+    through GraphQL (review threads, CodeRabbit's comments) is caught at the
+    heartbeat. Later waits keep the digests of the last wake, so a change
+    during a poll wakes the next wait at once."""
+    return [
+        f"repos/{repo}/pulls/{pr}",
+        f"repos/{repo}/commits/{head_sha}/check-runs?filter=all&per_page={PER_PAGE}&page=1",
+        f"repos/{repo}/commits/{head_sha}/statuses?per_page={PER_PAGE}",
+    ]
+
+
+@dataclass
+class BrokerSubscription:
+    """A connection to the session daemon's `/gh/watch` route."""
+
+    url: str
+    token: str
+    gh: str
+    env: list[list[str]]
+    session_id: str | None
+    keys: list[str] | None = None
+    seen: list[str | None] | None = None
+    deferred_until: int | None = None
+
+    @classmethod
+    def from_env(cls, environ: dict[str, str] | None = None) -> BrokerSubscription | None:
+        """The session's broker, or None outside a session that uses one."""
+        environ = dict(os.environ if environ is None else environ)
+        gh_target = environ.get("CLUD_GH_SHIM_TARGET", "")
+        if environ.get("CLUD_GH_READ_BROKER") != "1" or not gh_target:
+            return None
+        state = environ.get("CLUD_DAEMON_STATE_DIR") or str(Path.home() / ".clud" / "state")
+        try:
+            info = json.loads((Path(state) / "daemon.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        port = info.get("dashboard_port") if isinstance(info, dict) else None
+        token = info.get("dashboard_token") if isinstance(info, dict) else None
+        if not isinstance(port, int) or not isinstance(token, str) or not token:
+            return None
+        return cls(
+            url=f"http://127.0.0.1:{port}{BROKER_WATCH_PATH}",
+            token=token,
+            gh=gh_target,
+            env=[[key, environ[key]] for key in BROKER_FORWARDED_ENV if key in environ],
+            session_id=environ.get("CLUD_SESSION_ID") or None,
+        )
+
+    def _call(self, wait_sec: float) -> dict | None:
+        body = {
+            "gh": self.gh,
+            "hostname": None,
+            "env": self.env,
+            "session_id": self.session_id,
+            "endpoints": self.keys,
+            "seen": self.seen or [],
+            "wait_ms": int(max(0.0, wait_sec) * 1000),
+        }
+        request = urllib.request.Request(
+            self.url,
+            data=json.dumps(body).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": f"clud_dashboard_token={self.token}",
+            },
+            method="POST",
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=wait_sec + 15) as response:
+                reply = json.loads(response.read())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(reply, dict) or not isinstance(reply.get("digests"), list):
+            return None
+        return reply
+
+    def wait(self, keys: list[str], wait_sec: float) -> str:
+        """Block until a watched read changes or `wait_sec` runs out.
+
+        Returns `changed`, `quiet` (nothing changed), or `unavailable` (the
+        daemon did not answer; the caller sleeps as it would without a
+        broker). A new key set (the head moved) first takes a baseline.
+        """
+        if keys != self.keys:
+            self.keys, self.seen = list(keys), None
+            baseline = self._call(0)
+            if baseline is None:
+                return "unavailable"
+            self.seen = baseline["digests"]
+        deadline = time.monotonic() + wait_sec
+        while (left := deadline - time.monotonic()) > 0:
+            reply = self._call(min(left, BROKER_WAIT_SEC))
+            if reply is None:
+                return "unavailable"
+            self.seen = reply["digests"]
+            self.deferred_until = reply.get("deferred_until_s")
+            if reply.get("changed"):
+                return "changed"
+        return "quiet"
+
+
+def _await_next_poll(
+    subscription: BrokerSubscription | None,
+    keys: list[str],
+    poll_started: float,
+    interval: int,
+    deadline: float,
+    log: WatchLog | None,
+) -> None:
+    """Between two steady-state polls: block on the broker until a watched
+    read changes (at most a heartbeat, never past the deadline), else sleep
+    the rest of the interval as before."""
+    if subscription is not None:
+        wait = min(interval * SUBSCRIPTION_HEARTBEAT_POLLS, deadline - time.monotonic())
+        outcome = subscription.wait(keys, max(0.0, wait))
+        if log:
+            log.emit(
+                "subscription",
+                outcome=outcome,
+                deferred_until_s=subscription.deferred_until,
+            )
+        if outcome != "unavailable":
+            return
+    _sleep_remaining_interval(poll_started, interval)
+
+
 def _sleep_remaining_interval(poll_started: float, interval: int) -> None:
     remaining = max(0.0, interval - (time.monotonic() - poll_started))
     if remaining:
@@ -2486,6 +2768,7 @@ def watch(  # noqa: C901
     no_checks_grace: int = DEFAULT_NO_CHECKS_GRACE_SEC,
     max_queued: int | None = None,
     coderabbit_wait: int = DEFAULT_CODERABBIT_WAIT_SEC,
+    broker_wait: bool = True,
 ) -> int:
     deadline = time.monotonic() + timeout
     snapshot: PRSnapshot | None = None
@@ -2499,7 +2782,7 @@ def watch(  # noqa: C901
         return EXIT_GITHUB_UNREACHABLE
     # Initial snapshot — bail fast if the PR isn't open. A failed fetch is
     # GitHub being unreachable, never "closed" (#1418).
-    for attempt in range(1, MAX_CONSECUTIVE_API_FAILURES + 1):
+    for attempt in range(1, MAX_CONSECUTIVE_API_FAILURES + 1):  # ci-lint: allow GHAPI-001 bounded retry: at most MAX_CONSECUTIVE_API_FAILURES (3) tries for the first snapshot
         snapshot = PRSnapshot.fetch(pr, repo)
         if snapshot is not None:
             break
@@ -2549,6 +2832,11 @@ def watch(  # noqa: C901
     )
 
     require_re = re.compile(require_pattern) if require_pattern else None
+    # In a clud session with the read broker, wait on it between polls
+    # instead of sleeping (#1743 phase 3).
+    subscription = BrokerSubscription.from_env() if broker_wait else None
+    if log:
+        log.emit("subscription", outcome="available" if subscription else "polling")
 
     while True:
         if time.monotonic() >= deadline:
@@ -2564,6 +2852,7 @@ def watch(  # noqa: C901
             _exit_after_cancel(EXIT_TIMEOUT, "timeout", pr, repo, snapshot.head_sha, opts, log)
         poll_started = time.monotonic()
         poll_no += 1
+        stale_before = STALE_READS
         # A probe that found no CodeRabbit is not final (#1332): its comments
         # can arrive minutes after the first poll, and a probe that never runs
         # again would ignore them and let a merge through. Every few polls the
@@ -2630,6 +2919,18 @@ def watch(  # noqa: C901
             code = EXIT_GREEN if snapshot.state == "MERGED" else EXIT_PR_CLOSED
             label = "merged" if snapshot.state == "MERGED" else "closed"
             _exit_after_cancel(code, label, pr, repo, snapshot.head_sha, opts, log)
+        if STALE_READS != stale_before:
+            # Below the rate-limit reserve the session broker answered from
+            # its cache: never judge (pass or fail) on data that old.
+            print(
+                "NOTE  check data is a cached copy (rate-limit reserve); waiting for fresh data",
+                file=sys.stderr,
+                flush=True,
+            )
+            if log:
+                log.emit("api_degraded", source="broker", reason="stale_reads")
+            _sleep_remaining_interval(poll_started, interval)
+            continue
 
         # 1. Judge the head commit's checks. The REST check runs (every page)
         # are judged by the supersession rule; the rollup rows are the
@@ -2853,6 +3154,13 @@ def watch(  # noqa: C901
                             )
                         last_wait_state = wait_state
                     waiting_green = (failing, counts)
+            if STALE_READS != stale_before:
+                # The CodeRabbit reads above came from the broker's cache:
+                # green waits for a poll that read fresh data.
+                if log:
+                    log.emit("api_degraded", source="broker", reason="stale_reads")
+                _sleep_remaining_interval(poll_started, interval)
+                continue
             if waiting_green is None:
                 _exit_green(
                     pr,
@@ -2870,7 +3178,24 @@ def watch(  # noqa: C901
         except Exception as exc:
             print(f"NOTE  progress report failed: {exc}", file=sys.stderr)
 
-        _sleep_remaining_interval(poll_started, interval)
+        # A grace period, a mergeability count, a CodeRabbit wait or a queue
+        # limit is counted in polls or judged at poll time: keep polling at
+        # the interval. Otherwise block on the broker until something
+        # changes.
+        armed = (
+            idle_since is not None
+            or unknown_polls > 0
+            or waiting_green is not None
+            or max_queued is not None
+        )
+        _await_next_poll(
+            None if armed else subscription,
+            broker_watch_keys(repo_for_protection, pr, snapshot.head_sha),
+            poll_started,
+            interval,
+            deadline,
+            log,
+        )
 
 
 def _exit_green(
@@ -3021,7 +3346,7 @@ def _act_on_verdict(  # noqa: C901
     if verdict.cancellation_derived:
         # A cancellation is often concurrency reacting to a new push. Never
         # exit on stale data: confirm the head before acting.
-        fresh = PRSnapshot.fetch(pr, repo)
+        fresh = PRSnapshot.fetch(pr, repo)  # ci-lint: allow GHAPI-001 once per failure verdict, which then exits or drops the verdict
         if fresh is None or fresh.head_sha != snapshot.head_sha:
             moved_to = fresh.head_sha if fresh is not None else None
             print(
@@ -3093,7 +3418,7 @@ def _rerun_since_verdict(verdict: Verdict, repo: str | None) -> int | None:
     for j in verdict.failing:
         if j.run_id is None or j.run_attempt is None:
             continue
-        run = gh_json("api", f"repos/{repo}/actions/runs/{j.run_id}")
+        run = gh_json("api", f"repos/{repo}/actions/runs/{j.run_id}")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
         if not isinstance(run, dict):
             continue
         attempt = _as_int(run.get("run_attempt"))
@@ -3232,6 +3557,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="exit 11 when a run has waited this many seconds for a runner (default: off)",
     )
     p.add_argument(
+        "--no-broker-wait",
+        dest="broker_wait",
+        action="store_false",
+        help="in a clud session with the gh read broker, poll at --interval instead of "
+        "waiting on the broker for a change between polls (#1743)",
+    )
+    p.add_argument(
         "--coderabbit-wait",
         type=int,
         default=DEFAULT_CODERABBIT_WAIT_SEC,
@@ -3352,6 +3684,7 @@ def main(argv: list[str] | None = None) -> int:
             no_checks_grace=ns.no_checks_grace,
             max_queued=ns.max_queued,
             coderabbit_wait=ns.coderabbit_wait,
+            broker_wait=ns.broker_wait,
         )
     except WatchKilled as killed:
         print(f"KILLED  {killed}", file=sys.stderr)

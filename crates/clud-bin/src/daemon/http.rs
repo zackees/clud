@@ -755,7 +755,11 @@ fn run_dashboard_loop(
             }
             (Method::Post, crate::gh_broker::READ_PATH) => {
                 let guard = activity.as_ref().map(DaemonActivity::start_connection);
-                spawn_gh_read(request, Arc::clone(&gh_broker), guard);
+                spawn_gh_route(request, Arc::clone(&gh_broker), guard, GhRoute::Read);
+            }
+            (Method::Post, crate::gh_broker::WATCH_PATH) => {
+                let guard = activity.as_ref().map(DaemonActivity::start_connection);
+                spawn_gh_route(request, Arc::clone(&gh_broker), guard, GhRoute::Watch);
             }
             (Method::Get, crate::gh_broker::LEDGER_PATH) => {
                 let (status, bytes) = gh_broker.handle_ledger();
@@ -923,31 +927,82 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<RegistryMsg>>)
     }
 }
 
-/// #1743: answer one `gh api` read on its own thread. An upstream fetch
-/// takes seconds and concurrent readers of one key must be able to join it,
-/// so the dashboard loop never waits on the broker.
-fn spawn_gh_read(
+/// The broker routes that may block: a read waits on GitHub, a watch
+/// waits for a change.
+#[derive(Clone, Copy)]
+enum GhRoute {
+    Read,
+    Watch,
+}
+
+/// `/gh/watch` calls blocked at once. Each holds a thread for up to 55 s; a
+/// call over the limit is refused (503) and the waiter falls back to its
+/// own interval polling.
+const MAX_GH_WATCHES: usize = 32;
+static GH_WATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds one of the [`MAX_GH_WATCHES`] slots until dropped.
+struct WatchSlot;
+
+impl WatchSlot {
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        GH_WATCHES
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_GH_WATCHES).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for WatchSlot {
+    fn drop(&mut self) {
+        GH_WATCHES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// #1743: answer one `/gh/read` or `/gh/watch` request on its own thread.
+/// An upstream fetch takes seconds, a watch up to a minute, and concurrent
+/// readers of one key must be able to join one fetch, so the dashboard loop
+/// never waits on the broker.
+fn spawn_gh_route(
     mut request: Request,
     broker: Arc<crate::gh_broker::service::GhBroker>,
     guard: Option<super::activity::ActiveWorkGuard>,
+    route: GhRoute,
 ) {
+    let slot = match route {
+        GhRoute::Read => None,
+        GhRoute::Watch => match WatchSlot::take() {
+            Some(slot) => Some(slot),
+            None => {
+                respond_json(request, 503, &json_error_bytes("too many gh watches"));
+                return;
+            }
+        },
+    };
     let spawned = thread::Builder::new()
         .name("clud-gh-read".to_string())
         .spawn(move || {
             let _guard = guard;
+            let _slot = slot;
             let (status, bytes) = match read_body(&mut request) {
                 Ok(body) => {
                     let self_exe = std::env::current_exe().unwrap_or_default();
                     let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
                     let home = std::env::var_os(home_key).map(PathBuf::from);
-                    broker.handle_http(&body, &self_exe, home.as_deref())
+                    match route {
+                        GhRoute::Read => broker.handle_http(&body, &self_exe, home.as_deref()),
+                        GhRoute::Watch => broker.handle_watch(&body, &self_exe, home.as_deref()),
+                    }
                 }
                 Err(err) => (400, json_error_bytes(&format!("read body failed: {err}"))),
             };
             respond_json(request, status, &bytes);
         });
     if let Err(err) = spawned {
-        eprintln!("[clud] note: gh read thread spawn failed: {err}");
+        eprintln!("[clud] note: gh broker thread spawn failed: {err}");
     }
 }
 

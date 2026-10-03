@@ -17,6 +17,7 @@
 //! Every failure on the shim side falls back to the real `gh` unchanged.
 //! See `docs/architecture/gh-read-broker.md`.
 
+pub mod budget;
 pub mod classify;
 pub mod client;
 pub mod collection;
@@ -32,6 +33,9 @@ pub const READ_PATH: &str = "/gh/read";
 /// Daemon route that marks cached reads stale after a possible write: those
 /// carrying the posted `tags`, or every read when there are none.
 pub const INVALIDATE_PATH: &str = "/gh/invalidate";
+/// Daemon route that blocks until one of a set of reads changes (a
+/// subscription, #1743 phase 3); see [`service::WatchRequest`].
+pub const WATCH_PATH: &str = "/gh/watch";
 /// Daemon route (GET) that returns the newest ledger rows, oldest first, as
 /// a JSON array: what each brokered read cost upstream.
 pub const LEDGER_PATH: &str = "/gh/ledger";
@@ -83,6 +87,10 @@ pub struct ReadRequest {
     /// `CLUD_GH_FRESH=1`: skip the TTL, still revalidate conditionally.
     #[serde(default)]
     pub fresh: bool,
+    /// The shim's stdin is a terminal: a person is waiting, so the
+    /// rate-limit floor never defers this read. Older shims send none.
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 /// Daemon -> shim: the response to replay to the real `gh`.
@@ -92,4 +100,18 @@ pub struct ReadReply {
     pub headers: Vec<(String, String)>,
     pub body_b64: String,
     pub outcome: String,
+    /// Set when the body is a stored copy served below the rate-limit
+    /// floor instead of a refresh. Older shims ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<StaleNote>,
+}
+
+/// How stale a deferred reply is, and the window that deferred it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleNote {
+    pub age_ms: u64,
+    pub remaining: u64,
+    pub limit: u64,
+    /// Unix seconds at which the window resets.
+    pub reset_s: u64,
 }

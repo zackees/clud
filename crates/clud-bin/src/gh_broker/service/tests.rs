@@ -89,6 +89,8 @@ fn read<'a>(endpoint: &'a str, env: &'a [(String, String)]) -> BrokerRead<'a> {
         env,
         session_id: Some("s1"),
         fresh: false,
+        interactive: false,
+        quiet: false,
     }
 }
 
@@ -254,6 +256,7 @@ fn http_handler_refuses_a_gh_target_that_is_not_a_real_executable() {
             env: vec![],
             session_id: None,
             fresh: false,
+            interactive: false,
         })
         .unwrap();
         assert_eq!(w.broker.handle_http(&body, &exe, None).0, 400);
@@ -269,6 +272,7 @@ fn http_handler_refuses_a_gh_target_that_is_not_a_real_executable() {
             env: vec![],
             session_id: None,
             fresh: false,
+            interactive: false,
         })
         .unwrap();
         assert_eq!(w.broker.handle_http(&sh, &exe, None).0, 400);
@@ -311,6 +315,7 @@ fn http_handler_runs_gh_api_include_and_revalidates_with_the_etag() {
         env: vec![],
         session_id: None,
         fresh: false,
+        interactive: false,
     })
     .unwrap();
     let decode = |bytes: &[u8]| {

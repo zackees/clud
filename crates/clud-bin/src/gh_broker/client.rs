@@ -14,7 +14,7 @@
 //! no daemon, an old daemon without the route, a timeout, a non-2xx
 //! upstream status.
 
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +24,22 @@ use base64::Engine as _;
 use serde::Deserialize;
 
 use super::classify::ApiRead;
-use super::{ReadReply, ReadRequest, INVALIDATE_PATH, READ_PATH};
+use super::{ReadReply, ReadRequest, StaleNote, INVALIDATE_PATH, READ_PATH};
+
+/// Every stale mark the shim prints starts with this, so a script that
+/// must not act on a cached copy (a merge gate) can tell from stderr.
+pub const STALE_MARKER: &str = "clud: gh read broker: rate-limit reserve";
+
+/// The stderr line for a stored copy served below the rate-limit floor.
+pub fn stale_marker(note: &StaleNote) -> String {
+    let reset = super::collection::format_ts(i64::try_from(note.reset_s).unwrap_or(i64::MAX));
+    format!(
+        "{STALE_MARKER} ({} of {} requests left until {reset}): a cached copy from {}s ago, not a refresh",
+        note.remaining,
+        note.limit,
+        note.age_ms / 1000
+    )
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 /// Covers the daemon's own 30 s upstream timeout plus a queue of readers.
@@ -94,6 +109,7 @@ impl BrokerClient {
             env: self.env.clone(),
             session_id: self.session_id.clone(),
             fresh: self.fresh,
+            interactive: std::io::stdin().is_terminal(),
         };
         let body = serde_json::to_vec(&request).ok()?;
         let response = self.post(READ_PATH, &body, READ_TIMEOUT)?;
@@ -113,6 +129,9 @@ impl BrokerClient {
         let body = base64::engine::general_purpose::STANDARD
             .decode(reply.body_b64)
             .ok()?;
+        if let Some(note) = &reply.stale {
+            eprintln!("{}", stale_marker(note));
+        }
         Some(Replayable {
             status: reply.status,
             headers: reply.headers,
