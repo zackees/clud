@@ -305,7 +305,7 @@ candidate SHA. See
 
 | File | Role |
 | --- | --- |
-| `.github/actions/setup-build/action.yml` | python + uv + mold + soldr + cross tooling. Build side only. |
+| `.github/actions/setup-build/action.yml` | python + uv + soldr + cross tooling. Build side only. |
 | `.github/actions/setup-exec/action.yml` | python + uv, and **removes** the Rust toolchain. Exec side only. |
 | `.github/workflows/_build-target.yml` | one triple → one test bundle (+ optional wheel). The only workflow that compiles Rust. |
 | `.github/workflows/_run-tests.yml` | one triple × one suite → execution, no compilation. |

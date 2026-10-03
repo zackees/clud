@@ -1,6 +1,6 @@
 name: Setup build toolchain
 description: >
-  Python + uv + venv cache + mold + soldr-managed Rust, plus any cross-compile
+  Python + uv + venv cache + soldr-managed Rust (and its linker), plus any cross-compile
   tooling the requested target needs. Used only by jobs that compile. Exec jobs
   use ../setup-exec, which deliberately has no Rust toolchain.
 
@@ -57,23 +57,12 @@ runs:
         restore-keys: |
           venv-build-${{ runner.os }}-${{ runner.arch }}-py3.11-
 
-    - name: Install mold linker
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        set -euo pipefail
-        mapfile -t microsoft_sources < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d 2>/dev/null || true)
-        if [ "${#microsoft_sources[@]}" -gt 0 ]; then
-          sudo rm -f "${microsoft_sources[@]}"
-        fi
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends mold
-
     # setup-soldr owns Rust provisioning plus build/target caching (#68).
     # Shims keep every cargo entry point -- including maturin-spawned cargo and
     # the inner cargo of any cross wrapper -- routed through soldr/zccache.
-    # mold is installed first so dependency cooking and the real build see the
-    # same `linker: fast` environment.
+    # `linker: fast` is reld when present, else lld, on Linux (soldr#3262,
+    # since soldr 0.9.20). It never selects mold, so the apt install of mold
+    # that used to precede this step was 8 s of dead weight per build job.
     #
     # cache-key-suffix is the target triple: the cache is now fragmented only
     # by what actually changes the artifacts, not by job type.
