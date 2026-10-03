@@ -29,3 +29,12 @@ Keep tool output bounded (narrow searches, capped lists, ranged reads, bulk on d
   has been run, or because your role can't run tests or lint.
 
 Return the verdict through StructuredOutput.
+
+## Platform coverage selection
+
+Native PR coverage follows the changed platform implementation: native API/FFI
+handling, OS branches, adapters/selectors or native runtime contracts. Shared
+business logic and callers of unchanged platform code use the routine gate.
+Name the implementation and select only affected targets; target inventories,
+helper extraction and local coverage gaps do not justify `ci-full` or
+`ci-windows`. Preserve routine checks and full release validation.

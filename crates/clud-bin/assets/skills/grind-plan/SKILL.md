@@ -55,6 +55,15 @@ later, one goal at a time.
    every push: do not invent lint or test commands; verify is just the
    focused test.
 
+## Platform coverage selection
+
+Native PR coverage follows the changed platform implementation: native API/FFI
+handling, OS branches, adapters/selectors or native runtime contracts. Shared
+business logic and callers of unchanged platform code use the routine gate.
+Name the implementation and select only affected targets; target inventories,
+helper extraction and local coverage gaps do not justify `ci-full` or
+`ci-windows`. Preserve routine checks and full release validation.
+
 ## Plan-only mode
 
 When the prompt says PLAN-ONLY, skip steps 2-5 and only classify:

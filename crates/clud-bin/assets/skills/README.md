@@ -53,6 +53,15 @@ every backend's skills dir on launch. `clud-loop` was retired once
   resolved from Docker Desktop's real config (never the assumed C: default)
   and never compacted or deleted automatically.
 
+## Platform coverage selection
+
+Planning, review and integration skills select additional native coverage
+from changed platform implementations, not callers or available target lists.
+The integrator's `git/ci_targets.py` result is an inventory; it does not
+require checking every target for shared business-logic changes. Keep the
+repository's routine checks and complete release validation. Repository-local
+PTY skills follow [the same selection rule](../../../../docs/architecture/ci.md#when-to-add-native-ci-labels).
+
 ## How Skills Ship
 
 Each `SKILL.md` here is embedded into the binary via `include_str!` and written
