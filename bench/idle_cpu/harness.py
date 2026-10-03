@@ -356,7 +356,7 @@ def _isolated_env(temp_dir: Path, mock_dir: Path, state_dir: Path) -> dict[str, 
     return env
 
 
-def run_harness(sessions: int, window_secs: float, mode: str = "daemon") -> dict[str, Any]:
+def run_harness(sessions: int, window_secs: float, mode: str = "daemon") -> dict[str, Any]:  # noqa: C901
     """Perform one fully cleaned-up benchmark sample and return its report."""
     if mode not in MODES:
         raise ValueError(f"--mode must be one of {', '.join(MODES)}")

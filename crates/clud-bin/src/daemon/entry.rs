@@ -620,6 +620,10 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i32> {
     match &args.command {
         Some(Command::Attach {
@@ -806,6 +810,10 @@ fn select_session_kind(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &AtomicBool) -> i32 {
     // Reject credential-less direct Codex bridge requests before the daemon
     // creates a session that would immediately die in its worker. `start`

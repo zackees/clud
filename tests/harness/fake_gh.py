@@ -207,7 +207,7 @@ def _too_long(body: str | None) -> bool:
     return False
 
 
-def _jq(expr: str, data: Any) -> list[Any]:
+def _jq(expr: str, data: Any) -> list[Any]:  # noqa: C901
     """A tiny jq: ``.a.b``, ``.[]``, ``.[N]``, ``.["k"]``, ``|`` and ``length``."""
     step = re.compile(r'\.([A-Za-z_][\w-]*)|\.?\[(-?\d*)\]|\.?\["([^"]+)"\]')
     values = [data]
@@ -286,7 +286,7 @@ def _current_branch() -> str | None:
     return None
 
 
-def _search_terms(query: str | None) -> dict[str, Any]:
+def _search_terms(query: str | None) -> dict[str, Any]:  # noqa: C901
     """Split a GitHub search string into filters the fake understands."""
     out: dict[str, Any] = {
         "words": [],
@@ -606,7 +606,7 @@ def _graphql(state: dict, argv: list[str]) -> int:
     return _emit(argv, {"data": {"repository": {"issue": {"timelineItems": {"nodes": nodes}}}}})
 
 
-def _api(path: Path, state: dict, argv: list[str]) -> int:
+def _api(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     issues = state.setdefault("issues", {})
     if _api_endpoint(argv) == "graphql":
         return _graphql(state, argv)
@@ -740,7 +740,7 @@ def _api(path: Path, state: dict, argv: list[str]) -> int:
     return 0
 
 
-def _issue(path: Path, state: dict, argv: list[str]) -> int:
+def _issue(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     issues = state.setdefault("issues", {})
     sub = argv[1] if len(argv) > 1 else ""
 
@@ -925,7 +925,7 @@ def _pr_json(state: dict, pr: dict) -> dict:
     }
 
 
-def _pr(path: Path, state: dict, argv: list[str]) -> int:
+def _pr(path: Path, state: dict, argv: list[str]) -> int:  # noqa: C901
     sub = argv[1] if len(argv) > 1 else ""
     default_branch = state.get("default_branch", "main")
 

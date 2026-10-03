@@ -272,6 +272,10 @@ fn emit_passthrough_abort_diagnostic(
 /// poll-drain into the [`TeeWriter`] every 100ms (so the user still sees
 /// live output, modulo the poll interval), and append Started/Finished
 /// events to the session index.
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn run_with_session(
     ctx: &SessionContext,
     tool_id: u32,

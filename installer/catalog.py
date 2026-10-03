@@ -82,7 +82,7 @@ def is_executable(data: bytes, executable: str) -> bool:
     )
 
 
-def verify_static_musl_elf(data: bytes, arch: str) -> None:
+def verify_static_musl_elf(data: bytes, arch: str) -> None:  # noqa: C901
     """Reject truncated, wrong-architecture, or dynamically linked Linux assets."""
     if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
         raise ValueError("static musl asset must be a little-endian ELF64 executable")
@@ -111,7 +111,7 @@ def verify_static_musl_elf(data: bytes, arch: str) -> None:
                 raise ValueError("static musl asset has a DT_NEEDED dependency")
 
 
-def verify_direct_executable(data: bytes, os_name: str, arch: str, flavor: str | None) -> None:
+def verify_direct_executable(data: bytes, os_name: str, arch: str, flavor: str | None) -> None:  # noqa: C901
     """Check the advertised native format and machine before cataloging it."""
     if os_name == "linux":
         if flavor == "static-musl":
@@ -200,7 +200,7 @@ def _verified_catalog_assets(
     return verified
 
 
-def catalog_from_releases(
+def catalog_from_releases(  # noqa: C901
     releases: list[dict], fetch_bytes, verified_catalog: dict | None = None
 ) -> dict:
     cached_assets = _verified_catalog_assets(verified_catalog)

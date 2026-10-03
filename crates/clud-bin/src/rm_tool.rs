@@ -933,6 +933,11 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 /// The testable core of [`run`].
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub fn run_with(
     kind: Kind,
     options: &Options,

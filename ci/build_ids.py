@@ -70,7 +70,7 @@ def _build_id_from_notes(notes: bytes) -> str | None:
     return None
 
 
-def read_gnu_build_id(data: bytes) -> str | None:
+def read_gnu_build_id(data: bytes) -> str | None:  # noqa: C901
     """The `NT_GNU_BUILD_ID` note of an ELF image as lowercase hex, or None.
 
     Walks `PT_NOTE` program headers, the same view the loader and

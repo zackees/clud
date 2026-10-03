@@ -16,6 +16,16 @@ exclude = [
     "clud-webterm",
 ]
 
+# Function-complexity ratchet (zackees/ci.yml#229, RUST-018): every function
+# stays under clippy's default ceilings (cognitive complexity 25, 100 lines).
+# clippy runs with `-D warnings`, so `warn` is a hard gate. The functions
+# already over a ceiling carry `#[expect(clippy::..., reason = "...")]`, never
+# `allow`: an expectation that stops firing is itself a warning, so a
+# refactored function's suppression is deleted in the same change.
+[workspace.lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+
 [workspace.metadata.dylint]
 libraries = [{ path = "dylints/*" }]
 

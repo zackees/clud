@@ -162,6 +162,20 @@ static` and the full PR plan. Direct host execution is prohibited.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 
+### Function-complexity ratchet
+
+Every function stays under the linters' default ceilings: clippy's
+`too_many_lines` (100) and `cognitive_complexity` (25), set in the root
+`Cargo.toml`'s `[workspace.lints.clippy]` and inherited by every member, and
+ruff's `C901` (McCabe 10). Functions already over a ceiling carry
+`#[expect(clippy::..., reason = "complexity ratchet baseline ...")]` or a
+`# noqa: C901` on the `def` line; never `allow`, never a file-level waiver.
+When a refactor brings one under the ceiling, the unfulfilled `expect` (or
+RUF100's unused `noqa`) fails lint, so delete the marker in the same change.
+New code gets no marker: split the function instead.
+Policy: [zackees/ci.yml#229](https://github.com/zackees/ci.yml/issues/229)
+(`RUST-018`, `PY-004`).
+
 ### Process execution: `running-process` only
 
 **Python's `subprocess` module is banned everywhere.** Do not import it, invoke it indirectly, or introduce any new exception. Python's blocking stdout/stderr reads have caused serious problems in the toolset.

@@ -43,7 +43,7 @@ class Links(HTMLParser):
             self._current = None
 
 
-def verify(site: Path) -> str:
+def verify(site: Path) -> str:  # noqa: C901
     root = (site / "index.html").read_text(encoding="utf-8")
     page = (site / "install" / "index.html").read_text(encoding="utf-8")
     catalog = json.loads((site / "install" / "manifest.json").read_text(encoding="utf-8"))

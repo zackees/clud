@@ -1103,6 +1103,10 @@ impl<C: CredentialSource> Pipeline<C> {
         self.stream_inner(request_body, message_id, cancel, sink, Some(history))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn stream_attempt(
         &self,
         request: &ResponsesRequest,
@@ -1230,6 +1234,10 @@ impl<C: CredentialSource> Pipeline<C> {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     fn stream_inner(
         &self,
         request_body: &[u8],

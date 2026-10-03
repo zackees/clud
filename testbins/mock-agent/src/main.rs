@@ -27,6 +27,11 @@ const CODEX_BRIDGE_PROBE_REQUEST: &str = include_str!("../assets/codex_bridge_pr
 mod codex_app_server;
 mod serve;
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn main() {
     trace("start");
     let args: Vec<String> = std::env::args().collect();

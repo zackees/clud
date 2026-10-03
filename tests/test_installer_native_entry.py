@@ -40,7 +40,7 @@ def isolated_env(home: Path) -> dict[str, str]:
 
 
 @pytest.fixture
-def installer_target(tmp_path: Path):
+def installer_target(tmp_path: Path):  # noqa: C901
     if sys.platform != "win32":
         home = tmp_path / "home"
         home.mkdir(mode=0o700)

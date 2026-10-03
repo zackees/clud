@@ -37,7 +37,7 @@ FORBIDDEN_DLL_PREFIXES = (
 )
 
 
-def iter_imported_dll_names(pe_bytes: bytes) -> list[str]:
+def iter_imported_dll_names(pe_bytes: bytes) -> list[str]:  # noqa: C901
     """Return the list of DLL names in a PE file's import directory.
 
     Minimal PE parser — covers what we need to walk IMAGE_IMPORT_DESCRIPTOR
@@ -156,7 +156,7 @@ def _rva_to_offset(rva: int, sections: list[tuple[int, int, int]]) -> int | None
     return None
 
 
-def windows_manifest_resource(pe_bytes: bytes) -> bytes | None:
+def windows_manifest_resource(pe_bytes: bytes) -> bytes | None:  # noqa: C901
     """Return RT_MANIFEST resource id 1 from a PE, if it is present."""
     num_rva_off, data_dirs_off, sections = _pe_layout(pe_bytes)
     num_rva_sizes = struct.unpack_from("<I", pe_bytes, num_rva_off)[0]

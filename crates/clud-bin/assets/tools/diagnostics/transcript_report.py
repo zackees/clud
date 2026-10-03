@@ -224,7 +224,7 @@ def _result_bytes(block: dict[str, Any]) -> int:
     return 0
 
 
-def analyze(
+def analyze(  # noqa: C901
     rows: list[dict[str, Any]],
     *,
     burst_threshold: int = DEFAULT_BURST_THRESHOLD,

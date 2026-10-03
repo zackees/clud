@@ -1362,6 +1362,10 @@ fn forward_user_input<H: InteractiveHooks>(
 /// disconnects, i.e. after the reader has stopped and sent everything
 /// it read.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn run_raw_pty_pump_full_verbose_with_writer<H, R, W>(
     process: &NativePtyProcess,
     interrupted: &AtomicBool,

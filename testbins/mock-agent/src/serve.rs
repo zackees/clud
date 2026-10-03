@@ -210,6 +210,10 @@ fn recent_tool_results(messages: &[Value]) -> Vec<Value> {
 }
 
 /// Pick the role, step and action for one request.
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn plan(script: &Value, request: &Value) -> (String, usize, Value, Option<String>) {
     let system = system_text(request);
     let tools: Vec<&str> = request
@@ -336,6 +340,10 @@ fn plan(script: &Value, request: &Value) -> (String, usize, Value, Option<String
     (name, turn, step, None)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn respond_messages(
     server: &Server,
     stream: &mut TcpStream,

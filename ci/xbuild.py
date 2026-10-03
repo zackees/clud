@@ -133,7 +133,7 @@ def _run_argv(argv: list[str]) -> list[str]:
     return ["bash", "-c", 'ulimit -v 13000000; exec "$@"', "clud-xbuild", *argv]
 
 
-def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, str]:
+def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, str]:  # noqa: C901
     env = env.copy()
     # Cross targets default to the checked-in bindings when their SDK headers
     # are unavailable. Windows soldr overrides this below once it finds the
@@ -564,7 +564,7 @@ def verify_wheel_modes(wheel: Path) -> int:
     return 1 if errors else 0
 
 
-def cmd_wheel(args: argparse.Namespace) -> int:
+def cmd_wheel(args: argparse.Namespace) -> int:  # noqa: C901
     """Build the wheel into dist/ for this triple.
 
     Maturin normally reuses the same `target/<triple>/` directory the compile

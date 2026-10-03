@@ -317,6 +317,10 @@ impl StreamTranslator {
     }
 
     /// Translate one upstream frame into zero or more Anthropic frames.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     pub fn push(&mut self, frame: &SseFrame) -> Vec<String> {
         if self.finished {
             return Vec::new();

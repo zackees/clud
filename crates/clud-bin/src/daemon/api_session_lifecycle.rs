@@ -76,6 +76,10 @@ impl ApiSessionLifecycle {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+    )]
     pub fn submit(
         &self,
         session_id: &str,

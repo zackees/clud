@@ -358,6 +358,11 @@ fn parse_codex_instruction_override(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn build_launch_plan_for_target_at(
     args: &Args,
     target: ResolvedLaunchTarget,

@@ -112,7 +112,7 @@ def _action_input_default(source_name: str, text: str, input_name: str) -> str:
     )
 
 
-def _setup_soldr_steps_in_text(
+def _setup_soldr_steps_in_text(  # noqa: C901
     source_name: str, text: str
 ) -> list[tuple[str, str, str]]:
     """Parse setup-soldr steps and resolve a composite input's default."""

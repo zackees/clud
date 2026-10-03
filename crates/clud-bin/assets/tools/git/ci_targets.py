@@ -91,7 +91,7 @@ def _toolchain_targets(root: Path) -> list[str]:
     return found
 
 
-def discover(root: Path, host: str | None = None) -> dict[str, object]:
+def discover(root: Path, host: str | None = None) -> dict[str, object]:  # noqa: C901
     if not (root / "Cargo.toml").is_file():
         return {"rust": False, "targets": [], "skipped": []}
     seen: dict[str, str] = {}

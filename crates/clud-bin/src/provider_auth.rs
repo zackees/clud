@@ -780,6 +780,10 @@ fn write_credential_status(stdout: &mut dyn Write, json: bool, status: &str, fin
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn run_with_probe(
     descriptor: &AnthropicCompatProvider,
     subcommand: &DeepseekAuthSubcommand,

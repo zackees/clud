@@ -31,6 +31,10 @@ use super::wire_prost::{
 };
 use super::worker_shared::WorkerShared;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub(super) fn run_worker(
     state_dir: &Path,
     session_id: &str,
@@ -693,6 +697,10 @@ fn finish_pty_exit<C>(
     broadcast(code);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn handle_worker_client(
     mut stream: TcpStream,
     shared: &Arc<WorkerShared>,

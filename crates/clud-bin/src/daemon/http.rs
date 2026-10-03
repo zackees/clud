@@ -636,6 +636,10 @@ pub(super) fn spawn_dashboard_with_activity_and_lifecycle(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn run_dashboard_loop(
     server: Server,
     port: u16,

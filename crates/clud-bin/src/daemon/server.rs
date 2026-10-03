@@ -57,6 +57,10 @@ fn spawn_tool_installer() {
         .spawn(crate::tool_install::ensure_installed);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // Retag the crash reporter installed by main.rs so any crash inside the
     // daemon process gets written under role="daemon". `install_native`
@@ -577,6 +581,10 @@ pub(super) fn dispatch_daemon_request_with_sampler_and_lifecycle(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn dispatch_daemon_request_with_id(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
@@ -955,6 +963,10 @@ fn parse_worker_spawn_budget(raw: Option<&str>) -> Duration {
         .map_or(DEFAULT_WORKER_SPAWN_BUDGET, Duration::from_secs)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn daemon_create_session(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,

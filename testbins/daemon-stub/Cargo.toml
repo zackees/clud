@@ -18,3 +18,6 @@ name = "daemon-stub"
 path = "src/main.rs"
 # No tests: skip the empty harness (#1714, ci/banned_empty_harnesses.py).
 test = false
+
+[lints]
+workspace = true

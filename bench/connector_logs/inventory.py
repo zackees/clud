@@ -145,7 +145,7 @@ def _counter_dict(counter: Counter[str]) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
 
-def inventory_transcript(path: Path, project: Path) -> TranscriptInventory:
+def inventory_transcript(path: Path, project: Path) -> TranscriptInventory:  # noqa: C901
     models: set[str] = set()
     providers: set[str] = set()
     statuses: Counter[str] = Counter()
@@ -226,7 +226,7 @@ def bridge_start(process_dir: str) -> datetime | None:
         return None
 
 
-def inventory_bridge(path: Path) -> BridgeInventory:
+def inventory_bridge(path: Path) -> BridgeInventory:  # noqa: C901
     events: Counter[str] = Counter()
     reasons: Counter[str] = Counter()
     kinds: Counter[str] = Counter()

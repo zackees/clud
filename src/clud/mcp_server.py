@@ -300,7 +300,7 @@ async def _api(
     return await asyncio.to_thread(_http_json, base, token, method, path, body, headers)
 
 
-def _extract_text(events: list) -> str:
+def _extract_text(events: list) -> str:  # noqa: C901
     """Best-effort plain-text answer assembled from normalised backend JSONL."""
     parts: list[str] = []
     for ev in events:

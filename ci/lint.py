@@ -109,7 +109,7 @@ def clippy_subcommands(windows: bool) -> list[list[str]]:
     return [host, [*target, "--", "-D", "warnings"]]
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901
     """Run the lint suite.
 
     `--static-only` skips clippy. CI splits the suite: the platform-independent

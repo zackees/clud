@@ -107,7 +107,7 @@ def _copy(src: Path, dst: Path) -> None:
         dst.chmod(dst.stat().st_mode | 0o111)
 
 
-def pack(target: str, profile: str, dest: Path) -> int:
+def pack(target: str, profile: str, dest: Path) -> int:  # noqa: C901
     built = target_dir(target, profile)
     if not built.is_dir():
         print(f"no build output at {built}", file=sys.stderr)

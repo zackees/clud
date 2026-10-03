@@ -467,6 +467,11 @@ pub(super) fn tool_reason(role: &str, tool_name: &str, run: &RunFacts) -> Option
     Some(format!("{role} may not write files{mode}"))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 fn statement_reason(role: &str, words: &[String], run: &RunFacts) -> Option<String> {
     let program = program_name(&words[0]);
     let deny = |what: &str| Some(format!("{role} may not run `{what}`"));

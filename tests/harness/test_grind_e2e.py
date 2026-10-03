@@ -888,7 +888,7 @@ def _user_merges(h: Harness, pr: int) -> None:
         assert done.returncode == 0, (sub, done.stdout, done.stderr)
 
 
-def test_e2e_3_regrouped_epic_decide_later_one_feature_then_bugs_only(
+def test_e2e_3_regrouped_epic_decide_later_one_feature_then_bugs_only(  # noqa: C901
     harness: Harness,
 ) -> None:
     h = harness

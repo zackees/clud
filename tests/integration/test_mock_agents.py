@@ -283,7 +283,7 @@ class _FakeResponsesServer:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
-    def _serve(self) -> None:
+    def _serve(self) -> None:  # noqa: C901
         while not self._stop.is_set():
             try:
                 connection, _ = self._listener.accept()
@@ -679,7 +679,7 @@ class TestCodexBridgeForeground:
         # cold seeds plus five append-only suffixes.
         assert total_uncached < 10 * 16_384
 
-    def test_unified_route_matrix_through_one_mocked_claude_session(
+    def test_unified_route_matrix_through_one_mocked_claude_session(  # noqa: C901
         self,
         clud_binary: Path,
         mock_env: dict[str, str],

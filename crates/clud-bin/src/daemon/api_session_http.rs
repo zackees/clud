@@ -319,6 +319,10 @@ fn fingerprint(message: &str, interrupt_running: bool) -> String {
     format!("v1:{}:{message}", interrupt_running as u8)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
+)]
 pub(super) fn handle(
     mut request: Request,
     method: Method,
