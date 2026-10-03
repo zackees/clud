@@ -146,7 +146,7 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn, TextIO
+from typing import NoReturn, TextIO, TypeAlias
 
 from running_process import PIPE, RunningProcess, TimeoutExpired
 
@@ -704,317 +704,337 @@ def _from_older_attempt(check: dict, run: dict | None) -> bool:
     return completed is not None and started is not None and completed < started
 
 
-def _effective(entries: list[tuple[dict, dict | None]]) -> tuple[dict, dict | None]:
-    """The entry that stands for a group, in check-run id order.
-
-    A cancelled check is replaced by anything newer. A newer cancellation
-    never hides an older result, and a newer skip never hides an older result
-    that actually ran.
-    """
-    ordered = sorted(entries, key=lambda entry: entry[0]["id"])
-    current = ordered[0]
-    for entry in ordered[1:]:
-        check = entry[0]
-        if _is_cancelled(current[0]):
-            current = entry
-        elif _is_cancelled(check):
-            continue
-        elif _is_skipped(check) and not _is_skipped(current[0]):
-            continue
-        else:
-            current = entry
-    return current
+JsonValue: TypeAlias = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 
 
-def judge_check_runs(  # noqa: C901
-    check_runs: list[dict],
-    workflow_runs: list[dict],
-    head_sha: str,
-    required: set[str] | None,
-    *,
-    statuses: list[dict] | None = None,
-    head_branch: str | None = None,
-    require_re: re.Pattern[str] | None = None,
-    runs_grace_elapsed: bool = False,
-) -> Verdict:
-    """Judge the head commit's checks. Pure: no network, no clock.
+@dataclass(frozen=True)
+class _WorkflowRun:
+    document: dict[str, JsonValue]
 
-    `check_runs` are `repos/{r}/commits/{sha}/check-runs` items and
-    `workflow_runs` are `actions/runs?head_sha=` items, all pages. See the
-    module docstring for the supersession rule this implements.
 
-    `runs_grace_elapsed` says the head commit has had no workflow run for the
-    whole grace period: a missing required check then never reports (#1418)
-    instead of staying pending.
-    """
+@dataclass(frozen=True)
+class _CheckEntry:
+    check: dict[str, JsonValue]
+    run: dict[str, JsonValue] | None
 
-    def is_required(name: str) -> bool:
-        if require_re is not None:
-            return bool(require_re.search(name))
-        if not required:
-            return True
-        return name in required
 
-    runs_by_id: dict[int, dict] = {}
-    runs_by_suite: dict[int, dict] = {}
+@dataclass(frozen=True)
+class _CheckGroupKey:
+    workflow: str
+    name: str
+
+
+@dataclass(frozen=True)
+class _CheckGroup:
+    workflow: str
+    name: str
+    entries: list[_CheckEntry]
+
+
+@dataclass(frozen=True)
+class _RunJudgmentContext:
+    head_sha: str
+    head_branch: str | None
+    required: set[str] | None
+    require_re: re.Pattern[str] | None
+    runs_by_id: dict[int, _WorkflowRun]
+    runs_by_suite: dict[int, _WorkflowRun]
+    head_runs: list[dict]
+
+    def is_required(self, name: str) -> bool:
+        if self.require_re is not None:
+            return bool(self.require_re.search(name))
+        return not self.required or name in self.required
+
+    def on_head(self, run: dict) -> bool:
+        if run.get("head_sha") != self.head_sha or run.get("event") == "merge_group":
+            return False
+        branch = run.get("head_branch")
+        return not (self.head_branch and branch and branch != self.head_branch)
+
+    def run(self, run_id: int | None) -> dict | None:
+        indexed = self.runs_by_id.get(run_id)
+        return indexed.document if indexed is not None else None
+
+    def siblings(self, key: str, run_id: int) -> list[dict]:
+        return [r for r in self.head_runs if _workflow_key(r) == key and r["id"] != run_id]
+
+    def newer_runs(self, key: str, run_id: int) -> list[dict]:
+        own = _run_order(self.run(run_id))
+        return [r for r in self.siblings(key, run_id) if _run_order(r) > own]
+
+    def replacements(self, key: str, run_id: int) -> list[dict]:
+        # Concurrency can cancel either sibling regardless of its run number.
+        own = _run_order(self.run(run_id))
+        return [r for r in self.siblings(key, run_id) if not _is_cancelled(r) or _run_order(r) > own]
+
+    def resolve_replaced(self, key: str, run_id: int) -> str | None:
+        found = self.replacements(key, run_id)
+        if not found:
+            return None
+        return "pending" if any(_lower(r.get("status")) != "completed" for r in found) else "superseded"
+
+    def linked_run(self, check: dict) -> dict | None:
+        linked = _extract_run_id_from_link(check.get("details_url") or check.get("html_url"))
+        run = self.run(int(linked)) if linked else None
+        if run is None:
+            suite = _as_int((check.get("check_suite") or {}).get("id"))
+            indexed = self.runs_by_suite.get(suite)
+            run = indexed.document if indexed is not None else None
+        return run
+
+
+def _run_judgment_context(
+    workflow_runs: list[dict], head_sha: str, head_branch: str | None,
+    required: set[str] | None, require_re: re.Pattern[str] | None,
+) -> _RunJudgmentContext:
+    context = _RunJudgmentContext(head_sha, head_branch, required, require_re, {}, {}, [])
     for run in workflow_runs:
         if not isinstance(run, dict):
             continue
         run_id = _as_int(run.get("id"))
         if run_id is None:
             continue
-        runs_by_id[run_id] = run
+        indexed = _WorkflowRun(run)
+        context.runs_by_id[run_id] = indexed
         suite = _as_int(run.get("check_suite_id"))
         if suite is not None:
-            runs_by_suite[suite] = run
+            context.runs_by_suite[suite] = indexed
+    context.head_runs.extend(r.document for r in context.runs_by_id.values() if context.on_head(r.document))
+    return context
 
-    def on_head(run: dict) -> bool:
-        if run.get("head_sha") != head_sha or run.get("event") == "merge_group":
-            return False
-        branch = run.get("head_branch")
-        return not (head_branch and branch and branch != head_branch)
 
-    head_runs = [run for run in runs_by_id.values() if on_head(run)]
-
-    def siblings(key: str, run_id: int) -> list[dict]:
-        return [r for r in head_runs if _workflow_key(r) == key and r["id"] != run_id]
-
-    def newer_runs(key: str, run_id: int) -> list[dict]:
-        own = _run_order(runs_by_id[run_id])
-        return [r for r in siblings(key, run_id) if _run_order(r) > own]
-
-    def replacements(key: str, run_id: int) -> list[dict]:
-        """The runs that stand in for a cancelled run (#1710): any newer run,
-        and any sibling that was not itself cancelled. A concurrency group
-        cancels whichever run entered it first, so neither the id nor the
-        run number says which one survives; the survivor is the live one."""
-        own = _run_order(runs_by_id[run_id])
-        return [r for r in siblings(key, run_id) if not _is_cancelled(r) or _run_order(r) > own]
-
-    def resolve_replaced(key: str, run_id: int) -> str | None:
-        """pending/superseded when a replacement exists, else None."""
-        found = replacements(key, run_id)
-        if not found:
-            return None
-        return "pending" if any(_lower(r.get("status")) != "completed" for r in found) else (
-            "superseded"
-        )
-
-    # A cancelled run with a live sibling was superseded by concurrency: its
-    # checks never stand for a group the live run also reports (#1710).
-    superseded_runs = {
-        r["id"]
-        for r in head_runs
-        if _is_cancelled(r)
-        and any(not _is_cancelled(s) for s in siblings(_workflow_key(r), r["id"]))
-    }
-
-    groups: dict[tuple[str, str], list[tuple[dict, dict | None]]] = {}
+def _check_groups(check_runs: list[dict], context: _RunJudgmentContext) -> list[_CheckGroup]:
+    groups: dict[_CheckGroupKey, _CheckGroup] = {}
     for check in check_runs:
-        if not isinstance(check, dict) or check.get("head_sha") != head_sha:
+        if not isinstance(check, dict) or check.get("head_sha") != context.head_sha:
             continue
         name = check.get("name")
         if _as_int(check.get("id")) is None or not isinstance(name, str):
             continue
-        run: dict | None = None
-        linked = _extract_run_id_from_link(check.get("details_url") or check.get("html_url"))
-        if linked:
-            run = runs_by_id.get(int(linked))
-        if run is None:
-            suite = _as_int((check.get("check_suite") or {}).get("id"))
-            if suite is not None:
-                run = runs_by_suite.get(suite)
-        if run is not None:
-            if not on_head(run):
-                continue
-            key = _workflow_key(run)
-        else:
-            key = f"app:{(check.get('app') or {}).get('slug') or 'unknown'}"
-        groups.setdefault((key, name), []).append((check, run))
+        run = context.linked_run(check)
+        if run is not None and not context.on_head(run):
+            continue
+        key = _workflow_key(run) if run is not None else f"app:{(check.get('app') or {}).get('slug') or 'unknown'}"
+        group = groups.setdefault(_CheckGroupKey(key, name), _CheckGroup(key, name, []))
+        group.entries.append(_CheckEntry(check, run))
+    return list(groups.values())
 
-    # Runs a cancellation has reached, even while they still read in_progress.
-    runs_with_cancelled_check = {
-        run["id"]
-        for entries in groups.values()
-        for check, run in entries
-        if run is not None and _is_cancelled(check)
+
+def _effective_check_entry(entries: list[_CheckEntry]) -> _CheckEntry:
+    ordered = sorted(entries, key=lambda entry: entry.check["id"])
+    current = ordered[0]
+    for entry in ordered[1:]:
+        if _is_cancelled(current.check):
+            current = entry
+        elif _is_cancelled(entry.check):
+            continue
+        elif _is_skipped(entry.check) and not _is_skipped(current.check):
+            continue
+        else:
+            current = entry
+    return current
+
+
+def _failed_check_state(
+    entry: _CheckEntry, context: _RunJudgmentContext, key: str,
+    runs_with_cancelled_check: set[int],
+) -> str:
+    check, run = entry.check, entry.run
+    if _from_older_attempt(check, run):
+        return "pending"
+    run_id = _as_int(run.get("id")) if run is not None else None
+    if run is None or run_id is None:
+        return "fail"
+    cancelling = _lower(run.get("conclusion")) == "cancelled" or (
+        _lower(run.get("status")) != "completed" and run_id in runs_with_cancelled_check
+    )
+    return (context.resolve_replaced(key, run_id) or "fail") if cancelling else "fail"
+
+
+def _check_entry_state(
+    entry: _CheckEntry, context: _RunJudgmentContext, key: str,
+    runs_with_cancelled_check: set[int],
+) -> str:
+    check, run = entry.check, entry.run
+    if _lower(check.get("status")) != "completed":
+        return "pending"
+    conclusion = _lower(check.get("conclusion"))
+    if conclusion in PASSING_CONCLUSIONS:
+        return "pass"
+    if conclusion in {"action_required", "stale"}:
+        return "approval_required" if conclusion == "action_required" else "stale"
+    if conclusion != "cancelled":
+        return _failed_check_state(entry, context, key, runs_with_cancelled_check)
+    if run is not None and _lower(run.get("status")) != "completed":
+        return "pending"
+    run_id = _as_int(run.get("id")) if run is not None else None
+    replaced = context.resolve_replaced(key, run_id) if run_id is not None else None
+    return replaced or "fail"
+
+
+def _judge_check_group(
+    group: _CheckGroup, context: _RunJudgmentContext, superseded_runs: set[int],
+    runs_with_cancelled_check: set[int],
+) -> CheckJudgment:
+    live = [e for e in group.entries if e.run is None or e.run["id"] not in superseded_runs]
+    entry = _effective_check_entry(live or group.entries)
+    check, run = entry.check, entry.run
+    status, conclusion = _lower(check.get("status")), _lower(check.get("conclusion"))
+    return CheckJudgment(
+        name=group.name,
+        workflow=group.workflow,
+        state=_check_entry_state(entry, context, group.workflow, runs_with_cancelled_check),
+        conclusion=conclusion or status,
+        check_run_id=_as_int(check.get("id")),
+        run_id=_as_int(run.get("id")) if run is not None else None,
+        link=check.get("details_url") or check.get("html_url") or None,
+        required=context.is_required(group.name),
+        workflow_broken=conclusion == "startup_failure",
+        cancelled=status == "completed" and conclusion == "cancelled",
+        run_attempt=_as_int(run.get("run_attempt")) if run is not None else None,
+        run_status=_lower(run.get("status")) if run is not None else "",
+    )
+
+
+def _judge_grouped_checks(
+    groups: list[_CheckGroup], context: _RunJudgmentContext, notes: list[str],
+) -> list[CheckJudgment]:
+    superseded_runs = {
+        r["id"] for r in context.head_runs
+        if _is_cancelled(r) and any(not _is_cancelled(s) for s in context.siblings(_workflow_key(r), r["id"]))
     }
-
+    runs_with_cancelled_check = {
+        e.run["id"] for group in groups for e in group.entries
+        if e.run is not None and _is_cancelled(e.check)
+    }
     judgments: list[CheckJudgment] = []
-    notes: list[str] = []
-    for (key, name), entries in groups.items():
-        events = {str(run.get("event")) for _check, run in entries if run is not None}
+    for group in groups:
+        events = {str(e.run.get("event")) for e in group.entries if e.run is not None}
         if len(events) > 1:
-            notes.append(
-                f"{name} ({key}) reported by runs from events {sorted(events)}; "
-                "the newest check counts"
-            )
-        live = [e for e in entries if e[1] is None or e[1]["id"] not in superseded_runs]
-        check, run = _effective(live or entries)
-        status = _lower(check.get("status"))
-        conclusion = _lower(check.get("conclusion"))
-        run_id = _as_int(run.get("id")) if run is not None else None
-        cancelled = False
-        if status != "completed":
-            state = "pending"
-        elif conclusion in PASSING_CONCLUSIONS:
-            state = "pass"
-        elif conclusion == "action_required":
-            state = "approval_required"
-        elif conclusion == "stale":
-            state = "stale"
-        elif conclusion == "cancelled":
-            cancelled = True
-            if run is not None and _lower(run.get("status")) != "completed":
-                state = "pending"  # its own run is re-running
-            else:
-                replaced = resolve_replaced(key, run_id) if run_id is not None else None
-                state = replaced or "fail"
-        elif _from_older_attempt(check, run):
-            state = "pending"  # a re-run attempt has not reported this check yet
-        else:
-            state = "fail"
-            # A failure in a cancelled run (an `if: always()` gate, a job that
-            # `needs:` a cancelled one) is the cancellation's, not the code's:
-            # a replacement run supersedes it. So does one in a run that is
-            # still being cancelled, while it reads in_progress (#1710).
-            if run is not None and run_id is not None and (
-                _lower(run.get("conclusion")) == "cancelled"
-                or (
-                    _lower(run.get("status")) != "completed"
-                    and run_id in runs_with_cancelled_check
-                )
-            ):
-                state = resolve_replaced(key, run_id) or state
-        judgments.append(
-            CheckJudgment(
-                name=name,
-                workflow=key,
-                state=state,
-                conclusion=conclusion or status,
-                check_run_id=_as_int(check.get("id")),
-                run_id=run_id,
-                link=check.get("details_url") or check.get("html_url") or None,
-                required=is_required(name),
-                workflow_broken=conclusion == "startup_failure",
-                cancelled=cancelled,
-                run_attempt=_as_int(run.get("run_attempt")) if run is not None else None,
-                run_status=_lower(run.get("status")) if run is not None else "",
-            )
-        )
+            notes.append(f"{group.name} ({group.workflow}) reported by runs from events {sorted(events)}; the newest check counts")
+        judgments.append(_judge_check_group(group, context, superseded_runs, runs_with_cancelled_check))
+    return judgments
 
-    # Run-level results that produce no check runs at all.
-    for run in head_runs:
+
+def _append_unreported_run_results(
+    context: _RunJudgmentContext, judgments: list[CheckJudgment],
+) -> None:
+    for run in context.head_runs:
         if _lower(run.get("status")) != "completed":
             continue
         conclusion = _lower(run.get("conclusion"))
         if conclusion not in {"startup_failure", "action_required"}:
             continue
         key = _workflow_key(run)
-        if newer_runs(key, run["id"]) or any(j.run_id == run["id"] for j in judgments):
+        if context.newer_runs(key, run["id"]) or any(j.run_id == run["id"] for j in judgments):
             continue
-        judgments.append(
-            CheckJudgment(
-                name=str(run.get("name") or key),
-                workflow=key,
-                state="fail" if conclusion == "startup_failure" else "approval_required",
-                conclusion=conclusion,
-                check_run_id=None,
-                run_id=run["id"],
-                link=run.get("html_url") or None,
-                required=True,
-                workflow_broken=conclusion == "startup_failure",
-            )
-        )
+        judgments.append(CheckJudgment(
+            name=str(run.get("name") or key), workflow=key,
+            state="fail" if conclusion == "startup_failure" else "approval_required",
+            conclusion=conclusion, check_run_id=None, run_id=run["id"],
+            link=run.get("html_url") or None, required=True,
+            workflow_broken=conclusion == "startup_failure",
+        ))
 
-    # Legacy commit statuses: newest per context (highest id when present).
+
+def _append_legacy_statuses(
+    statuses: list[dict] | None, context: _RunJudgmentContext,
+    judgments: list[CheckJudgment],
+) -> None:
     seen_contexts: set[str] = set()
     for status_item in sorted(
         (s for s in statuses or [] if isinstance(s, dict)),
         key=lambda s: -(_as_int(s.get("id")) or 0),
     ):
-        context = status_item.get("context")
-        if not isinstance(context, str) or context in seen_contexts:
+        name = status_item.get("context")
+        if not isinstance(name, str) or name in seen_contexts:
             continue
-        seen_contexts.add(context)
+        seen_contexts.add(name)
         raw = _lower(status_item.get("state"))
-        state = (
-            "pass" if raw == "success" else "pending" if raw in {"pending", "expected"} else "fail"
-        )
-        judgments.append(
-            CheckJudgment(
-                name=context,
-                workflow="status",
-                state=state,
-                conclusion=raw,
-                check_run_id=None,
-                run_id=None,
-                link=status_item.get("target_url") or None,
-                required=is_required(context),
-            )
-        )
+        state = "pass" if raw == "success" else "pending" if raw in {"pending", "expected"} else "fail"
+        judgments.append(CheckJudgment(
+            name=name, workflow="status", state=state, conclusion=raw,
+            check_run_id=None, run_id=None, link=status_item.get("target_url") or None,
+            required=context.is_required(name),
+        ))
 
-    missing: list[str] = []
-    if required and require_re is None:
-        reported = {j.name for j in judgments}
-        missing = sorted(required - reported)
-    all_runs_done = bool(head_runs) and all(
-        _lower(r.get("status")) == "completed" for r in head_runs
-    )
 
-    req = [j for j in judgments if j.required]
-    real_failure_runs = {
-        j.run_id for j in req if j.state == "fail" and not j.cancelled and j.run_id is not None
-    }
-    # Fail-fast siblings of a real failure in the same run are not the cause.
-    failing = [
-        j
-        for j in req
-        if j.state == "fail" and not (j.cancelled and j.run_id in real_failure_runs)
-    ]
-    advisory = [j for j in judgments if not j.required and j.state in {"fail", "stale"}]
-    failing_run_ids: dict[str, int] = {}
-    for j in failing:
-        if j.run_id is None or j.workflow == "status":
+def _failing_run_ids(
+    failing: list[CheckJudgment], context: _RunJudgmentContext,
+) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for judgment in failing:
+        if judgment.run_id is None or judgment.workflow == "status":
             continue
-        held = failing_run_ids.get(j.workflow)
-        if held is None or _run_order(runs_by_id[j.run_id]) > _run_order(runs_by_id[held]):
-            failing_run_ids[j.workflow] = j.run_id
+        held = result.get(judgment.workflow)
+        if held is None or _run_order(context.run(judgment.run_id)) > _run_order(context.run(held)):
+            result[judgment.workflow] = judgment.run_id
+    return result
 
-    if any(j.state == "approval_required" for j in req):
-        state = "approval_required"
-    elif failing:
-        state = "fail"
-    elif any(j.state == "stale" for j in req):
-        state = "stale"
-    elif any(j.state == "pending" for j in req):
-        state = "pending"
-    elif missing:
-        no_runs_ever = not head_runs and runs_grace_elapsed
-        state = "never_reported" if all_runs_done or no_runs_ever else "pending"
-    elif not judgments:
-        state = "pass" if all_runs_done else "pending"
-    elif not any(j.state == "pass" and j.conclusion != "skipped" for j in req):
-        # Skips alone prove nothing ran on this head (#1639): the aggregate
-        # may not exist yet because it `needs:` still-queued jobs.
-        state = "pending"
-    elif required and require_re is None and any(
-        j.conclusion == "skipped" and not _run_succeeded(runs_by_id.get(j.run_id))
-        for j in req
-        if j.name in required
+
+def _successful_checks_state(
+    context: _RunJudgmentContext, judgments: list[CheckJudgment],
+    required_judgments: list[CheckJudgment], all_runs_done: bool,
+) -> str:
+    if not judgments:
+        return "pass" if all_runs_done else "pending"
+    if not any(j.state == "pass" and j.conclusion != "skipped" for j in required_judgments):
+        return "pending"
+    if context.required and context.require_re is None and any(
+        j.conclusion == "skipped" and not _run_succeeded(context.run(j.run_id))
+        for j in required_judgments if j.name in context.required
     ):
-        # A protected gate (`CI OK`) that skipped is no verdict, unless the run
-        # that skipped it finished green: a tier that skips a protected job
-        # (bosn's `ci-test` skips `Full CI coverage`) is satisfied, as GitHub
-        # treats it, or a ready PR is watched forever (zackees/bosn#360).
-        state = "pending"
-    elif not required and require_re is None and not all_runs_done and head_runs:
-        # Without branch protection every check is required, including the
-        # ones a queued run has not created yet.
-        state = "pending"
-    else:
-        state = "pass"
-    return Verdict(state, judgments, failing, advisory, failing_run_ids, missing, notes)
+        return "pending"
+    if not context.required and context.require_re is None and not all_runs_done and context.head_runs:
+        return "pending"
+    return "pass"
+
+
+def _verdict_state(
+    context: _RunJudgmentContext, judgments: list[CheckJudgment],
+    req: list[CheckJudgment], failing: list[CheckJudgment], missing: list[str],
+    runs_grace_elapsed: bool,
+) -> str:
+    if any(j.state == "approval_required" for j in req):
+        return "approval_required"
+    if failing:
+        return "fail"
+    if any(j.state == "stale" for j in req):
+        return "stale"
+    if any(j.state == "pending" for j in req):
+        return "pending"
+    all_runs_done = bool(context.head_runs) and all(_lower(r.get("status")) == "completed" for r in context.head_runs)
+    if missing:
+        no_runs_ever = not context.head_runs and runs_grace_elapsed
+        return "never_reported" if all_runs_done or no_runs_ever else "pending"
+    return _successful_checks_state(context, judgments, req, all_runs_done)
+
+
+def judge_check_runs(
+    check_runs: list[dict], workflow_runs: list[dict], head_sha: str,
+    required: set[str] | None, *, statuses: list[dict] | None = None,
+    head_branch: str | None = None, require_re: re.Pattern[str] | None = None,
+    runs_grace_elapsed: bool = False,
+) -> Verdict:
+    """Judge head checks without network or clock; preserve rerun supersession.
+
+    An elapsed grace period turns missing checks with no runs into
+    never_reported. Approval, real failure, stale, and pending retain their
+    precedence over missing checks and successful aggregate checks.
+    """
+    context = _run_judgment_context(workflow_runs, head_sha, head_branch, required, require_re)
+    notes: list[str] = []
+    judgments = _judge_grouped_checks(_check_groups(check_runs, context), context, notes)
+    _append_unreported_run_results(context, judgments)
+    _append_legacy_statuses(statuses, context, judgments)
+    missing = sorted(required - {j.name for j in judgments}) if required and require_re is None else []
+    req = [j for j in judgments if j.required]
+    real_failure_runs = {j.run_id for j in req if j.state == "fail" and not j.cancelled and j.run_id is not None}
+    failing = [j for j in req if j.state == "fail" and not (j.cancelled and j.run_id in real_failure_runs)]
+    advisory = [j for j in judgments if not j.required and j.state in {"fail", "stale"}]
+    state = _verdict_state(context, judgments, req, failing, missing, runs_grace_elapsed)
+    return Verdict(state, judgments, failing, advisory, _failing_run_ids(failing, context), missing, notes)
 
 
 def paginate(path: str, key: str) -> list[dict] | None:
