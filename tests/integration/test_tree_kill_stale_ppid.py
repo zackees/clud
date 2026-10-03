@@ -85,7 +85,8 @@ def _launch_and_exit() -> int:
     # No captured pipes: ping would inherit them, and draining them to EOF
     # would wait for ping. Its output goes to NUL instead.
     launcher = process.Popen(
-        ["cmd", "/c", "start", "", "/b", "ping", "-n", "120", "127.0.0.1", ">NUL", "2>&1"],
+        # One string, handed to CreateProcess as-is, so cmd parses the redirect.
+        'cmd /d /c start "" /b ping -n 120 127.0.0.1 >NUL 2>&1',
     )
     pid = launcher.pid
     assert pid is not None
@@ -108,7 +109,16 @@ def _orphan_with_stale_parent() -> tuple[int, psutil.Process]:
                 return True
         return False
 
-    assert _wait_until(find, 10), "ping.exe started by `start /b` never appeared"
+    if not _wait_until(find, 10):
+        survivors = [
+            f"{p.pid}:{p.info['name']}"
+            for p in psutil.process_iter(["ppid", "name"])
+            if p.info["ppid"] == stale_parent
+        ]
+        pytest.fail(
+            "ping.exe started by `start /b` never appeared; "
+            f"children of {stale_parent}: {survivors}"
+        )
     return stale_parent, orphan[0]
 
 
