@@ -2412,12 +2412,9 @@ def fetch_run_jobs(run_id: str, repo: str | None) -> dict | None:
     porcelain view is never brokered). None on any error."""
     if not repo:
         return None
-    run = gh_json("api", f"repos/{repo}/actions/runs/{run_id}")
-    listing = gh_json("api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
-    if not isinstance(run, dict) or not isinstance(listing, dict):
-        return None
-    jobs = listing.get("jobs")
-    if not isinstance(jobs, list):
+    run = gh_json("api", f"repos/{repo}/actions/runs/{run_id}")  # ci-lint: allow GHAPI-001 conditional: gh_json sends REST GETs through api_get (session broker ETag, else If-None-Match)
+    jobs = paginate(f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs")
+    if not isinstance(run, dict) or jobs is None:
         return None
 
     def step(raw: dict) -> dict:
@@ -2623,8 +2620,12 @@ SUBSCRIPTION_HEARTBEAT_POLLS = 6
 def broker_watch_keys(repo: str, pr: int, head_sha: str) -> list[str]:
     """The REST reads whose change should wake the watch: the PR, its
     reviews and comments, and the head commit's checks, runs and statuses.
-    The check-run and run URLs are the ones `paginate` reads first, so the
-    baseline digest is of the very body the poll judged."""
+    The check-run and run URLs are the ones `paginate` reads first, so for
+    those two the first baseline is of the very body the poll judged. The
+    others the poll reads through GraphQL: a change between that poll and
+    the first baseline of a new key set (the first poll, a moved head) is
+    seen at the heartbeat. Later waits keep the digests of the last wake, so
+    a change during a poll wakes the next wait at once."""
     return [
         f"repos/{repo}/pulls/{pr}",
         f"repos/{repo}/commits/{head_sha}/check-runs?filter=all&per_page={PER_PAGE}&page=1",
@@ -3155,6 +3156,13 @@ def watch(  # noqa: C901
                             )
                         last_wait_state = wait_state
                     waiting_green = (failing, counts)
+            if STALE_READS != stale_before:
+                # The CodeRabbit reads above came from the broker's cache:
+                # green waits for a poll that read fresh data.
+                if log:
+                    log.emit("api_degraded", source="broker", reason="stale_reads")
+                _sleep_remaining_interval(poll_started, interval)
+                continue
             if waiting_green is None:
                 _exit_green(
                     pr,

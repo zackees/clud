@@ -935,6 +935,33 @@ enum GhRoute {
     Watch,
 }
 
+/// `/gh/watch` calls blocked at once. Each holds a thread for up to 55 s; a
+/// call over the limit is refused (503) and the waiter falls back to its
+/// own interval polling.
+const MAX_GH_WATCHES: usize = 32;
+static GH_WATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds one of the [`MAX_GH_WATCHES`] slots until dropped.
+struct WatchSlot;
+
+impl WatchSlot {
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        GH_WATCHES
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_GH_WATCHES).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for WatchSlot {
+    fn drop(&mut self) {
+        GH_WATCHES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// #1743: answer one `/gh/read` or `/gh/watch` request on its own thread.
 /// An upstream fetch takes seconds, a watch up to a minute, and concurrent
 /// readers of one key must be able to join one fetch, so the dashboard loop
@@ -945,10 +972,21 @@ fn spawn_gh_route(
     guard: Option<super::activity::ActiveWorkGuard>,
     route: GhRoute,
 ) {
+    let slot = match route {
+        GhRoute::Read => None,
+        GhRoute::Watch => match WatchSlot::take() {
+            Some(slot) => Some(slot),
+            None => {
+                respond_json(request, 503, &json_error_bytes("too many gh watches"));
+                return;
+            }
+        },
+    };
     let spawned = thread::Builder::new()
         .name("clud-gh-read".to_string())
         .spawn(move || {
             let _guard = guard;
+            let _slot = slot;
             let (status, bytes) = match read_body(&mut request) {
                 Ok(body) => {
                     let self_exe = std::env::current_exe().unwrap_or_default();
