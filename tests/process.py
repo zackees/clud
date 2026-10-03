@@ -13,7 +13,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-import psutil
 from running_process import (
     CREATE_NEW_PROCESS_GROUP,
     DEVNULL,
@@ -260,6 +259,10 @@ def terminate_process_tree(pid: int, timeout_seconds: float = 3.0) -> bool:
     which exited 1 with no summary (#1738). This walk goes through
     `index_children`, which only links a child no older than its parent.
     """
+    # Imported here: installer lanes import this module with only pytest and
+    # running-process installed, and only the tree kill needs psutil.
+    import psutil
+
     procs = {proc.pid: proc for proc in psutil.process_iter(["ppid", "create_time"])}
     root = procs.get(pid)
     if root is None:

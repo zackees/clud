@@ -34,8 +34,8 @@ direct Bosn build task: those paths can interfere with the system `clud`. If
 act cannot represent an affected job (notably native Windows or macOS
 execution), use the relevant GitHub Actions lane for that validation and
 report the local coverage gap; never claim a local pass proves native
-behavior. This needs bosn 0.1.8 or newer (`bosn --version`), the first release
-that runs act2. If bosn or Docker is unavailable or too old, report the
+behavior. This needs bosn 0.1.10 or newer (`bosn --version`), the first release
+whose act2 runs every lane documented in ci.md. If bosn or Docker is unavailable or too old, report the
 blocker rather than falling back to host testing. The workflows carry no
 act-only workarounds (zackees/ci.yml ACT-003): a local gap is filed in
 zackees/ci.yml, not patched here. The commands and limits are in
