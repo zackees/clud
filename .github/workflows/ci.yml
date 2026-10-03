@@ -113,7 +113,7 @@ jobs:
         if: github.event_name == 'pull_request'
         with:
           repository: zackees/ci.yml
-          ref: 7edeb8dc318c1530ee3bf770029cb2e8b639e6f5
+          ref: 98fd662a48df43fe016c45a1f845e345b52fecef
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
