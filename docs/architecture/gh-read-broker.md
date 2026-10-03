@@ -16,8 +16,12 @@ caller's query returns, and [targeted invalidation](#write-invalidation).
 Every refresh of a merged collection re-sends its upstream pages with their
 ETags, so a deletion, a reaction or a rerun is seen on the next refresh at no
 rate-limit cost ([DD-153](../DESIGN_DECISIONS.md#dd-153-merged-gh-reads-revalidate-every-page-instead-of-querying-a-delta)).
-Porcelain commands (`gh pr view`, `gh run view`, ...), subscriptions and the
-budget floor are later phases of #1743.
+Phase 3 adds [subscriptions](#subscriptions-phase-3), a daemon route a
+waiter blocks on until one of its reads changes, and the
+[rate-limit floor](#rate-limit-floor-phase-3), which defers background
+refreshes when the budget runs low
+([DD-154](../DESIGN_DECISIONS.md#dd-154-gh-waiters-block-on-broker-subscriptions-and-background-refreshes-yield-below-a-reserve)).
+Porcelain commands (`gh pr view`, `gh run view`, ...) are not brokered.
 
 ## Path of one read
 
@@ -261,6 +265,88 @@ added to a finished commit included. The one exception is `pr merge`
 closing a linked issue, which leaves that issue's cached reads fresh for
 their TTL.
 
+## Subscriptions (phase 3)
+
+`POST /gh/watch` (`gh_broker::service::watch`) lets a waiter block until
+something it cares about changes, instead of polling GitHub itself. The
+request names up to 16 REST endpoints, the identity (`gh`, forwarded env,
+session), the digest of each body the waiter last saw, and how long to
+wait (at most 55 s per call; a waiter calls again to keep waiting). The
+daemon re-reads every endpoint through the broker's own read path, once a
+second:
+
+- Within an endpoint's TTL that is a cache hit: no request, no ledger row.
+- After it, the broker revalidates: a free `304` while nothing changed. The
+  refresh is single-flighted with every other subscriber and every ordinary
+  read of the same key, so ten waiters on one PR cost what one does, and the
+  waiter's next read of that key is a cache hit.
+- A read that fails (an upstream error, nothing stored) is retried after one
+  TTL, not every tick.
+
+The call returns as soon as a digest differs from the one sent (`changed`
+lists them), or when the wait runs out. A call without digests returns at
+once with the current ones: the baseline. A failed read is `null` and never
+counts as a change. Below the [floor](#rate-limit-floor-phase-3) the refresh
+is deferred: the reply carries `deferred_until_s`, the digests are of stored
+copies, and the call sleeps to the reset (or its deadline) in one step.
+
+`pr_merge_watch.py` is the first waiter. In a session with the broker
+(`CLUD_GH_READ_BROKER=1` and the daemon's `daemon.json`), it blocks on the
+subscription between steady-state polls, at most six intervals (a heartbeat,
+for GraphQL-only state such as review threads). It watches seven reads:
+
+- the PR;
+- the head commit's check runs and workflow runs, at the exact URLs its own
+  `paginate` reads first, so the baseline digest is of the body the poll
+  just judged;
+- the head commit's statuses;
+- the PR's reviews, issue comments and review comments.
+
+A poll still decides everything, with the same exit codes: a required
+failure exits 1 on the poll right after the wake, review activity exits 2,
+an empty head exits 8. A poll whose verdict waits on a count or a clock (a
+no-checks grace period, `mergeable=UNKNOWN` counted to exit 9, a CodeRabbit
+wait, `--max-queued`) keeps the plain interval. Outside a session, or when
+the daemon does not answer, the watcher polls as before.
+
+Its REST reads are always conditional. In a session they are plain
+`gh api` GETs the broker revalidates by ETag (the shim never brokers `-i`
+or `-H`). Outside one, the watcher sends its own `If-None-Match` from an
+in-process ETag cache (`api_get`). Its per-run progress report reads the run
+and its jobs over REST instead of `gh run view --json jobs`, which is never
+brokered.
+
+## Rate-limit floor (phase 3)
+
+`gh_broker::budget` keeps the newest `X-RateLimit-Limit`, `-Remaining` and
+`-Reset` of the `core` resource for each identity, from every upstream
+response, `304`s included. Concurrent responses arrive out of order, so
+within one window the lower `remaining` wins, and an older window never
+replaces a newer one.
+
+Below the reserve (default 10% of the limit) and before the window resets,
+a read that would go upstream is **deferred** unless it is interactive. The
+shim marks a read interactive when its stdin is a terminal, so a person at
+a prompt always reaches GitHub. A deferred read:
+
+- is served the stored copy (TTL ignored) and marked stale: the ledger
+  outcome is `deferred`, and the shim prints one line on stderr,
+  `clud: gh read broker: rate-limit reserve (R of L requests left until
+  <reset>): a cached copy from Ns ago, not a refresh`, while stdout is the
+  stored body exactly as before;
+- or, with nothing stored, goes to the real `gh` (a `409` from the route).
+  The broker never invents a body.
+
+A gate must not decide on a cached copy. `pr_merge_watch.py` counts the
+marker in the stderr of its `gh` calls, and a poll that saw one neither
+fails nor passes. It logs `api_degraded` with `reason=stale_reads` and waits
+for fresh data. Subscriptions defer too ([above](#subscriptions-phase-3)).
+
+The reserve is `CLUD_GH_BROKER_RESERVE_PCT` in the daemon's environment,
+else `git.gh_read_broker_reserve_pct` in `~/.clud/settings.json` (re-read
+at most once a minute), else 10. `0` turns the floor off; values over 100
+mean 100.
+
 ## Store and ledger
 
 `<state>/gh-broker.redb` (`~/.clud/state`, or `$CLUD_DAEMON_STATE_DIR`),
@@ -275,7 +361,9 @@ owned by the daemon:
 | `meta` | `invalidated_at_ms` |
 | `ledger` | seq → `ts_ms`, `session_id`, `key` (`host/endpoint`), `outcome`, `upstream_requests`, `rate_remaining`, `changed`, `removed` |
 
-`outcome` is `cache` (no upstream request), `304` (for a merged read: every
+`outcome` is `cache` (no upstream request), `deferred` (below the
+rate-limit floor: a stored copy, or the real `gh`, and no request), `304`
+(for a merged read: every
 page was a `304`), `incremental` (a merged read re-sent at least one page;
 `changed` counts the objects added or changed, `removed` those deleted
 upstream), `full` (an exact-URL fetch, or a merged collection's first fetch
@@ -313,7 +401,9 @@ stays off. So after an upgrade such a session's next statusline tick or
 | --- | --- |
 | `crates/clud-bin/src/gh_broker/classify.rs` | `api_read`, `may_write` |
 | `crates/clud-bin/src/gh_broker/client.rs` | shim side: daemon request, replay server |
-| `crates/clud-bin/src/gh_broker/service.rs` | TTL, single-flight, revalidation, invalidation, ledger, `/gh/read` and `/gh/invalidate` bodies |
+| `crates/clud-bin/src/gh_broker/service.rs` | TTL, single-flight, revalidation, the floor's deferrals, invalidation, ledger, `/gh/read` and `/gh/invalidate` bodies |
+| `crates/clud-bin/src/gh_broker/service/watch.rs` | subscriptions: the `/gh/watch` body |
+| `crates/clud-bin/src/gh_broker/budget.rs` | rate-limit windows per identity, the reserve |
 | `crates/clud-bin/src/gh_broker/service/merged.rs` | merged reads: the conditional pass over every page, the re-check, fallback |
 | `crates/clud-bin/src/gh_broker/collection.rs` | collection plans, page URLs and widths, page parsing, order checks, change counts, rendering |
 | `crates/clud-bin/src/gh_broker/scope.rs` | invalidation tags of reads and writes |
@@ -321,7 +411,8 @@ stays off. So after an upgrade such a session's next statusline tick or
 | `crates/clud-bin/src/gh_broker/upstream.rs` | `gh api -i` transport and parser |
 | `crates/clud-bin/src/shim_main.rs` | `gh_shim::brokered_read`, invalidation after writes |
 | `crates/clud-bin/src/shim_main/dispatch.rs` | builds the `BrokerClient` from the session env, or from the setting when the key is absent |
-| `crates/clud-bin/src/daemon/http.rs` | `/gh/read` (own thread), `/gh/invalidate` and `/gh/ledger` routes |
+| `crates/clud-bin/src/daemon/http.rs` | `/gh/read` and `/gh/watch` (own threads), `/gh/invalidate` and `/gh/ledger` routes |
+| `crates/clud-bin/assets/tools/github/pr_merge_watch.py` | `BrokerSubscription`, `broker_watch_keys`, `api_get`: the watcher's subscription and conditional reads |
 
 Tests: `gh_broker` unit tests cover classification, TTL hits with zero
 upstream requests, `304` revalidation, single-flight, invalidation, identity
@@ -333,7 +424,14 @@ byte for byte with that fake's full answer to the caller's exact URL: edits,
 reactions and deletions on any page, reruns of finished runs in a run list
 and a jobs listing, a late check run, a deletion that lands between two page
 requests, run-list widths, page-size emulation, the exact-URL fallback and
-targeted invalidation. `tests/test_gh_read_broker.py` drives the real alias against a
+targeted invalidation. `service/watch/tests.rs` runs subscriptions and the
+floor on a fake clock: a quiet wait that costs nothing inside the TTL, a
+change seen at the next refresh, a failed read that is not a change, stale
+copies below the floor while interactive reads proceed, and a deferred
+subscription that sleeps to its deadline. `tests/test_pr_merge_watch_subscription.py`
+drives the watcher's client against a fake daemon and `watch()` against a
+fake subscription, and checks that its env list mirrors `FORWARDED_ENV`.
+`tests/test_gh_read_broker.py` drives the real alias against a
 fake daemon and a fake `gh`. It checks byte-identical output, the fallbacks
 (no daemon, a daemon miss, the setting off) and the invalidation each write
 posts, and that a session without the key follows the setting.

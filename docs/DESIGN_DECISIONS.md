@@ -6300,3 +6300,60 @@ instead of none: wall time and local `gh` processes, not budget. A change
 re-sends the whole page it is on, where the delta sent only the changed
 objects. The ledger records `removed` (objects deleted upstream) beside
 `changed`, and a merged `304` means every page was a `304`.
+
+## DD-154: gh waiters block on broker subscriptions, and background refreshes yield below a reserve
+
+**Context:** phase 3 of #1743. With the read broker, an in-session
+`pr_merge_watch.py` still woke every 20 s, made a GraphQL call, re-read its
+REST state (cheap through the broker, but not free) and asked `gh run view`
+for every pending run's jobs (never brokered). Several watchers and agents
+also share one 5,000/hour budget, and nothing kept a share of it for the
+person at the prompt. The design asked for subscriptions ("waiters are woken
+on change or terminal state") and a 10% floor below which background readers
+wait for the reset while interactive ones go through. Gates must fail
+closed.
+
+**Decision:**
+
+- `POST /gh/watch` blocks for up to 55 s on a set of at most 16 REST reads,
+  re-reading them through the broker's ordinary read path once a second.
+  The TTL is the refresh cadence, and single-flight makes every subscriber
+  and every reader of a key share one upstream request. A change is a
+  different body digest. A failed read is never a change, and it is retried
+  after one TTL. "Terminal state" needs no special case: a merged PR or a
+  finished check is a change, and the waiter's own poll decides what it
+  means.
+- The watcher keeps all of its judgment. It replaces only its steady-state
+  sleep with a subscription wait (heartbeat: six intervals), so every exit
+  code and verdict path is the polling code. Where a verdict is counted in
+  polls or timed by a clock (no-checks grace, `mergeable=UNKNOWN`,
+  CodeRabbit wait, `--max-queued`), it keeps the interval.
+- Rate-limit windows are tracked per identity from every upstream response.
+  Below the reserve, a non-interactive read is served the stored copy,
+  marked stale on stderr and in the ledger (`deferred`), or, with nothing
+  stored, goes to the real `gh`. "Interactive" is the shim's stdin being a
+  terminal. Blocking a read until the reset (up to an hour) was rejected: it
+  would hang every script and hook. Failing it was rejected too: it would
+  turn a watcher's budget problem into an "unreachable" exit.
+- The watcher never decides on a stale copy: a poll whose `gh` stderr
+  carries the marker neither fails nor passes. So the floor can delay a
+  verdict, but never fabricate or reverse one.
+- The reserve is a daemon-side setting, `git.gh_read_broker_reserve_pct`
+  (default 10, `CLUD_GH_BROKER_RESERVE_PCT` overrides it), because the
+  daemon is the only place that sees every caller's spending.
+- The watcher's REST reads are conditional in every mode: brokered in a
+  session, with its own `If-None-Match` outside one. Its job progress comes
+  from REST instead of `gh run view`. `ci/publish.py`'s release wait
+  revalidates the run with its ETag under a 3-hour deadline. This also
+  satisfies zackees/ci.yml's GHAPI-001 static rule, with same-line
+  allowances only for bounded retries, once-per-head or on-exit reads, and
+  GraphQL (which has no ETag).
+
+**Consequences:** a quiet watch costs one free `304` per watched key per TTL,
+no GraphQL and no job reads until something changes or the heartbeat fires.
+A change wakes it within one TTL (30 s for runs, 60 s for the rest). A
+change that lands between a poll and the following baseline, on a key the
+poll read only through GraphQL, is seen at the heartbeat. Below the floor,
+watchers stall until the reset instead of draining the budget. A person's
+`gh api` still goes through, and nothing reports success on cached data.
+The watcher's copy of `FORWARDED_ENV` is pinned by a test.

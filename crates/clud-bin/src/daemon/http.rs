@@ -755,7 +755,11 @@ fn run_dashboard_loop(
             }
             (Method::Post, crate::gh_broker::READ_PATH) => {
                 let guard = activity.as_ref().map(DaemonActivity::start_connection);
-                spawn_gh_read(request, Arc::clone(&gh_broker), guard);
+                spawn_gh_route(request, Arc::clone(&gh_broker), guard, GhRoute::Read);
+            }
+            (Method::Post, crate::gh_broker::WATCH_PATH) => {
+                let guard = activity.as_ref().map(DaemonActivity::start_connection);
+                spawn_gh_route(request, Arc::clone(&gh_broker), guard, GhRoute::Watch);
             }
             (Method::Get, crate::gh_broker::LEDGER_PATH) => {
                 let (status, bytes) = gh_broker.handle_ledger();
@@ -923,13 +927,23 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<RegistryMsg>>)
     }
 }
 
-/// #1743: answer one `gh api` read on its own thread. An upstream fetch
-/// takes seconds and concurrent readers of one key must be able to join it,
-/// so the dashboard loop never waits on the broker.
-fn spawn_gh_read(
+/// The broker routes that may block: a read waits on GitHub, a watch
+/// waits for a change.
+#[derive(Clone, Copy)]
+enum GhRoute {
+    Read,
+    Watch,
+}
+
+/// #1743: answer one `/gh/read` or `/gh/watch` request on its own thread.
+/// An upstream fetch takes seconds, a watch up to a minute, and concurrent
+/// readers of one key must be able to join one fetch, so the dashboard loop
+/// never waits on the broker.
+fn spawn_gh_route(
     mut request: Request,
     broker: Arc<crate::gh_broker::service::GhBroker>,
     guard: Option<super::activity::ActiveWorkGuard>,
+    route: GhRoute,
 ) {
     let spawned = thread::Builder::new()
         .name("clud-gh-read".to_string())
@@ -940,14 +954,17 @@ fn spawn_gh_read(
                     let self_exe = std::env::current_exe().unwrap_or_default();
                     let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
                     let home = std::env::var_os(home_key).map(PathBuf::from);
-                    broker.handle_http(&body, &self_exe, home.as_deref())
+                    match route {
+                        GhRoute::Read => broker.handle_http(&body, &self_exe, home.as_deref()),
+                        GhRoute::Watch => broker.handle_watch(&body, &self_exe, home.as_deref()),
+                    }
                 }
                 Err(err) => (400, json_error_bytes(&format!("read body failed: {err}"))),
             };
             respond_json(request, status, &bytes);
         });
     if let Err(err) = spawned {
-        eprintln!("[clud] note: gh read thread spawn failed: {err}");
+        eprintln!("[clud] note: gh broker thread spawn failed: {err}");
     }
 }
 

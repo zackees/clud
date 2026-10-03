@@ -876,6 +876,25 @@ pub fn load_gh_read_broker_enabled_at(home: &Path) -> Result<bool, SettingsError
         .unwrap_or(true))
 }
 
+/// `git.gh_read_broker_reserve_pct` (#1743): the share of the GitHub REST
+/// rate limit (percent) the read broker keeps for interactive reads. Below
+/// it, background refreshes are deferred until the window resets. `None`
+/// when unset; the broker then uses 10.
+pub fn load_gh_read_broker_reserve_pct() -> Result<Option<u64>, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_gh_read_broker_reserve_pct_at(&home)
+}
+
+pub fn load_gh_read_broker_reserve_pct_at(home: &Path) -> Result<Option<u64>, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(document
+        .get("git")
+        .and_then(|item| item.get("gh_read_broker_reserve_pct"))
+        .and_then(Value::as_u64))
+}
+
 pub fn save_gh_read_broker_enabled_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
     with_settings_document(home, |document| {
         let git = object_entry(document, "git");
