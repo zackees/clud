@@ -1875,8 +1875,9 @@ def test_usage_error_exits_64_not_the_review_verdict_code(watcher, capsys) -> No
         watcher.parse_args(["--pr", "527"])
     assert raised.value.code == 64
     assert "unrecognized arguments" in capsys.readouterr().err
+    # An omitted PR is the current branch's (refs #1741); a second one is not.
     with pytest.raises(SystemExit) as raised:
-        watcher.parse_args([])
+        watcher.parse_args(["527", "528"])
     assert raised.value.code == 64
 
 

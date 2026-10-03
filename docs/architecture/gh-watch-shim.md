@@ -12,9 +12,12 @@ without a valid session the alias is the next real `gh` on PATH (see
 runs the real executable as a child with the original arguments and inherited
 stdio, and returns its exit status. Signals are handled shell-style so the
 wait status is unchanged ([DD-131](../DESIGN_DECISIONS.md#dd-131-the-git--gh-telemetry-shim-waits-for-the-child-instead-of-execing)). A PR-check watch is
-instead parsed against a deliberately narrow flag contract. Numeric PRs go
-directly to the bundled watcher; omitted, branch, and URL selectors are
-resolved by the real executable's `pr view` command. The watcher runs through
+instead parsed against a deliberately narrow flag contract. The selector
+(a number, a branch, a PR URL, or none) goes to the bundled watcher as is.
+The watcher resolves it on `--repo`, else on the `origin` remote, and a URL
+names its own repo. The shim does no lookup of its own: a bare
+`gh pr view <branch>` in a fork resolves to the parent repository (#1741).
+The watcher runs through
 the pinned `CLUD_EXE tool run github/pr_merge_watch.py` path; without a
 valid `CLUD_EXE` the watch runs on the real executable unchanged. The
 upgrade is fail-fast only: it passes `--cancel-on fail`, so review activity
