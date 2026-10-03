@@ -125,6 +125,10 @@ def test_unsafe_mode_suppresses_drift_warning_but_runs_declared_hook(tmp_path: P
 
     assert result.returncode == 0, result
     assert "[clud] CwdChanged: the session cwd moved to" not in result.stderr
+    # Hooks follow the new cwd's containment; moving outside the repo does
+    # not fire the old repo's hook, but moving within it does.
+    within = _run(tmp_path, repo, repo / "src", extra_env={"CLUD_UNSAFE_MODE": "1"})
+    assert within.returncode == 0, within
     assert (repo / "marker").exists()
 
 
