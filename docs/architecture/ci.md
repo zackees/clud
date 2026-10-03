@@ -958,7 +958,9 @@ Clippy needs only two: this workspace gates by OS, not architecture. The
 **Doc-tests run once.** They were covered by the old `cargo test --workspace`
 but produce no harness binary, so they cannot ride along in a bundle. They are
 OS- and architecture-independent, so one run on the host triple is full
-coverage rather than a reduction.
+coverage rather than a reduction. That run is in the Linux x64 Clippy job
+(`doctest: true`), not the build job: every unit lane waits for the build job
+to complete, and the Clippy job finishes over a minute earlier.
 
 ## Template inventory
 

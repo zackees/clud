@@ -199,6 +199,9 @@ jobs:
       clippy: true
       compile: false
       bundle: false
+      # Doc-tests ride here, beside the build rather than ahead of the unit
+      # lanes (_build-target.yml's Doc tests step).
+      doctest: true
       save-cache: "false"
 
   build-linux-x64:

@@ -359,6 +359,9 @@ def test_doc_tests_run_on_a_live_matrix_triple():
         "doc-tests must not key on the strategy — that is how #863 silently "
         f"disabled them: {condition}"
     )
+    assert "inputs.doctest" in condition, condition
+    lint = CI_YML.read_text(encoding="utf-8").split("\n  lint-linux-x64:\n", 1)[1]
+    assert "doctest: true" in lint.split("\n\n  ", 1)[0], "the Linux x64 Clippy job must run them"
     named = re.search(r"inputs\.target == '([^']+)'", condition)
     assert named, f"doc-test condition must pin a target triple: {condition}"
     live = {target.triple for target in TARGETS}

@@ -34,6 +34,14 @@ on:
         required: false
         type: boolean
         default: true
+      doctest:
+        description: >-
+          Run the workspace doc-tests (x86_64-unknown-linux-gnu only). CI runs
+          them in the Linux x64 Clippy job, off the build job that every unit
+          test lane waits on.
+        required: false
+        type: boolean
+        default: false
       compile:
         description: Build the workspace binaries (and, with bundle, the test harnesses). Off only for a lint-only call.
         required: false
@@ -198,9 +206,13 @@ jobs:
       # reduction. Keyed on the TRIPLE, not the strategy: #859 moved every
       # lane to the soldr strategy and a `strategy == 'native'` key silently
       # stopped running doc-tests anywhere (#863).
-      # `test_doc_tests_run_on_a_live_matrix_triple` pins this key.
+      # `test_doc_tests_run_on_a_live_matrix_triple` pins this key. They run
+      # in the Clippy job (`doctest: true`), not the build job: the unit test
+      # lanes start only when the build job completes, and the Clippy job
+      # finishes over a minute before it, so this moves ~7 s off the PR's
+      # critical path at no wall-clock cost.
       - name: Doc tests
-        if: ${{ inputs.bundle && inputs.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' }}
+        if: ${{ inputs.doctest && inputs.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' }}
         run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       # This ZIP is the pinned portable build of zackees/wezterm at
