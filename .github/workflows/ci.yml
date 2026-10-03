@@ -60,9 +60,19 @@ jobs:
     name: CI mode
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       mode: ${{ steps.mode.outputs.tier }}
       source_ref: ${{ steps.source.outputs.ref }}
+      reuse: ${{ steps.reuse.outputs.reuse }}
+      would_reuse: ${{ steps.reuse.outputs.would_reuse }}
+      reuse_reason: ${{ steps.reuse.outputs.reason }}
+      reuse_pr: ${{ steps.reuse.outputs.pr }}
+      reuse_run_url: ${{ steps.reuse.outputs.run_url }}
+      reuse_tree: ${{ steps.reuse.outputs.tree }}
       # zackees/ci.yml GATE-008/010: 'true' only on a PR whose head carries a
       # stamp-valid `Ci-Attestation:` for every gate ci-attestations.yml maps
       # to the job, inside local-gate.toml's [gate.trust] policy as committed
@@ -114,7 +124,7 @@ jobs:
       # checked out above. It fails closed (every skip_* stays unset) on any
       # reason code but `trusted`.
       - uses: actions/checkout@v4
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
           repository: zackees/ci.yml
           ref: 98fd662a48df43fe016c45a1f845e345b52fecef
@@ -125,6 +135,23 @@ jobs:
         id: gate
         if: github.event_name == 'pull_request'
         run: PYTHONPATH=.ci-lint python -m ci_lint local-gate verify --repo . --trust --github-output
+      # zackees/ci.yml#157 (GEN-021): measure byte-identical merged-tree
+      # reuse before enabling it. Shadow outputs never select or skip jobs.
+      - name: Default-branch reuse (shadow)
+        id: reuse
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          PYTHONPATH=.ci-lint python -m ci_lint reuse-check
+          --workflow ci.yml --mode shadow --github-output --out reuse-check.json
+          --required-job 'Static checks'
+          --required-job 'Dylint / Dylint'
+          --required-job 'Clippy linux-x64 / x86_64-unknown-linux-gnu'
+          --required-job 'Build linux-x64 / x86_64-unknown-linux-gnu'
+          --required-job 'Test linux-x64 (unit) (rust) / x86_64-unknown-linux-gnu unit'
+          --required-job 'Test linux-x64 (unit) (py1of2) / x86_64-unknown-linux-gnu unit'
+          --required-job 'Test linux-x64 (unit) (py2of2) / x86_64-unknown-linux-gnu unit'
 
   # Everything platform-independent, once, on the cheapest runner. Previously
   # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
@@ -459,6 +486,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Default-branch reuse evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          WOULD_REUSE: ${{ needs.static.outputs.would_reuse }}
+          REASON: ${{ needs.static.outputs.reuse_reason }}
+          PR: ${{ needs.static.outputs.reuse_pr }}
+          RUN_URL: ${{ needs.static.outputs.reuse_run_url }}
+          TREE: ${{ needs.static.outputs.reuse_tree }}
+        run: |
+          {
+            echo '### Default-branch reuse (shadow)'
+            printf '\nWould reuse: %s\n\nReason: %s\n\nPR: %s\n\nProving run: %s\n\nTree: %s\n' "$WOULD_REUSE" "$REASON" "$PR" "$RUN_URL" "$TREE"
+            echo 'All selected jobs still run; this decision only collects evidence.'
+          } >> "$GITHUB_STEP_SUMMARY"
       # `always()` plus explicit result inspection is required: a failing
       # `needs` would otherwise skip this job and leave the check pending
       # forever rather than reporting red.
