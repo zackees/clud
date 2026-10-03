@@ -85,7 +85,7 @@ def explain_readonly_failure(argv: list[str]) -> None:
     if offender is None:
         return
     print(
-        f"\nlint: if the failure above says \"is not writeable\", this is why:\n"
+        f'\nlint: if the failure above says "is not writeable", this is why:\n'
         f"  {offender} is read-only.\n"
         f"  soldr's target-tree cache hardlinks artifacts in read-only, and the\n"
         f"  cargo resolved here is not soldr's, so it cannot rewrite them.\n"
@@ -147,6 +147,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     # then do we pay for a cargo process. The old order put ruff last,
     # behind fmt.
     if run([sys.executable, "-m", "ruff", "check", "src", "tests", "ci"]) != 0:
+        return 1
+    # The complexity ratchet (zackees/ci.yml#229, PY-004) covers every tracked
+    # Python file, not just the three trees above: bench/, installer/ and the
+    # bundled tool assets carry C901 noqa baselines too.
+    if run([sys.executable, "-m", "ruff", "check", "--select", "C901", "."]) != 0:
         return 1
     if check_banned_imports() != 0:
         return 1
