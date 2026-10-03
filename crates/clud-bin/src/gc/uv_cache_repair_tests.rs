@@ -172,7 +172,10 @@ mod unix {
         // the drop, so poll briefly instead of asserting on one pass.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while repair_corrupt_wheels_at(&root, false).repaired == 0 {
-            assert!(std::time::Instant::now() < deadline, "entry lock never released");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "entry lock never released"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(invalidated(&bad));
