@@ -171,7 +171,7 @@ the workflow under act2 in an isolated engine
 ([ci.md § Local validation](ci.md#local-validation-before-remote-ci)):
 
 ```bash
-bosn ci run --workspace . --trigger pr --job static --wait  # fmt, ruff, static checks
+bosn ci run --workspace . --trigger pr --job static-checks --wait  # fmt, ruff, static guards
 bosn ci run --workspace . --trigger pr --wait               # adds Linux clippy, build, Rust + Python unit suites
 ```
 

@@ -10,7 +10,8 @@ Guidance for Claude Code when working in this repository.
 
 The commands below describe what the CI jobs execute. Agents must run local
 lint and tests only through `bosn ci run --workspace . --trigger pr`
-(`--job static` for lint alone); never invoke these commands on the host.
+(`--job static-checks` for formatting/Ruff/guards, `--job lint-linux-x64`
+for Clippy/doc-tests); never invoke these commands on the host.
 Changes to Windows platform implementations or native runtime contracts
 require `ci-windows`, including the relevant PTY tests. Shared business logic
 calling unchanged Windows APIs stays on routine CI; inspect the changed code
@@ -49,7 +50,7 @@ commit everything, then
 `uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run`
 and `git push --force-with-lease`. Don't amend or rebase after stamping: that
 invalidates the stamp and the PR simply runs every lane. Plain `bosn ci run`
-stays valid for `--job static` and focused jobs.
+stays valid for `--job static-checks` and focused jobs.
 
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
 local CI is a pre-push check, not the edit loop. Run the full PR plan at most
@@ -167,8 +168,10 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 
 ## Code Quality Standards
 
-For agents, the lint requirement below is fulfilled by `bosn ci run --job
-static` and the full PR plan. Direct host execution is prohibited.
+For agents, the full PR plan fulfills the lint requirement below. Focused
+`--job static-checks` runs formatting/Ruff/guards, `--job lint-linux-x64`
+runs Clippy/doc-tests, and `--job dylint` runs Dylint. `--job static` only
+probes CI mode and attestations. Direct host execution is prohibited.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 
@@ -358,7 +361,7 @@ Things that bite:
   workflow runs; see
   [`ci.md`](docs/architecture/ci.md#the-static-c-runtime-link-is-gone-1207).
   `ci/banned_cross_tools.py` enforces the ban under `bash lint` and CI's static
-  job; `ci/xbuild.py::cargo_argv` additionally *raises* on a zigbuild strategy
+  checks job; `ci/xbuild.py::cargo_argv` additionally *raises* on a zigbuild strategy
   for any soldr-owned triple (which is now every clud triple), because the text
   scan cannot follow a target held in a variable.
   Two rule classes, and the distinction is the thing to get right when editing
