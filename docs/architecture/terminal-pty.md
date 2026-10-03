@@ -191,6 +191,11 @@ the rm guard (#1746).
 | `ci-test` | Linux x64 integration plus Windows x64 |
 | `ci-full` | All six targets, including hosted macOS arm64 and x64 |
 
+Choose labels using [the changed platform implementation](ci.md#when-to-add-native-ci-labels),
+not because the code uses a PTY. Shared pump business logic calling unchanged
+platform APIs stays on routine CI; native API/OS-contract changes select the
+affected native lanes. Helper extraction like #1769 does not need `ci-full`.
+
 - Watch a PR with `clud tool run github/pr_merge_watch.py -- <PR> [--no-cancel]`.
   Hand-written polling loops are blocked by a hook.
 - Read a job log with
@@ -207,7 +212,7 @@ platform. They link back here for the shared facts above.
 - [terminal-pty-linux](../../.claude/skills/terminal-pty-linux/SKILL.md):
   POSIX PTY, raw mode and OPOST, signals, and full local validation via act.
 - [terminal-pty-macos](../../.claude/skills/terminal-pty-macos/SKILL.md):
-  libc type differences and `ci-full`-only validation.
+  libc type differences and native validation for macOS implementation changes.
 
 ## See also
 

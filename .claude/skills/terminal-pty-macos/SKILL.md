@@ -1,6 +1,6 @@
 ---
 name: terminal-pty-macos
-description: Use before changing or debugging clud's terminal/PTY path on macOS (POSIX PTY, raw mode, libc termios/openpty type differences from Linux, escape sequences, terminal restore). Covers what differs from Linux, how to catch macOS-only compile errors early, and how to validate with the ci-full label since neither the host nor act can run macOS.
+description: Use before changing or debugging clud's terminal/PTY path on macOS (POSIX PTY, raw mode, libc termios/openpty type differences from Linux, escape sequences, terminal restore). Covers what differs from Linux, how to catch macOS-only compile errors early, and when a macOS platform implementation change needs ci-full; shared business logic calling platform code stays on routine CI.
 ---
 
 # Terminal / PTY on macOS
@@ -62,8 +62,15 @@ resumable scanners, and restore from `Drop`. In addition:
 2. Push. On routine PRs the **Dylint** job also compiles check-only for
    `aarch64-apple-darwin`. It caught a macOS-only compile error while #1709
    was in progress, so read its result before anything else.
-3. Add the `ci-full` label for runtime coverage. It adds the hosted macOS
-   arm64 and x64 build and test lanes, plus the other targets.
+3. Add `ci-full` only when the diff changes macOS/POSIX platform
+   implementation or its native runtime contract (for example termios or
+   native PTY API handling). Name the changed implementation and what the
+   macOS lanes prove in the PR body. Shared pump orchestration, stream
+   parsing, helper extraction, and calls to unchanged platform APIs stay
+   on routine CI, even in `session.rs`; moving an unchanged OS branch into
+   a helper does not qualify. A failed/incomplete local run is not a reason
+   to add the label. See [CI label selection](../../../docs/architecture/ci.md#when-to-add-native-ci-labels).
+   When warranted, the label adds hosted macOS arm64/x64 and other targets.
 4. Watch the run with
    `clud tool run github/pr_merge_watch.py -- <PR> [--no-cancel]`. Read a
    failing job with
