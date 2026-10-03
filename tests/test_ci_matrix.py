@@ -538,7 +538,13 @@ def test_workflows_use_the_local_runner_signal_only_under_an_exception() -> None
     assert offenders == [], offenders
 
 
-ATTESTED_SKIP_JOBS = ("static-checks", "dylint", "lint-linux-x64", "build-linux-x64", "test-linux-x64-unit")
+ATTESTED_SKIP_JOBS = (
+    "static-checks",
+    "dylint",
+    "lint-linux-x64",
+    "build-linux-x64",
+    "test-linux-x64-unit",
+)
 
 
 def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
