@@ -1,0 +1,74 @@
+# clud's local gate (zackees/ci.yml GATE-001..011; docs/architecture/ci.md).
+#
+# Before every push, from a clean, committed tree (and once per worktree,
+# `uv sync --frozen --group dev --no-install-project` so .venv exists):
+#
+#   uvx --from git+https://github.com/zackees/ci.yml@7edeb8dc318c1530ee3bf770029cb2e8b639e6f5 ci-lint local-gate run
+#
+# It runs the lanes below and, on success, stamps HEAD with a tree-bound
+# `Local-Gate:` trailer plus one `Ci-Attestation:` trailer per gate in
+# ci-attestations.yml. CI's `static` job verifies them; on an attested PR
+# head it skips the remote Linux x64 lanes the gate already ran.
+[gate]
+run = [".venv/bin/python", "ci/local_gate.py"]
+# The remote `static` job runs `ci/local_gate.py --lane static` and nothing
+# else; its other steps only prepare the run (provenance, CI mode, the dev
+# venv) or are this gate's own verify step. Locally the `ci` lane replays
+# the whole `static` job, those steps included, under act.
+mirrors = ["ci.yml:static"]
+setup-steps = [
+  "Verify source and workflow provenance",
+  "Resolve CI mode and candidate SHA",
+  "Local gate attestation",
+  "Sync",
+]
+verify = "ci.yml:static"
+# GATE-003 in shadow: an unattested PR head is reported, not failed, and
+# gets the full remote run exactly as before. CLAUDE.md still tells agents to
+# cancel a queued bosn run and push, and most PRs come from sessions that do
+# not run this gate yet. Attested heads are what [gate.trust] speeds up.
+# Promote to "enforce" once `ci-lint local-gate first-pass` shows attested
+# heads are the norm.
+mode = "shadow"
+
+# GATE-005 (zackees/ci.yml#168): clud is live infrastructure on the
+# developer's host (its daemon, shims and state roots), so its tests never
+# run there. tests/conftest.py refuses unless CI=true (GitHub, act) or the
+# marker is set (bosn/Dockerfile). The gate runs the suite through `bosn ci`,
+# which replays ci.yml under act2 in a per-run engine (CI=true) on a
+# snapshot of this worktree; CLAUDE.md makes that the only sanctioned local
+# runner. Tree proof (GATE-009): ci/local_gate.py requires bosn's run receipt
+# to name this worktree, HEAD's sha and a clean snapshot.
+[gate.isolation]
+marker = "CLUD_TEST_ISOLATED"
+runner = ["bosn", "ci", "run"]
+guard = "tests/conftest.py"
+proves-tree = true
+
+# GATE-007: one lane. `bosn ci --job` runs a job without its `needs:`, so
+# the Linux x64 lanes (which need `static`'s outputs and the build bundle)
+# can only be replayed together, as one minimal-mode run. No exclusions:
+# the crates embed Markdown skills and the tests read docs/ and .github/.
+[gate.lanes.ci]
+run = [".venv/bin/python", "ci/local_gate.py", "--lane", "ci"]
+tools = ["bosn"]
+
+# GATE-008 / GATE-010: an attested PR head skips the remote Linux x64 lanes
+# the `ci` lane replayed; `static` (the verify job) always runs. Read from
+# the PR's BASE. Fails closed: a fork or non-writer author, any CI label
+# (ci-test, ci-windows and ci-full select more than the gate replays), a
+# head not attested for its exact tree, a change to a surface (this file,
+# ci-attestations.yml, ci/local_gate.py, ci.yml and the reusable workflows
+# and actions it calls), or the 1-in-10 audit sample all run every job.
+# Pushes to main always run every job (the post-merge catch); a release
+# runs its own SHA-pinned full CI and ignores attestations.
+[gate.trust]
+mode = "enforce"
+skip = [
+  "ci.yml:dylint",
+  "ci.yml:lint-linux-x64",
+  "ci.yml:build-linux-x64",
+  "ci.yml:test-linux-x64-unit",
+]
+covered-by = { "ci.yml:dylint" = ["ci"], "ci.yml:lint-linux-x64" = ["ci"], "ci.yml:build-linux-x64" = ["ci"], "ci.yml:test-linux-x64-unit" = ["ci"] }
+full-labels = ["ci-full", "ci:full", "ci-test", "ci-windows"]

@@ -48,6 +48,13 @@ bosn queue: cancel your own run (`bosn ci cancel RUN`) and push. Never
 `pkill`/`pgrep -f` bosn runs, because the pattern also kills other sessions'
 runs.
 
+**Local gate** ([details](docs/architecture/ci.md#the-local-gate-attest-once-skip-the-remote-linux-lanes)):
+to run that one full local plan, use `ci-lint local-gate run` (it calls
+`bosn ci` and stamps the commit). On a PR whose head carries the stamp, CI
+skips the Linux x64 lanes the local run proved, so the PR goes green in about
+a minute instead of about ten. An unstamped head still gets the full remote
+run.
+
 ## Repository Map
 
 This is a Rust CLI (`clud`) distributed as a Python wheel via maturin (`bindings = "bin"`). The Rust source lives under `crates/` and is mirrored by a progressive-disclosure README tree:

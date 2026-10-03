@@ -4,6 +4,10 @@ FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f9
 # project-specific label so an unrelated registry cannot claim the same tag.
 LABEL org.opencontainers.image.title="clud-bosn-validation"
 
+# GATE-005 (zackees/ci.yml#168): tests/conftest.py refuses to run clud's
+# tests on a developer host; this isolated image is allowed to.
+ENV CLUD_TEST_ISOLATED=1
+
 RUN apt-get update \
     # Debian package names. python-name-lint: allow-next-line
     && apt-get install -y --no-install-recommends clang lld python3 python3-pip python-is-python3 git pkg-config libssl-dev nodejs npm \

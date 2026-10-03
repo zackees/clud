@@ -1,0 +1,37 @@
+# ci-attestations (zackees/ci.yml GATE-010/011; docs/architecture/ci.md).
+#
+# Each gate is one thing ci.yml would otherwise verify remotely, named
+# <ecosystem>/<platform>/<check>. `lane` is the local-gate.toml lane whose
+# pass proves it: `ci-lint local-gate run` writes one `Ci-Attestation:`
+# trailer per gate of each passed lane into the commit message. A gate with
+# no trailer was not run locally, so CI runs it.
+#
+# Every gate here is proven by the `ci` lane: a minimal-mode replay of
+# ci.yml under `bosn ci` (act2, Linux x64), running the same jobs, commands
+# and reusable workflows as GitHub's ubuntu-24.04 runner. All are native:
+# the Windows and macOS Dylint gates are the same check-only cross-target
+# passes the remote Dylint job runs on Linux, not executions on those OSes.
+#
+# `jobs` maps each remote job to the gates it runs. On a PR, the `static`
+# job skips a job only when every one of its gates is attested and the
+# head passes [gate.trust] (local-gate.toml). Read from the PR's base; this
+# file is itself a trust surface. Pushes to main always run every job.
+version: 1
+gates:
+  rust/x86_64-unknown-linux-gnu/dylint: {lane: ci}
+  rust/x86_64-pc-windows-msvc/dylint: {lane: ci, fidelity: native}   # check-only, cross from Linux
+  rust/aarch64-apple-darwin/dylint: {lane: ci, fidelity: native}     # check-only, cross from Linux
+  rust/x86_64-unknown-linux-gnu/clippy: {lane: ci}
+  rust/x86_64-unknown-linux-gnu/build: {lane: ci}                    # dev build + test bundle
+  rust/x86_64-unknown-linux-gnu/test: {lane: ci}                     # unit shard `rust`
+  python/x86_64-unknown-linux-gnu/test: {lane: ci}                   # unit shards py1of2, py2of2
+jobs:
+  ci.yml:dylint:
+    - rust/x86_64-unknown-linux-gnu/dylint
+    - rust/x86_64-pc-windows-msvc/dylint
+    - rust/aarch64-apple-darwin/dylint
+  ci.yml:lint-linux-x64: [rust/x86_64-unknown-linux-gnu/clippy]
+  ci.yml:build-linux-x64: [rust/x86_64-unknown-linux-gnu/build]
+  ci.yml:test-linux-x64-unit:
+    - rust/x86_64-unknown-linux-gnu/test
+    - python/x86_64-unknown-linux-gnu/test

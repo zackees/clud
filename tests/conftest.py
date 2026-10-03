@@ -16,6 +16,22 @@ from ci.pytest_tmp_retention import (  # noqa: F401  (pytest hooks, #1686)
     pytest_terminal_summary,
 )
 
+# GATE-005 (zackees/ci.yml#168): clud is live infrastructure on the
+# developer's own host -- its daemon, shims and state roots -- and these
+# tests start clud processes, so they never run there. They run under CI
+# (GitHub runners and act set CI=true; locally that is `bosn ci run`) or in
+# an isolated container that sets CLUD_TEST_ISOLATED=1 (bosn/Dockerfile).
+# Checked before the scrub below.
+if os.environ.get("CI", "").lower() not in {"1", "true", "yes"} and (
+    os.environ.get("CLUD_TEST_ISOLATED") != "1"
+):
+    pytest.exit(
+        "refusing to run clud's tests on this host (GATE-005): run them isolated with "
+        "`bosn ci run --workspace . --trigger pr --wait` (CI=true), or in a container "
+        "that sets CLUD_TEST_ISOLATED=1",
+        returncode=4,
+    )
+
 # A clud session exports state such as CLUD_SKIP_RM_IDENTITY (auto-on in
 # clud's own repo) and CLUD_ROUTE_CONTEXT. Inherited by the hook binaries
 # under test, they flip the behavior those tests assert (#1423). Tests set

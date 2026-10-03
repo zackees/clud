@@ -53,6 +53,13 @@ jobs:
   # Everything platform-independent, once, on the cheapest runner. Previously
   # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
   # inside ci/lint.py so a ruff error reds out in well under a minute.
+  #
+  # Also the local gate's verify job (zackees/ci.yml GATE-002/003/008/010,
+  # local-gate.toml): every other job needs this one. A PR head that never
+  # passed `ci-lint local-gate run` is reported here (GATE-003 runs in shadow
+  # mode) and gets the full run. On an attested PR head inside [gate.trust], `skip_<job>` is 'true' for each Linux x64 lane
+  # whose gates (ci-attestations.yml) the local `bosn ci` replay proved, and
+  # that lane is skipped. Never 'true' on push, dispatch or merge_group.
   static:
     name: Static checks
     runs-on: ubuntu-24.04
@@ -60,6 +67,11 @@ jobs:
     outputs:
       mode: ${{ steps.mode.outputs.tier }}
       source_ref: ${{ steps.source.outputs.ref }}
+      trusted: ${{ steps.gate.outputs.trusted }}
+      skip_dylint: ${{ steps.gate.outputs.skip_dylint }}
+      skip_lint-linux-x64: ${{ steps.gate.outputs.skip_lint-linux-x64 }}
+      skip_build-linux-x64: ${{ steps.gate.outputs.skip_build-linux-x64 }}
+      skip_test-linux-x64-unit: ${{ steps.gate.outputs.skip_test-linux-x64-unit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -106,6 +118,12 @@ jobs:
           # zackees/ci.yml#226. Separate key so the hosted entry stays pruned.
           prune-cache: ${{ !env.ACT }}
           cache-suffix: ${{ env.ACT && 'act-unpruned' || '' }}
+      # Full history (fetch-depth: 0 above): GATE-008 reads the base commit's
+      # local-gate.toml and diffs the PR from its merge base. The ref is
+      # ci/local_gate.py's CI_LINT_REF (tests/test_local_gate.py).
+      - name: Local gate attestation
+        id: gate
+        run: uvx --python 3.11 --from "git+https://github.com/zackees/ci.yml@7edeb8dc318c1530ee3bf770029cb2e8b639e6f5" ci-lint local-gate verify --repo . --trust --github-output
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11
       - name: Setup soldr
@@ -126,8 +144,11 @@ jobs:
       # `.venv/bin/python`, not `uv run`: pyproject sets build-backend = "soldr",
       # so `uv run` would sync the project and kick off a full PEP 517 maturin
       # build of the Rust binary. See lint:8-24 for the same workaround.
+      # GATE-001: this job runs the local gate's `static` lane and nothing
+      # else (`ci.lint --static-only`); add a static check to ci/lint.py,
+      # never as a step here.
       - name: Static checks
-        run: .venv/bin/python -m ci.lint --static-only
+        run: .venv/bin/python ci/local_gate.py --lane static
 
   # ---------------------------------------------------------------- dylint --
   # Dylint is required in every mode. The reusable workflow runs the custom
@@ -135,6 +156,8 @@ jobs:
   dylint:
     name: Dylint
     needs: static
+    # GATE-010: skipped only for an attested PR head (see `static`).
+    if: needs.static.outputs.skip_dylint != 'true'
     uses: ./.github/workflows/_dylint.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -157,7 +180,7 @@ jobs:
     needs: static
     # windows mode keeps these routine lanes too (#1652): without a merge
     # queue, CI OK green must imply Linux passed on the same head SHA.
-    if: needs.static.outputs.mode != ''
+    if: needs.static.outputs.mode != '' && needs.static.outputs.skip_lint-linux-x64 != 'true'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -174,7 +197,7 @@ jobs:
     needs: static
     # windows mode keeps these routine lanes too (#1652): without a merge
     # queue, CI OK green must imply Linux passed on the same head SHA.
-    if: needs.static.outputs.mode != ''
+    if: needs.static.outputs.mode != '' && needs.static.outputs.skip_build-linux-x64 != 'true'
     uses: ./.github/workflows/_build-target.yml
     with:
       source_ref: ${{ needs.static.outputs.source_ref }}
@@ -192,6 +215,7 @@ jobs:
   test-linux-x64-unit:
     name: Test linux-x64 (unit)
     needs: [static, build-linux-x64]
+    if: needs.static.outputs.skip_test-linux-x64-unit != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -420,12 +444,20 @@ jobs:
             ${{ needs.dylint.result }}
             ${{ needs.build-windows-x64.result }}
             ${{ needs.test-windows-x64.result }}
+          # GATE-010: a minimal lane skipped because `static` found every one
+          # of its gates attested (skip_<job> == 'true') counts as passed; any
+          # other skip of a minimal lane fails below.
           MINIMAL: >-
             ${{ needs.static.result }}
-            ${{ needs.dylint.result }}
-            ${{ needs.lint-linux-x64.result }}
-            ${{ needs.build-linux-x64.result }}
-            ${{ needs.test-linux-x64-unit.result }}
+            ${{ needs.dylint.result == 'skipped' && needs.static.outputs.skip_dylint == 'true' && 'success' || needs.dylint.result }}
+            ${{ needs.lint-linux-x64.result == 'skipped' && needs.static.outputs.skip_lint-linux-x64 == 'true' && 'success' || needs.lint-linux-x64.result }}
+            ${{ needs.build-linux-x64.result == 'skipped' && needs.static.outputs.skip_build-linux-x64 == 'true' && 'success' || needs.build-linux-x64.result }}
+            ${{ needs.test-linux-x64-unit.result == 'skipped' && needs.static.outputs.skip_test-linux-x64-unit == 'true' && 'success' || needs.test-linux-x64-unit.result }}
+          ATTESTED_SKIPS: >-
+            dylint=${{ needs.static.outputs.skip_dylint }}
+            lint-linux-x64=${{ needs.static.outputs.skip_lint-linux-x64 }}
+            build-linux-x64=${{ needs.static.outputs.skip_build-linux-x64 }}
+            test-linux-x64-unit=${{ needs.static.outputs.skip_test-linux-x64-unit }}
           EXTENDED: >-
             ${{ needs.test-linux-x64-integration.result }}
             ${{ needs.build-windows-x64.result }}
@@ -444,6 +476,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "$RESULTS"
+          echo "attested skips (GATE-010): $ATTESTED_SKIPS"
           if echo "$RESULTS" | grep -qE '"result": *"(failure|cancelled)"'; then
             echo "::error::one or more CI jobs failed or were cancelled"
             exit 1

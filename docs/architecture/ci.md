@@ -175,6 +175,51 @@ If Docker or bosn is unavailable, or bosn is older than 0.1.8, report the local 
 do not fall back to host or direct Bosn tests. Do not auto-install tools or
 prune Docker resources. See the bundled `clud-bosn` skill for prerequisites.
 
+### The local gate: attest once, skip the remote Linux lanes
+
+The full local run above is also the **local gate**
+([zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/docs/policy-general.md#local-gate-first-gate-001005)
+GATE-001..011). Run it through ci-lint, which stamps the commit:
+
+```bash
+uv sync --frozen --group dev --no-install-project   # once per worktree: .venv/bin/python
+uvx --from git+https://github.com/zackees/ci.yml@<CI_LINT_REF> ci-lint local-gate run
+git push --force-with-lease
+```
+
+`<CI_LINT_REF>` is `CI_LINT_REF` in `ci/local_gate.py`. The command needs a
+clean, committed tree. It runs `local-gate.toml`'s one lane, `ci`, which is
+`bosn ci run` of the minimal plan (Static checks, Dylint, Clippy, Build and
+the three Linux x64 unit shards, then CI OK), and checks bosn's receipt: a
+clean snapshot of this worktree at `HEAD`, with every one of those jobs
+green. The replay uses a push event; push and an unlabeled PR select the
+same jobs. On success it amends `HEAD`'s message with a `Local-Gate:` trailer
+bound to the tree, plus one `Ci-Attestation:` trailer per gate in
+`ci-attestations.yml`. The pass is cached per tree for 24 h, so rerunning
+the gate after a message-only change costs nothing.
+
+In CI the `static` job verifies the trailers. An unattested PR head is
+reported there (GATE-003 runs in shadow mode) and runs every job. An attested head that changes no gate surface skips Dylint, Clippy
+linux-x64, Build linux-x64 and the unit shards, and `CI OK` counts those
+skips as passed. The surfaces are `local-gate.toml`, `ci-attestations.yml`,
+`ci/local_gate.py`, `ci.yml` and the reusable workflows and actions it
+calls. Everything still runs when:
+
+- the head is a fork, or its author has no write access;
+- the PR has a `ci-test`, `ci-windows` or `ci-full` label;
+- the PR changes a surface;
+- the head falls in the 1-in-10 audit sample;
+- the event is a push to `main` (the post-merge catch), a manual full run,
+  or a release.
+
+`static` itself always runs, because it is the verify job. Its checks are the
+gate's `static` lane, `ci/local_gate.py --lane static`, so add a static check
+to `ci/lint.py`, never as a workflow step.
+
+clud's tests refuse to start on a host (`tests/conftest.py`, GATE-005).
+They need `CI=true`, which GitHub, act and so `bosn ci` all set, or
+`CLUD_TEST_ISOLATED=1`, which the bosn images set.
+
 ### Manual Windows probes (ignored tests)
 
 <!-- manual-windows-probes -->
