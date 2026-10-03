@@ -224,8 +224,10 @@ fn api_write_tags(words: &[&str]) -> Option<Vec<String>> {
         ["repos", owner, repo, "actions", "runs", id, ..] if is_number(id) => {
             run_write(&mut tags, &repo_slug(&format!("{owner}/{repo}"))?, id);
         }
-        // A job rerun reopens a run the path does not name.
-        ["repos", _, _, "actions", "jobs", ..] => return None,
+        // A job, check-suite or check-run rerun reopens a run the path does
+        // not name.
+        ["repos", _, _, "actions", "jobs", ..]
+        | ["repos", _, _, "check-suites" | "check-runs", ..] => return None,
         ["repos", owner, repo, "pulls", n, "merge"] if is_number(n) => {
             let repo = repo_slug(&format!("{owner}/{repo}"))?;
             push_repo(&mut tags, &repo, &format!("num:{n}"));
@@ -380,6 +382,8 @@ mod tests {
             ],
             &["api", "-X", "PATCH", "repos/o/r/issues/comments/9"],
             &["api", "-X", "POST", "repos/o/r/actions/jobs/9/rerun"],
+            &["api", "-X", "POST", "repos/o/r/check-suites/9/rerequest"],
+            &["api", "-X", "POST", "repos/o/r/check-runs/9/rerequest"],
             &["api", "-X", "POST", "repos/o/r/git/refs"],
         ] {
             assert_eq!(tags(words), None, "{words:?}");

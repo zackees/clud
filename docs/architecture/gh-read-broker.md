@@ -232,8 +232,10 @@ listing thaws only for a write that names it. An older daemon ignores the
 tags and invalidates globally.
 
 Writes made outside clud sessions (the web UI, CI, another machine) are seen
-within one TTL, with three phase-2 exceptions: a deleted comment or run is
-seen at the next reconciliation (at most 30 minutes); a rerun of a finished
+within one TTL, with four phase-2 exceptions: a deleted comment or run is
+seen at the next reconciliation (at most 30 minutes), and so is a change
+that does not move `updated_at` on an object below the high-water mark (a
+reaction count, a review comment going outdated after a push); a rerun of a finished
 run is seen in a run list only at the next reconciliation, and its frozen
 jobs listing only after a write in a session names the run; and a check run
 added more than 5 minutes after the rest finished is not seen until a write

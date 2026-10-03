@@ -375,6 +375,12 @@ fn delta(
             state.total_count = Some(prior.total_count.unwrap_or(0) + new_runs);
         }
         (state.members, state.max_id) = finish(plan.kind, members, prior.max_id);
+        if changed > 0 {
+            // The seed's ETag describes the collection before this change.
+            // Sending it later could `304` once a merged object is deleted
+            // again and bring that object back.
+            state.seed_etag = None;
+        }
         if let Some((url, etag, headers)) = first {
             state.delta_url = Some(url);
             state.delta_etag = etag;

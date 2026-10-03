@@ -153,6 +153,13 @@ fn pages_parse_only_when_they_rebuild_byte_for_byte() {
     assert_eq!(page.total_count, Some(42));
     assert_eq!(page.members[0].status.as_deref(), Some("queued"));
     // An extra wrapper key would be dropped by the rebuild, so it is refused.
+    // A page in another order than the merge assumes is refused.
+    let swapped = format!(
+        "[{},{}]",
+        comment(2, "2026-10-02T11:00:00Z", "2026-10-02T11:00:00Z"),
+        comment(1, "2026-10-02T10:00:00Z", "2026-10-02T10:00:00Z")
+    );
+    assert_eq!(parse_page(Kind::IssueComments, swapped.as_bytes()), None);
     let extra = runs.replacen("{\"total_count\":42,", "{\"total_count\":42,\"x\":1,", 1);
     assert_eq!(parse_page(Kind::Runs, extra.as_bytes()), None);
 }

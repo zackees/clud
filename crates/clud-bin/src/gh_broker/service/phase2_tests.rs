@@ -546,6 +546,23 @@ fn deletions_drop_out_at_reconciliation_and_after_a_write_that_names_the_issue()
     );
 }
 
+#[test]
+fn a_deleted_object_a_delta_added_is_dropped_at_reconciliation() {
+    let w = world(three_comments());
+    w.read(COMMENTS);
+    w.server().comments.push(comment(4, "2026-10-02T11:00:00Z"));
+    w.advance(DEFAULT_TTL_MS);
+    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
+    // Deleting it makes the collection byte-identical to the seed: the
+    // seed's ETag must not be sent, or GitHub would answer 304.
+    w.server().comments.pop();
+    w.advance(RECONCILE_MS);
+    assert_eq!(w.read(COMMENTS), w.full(COMMENTS));
+    let log = w.log();
+    assert_eq!(log[2].0, "repos/o/r/issues/5/comments?per_page=100");
+    assert_eq!(log[2].1, None);
+}
+
 const JOBS: &str = "repos/o/r/actions/runs/7/jobs";
 
 fn done(at: &str) -> Step {

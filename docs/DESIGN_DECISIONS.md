@@ -6184,9 +6184,13 @@ comment`/`run rerun` to invalidate only what they touch.
   finished commit; a jobs listing freezes only once the run object itself
   reports `completed`.
 
-**Consequences:** a merged read costs at most what the phase-1 read cost
-(one request, or a free `304` when its bound and ETag repeat), and transfers
-only changed objects. Deletions are seen at the 30-minute reconciliation;
+**Consequences:** a merged read usually costs what the phase-1 read cost
+(one request, or a free `304` when its bound and ETag repeat) and transfers
+only changed objects. Its bounds are five pages for a delta and ten for a
+full comment fetch. A page GitHub sends in another order than the merge
+assumes makes the collection unmergeable rather than reordered. Deletions,
+and changes that do not move `updated_at` (reaction counts, outdated review
+comments), are seen at the 30-minute reconciliation;
 reruns of finished runs started outside clud are seen in a run list only
 then, and thaw a frozen jobs listing only after an in-session write names
 the run. Collections over 10 pages or 8 MiB are not merged.

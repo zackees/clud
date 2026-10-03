@@ -279,6 +279,13 @@ pub fn parse_page(kind: Kind, body: &[u8]) -> Option<Page> {
             total_count: Some(runs.total_count),
         }
     };
+    // The merge re-sorts into the order assumed here; a page GitHub sent in
+    // another order would make a merged answer differ from a full fetch.
+    let mut sorted = page.members.clone();
+    sort(kind, &mut sorted);
+    if sorted != page.members {
+        return None;
+    }
     let rebuilt = render(kind, &page.members, page.total_count, usize::MAX);
     (rebuilt == body).then_some(page)
 }
