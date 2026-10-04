@@ -210,9 +210,13 @@ git push --force-with-lease
 The gate refuses an uncommitted tree. On a cold commit it runs the same full
 `bosn ci run --workspace . --trigger pr --wait` plan through
 [`ci/local_gate.py`](../../ci/local_gate.py). The wrapper checks Bosn's
-structured result for the exact head, each completed routine job and its
-required steps, all three unit shards, and `CI OK` before issuing a
-tree-bound receipt. That receipt seeds separate static, Dylint, Clippy,
+structured result for the exact clean head and workspace, the act engine,
+and act2.3 or later (available in bosn 0.1.12). It requires each routine job's
+successful `Main` execution steps, all three unit shards, and `CI OK` before
+issuing a tree-bound receipt. Boolean status codes and malformed job trees
+cannot prove a pass. Gate commands use `uv run --no-project --isolated` so
+an ancestor checkout's virtual environment cannot select older gate tools.
+That receipt seeds separate static, Dylint, Clippy,
 build, and unit cache entries. Root Python test changes invalidate static
 and unit while retaining the Rust-only Dylint, Clippy, and build passes;
 other changes conservatively invalidate every lane. With fewer than three
