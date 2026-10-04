@@ -47,7 +47,7 @@ zackees/ci.yml, not patched here. The commands and limits are in
 same bosn run and, on a pass, stamps the commit so the PR skips the routine
 Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
 commit everything, then
-`uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run`
+`uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run`
 and `git push --force-with-lease`. Don't amend or rebase after stamping: that
 invalidates the stamp and the PR simply runs every lane. Plain `bosn ci run`
 stays valid for `--job static-checks` and focused jobs.

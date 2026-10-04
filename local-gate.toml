@@ -3,24 +3,47 @@
 #
 # Before pushing, from a clean, committed tree:
 #
-#   uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run
+#   uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run
 #
 # runs the PR plan once under bosn ci -> act2 (the same run CLAUDE.md
 # already requires) and, on success, amends HEAD's message with a tree-bound
 # `Local-Gate:` trailer plus one `Ci-Attestation:` per gate in
 # ci-attestations.yml. The static job then lets the routine Linux lanes skip.
 [gate]
-run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait"]
+run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate"]
 verify = "ci.yml:static"
 # Opt-in: an unattested PR head is reported, never failed. It simply runs
 # every lane remotely, as before.
 mode = "shadow"
 
-# One lane: the bosn run replays the whole routine plan at once. It reads
-# every input the remote lanes read, so nothing is excluded.
-[gate.lanes.pr]
-run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait"]
-tools = ["bosn", "docker"]
+# Bosn's full run keeps its parallel schedule when three or more lanes miss.
+# ci/local_gate.py validates every actual job and step before issuing a receipt.
+[gate.full-run]
+receipt = "lane-passes-v1"
+min-misses = 3
+
+[gate.lanes.static]
+run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "static"]
+tools = ["bosn", "docker", "uv", "python"]
+
+[gate.lanes.dylint]
+run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "dylint"]
+exclude = ["tests/test_*.py"]
+tools = ["bosn", "docker", "uv", "python"]
+
+[gate.lanes.clippy]
+run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "clippy"]
+exclude = ["tests/test_*.py"]
+tools = ["bosn", "docker", "uv", "python"]
+
+[gate.lanes.build]
+run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "build"]
+exclude = ["tests/test_*.py"]
+tools = ["bosn", "docker", "uv", "python"]
+
+[gate.lanes.unit]
+run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "unit"]
+tools = ["bosn", "docker", "uv", "python"]
 
 # GATE-008: an attested PR head skips the remote routine Linux lanes. They
 # would rerun exactly the bosn plan that just passed, about 5 minutes of PR
@@ -40,7 +63,7 @@ skip = [
   "ci.yml:build-linux-x64",
   "ci.yml:test-linux-x64-unit",
 ]
-covered-by = { "ci.yml:static-checks" = ["pr"], "ci.yml:dylint" = ["pr"], "ci.yml:lint-linux-x64" = ["pr"], "ci.yml:build-linux-x64" = ["pr"], "ci.yml:test-linux-x64-unit" = ["pr"] }
+covered-by = { "ci.yml:static-checks" = ["static"], "ci.yml:dylint" = ["dylint"], "ci.yml:lint-linux-x64" = ["clippy"], "ci.yml:build-linux-x64" = ["build"], "ci.yml:test-linux-x64-unit" = ["unit"] }
 # Labels that select lanes the local plan does not run.
 full-labels = ["ci-test", "ci-windows", "ci-full", "ci:full"]
 # The CI helpers only the skipped jobs run.

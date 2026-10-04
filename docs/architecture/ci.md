@@ -203,14 +203,22 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@98fd662a48df43fe016c45a1f845e345b52fecef ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run
 git push --force-with-lease
 ```
 
-The gate refuses an uncommitted tree. It runs the same `bosn ci run --workspace
-. --trigger pr --wait` ([`local-gate.toml`](../../local-gate.toml)), and on a
-pass it amends HEAD's message (tree unchanged) with a `Local-Gate:` trailer and
-one stamped `Ci-Attestation:` per gate in
+The gate refuses an uncommitted tree. On a cold commit it runs the same full
+`bosn ci run --workspace . --trigger pr --wait` plan through
+[`ci/local_gate.py`](../../ci/local_gate.py). The wrapper checks Bosn's
+structured result for the exact head, each completed routine job and its
+required steps, all three unit shards, and `CI OK` before issuing a
+tree-bound receipt. That receipt seeds separate static, Dylint, Clippy,
+build, and unit cache entries. Root Python test changes invalidate static
+and unit while retaining the Rust-only Dylint, Clippy, and build passes;
+other changes conservatively invalidate every lane. With fewer than three
+misses, the missing named jobs run directly. On a pass the gate amends HEAD's
+message (tree unchanged) with a `Local-Gate:` trailer and one stamped
+`Ci-Attestation:` per gate in
 [`ci-attestations.yml`](../../ci-attestations.yml). The `Local
 gate attestation` step (`ci-lint local-gate verify --trust`, in the `static`
 job, displayed as `CI mode`) then sets `skip_<job>` for `static-checks`,
