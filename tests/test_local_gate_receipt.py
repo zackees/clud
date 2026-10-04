@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 
 import pytest
 
-from ci.local_gate import proved_lanes
+from ci.local_gate import ROOT, proved_lanes
 
 HEAD = "a" * 40
 EXPECTED = {
@@ -48,6 +49,7 @@ def _record() -> dict[str, object]:
         "sha": HEAD, "state": "done", "conclusion": "success",
         "exit_code": 0, "act_exit_code": 0, "dirty": None,
         "tree_digest": "b" * 64, "job": None,
+        "workspace": str(ROOT), "engine": "act", "act_version": "0.2.89-act2.3",
         "tree": {"malformed_lines": 0, "groups": [{"jobs": jobs}]},
     }
 
@@ -87,3 +89,27 @@ def test_wrong_head_dirty_snapshot_and_wrong_selected_job_fail_closed() -> None:
         proved_lanes(dirty, head=HEAD, lane=None)
     with pytest.raises(ValueError, match="different job"):
         proved_lanes(record, head=HEAD, lane="dylint")
+
+
+@dataclass(frozen=True)
+class InvalidMetadata:
+    field: str
+    value: str | bool
+
+
+@pytest.mark.parametrize("case", (
+    InvalidMetadata("engine", "native"),
+    InvalidMetadata("workspace", str(ROOT.parent / "another-checkout")),
+    InvalidMetadata("act_version", "0.2.89-act2.2"),
+    InvalidMetadata("act_version", "0.2.89"),
+    InvalidMetadata("schema_version", True),
+    InvalidMetadata("exit_code", False),
+    InvalidMetadata("act_exit_code", False),
+))
+def test_untrusted_engine_workspace_version_and_boolean_metadata_fail_closed(
+    case: InvalidMetadata,
+) -> None:
+    record = _record()
+    record[case.field] = case.value
+    with pytest.raises(ValueError):
+        proved_lanes(record, head=HEAD, lane=None)
