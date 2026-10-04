@@ -184,6 +184,10 @@ jobs:
           cache-suffix: ${{ env.ACT && 'act-unpruned' || '' }}
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11
+      # Proof validation needs no compiled clud binary. Catch a weakened
+      # attestation verifier before starting the expensive Rust lanes.
+      - name: Test local gate proof
+        run: .venv/bin/python -m pytest tests/test_local_gate_receipt.py -q
       - name: Setup soldr
         uses: zackees/setup-soldr@v0
         env:
