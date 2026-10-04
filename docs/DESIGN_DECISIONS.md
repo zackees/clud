@@ -6452,3 +6452,22 @@ operator serializes builds. Cargo's target lock also serializes competing
 writers; workspace outputs and binaries can be replaced by another branch's
 build, so concurrent branch tests must retain private targets. Measurement
 details and limits are in [skill-system.md](architecture/skill-system.md#worktree-cargo-targets-1685).
+
+## DD-159: warn once per settings file for project-syncing hook commands
+
+**Context:** #1739: several native PreToolUse hooks can fail together when a
+working-tree dependency pin is unavailable. Claude Code renders a nonblocking
+hook failure once per invocation, with only the first stderr line visible to
+the user and no agent context. Clud does not own native hook execution.
+
+**Decision:** Hook health counts active PreToolUse commands that invoke
+`uv run` without `--no-sync` or `--no-project`, and prints one
+launch warning per settings file for both Claude and Codex launches. It
+recommends the flags that avoid a working-tree dependency sync; `--frozen`
+alone still syncs. Clud does not
+rewrite project-owned hook commands or claim to alter Claude's renderer.
+
+**Consequence:** users see the fragile hook configuration before the first
+tool call, with a count instead of one warning per hook. Native runtime
+deduplication and delivery of failures to the agent remain upstream work.
+See [hook-dispatch.md](architecture/hook-dispatch.md#native-hook-dependency-failures-1739).

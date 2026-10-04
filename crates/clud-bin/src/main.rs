@@ -1155,6 +1155,8 @@ fn prepare_launch_host(
             verbose_log::log("[clud] hooks: checking launch parity");
         }
         hook_health::emit_launch_warnings();
+    } else if hook_health::should_warn_uv_launch(args) {
+        hook_health::emit_uv_launch_warnings();
     }
 
     // Before any child starts, so the command hook inherits the switch.

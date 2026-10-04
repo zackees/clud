@@ -27,7 +27,7 @@ pub use types::{
 use inspect::inspect_current as inspect_current_impl;
 use prompts::{run_backend_prompt, run_validation_followups};
 use repairs::{apply_deterministic_repairs, deterministic_repair_actions};
-use warnings::{print_dry_run_plan, print_report_warnings};
+use warnings::{print_dry_run_plan, print_report_warnings, uv_run_hook_warnings};
 
 #[cfg(test)]
 use codex_trust::{add_codex_project_trust, is_extended_key_for, migrate_codex_hooks_feature_flag};
@@ -46,10 +46,14 @@ pub(in crate::hook_health) const LEGACY_CODEX_HOOKS_FEATURE: &str = "codex_hooks
 pub(in crate::hook_health) const CURRENT_CODEX_HOOKS_FEATURE: &str = "hooks";
 
 pub fn should_check_launch(args: &Args, launch_target: ResolvedLaunchTarget) -> bool {
-    if args.fix_hooks || args.clean_worktrees {
+    if launch_target.effective_harness != Backend::Codex {
         return false;
     }
-    if launch_target.effective_harness != Backend::Codex {
+    should_warn_uv_launch(args)
+}
+
+pub fn should_warn_uv_launch(args: &Args) -> bool {
+    if args.fix_hooks || args.clean_worktrees {
         return false;
     }
     matches!(
@@ -60,6 +64,19 @@ pub fn should_check_launch(args: &Args, launch_target: ResolvedLaunchTarget) -> 
             | Some(CliCommand::Fix { .. })
             | Some(CliCommand::Do { .. })
     )
+}
+
+/// The native Claude hook runner owns failures. Warn once before launch when
+/// project hook commands can sync an unresolvable working-tree dependency.
+pub fn emit_uv_launch_warnings() {
+    let report = inspect_current_impl();
+    let Some(message) = format_launch_warnings(&uv_run_hook_warnings(&report.claude)) else {
+        return;
+    };
+    let stderr = std::io::stderr();
+    let mut handle = stderr.lock();
+    let _ = handle.write_all(message.as_bytes());
+    let _ = handle.flush();
 }
 
 /// Write the launch hook-health warnings to stderr. Issue #1346 (same root

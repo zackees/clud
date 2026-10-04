@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::repairs::plan_repairs;
 use super::types::{FrontendHookSummary, HookHealthReport, RepairAction};
@@ -12,6 +12,8 @@ pub(in crate::hook_health) fn build_warnings(
     let mut warnings = Vec::new();
     warnings.extend(claude.warnings.iter().cloned());
     warnings.extend(codex.warnings.iter().cloned());
+    warnings.extend(uv_run_hook_warnings(claude));
+    warnings.extend(uv_run_hook_warnings(codex));
 
     let claude_active = claude.active_hooks();
     let codex_active = codex.active_hooks();
@@ -39,6 +41,64 @@ pub(in crate::hook_health) fn build_warnings(
         ));
     }
     warnings
+}
+
+pub(in crate::hook_health) fn uv_run_hook_warnings(summary: &FrontendHookSummary) -> Vec<String> {
+    let mut by_source = BTreeMap::new();
+    for hook in summary.active_hooks() {
+        if hook
+            .command
+            .as_deref()
+            .is_some_and(uv_run_without_safe_flag)
+        {
+            *by_source.entry(&hook.source_path).or_insert(0usize) += 1;
+        }
+    }
+    by_source
+        .into_iter()
+        .map(|(source, count)| {
+            format!(
+                "{count} {} PreToolUse hook(s) in {} use `uv run` without `--no-sync` or `--no-project`. A dependency pin changed in the working tree can break every tool call. Use `uv run --no-sync` with an installed environment, or `--no-project` for stdlib-only scripts. `--frozen` alone still syncs.",
+                summary.frontend.display_name(),
+                display_path(source)
+            )
+        })
+        .collect()
+}
+
+pub(super) fn uv_run_without_safe_flag(command: &str) -> bool {
+    let words = shell_words::split(command)
+        .unwrap_or_else(|_| command.split_whitespace().map(str::to_string).collect());
+    words.windows(2).enumerate().any(|(index, pair)| {
+        if !matches!(pair[0].as_str(), "uv" | "uv.exe") || pair[1] != "run" {
+            return false;
+        }
+        let mut i = index + 2;
+        let mut no_sync = false;
+        while let Some(word) = words.get(i) {
+            if word == "--" || !word.starts_with('-') {
+                break;
+            }
+            if matches!(
+                word.as_str(),
+                "--script" | "--module" | "--gui-script" | "-m" | "-s"
+            ) || word.starts_with("--script=")
+                || word.starts_with("--module=")
+                || word.starts_with("--gui-script=")
+            {
+                break;
+            }
+            if matches!(word.as_str(), "--no-sync" | "--no-project") {
+                no_sync = true;
+            }
+            let takes_value = !word.contains('=')
+                && (crate::block_bad_cmd::UV_RUN_OPTIONS_WITH_VALUE.contains(&word.as_str())
+                    || crate::block_bad_cmd::UV_RUN_SHORT_OPTIONS_WITH_VALUE
+                        .contains(&word.as_str()));
+            i += if takes_value { 2 } else { 1 };
+        }
+        !no_sync
+    })
 }
 
 pub(in crate::hook_health) fn matcher_sets_are_compatible(
