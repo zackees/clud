@@ -46,12 +46,14 @@ def _ok_job(jobs: dict[str, object], key: str, steps: tuple[str, ...]) -> bool:
     sections = job.get("sections")
     if not isinstance(sections, list):
         return False
-    return all(sum(isinstance(s, dict) and s.get("name") == step and s.get("status") == "completed"
+    return all(sum(isinstance(s, dict) and s.get("name") == step and s.get("stage") == "Main"
+                   and s.get("status") == "completed"
                    and s.get("conclusion") == "success" for s in sections) == 1 for step in steps)
 
 
 def _parse_job_tree(tree: object) -> dict[str, object]:
-    if (not isinstance(tree, dict) or tree.get("malformed_lines") != 0
+    if (not isinstance(tree, dict) or type(tree.get("malformed_lines")) is not int
+            or tree.get("malformed_lines") != 0
             or not isinstance(tree.get("groups"), list)):
         raise ValueError("Bosn job tree is missing or malformed")
     jobs: dict[str, object] = {}
