@@ -92,7 +92,9 @@ everything first:
   write. *Sequential*: one goal at a time from `origin/<main>` in the local
   checkout, no worktrees or sister clones, so a heavy C++/Rust build cache is
   reused. *Cron*: the harness's `/loop`, one issue per tick, each tick a
-  sequential run.
+  sequential run. Parallel Rust worktrees keep private Cargo targets if builds
+  or tests may overlap. The measured, opt-in shared-target option for strictly
+  sequential work is in [skill-system.md](skill-system.md#worktree-cargo-targets-1685).
 - **Models** for planner, worker, reviewer and integrator (the lander shares
   the integrator's). The default is the session's own model, whatever route
   resolved it; an unchanged default is omitted so the agent inherits it.

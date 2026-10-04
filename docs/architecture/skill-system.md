@@ -125,6 +125,31 @@ prints nothing. `real_bundle_install_is_idempotent` and
   bundler, and would delete newer skills whenever an older binary ran.
   Retirement is a decision, not an inference.
 
+## Worktree Cargo targets (#1685)
+
+`/clud-git` offers an opt-in shared `CARGO_TARGET_DIR` for sequential Rust
+work. `/grind` keeps targets private when different branches may build or test
+concurrently. A shared target saves dependency compilation and disk space, but
+Cargo serializes its writers and a workspace binary may belong to whichever
+branch built last. Integration tests that discover that binary from the target
+directory need a private target unless all builds and tests are serialized.
+
+Measurement on Linux, clud `b10ff1fa`, `soldr cargo check -p clud --lib`,
+October 2026, run sequentially with no host tests or lint:
+
+| Fresh worktree | Target | Wall time | Target size |
+| --- | --- | ---: | ---: |
+| Seed | private new target | 71.8 s | 889 MB |
+| Second, with soldr cache warm | private new target | 45.7 s | 889 MB |
+| Third, same source | seed's shared target | 2.25 s | shared 889 MB |
+| Third, after a source comment change | seed's shared target | 16.8 s | shared target |
+
+The same-source run reused Cargo's existing outputs. A source change rebuilt
+the workspace crate, so the 2.25 s result is not a promise for active branch
+development. These checks do not exercise build-script differences, native
+builds, or concurrent tests. Shared targets remain opt-in; the default stays
+private until a safe concurrent test strategy is measured.
+
 ## See Also
 
 - `../../crates/clud-bin/assets/skills/README.md`
