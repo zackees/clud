@@ -31,7 +31,8 @@ def _record() -> dict[str, object]:
         {
             "key": key, "status": "completed", "conclusion": "success",
             "sections": [
-                {"name": step, "status": "completed", "conclusion": "success"}
+                {"name": step, "stage": "Main", "status": "completed",
+                 "conclusion": "success"}
                 for step in steps
             ],
         }
@@ -112,4 +113,20 @@ def test_untrusted_engine_workspace_version_and_boolean_metadata_fail_closed(
     record = _record()
     record[case.field] = case.value
     with pytest.raises(ValueError, match="Bosn"):
+        proved_lanes(record, head=HEAD, lane=None)
+
+
+@pytest.mark.parametrize("stage", ["Pre", "Post", "Complete", None])
+def test_required_step_must_have_executed_in_main_stage(stage: str | None) -> None:
+    record = _record()
+    jobs = record["tree"]["groups"][0]["jobs"]  # type: ignore[index]
+    jobs[1]["sections"][-1]["stage"] = stage
+    with pytest.raises(ValueError, match="dylint"):
+        proved_lanes(record, head=HEAD, lane=None)
+
+
+def test_boolean_malformed_line_count_fails_closed() -> None:
+    record = _record()
+    record["tree"]["malformed_lines"] = False  # type: ignore[index]
+    with pytest.raises(ValueError, match="malformed"):
         proved_lanes(record, head=HEAD, lane=None)
