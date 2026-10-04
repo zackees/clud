@@ -885,6 +885,42 @@ fn test_safe_mode_no_yolo() {
 }
 
 #[test]
+fn unsafe_launch_omits_clud_deletion_instructions_for_both_harnesses() {
+    let claude = plan(&["clud", "--unsafe", "-p", "hello"]);
+    assert!(claude.unsafe_mode);
+    assert!(!claude
+        .command
+        .iter()
+        .any(|arg| arg == "--append-system-prompt"));
+    assert!(claude
+        .command
+        .iter()
+        .any(|arg| arg == "--dangerously-skip-permissions"));
+
+    let codex = plan(&["clud", "--codex", "--unsafe", "-p", "hello"]);
+    assert!(codex.unsafe_mode);
+    assert!(codex_config_values(&codex)
+        .iter()
+        .all(|value| !value.starts_with("developer_instructions=")));
+    assert!(codex
+        .command
+        .iter()
+        .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+
+    let user_instructions = plan(&[
+        "clud",
+        "--codex",
+        "--unsafe",
+        "--",
+        "-c",
+        "developer_instructions=\"keep my instructions\"",
+    ]);
+    assert!(codex_config_values(&user_instructions)
+        .iter()
+        .any(|value| value.contains("keep my instructions")));
+}
+
+#[test]
 fn test_codex_prompt_goes_through_exec_subcommand() {
     // Codex's `-p` is `--profile`, not a prompt flag. Non-interactive
     // runs must use `codex exec <prompt>` with the prompt as positional.

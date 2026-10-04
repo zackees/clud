@@ -243,9 +243,7 @@ def test_complete_safe_tool_payload_is_processed_with_held_open_stdin(tmp_path: 
     assert result.returncode == 0, result
     output = json.loads(result.stdout)["hookSpecificOutput"]
     assert output["permissionDecision"] == "allow"
-    log = (home / ".clud" / "tools" / "hooks" / "block-bad-cmd.log").read_text(
-        encoding="utf-8"
-    )
+    log = (home / ".clud" / "tools" / "hooks" / "block-bad-cmd.log").read_text(encoding="utf-8")
     assert "stdin_read_incomplete" in log
 
 
@@ -261,9 +259,7 @@ def test_deletion_hook_rewrites_or_refuses_with_fields_preserved(
     tmp_path: Path, command: str, expected: str | None
 ) -> None:
     tool_input = {"command": command, "timeout": 120_000, "future_field": {"preserve": True}}
-    payload = json.dumps(
-        {"tool_name": "Bash", "tool_input": tool_input, "cwd": str(tmp_path)}
-    )
+    payload = json.dumps({"tool_name": "Bash", "tool_input": tool_input, "cwd": str(tmp_path)})
     result = _run_hook_with_open_stdin(tmp_path, payload)
     output = json.loads(result.stdout)["hookSpecificOutput"]
     if expected is None:
@@ -276,11 +272,22 @@ def test_deletion_hook_rewrites_or_refuses_with_fields_preserved(
         assert output["updatedInput"] == {**tool_input, "command": expected}
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["rm -rf build", "rmdir old", "unlink file", "find build -name '*.tmp' -delete"],
+)
+def test_unsafe_session_leaves_deletion_commands_unchanged(tmp_path: Path, command: str) -> None:
+    payload = json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(tmp_path)}
+    )
+    result = _run_hook_with_open_stdin(tmp_path, payload, extra_env={"CLUD_UNSAFE_MODE": "1"})
+    assert result.returncode == 0, result
+    assert result.stdout == ""
+
+
 def test_deletion_hook_preserves_camel_case_codex_payload(tmp_path: Path) -> None:
     tool_input = {"command": "r" + "m -v 'my file'", "timeoutMs": 30_000}
-    payload = json.dumps(
-        {"toolName": "Bash", "toolInput": tool_input, "cwdPath": str(tmp_path)}
-    )
+    payload = json.dumps({"toolName": "Bash", "toolInput": tool_input, "cwdPath": str(tmp_path)})
     result = _run_hook_with_open_stdin(tmp_path, payload)
     assert result.returncode == 0, result
     output = json.loads(result.stdout)["hookSpecificOutput"]

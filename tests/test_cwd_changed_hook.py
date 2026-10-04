@@ -116,6 +116,22 @@ def test_an_escape_the_scanner_cannot_see_warns(tmp_path: Path) -> None:
     assert "[clud] CwdChanged: the session cwd moved to" in result.stderr
 
 
+def test_unsafe_mode_suppresses_drift_warning_but_runs_declared_hook(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path, hooks_json=HOOKS_JSON)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    result = _run(tmp_path, repo, outside, extra_env={"CLUD_UNSAFE_MODE": "1"})
+
+    assert result.returncode == 0, result
+    assert "[clud] CwdChanged: the session cwd moved to" not in result.stderr
+    # Hooks follow the new cwd's containment; moving outside the repo does
+    # not fire the old repo's hook, but moving within it does.
+    within = _run(tmp_path, repo, repo / "src", extra_env={"CLUD_UNSAFE_MODE": "1"})
+    assert within.returncode == 0, within
+    assert (repo / "marker").exists()
+
+
 def test_a_move_within_the_registered_root_stays_silent(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path, hooks_json=HOOKS_JSON)
     subdir = repo / "src"
@@ -169,9 +185,7 @@ def test_a_refusing_cwd_changed_hook_is_downgraded_to_a_warning(
     # decision control, so an exit 2 surfaces as a warning, never a block.
     repo = _make_repo(
         tmp_path,
-        hooks_json=json.dumps(
-            {"hooks": {"CwdChanged": [{"command": "exit 2", "timeout": 30}]}}
-        ),
+        hooks_json=json.dumps({"hooks": {"CwdChanged": [{"command": "exit 2", "timeout": 30}]}}),
     )
     subdir = repo / "src"
 

@@ -69,6 +69,14 @@ fn run(mut args: args::Args) {
     if let Some(code) = dispatch_before_startup(&args) {
         std::process::exit(code);
     }
+    // A nested launch makes a fresh policy choice. Never inherit an unsafe
+    // marker from the parent session when this invocation omitted the flag.
+    unsafe {
+        std::env::remove_var(runner::UNSAFE_MODE_ENV);
+        if args.unsafe_mode {
+            std::env::set_var(runner::UNSAFE_MODE_ENV, "1");
+        }
+    }
     init_foreground_process(&args);
     if let Some(code) = dispatch_maintenance(&args) {
         std::process::exit(code);
@@ -1527,6 +1535,7 @@ fn print_dry_run_and_exit(
     };
     let json = serde_json::json!({
         "command": clud::secret_redaction::redact_args(&dry_run_command),
+        "unsafe_mode": plan.unsafe_mode,
         "iterations": plan.iterations,
         "backend": backend.executable_name(),
         "routing_mode": launch_target.routing_mode.as_str(),

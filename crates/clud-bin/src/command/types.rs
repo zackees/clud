@@ -29,6 +29,9 @@ pub enum HeadlessSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchPlan {
     pub command: Vec<String>,
+    /// Explicit per-launch opt-out of clud's agent safety policy.
+    #[serde(default)]
+    pub unsafe_mode: bool,
     pub iterations: u32,
     pub backend: Backend,
     #[serde(default)]
@@ -121,6 +124,7 @@ mod tests {
         harness_source: PreferenceSource,
     ) -> LaunchPlan {
         LaunchPlan {
+            unsafe_mode: false,
             command: vec![effective.executable_name().to_string()],
             iterations: 1,
             backend: effective,

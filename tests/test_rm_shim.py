@@ -45,7 +45,7 @@ def world(tmp_path: Path) -> tuple[Path, Path, dict[str, str], Path]:
     stub = stub_dir / name
     stub.write_text(
         # Debian's system interpreter is outside clud's shim. python-name-lint: allow-next-line
-        '#!/usr/bin/python3\nimport json, os, sys\n'
+        "#!/usr/bin/python3\nimport json, os, sys\n"
         'open(os.environ["RM_STUB_LOG"], "w").write(json.dumps(sys.argv[1:]))\n',
         encoding="utf-8",
     )
@@ -72,6 +72,49 @@ def run(shim: Path, env: dict[str, str], *args: str, cwd: Path | None = None):
         text=True,
         timeout=30,
     )
+
+
+def test_unsafe_session_hands_catastrophic_rm_to_the_real_binary(world) -> None:
+    shim, home, env, log = world
+    protected = run(shim, env, "-rf", str(home))
+    assert protected.returncode == 2, protected
+    assert not log.exists()
+    env["CLUD_UNSAFE_MODE"] = "1"
+    handed_off = run(shim, env, "-rf", str(home))
+    assert handed_off.returncode == 0, handed_off
+    assert json.loads(log.read_text(encoding="utf-8")) == ["-rf", str(home)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX backend fixture")
+def test_new_launch_does_not_inherit_unsafe_from_parent(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text(
+        '#!/bin/sh\nprintf "unsafe=%s\\n" "${CLUD_UNSAFE_MODE:-unset}"\n',
+        encoding="utf-8",
+    )
+    codex.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        PATH=os.pathsep.join((str(bin_dir), "/usr/bin", "/bin")),
+        CLUD_UNSAFE_MODE="1",
+    )
+    for flag, expected in (([], "unsafe=unset"), (["--unsafe"], "unsafe=1")):
+        result = process.run(
+            [str(binary("clud")), "--codex", "--no-daemon", *flag, "-p", "probe"],
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result
+        assert expected in result.stdout
 
 
 def test_hook_rewrite_still_applies_repository_command_policy(tmp_path: Path) -> None:
@@ -121,18 +164,27 @@ def test_hook_rewrite_still_applies_repository_command_policy(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    "prefix", ["PATH=/usr/bin", "CLUD_RM_ROOTS=/", "CLUD_RM_ROLE=user", "export PATH=/usr/bin;"]
+    "prefix",
+    [
+        "PATH=/usr/bin",
+        "CLUD_RM_ROOTS=/",
+        "CLUD_RM_ROLE=user",
+        "CLUD_UNSAFE_MODE=1",
+        "export PATH=/usr/bin;",
+    ],
 )
 def test_hook_rewrite_refuses_deletion_environment_changes(tmp_path: Path, prefix: str) -> None:
     home = tmp_path / "home"
     home.mkdir()
     env = os.environ.copy()
     env.update(HOME=str(home), USERPROFILE=str(home), CLUD_SKIP_RM_IDENTITY="1")
-    payload = json.dumps({
-        "tool_name": "Bash",
-        "tool_input": {"command": prefix + " " + "r" + "m -rf build"},
-        "cwd": str(tmp_path),
-    })
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": prefix + " " + "r" + "m -rf build"},
+            "cwd": str(tmp_path),
+        }
+    )
     result = process.run(
         [str(binary("clud-cmd-scan"))],
         input=payload,
@@ -161,11 +213,13 @@ def test_hook_leaves_investigation_false_positives_unchanged(tmp_path: Path, com
     home.mkdir()
     env = os.environ.copy()
     env.update(HOME=str(home), USERPROFILE=str(home), CLUD_SKIP_RM_IDENTITY="1")
-    payload = json.dumps({
-        "tool_name": "Bash",
-        "tool_input": {"command": command},
-        "cwd": str(tmp_path),
-    })
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(tmp_path),
+        }
+    )
     result = process.run(
         [str(binary("clud-cmd-scan"))],
         input=payload,
@@ -239,7 +293,6 @@ def _assert_no_daemon_left(home: Path) -> None:
     while psutil.pid_exists(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert not psutil.pid_exists(pid), f"daemon {pid} outlived the test"
-
 
 
 @pytest.mark.parametrize("operand", ["/", "/.", "//", "/./", "/.."])
@@ -348,7 +401,7 @@ def test_busybox_handoff_does_not_receive_gnu_only_flags(world, tmp_path: Path) 
     applet = stub_dir / "busybox"
     applet.write_text(
         # Debian's system interpreter is outside clud's shim. python-name-lint: allow-next-line
-        '#!/usr/bin/python3\nimport json, os, sys\n'
+        "#!/usr/bin/python3\nimport json, os, sys\n"
         'open(os.environ["RM_STUB_LOG"], "w").write(json.dumps(sys.argv[1:]))\n',
         encoding="utf-8",
     )

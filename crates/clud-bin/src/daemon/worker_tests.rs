@@ -13,6 +13,7 @@ use tempfile::TempDir;
 
 fn cross_route_plan() -> LaunchPlan {
     LaunchPlan {
+        unsafe_mode: false,
         command: vec!["claude".to_string()],
         iterations: 1,
         backend: Backend::Claude,

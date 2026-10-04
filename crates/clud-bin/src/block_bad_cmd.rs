@@ -332,7 +332,9 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         for message in &stdin.log_messages {
             append_log(message);
         }
-        let parent = block_bad_cmd_cwd_changed::session_parent_root();
+        let parent = (!crate::runner::unsafe_mode_enabled())
+            .then(block_bad_cmd_cwd_changed::session_parent_root)
+            .flatten();
         return block_bad_cmd_cwd_changed::handle_cwd_changed(&stdin.text, parent.as_deref());
     }
 
@@ -353,7 +355,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // early `return 0` below is an allow-by-default that the gate must
     // override — see `block_bad_cmd_gate`'s module docs for why this module's
     // usual fail-open posture is inverted here.
-    let gate_enforced = event == PRE_TOOL_USE_EVENT
+    let gate_enforced = !crate::runner::unsafe_mode_enabled()
+        && event == PRE_TOOL_USE_EVENT
         && block_bad_cmd_gate::gate_mode() == block_bad_cmd_gate::GateMode::Enforce;
 
     let stdin = read_stdin_bounded();
@@ -420,6 +423,19 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         payload.cwd.to_string_lossy(),
         payload.command
     ));
+
+    if crate::runner::unsafe_mode_enabled() {
+        if serves_declared_hooks(invocation) {
+            if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
+                return code;
+            }
+        }
+        if event == PRE_TOOL_USE_EVENT {
+            capture_git_paths_without_policy(&payload);
+        }
+        append_log("unsafe mode: clud command policy bypassed");
+        return 0;
+    }
 
     // #1668: the safe-rm root override is the user's alone. Checked before
     // the per-call opt-out below, which the agent types itself and so must
@@ -671,26 +687,8 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
     // has already had its say; a project guard runs last so its message is
     // not buried under one clud would have produced anyway.
     if evaluation.reason.is_none() && serves_declared_hooks(invocation) {
-        if let Some(denial) = declared_hook_denial(event, &payload, &stdin.text) {
-            for message in &denial.log_messages {
-                append_log(message);
-            }
-            let msg = format!(
-                "[clud hooks] {event} hook refused {:?}: {}",
-                payload.tool_name, denial.reason
-            );
-            append_log(&format!("BLOCKED: {msg}"));
-            // A hook that spoke the harness's JSON protocol gets relayed
-            // verbatim; re-wrapping would rewrite its decision.
-            match denial.stdout {
-                Some(stdout) => print!("{stdout}"),
-                None if event == PRE_TOOL_USE_EVENT => {
-                    println!("{}", deny_json(&denial.reason));
-                }
-                None => {}
-            }
-            eprintln!("{msg}");
-            return 2;
+        if let Some(code) = run_declared_hook_checks(event, &payload, &stdin.text) {
+            return code;
         }
     }
 
@@ -1041,6 +1039,9 @@ fn refuse_unverifiable_payload(
     raw: &str,
     what: &str,
 ) -> Option<i32> {
+    if crate::runner::unsafe_mode_enabled() {
+        return None;
+    }
     if event != PRE_TOOL_USE_EVENT {
         return None;
     }
@@ -1200,6 +1201,30 @@ struct DeclaredHookDenial {
     reason: String,
     stdout: Option<String>,
     log_messages: Vec<String>,
+}
+
+fn run_declared_hook_checks(
+    event: &str,
+    payload: &HookPayloadView,
+    raw_payload: &str,
+) -> Option<i32> {
+    let denial = declared_hook_denial(event, payload, raw_payload)?;
+    for message in &denial.log_messages {
+        append_log(message);
+    }
+    let msg = format!(
+        "[clud hooks] {event} hook refused {:?}: {}",
+        payload.tool_name, denial.reason
+    );
+    append_log(&format!("BLOCKED: {msg}"));
+    // A hook that spoke the harness's JSON protocol gets relayed verbatim.
+    match denial.stdout {
+        Some(stdout) => print!("{stdout}"),
+        None if event == PRE_TOOL_USE_EVENT => println!("{}", deny_json(&denial.reason)),
+        None => {}
+    }
+    eprintln!("{msg}");
+    Some(2)
 }
 
 /// Run the Tier B hooks for `event` — the parent's, each touched child
@@ -1403,6 +1428,23 @@ fn block_cd_denial(
 fn command_may_contain_clone_or_worktree_add(command_text: &str) -> bool {
     let lower = command_text.to_ascii_lowercase();
     lower.contains("clone") || lower.contains("worktree")
+}
+
+/// Keep eager GC registration in unsafe sessions without asking the command
+/// evaluator to apply any of its blocking or rewriting rules.
+fn capture_git_paths_without_policy(payload: &HookPayloadView) {
+    if !command_may_contain_clone_or_worktree_add(&payload.command) {
+        return;
+    }
+    let repo_root = locate_repo_root_from(&payload.cwd);
+    let dialect = shell_dialect_for_tool(&payload.tool_name);
+    let command = strip_heredoc_bodies(&payload.command);
+    for segment in split_shell_segments(&command, dialect) {
+        let words = command_words(segment.trim());
+        if let Some(capture) = detect_git_path_capture(&words, Some(&payload.cwd)) {
+            report_git_path_capture_to_daemon(&capture, repo_root.as_deref());
+        }
+    }
 }
 
 /// `git -C`/global-flag invocations aside (see `detect_git_path_capture`'s

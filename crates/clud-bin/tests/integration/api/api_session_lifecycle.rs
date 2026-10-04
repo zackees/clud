@@ -18,6 +18,7 @@ fn plan(executable: PathBuf, cwd: &Path, args: Vec<String>) -> LaunchPlan {
     let mut command = vec![executable.to_string_lossy().into_owned()];
     command.extend(args);
     LaunchPlan {
+        unsafe_mode: false,
         command,
         iterations: 1,
         backend: Backend::Claude,

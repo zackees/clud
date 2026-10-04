@@ -140,8 +140,13 @@ pub struct Args {
     #[arg(long = "context-window")]
     pub context_window: Option<String>,
 
-    #[arg(long = "safe")]
+    #[arg(long = "safe", conflicts_with = "unsafe_mode")]
     pub safe: bool,
+
+    /// Disable clud's launch-scoped agent safety policy, including deletion
+    /// redirects and command guards. Explicit safe-rm calls retain their meaning.
+    #[arg(long = "unsafe", conflicts_with = "safe")]
+    pub unsafe_mode: bool,
 
     /// Strip the harness tools that stall an unattended run waiting on a
     /// human: plan mode and multiple-choice questions. `--dangerously-skip-
@@ -353,6 +358,7 @@ impl std::fmt::Debug for Args {
             .field("deepseek", &self.deepseek)
             .field("kimi", &self.kimi)
             .field("openrouter", &self.openrouter)
+            .field("unsafe_mode", &self.unsafe_mode)
             .field(
                 "passthrough",
                 &crate::secret_redaction::redact_args(&self.passthrough),
@@ -1622,6 +1628,7 @@ fn split_known_unknown(raw: &[String]) -> Result<(Vec<String>, Vec<String>), Str
         "--subprocess",
         "--pty",
         "--safe",
+        "--unsafe",
         "--unattended",
         "--allow-plan-mode",
         "--coauthor",

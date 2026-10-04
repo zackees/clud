@@ -6382,3 +6382,30 @@ interrupts its agent instead of continuing without a claim.
 cleanup. Sibling worktrees remain independent. A claim requiring command
 refuses to proceed while the daemon is down, while ordinary launches and
 commands without a mutation claim continue.
+
+## DD-156: `--unsafe` is an explicit session policy, separate from backend permissions
+
+**Context:** clud already launches agents with the backend's permission bypass
+by default, but its own command scanner, deletion rewrite, `rm` catastrophe
+floor, shell guards, and generated instructions still constrain their actions.
+`--safe` controls the backend permission prompts and cannot express an opt-out
+of clud's safeguards. The safeguards are spread across launch settings, hooks,
+and shims, so removing only one would leave an inconsistent session.
+
+**Decision:** `--unsafe` disables clud's own agent safety policy for one launch
+and its subagents. It is mutually exclusive with `--safe`; neither setting is
+saved. `LaunchPlan` records the choice for settings and dry runs. The launching
+process exports a session marker, and the shared child environment builder
+passes it to helpers. A nested clud launch clears an inherited marker before
+applying its own flag, and the daemon drops its inherited marker before merging
+a new client's environment. The command scanner skips clud's command rules in
+unsafe mode but still dispatches independently declared hooks and registers
+git path captures with GC. The `rm` alias uses its ordinary real-binary
+passthrough, and an explicit `safe-rm` keeps its normal behavior.
+
+**Consequences:** callers can deliberately run real deletion commands and
+other commands clud normally refuses. A later launch returns to the default
+policy without changing settings or reinstalling hooks. The backend's own
+permission mode and the user's project hooks remain independent. The full
+scope and verification contract live in
+[unsafe-mode.md](architecture/unsafe-mode.md).
