@@ -611,6 +611,33 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         crate::repo_clud_config::discover_effective_clud_config(&payload.cwd).unwrap_or_default();
     let effective_command = deletion_rewrite.as_deref().unwrap_or(&payload.command);
 
+    if event == PRE_TOOL_USE_EVENT
+        && std::env::var("CLUD_CHECKOUT_CLAIM_OVERRIDE")
+            .ok()
+            .as_deref()
+            != Some("1")
+    {
+        let targets = match git_mutation_targets(
+            effective_command,
+            shell_dialect_for_tool(&payload.tool_name),
+            &payload.cwd,
+        ) {
+            Ok(targets) => targets,
+            Err(reason) => {
+                println!("{}", deny_json(&reason));
+                eprintln!("[clud checkout claim] {reason}");
+                return 2;
+            }
+        };
+        for target in targets {
+            if let Some(reason) = checkout_claim_denial(&payload, &target) {
+                println!("{}", deny_json(&reason));
+                eprintln!("[clud checkout claim] {reason}");
+                return 2;
+            }
+        }
+    }
+
     let allow_hybrid_uv_run = std::env::var("CLUD_UV_RUST_ALLOW_ALL").ok().as_deref() == Some("1");
     // zackees/clud#532: the repo-root lookup below shells out to `git`, so
     // it's gated on a cheap substring check — this hook fires on every
@@ -779,6 +806,207 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
 
     append_log("allowed");
     0
+}
+
+#[cfg(test)]
+fn git_mutation(command_text: &str, dialect: ShellDialect) -> bool {
+    !git_mutation_targets(command_text, dialect, Path::new("."))
+        .unwrap()
+        .is_empty()
+}
+
+fn git_mutation_targets(
+    command_text: &str,
+    dialect: ShellDialect,
+    cwd: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    if !command_text.to_ascii_lowercase().contains("git") {
+        return Ok(Vec::new());
+    }
+    let ambiguous_cd = command_text.contains('|');
+    let mut directories = vec![cwd.to_path_buf()];
+    let mut targets = Vec::new();
+    let mut inherited_git_env = false;
+    for segment in split_shell_segments(command_text, dialect) {
+        let words = command_words(&segment);
+        let raw_words = tokenize(&segment);
+        let Some(first) = words.first() else {
+            inherited_git_env |= raw_words
+                .iter()
+                .any(|word| word.starts_with("GIT_WORK_TREE=") || word.starts_with("GIT_DIR="));
+            continue;
+        };
+        let program = program_name(first);
+        if program == "export" {
+            inherited_git_env |= raw_words
+                .iter()
+                .any(|word| word.starts_with("GIT_WORK_TREE=") || word.starts_with("GIT_DIR="));
+            continue;
+        }
+        if matches!(program.as_str(), "cd" | "pushd") {
+            let path_index = if words.get(1).is_some_and(|word| word == "--") {
+                2
+            } else {
+                1
+            };
+            if let Some(path) = words.get(path_index) {
+                let next = directories
+                    .iter()
+                    .map(|dir| dir.join(path))
+                    .collect::<Vec<_>>();
+                if !ambiguous_cd {
+                    directories.clear();
+                }
+                directories.extend(next);
+                if directories.len() > 16 {
+                    return Err("cannot verify checkout after many directory changes; run Git in a separate tool call".to_string());
+                }
+            }
+            continue;
+        }
+        if !program.eq_ignore_ascii_case("git") && !program.eq_ignore_ascii_case("git.exe") {
+            continue;
+        }
+        if inherited_git_env {
+            return Err("cannot verify Git checkout after changing Git environment; run Git in a separate tool call".to_string());
+        }
+        let git_index = raw_words
+            .iter()
+            .position(|word| matches!(program_name(word).as_str(), "git" | "git.exe"))
+            .unwrap_or(0);
+        let assignments = &raw_words[..git_index];
+        if assignments.iter().any(|word| {
+            word == "-C"
+                || word.starts_with("-C")
+                || word == "--chdir"
+                || word.starts_with("--chdir=")
+        }) {
+            return Err(
+                "cannot verify Git checkout after env --chdir; run Git in a separate tool call"
+                    .to_string(),
+            );
+        }
+        let env_work_tree = assignments
+            .iter()
+            .rev()
+            .find_map(|word| word.strip_prefix("GIT_WORK_TREE="));
+        let env_git_dir = assignments
+            .iter()
+            .rev()
+            .find_map(|word| word.strip_prefix("GIT_DIR="));
+        for directory in &directories {
+            if let Some(target) = git_segment_target(&words, directory, env_work_tree, env_git_dir)?
+            {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+    }
+    Ok(targets)
+}
+
+fn git_segment_target(
+    words: &[String],
+    cwd: &Path,
+    env_work_tree: Option<&str>,
+    env_git_dir: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let mut target = cwd.to_path_buf();
+    let mut git_dir = None;
+    let mut work_tree_set = false;
+    let mut index = 1;
+    while let Some(word) = words.get(index) {
+        match word.as_str() {
+            "-C" | "--work-tree" => {
+                let value = words
+                    .get(index + 1)
+                    .ok_or("missing Git path option value")?;
+                target = target.join(value);
+                work_tree_set |= word == "--work-tree";
+                index += 2;
+            }
+            "--git-dir" => {
+                git_dir = Some(target.join(words.get(index + 1).ok_or("missing --git-dir value")?));
+                index += 2;
+            }
+            "-c" => index += 2,
+            value if value.starts_with("-C") && value.len() > 2 => {
+                target = target.join(&value[2..]);
+                index += 1;
+            }
+            value if value.starts_with("--work-tree=") => {
+                target = target.join(&value[12..]);
+                work_tree_set = true;
+                index += 1;
+            }
+            value if value.starts_with("--git-dir=") => {
+                git_dir = Some(target.join(&value[10..]));
+                index += 1;
+            }
+            value if value.starts_with('-') => index += 1,
+            verb => {
+                if !matches!(
+                    verb,
+                    "switch" | "checkout" | "commit" | "reset" | "stash" | "rebase" | "merge"
+                ) {
+                    return Ok(None);
+                }
+                if !work_tree_set {
+                    if let Some(work_tree) = env_work_tree {
+                        target = target.join(work_tree);
+                        work_tree_set = true;
+                    }
+                }
+                if !work_tree_set {
+                    let git_dir = git_dir.or_else(|| env_git_dir.map(|value| target.join(value)));
+                    if let Some(git_dir) = git_dir {
+                        if git_dir.file_name().is_some_and(|name| name == ".git") {
+                            target = git_dir.parent().unwrap_or(cwd).to_path_buf();
+                        } else {
+                            return Err("cannot verify checkout for git --git-dir; run from its worktree or set --work-tree".to_string());
+                        }
+                    }
+                }
+                return Ok(Some(target));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn checkout_claim_denial(payload: &HookPayloadView, target: &Path) -> Option<String> {
+    if std::env::var("CLUD_CHECKOUT_CLAIM_OVERRIDE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        append_log("checkout claim override=1");
+        return None;
+    }
+    let state_dir = match crate::daemon::default_state_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("[clud checkout claim] daemon unavailable: {error}");
+            return None;
+        }
+    };
+    let session = std::env::var("CLUD_CHECKOUT_SESSION_ID")
+        .ok()
+        .or_else(|| payload.session_id.clone());
+    match crate::daemon::claimed_by_other(&state_dir, target, session.as_deref()) {
+        Ok(Some(holder)) => Some(format!(
+            "checkout is claimed by session {} ({}{}); use a new worktree or wait",
+            holder.session_id,
+            holder.tool,
+            holder.run.map_or_else(String::new, |run| format!(" {run}"))
+        )),
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("[clud checkout claim] daemon unavailable: {error}; allowing git command");
+            None
+        }
+    }
 }
 
 /// Refuse a tool call whose payload could not be read or parsed, when allowing
@@ -6266,5 +6494,102 @@ mod tests {
             recursive_agent_decision(&view.tool_name, view.agent_id.as_deref(), true),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn checkout_claim_hook_queries_only_mutating_git_commands() {
+        for command in [
+            "git switch main",
+            "git checkout feature",
+            "git commit -m change",
+            "git reset --hard HEAD",
+            "git stash pop",
+            "git rebase main",
+            "git merge feature",
+            "Git.exe switch main",
+            "cd repo && git -C nested switch main",
+        ] {
+            assert!(git_mutation(command, ShellDialect::Posix), "{command}");
+        }
+        for command in [
+            "git log",
+            "git status",
+            "git worktree list",
+            "echo git switch",
+        ] {
+            assert!(!git_mutation(command, ShellDialect::Posix), "{command}");
+        }
+        assert_eq!(
+            git_mutation_targets(
+                "git -C ../other switch main",
+                ShellDialect::Posix,
+                Path::new("/repo/one")
+            )
+            .unwrap(),
+            vec![PathBuf::from("/repo/one/../other")]
+        );
+        assert_eq!(
+            git_mutation_targets(
+                "git --work-tree=/repo/two commit -m x",
+                ShellDialect::Posix,
+                Path::new("/repo/one")
+            )
+            .unwrap(),
+            vec![PathBuf::from("/repo/two")]
+        );
+        assert_eq!(
+            git_mutation_targets(
+                "cd /repo/two && git switch main",
+                ShellDialect::Posix,
+                Path::new("/repo/one")
+            )
+            .unwrap(),
+            vec![PathBuf::from("/repo/two")]
+        );
+        assert_eq!(
+            git_mutation_targets(
+                "git --git-dir=/repo/two/.git commit",
+                ShellDialect::Posix,
+                Path::new("/repo/one")
+            )
+            .unwrap(),
+            vec![PathBuf::from("/repo/two")]
+        );
+        assert_eq!(
+            git_mutation_targets(
+                "GIT_WORK_TREE=/repo/two GIT_DIR=/repo/two/.git git commit -m x",
+                ShellDialect::Posix,
+                Path::new("/repo/one")
+            )
+            .unwrap(),
+            vec![PathBuf::from("/repo/two")]
+        );
+        assert_eq!(
+            git_mutation_targets(
+                "GIT_WORK_TREE=/repo/two git -C nested commit -m x",
+                ShellDialect::Posix,
+                Path::new("/repo/one")
+            )
+            .unwrap(),
+            vec![PathBuf::from("/repo/two")]
+        );
+        assert_eq!(
+            git_mutation_targets(
+                "cd -- /repo/two && git switch main",
+                ShellDialect::Posix,
+                Path::new("/repo/one")
+            )
+            .unwrap(),
+            vec![PathBuf::from("/repo/two")]
+        );
+        for command in [
+            "export GIT_WORK_TREE=/repo/two GIT_DIR=/repo/two/.git; git commit -m x",
+            "env --chdir=/repo/two git commit -m x",
+        ] {
+            assert!(
+                git_mutation_targets(command, ShellDialect::Posix, Path::new("/repo/one")).is_err(),
+                "{command}"
+            );
+        }
     }
 }

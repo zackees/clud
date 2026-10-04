@@ -1,7 +1,6 @@
-use std::cmp::Ordering as VersionOrdering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,8 +16,8 @@ use crate::orphan_reaper;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::activity::{should_idle_shutdown, DaemonActivity};
+use super::checkout_claims::{CheckoutClaimRegistry, CheckoutRequest};
 use super::client::cleanup_stale_state;
-use super::client_compat::compare_versions;
 use super::client_leases::ClientLeaseRegistry;
 use super::daemon_events;
 use super::gc_service::{
@@ -235,6 +234,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let client_leases = ClientLeaseRegistry::default();
+    let checkout_claims = CheckoutClaimRegistry::new(Duration::from_secs(2));
     let mut last_client_lease_prune = Instant::now();
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     // #933: a daemon's base environment is the OS/login environment, not the
@@ -316,6 +316,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 let shutdown_requested = Arc::clone(&shutdown_requested);
                 let proc_sampler = proc_sampler.clone();
                 let client_leases = client_leases.clone();
+                let checkout_claims = checkout_claims.clone();
                 let activity = activity.clone();
                 let api_lifecycle = Arc::clone(&api_lifecycle);
                 thread::spawn(move || {
@@ -330,6 +331,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                             shutdown_requested: &shutdown_requested,
                             proc_sampler: &proc_sampler,
                             client_leases: &client_leases,
+                            checkout_claims: &checkout_claims,
                             activity: &activity,
                             api_lifecycle: &api_lifecycle,
                         },
@@ -456,6 +458,7 @@ struct TcpConnectionServices<'a> {
     shutdown_requested: &'a Arc<AtomicBool>,
     proc_sampler: &'a ProcSamplerHandle,
     client_leases: &'a ClientLeaseRegistry,
+    checkout_claims: &'a CheckoutClaimRegistry,
     activity: &'a DaemonActivity,
     api_lifecycle: &'a Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
 }
@@ -468,6 +471,9 @@ fn handle_daemon_connection(
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(());
+    }
+    if let Ok(request) = serde_json::from_str::<CheckoutRequest>(&line) {
+        return handle_checkout_connection(&mut stream, reader, services.checkout_claims, request);
     }
     let (request, response_format) = decode_daemon_request_line(&line).map_err(wire_error_to_io)?;
     let request_id = daemon_events::request_id();
@@ -514,6 +520,29 @@ fn handle_daemon_connection(
     if is_shutdown {
         let _ = stream.shutdown(std::net::Shutdown::Write);
         services.shutdown_requested.store(true, Ordering::SeqCst);
+    }
+    result
+}
+
+fn handle_checkout_connection(
+    stream: &mut TcpStream,
+    mut reader: BufReader<TcpStream>,
+    claims: &CheckoutClaimRegistry,
+    request: CheckoutRequest,
+) -> io::Result<()> {
+    let connection_id = daemon_events::request_id();
+    let hold_presence = matches!(request, CheckoutRequest::Present { .. });
+    let reply = claims.respond(connection_id, request);
+    let result = serde_json::to_writer(&mut *stream, &reply)
+        .map_err(io::Error::other)
+        .and_then(|()| stream.write_all(b"\n"))
+        .and_then(|()| stream.flush());
+    if result.is_ok() && hold_presence {
+        let mut byte = [0u8; 1];
+        while matches!(reader.read(&mut byte), Ok(1)) {}
+    }
+    if hold_presence {
+        claims.disconnect(connection_id);
     }
     result
 }
@@ -722,33 +751,14 @@ fn dispatch_daemon_request_with_id(
 }
 
 fn shutdown_response(
-    client_version: Option<&str>,
+    _client_version: Option<&str>,
     expected_daemon: Option<crate::process_identity::ProcessIdentity>,
 ) -> DaemonResponse {
-    let daemon_version = env!("CARGO_PKG_VERSION");
-    let Some(client_version) = client_version else {
-        return DaemonResponse::Error {
-            message: format!(
-                "refusing unversioned shutdown request; daemon version {daemon_version} must be stopped by clud {daemon_version} or newer"
-            ),
-        };
-    };
-    match compare_versions(client_version, daemon_version) {
-        Some(VersionOrdering::Equal | VersionOrdering::Greater) => {}
-        Some(VersionOrdering::Less) | None => {
-            return DaemonResponse::Error {
-                message: format!(
-                    "refusing shutdown from clud {client_version}; daemon version {daemon_version} is newer"
-                ),
-            };
-        }
-    }
-
     let actual = crate::process_identity::ProcessIdentity::new(
         std::process::id(),
         crate::process_identity::self_start_time(),
     );
-    if expected_daemon != Some(actual) {
+    if expected_daemon.is_some_and(|expected| expected != actual) {
         return DaemonResponse::Error {
             message: format!(
                 "refusing shutdown for a different daemon generation; running daemon is pid {} started at {}",
@@ -1630,6 +1640,7 @@ fn merge_ctrl_c_profile_for_daemon(session: &mut SessionSnapshot, mut update: Ct
 
 #[cfg(test)]
 mod tests {
+    use super::super::checkout_claims::{CheckoutKey, CheckoutOccupant, CheckoutReply};
     use super::super::wire_prost::{
         decode_daemon_response_line, encode_daemon_request_line, DaemonWireFormat,
     };
@@ -1638,6 +1649,99 @@ mod tests {
     use std::net::TcpStream;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn checkout_claim_round_trips_through_daemon_tcp_handler() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let claims = CheckoutClaimRegistry::new(Duration::ZERO);
+        let observed_claims = claims.clone();
+        let server = thread::spawn(move || {
+            let mut workers = Vec::new();
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let claims = claims.clone();
+                workers.push(thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request = serde_json::from_str(&line).unwrap();
+                    handle_checkout_connection(&mut stream, reader, &claims, request).unwrap();
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        let key = CheckoutKey {
+            worktree: "/repo".into(),
+            common_git_dir: "/repo/.git".into(),
+        };
+        let call = |request: CheckoutRequest| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            serde_json::to_writer(&mut stream, &request).unwrap();
+            stream.write_all(b"\n").unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            (
+                stream,
+                serde_json::from_str::<CheckoutReply>(&line).unwrap(),
+            )
+        };
+        let (presence, reply) = call(CheckoutRequest::Present {
+            checkout: key.clone(),
+            occupant: CheckoutOccupant {
+                session_id: "one".into(),
+                pid: 1,
+                tool: "grind".into(),
+                run: None,
+                started_at: 1,
+                claimed: false,
+            },
+        });
+        assert!(matches!(reply, CheckoutReply::Present { .. }));
+        assert!(matches!(
+            call(CheckoutRequest::Claim {
+                checkout: key.clone(),
+                session_id: "one".into(),
+                restoring: false,
+            })
+            .1,
+            CheckoutReply::Claimed
+        ));
+        let (second_presence, _) = call(CheckoutRequest::Present {
+            checkout: key.clone(),
+            occupant: CheckoutOccupant {
+                session_id: "two".into(),
+                pid: 2,
+                tool: "do".into(),
+                run: None,
+                started_at: 2,
+                claimed: false,
+            },
+        });
+        assert!(matches!(
+            call(CheckoutRequest::Claim {
+                checkout: key.clone(),
+                session_id: "two".into(),
+                restoring: false,
+            }).1,
+            CheckoutReply::Refused { holder: Some(holder), .. } if holder.session_id == "one"
+        ));
+        let (_, reply) = call(CheckoutRequest::Who {
+            checkout: key.clone(),
+            exclude_session: None,
+        });
+        assert!(
+            matches!(reply, CheckoutReply::Who { occupants } if occupants.len() == 2 && occupants.iter().filter(|person| person.claimed).count() == 1)
+        );
+        drop(presence);
+        drop(second_presence);
+        server.join().unwrap();
+        assert!(observed_claims.who(&key, None).is_empty());
+    }
 
     #[test]
     fn api_kill_dispatch_uses_the_supplied_lifecycle_owner() {
@@ -2211,12 +2315,12 @@ mod tests {
         );
     }
 
-    /// Previous-release clients may still use non-destructive JSON requests,
-    /// but their unversioned shutdown must not terminate a newer daemon.
+    /// Previous-release clients may still use JSON requests, including
+    /// unversioned shutdown when the operator explicitly asks for it.
     /// Keep this fixture raw so it cannot accidentally acquire current-client
     /// credentials through a helper.
     #[test]
-    fn daemon_rejects_previous_release_raw_json_shutdown() {
+    fn daemon_accepts_previous_release_raw_json_shutdown() {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().to_path_buf();
         let daemon_state_dir = state_dir.clone();
@@ -2241,28 +2345,36 @@ mod tests {
             "raw legacy JSON shutdown must receive a legacy JSON reply: {shutdown_line:?}"
         );
         let shutdown_json: serde_json::Value = serde_json::from_str(&shutdown_line).unwrap();
-        assert_eq!(shutdown_json["op"], "error");
-        assert!(
-            shutdown_json["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("unversioned shutdown")),
-            "legacy shutdown should explain why it was refused: {shutdown_line:?}"
-        );
-
-        let (authorized, _) = send_daemon_request_line(
-            &state_dir,
-            &DaemonRequest::Shutdown {
-                client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                expected_daemon: Some(info.identity()),
-            },
-            DaemonWireFormat::Prost,
-        );
-        assert!(matches!(authorized, DaemonResponse::ShutdownAck { .. }));
+        assert_eq!(shutdown_json["op"], "shutdown_ack");
+        assert_eq!(shutdown_json["pid"], info.pid);
         assert_eq!(daemon_thread.join().unwrap(), 0);
         assert!(
             !daemon_info_path(&state_dir).exists(),
-            "daemon should remove daemon.json during authorized shutdown"
+            "daemon should remove daemon.json during shutdown"
         );
+    }
+
+    #[test]
+    fn shutdown_accepts_older_client_but_checks_supplied_generation() {
+        let actual = crate::process_identity::ProcessIdentity::new(
+            std::process::id(),
+            crate::process_identity::self_start_time(),
+        );
+        assert!(matches!(
+            shutdown_response(Some("0.0.1"), Some(actual)),
+            DaemonResponse::ShutdownAck { .. }
+        ));
+        assert!(matches!(
+            shutdown_response(None, None),
+            DaemonResponse::ShutdownAck { .. }
+        ));
+        assert!(matches!(
+            shutdown_response(
+                None,
+                Some(crate::process_identity::ProcessIdentity::pid_only(u32::MAX))
+            ),
+            DaemonResponse::Error { .. }
+        ));
     }
 
     #[test]

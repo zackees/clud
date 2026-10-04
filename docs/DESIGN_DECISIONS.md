@@ -2316,17 +2316,20 @@ the capability; only daemon-state mutation is gated. `--no-daemon` remains the
 explicit CLI opt-out. This supersedes the `CLUD_NO_DAEMON` portions of DD-011
 and DD-012.
 
-Daemon shutdown is independently generation- and version-guarded. A shutdown
-request carries the caller version and the expected daemon PID plus start time;
-the daemon rejects legacy/unversioned callers, older callers, and requests for
-a different generation.
+Daemon shutdown is an explicit recovery action and accepts callers regardless
+of version. A shutdown request normally carries the expected daemon PID and
+start time; the daemon rejects a different generation, but accepts legacy
+requests that omit this field. If an older daemon rejects the request, the
+client terminates only the recorded process identity. Implicit daemon creation
+still refuses a newer daemon and explains how to stop or restart it explicitly.
 
 **Consequences:** Adding a new subcommand cannot accidentally gain daemon-spawn
 authority. `clud tool` and hook chains cannot inherit it. A utility mode may
 talk to an already-running compatible daemon but gets a local permission error
 if its operation would need to create or replace one. An older client that
-encounters a newer daemon leaves it untouched, emits the yellow compatibility
-error, and exits 1.
+encounters a newer daemon during normal launch leaves it untouched, emits the
+yellow compatibility error, and exits 1. Explicit stop and restart can recover
+from that version skew.
 
 ## DD-052: hook applicability is decided by a root's relationship to the session, not by path geometry
 
@@ -6358,7 +6361,29 @@ watchers stall until the reset instead of draining the budget. A person's
 `gh api` still goes through, and nothing reports success on cached data.
 The watcher's copy of `FORWARDED_ENV` is pinned by a test.
 
-## DD-155: `--unsafe` is an explicit session policy, separate from backend permissions
+## DD-155: checkout claims live on daemon connections
+
+**Context:** Two agent sessions can enter the same Git checkout and make
+conflicting commits or branch changes. A lock file can outlive a killed
+process and cannot distinguish independent worktrees of one repository.
+
+**Decision:** The daemon records a canonical worktree and common Git directory
+for each live foreground connection. It grants at most one mutation claim per
+worktree and removes claims when their connection closes. Claiming clients keep
+an intent marker in daemon state so they can restore their claim after daemon
+restart; the daemon gives existing clients a short grace period before a new
+claim can be granted. A confirmed release clears the live claim and its
+marker. The PreToolUse hook queries the daemon only for selected mutating Git
+verbs, and fails open with a warning when the daemon is unavailable. If claim
+restoration loses a race after the grace period, the foreground client
+interrupts its agent instead of continuing without a claim.
+
+**Consequences:** A killed client releases its claim without stale lock
+cleanup. Sibling worktrees remain independent. A claim requiring command
+refuses to proceed while the daemon is down, while ordinary launches and
+commands without a mutation claim continue.
+
+## DD-156: `--unsafe` is an explicit session policy, separate from backend permissions
 
 **Context:** clud already launches agents with the backend's permission bypass
 by default, but its own command scanner, deletion rewrite, `rm` catastrophe

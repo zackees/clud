@@ -1,6 +1,6 @@
 # `clud --unsafe` policy
 
-Design decision: [DD-155](../DESIGN_DECISIONS.md).
+Design decision: [DD-156](../DESIGN_DECISIONS.md).
 
 `--unsafe` is an explicit, per-launch choice to disable clud's own agent safety
 rules. It is separate from `--safe`, which controls the backend's permission

@@ -94,6 +94,14 @@ feeds a per-route health record rather than a single response.
 | `402` insufficient credits | drained | Fail over. No auto-recovery; clears on a credential or config change. |
 | `401`, `403` | unauthenticated | Fail over, plus one notice naming `clud auth login <provider>`. |
 | `400`, `413`, `422` | request-fatal | **Never** fail over. Surface unchanged; the next rung fails the same way. |
+| `200` JSON without a Messages envelope, or an SSE response with no event | provider-fault | Fail over before committing the response. Cool the route briefly; if no rung is available, answer `502` with the route name. |
+
+The proxy checks successful JSON bodies before forwarding them. It requires a
+Messages `message` object with an assistant role, ID, model, usage, and content array. This
+check buffers at most 16 MiB; a larger JSON body is a provider fault. For SSE,
+it waits for the first complete event with a data line before forwarding bytes, so a zero-event stream
+has the same classification as a malformed non-streaming retry. The existing
+`text/plain` handling remains untouched.
 
 One deliberate non-behavior. The observed `402` reads "requested up to 32000
 tokens, but can only afford 1600." Shrinking `max_tokens` to fit is the

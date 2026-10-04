@@ -86,14 +86,16 @@ fn newer_daemon_is_refused_and_rendered_yellow() {
     let rendered = incompatible_daemon_error_line(&error);
     assert!(rendered.starts_with("\x1b[33m[clud] error:"));
     assert!(rendered.ends_with("\x1b[0m"));
+    assert!(rendered.contains(&format!("pid {}", info.pid)));
+    assert!(rendered.contains("clud daemon stop"));
+    assert!(rendered.contains("clud daemon restart"));
     assert!(daemon_info_path(tmp.path()).exists());
 }
 
 #[test]
-fn daemon_stop_preflight_refuses_newer_daemon_without_signaling_it() {
+fn daemon_stop_sends_shutdown_to_newer_daemon() {
     let tmp = tempfile::tempdir().unwrap();
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (port, line_rx) = spawn_shutdown_ack_peer();
     let info = DaemonInfo {
         pid: std::process::id(),
         pid_start: crate::process_identity::self_start_time(),
@@ -106,8 +108,11 @@ fn daemon_stop_preflight_refuses_newer_daemon_without_signaling_it() {
     super::super::io_helpers::write_json_file(&daemon_info_path(tmp.path()), &info).unwrap();
 
     let error = request_daemon_shutdown(tmp.path())
-        .expect_err("older clud must not send shutdown to a newer daemon");
-    assert!(is_incompatible_daemon_error(&error));
+        .expect_err("a different acknowledged pid must not count as a stopped daemon");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    let line = line_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (request, _) = super::super::wire_prost::decode_daemon_request_line(&line).unwrap();
+    assert!(matches!(request, DaemonRequest::Shutdown { .. }));
     assert!(identity_is_alive(&info.identity()));
     assert!(daemon_info_path(tmp.path()).exists());
 }

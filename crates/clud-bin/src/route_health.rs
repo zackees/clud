@@ -54,6 +54,9 @@ pub enum RouteVerdict {
     /// The request itself will never be accepted. **Never** fails over —
     /// replaying it only spends a second account to reproduce the same error.
     RequestFatal,
+    /// The provider answered successfully at HTTP level but did not speak
+    /// the Messages protocol. A different route may still serve the turn.
+    ProviderFault,
 }
 
 impl RouteVerdict {
@@ -61,7 +64,7 @@ impl RouteVerdict {
     pub fn fails_over(self) -> bool {
         matches!(
             self,
-            Self::Exhausted { .. } | Self::Drained | Self::Unauthenticated
+            Self::Exhausted { .. } | Self::Drained | Self::Unauthenticated | Self::ProviderFault
         )
     }
 
@@ -74,6 +77,7 @@ impl RouteVerdict {
             Self::Drained => "drained",
             Self::Unauthenticated => "unauthenticated",
             Self::RequestFatal => "request-fatal",
+            Self::ProviderFault => "provider-fault",
         }
     }
 
@@ -203,6 +207,10 @@ impl RouteLedger {
             // A request-fatal failure says nothing about the route, so it must
             // not clear an existing cooldown either.
             RouteVerdict::RequestFatal => {}
+            RouteVerdict::ProviderFault => {
+                entry.until = Some(now + DEFAULT_THROTTLE_COOLDOWN);
+                entry.reason = verdict.reason();
+            }
             RouteVerdict::Healthy => *entry = Entry::default(),
             RouteVerdict::Throttled { cooldown } => {
                 entry.consecutive_throttles = entry.consecutive_throttles.saturating_add(1);
@@ -382,6 +390,7 @@ mod tests {
     fn only_route_terminal_verdicts_fail_over() {
         assert!(RouteVerdict::Drained.fails_over());
         assert!(RouteVerdict::Unauthenticated.fails_over());
+        assert!(RouteVerdict::ProviderFault.fails_over());
         assert!(RouteVerdict::Exhausted {
             cooldown: Duration::from_secs(1)
         }
@@ -395,6 +404,25 @@ mod tests {
             .fails_over(),
             "a throttle is served in place, not failed over"
         );
+    }
+
+    #[test]
+    fn malformed_provider_response_cools_route_briefly() {
+        let now = Instant::now();
+        let mut ledger = RouteLedger::new();
+        let state = ledger.record(
+            ConversationRoute::DeepSeek,
+            RouteVerdict::ProviderFault,
+            now,
+        );
+        assert!(matches!(
+            state,
+            RouteState::Cooling {
+                reason: "provider-fault",
+                ..
+            }
+        ));
+        assert!(ledger.is_available(ConversationRoute::DeepSeek, now + DEFAULT_THROTTLE_COOLDOWN));
     }
 
     /// A provider-stated reset is honoured, and a provider claiming a six-day

@@ -34,30 +34,20 @@ use super::client_compat::{compare_versions, is_old_daemon_signature};
 struct IncompatibleDaemonVersion {
     running: String,
     client: &'static str,
+    pid: u32,
 }
 
 impl fmt::Display for IncompatibleDaemonVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "refusing to stop daemon version {} with older clud {}; upgrade clud or stop the daemon from version {}",
-            self.running, self.client, self.running
+            "daemon pid {} runs version {}, newer than clud {}; run `clud daemon stop` or `clud daemon restart` to replace it",
+            self.pid, self.running, self.client
         )
     }
 }
 
 impl std::error::Error for IncompatibleDaemonVersion {}
-
-#[derive(Debug)]
-struct ProtectedDaemonShutdown(String);
-
-impl fmt::Display for ProtectedDaemonShutdown {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ProtectedDaemonShutdown {}
 
 fn incompatible_daemon_error(info: &DaemonInfo) -> io::Error {
     io::Error::new(
@@ -65,15 +55,15 @@ fn incompatible_daemon_error(info: &DaemonInfo) -> io::Error {
         IncompatibleDaemonVersion {
             running: info.version.as_deref().unwrap_or("<unknown>").to_string(),
             client: env!("CARGO_PKG_VERSION"),
+            pid: info.pid,
         },
     )
 }
 
 pub fn is_incompatible_daemon_error(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(|source| {
-        source.downcast_ref::<IncompatibleDaemonVersion>().is_some()
-            || source.downcast_ref::<ProtectedDaemonShutdown>().is_some()
-    })
+    error
+        .get_ref()
+        .is_some_and(|source| source.downcast_ref::<IncompatibleDaemonVersion>().is_some())
 }
 
 pub fn print_incompatible_daemon_error(error: &io::Error) {
@@ -674,10 +664,6 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
         ));
     }
 
-    if daemon_version_disposition(&info) == DaemonVersionDisposition::RefuseNewerOrUnknown {
-        return Err(incompatible_daemon_error(&info));
-    }
-
     let pid = match send_daemon_request(
         state_dir,
         &DaemonRequest::Shutdown {
@@ -685,12 +671,19 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
             expected_daemon: Some(recorded),
         },
     ) {
-        Ok(DaemonResponse::ShutdownAck { pid }) => pid,
-        Ok(DaemonResponse::Error { message }) => {
+        Ok(DaemonResponse::ShutdownAck { pid }) if pid == recorded_pid => pid,
+        Ok(DaemonResponse::ShutdownAck { pid }) => {
             return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                ProtectedDaemonShutdown(message),
+                io::ErrorKind::InvalidData,
+                format!(
+                    "daemon shutdown acknowledgment named pid {pid}, expected pid {recorded_pid}"
+                ),
             ));
+        }
+        Ok(DaemonResponse::Error { message }) => {
+            eprintln!("[clud] daemon pid {recorded_pid} rejected shutdown IPC ({message}); terminating its recorded process directly");
+            terminate_recorded_daemon(&recorded);
+            recorded_pid
         }
         Ok(response) => {
             return Err(io::Error::new(
@@ -702,26 +695,14 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
             eprintln!(
                 "[clud] daemon pid {recorded_pid} does not support shutdown IPC; terminating it directly"
             );
-            signal_process_tree_as(&recorded, Signal::Term);
-            thread::sleep(Duration::from_millis(150));
-            if identity_is_alive(&recorded) {
-                signal_process_tree_as(&recorded, Signal::Kill);
-            }
+            terminate_recorded_daemon(&recorded);
             recorded_pid
         }
         Err(err) => return shutdown_connect_error(state_dir, &recorded, err),
     };
 
-    // The acking daemon reports its own pid; when that is the pid we already
-    // had on disk we can keep the recorded start time, otherwise fall back to
-    // a pid-only wait (issue #558).
-    let exiting = if pid == recorded_pid {
-        recorded
-    } else {
-        ProcessIdentity::pid_only(pid)
-    };
     let deadline = Instant::now() + Duration::from_secs(10);
-    while identity_is_alive(&exiting) {
+    while identity_is_alive(&recorded) {
         if Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -733,6 +714,14 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
 
     let _ = fs::remove_file(daemon_info_path(state_dir));
     Ok(pid)
+}
+
+fn terminate_recorded_daemon(recorded: &ProcessIdentity) {
+    signal_process_tree_as(recorded, Signal::Term);
+    thread::sleep(Duration::from_millis(150));
+    if identity_is_alive(recorded) {
+        signal_process_tree_as(recorded, Signal::Kill);
+    }
 }
 
 /// A daemon can exit after its identity is checked but before the shutdown
