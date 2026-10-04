@@ -2418,8 +2418,14 @@ const FAILURE_PREFIX_BYTES: usize = 8 * 1024;
 /// Statuses worth reading a body for before committing. Everything else is
 /// either a success or a failure whose meaning the status already fixes, and
 /// buffering those would only delay the client.
+///
+/// `400` is probed despite that rule because a status alone no longer settles a
+/// 400: a guardrail rejection and a malformed request share the status and
+/// differ completely in whether another route can serve the bytes. Reading the
+/// prefix is free when it does not decline — it is re-emitted verbatim — so the
+/// only cost is the buffer on rejections that were going to be read anyway.
 fn may_be_route_terminal(status: u16) -> bool {
-    matches!(status, 401 | 402 | 403 | 429)
+    matches!(status, 400 | 401 | 402 | 403 | 429)
 }
 
 /// Whether a `ureq` transport failure was a *timeout* rather than a dead peer.
@@ -6976,6 +6982,47 @@ Connection: close
         assert!(
             claude.requests().is_empty(),
             "a 400 must not be replayed onto a second account"
+        );
+    }
+
+    /// The one 400 that *does* descend the ladder. A guardrail exclusion leaves
+    /// the request well-formed and only the route's own configuration
+    /// unwilling, so replaying the identical bytes onto the next rung is safe
+    /// and is the difference between a relaunch and a re-route.
+    #[test]
+    fn a_policy_rejected_route_is_replayed_onto_the_next_rung() {
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start_with_responses(vec![Some(raw_response(
+            400,
+            "Bad Request",
+            "API Error: 400 0 endpoints out of 1 requested are available \
+             matching your guardrail restrictions and data policy. \
+             ZDR violation (guardrail)",
+        ))]);
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-flash",
+                "policy-rejected-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+
+        // The client sees one 200 and never learns the first rung declined —
+        // the pre-commit replay is what keeps a policy rejection invisible.
+        assert_eq!(status(&response), 200, "{response}");
+        assert_eq!(
+            claude.requests().len(),
+            1,
+            "the identical bytes must be replayed onto the fallback rung"
         );
     }
 

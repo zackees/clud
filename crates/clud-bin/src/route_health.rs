@@ -34,6 +34,16 @@ pub const DEFAULT_THROTTLE_COOLDOWN: Duration = Duration::from_secs(20);
 /// stop asking.
 pub const MAX_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
+/// Cooldown for a route refused by its own configuration (a gateway guardrail
+/// excluded every endpoint it could have used).
+///
+/// Short on purpose. Unlike an exhausted allowance this is not a clock anyone
+/// is waiting out — it is a setting the operator can edit at any moment, and the
+/// usual remedy is exactly the one the user reaches for when it bites: relax
+/// the policy. A long stall would keep a perfectly good route benched long after
+/// the thing that blocked it was fixed.
+pub const DEFAULT_POLICY_REJECTED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
 /// Consecutive throttles that promote a route from "slow down" to "spent".
 pub const THROTTLE_ESCALATION_THRESHOLD: u32 = 3;
 
@@ -46,6 +56,11 @@ pub enum RouteVerdict {
     Throttled { cooldown: Duration },
     /// A billing period's allowance is spent. Fail over until `cooldown`.
     Exhausted { cooldown: Duration },
+    /// The route's own configuration refuses the request — a gateway guardrail
+    /// excluded every endpoint behind it. The request itself is well-formed, so
+    /// unlike [`Self::RequestFatal`] another route can serve these exact bytes.
+    /// Fail over until `cooldown`.
+    PolicyRejected { cooldown: Duration },
     /// The balance is spent. No clock: only a credential or config change
     /// clears it, so no amount of waiting helps.
     Drained,
@@ -64,7 +79,11 @@ impl RouteVerdict {
     pub fn fails_over(self) -> bool {
         matches!(
             self,
-            Self::Exhausted { .. } | Self::Drained | Self::Unauthenticated | Self::ProviderFault
+            Self::Exhausted { .. }
+                | Self::PolicyRejected { .. }
+                | Self::Drained
+                | Self::Unauthenticated
+                | Self::ProviderFault
         )
     }
 
@@ -74,6 +93,7 @@ impl RouteVerdict {
             Self::Healthy => "healthy",
             Self::Throttled { .. } => "throttled",
             Self::Exhausted { .. } => "exhausted",
+            Self::PolicyRejected { .. } => "policy-rejected",
             Self::Drained => "drained",
             Self::Unauthenticated => "unauthenticated",
             Self::RequestFatal => "request-fatal",
@@ -92,6 +112,14 @@ impl RouteVerdict {
             401 | 403 => return Self::Unauthenticated,
             402 => return Self::Drained,
             _ => {}
+        }
+        // Read before the status rules: a policy rejection is a 400, which the
+        // blanket `Permanent` below would otherwise turn into `RequestFatal`
+        // and strand a conversation another route could have answered.
+        if failure.class() == FailureClass::PolicyRejected {
+            return Self::PolicyRejected {
+                cooldown: DEFAULT_POLICY_REJECTED_COOLDOWN,
+            };
         }
         if failure.class() == FailureClass::Exhausted {
             return Self::Exhausted {
@@ -116,6 +144,11 @@ impl RouteVerdict {
         match failure.class() {
             FailureClass::Transient | FailureClass::Unknown => Self::Healthy,
             FailureClass::Permanent => Self::RequestFatal,
+            // Handled above; a route cannot be rejected by policy without a
+            // policy-rejected class.
+            FailureClass::PolicyRejected => Self::PolicyRejected {
+                cooldown: DEFAULT_POLICY_REJECTED_COOLDOWN,
+            },
             // Handled above; a route cannot be exhausted and not exhausted.
             FailureClass::Exhausted => Self::Exhausted {
                 cooldown: DEFAULT_EXHAUSTED_COOLDOWN,
@@ -229,6 +262,14 @@ impl RouteLedger {
                 entry.consecutive_throttles = 0;
                 entry.until = Some(now + cooldown);
                 entry.reason = "exhausted";
+            }
+            // Bench rather than mark down: the route is fine, its policy is
+            // not, and an operator editing the policy should find the route
+            // usable again on its own. `clud route clear` still forces it.
+            RouteVerdict::PolicyRejected { cooldown } => {
+                entry.consecutive_throttles = 0;
+                entry.until = Some(now + cooldown);
+                entry.reason = "policy-rejected";
             }
             RouteVerdict::Drained | RouteVerdict::Unauthenticated => {
                 entry.consecutive_throttles = 0;
@@ -344,6 +385,17 @@ mod tests {
                 RouteVerdict::RequestFatal,
             ),
             (
+                // Same status as the row above and the opposite decision: the
+                // bytes are fine, this route's guardrail is not.
+                400,
+                "API Error: 400 0 endpoints out of 1 requested are available \
+                 matching your guardrail restrictions and data policy. \
+                 ZDR violation (guardrail)",
+                RouteVerdict::PolicyRejected {
+                    cooldown: DEFAULT_POLICY_REJECTED_COOLDOWN,
+                },
+            ),
+            (
                 422,
                 r#"{"error":{"message":"unprocessable"}}"#,
                 RouteVerdict::RequestFatal,
@@ -361,6 +413,33 @@ mod tests {
                 "status {status} body {body}"
             );
         }
+    }
+
+    /// The carve-out that makes a policy rejection safe to replay: it descends
+    /// the ladder, and it benches the route rather than marking it down, so an
+    /// operator who relaxes the policy gets the route back without a relaunch.
+    #[test]
+    fn a_policy_rejection_fails_over_and_recovers_on_its_own() {
+        let rejected = RouteVerdict::from_failure(&failure(
+            400,
+            "0 endpoints out of 1 requested are available matching your \
+             guardrail restrictions and data policy. ZDR violation (guardrail)",
+        ));
+        assert!(rejected.fails_over());
+
+        let now = Instant::now();
+        let mut ledger = RouteLedger::new();
+        let after = ledger.record(ConversationRoute::Claude, rejected, now);
+        assert!(!after.is_available(), "{after:?}");
+        assert_eq!(after.reason(), "policy-rejected");
+
+        // Not a clock-less `Down`: once the operator relaxes the guardrail the
+        // route becomes usable again with no `clud route clear` and no relaunch.
+        let healed = ledger.state(
+            ConversationRoute::Claude,
+            now + DEFAULT_POLICY_REJECTED_COOLDOWN + Duration::from_secs(1),
+        );
+        assert!(healed.is_available(), "{healed:?}");
     }
 
     /// A malformed request must never descend the ladder, and must not clear a

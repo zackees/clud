@@ -106,6 +106,16 @@ pub enum FailureClass {
     /// Split out of [`Self::Permanent`] because it is the one failure with a
     /// *reset time* and a remedy, and the client-facing message says so.
     Exhausted,
+    /// The route's own *configuration* makes this request unacceptable, and no
+    /// amount of retrying changes that: a gateway guardrail excluded the only
+    /// endpoint that could have served it, so a second attempt names the same
+    /// excluded endpoint.
+    ///
+    /// Split out of [`Self::Permanent`] because — unlike a malformed request,
+    /// which fails identically on every route — these bytes are fine and only
+    /// *this* route refuses them. That makes it a legitimate failover rather
+    /// than a second account spent reproducing an error.
+    PolicyRejected,
 }
 
 /// A non-2xx upstream response, reduced to what is safe to keep.
@@ -174,7 +184,7 @@ impl UpstreamFailure {
     /// Attempt budget this failure earns.
     fn max_attempts(&self, config: &UpstreamConfig) -> u32 {
         match self.class {
-            FailureClass::Permanent | FailureClass::Exhausted => 1,
+            FailureClass::Permanent | FailureClass::Exhausted | FailureClass::PolicyRejected => 1,
             FailureClass::Transient => config.max_attempts.max(1),
             FailureClass::Unknown => config.unknown_max_attempts.max(1),
         }
@@ -287,6 +297,24 @@ const EXHAUSTED_SIGNATURES: &[&str] = &[
     "requires more credits",
 ];
 
+/// Body signatures that mean "this *route's configuration* refuses this
+/// request", as opposed to the request itself being malformed.
+///
+/// OpenRouter-shaped and deliberately loose, because the exclusion reason is
+/// free prose assembled by the gateway rather than a stable error code. Checked
+/// before [`PERMANENT_SIGNATURES`] so that a guardrail rejection is never read
+/// as a generic request rejection.
+const POLICY_REJECTED_SIGNATURES: &[&str] = &[
+    // "0 endpoints out of 1 requested are available matching your guardrail
+    // restrictions and data policy".
+    "guardrail",
+    "zdr",
+    "zero data retention",
+    "data policy",
+    "endpoints out of",
+    "no endpoints available",
+];
+
 /// Body signatures that positively mark a 5xx as an outage rather than a
 /// rejection. Anything else at 5xx is [`FailureClass::Unknown`].
 const TRANSIENT_SIGNATURES: &[&str] = &[
@@ -314,6 +342,16 @@ fn classify(status: u16, body_prefix: &str) -> FailureClass {
         .any(|signature| body.contains(signature))
     {
         return FailureClass::Exhausted;
+    }
+    // Before the permanent table and the status list: a policy rejection wears
+    // a 400 exactly like a malformed request, but only this route can serve it
+    // differently, so the status alone would strand a conversation that another
+    // route could have answered.
+    if POLICY_REJECTED_SIGNATURES
+        .iter()
+        .any(|signature| body.contains(signature))
+    {
+        return FailureClass::PolicyRejected;
     }
     if PERMANENT_SIGNATURES
         .iter()
@@ -487,7 +525,7 @@ impl UpstreamError {
             Self::Transport(_) | Self::Timeout => true,
             Self::Status(failure) => !matches!(
                 failure.class,
-                FailureClass::Permanent | FailureClass::Exhausted
+                FailureClass::Permanent | FailureClass::Exhausted | FailureClass::PolicyRejected
             ),
             Self::Credentials(_)
             | Self::CompactMalformed
@@ -1813,6 +1851,7 @@ mod tests {
             (FailureClass::Permanent, PERMANENT_SIGNATURES),
             (FailureClass::Exhausted, EXHAUSTED_SIGNATURES),
             (FailureClass::Transient, TRANSIENT_SIGNATURES),
+            (FailureClass::PolicyRejected, POLICY_REJECTED_SIGNATURES),
         ] {
             assert!(
                 !signatures.is_empty(),
@@ -1827,6 +1866,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_guardrail_rejection_is_policy_not_a_malformed_request() {
+        // The exact body OpenRouter returns when its ZDR guardrail excludes the
+        // only endpoint that could serve the request.
+        let body = "API Error: 400 0 endpoints out of 1 requested are available \
+                    matching your guardrail restrictions and data policy. \
+                    ZDR violation (guardrail)";
+        let failure = failure_from(400, body);
+        assert_eq!(failure.class(), FailureClass::PolicyRejected);
+
+        // Not retryable: a second attempt names the same excluded endpoint, so
+        // the only way to succeed is a different route, not a fresher try.
+        assert_eq!(failure.max_attempts(&fast_config()), 1);
+        assert!(!UpstreamError::Status(failure).is_retryable());
+
+        // The carve-out is narrow. An ordinary 400 is still Permanent, so it
+        // still never descends the ladder and never spends a second account.
+        let ordinary = failure_from(400, r#"{"error":{"message":"bad shape"}}"#);
+        assert_eq!(ordinary.class(), FailureClass::Permanent);
+
+        // And the signature wins over the status even at 5xx, where the
+        // fallthrough would otherwise have called it an outage.
+        assert_eq!(
+            failure_from(502, body).class(),
+            FailureClass::PolicyRejected
+        );
     }
 
     #[test]

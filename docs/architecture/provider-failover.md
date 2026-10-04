@@ -94,6 +94,7 @@ feeds a per-route health record rather than a single response.
 | `402` insufficient credits | drained | Fail over. No auto-recovery; clears on a credential or config change. |
 | `401`, `403` | unauthenticated | Fail over, plus one notice naming `clud auth login <provider>`. |
 | `400`, `413`, `422` | request-fatal | **Never** fail over. Surface unchanged; the next rung fails the same way. |
+| `400` whose body names a *policy* exclusion (a gateway guardrail — ZDR, data policy — excluded every endpoint behind this route) | policy-rejected | Fail over. The bytes are well-formed and only *this route's configuration* refuses them, which is the one case that makes the "malformed requests fail everywhere" rule not apply. |
 | `200` JSON without a Messages envelope, or an SSE response with no event | provider-fault | Fail over before committing the response. Cool the route briefly; if no rung is available, answer `502` with the route name. |
 
 The proxy checks successful JSON bodies before forwarding them. It requires a
@@ -102,6 +103,22 @@ check buffers at most 16 MiB; a larger JSON body is a provider fault. For SSE,
 it waits for the first complete event with a data line before forwarding bytes, so a zero-event stream
 has the same classification as a malformed non-streaming retry. The existing
 `text/plain` handling remains untouched.
+
+The `policy-rejected` row is a carve-out to the request-fatal rule, so it is worth stating why it
+is safe. The `request-fatal` reasoning — *a malformed request fails identically
+everywhere* — depends on the request being the thing that is wrong. A guardrail
+rejection inverts it: the route's configuration is the thing that is wrong, so
+another route is not merely allowed to try but is likely to succeed. Replaying
+the identical bytes is exactly what the ladder already does for the rows above
+it. `400` is therefore probed pre-commit alongside `401`/`402`/`403`/`429`, so
+its body reaches the classifier; a non-declining 400 is re-emitted verbatim and
+pays only a bounded buffer.
+
+It is benched with a short cooldown rather than marked down, because the
+remedy is a setting the operator can change at any moment. Editing the guardrail
+brings the route back on its own, with no `clud route clear` and — the point of
+the change — no relaunch.
+
 
 One deliberate non-behavior. The observed `402` reads "requested up to 32000
 tokens, but can only afford 1600." Shrinking `max_tokens` to fit is the
