@@ -88,6 +88,8 @@ fn run(mut args: args::Args) {
     admit_provider_bridge(&args, launch.target);
     set_daemon_spawn_authority(&args);
     let foreground_client_lease = start_early_daemon(&args);
+    let foreground_checkout_presence =
+        start_checkout_presence(&args, foreground_client_lease.is_some(), &interrupted);
 
     // #569: the persistent daemon deliberately starts before this foreground
     // process joins the Windows tracking job, so it can outlive the CLI.
@@ -100,10 +102,65 @@ fn run(mut args: args::Args) {
     }
     emit_launch_notices(&args, launch.target);
     let exit_code = launch_and_clean_up(&args, &plan, interrupted.as_ref(), job_orphan_reaper);
+    drop(foreground_checkout_presence);
     if let Some(lease) = foreground_client_lease {
         lease.release();
     }
     std::process::exit(exit_code);
+}
+
+fn start_checkout_presence(
+    args: &args::Args,
+    daemon_ready: bool,
+    interrupted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Option<daemon::ForegroundCheckoutPresence> {
+    if args.dry_run {
+        return None;
+    }
+    let (tool, run, claim) = match args.command.as_ref() {
+        Some(args::Command::Grind { url }) => ("grind", url.clone(), true),
+        Some(args::Command::Do { target }) => ("do", target.clone(), true),
+        Some(args::Command::Fix { url }) => ("fix", url.clone(), true),
+        _ => ("clud", None, false),
+    };
+    if !daemon_ready {
+        if claim {
+            eprintln!("[clud] cannot claim checkout: daemon is unavailable; use a new worktree");
+            std::process::exit(1);
+        }
+        return None;
+    }
+    let result = args
+        .daemon_state_dir
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(daemon::default_state_dir)
+        .and_then(|state_dir| {
+            let cwd = std::env::current_dir()?;
+            let presence = daemon::start_foreground_presence(
+                &state_dir,
+                &cwd,
+                tool,
+                run,
+                claim,
+                std::sync::Arc::clone(interrupted),
+            )?;
+            if args.daemon_state_dir.is_some() {
+                std::env::set_var(daemon::ENV_STATE_DIR, &state_dir);
+            }
+            Ok(presence)
+        });
+    match result {
+        Ok(presence) => presence,
+        Err(error) if claim => {
+            eprintln!("[clud] cannot claim checkout: {error}");
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("[clud] note: checkout presence unavailable: {error}");
+            None
+        }
+    }
 }
 
 /// Modes that must run before the crash reporter, the runtime-cache hop and
@@ -170,6 +227,7 @@ fn dispatch_fast_path_command(cmd: Option<&args::Command>) -> Option<i32> {
         args::Command::DoPrompt { target } => command::do_prompt::run(target),
         args::Command::GrindScripts => command::grind_scripts::run(),
         args::Command::GrindFacts { args } => clud::grind_facts::run_cli(args),
+        args::Command::Claim { action } => daemon::run_claim_command(action),
         args::Command::SafeRm { args } => clud::rm_tool::run(args),
         args::Command::InstallAssets { home } => install_assets(home.as_deref()),
         args::Command::Tool { subcommand } => {
@@ -1180,7 +1238,14 @@ fn start_early_daemon(args: &args::Args) -> Option<daemon::ForegroundClientLease
     // this to `command.is_none()`, which pushed the centralized path's daemon
     // start after the tracker and left `clud loop --repeat` with a daemon that
     // did not outlive the launch.
-    let needs_early_daemon = args.command.is_none() || daemon::experimental_enabled(args);
+    let needs_early_daemon = args.command.is_none()
+        || daemon::experimental_enabled(args)
+        || matches!(
+            args.command.as_ref(),
+            Some(
+                args::Command::Grind { .. } | args::Command::Do { .. } | args::Command::Fix { .. }
+            )
+        );
     if !needs_early_daemon || args.no_daemon || args.dry_run {
         if args.verbose {
             verbose_log::log("[clud] daemon: skipped");
@@ -1195,7 +1260,12 @@ fn start_early_daemon(args: &args::Args) -> Option<daemon::ForegroundClientLease
     if args.verbose {
         verbose_log::log("[clud] daemon: ensure running");
     }
-    let state_dir = match daemon::default_state_dir() {
+    let state_dir = match args
+        .daemon_state_dir
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(daemon::default_state_dir)
+    {
         Ok(state_dir) => state_dir,
         Err(e) => {
             eprintln!("[clud] note: cannot resolve state dir: {}", e);

@@ -129,7 +129,9 @@ fn format_duration_short(millis: u64) -> String {
 pub(super) fn run_list(state_dir: &Path) -> i32 {
     let sessions = list_background_sessions(state_dir);
     let api_sessions = ApiSessionStore::new(state_dir).list().unwrap_or_default();
-    if sessions.is_empty() && api_sessions.is_empty() {
+    let has_api_sessions = !api_sessions.is_empty();
+    let checkout_sessions = super::checkout_claims::all_live(state_dir).unwrap_or_default();
+    if sessions.is_empty() && api_sessions.is_empty() && checkout_sessions.is_empty() {
         println!("No background sessions.");
         return 0;
     }
@@ -194,6 +196,28 @@ pub(super) fn run_list(state_dir: &Path) -> i32 {
                 session.id,
                 format!("{:?}", session.state).to_ascii_lowercase(),
                 session.cwd.display()
+            );
+        }
+    }
+    if !checkout_sessions.is_empty() {
+        if has_background_sessions || has_api_sessions {
+            println!();
+        }
+        println!(
+            "{:<30} {:<8} {:<9} CHECKOUT",
+            "LIVE SESSION", "PID", "CLAIM"
+        );
+        for (checkout, occupant) in checkout_sessions {
+            println!(
+                "{:<30} {:<8} {:<9} {}",
+                occupant.session_id,
+                occupant.pid,
+                if occupant.claimed {
+                    "claimed"
+                } else {
+                    "present"
+                },
+                checkout.worktree.display()
             );
         }
     }

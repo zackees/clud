@@ -6360,3 +6360,25 @@ poll read only through GraphQL, is seen at the heartbeat. Below the floor,
 watchers stall until the reset instead of draining the budget. A person's
 `gh api` still goes through, and nothing reports success on cached data.
 The watcher's copy of `FORWARDED_ENV` is pinned by a test.
+
+## DD-155: checkout claims live on daemon connections
+
+**Context:** Two agent sessions can enter the same Git checkout and make
+conflicting commits or branch changes. A lock file can outlive a killed
+process and cannot distinguish independent worktrees of one repository.
+
+**Decision:** The daemon records a canonical worktree and common Git directory
+for each live foreground connection. It grants at most one mutation claim per
+worktree and removes claims when their connection closes. Claiming clients keep
+an intent marker in daemon state so they can restore their claim after daemon
+restart; the daemon gives existing clients a short grace period before a new
+claim can be granted. A confirmed release clears the live claim and its
+marker. The PreToolUse hook queries the daemon only for selected mutating Git
+verbs, and fails open with a warning when the daemon is unavailable. If claim
+restoration loses a race after the grace period, the foreground client
+interrupts its agent instead of continuing without a claim.
+
+**Consequences:** A killed client releases its claim without stale lock
+cleanup. Sibling worktrees remain independent. A claim requiring command
+refuses to proceed while the daemon is down, while ordinary launches and
+commands without a mutation claim continue.

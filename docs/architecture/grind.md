@@ -6,6 +6,10 @@ it is a bug, not a compatibility contract.
 
 ## Launch
 
+`clud grind` acquires the current checkout's mutation claim before the
+harness starts; direct `/grind` invocations acquire it in the router. See
+[checkout claims](checkout-claims.md) for contention and restart behavior.
+
 `clud grind [url]` starts exactly one normal, foreground, interactive PTY
 session for the Claude harness. With no URL, clud resolves the repository's
 `origin` remote to its forge issues page; an explicit URL is used verbatim.

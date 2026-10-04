@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +16,7 @@ use crate::orphan_reaper;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::activity::{should_idle_shutdown, DaemonActivity};
+use super::checkout_claims::{CheckoutClaimRegistry, CheckoutRequest};
 use super::client::cleanup_stale_state;
 use super::client_leases::ClientLeaseRegistry;
 use super::daemon_events;
@@ -233,6 +234,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let client_leases = ClientLeaseRegistry::default();
+    let checkout_claims = CheckoutClaimRegistry::new(Duration::from_secs(2));
     let mut last_client_lease_prune = Instant::now();
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     // #933: a daemon's base environment is the OS/login environment, not the
@@ -314,6 +316,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 let shutdown_requested = Arc::clone(&shutdown_requested);
                 let proc_sampler = proc_sampler.clone();
                 let client_leases = client_leases.clone();
+                let checkout_claims = checkout_claims.clone();
                 let activity = activity.clone();
                 let api_lifecycle = Arc::clone(&api_lifecycle);
                 thread::spawn(move || {
@@ -328,6 +331,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                             shutdown_requested: &shutdown_requested,
                             proc_sampler: &proc_sampler,
                             client_leases: &client_leases,
+                            checkout_claims: &checkout_claims,
                             activity: &activity,
                             api_lifecycle: &api_lifecycle,
                         },
@@ -454,6 +458,7 @@ struct TcpConnectionServices<'a> {
     shutdown_requested: &'a Arc<AtomicBool>,
     proc_sampler: &'a ProcSamplerHandle,
     client_leases: &'a ClientLeaseRegistry,
+    checkout_claims: &'a CheckoutClaimRegistry,
     activity: &'a DaemonActivity,
     api_lifecycle: &'a Arc<super::api_session_lifecycle::ApiSessionLifecycle>,
 }
@@ -466,6 +471,9 @@ fn handle_daemon_connection(
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(());
+    }
+    if let Ok(request) = serde_json::from_str::<CheckoutRequest>(&line) {
+        return handle_checkout_connection(&mut stream, reader, services.checkout_claims, request);
     }
     let (request, response_format) = decode_daemon_request_line(&line).map_err(wire_error_to_io)?;
     let request_id = daemon_events::request_id();
@@ -512,6 +520,29 @@ fn handle_daemon_connection(
     if is_shutdown {
         let _ = stream.shutdown(std::net::Shutdown::Write);
         services.shutdown_requested.store(true, Ordering::SeqCst);
+    }
+    result
+}
+
+fn handle_checkout_connection(
+    stream: &mut TcpStream,
+    mut reader: BufReader<TcpStream>,
+    claims: &CheckoutClaimRegistry,
+    request: CheckoutRequest,
+) -> io::Result<()> {
+    let connection_id = daemon_events::request_id();
+    let hold_presence = matches!(request, CheckoutRequest::Present { .. });
+    let reply = claims.respond(connection_id, request);
+    let result = serde_json::to_writer(&mut *stream, &reply)
+        .map_err(io::Error::other)
+        .and_then(|()| stream.write_all(b"\n"))
+        .and_then(|()| stream.flush());
+    if result.is_ok() && hold_presence {
+        let mut byte = [0u8; 1];
+        while matches!(reader.read(&mut byte), Ok(1)) {}
+    }
+    if hold_presence {
+        claims.disconnect(connection_id);
     }
     result
 }
@@ -1609,6 +1640,7 @@ fn merge_ctrl_c_profile_for_daemon(session: &mut SessionSnapshot, mut update: Ct
 
 #[cfg(test)]
 mod tests {
+    use super::super::checkout_claims::{CheckoutKey, CheckoutOccupant, CheckoutReply};
     use super::super::wire_prost::{
         decode_daemon_response_line, encode_daemon_request_line, DaemonWireFormat,
     };
@@ -1617,6 +1649,99 @@ mod tests {
     use std::net::TcpStream;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn checkout_claim_round_trips_through_daemon_tcp_handler() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let claims = CheckoutClaimRegistry::new(Duration::ZERO);
+        let observed_claims = claims.clone();
+        let server = thread::spawn(move || {
+            let mut workers = Vec::new();
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let claims = claims.clone();
+                workers.push(thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request = serde_json::from_str(&line).unwrap();
+                    handle_checkout_connection(&mut stream, reader, &claims, request).unwrap();
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        let key = CheckoutKey {
+            worktree: "/repo".into(),
+            common_git_dir: "/repo/.git".into(),
+        };
+        let call = |request: CheckoutRequest| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            serde_json::to_writer(&mut stream, &request).unwrap();
+            stream.write_all(b"\n").unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            (
+                stream,
+                serde_json::from_str::<CheckoutReply>(&line).unwrap(),
+            )
+        };
+        let (presence, reply) = call(CheckoutRequest::Present {
+            checkout: key.clone(),
+            occupant: CheckoutOccupant {
+                session_id: "one".into(),
+                pid: 1,
+                tool: "grind".into(),
+                run: None,
+                started_at: 1,
+                claimed: false,
+            },
+        });
+        assert!(matches!(reply, CheckoutReply::Present { .. }));
+        assert!(matches!(
+            call(CheckoutRequest::Claim {
+                checkout: key.clone(),
+                session_id: "one".into(),
+                restoring: false,
+            })
+            .1,
+            CheckoutReply::Claimed
+        ));
+        let (second_presence, _) = call(CheckoutRequest::Present {
+            checkout: key.clone(),
+            occupant: CheckoutOccupant {
+                session_id: "two".into(),
+                pid: 2,
+                tool: "do".into(),
+                run: None,
+                started_at: 2,
+                claimed: false,
+            },
+        });
+        assert!(matches!(
+            call(CheckoutRequest::Claim {
+                checkout: key.clone(),
+                session_id: "two".into(),
+                restoring: false,
+            }).1,
+            CheckoutReply::Refused { holder: Some(holder), .. } if holder.session_id == "one"
+        ));
+        let (_, reply) = call(CheckoutRequest::Who {
+            checkout: key.clone(),
+            exclude_session: None,
+        });
+        assert!(
+            matches!(reply, CheckoutReply::Who { occupants } if occupants.len() == 2 && occupants.iter().filter(|person| person.claimed).count() == 1)
+        );
+        drop(presence);
+        drop(second_presence);
+        server.join().unwrap();
+        assert!(observed_claims.who(&key, None).is_empty());
+    }
 
     #[test]
     fn api_kill_dispatch_uses_the_supplied_lifecycle_owner() {

@@ -4,7 +4,7 @@ description: "Work through a list of goals (a meta issue, issue list, free-form 
 triggers:
   - When the user runs /grind or clud grind
 disable-model-invocation: true
-allowed-tools: Bash(clud grind-scripts:*), Bash(clud grind-facts:*)
+allowed-tools: Bash(clud grind-scripts:*), Bash(clud grind-facts:*), Bash(clud claim acquire:*), Bash(clud claim release-own:*)
 ---
 <!-- managed-by: clud -->
 
@@ -17,6 +17,10 @@ yourself from the repository root. If that fails too, treat the repository as
 having no scripts and skip the scripts question.
 
 # /grind
+
+Before intake or any checkout mutation, run `clud claim acquire` in the
+current checkout. If the daemon is unavailable or another session holds the
+claim, stop and offer a new worktree or a retry after the claim releases.
 
 Router for the grind DAG. It gathers every answer up front, then hands the
 deterministic part to the bundled `grind-run` workflow.
@@ -511,6 +515,7 @@ two), whether or not every goal merged:
 5. **Report what you could not clean or restore**, and why. Never delete
    work the run did not create to get a clean status, and never ask about
    repo state here; report it instead.
+6. **Release this run's checkout claim** with `clud claim release-own`.
 
 ## The DAG
 

@@ -11,6 +11,10 @@ triggers:
 
 # /clud-fix-quick
 
+Before the first edit, run `clud claim acquire` in the current checkout.
+If the daemon is unavailable or another session holds the claim, stop and
+offer a new worktree or a retry after the claim releases.
+
 Speed mode for small, well-understood changes. Edits files in place on the current
 branch (no disposable worktree), runs the smallest set of gates that
 still catches regressions, then pushes — directly when the branch
@@ -177,6 +181,7 @@ for review purposes; run the source gates.
     any non-default test/lint/review notes. A recovered push race is
     reported as a note (`push: direct after rebase onto <sha>`), not
     as a blocker.
+11. **Release this run's checkout claim** with `clud claim release-own`.
 
 ## Push-Race Recovery
 

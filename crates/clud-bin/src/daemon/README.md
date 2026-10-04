@@ -1,5 +1,8 @@
 # daemon/
 
+`checkout_claims.rs` owns live checkout presence and exclusive mutation claims
+(see [checkout claims](../../../../docs/architecture/checkout-claims.md)).
+
 Provider/harness metadata travels additively inside each worker's
 `LaunchPlan`; repeat commands pin both resolved choices. See
 [docs/architecture/codex-via-claude.md](../../../../docs/architecture/codex-via-claude.md)
