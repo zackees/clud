@@ -1810,6 +1810,10 @@ fn serve_unified_messages(
                     // probing off so the client receives the real upstream
                     // status instead of a silent hang.
                     warn_route_exhausted(attempt.route, verdict, state, None);
+                    if verdict == RouteVerdict::ProviderFault {
+                        write_provider_fault(stream, attempt.route);
+                        return;
+                    }
                     return finish_without_failover(
                         stream,
                         config,
@@ -1833,6 +1837,21 @@ fn serve_unified_messages(
             }
         }
     }
+}
+
+fn write_provider_fault(stream: &mut TcpStream, route: ConversationRoute) {
+    let body = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": format!(
+                "gateway route {} returned a malformed Messages response",
+                route.as_str()
+            ),
+        }
+    })
+    .to_string();
+    let _ = write_response(stream, 502, "application/json", body.as_bytes(), false);
 }
 
 /// The catalog row a unified request's model names, plus the legacy
@@ -2466,7 +2485,7 @@ fn serve_anthropic_proxy(
     // sees that a provider declined. A prefix that does not read as
     // route-terminal falls through and is re-emitted below, so the probe costs
     // the client nothing.
-    let prefix = if probe && may_be_route_terminal(status) {
+    let mut prefix = if probe && may_be_route_terminal(status) {
         match probe_route_prefix(reader.as_mut(), status, &probe_headers) {
             Ok(prefix) => prefix,
             Err(verdict) => return ProxyOutcome::Declined(verdict),
@@ -2474,6 +2493,12 @@ fn serve_anthropic_proxy(
     } else {
         Vec::new()
     };
+    if status == 200 && target.path == "/v1/messages" {
+        match inspect_messages_response(reader.as_mut(), &content_type) {
+            Ok(checked) => prefix.extend_from_slice(&checked),
+            Err(verdict) => return ProxyOutcome::Declined(verdict),
+        }
+    }
 
     let head = ProxyResponseHead {
         status,
@@ -2493,6 +2518,95 @@ fn serve_anthropic_proxy(
     let _ = stream.flush();
     let _ = stream.shutdown(Shutdown::Both);
     ProxyOutcome::Committed { status }
+}
+
+const MESSAGE_JSON_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// Verify the response before committing HTTP 200 to Claude Code. Once that
+/// status is sent, a malformed provider body can no longer use the ladder.
+fn inspect_messages_response(
+    reader: &mut dyn Read,
+    content_type: &str,
+) -> Result<Vec<u8>, RouteVerdict> {
+    if content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream")
+    {
+        return inspect_first_stream_event(reader);
+    }
+    if !content_type.to_ascii_lowercase().contains("json") {
+        return Ok(Vec::new());
+    }
+    let mut body = Vec::new();
+    reader
+        .take(MESSAGE_JSON_LIMIT + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| RouteVerdict::ProviderFault)?;
+    if body.len() as u64 > MESSAGE_JSON_LIMIT {
+        return Err(RouteVerdict::ProviderFault);
+    }
+    let message: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| RouteVerdict::ProviderFault)?;
+    if message.get("type").and_then(serde_json::Value::as_str) != Some("message")
+        || message.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
+        || !message
+            .get("content")
+            .is_some_and(serde_json::Value::is_array)
+        || !message.get("id").is_some_and(serde_json::Value::is_string)
+        || !message
+            .get("model")
+            .is_some_and(serde_json::Value::is_string)
+        || !message
+            .get("usage")
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return Err(RouteVerdict::ProviderFault);
+    }
+    Ok(body)
+}
+
+/// A stream with no SSE event has the same provider fault as a non-Message
+/// JSON retry. Keep the first event's bytes so forwarding stays lossless.
+fn inspect_first_stream_event(reader: &mut dyn Read) -> Result<Vec<u8>, RouteVerdict> {
+    let mut prefix = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while prefix.len() < FAILURE_PREFIX_BYTES {
+        let count = reader
+            .read(&mut chunk)
+            .map_err(|_| RouteVerdict::ProviderFault)?;
+        if count == 0 {
+            break;
+        }
+        prefix.extend_from_slice(&chunk[..count]);
+        if has_complete_sse_event(&prefix) {
+            return Ok(prefix);
+        }
+    }
+    Err(RouteVerdict::ProviderFault)
+}
+
+fn has_complete_sse_event(bytes: &[u8]) -> bool {
+    let mut start = 0;
+    let mut has_data = false;
+    for (end, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let mut line = &bytes[start..end];
+        if line.last() == Some(&b'\r') {
+            line = &line[..line.len() - 1];
+        }
+        if line.is_empty() {
+            if has_data {
+                return true;
+            }
+            has_data = false;
+        } else if line.starts_with(b"data:") {
+            has_data = true;
+        }
+        start = end + 1;
+    }
+    false
 }
 
 /// The upstream request for one proxy hop: byte-idle timeouts, and only the
@@ -6409,6 +6523,150 @@ Connection: close
             body.len()
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn non_message_json_from_a_provider_fails_over_before_http_200_is_committed() {
+        let valid = r#"{"id":"msg_ok","type":"message","role":"assistant","model":"claude-opus-4-1","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let claude = FakeResponses::start_with_response(Some(raw_response(200, "OK", valid)));
+        let deepseek = FakeResponses::start_with_response(Some(raw_response(
+            200,
+            "OK",
+            r#"{"error":{"message":"provider gateway fault"}}"#,
+        )));
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-flash",
+                "malformed-json-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("msg_ok"), "{response}");
+        assert!(!response.contains("provider gateway fault"), "{response}");
+        assert_eq!(deepseek.requests().len(), 1);
+        assert_eq!(claude.requests().len(), 1);
+    }
+
+    #[test]
+    fn non_message_json_without_a_fallback_is_a_named_gateway_error() {
+        let claude = FakeResponses::start();
+        let deepseek =
+            FakeResponses::start_with_response(Some(raw_response(200, "OK", r#"{"choices":[]}"#)));
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-flash",
+                "malformed-no-fallback",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&response), 502, "{response}");
+        assert!(response.contains("gateway route deepseek"), "{response}");
+        assert_eq!(deepseek.requests().len(), 1, "do not reissue malformed 200");
+        assert!(claude.requests().is_empty());
+    }
+
+    #[test]
+    fn zero_complete_sse_events_use_the_same_fault_as_non_message_json() {
+        for body in ["", "event: message_start\n", ": data: fake event\n\n"] {
+            let claude = FakeResponses::start();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes();
+            let deepseek = FakeResponses::start_with_response(Some(reply));
+            let config = BridgeConfig::default().with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone()),
+            );
+            let bridge = BridgeHandle::start(config).unwrap();
+            let response = request(
+                bridge.socket_addr(),
+                &unified_message_request(
+                    &bridge,
+                    "clud-claude-deepseek-flash",
+                    "empty-stream-session",
+                    "native-claude-oauth-canary",
+                ),
+            );
+            assert_eq!(status(&response), 502, "{body:?}: {response}");
+            assert!(
+                response.contains("gateway route deepseek"),
+                "{body:?}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_sse_stream_descends_to_a_healthy_route() {
+        let valid = r#"{"id":"msg_ok","type":"message","role":"assistant","model":"claude-opus-4-1","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let claude = FakeResponses::start_with_response(Some(raw_response(200, "OK", valid)));
+        let empty = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let deepseek = FakeResponses::start_with_response(Some(empty));
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone())
+                .with_failover(FailoverLadder::parse("claude-opus-4-1", true).unwrap()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-flash",
+                "empty-stream-failover",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains("msg_ok"), "{response}");
+        assert_eq!(deepseek.requests().len(), 1);
+        assert_eq!(claude.requests().len(), 1);
+    }
+
+    #[test]
+    fn text_plain_response_keeps_the_existing_proxy_behavior() {
+        let claude = FakeResponses::start();
+        let body = "legacy plain response";
+        let plain = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let deepseek = FakeResponses::start_with_response(Some(plain));
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), false)
+                .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-deepseek-flash",
+                "plain-session",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains(body), "{response}");
+        assert!(claude.requests().is_empty());
     }
 
     /// The whole point of #968: a spent route is replayed onto the next rung
