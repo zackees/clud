@@ -79,10 +79,10 @@ jobs:
       # on the base. Never 'true' on push or dispatch. See
       # docs/architecture/ci.md#attested-skip-gate-008010.
       skip_dylint: ${{ steps.gate.outputs.skip_dylint }}
-      skip_lint-linux-x64: ${{ steps.gate.outputs.skip_lint-linux-x64 }}
+      skip_lint-linux-x64: ${{ steps.gate.outputs.skip_lint-linux-x64 || steps.reuse_skip.outputs.skip_lint-linux-x64 }}
       skip_build-linux-x64: ${{ steps.gate.outputs.skip_build-linux-x64 }}
-      skip_test-linux-x64-unit: ${{ steps.gate.outputs.skip_test-linux-x64-unit }}
-      skip_static-checks: ${{ steps.gate.outputs.skip_static-checks }}
+      skip_test-linux-x64-unit: ${{ steps.gate.outputs.skip_test-linux-x64-unit || steps.reuse_skip.outputs.skip_test-linux-x64-unit }}
+      skip_static-checks: ${{ steps.gate.outputs.skip_static-checks || steps.reuse_skip.outputs.skip_static-checks }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,16 +135,22 @@ jobs:
         id: gate
         if: github.event_name == 'pull_request'
         run: PYTHONPATH=.ci-lint python -m ci_lint local-gate verify --repo . --trust --github-output
-      # zackees/ci.yml#157 (GEN-021): measure byte-identical merged-tree
-      # reuse before enabling it. Shadow outputs never select or skip jobs.
-      - name: Default-branch reuse (shadow)
+      # zackees/ci.yml#157 (GEN-021): byte-identical merged-tree reuse.
+      # zackees/ci.yml#310 + owner directive 2026-10-04: promote immediately.
+      # The shadow quota (100 decisive runs, 30 for low-volume) bought
+      # confidence in the tool rather than soundness in the decision, and
+      # by the rule of three 100 clean runs only bounds the false-reuse
+      # rate at ~3%. `reuse-report` on this workflow since 2026-09-30:
+      # 40 decisive runs, 17 safe skips (42.5%), 0 false-reuse candidates.
+      - name: Default-branch reuse (enforce)
         id: reuse
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           PYTHONPATH=.ci-lint python -m ci_lint reuse-check
-          --workflow ci.yml --mode shadow --github-output --out reuse-check.json
+          --workflow ci.yml --mode enforce --github-output --out reuse-check.json
+          --max-age-hours 12
           --required-job 'Static checks'
           --required-job 'Dylint / Dylint'
           --required-job 'Clippy linux-x64 / x86_64-unknown-linux-gnu'
@@ -152,6 +158,44 @@ jobs:
           --required-job 'Test linux-x64 (unit) (rust) / x86_64-unknown-linux-gnu unit'
           --required-job 'Test linux-x64 (unit) (py1of2) / x86_64-unknown-linux-gnu unit'
           --required-job 'Test linux-x64 (unit) (py2of2) / x86_64-unknown-linux-gnu unit'
+      # GEN-021 strategy (i) from docs/designs/default-branch-verified-reuse.md
+      # section 8: on a reused push, skip the VALIDATION jobs and keep the
+      # CACHE WRITERS. Dylint and Build linux-x64 still run, so every main
+      # push keeps refreshing the caches PRs restore from; only the work a
+      # green PR already proved is skipped.
+      #
+      # Why there is no nightly full run here, despite the design asking for
+      # one as the drift backstop: measured over 12 recent successful main
+      # pushes, a main-push run costs 14.9 runner-minutes of which 7.1 (48%)
+      # is skippable validation. At the observed 1.63 main pushes/day and a
+      # 42-60% reuse rate, reuse saves ~5 runner-min/day -- while a nightly
+      # minimal-tier run costs 14.9/day and a full-tier one ~60/day. The
+      # backstop would cost 3-12x what it protects. The drift window is
+      # instead bounded by --max-age-hours 12 above (a proving run older
+      # than 12h forces a full run) plus the live re-verification
+      # reuse-check performs on every job it skips. Revisit if the push rate
+      # rises enough for a nightly to pay for itself.
+      #
+      # Fail-closed by construction: this step emits nothing unless the
+      # decision above set reuse=true, which reuse-check only does after one
+      # merged PR, an identical tree, and a green per-job proving run.
+      - name: Select jobs to skip on a verified reuse
+        id: reuse_skip
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          REUSE: ${{ steps.reuse.outputs.reuse }}
+        run: |
+          set -euo pipefail
+          if [ "$REUSE" != "true" ]; then
+            echo "reuse is '$REUSE' -- no job is skipped"
+            exit 0
+          fi
+          # Validation only. dylint and build-linux-x64 are deliberately
+          # absent: they are the default-branch cache writers.
+          for job in static-checks lint-linux-x64 test-linux-x64-unit; do
+            echo "skip_$job=true" >> "$GITHUB_OUTPUT"
+          done
+          echo "skipping validation jobs on a verified byte-identical merge"
 
   # Everything platform-independent, once, on the cheapest runner. Previously
   # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
@@ -498,11 +542,16 @@ jobs:
           PR: ${{ needs.static.outputs.reuse_pr }}
           RUN_URL: ${{ needs.static.outputs.reuse_run_url }}
           TREE: ${{ needs.static.outputs.reuse_tree }}
+          REUSE: ${{ needs.static.outputs.reuse }}
         run: |
           {
-            echo '### Default-branch reuse (shadow)'
-            printf '\nWould reuse: %s\n\nReason: %s\n\nPR: %s\n\nProving run: %s\n\nTree: %s\n' "$WOULD_REUSE" "$REASON" "$PR" "$RUN_URL" "$TREE"
-            echo 'All selected jobs still run; this decision only collects evidence.'
+            echo '### Default-branch verified reuse'
+            printf '\nReuse: %s\n\nWould reuse: %s\n\nReason: %s\n\nPR: %s\n\nProving run: %s\n\nTree: %s\n' "$REUSE" "$WOULD_REUSE" "$REASON" "$PR" "$RUN_URL" "$TREE"
+            if [ "$REUSE" = "true" ]; then
+              echo 'Validation jobs were skipped; Dylint and Build linux-x64 still ran as cache writers.'
+            else
+              echo 'No job was skipped; every selected job ran in full.'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       # `always()` plus explicit result inspection is required: a failing
       # `needs` would otherwise skip this job and leave the check pending
