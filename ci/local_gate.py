@@ -46,12 +46,14 @@ def _ok_job(jobs: dict[str, object], key: str, steps: tuple[str, ...]) -> bool:
     sections = job.get("sections")
     if not isinstance(sections, list):
         return False
-    return all(sum(isinstance(s, dict) and s.get("name") == step and s.get("status") == "completed"
+    return all(sum(isinstance(s, dict) and s.get("name") == step and s.get("stage") == "Main"
+                   and s.get("status") == "completed"
                    and s.get("conclusion") == "success" for s in sections) == 1 for step in steps)
 
 
 def _parse_job_tree(tree: object) -> dict[str, object]:
-    if (not isinstance(tree, dict) or tree.get("malformed_lines") != 0
+    if (not isinstance(tree, dict) or type(tree.get("malformed_lines")) is not int
+            or tree.get("malformed_lines") != 0
             or not isinstance(tree.get("groups"), list)):
         raise ValueError("Bosn job tree is missing or malformed")
     jobs: dict[str, object] = {}
@@ -69,17 +71,28 @@ def _parse_job_tree(tree: object) -> dict[str, object]:
 def _checked_jobs(result: object, *, head: str, lane: str | None) -> dict[str, object]:
     if not isinstance(result, dict):
         raise ValueError("Bosn returned no structured run record")
-    required = {
-        "schema_version": 1, "repository": "zackees/clud",
+    required: dict[str, str | int] = {
+        "schema_version": 1, "repository": "zackees/clud", "engine": "act",
         "workflow": ".github/workflows/ci.yml", "trigger": "pr", "mode": "minimal",
         "sha": head, "state": "done", "conclusion": "success",
         "exit_code": 0, "act_exit_code": 0,
     }
-    if any(result.get(key) != value for key, value in required.items()):
+    if any(type(result.get(key)) is not type(value) or result.get(key) != value
+           for key, value in required.items()):
         raise ValueError("Bosn run metadata differs from this PR head or is not successful")
     if (result.get("dirty") is not None
             or not re.fullmatch(r"[0-9a-f]{64}", str(result.get("tree_digest")))):
         raise ValueError("Bosn did not run a clean source snapshot")
+    workspace = result.get("workspace")
+    if not isinstance(workspace, str) or Path(workspace).resolve() != ROOT.resolve():
+        raise ValueError("Bosn ran a different workspace")
+    version = result.get("act_version")
+    match = (
+        re.fullmatch(r"\d+\.\d+\.\d+-act2\.(\d+)", version)
+        if isinstance(version, str) else None
+    )
+    if match is None or int(match.group(1)) < 3:
+        raise ValueError("Bosn must run act2.3 or later with executed-step proof")
     if result.get("job") != (JOB_IDS[lane] if lane else None):
         raise ValueError("Bosn selected a different job plan")
     return _parse_job_tree(result.get("tree"))

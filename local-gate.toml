@@ -10,7 +10,7 @@
 # `Local-Gate:` trailer plus one `Ci-Attestation:` per gate in
 # ci-attestations.yml. The static job then lets the routine Linux lanes skip.
 [gate]
-run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate"]
+run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate"]
 verify = "ci.yml:static"
 # Opt-in: an unattested PR head is reported, never failed. It simply runs
 # every lane remotely, as before.
@@ -23,26 +23,26 @@ receipt = "lane-passes-v1"
 min-misses = 3
 
 [gate.lanes.static]
-run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "static"]
+run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "static"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.dylint]
-run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "dylint"]
+run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "dylint"]
 exclude = ["tests/test_*.py"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.clippy]
-run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "clippy"]
+run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "clippy"]
 exclude = ["tests/test_*.py"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.build]
-run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "build"]
+run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "build"]
 exclude = ["tests/test_*.py"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.unit]
-run = ["uv", "run", "--no-project", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "unit"]
+run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "unit"]
 tools = ["bosn", "docker", "uv", "python"]
 
 # GATE-008: an attested PR head skips the remote routine Linux lanes. They

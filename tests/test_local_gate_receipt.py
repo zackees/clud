@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 
 import pytest
 
-from ci.local_gate import proved_lanes
+from ci.local_gate import ROOT, proved_lanes
 
 HEAD = "a" * 40
 EXPECTED = {
@@ -30,7 +31,8 @@ def _record() -> dict[str, object]:
         {
             "key": key, "status": "completed", "conclusion": "success",
             "sections": [
-                {"name": step, "status": "completed", "conclusion": "success"}
+                {"name": step, "stage": "Main", "status": "completed",
+                 "conclusion": "success"}
                 for step in steps
             ],
         }
@@ -48,6 +50,7 @@ def _record() -> dict[str, object]:
         "sha": HEAD, "state": "done", "conclusion": "success",
         "exit_code": 0, "act_exit_code": 0, "dirty": None,
         "tree_digest": "b" * 64, "job": None,
+        "workspace": str(ROOT), "engine": "act", "act_version": "0.2.89-act2.3",
         "tree": {"malformed_lines": 0, "groups": [{"jobs": jobs}]},
     }
 
@@ -87,3 +90,43 @@ def test_wrong_head_dirty_snapshot_and_wrong_selected_job_fail_closed() -> None:
         proved_lanes(dirty, head=HEAD, lane=None)
     with pytest.raises(ValueError, match="different job"):
         proved_lanes(record, head=HEAD, lane="dylint")
+
+
+@dataclass(frozen=True)
+class InvalidMetadata:
+    field: str
+    value: str | bool
+
+
+@pytest.mark.parametrize("case", [
+    InvalidMetadata("engine", "native"),
+    InvalidMetadata("workspace", str(ROOT.parent / "another-checkout")),
+    InvalidMetadata("act_version", "0.2.89-act2.2"),
+    InvalidMetadata("act_version", "0.2.89"),
+    InvalidMetadata("schema_version", True),
+    InvalidMetadata("exit_code", False),
+    InvalidMetadata("act_exit_code", False),
+])
+def test_untrusted_engine_workspace_version_and_boolean_metadata_fail_closed(
+    case: InvalidMetadata,
+) -> None:
+    record = _record()
+    record[case.field] = case.value
+    with pytest.raises(ValueError, match="Bosn"):
+        proved_lanes(record, head=HEAD, lane=None)
+
+
+@pytest.mark.parametrize("stage", ["Pre", "Post", "Complete", None])
+def test_required_step_must_have_executed_in_main_stage(stage: str | None) -> None:
+    record = _record()
+    jobs = record["tree"]["groups"][0]["jobs"]  # type: ignore[index]
+    jobs[1]["sections"][-1]["stage"] = stage
+    with pytest.raises(ValueError, match="dylint"):
+        proved_lanes(record, head=HEAD, lane=None)
+
+
+def test_boolean_malformed_line_count_fails_closed() -> None:
+    record = _record()
+    record["tree"]["malformed_lines"] = False  # type: ignore[index]
+    with pytest.raises(ValueError, match="malformed"):
+        proved_lanes(record, head=HEAD, lane=None)
