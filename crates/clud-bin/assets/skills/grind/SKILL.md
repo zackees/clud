@@ -215,6 +215,10 @@ after it, by the main session or anyone else.
   clones; best for C++/Rust or other heavy repos where a cold worktree build
   is expensive. (iii) *Cron*: one issue per `/loop` tick, each tick a
   sequential run.
+  In parallel mode, keep Cargo targets private while integrators can build or
+  test different branches concurrently. An operator may opt in to a shared
+  `CARGO_TARGET_DIR` only when builds and tests are serialized, following
+  `/clud-git`'s Rust target directory guidance (#1685).
 - **Models**, one question for the planner, worker, reviewer and integrator
   (the lander shares the integrator's, prework the planner's): first "the
   session's model for every role", labelled "(Recommended)", then up to 3

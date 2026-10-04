@@ -6432,3 +6432,23 @@ does not change `safe_rm.extra_roots` or permit arbitrary directories.
 cleanup with the recoverable trash command. The grant and each deletion carry
 the reason in an audit record. Policy and syntax:
 [rm-tools.md](architecture/rm-tools.md#authorized-sibling-checkouts-1784).
+
+## DD-158: shared Cargo targets are opt-in for serialized worktree builds
+
+**Context:** #1685: each Rust worktree's private `target/` duplicates
+dependency artifacts. A sequential Linux measurement with `soldr cargo check
+-p clud --lib` found a 45.7 s check and 889 MB target for a fresh worktree
+with a warm compiler cache, versus 2.25 s using an already populated shared
+target on identical source. Changing a workspace source comment made the shared
+check take 16.8 s.
+
+**Decision:** `/clud-git` documents `CARGO_TARGET_DIR=<main-checkout>/target`
+as an explicit option for sequential Rust work. `/grind` keeps private targets
+when branches may build or test concurrently. Clud does not set
+`CARGO_TARGET_DIR` automatically.
+
+**Consequences:** dependency artifacts and disk space can be reused when the
+operator serializes builds. Cargo's target lock also serializes competing
+writers; workspace outputs and binaries can be replaced by another branch's
+build, so concurrent branch tests must retain private targets. Measurement
+details and limits are in [skill-system.md](architecture/skill-system.md#worktree-cargo-targets-1685).

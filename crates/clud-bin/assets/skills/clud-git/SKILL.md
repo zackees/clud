@@ -31,6 +31,23 @@ The three hard rules below are non-negotiable — this skill exists to centraliz
 4. **Create.** `git worktree add -b <branch> .claude/worktrees/<short-name> origin/main`. The path component is freely chosen — convention is `<slice-or-feature>-<issue-number>` so leftover dirs are searchable.
 5. **RED -> GREEN inside the worktree.** All edits, lint, tests, and commits happen inside the worktree path. Never edit the main checkout for worktree-scoped work.
 
+### Rust target directory for sequential work
+
+For one Rust build or test at a time, you may opt in to reusing the main
+checkout's Cargo target directory: set `CARGO_TARGET_DIR=<main-checkout>/target`
+for each worktree command. Keep the target in the persistent main checkout, not
+in a worktree that will be removed. Cargo serializes builds sharing a target,
+and dependencies can be reused. Workspace crate outputs and
+`target/debug/clud` can be replaced by a build from another branch, so never
+share the target while different worktrees build or test concurrently. In
+particular, integration tests that locate a binary through `CARGO_TARGET_DIR`
+must use a private target if another branch can build at the same time.
+
+This is opt-in: leave each worktree's target private when concurrent builds or
+tests are expected. Prefer the local checkout for sequential Rust work when it
+already has a warm target. The measurement and limits are in
+`docs/architecture/skill-system.md` (#1685).
+
 ## Worktree teardown playbook
 
 1. **`git status` clean check.** Inside the worktree, confirm no uncommitted changes — refuse to tear down a dirty worktree without explicit user OK.
