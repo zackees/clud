@@ -56,10 +56,10 @@ one clud would have produced anyway.
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash", "command": "uv run python ci/hooks/check_cmd.py" }
+      { "matcher": "Bash", "command": "uv run --frozen --no-sync python ci/hooks/check_cmd.py" }
     ],
     "Stop": [
-      { "command": "uv run python ci/hooks/check_on_stop.py", "timeout": 120 }
+      { "command": "uv run --frozen --no-sync python ci/hooks/check_on_stop.py", "timeout": 120 }
     ]
   }
 }
@@ -77,6 +77,26 @@ one clud would have produced anyway.
 Parsing is lenient in the same way `repo_clud_config` is: one malformed entry
 is skipped with a warning rather than taking the file's other hooks down with
 it.
+
+### Native hook dependency failures (#1739)
+
+At launch, `hook_health` counts PreToolUse commands in each Claude or Codex
+hook settings file that call `uv run` without `--no-sync` or
+`--no-project`. It emits one warning per file. A new or unpublished dependency
+pin in the working tree can otherwise make every hook invocation fail before
+its script starts. Use `uv run --no-sync` when the environment is already
+installed, or `--no-project` for a stdlib-only hook script. `--frozen` alone
+prevents lockfile updates but still syncs the environment.
+
+Claude Code itself formats failures from commands still declared in
+`.claude/settings.json`: for a nonblocking exit without valid JSON, it shows
+only the first stderr line and does not send the failure to the agent. Clud's
+launch warning can prevent the dependency failure but cannot change that
+renderer behavior or deduplicate its per-call notices. A hook that needs to
+report a nonblocking diagnostic to the agent must return valid JSON with
+`hookSpecificOutput.additionalContext` for its event. Moving a hook into
+`.clud/hooks.json` gives clud control of execution, subject to the Tier B
+contract below.
 
 **Migrating means moving, not copying.** A command left in
 `.claude/settings.json` *and* declared here runs twice, and the copy the

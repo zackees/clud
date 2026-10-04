@@ -65,7 +65,7 @@ const LEGACY_RUST_TRAMPOLINES: &[&str] = &[
 ];
 const SHELL_WRAPPERS: &[&str] = &["cmd", "powershell", "pwsh", "bash", "sh", "zsh", "eval"];
 
-const UV_RUN_OPTIONS_WITH_VALUE: &[&str] = &[
+pub(crate) const UV_RUN_OPTIONS_WITH_VALUE: &[&str] = &[
     "--allow-insecure-host",
     "--cache-dir",
     "--color",
@@ -112,7 +112,8 @@ const UV_RUN_OPTIONS_WITH_VALUE: &[&str] = &[
     "--with-editable",
     "--with-requirements",
 ];
-const UV_RUN_SHORT_OPTIONS_WITH_VALUE: &[&str] = &["-C", "-P", "-f", "-i", "-m", "-p", "-s", "-w"];
+pub(crate) const UV_RUN_SHORT_OPTIONS_WITH_VALUE: &[&str] =
+    &["-C", "-P", "-f", "-i", "-m", "-p", "-s", "-w"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookPayloadView {

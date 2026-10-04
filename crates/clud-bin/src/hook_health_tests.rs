@@ -34,6 +34,7 @@ fn launch_hook_gate_follows_effective_harness_not_provider_flag() {
     )
     .unwrap();
     assert!(!should_check_launch(&cross_route_args, claude_harness));
+    assert!(should_warn_uv_launch(&cross_route_args));
 
     let bare_args = Args::parse_from(["clud"]);
     let saved_codex = crate::backend::resolve_launch_target(
@@ -46,6 +47,46 @@ fn launch_hook_gate_follows_effective_harness_not_provider_flag() {
     )
     .unwrap();
     assert!(should_check_launch(&bare_args, saved_codex));
+}
+
+#[test]
+fn risky_uv_hook_invocations_are_counted_once_per_settings_file() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+            {"type":"command","command":"cd \"$d\" && uv run python ci/hooks/a.py"},
+            {"type":"command","command":"uv run python ci/hooks/b.py"},
+            {"type":"command","command":"uv run --frozen --no-sync python ci/hooks/c.py"},
+            {"type":"command","command":"uv run --no-project python ci/hooks/d.py"},
+            {"type":"command","command":"uv run --frozen python ci/hooks/e.py"}
+        ]}]}}"#,
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+    let uv_warnings = uv_run_hook_warnings(&report.claude);
+    assert_eq!(uv_warnings.len(), 1);
+    assert!(uv_warnings[0].contains("3 Claude PreToolUse hook(s)"));
+    assert!(uv_warnings[0].contains("--frozen` alone still syncs"));
+    assert!(report.warnings.contains(&uv_warnings[0]));
+}
+
+#[test]
+fn uv_hook_flags_belong_to_its_options_not_a_script_or_later_command() {
+    assert!(warnings::uv_run_without_safe_flag(
+        "uv run python a.py --no-sync"
+    ));
+    assert!(warnings::uv_run_without_safe_flag(
+        "uv run python a.py; uv run --no-sync python b.py"
+    ));
+    assert!(!warnings::uv_run_without_safe_flag(
+        "uv run --with foo --no-sync python b.py"
+    ));
+    assert!(warnings::uv_run_without_safe_flag(
+        "uv run --script a.py --no-sync"
+    ));
 }
 
 fn trusted_state_for(path: &Path, group: usize, handler: usize) -> String {

@@ -645,7 +645,9 @@ Skills and hooks:
   "not meta"; #1404), and `diagnostics/transcript_report.py` (#1276,
   [DD-138](../../../docs/DESIGN_DECISIONS.md#dd-138-the-first-1276-slice-is-a-read-only-transcript-analyzer-not-a-repeated-call-guard)).
 - `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
-  remediation. `codex_trust.rs` also owns `codex_project_trusted` — the
+  remediation. `warnings.rs` also groups project-syncing hook commands into
+  one launch warning per settings file (#1739). `codex_trust.rs` owns
+  `codex_project_trusted` — the
   `[projects."<key>"] trust_level = "trusted"` check against
   `~/.codex/config.toml` that gates child/extern Tier-B hook execution in
   codex sessions (#967 Phase 4), and the `add_codex_project_trust` repair
