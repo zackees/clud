@@ -111,7 +111,9 @@ Entry and orchestration:
   of the Anthropic passthrough proxy reads byte-idle rather than on a
   whole-request deadline, reports a mid-stream failure in-band instead of
   closing like a clean end, and answers a timeout 504 rather than 502 (#1263,
-  DD-028 amendment, DD-079).
+  DD-028 amendment, DD-079). Before committing a successful Messages response,
+  it classifies non-Message JSON and zero-event SSE as provider faults (#1698);
+  see `docs/architecture/provider-failover.md`.
 - `codex_model.rs` - #752's Codex compatibility view over the shared provider
   catalog: the `sol`/`terra`/`luna` aliases and per-model defaults, the
   `<model>@<effort>` parser, and the provider-neutral `Effort` ladder
