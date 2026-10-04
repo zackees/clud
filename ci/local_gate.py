@@ -85,7 +85,10 @@ def _checked_jobs(result: object, *, head: str, lane: str | None) -> dict[str, o
     if not isinstance(workspace, str) or Path(workspace).resolve() != ROOT.resolve():
         raise ValueError("Bosn ran a different workspace")
     version = result.get("act_version")
-    match = re.fullmatch(r"\d+\.\d+\.\d+-act2\.(\d+)", version) if isinstance(version, str) else None
+    match = (
+        re.fullmatch(r"\d+\.\d+\.\d+-act2\.(\d+)", version)
+        if isinstance(version, str) else None
+    )
     if match is None or int(match.group(1)) < 3:
         raise ValueError("Bosn must run act2.3 or later with executed-step proof")
     if result.get("job") != (JOB_IDS[lane] if lane else None):
