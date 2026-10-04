@@ -101,7 +101,8 @@ fn usage() -> String {
          \n\
          \x20 --purge    delete for real instead of trashing\n\
          \x20 --tracked  allow git-tracked paths (otherwise use `git rm`)\n\
-         \x20 --dry-run  report what would happen; change nothing",
+         \x20 --dry-run  report what would happen; change nothing\n\
+         \x20 --grant-root <checkout> --reason <reason>  grant a sibling Git checkout for this session",
         keep = TRASH_KEEP.as_secs() / 3_600,
     )
 }
@@ -186,6 +187,7 @@ pub struct Roots {
     pub extra_root_warnings: Vec<String>,
     /// Paths allowed only by an extra root (a subset of `ledger_grants`).
     extra_grants: BTreeMap<PathBuf, String>,
+    session_grants: Vec<session_grants::SessionGrant>,
 }
 
 impl Roots {
@@ -245,6 +247,7 @@ impl Roots {
             extra_roots: Vec::new(),
             extra_root_warnings: Vec::new(),
             extra_grants: BTreeMap::new(),
+            session_grants: Vec::new(),
         }
     }
 
@@ -265,6 +268,12 @@ impl Roots {
     ) -> Self {
         self.extra_roots = roots;
         self.extra_root_warnings = warnings;
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_grants(mut self, grants: Vec<session_grants::SessionGrant>) -> Self {
+        self.session_grants = grants;
         self
     }
 
@@ -339,6 +348,9 @@ impl Roots {
         }
         if self.temp_roots.iter().any(|r| r == path) {
             return Err("is a system temp directory itself".into());
+        }
+        if let Some(result) = self.session_grant_for(path) {
+            return result;
         }
         // Strictly under a human-set extra root (#1668): the temp-root rules,
         // and the override's reason goes into the audit records.
@@ -422,6 +434,27 @@ impl Roots {
             None => format!("is outside the allowed roots ({shown})"),
         };
         Err(refusal + &ledger_clause + OUTSIDE_HINT)
+    }
+
+    fn session_grant_for(&mut self, path: &Path) -> Option<Result<PathBuf, String>> {
+        if let Some(grant) = self
+            .session_grants
+            .iter()
+            .find(|grant| path.starts_with(&grant.root) && path != grant.root)
+            .cloned()
+        {
+            if let Err(error) = self.check_owned_under("the session root grant", &grant.root, path)
+            {
+                return Some(Err(error));
+            }
+            self.ledger_grants
+                .insert(path.to_path_buf(), session_grants::reason(&grant));
+            return Some(Ok(grant.root));
+        }
+        self.session_grants
+            .iter()
+            .any(|grant| grant.root == path)
+            .then(|| Err("is a granted checkout root itself".into()))
     }
 
     /// Refuse `path` under the temp root `temp` when an existing entry
@@ -848,9 +881,15 @@ impl Context {
             }
             None => (Vec::new(), Vec::new()),
         };
-        let roots = Roots::resolve(roots_env.as_deref(), &cwd)
+        let mut roots = Roots::resolve(roots_env.as_deref(), &cwd)
             .with_ledger(Arc::new(source))
             .with_extra_roots(extra, warnings);
+        if let (Some(session), Ok(state)) =
+            (session_id.as_deref(), crate::daemon::default_state_dir())
+        {
+            let grants = session_grants::load(&state, session, &roots.roots);
+            roots = roots.with_session_grants(grants);
+        }
         let role = std::env::var(ROLE_ENV)
             .ok()
             .filter(|r| !r.is_empty())
@@ -909,6 +948,9 @@ pub struct Outcome {
 
 /// `safe-rm` from the process environment. Returns the exit code.
 pub fn run(args: &[String]) -> i32 {
+    if args.first().is_some_and(|arg| arg == "--grant-root") {
+        return run_grant(args);
+    }
     let options = match parse_args(args) {
         Ok(Some(options)) => options,
         Ok(None) => {
@@ -930,6 +972,40 @@ pub fn run(args: &[String]) -> i32 {
     let mut out = std::io::stdout().lock();
     let mut err = std::io::stderr().lock();
     run_with(Kind::Safe, &options, &ctx, &mut roots, &mut out, &mut err)
+}
+
+fn run_grant(args: &[String]) -> i32 {
+    let [_, root, flag, reason] = args else {
+        eprintln!("{COMMAND}: usage: {COMMAND} --grant-root <sibling-checkout> --reason <authorization reason>");
+        return 2;
+    };
+    if flag != "--reason" {
+        eprintln!("{COMMAND}: expected --reason after sibling checkout");
+        return 2;
+    }
+    let Some(session_id) = session_id_from_env() else {
+        eprintln!("{COMMAND}: no clud session id; launch through clud, or set CLUD_SESSION_ID to a unique value before starting this session");
+        return 1;
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        eprintln!("{COMMAND}: cannot resolve current directory");
+        return 1;
+    };
+    let roots = Roots::resolve(std::env::var_os(ROOTS_ENV).as_deref(), &cwd);
+    let Ok(state) = crate::daemon::default_state_dir() else {
+        eprintln!("{COMMAND}: cannot resolve clud state directory");
+        return 1;
+    };
+    match session_grants::grant(Path::new(root), reason, &session_id, &roots.roots, &state) {
+        Ok(root) => {
+            println!("{COMMAND}: granted {} for this session", root.display());
+            0
+        }
+        Err(error) => {
+            eprintln!("{COMMAND}: {error}");
+            1
+        }
+    }
 }
 
 /// The testable core of [`run`].
@@ -1615,6 +1691,9 @@ pub mod ledger;
 
 #[path = "rm_tool_extra_roots.rs"]
 pub mod extra_roots;
+
+#[path = "rm_tool_session_grants.rs"]
+mod session_grants;
 
 #[cfg(test)]
 #[path = "rm_tool_tests.rs"]

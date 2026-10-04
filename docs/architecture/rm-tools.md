@@ -24,6 +24,32 @@ allowed checkout may itself be removed, including one git already dropped from
 file still names the allowed repo's `.git/worktrees/` metadata; #1573). Before a
 move to the trash or a purge, directories in the tree are made writable, so
 sealed read-only build outputs do not abort the removal halfway.
+The command guard refuses assignments and unsets of deletion-policy variables,
+while read-only checks such as `command -v safe-rm; printenv CLUD_RM_ROOTS`
+remain available.
+
+### Authorized sibling checkouts (#1784)
+
+For a coordinated change in another Git checkout beside the launch checkout,
+record an explicit session grant before cleanup:
+
+```sh
+safe-rm --grant-root ../fbuild-wt-ape --reason "authorized APE loader migration"
+safe-rm --tracked ../fbuild-wt-ape/crates/fbuild-core/src/platform/ape/install.rs
+```
+
+The grant requires a nonempty reason, an existing sibling Git checkout owned
+by the caller on Unix, and a session ID. Clud supplies `CLUD_SESSION_ID` to
+Codex and Claude children. For a
+standalone session without one, set it to a unique value before starting the
+session or launch through clud. Each grant is stored under
+`~/.clud/state/rm-grants/` under the hash of the session ID; its record includes
+the canonical checkout, reason, and time; on Unix it also records the checkout's
+device and inode to reject replacement. Only that session can load it. The
+checkout root itself remains protected. Child paths must be
+owned by the caller on Unix, and a symlink leading outside the granted checkout
+is judged at its real destination and refused. A grant reason appears in the
+deletion audit. An unrelated or ungranted sibling stays outside the roots.
 
 ### System temp directories (#1622)
 

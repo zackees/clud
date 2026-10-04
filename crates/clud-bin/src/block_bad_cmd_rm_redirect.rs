@@ -78,16 +78,47 @@ pub(super) enum Redirect {
 /// A rewrite must not launder a shell assignment that changes the deletion
 /// roots, role or program resolution used by the rewritten command.
 pub(super) fn changes_deletion_environment(command: &str) -> bool {
-    tokenize(command).iter().any(|word| {
+    let words = tokenize(command);
+    words.iter().enumerate().any(|(index, word)| {
+        let word = word.trim_matches([';', '&', '|', '(', ')']);
         let name = word
             .split('=')
             .next()
             .unwrap_or_default()
             .trim_end_matches('+');
-        matches!(name, "PATH" | "CLUD_RM_ROOTS" | "CLUD_RM_ROLE" | "CLUD_UNSAFE_MODE")
-            // The system temp directories are deletion roots too (#1622).
-            || (word.contains('=') && matches!(name, "TMPDIR" | "TEMP" | "TMP"))
+        let protected = protected_env_name(name);
+        let shell_mutation = words[..index]
+            .iter()
+            .rev()
+            .take_while(|previous| !previous.ends_with([';', '&', '|']))
+            .any(|previous| {
+                matches!(
+                    previous.as_str(),
+                    "unset" | "unsetenv" | "export" | "setenv"
+                )
+            });
+        (protected && word.contains('='))
+            || (protected
+                && (shell_mutation
+                    || index > 0 && matches!(words[index - 1].as_str(), "-u" | "--unset")))
+            || ["--unset=", "-u"]
+                .iter()
+                .any(|prefix| word.strip_prefix(prefix).is_some_and(protected_env_name))
     })
+}
+
+fn protected_env_name(name: &str) -> bool {
+    matches!(
+        name,
+        "PATH"
+            | "CLUD_RM_ROOTS"
+            | "CLUD_RM_ROLE"
+            | "CLUD_UNSAFE_MODE"
+            | "CLUD_SESSION_ID"
+            | "TMPDIR"
+            | "TEMP"
+            | "TMP"
+    )
 }
 
 pub(super) fn raw_payload_mentions_removal(raw: &str) -> bool {

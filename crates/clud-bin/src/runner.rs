@@ -161,6 +161,7 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
     keys.push(crate::shell::nounset::PREV_KEY);
     keys.push(crate::shell::cmd_gate::GATE_KEY);
     keys.push(crate::rm_tool::ROOTS_ENV);
+    keys.push("CLUD_SESSION_ID");
     keys.push(crate::shim_session::RM_SHIM_DIR_KEY);
     keys.push(crate::shim_session::GH_SHIM_TARGET_KEY);
     keys.push(crate::shim_session::GH_SHIM_ACTIVE_KEY);
@@ -250,6 +251,10 @@ fn apply_child_env_policy_with_nounset_opt_out(
     if unsafe_mode {
         env.push((UNSAFE_MODE_ENV.to_string(), "1".to_string()));
     }
+    // Codex does not provide Claude's session id. Mint one for each clud
+    // launch so safe-mktemp and safe-rm share the creation ledger.
+    let session = child_session_id(&env);
+    push_or_replace(&mut env, "CLUD_SESSION_ID", &session);
 
     // Internal hooks and bundled instructions must use this executable, not
     // a second `clud` resolved from PATH (which may be a different uvx copy).
@@ -358,6 +363,30 @@ fn apply_child_env_policy_with_nounset_opt_out(
     env
 }
 
+fn child_session_id(env: &[(String, String)]) -> String {
+    env.iter()
+        .find(|(key, value)| key == "CLUD_SESSION_ID" && !value.is_empty())
+        .map(|(_, value)| value.clone())
+        .or_else(|| {
+            env.iter()
+                .find(|(key, value)| key == crate::grind_facts::SESSION_ENV && !value.is_empty())
+                .map(|(_, value)| value.clone())
+        })
+        .unwrap_or_else(|| {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!(
+                "clud-{}-{nanos}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )
+        })
+}
+
 /// Build the child environment for a foreground launch: the parent env
 /// plus every policy layer in [`apply_child_env_policy`].
 pub fn child_env() -> Vec<(String, String)> {
@@ -442,6 +471,28 @@ fn push_or_replace(env: &mut Vec<(String, String)>, key: &str, value: &str) {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn child_env_provides_stable_deletion_session_identity() {
+        let with_claude = apply_child_env_policy_with_nounset_opt_out(
+            vec![(
+                crate::grind_facts::SESSION_ENV.into(),
+                "claude-session".into(),
+            )],
+            false,
+            true,
+        );
+        assert_eq!(
+            value(&with_claude, "CLUD_SESSION_ID"),
+            Some("claude-session")
+        );
+
+        let with_codex = apply_child_env_policy_with_nounset_opt_out(Vec::new(), false, true);
+        let minted = value(&with_codex, "CLUD_SESSION_ID").unwrap().to_owned();
+        assert!(minted.starts_with("clud-"));
+        let nested = apply_child_env_policy_with_nounset_opt_out(with_codex, false, true);
+        assert_eq!(value(&nested, "CLUD_SESSION_ID"), Some(minted.as_str()));
+    }
 
     fn value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
         env.iter()

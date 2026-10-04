@@ -36,7 +36,9 @@ pub struct DaemonLedger {
 
 impl CreationLedger for DaemonLedger {
     fn lookup(&self, path: &Path) -> Result<Vec<CreatedEntry>, String> {
-        let session = self.session_id.as_deref().ok_or("no clud session id")?;
+        let session = self.session_id.as_deref().ok_or(
+            "no clud session id; launch through clud, or set CLUD_SESSION_ID to a unique value before starting this session",
+        )?;
         let state = self.state_dir.as_deref().ok_or("no clud state directory")?;
         crate::daemon::gc_client_query_created(
             state,
