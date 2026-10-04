@@ -6409,3 +6409,26 @@ policy without changing settings or reinstalling hooks. The backend's own
 permission mode and the user's project hooks remain independent. The full
 scope and verification contract live in
 [unsafe-mode.md](architecture/unsafe-mode.md).
+
+## DD-157: sibling checkout cleanup uses an explicit session grant
+
+**Context:** #1784: an authorized migration may edit a sister checkout but
+`safe-rm` still refuses to trash obsolete tracked files there. The user-level
+`safe_rm.extra_roots` setting from DD-137 is deliberately unavailable to an
+agent, and Codex lacks Claude's session ID for the creation ledger.
+
+**Decision:** `safe-rm --grant-root <checkout> --reason <reason>` records an
+explicit session-scoped grant only for an existing sibling Git checkout. It
+stores the canonical path, session ID, timestamp, and reason under
+`~/.clud/state/rm-grants/`. On Unix it also stores the checkout's device and
+inode. Every deletion reloads the record and checks that the checkout still
+exists beside the launch checkout; Unix additionally rejects a replaced
+checkout. The checkout root itself remains protected; child paths get the
+existing ownership, symlink and trash checks. Codex children receive a unique
+`CLUD_SESSION_ID`; Claude's own session ID is preserved. This narrow grant
+does not change `safe_rm.extra_roots` or permit arbitrary directories.
+
+**Consequence:** an agent can carry out an explicitly authorized sister-repo
+cleanup with the recoverable trash command. The grant and each deletion carry
+the reason in an audit record. Policy and syntax:
+[rm-tools.md](architecture/rm-tools.md#authorized-sibling-checkouts-1784).

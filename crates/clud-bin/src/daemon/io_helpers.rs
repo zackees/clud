@@ -766,6 +766,7 @@ mod tests {
         let guard = EnvGuard::set_all(&[
             (crate::shell::nounset::OPT_OUT_KEY, None),
             (crate::shell::completion_guard::OPT_OUT_KEY, None),
+            ("CLUD_SESSION_ID", Some("builder-parity-test")),
         ]);
         let client: Vec<(String, String)> = std::env::vars().collect();
         let daemon = child_env_from(&client);
@@ -801,6 +802,7 @@ mod tests {
             ("PATH", "/client/only/bin"),
             ("HOME", home_path.as_str()),
             ("USERPROFILE", home_path.as_str()),
+            ("CLUD_SESSION_ID", "builder-parity-test"),
         ]);
 
         assert_eq!(

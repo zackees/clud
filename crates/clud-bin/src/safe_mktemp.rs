@@ -182,8 +182,9 @@ mod unix {
             .ok_or_else(|| {
                 fail(
                     2,
-                    "no clud session id (CLUD_SESSION_ID / CLAUDE_CODE_SESSION_ID); the \
-                     creation ledger is per session, so nothing created",
+                    "no clud session id (CLUD_SESSION_ID / CLAUDE_CODE_SESSION_ID); \
+                     launch through clud, or set CLUD_SESSION_ID to a unique value before \
+                     starting this session; nothing created",
                 )
             })?;
         let target = target_path(raw, &request.cwd)?;

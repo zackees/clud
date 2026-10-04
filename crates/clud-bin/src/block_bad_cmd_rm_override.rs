@@ -148,6 +148,7 @@ mod tests {
             "jq '.safe_rm.extra_roots=[{\"path\":\"/srv\"}]' ~/.clud/settings.json > /x/s && mv /x/s ~/.clud/settings.json",
             "cat new.json | tee ~/.clud/settings.json",
             "sed -i 's/a/b/' ~/.clud/settings.json",
+            "sed -n 'w /home/u/.clud/settings.json' notes.txt",
             "python -c \"open('/home/u/.clud/settings.json','w').write('{}')\"",
             "cp evil.json ~/.clud/settings.json",
             "cd ~/.clud && echo x > settings.json",

@@ -334,7 +334,8 @@ def test_linux_gnu_history_is_classified_as_host_specific() -> None:
     payload[:6] = b"\x7fELF\x02\x01"
     struct.pack_into("<H", payload, 18, 62)
     payload = bytes(payload)
-    item = release("2.9.0", "https://example.com/windows", wheel("clud.exe", b"MZpayload"))
+    windows_wheel = wheel("clud.exe", b"MZpayload")
+    item = release("2.9.0", "https://example.com/windows", windows_wheel)
     item["assets"].append(
         {
             "name": "clud-2.9.0-x86_64-unknown-linux-gnu",
@@ -345,7 +346,7 @@ def test_linux_gnu_history_is_classified_as_host_specific() -> None:
     )
     catalog = catalog_from_releases(
         [item],
-        lambda url: payload if url.endswith("linux") else wheel("clud.exe", b"MZpayload"),
+        lambda url: payload if url.endswith("linux") else windows_wheel,
     )
     linux = next(
         entry for entry in catalog["releases"][0]["platforms"]
