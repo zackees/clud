@@ -97,7 +97,7 @@ class InvalidMetadata:
     value: str | bool
 
 
-@pytest.mark.parametrize("case", (
+@pytest.mark.parametrize("case", [
     InvalidMetadata("engine", "native"),
     InvalidMetadata("workspace", str(ROOT.parent / "another-checkout")),
     InvalidMetadata("act_version", "0.2.89-act2.2"),
@@ -105,11 +105,11 @@ class InvalidMetadata:
     InvalidMetadata("schema_version", True),
     InvalidMetadata("exit_code", False),
     InvalidMetadata("act_exit_code", False),
-))
+])
 def test_untrusted_engine_workspace_version_and_boolean_metadata_fail_closed(
     case: InvalidMetadata,
 ) -> None:
     record = _record()
     record[case.field] = case.value
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Bosn"):
         proved_lanes(record, head=HEAD, lane=None)
