@@ -546,6 +546,18 @@ ATTESTED_SKIP_JOBS = (
     "test-linux-x64-unit",
 )
 
+# zackees/ci.yml GEN-021 (#162): a verified byte-identical merge may skip
+# the VALIDATION lanes, but never the CACHE WRITERS. Dylint and
+# Build linux-x64 refresh the default-branch caches every PR restores from,
+# so they run on every main push regardless of the reuse decision. This
+# split is the load-bearing part of the wiring and is asserted, not assumed.
+REUSE_SKIP_JOBS = (
+    "static-checks",
+    "lint-linux-x64",
+    "test-linux-x64-unit",
+)
+WRITER_JOBS = ("dylint", "build-linux-x64")
+
 
 def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
     """zackees/ci.yml GATE-008/010: an attested PR head skips exactly the
@@ -566,7 +578,15 @@ def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
     minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
     rest = gate.split("MINIMAL: >-", 1)[0] + gate.split("EXTENDED: >-", 1)[1]
     for job in ATTESTED_SKIP_JOBS:
-        output = f"skip_{job}: ${{{{ steps.gate.outputs.skip_{job} }}}}"
+        if job in REUSE_SKIP_JOBS:
+            # Attestation OR a verified default-branch reuse.
+            output = (
+                f"skip_{job}: ${{{{ steps.gate.outputs.skip_{job} "
+                f"|| steps.reuse_skip.outputs.skip_{job} }}}}"
+            )
+        else:
+            # A cache writer: attestation only, never reuse.
+            output = f"skip_{job}: ${{{{ steps.gate.outputs.skip_{job} }}}}"
         assert output in static, job
         block = text.split(f"\n  {job}:\n", 1)[1].split("\n\n  ", 1)[0]
         assert f"needs.static.outputs.skip_{job} != 'true'" in block, job
@@ -580,3 +600,36 @@ def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
     # A label that selects lanes the local plan does not run must never trust.
     for label in ("ci-test", "ci-windows", "ci-full", "ci:full"):
         assert f'"{label}"' in trust.split("full-labels", 1)[1].split("\n", 1)[0], label
+
+
+def test_default_branch_reuse_skips_validation_but_never_the_cache_writers() -> None:
+    """zackees/ci.yml GEN-021 strategy (i).
+
+    The whole point of keeping Dylint and Build linux-x64 out of the reuse
+    skip list is that they are the default-branch cache writers: every main
+    push refreshes the caches that PRs restore from. If reuse could skip
+    them, the caches would go stale for every downstream PR and the saving
+    on the push would be paid back many times over on the PRs.
+
+    So this asserts the negative directly -- the writers appear nowhere in
+    the reuse-skip step -- rather than trusting the comment above it."""
+
+    text = CI_YML.read_text(encoding="utf-8")
+    static = text.split("\n  static:\n", 1)[1].split("\n  static-checks:\n", 1)[0]
+    step = static.split("- name: Select jobs to skip on a verified reuse", 1)[1]
+    step = step.split("\n  # Everything platform-independent", 1)[0]
+
+    for job in REUSE_SKIP_JOBS:
+        assert job in step.split("for job in", 1)[1].split("; do", 1)[0], job
+    for job in WRITER_JOBS:
+        assert job not in step.split("for job in", 1)[1].split("; do", 1)[0], (
+            f"{job} is a cache writer and must always run"
+        )
+        assert f"steps.reuse_skip.outputs.skip_{job}" not in static, job
+
+    # And the step is fail-closed: it emits nothing unless the decision said so.
+    assert 'if [ "$REUSE" != "true" ]; then' in step
+    assert 'if: github.event_name == \'push\' && github.ref == \'refs/heads/main\'' in step
+    # Enforcement, not shadow, or the skips would never happen.
+    assert "--mode enforce" in static
+    assert "--mode shadow" not in static
