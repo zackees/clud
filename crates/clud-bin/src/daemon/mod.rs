@@ -5,6 +5,7 @@ pub mod api_sessions;
 pub mod api_turn_controller;
 mod attach;
 mod attach_input;
+mod checkout_claims;
 mod client;
 mod client_compat;
 mod client_leases;
@@ -37,6 +38,10 @@ mod wire_prost;
 mod worker;
 mod worker_shared;
 
+pub(crate) use checkout_claims::claimed_by_other;
+pub use checkout_claims::{
+    run_claim_command, start_foreground_presence, ForegroundCheckoutPresence,
+};
 pub use client::try_register_gc_watch;
 pub use client::{
     acquire_foreground_client_lease, daemon_client_metrics, ensure_daemon, gc_client_insert,
@@ -56,7 +61,7 @@ pub use http::{
 /// `types` is private; re-export just the state-dir env-var name so
 /// `gc::delete_audit` (#893) resolves the same variable without a second
 /// definition of the string.
-pub(crate) use types::ENV_STATE_DIR;
+pub use types::ENV_STATE_DIR;
 // Issue #469: re-exports for the telemetry integration test under
 // `tests/integration/diagnostics/telemetry_endpoint.rs` which spawns the dashboard server
 // directly and asserts the full HTTP round-trip.

@@ -653,6 +653,11 @@ pub enum Command {
     /// Kill all active background sessions.
     Slay,
     List,
+    /// Inspect or manage a live checkout claim.
+    Claim {
+        #[command(subcommand)]
+        action: ClaimSubcommand,
+    },
     /// Inspect daemon-sampled CPU/RSS process trees.
     Top {
         /// Emit machine-readable JSON.
@@ -894,6 +899,22 @@ pub enum Command {
         daemon_pid: u32,
         #[arg(long = "spec-file")]
         spec_file: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ClaimSubcommand {
+    /// Claim the current checkout for this live clud session.
+    Acquire,
+    /// Release this session's claim without affecting another session.
+    ReleaseOwn,
+    /// Show live sessions and their claims in the current checkout.
+    Who,
+    /// Release a claim for a checkout after interactive confirmation.
+    Release {
+        checkout: std::path::PathBuf,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1350,6 +1371,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "kill",
     "slay",
     "list",
+    "claim",
     "top",
     "logs",
     "log",
@@ -1848,6 +1870,23 @@ mod grind_scripts_parse_tests {
         let args = Args::parse_from_raw(raw);
         assert!(matches!(args.command, Some(Command::GrindScripts)));
         assert!(args.passthrough.is_empty());
+    }
+
+    #[test]
+    fn claim_subcommands_are_not_backend_passthrough() {
+        let args = Args::parse_from_raw(
+            ["clud", "claim", "release", "/repo", "--yes"]
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+        );
+        assert!(args.passthrough.is_empty());
+        assert!(matches!(
+            args.command,
+            Some(Command::Claim {
+                action: ClaimSubcommand::Release { yes: true, .. }
+            })
+        ));
     }
 
     #[test]
