@@ -31,6 +31,27 @@ tool and, in cron mode, its native `/loop`. A Codex or DeepSeek model uses
 (`command::builder::grind_launch_error`); clud never substitutes `clud loop`
 or a hand-rolled loop.
 
+### Third-party model routes and the Workflow tool
+
+`/grind` depends entirely on Claude Code's Workflow tool. `--openrouter`,
+`--deepseek`, `--kimi` and the other Anthropic-compatible providers resolve
+to the Claude harness through `ModelProvider::native_harness()`, so
+`grind_launch_error` (`crates/clud-bin/src/command/builder.rs`) admits them
+([provider-selection.md](provider-selection.md)). The router starts the
+workflow and ends its turn; the run then advances only on task
+notifications. If the gateway model never emits the Workflow tool call, or
+the tool is suppressed, no notification ever arrives and the run waits
+silently with no error. Signs of this failure:
+
+- the router's turn ended with no Workflow `tool_use` in the transcript;
+- `~/.clud/tmp/grind/<session>.json` gets no run-facts update and no
+  worktree appears under `~/.clud/tmp-wt/`;
+- `--disallowedTools` in `clud --dry-run ... grind <url>` names Workflow.
+
+The remedy is to rerun on the Claude route or on a model that supports tool
+use. `grind_launches_the_workflow_session_on_every_non_anthropic_claude_route`
+in `crates/clud-bin/src/command/tests/grind_launch.rs` pins the launch side.
+
 ## The DAG
 
 `/grind` is a router over bundled skills, one bundled workflow, and five
@@ -651,6 +672,9 @@ separately.
 The per-feature suites in `tests/harness/`, each named for the section above
 it covers:
 
+- `grind_launch.rs`'s
+  `grind_launches_the_workflow_session_on_every_non_anthropic_claude_route`
+  (Rust) — third-party routes launch the Workflow session.
 - `test_grind_routing.py` — input routing and the `/do` refusal.
 - `test_grind_plan_only.py` — the plan-only pass and threshold.
 - `test_grind_meta_of_metas.py`, `test_grind_overlap.py` — regroup and no
