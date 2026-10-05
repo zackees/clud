@@ -214,8 +214,17 @@ def test_every_build_waits_for_mode_and_full_is_complete():
     assert "matrix:" not in dylint_workflow
     for name in ("linux-x64", "windows-x64", "macos-arm", "linux-arm", "windows-arm", "macos-x64"):
         block = text.split(f"\n  build-{name}:\n", 1)[1].split("\n  test-", 1)[0]
-        assert "    needs: static\n" in block, name
-        assert "    if: needs.static.outputs.mode" in block, name
+        # Accept either `needs: static` or `needs: [static, ...]`: the
+        # property under test is that every build WAITS FOR static's mode
+        # output, not the exact scalar-vs-list spelling. `build-linux-x64`
+        # legitimately lists `cache-maint` as a second dependency (the
+        # pre-prune must precede its cache save), which a substring match on
+        # the scalar form rejected while the behaviour was correct.
+        assert "needs: static" in block or "needs: [static," in block, name
+        # Same for the `if:` -- the property is that it consults static's
+        # mode output. `always() && !cancelled() && ...` (needed to survive a
+        # skipped `cache-maint`) no longer starts with `if: needs.static...`.
+        assert "needs.static.outputs.mode" in block, name
     assert "${{ needs.dylint.result }}" in text
     assert 'if [ "$MODE" = "full" ]; then' in text
 

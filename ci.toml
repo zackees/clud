@@ -106,6 +106,12 @@ cache  = "machine"
 
 [allow]
 workflows         = { "ci.yml" = ["pull_request", "push:main", "merge_group", "schedule", "workflow_dispatch"], "_dylint.yml" = ["pull_request", "push:main", "schedule", "workflow_dispatch"], "_run-tests.yml" = ["pull_request", "push:main"], "auto-release.yml" = ["push:tag", "workflow_dispatch"] }
+# The cache-pre-prune job is the one job that deletes live cache entries, and
+# only ever on a default-branch push (`if: github.event_name == 'push' && ref ==
+# main`, in ci.yml). It is granted here per job rather than relying on ci.yml's
+# top-level `actions: write`, so the grant does not reach the `static` job,
+# which checks out untrusted pull-request heads.
+permissions        = { "actions: write" = ["cache-maint"] }
 actions           = ["actions/checkout", "actions/upload-artifact", "actions/download-artifact", "zackees/setup-soldr", "astral-sh/setup-uv"]
 # The unversioned interpreter only: ci/banned_python3.py bans the
 # version-suffixed spelling in every tracked file (including this one), and
@@ -122,6 +128,11 @@ pypi = { auth = "oidc", environment = "pypi", mode = "mock" }
 # `pre-prune = true` is what waives the lockfile-change peak in CACHE-004.
 # Without it the peak doubles a 9.3 GiB steady state and the declared shape
 # cannot fit GitHub's 10 GB cap at all.
+#
+# The waiver is only honoured if something actually pre-prunes, so ci.yml's
+# `cache-maint` job runs `ci-lint cache preprune --lockfile-changed` before the
+# two default-branch cache writers (`dylint`, `build-linux-x64`). It is gated on
+# a default-branch push, so a PR or tag run never deletes anything.
 [flow.main]
 extends   = "minimal"
 cache     = "write"
