@@ -21,16 +21,21 @@ budget of a workflow step at a single command.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+from ci.process import run
 
 ROOT = Path(__file__).resolve().parent.parent
 WATCHED = ("Cargo.lock", "uv.lock", "rust-toolchain.toml")
 
 
 def main() -> int:
-    proc = subprocess.run(
+    # ci.process.run is the sanctioned wrapper: `subprocess` is a BANNED
+    # import in this repository (ci/banned_imports.py, PY-003), and every
+    # process spawn goes through running-process so the pinned toolchain and
+    # cache apply.
+    proc = run(
         ["git", "diff", "--name-only", "HEAD^", "HEAD", "--", *WATCHED],
         cwd=ROOT,
         capture_output=True,
