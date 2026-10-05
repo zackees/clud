@@ -25,10 +25,12 @@ harness     = { run = "python -m ci.test_harness",           required = false }
 # `minimal` is what a main push runs: every Linux lane plus Static checks,
 # Dylint, Lint and the Linux unit/integration/harness legs. The cross
 # targets are added by label, exactly as ci.yml's `ci_matrix` resolves them.
-# `pre-prune = true` on the writer flows waives the lockfile-change peak in
-# CACHE-004's arithmetic (worst == steady). Without it, six `compile`
-# targets at ~1.4 GiB each double on a lockfile change and the declared
-# shape cannot fit the 10 GB cap at all.
+# The writer flow ([flow.main] below) deliberately carries NO
+# `pre-prune = true` -- see the note there. Without that waiver six `compile`
+# targets at ~1.4 GiB each double on a lockfile change, so CACHE-004's
+# honest worst case no longer fits the 9.5 GB cap; closing that gap is a
+# cardinality/`max` decision (zackees/clud#1800), not something an unhonoured
+# waiver may paper over (zackees/ci.yml#352, guidance #354, tracked #360).
 [flow.minimal]
 platforms  = ["linux-x64"]
 suites      = ["static", "dylint", "lint", "unit", "integration", "harness"]
@@ -118,11 +120,23 @@ platform-code     = ["ci/platform/**"]
 
 [publish]
 pypi = { auth = "oidc", environment = "pypi", mode = "mock" }
-# The default-branch writer flow: `cache = "write"` marks it as a writer, and
-# `pre-prune = true` is what waives the lockfile-change peak in CACHE-004.
-# Without it the peak doubles a 9.3 GiB steady state and the declared shape
-# cannot fit GitHub's 10 GB cap at all.
+# The default-branch writer flow: `cache = "write"` marks it as a writer.
+#
+# NO `pre-prune = true` here, deliberately (zackees/ci.yml#352, rule
+# CACHE-034; guidance zackees/ci.yml#354; tracked in zackees/ci.yml#360).
+# The waiver drops CACHE-004's lockfile-change-peak term from the budget
+# proof, so declaring it bought a smaller modelled footprint for free -- but
+# no workflow, composite action, or ci/ script here ever runs
+# `ci-lint cache preprune`, so the declaration was never true. Removed instead
+# of wired, and the honest arithmetic does NOT fit: steady 9,599,713,280 B +
+# lockfile peak 9,332,326,400 B = 18,932,039,680 B against the 9.5GB
+# (10,200,547,328 B) budget, so CACHE-004 now reports the overage. That
+# cardinality/`max` decision is zackees/clud#1800 and is deliberately out of
+# scope for this change, which only makes the modelled number honest.
+# Restoring the waiver requires a real `ci-lint cache preprune` step ordered
+# ahead of the cache saves WITHIN THE SAME RUN -- same job, or an earlier
+# `needs:` link; GitHub Actions has no cross-workflow barrier -- on a job
+# holding `actions: write`.
 [flow.main]
 extends   = "minimal"
 cache     = "write"
-pre-prune = true
