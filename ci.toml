@@ -15,12 +15,12 @@ macos-arm   = { target = "aarch64-apple-darwin",      runs-on = "macos-15",     
 macos-x64   = { target = "x86_64-apple-darwin",       runs-on = "macos-15-intel",   group = "macos" }
 
 [suites]
-static      = { run = "python3 -m ci.lint",                    required = true }
-dylint      = { run = "python3 -m ci.dylint_workspace",       required = true }
-lint        = { run = "python3 -m ci.lint_rust",              required = true }
-unit        = { run = "python3 -m ci.test_unit",              required = true }
-integration = { run = "python3 -m ci.test_integration",       required = false }
-harness     = { run = "python3 -m ci.test_harness",           required = false }
+static      = { run = "python -m ci.lint",                    required = true }
+dylint      = { run = "python -m ci.dylint_workspace",       required = true }
+lint        = { run = "python -m ci.lint_rust",              required = true }
+unit        = { run = "python -m ci.test_unit",              required = true }
+integration = { run = "python -m ci.test_integration",       required = false }
+harness     = { run = "python -m ci.test_harness",           required = false }
 
 # `minimal` is what a main push runs: every Linux lane plus Static checks,
 # Dylint, Lint and the Linux unit/integration/harness legs. The cross
@@ -96,7 +96,10 @@ cache  = "machine"
 [allow]
 workflows         = { "ci.yml" = ["pull_request", "push:main", "merge_group", "schedule", "workflow_dispatch"], "_dylint.yml" = ["pull_request", "push:main", "schedule", "workflow_dispatch"], "_run-tests.yml" = ["pull_request", "push:main"], "auto-release.yml" = ["push:tag", "workflow_dispatch"] }
 actions           = ["actions/checkout", "actions/upload-artifact", "actions/download-artifact", "zackees/setup-soldr", "astral-sh/setup-uv"]
-tools             = ["soldr", "uv", "git", "jq", "python3"]
+# The unversioned interpreter only: ci/banned_python3.py bans the
+# version-suffixed spelling in every tracked file (including this one), and
+# clud's workflows invoke the unversioned form throughout.
+tools             = ["soldr", "uv", "git", "jq", "python"]
 setup-soldr       = { only-in = ".github/actions/setup-build", require = { save-cache-remote = "plan" } }
 setup-uv          = { require = { save-cache = "plan" } }
 platform-selector = "ci/ci_matrix.py"
