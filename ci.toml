@@ -63,13 +63,13 @@ pr       = { mode = "none", families = [], max-per-pr = "0MB", budget = "0MB", t
 [cache.family]
 # 1.17-1.38 GiB observed per entry; keyed per build target (build-<target>,
 # dylint-zccache, static), so `per = "platform"` is the honest shape.
-compile    = { via = "setup-soldr:build-cache",    max = "1400MB", lockfile = true, per = "platform", evict = "lru" }
-deps       = { via = "setup-soldr:cook",          max = "250MB",  lockfile = true, per = "none",     evict = "lru" }
+compile    = { via = "setup-soldr:build-cache",    max = "1400MB", lockfile = true, per = "platform", evict = "lru", promote = "ancestor" }
+deps       = { via = "setup-soldr:cook",          max = "250MB",  lockfile = true, per = "none",     evict = "lru", promote = "ancestor" }
 toolchain  = { via = "setup-soldr:solo-toolchain", max = "210MB",  per = "none",                evict = "lru" }
 soldr-mini = { via = "setup-soldr:soldr-mini",    max = "15MB",   per = "none" }
 uv         = { via = "setup-uv",                  max = "5MB",    per = "platform" }
 # `cargoregistry` is a real `setup-soldr:*` shape (resolve-setup.ts:1055).
-cargoregistry = { via = "setup-soldr:cargo-registry", max = "250MB", lockfile = true, per = "none", evict = "lru" }
+cargoregistry = { via = "setup-soldr:cargo-registry", max = "250MB", lockfile = true, per = "none", evict = "lru", promote = "ancestor" }
 
 # KNOWN GAP: this repository's own `venv-build-<OS>-<arch>-py<ver>-*` and
 # `venv-exec-<OS>-<arch>-py<ver>-*` keys (7 live entries, ~264 MB) come from
@@ -80,12 +80,23 @@ cargoregistry = { via = "setup-soldr:cargo-registry", max = "250MB", lockfile = 
 # not match would be fiction, so they stay undeclared and `ci-lint cache audit`
 # reports them as CACHE-001. Filed as a schema gap rather than papered over.
 
-# Promotion (CACHE-024, #185) is a declaration only: setup-soldr#552 has not
-# implemented nearest-ancestor restore, so CACHE-030 reports this
-# `needs_review`. It is recorded because it is the policy this repository
-# intends to adopt, not because anything consumes it yet.
+# Promotion (CACHE-024, #185, zackees/ci.yml#335). zackees/ci.yml standardizes
+# promotion on setup-soldr's ancestor encoding -- shortest parent-edge distance
+# from a live git DAG walk -- rather than this repository's `m<n>` first-parent
+# ordinal, which inverts on wide merges (a 50-commit branch tip reports ordinal
+# 53 while the merge commit containing it reports 4, so a cache saved at the
+# merge looks older than one saved 50 commits before it). #335 keeps the
+# `m<n>` label for offline audit only.
+#
+# Declaring `mode = "ancestor"` opts each family below into the LINEAGE LABEL
+# that makes a nearest-ancestor search decidable -- a key ending in a bare
+# content hash destroys the ancestry at save time (CACHE-031). This is still a
+# declaration only: the setup-soldr pilot (#566) is merged but unreleased, so
+# CACHE-030/032 report `needs_review` and the opt-in is silently inert until a
+# release carries it. Recording it now is deliberate -- it is the policy this
+# repository intends to adopt, and it is provably ready the day the tag lands.
 [cache.promote]
-mode          = "off"
+mode          = "ancestor"
 max-age-hours = 168
 
 [local]
