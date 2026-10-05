@@ -797,7 +797,11 @@ Quick lookup, which file owns a given subcommand:
   is passed through verbatim.
 - `clud grind reconcile` -> `grind_reconcile.rs` (dispatched in `main.rs` via
   `args::is_reconcile`): the feature-branch repair pass of #1393, reading only
-  GitHub; see [grind.md](../../../docs/architecture/grind.md#never-losing-issues-in-feature-mode).
+  GitHub. It is not a launch — no harness is spawned — so it is exempt from the
+  Claude-harness requirement `grind_launch_error` applies to the interactive
+  `/grind` launch (#1803); the gate keys that exemption on the same
+  `args::is_reconcile` predicate. See
+  [grind.md](../../../docs/architecture/grind.md#never-losing-issues-in-feature-mode).
 - `clud grind-facts path|clear` -> `grind_facts.rs` (dispatched early in
   `main.rs`): this session's `/grind` run-facts file,
   `~/.clud/tmp/grind/<session_id>.json`, which the hook's grind caps read by

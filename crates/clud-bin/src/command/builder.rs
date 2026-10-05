@@ -24,14 +24,37 @@ const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
 /// Return a launch error when `grind` cannot honor its interactive-harness
 /// contract. Claude is the only harness with the Workflow tool and native `/loop`
 /// that the `/grind` router skill needs.
+///
+/// #1803: `clud grind reconcile` is **not** a launch. It parses as
+/// `Command::Grind` but runs the feature-branch repair pass (`grind_reconcile.rs`),
+/// which reads GitHub through `gh` and exits with its own status — it never
+/// spawns a harness, never opens a `/loop`, and never loads the `/grind` skill.
+/// Gating it here read the *resolved* harness, which comes from the saved
+/// global preference, so a user whose `~/.clud/settings.json` named a
+/// non-Claude default was refused with "requires the Claude harness" from
+/// inside a session that really was Claude. Its siblings (`grind-facts`,
+/// `grind-scripts`, `clud tool run`) were unaffected because
+/// `dispatch_fast_path_command` handles them before any backend is resolved,
+/// which is exactly how the `grind` family came to disagree with itself.
+///
+/// The exemption is deliberately keyed on `args::is_reconcile` — the same
+/// predicate `main.rs` dispatches on — so the gate and the dispatch can never
+/// drift apart again.
 pub fn grind_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&'static str> {
-    if !matches!(&args.command, Some(Command::Grind { .. })) {
+    let Some(Command::Grind { url }) = &args.command else {
+        return None;
+    };
+    if crate::args::is_reconcile(url.as_deref()) {
         return None;
     }
     if !matches!(target.effective_harness, Backend::Claude) {
-        return Some(
-            "`clud grind` requires the Claude harness, whose Workflow tool and `/loop` the `/grind` skill drives; use `--harness claude`",
-        );
+        // Name the harness that was actually resolved, and where it came from:
+        // a refusal that cannot be diagnosed from the message alone is the
+        // failure mode #1803 was reported as.
+        return Some(match target.harness_source {
+            crate::backend::PreferenceSource::Cli => "`clud grind` requires the Claude harness, whose Workflow tool and `/loop` the `/grind` skill drives; use `--harness claude`",
+            _ => "`clud grind` requires the Claude harness, whose Workflow tool and `/loop` the `/grind` skill drives, but the resolved harness is not Claude; use `--harness claude`",
+        });
     }
     if args.subprocess {
         return Some("`clud grind` requires an interactive PTY; remove `--subprocess`");

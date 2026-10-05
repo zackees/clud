@@ -449,7 +449,24 @@ Issue [#1393](https://github.com/zackees/clud/issues/1393).
 
 Reconcile is idempotent: a healthy open issue yields no action. It is covered
 by unit tests in `grind_reconcile.rs` and by
-`tests/harness/test_grind_reconcile.py`. The rationale is in
+`tests/harness/test_grind_reconcile.py`.
+
+**Reconcile is not a launch, so it carries no harness requirement (#1803).**
+It parses as `clud grind reconcile` — i.e. `Command::Grind` — but it reads
+GitHub through `gh` and exits with its own status: no harness is spawned, no
+`/loop` is seeded, and the `/grind` router skill never loads. The Claude
+harness requirement in [`grind_launch_error`](../../crates/clud-bin/src/command/builder.rs)
+therefore applies only to the interactive launch, and keys its exemption on
+the same `args::is_reconcile` predicate `main.rs` dispatches on, so the gate
+and the dispatch cannot drift apart. Before #1803 the gate read the *resolved*
+harness — which comes from the saved global preference in
+`~/.clud/settings.json` — so a user whose saved default named a non-Claude
+harness was refused from inside a session that really was Claude. Its
+siblings (`grind-facts`, `grind-scripts`, `clud tool run`) were unaffected
+because `dispatch_fast_path_command` handles them before any backend is
+resolved, which is how the `grind` family came to disagree with itself.
+
+The rationale is in
 [DD-096](../DESIGN_DECISIONS.md#dd-096-the-feature-pr-is-the-single-closer-of-grind-issues-and-clud-grind-reconcile-reopens-early-closes).
 
 ### Repository lint/test scripts
