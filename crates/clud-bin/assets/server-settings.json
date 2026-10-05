@@ -65,7 +65,7 @@
       "cohere/command-r7b-12-2024": 128000,
       "cohere/north-mini-code:free": 256000,
       "deepseek/deepseek-chat": 128000,
-      "deepseek/deepseek-chat-v3-0324": 163840,
+      "deepseek/deepseek-chat-v3-0324": 128000,
       "deepseek/deepseek-chat-v3.1": 163840,
       "deepseek/deepseek-r1": 64000,
       "deepseek/deepseek-r1-0528": 163840,
