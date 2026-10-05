@@ -121,8 +121,23 @@ The workflow also returns `path` and a one-line `message`:
 (`T` is the top meta issue). A PR is a feature PR *under `T`* when its head
 is `grind/meta-<X>-…` and `X` is `T` or one of `T`'s sub-issues
 (`gh api repos/<o>/<r>/issues/<T>/sub_issues`): in a meta of metas the
-feature branch carries its sub-meta's number (section 2b). If any exists,
-the plan becomes bugs-only: move every feature group into `deferred_groups`
+feature branch carries its sub-meta's number (section 2b).
+
+**Live or abandoned.** A run that stalls or whose session ends leaves its
+feature PR open, and nothing else ever closes it (#1819). So for each
+feature PR under `T`, read `gh pr view <n> --json commits,updatedAt,body`
+and `clud grind-facts owner <n>`, which lists every run whose facts record
+that PR with `idle_secs`, the time since that run's last tool call (the hook
+refreshes the facts file on every lookup). The PR is *abandoned* when no
+goal has landed on it (every goals-table row is still `pending` and it has
+no commit beyond the opening one) and either no run owns it or every owner
+has been idle for 30 minutes or more. Anything else is *live*. Report which,
+with the evidence (`feature PR #<n> (run <id>): no goal landed, owner idle
+<m> min`).
+
+A live PR, or an abandoned one the user keeps in the question round
+(section 2, Blocking feature PR), makes the plan bugs-only:
+move every feature group into `deferred_groups`
 (no feature stage, no branch), set `rules.no_overlap: "bugs_only"` and
 `"waiting_on_pr": <n>` in the plan, skip the regroup, feature-pick and
 feature-merge questions, and report
@@ -186,7 +201,7 @@ At most 2 AskUserQuestion calls in total, and nothing is asked twice.
 AskUserQuestion takes at most 4 questions per call and 2-4 options per
 question (the user can always type another answer), so the round is fixed:
 
-- **Call 1, the repo and the plan:** Dirty repo, Regroup, Mode, Models.
+- **Call 1, the repo and the plan:** Dirty repo, Regroup or Blocking feature PR, Mode, Models.
 - **Call 2, the run's policies:** Local CI, Scripts, Feature merge policy,
   Problem reporting.
 
@@ -198,6 +213,16 @@ after it, by the main session or anyone else.
 - **Dirty repo** (only if 1c found changes): show the file list; options
   Stash it, Commit to a WIP branch, Carry into the grind worktree (only when
   the plan has a feature stage), Abort.
+- **Blocking feature PR** (only when 1b found an *abandoned* feature PR
+  under `T`; it replaces the Regroup item, which a bugs-only plan skips):
+  show the 1b evidence; options **Close #<n> and run the feature stage**
+  (Recommended) and **Keep #<n>; bugs-only this run**. On Close, after the
+  round and before prework: `gh pr close <n> --delete-branch --comment
+  "Closing: abandoned by grind run <id> (no goal landed); run <run-id>
+  takes over."`; if `.clud/grind/worktrees/feature` still holds that
+  branch, check it has no unpushed work (`/clud-git`) and remove it with
+  `git worktree remove` and `git branch -D`; then keep the feature stage
+  (no `waiting_on_pr`). A live PR is never offered for closing.
 - **Regroup** (only when 1b returned `regroup`): ONE single-select question
   that both confirms the regroup plan
   (`bugs: #b1 #b2 · F1 "<name>": #c1 #c2 · F2 "<name>": #c3 #c4`) and picks
@@ -419,7 +444,11 @@ branch contains every bug fix that merged:
    and commit it as the branch's first commit,
    `grind: carry uncommitted changes from <starting branch>`. Then push the
    branch: `git -C <worktree> push -u origin grind/meta-<M>-<run-id>`.
-4. Before the first goal lands, open a DRAFT feature PR:
+4. Before the first goal lands, open a DRAFT feature PR. GitHub refuses a
+   PR with no commits, and a branch just cut from `origin/<main>` has none
+   unless step 3 carried changes, so first give it an opening commit:
+   `git -C <worktree> commit --allow-empty -m "grind: open feature branch for run <run-id> (#<M>)"`
+   and push it. Then
    `gh pr create --draft --base <main> --head grind/meta-<M>-<run-id>`. The
    body starts with `Closes #<meta>` (plus `Closes #<original>` when intake
    converted an original issue), followed by a goals table (goal, goal PR,

@@ -333,7 +333,8 @@ pub(super) fn shell_reason(role: &str, command: &str, run: &RunFacts) -> Option<
     }
     statements
         .iter()
-        .find_map(|words| statement_reason(role, words, run))
+        .map(|words| strip_gh_repo_flag(words))
+        .find_map(|words| statement_reason(role, &words, run))
 }
 
 /// Markers in a commit message, PR title or body that make GitHub skip every
@@ -1064,6 +1065,7 @@ pub(super) fn router_reason(command: &str, run: &RunFacts) -> Option<String> {
     let stale = "; if no /grind run is active, run `clud grind-facts clear`";
     let statements = statement_words(command).ok()?;
     statements.iter().find_map(|words| {
+        let words = &strip_gh_repo_flag(words);
         if closes_issue(words) {
             return Some(format!(
                 "the /grind router never closes issues in feature-branch mode: the feature PR's \
@@ -1285,7 +1287,7 @@ fn creates_issue(words: &[String]) -> bool {
         .iter()
         .flat_map(|w| w.split_whitespace().map(program_name).collect::<Vec<_>>())
         .collect();
-    tokens
+    strip_gh_repo_flag(&tokens)
         .windows(3)
         .any(|w| w[0] == "gh" && w[1] == "issue" && w[2] == "create")
 }
@@ -1295,11 +1297,13 @@ fn creates_issue(words: &[String]) -> bool {
 /// `--raw-field`, any method). Looks through wrappers like [`creates_issue`].
 /// `clud grind reconcile` is a clud invocation, not `gh`, so it is untouched.
 fn closes_issue(words: &[String]) -> bool {
-    let tokens: Vec<&str> = words
+    let tokens: Vec<String> = words
         .iter()
         .flat_map(|w| w.split_whitespace())
-        .map(|t| t.trim_matches(&['\'', '"'][..]))
+        .map(|t| t.trim_matches(&['\'', '"'][..]).to_string())
         .collect();
+    let tokens = strip_gh_repo_flag(&tokens);
+    let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
     let is_gh = |t: &str| program_name(t) == "gh";
     if tokens
         .windows(3)
@@ -1334,6 +1338,34 @@ fn closes_issue(words: &[String]) -> bool {
                 .enumerate()
                 .any(|(j, t)| field_closes(t, rest.get(j + 1)))
     })
+}
+
+/// Drop gh's `-R/--repo <owner/name>` (and `--repo=`/`-R<x>`) from right
+/// after each `gh` token, so `gh -R o/r issue view` reads like `gh issue
+/// view` to every check here. Without it a planner's plain read was refused,
+/// and `gh -R o/r issue close` slipped past the close ban (#1819).
+fn strip_gh_repo_flag(tokens: &[String]) -> Vec<String> {
+    let unquote = |t: &str| t.trim_matches(&['\'', '"'][..]).to_string();
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        out.push(token.clone());
+        i += 1;
+        if program_name(&unquote(token)) != "gh" {
+            continue;
+        }
+        while let Some(next) = tokens.get(i).map(|t| unquote(t)) {
+            if next == "-R" || next == "--repo" {
+                i += 2;
+            } else if next.starts_with("--repo=") || (next.starts_with("-R") && next.len() > 2) {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn is_clud(word: &str) -> bool {
@@ -1672,6 +1704,27 @@ mod tests {
             &facts
         ));
         assert!(!allowed(PLANNER, "ls $(cargo metadata)", &facts));
+    }
+
+    #[test]
+    fn gh_repo_flag_neither_blocks_reads_nor_hides_writes() {
+        let facts = run(false, false);
+        let plan = RunFacts {
+            plan_only: true,
+            ..run(true, false)
+        };
+        for read in [
+            "gh -R zackees/clud issue view 1807 --json body -q .body",
+            "gh --repo zackees/clud issue view 1807",
+            "gh --repo=zackees/clud pr list",
+            "gh -Rzackees/clud issue list",
+        ] {
+            assert!(allowed(PLANNER, read, &facts), "{read}");
+            assert!(allowed(PLANNER, read, &plan), "{read}");
+        }
+        assert!(!allowed(INTEGRATOR, "gh -R o/r issue close 5", &facts));
+        assert!(!allowed(INTEGRATOR, "gh --repo o/r issue create -t x", &facts));
+        assert!(!allowed(PLANNER, "gh -R o/r pr merge 5", &facts));
     }
 
     #[test]
