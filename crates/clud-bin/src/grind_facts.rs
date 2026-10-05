@@ -696,7 +696,10 @@ mod tests {
         assert_eq!(v["owners"][0]["session"], A);
         assert_eq!(v["owners"][0]["own"], true);
         let (_, out, _) = cli(&["owner", "8"], Some(B), dir.path());
-        assert_eq!(serde_json::from_str::<Value>(out.trim()).unwrap()["owners"], serde_json::json!([]));
+        assert_eq!(
+            serde_json::from_str::<Value>(out.trim()).unwrap()["owners"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

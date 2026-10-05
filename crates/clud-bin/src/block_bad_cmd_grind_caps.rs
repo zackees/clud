@@ -1723,7 +1723,11 @@ mod tests {
             assert!(allowed(PLANNER, read, &plan), "{read}");
         }
         assert!(!allowed(INTEGRATOR, "gh -R o/r issue close 5", &facts));
-        assert!(!allowed(INTEGRATOR, "gh --repo o/r issue create -t x", &facts));
+        assert!(!allowed(
+            INTEGRATOR,
+            "gh --repo o/r issue create -t x",
+            &facts
+        ));
         assert!(!allowed(PLANNER, "gh -R o/r pr merge 5", &facts));
     }
 
