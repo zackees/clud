@@ -321,8 +321,17 @@ jobs:
   dylint:
     name: Dylint
     needs: [static, cache-maint]
+    # `always() && !cancelled()` OVERRIDES the skip cascade. cache-maint only
+    # runs on a push to main (it must never delete on a PR), and in GitHub
+    # Actions a SKIPPED `needs:` skips its dependents no matter what a plain
+    # `!failure()` guard says -- which left both cache writers skipped on every
+    # PR, so `CI OK` reported "a minimal lane did not run to success".
+    # `always()` keeps this job running when cache-maint was skipped (the PR
+    # case, where no prune is wanted) while still cancelling on a real
+    # cancellation. On the push path cache-maint has already completed before
+    # this job starts, so the pre-prune still precedes the save.
     if: >-
-      ${{ !cancelled() && !failure()
+      ${{ always() && !cancelled()
           && needs.static.outputs.skip_dylint != 'true' }}
     uses: ./.github/workflows/_dylint.yml
     with:
@@ -368,8 +377,10 @@ jobs:
     needs: [static, cache-maint]
     # windows mode keeps these routine lanes too (#1652): without a merge
     # queue, CI OK green must imply Linux passed on the same head SHA.
+    # `always() && !cancelled()` for the same reason as `dylint` above: a
+    # skipped cache-maint (every non-push run) must not skip this writer.
     if: >-
-      ${{ !cancelled() && !failure()
+      ${{ always() && !cancelled()
           && needs.static.outputs.mode != ''
           && needs.static.outputs.skip_build-linux-x64 != 'true' }}
     uses: ./.github/workflows/_build-target.yml
