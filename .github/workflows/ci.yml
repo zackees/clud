@@ -400,7 +400,13 @@ jobs:
   test-linux-x64-unit:
     name: Test linux-x64 (unit)
     needs: [static, build-linux-x64]
-    if: needs.static.outputs.skip_test-linux-x64-unit != 'true'
+    # `always() && !cancelled()` for the same reason as dylint/build-linux-x64:
+    # build-linux-x64 is SKIPPED whenever its own inputs are unmet, and a
+    # skipped `needs:` cascades -- a bare `if:` here left the minimal lane with
+    # nothing green for `CI OK` to aggregate.
+    if: >-
+      ${{ always() && !cancelled()
+          && needs.static.outputs.skip_test-linux-x64-unit != 'true' }}
     strategy:
       fail-fast: false
       matrix:
