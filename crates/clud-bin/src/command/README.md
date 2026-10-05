@@ -27,7 +27,7 @@ routing are documented at
 - `grind_scripts.rs` — `clud grind-scripts`, the renderer behind the `/grind` router's `` !`clud grind-scripts` `` line (#1336). It detects the repo root's lint and test entry scripts (`lint`, `lint.sh`, `lint.bat`, `lint.ps1` and the matching `test*`). It prefers `.bat`/`.ps1` on Windows and the extensionless or `.sh` form elsewhere, and prints each script's kind, path, run command (with `bash`/`cmd /c`/`pwsh -File` when it isn't executable) and the files to read for modes (the script plus the local files it delegates to). It never runs a script. The contract is in [grind.md](../../../../docs/architecture/grind.md#repository-linttest-scripts); tested in `tests/harness/test_grind_scripts.py`.
 - `do_kind.rs` — classifies a `clud do` target before launch: a GitHub issue with open native sub-issues (`gh api …/sub_issues`) is a meta issue. It refuses when the question can't be answered; `CLUD_DO_KIND=single|meta` overrides it.
 - `types.rs` — `LaunchPlan`, `LoopMarkers`, `RepeatSchedule` serde structs that flow into `--dry-run` JSON and into daemon job records; the plan carries additive `routing_mode` and normalized `model_selection` fields.
-- `tests.rs` — 60+ unit tests covering yolo/safe, codex `exec`/`resume`, loop contract injection, stream-json placement before `-p`, `--repeat` parsing edge cases, and scheduler no-overlap invariants.
+- `tests.rs` — unit tests covering yolo/safe, the bridge/plan-mode policy, and the shared helpers the `tests/` submodules pull in with `use super::*`. Per-domain suites live alongside in `tests/` — see [tests/README.md](tests/README.md).
 
 ## Key items
 
