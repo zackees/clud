@@ -1,0 +1,117 @@
+schema = 3
+profile = "library"
+linter  = "zackees/ci.yml@f1984ebe546a89e9677c904563aa443791283102"   # the exact ci-lint commit precheck runs
+
+# ── Platforms ─────────────────────────────────────────────────────────────
+# Derived from .github/workflows/ci.yml's own `runs-on:` labels and the
+# targets its build/test jobs compile. Not a rewrite of ci.yml: this table
+# exists so `ci-lint cache` can classify this repository's cache entries.
+[platforms]
+linux-x64   = { target = "x86_64-unknown-linux-gnu",  runs-on = "ubuntu-24.04",    group = "linux",   wheel = "manylinux_2_17" }
+linux-arm   = { target = "aarch64-unknown-linux-gnu", runs-on = "ubuntu-24.04-arm", group = "linux",   wheel = "manylinux_2_17" }
+windows-x64 = { target = "x86_64-pc-windows-msvc",    runs-on = "windows-2025",     group = "windows" }
+windows-arm = { target = "aarch64-pc-windows-msvc",   runs-on = "windows-11-arm",   group = "windows" }
+macos-arm   = { target = "aarch64-apple-darwin",      runs-on = "macos-15",         group = "macos" }
+macos-x64   = { target = "x86_64-apple-darwin",       runs-on = "macos-15-intel",   group = "macos" }
+
+[suites]
+static      = { run = "python -m ci.lint",                    required = true }
+dylint      = { run = "python -m ci.dylint_workspace",       required = true }
+lint        = { run = "python -m ci.lint_rust",              required = true }
+unit        = { run = "python -m ci.test_unit",              required = true }
+integration = { run = "python -m ci.test_integration",       required = false }
+harness     = { run = "python -m ci.test_harness",           required = false }
+
+# `minimal` is what a main push runs: every Linux lane plus Static checks,
+# Dylint, Lint and the Linux unit/integration/harness legs. The cross
+# targets are added by label, exactly as ci.yml's `ci_matrix` resolves them.
+# `pre-prune = true` on the writer flows waives the lockfile-change peak in
+# CACHE-004's arithmetic (worst == steady). Without it, six `compile`
+# targets at ~1.4 GiB each double on a lockfile change and the declared
+# shape cannot fit the 10 GB cap at all.
+[flow.minimal]
+platforms  = ["linux-x64"]
+suites      = ["static", "dylint", "lint", "unit", "integration", "harness"]
+
+[flow.windows]
+platforms  = ["linux-x64", "windows-x64"]
+suites      = ["static", "dylint", "lint", "unit", "integration", "harness"]
+
+[flow.full]
+platforms  = "all"
+suites      = ["static", "dylint", "lint", "unit", "integration", "harness"]
+
+[tags]
+ci-windows = { flow = "windows" }
+ci-full    = { flow = "full" }
+
+# ── Cache sharing and management ───────────────────────────────────────────
+# This repository sat at 10.56 GiB on 2026-10-04 -- OVER GitHub's 10 GB
+# repository cap -- so new saves were being refused and pull requests were
+# running on cold caches. Every family's key embeds a per-run hash, so each
+# run appended an entry nothing retired; `max` sizes ONE entry and cannot
+# bound the family, and `per` declares the writer shape rather than the
+# entry count. `evict = "lru"` is what does (CACHE-029), and
+# `ci-lint cache janitor` then keeps each family at `max x cardinality`.
+[cache]
+budget   = "9.5GB"
+write-on = ["main"]
+never    = []
+retired  = []
+pr       = { mode = "none", families = [], max-per-pr = "0MB", budget = "0MB", trim = "on-close" }
+
+[cache.family]
+# 1.17-1.38 GiB observed per entry; keyed per build target (build-<target>,
+# dylint-zccache, static), so `per = "platform"` is the honest shape.
+compile    = { via = "setup-soldr:build-cache",    max = "1400MB", lockfile = true, per = "platform", evict = "lru" }
+deps       = { via = "setup-soldr:cook",          max = "250MB",  lockfile = true, per = "none",     evict = "lru" }
+toolchain  = { via = "setup-soldr:solo-toolchain", max = "210MB",  per = "none",                evict = "lru" }
+soldr-mini = { via = "setup-soldr:soldr-mini",    max = "15MB",   per = "none" }
+uv         = { via = "setup-uv",                  max = "5MB",    per = "platform" }
+# `cargoregistry` is a real `setup-soldr:*` shape (resolve-setup.ts:1055).
+cargoregistry = { via = "setup-soldr:cargo-registry", max = "250MB", lockfile = true, per = "none", evict = "lru" }
+
+# KNOWN GAP: this repository's own `venv-build-<OS>-<arch>-py<ver>-*` and
+# `venv-exec-<OS>-<arch>-py<ver>-*` keys (7 live entries, ~264 MB) come from
+# .github/actions/setup-build and setup-exec writing through the sanctioned
+# actions/cache wrapper, with their own literal prefixes. No `[cache.family].via`
+# resolves to them -- `via = "ci-lint"` builds `<family-id>-v1-`, and the
+# `setup-soldr:*` values each own a fixed prefix. Declaring a family that does
+# not match would be fiction, so they stay undeclared and `ci-lint cache audit`
+# reports them as CACHE-001. Filed as a schema gap rather than papered over.
+
+# Promotion (CACHE-024, #185) is a declaration only: setup-soldr#552 has not
+# implemented nearest-ancestor restore, so CACHE-030 reports this
+# `needs_review`. It is recorded because it is the policy this repository
+# intends to adopt, not because anything consumes it yet.
+[cache.promote]
+mode          = "off"
+max-age-hours = 168
+
+[local]
+runner = "bosn-act"
+lanes  = ["precheck", "fast"]
+cache  = "machine"
+
+[allow]
+workflows         = { "ci.yml" = ["pull_request", "push:main", "merge_group", "schedule", "workflow_dispatch"], "_dylint.yml" = ["pull_request", "push:main", "schedule", "workflow_dispatch"], "_run-tests.yml" = ["pull_request", "push:main"], "auto-release.yml" = ["push:tag", "workflow_dispatch"] }
+actions           = ["actions/checkout", "actions/upload-artifact", "actions/download-artifact", "zackees/setup-soldr", "astral-sh/setup-uv"]
+# The unversioned interpreter only: ci/banned_python3.py bans the
+# version-suffixed spelling in every tracked file (including this one), and
+# clud's workflows invoke the unversioned form throughout.
+tools             = ["soldr", "uv", "git", "jq", "python"]
+setup-soldr       = { only-in = ".github/actions/setup-build", require = { save-cache-remote = "plan" } }
+setup-uv          = { require = { save-cache = "plan" } }
+platform-selector = "ci/ci_matrix.py"
+platform-code     = ["ci/platform/**"]
+
+[publish]
+pypi = { auth = "oidc", environment = "pypi", mode = "mock" }
+# The default-branch writer flow: `cache = "write"` marks it as a writer, and
+# `pre-prune = true` is what waives the lockfile-change peak in CACHE-004.
+# Without it the peak doubles a 9.3 GiB steady state and the declared shape
+# cannot fit GitHub's 10 GB cap at all.
+[flow.main]
+extends   = "minimal"
+cache     = "write"
+pre-prune = true
