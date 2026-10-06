@@ -3619,8 +3619,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--no-retry", action="store_true", help="disable backoff/retry on cancel API calls"
     )
-    # #1839: `clud tool run github/pr_merge_watch.py 1835 -- --no-cancel`
-    # forwards the `--` as data, and argparse then reads every later flag as a
+    # #1839: the tool runner forwards a `--` placed after the PR number as
+    # data (`1835 -- --no-cancel`), and argparse then reads every later flag as a
     # positional and exits 64 -- in the background, silently wasting a CI
     # wait. This tool takes no passthrough, so a literal `--` is only ever
     # that forwarding separator.

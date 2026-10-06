@@ -86,6 +86,13 @@ pub fn verdict(report: &Value) -> Verdict {
         .and_then(Value::as_str)
         .map(str::to_string);
     let clean = failed == 0 && cancelled == 0 && succeeded > 0;
+    // Every job ran and passed, but bosn still ended `incomplete`/`error` for
+    // an engine reason (act's reusable-workflow gap, a Docker cleanup
+    // timeout). That says nothing about the code under test.
+    let covered = report
+        .get("coverage_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     match conclusion {
         "success" if clean => Verdict::Pass {
             succeeded,
@@ -97,6 +104,13 @@ pub fn verdict(report: &Value) -> Verdict {
                 note: Some("act cannot run reusable workflows; not a failure".to_string()),
             }
         }
+        "incomplete" | "error" if clean && covered => Verdict::Pass {
+            succeeded,
+            note: Some(format!(
+                "bosn reported '{}' after every job passed; not a code failure",
+                reason.as_deref().unwrap_or(conclusion)
+            )),
+        },
         _ => Verdict::Fail {
             succeeded,
             failed: failed + cancelled,
@@ -228,9 +242,17 @@ fn is_ruff_finding(line: &str) -> bool {
 /// plus the few context lines after it (a rustc `-->` location and source
 /// excerpt, a panic message), ANSI-stripped and de-noised, capped.
 pub fn extract_diagnostics(log: &str) -> Vec<String> {
+    // libtest prints passing tests' output too (a test may panic on purpose).
+    // When it reports a `failures:` section, only that section is about why
+    // the step failed.
+    let lines: Vec<&str> = log.lines().collect();
+    let start = lines
+        .iter()
+        .position(|raw| without_timing(&strip_ansi(raw)).trim_end() == "failures:")
+        .unwrap_or(0);
     let mut out = Vec::new();
     let mut context = 0usize;
-    for raw in log.lines() {
+    for raw in &lines[start..] {
         let clean = strip_ansi(raw);
         let line = without_timing(&clean).trim_end();
         if line.is_empty() || is_noise(line) {

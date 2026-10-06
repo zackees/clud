@@ -36,6 +36,7 @@ fn incomplete_for_any_other_reason_is_not_a_pass() {
     let report = serde_json::json!({
         "conclusion": "incomplete",
         "reason": "runner lost",
+        "coverage_complete": false,
         "jobs": {"succeeded": 2, "failed": 0, "cancelled": 0},
     });
     assert!(!verdict(&report).passed());
@@ -123,4 +124,31 @@ fn strip_ansi_removes_color_codes() {
         strip_ansi("\u{1b}[1m\u{1b}[91merror\u{1b}[0m: x"),
         "error: x"
     );
+}
+
+/// Docker cleanup timing out after every job passed (captured 2026-10-06).
+#[test]
+fn an_engine_error_after_full_coverage_is_a_pass_with_a_note() {
+    let report = serde_json::json!({
+        "conclusion": "error",
+        "reason": "engine cleanup failed: Docker CLI exceeded its deadline",
+        "coverage_complete": true,
+        "jobs": {"succeeded": 2, "failed": 0, "cancelled": 0},
+    });
+    let verdict = verdict(&report);
+    assert!(verdict.passed(), "{verdict:?}");
+    assert!(
+        verdict.line().contains("engine cleanup failed"),
+        "{}",
+        verdict.line()
+    );
+}
+
+/// A passing test that panics on purpose must not crowd out the real failure.
+#[test]
+fn only_the_failures_section_is_used_when_libtest_prints_one() {
+    let log = "test pty::raw_pump ... ok\nthread 'pty::raw_pump' panicked at pty.rs:588:13:\ndeliberate panic\n\nfailures:\n\n---- tools::tests::x stdout ----\nthread 'tools::tests::x' panicked at src/tools.rs:420:17:\nreal failure\n";
+    let text = extract_diagnostics(log).join("\n");
+    assert!(text.contains("src/tools.rs:420:17"), "{text}");
+    assert!(!text.contains("deliberate panic"), "{text}");
 }
