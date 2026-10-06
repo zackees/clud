@@ -674,6 +674,27 @@ def test_openrouter_grind_refuses_unsupported_sessions(argv: tuple[str, ...], ne
     assert needle in result.stderr
 
 
+def test_a_fresh_openrouter_grind_launch_is_pinned_to_its_resolved_model() -> None:
+    """#1809: with no `--model` and nothing saved, the catalog default is the
+    launch's pin (DD-077), so a direct OpenRouter `/grind` session has gateway
+    discovery off; only an explicit `--model` changes which id is pinned."""
+    url = "https://github.com/zackees/clud/issues/1807"
+    fresh = _run("--dry-run", "--openrouter", "grind", url)
+    assert fresh.returncode == 0, fresh.stderr
+    data = json.loads(fresh.stdout)
+    assert data["model_selection"]["model_source"] == "catalog_default"
+    assert data["allowed_models"] == ["~anthropic/claude-sonnet-latest"]
+    assert data["pinned_from_previous_selection"] is True
+    pinned = _run(
+        "--dry-run", "--openrouter", "--model", "~anthropic/claude-haiku-latest", "grind", url
+    )
+    assert pinned.returncode == 0, pinned.stderr
+    data = json.loads(pinned.stdout)
+    assert data["allowed_models"] == ["~anthropic/claude-haiku-latest"]
+    assert data["pinned_from_previous_selection"] is False
+    assert data["command"][-1] == f"/grind {url}"
+
+
 def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:
     for argv in [
         ("--dry-run", "--codex", "do"),

@@ -305,10 +305,15 @@ remains the frontend and receives the resolved main-model wire ID through its
    catalog slug before launch. Unknown full IDs pass through losslessly because
    OpenRouter owns that namespace.
 3. Claude Code's `/model` command offers the gateway-discovered live
-   inventory after launch, alongside its own built-in rows. Clud enables
-   discovery on unpinned launches but does not implement a separate
-   pre-launch OpenRouter picker, and cannot restrict the picker to the
-   discovered set.
+   inventory after launch, alongside its own built-in rows, but only on a
+   launch with no model pin. A direct `clud --openrouter` launch is always
+   pinned: with no `--model`, the resolved selection (the saved
+   `providers.openrouter.model`, else the catalog default) is the pin
+   ([DD-077](../DESIGN_DECISIONS.md#dd-077-a-launch-time-model-pin-constrains-every-model-slot-not-just-the-main-model)),
+   so discovery is off and the picker shows only the built-in rows. The
+   `--unified` route keeps discovery on, filtered to the allowlist. Clud
+   does not implement a separate pre-launch OpenRouter picker, and cannot
+   restrict the picker to the discovered set.
 
 A live `clud --openrouter --model <id>` also becomes OpenRouter's saved
 default (`providers.openrouter.model` in `~/.clud/settings.json`), so the next

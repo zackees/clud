@@ -236,3 +236,25 @@ fn grind_on_openrouter_still_refuses_detached_and_subprocess_sessions() {
         assert!(error.contains(needle), "{flag}: {error}");
     }
 }
+
+/// #1809: the OpenRouter `/grind` session is a plain interactive harness
+/// session: no headless flag, no clud-side repetition, and no stream-json
+/// progress rendering.
+#[test]
+fn grind_on_openrouter_boots_one_plain_interactive_session() {
+    let url = "https://github.com/zackees/clud/issues/1807";
+    let args = parse(&["clud", "--openrouter", "grind", url]);
+    let plan = build_launch_plan_for_target(
+        &args,
+        third_party_claude_route(ModelProvider::OpenRouter),
+        "claude",
+    );
+    let seed = format!("/grind {url}");
+    assert_eq!(plan.command.last(), Some(&seed));
+    assert!(!plan.command.contains(&"-p".to_string()));
+    assert!(!plan.command.contains(&"exec".to_string()));
+    assert!(!plan.stream_json_progress);
+    assert!(plan.repeat_schedule.is_none());
+    assert!(plan.loop_markers.is_none());
+    assert_eq!(plan.iterations, 1);
+}
