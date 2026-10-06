@@ -78,6 +78,7 @@ pub mod loop_spec;
 pub mod multicall;
 pub mod openrouter_catalog;
 pub mod openrouter_free;
+pub mod openrouter_routing;
 pub mod optimize;
 pub mod orphan_reaper;
 pub mod paste_image;

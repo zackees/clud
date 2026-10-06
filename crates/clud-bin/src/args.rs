@@ -132,6 +132,13 @@ pub struct Args {
     #[arg(long = "allow-model", value_name = "MODEL", action = ArgAction::Append)]
     pub allow_model: Vec<String>,
 
+    /// OpenRouter only: serve every request from exactly these upstream
+    /// providers (OpenRouter's `provider.only`, e.g. `parasail/fp8`), with
+    /// fallbacks off, so a request fails rather than rerouting to another
+    /// provider or price. Repeatable.
+    #[arg(long = "provider-only", value_name = "PROVIDER", action = ArgAction::Append)]
+    pub provider_only: Vec<String>,
+
     /// Reasoning effort, kept independent from the selected model.
     #[arg(long = "effort")]
     pub effort: Option<String>,
@@ -1575,6 +1582,7 @@ const SPLITTER_VALUE_FLAGS: &[&str] = &[
     "--resume-mode",
     "--model",
     "--allow-model",
+    "--provider-only",
     "--provider",
     "--mode",
     "--failover",
