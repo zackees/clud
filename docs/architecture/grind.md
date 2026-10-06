@@ -52,6 +52,32 @@ The remedy is to rerun on the Claude route or on a model that supports tool
 use. `grind_launches_the_workflow_session_on_every_non_anthropic_claude_route`
 in `crates/clud-bin/src/command/tests/grind_launch.rs` pins the launch side.
 
+**Verified end to end on OpenRouter (#1811).** On 2026-10-05, installed
+clud 2.8.27 ran `clud --openrouter --model ~anthropic/claude-sonnet-latest
+grind` on smoke meta #1825 (one child, #1818). The run used sequential mode,
+the session model for every role, and `feature_merge: later`. Every stage
+completed: routing, the plan-only pass, the two-call question round,
+prework, plan → work → review → integrate → land (goal PR #1827 merged into
+the feature branch by the lander), and Finish. Finish marked feature PR #1826
+ready, filed follow-up #1828, and removed the run facts and `plan.json`.
+#1826 then merged, closing #1818 and #1825.
+
+Why every role billed to OpenRouter: the launch was pinned (the
+`gateway model discovery is off` notice), and the overlay gave every
+`ANTHROPIC_DEFAULT_*` slot and the subagent slot the pinned id. Its only
+credential was the OpenRouter token at `https://openrouter.ai/api`, with
+`ANTHROPIC_API_KEY` empty. Workflow agents with no model override inherit
+that session, so no request could authenticate to Anthropic.
+
+What this run did not check (#1811):
+- OpenRouter's activity page, so the per-role wire ids were not read there.
+- The invalid-key failure path. Testing it would overwrite the stored vault
+  key.
+
+Defects it found: #1828 (`./test` pty timing on the integrator host), and
+#1830 (classification flipped bug/feature for the same child across two
+launches).
+
 ## The DAG
 
 `/grind` is a router over bundled skills, one bundled workflow, and five
