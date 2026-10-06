@@ -140,7 +140,8 @@ pub fn probe(wire_id: &str, key: &str) -> ProbeVerdict {
     match agent
         .post(PROBE_URL)
         .set("Authorization", &format!("Bearer {key}"))
-        .send_json(body)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
     {
         Err(ureq::Error::Status(status, response)) => {
             let mut text = String::new();
