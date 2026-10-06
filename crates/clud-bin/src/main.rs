@@ -873,11 +873,23 @@ fn refuse_unproven_free_model(args: &args::Args, launch_target: backend::Resolve
     else {
         return;
     };
-    let verdict =
-        clud::openrouter_free::check(wire, &openrouter_catalog::catalog_cached_or_embedded());
-    if let Some(message) = clud::openrouter_free::refusal(wire, &verdict) {
+    let catalog = openrouter_catalog::catalog_cached_or_embedded();
+    let verdict = clud::openrouter_free::check(wire, &catalog);
+    if let Some(message) = clud::openrouter_free::refusal(wire, &verdict, &catalog) {
         eprintln!("[clud] error: {message}");
         std::process::exit(2);
+    }
+    // Name the price on every OpenRouter launch, and say when it came from a
+    // saved default rather than this command line (#1833).
+    let source = args
+        .resolved_model_selection
+        .as_ref()
+        .and_then(|selection| selection.model_source)
+        .and_then(|source| serde_json::to_value(source).ok())
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    if let Some(notice) = clud::openrouter_free::price_notice(wire, &catalog, &source) {
+        eprintln!("{notice}");
     }
 }
 
