@@ -39,8 +39,11 @@ fn video_launch_loads_the_plugin_and_seeds_the_skill() {
     let p = plan(&["clud", "video"]);
     let dir = plugin_dir_arg(&p).expect("clud video passes --plugin-dir");
     assert!(
-        dir.replace('\\', "/")
-            .ends_with(".clud/extern/video-use-plugin"),
+        std::path::Path::new(dir).ends_with(
+            std::path::Path::new(".clud")
+                .join("extern")
+                .join("video-use-plugin")
+        ),
         "{dir}"
     );
     assert!(last_arg(&p).starts_with("/video-use "), "{:?}", p.command);
