@@ -661,12 +661,13 @@ def test_openrouter_grind_dry_run_is_one_credential_free_claude_session() -> Non
             ("--openrouter", "--harness", "codex"),
             "OpenRouter provider cannot use the Codex harness",
         ),
-        (("--openrouter", "--detach"), "requires a foreground interactive PTY"),
         (("--openrouter", "--subprocess"), "requires an interactive PTY"),
     ],
 )
 def test_openrouter_grind_refuses_unsupported_sessions(argv: tuple[str, ...], needle: str) -> None:
-    """#1808: each refusal exits 2 before any session or vault access."""
+    """#1808: each refusal exits 2 before any session or vault access.
+    (`--detach` conflicts with `--dry-run` in clap, so its grind refusal is
+    pinned by the Rust unit test instead.)"""
     result = _run("--dry-run", *argv, "grind", "https://github.com/zackees/clud/issues")
     assert result.returncode == 2, (result.stdout, result.stderr)
     assert result.stdout == ""
