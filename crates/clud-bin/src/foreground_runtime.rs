@@ -2,9 +2,7 @@
 
 use crate::backend::{Backend, ModelProvider, RoutingMode};
 use crate::clud_settings::CodexCliLoginImport;
-use crate::codex_bridge::{
-    BridgeConfig, BridgeError, BridgeHandle, UnifiedGatewayConfig, UNIFIED_GATEWAY_TOKEN_HEADER,
-};
+use crate::codex_bridge::{BridgeConfig, BridgeError, BridgeHandle, UNIFIED_GATEWAY_TOKEN_HEADER};
 use crate::codex_model::ModelSpec;
 use crate::command::LaunchPlan;
 use crate::selector::{self, Key, Note, Row, Selector, Step, View};
@@ -21,7 +19,6 @@ use std::path::{Path, PathBuf};
 // owns them. These aliases keep this module's render call sites reading the
 // same names they always did.
 use crate::route_plan::{
-    BRIDGE_TIMEOUT_MS as BRIDGE_API_TIMEOUT_MS,
     CODEX_BRIDGE_OPUS_MODEL as CODEX_VIA_CLAUDE_OPUS_MODEL,
     CODEX_BRIDGE_SONNET_MODEL as CODEX_VIA_CLAUDE_SONNET_MODEL,
     DIRECT_TIMEOUT_MS as DIRECT_API_TIMEOUT_MS,
@@ -318,6 +315,10 @@ impl ForegroundRuntime {
         let (bridge, claude_settings, mut startup_notices) = if is_unified(plan) {
             let integration_upstreams =
                 crate::codex_bridge::unified_integration_upstreams_from_process();
+            let route = crate::route_plan::route_of(
+                plan,
+                &crate::route_plan::Ambient::from_child_env(&env),
+            );
             // Optional routes must never block native Claude. Resolve only
             // availability metadata here; the actual credentials stay inside
             // the launch-scoped bridge and are not serialized into the plan.
@@ -325,43 +326,46 @@ impl ForegroundRuntime {
             // (test) credentials, so logout is observable end to end.
             let fixture_keys =
                 integration_upstreams.is_some() && !crate::provider_auth::test_vault_active();
-            let deepseek_key = fixture_keys
-                .then(|| "clud-test-deepseek-key".to_string())
-                .or_else(|| store.get().ok().flatten());
-            // OpenRouter keeps its own vault record, so it needs its own store
-            // rather than the injected DeepSeek-scoped one. Probed inline for
-            // the same reason `codex_available` is: an absent optional
-            // credential must omit a discovery row, never fail the launch.
-            let openrouter_key = fixture_keys
-                .then(|| "clud-test-openrouter-key".to_string())
-                .or_else(|| {
-                    crate::provider_auth::NativeSecretStore::new_for(
-                        crate::provider_auth::OPENROUTER_VAULT_SERVICE,
-                        crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
-                    )
-                    .ok()
-                    .and_then(|store| {
-                        use crate::provider_auth::SecretStore as _;
-                        store.get().ok().flatten()
-                    })
-                });
-            // Kimi, like OpenRouter, has its own vault record. Integration
-            // runs probe it only when a Kimi fake exists, so a stored key can
-            // never reach the real Moonshot endpoint from a test.
             let kimi_fake = integration_has_kimi(&integration_upstreams);
-            let kimi_key = if integration_upstreams.is_some() && (fixture_keys || !kimi_fake) {
-                None
-            } else {
-                crate::provider_auth::NativeSecretStore::new_for(
-                    crate::provider_auth::KIMI_VAULT_SERVICE,
-                    crate::provider_auth::KIMI_VAULT_ACCOUNT,
+            // One key lookup, driven by the route's own credential sources:
+            // the vault identifiers come from each provider's registry
+            // descriptor, so this path names no vault constant itself.
+            let key_for = |provider: ModelProvider| -> Option<String> {
+                if fixture_keys {
+                    return Some(format!("clud-test-{}-key", provider.as_str()));
+                }
+                // Integration runs probe Kimi only when a Kimi fake exists, so
+                // a stored key can never reach the real Moonshot endpoint from
+                // a test.
+                if provider == ModelProvider::Kimi
+                    && integration_upstreams.is_some()
+                    && (fixture_keys || !kimi_fake)
+                {
+                    return None;
+                }
+                // The injected store is this launch's provider-scoped one, and
+                // is what a direct DeepSeek launch reads through too.
+                if provider == ModelProvider::DeepSeek {
+                    return store.get().ok().flatten();
+                }
+                let descriptor = crate::provider_registry::descriptor_for(provider)?;
+                let vault = crate::provider_auth::NativeSecretStore::new_for(
+                    descriptor.vault_service,
+                    descriptor.vault_account,
                 )
-                .ok()
-                .and_then(|store| {
-                    use crate::provider_auth::SecretStore as _;
-                    store.get().ok().flatten()
-                })
+                .ok()?;
+                let source = route
+                    .upstreams
+                    .iter()
+                    .find(|upstream| upstream.provider == provider)
+                    .map(|upstream| upstream.credential.clone())?;
+                crate::route_plan::read_credential(&source, &vault)
+                    .ok()
+                    .flatten()
             };
+            let deepseek_key = key_for(ModelProvider::DeepSeek);
+            let openrouter_key = key_for(ModelProvider::OpenRouter);
+            let kimi_key = key_for(ModelProvider::Kimi);
             let codex_available = integration_upstreams.is_some()
                 || crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
             let mut startup_notices = unified_startup_notices(
@@ -391,10 +395,12 @@ impl ForegroundRuntime {
                         .to_string(),
                 );
             }
-            let unified = UnifiedGatewayConfig::new(deepseek_key, codex_available)
-                .with_openrouter(openrouter_key)
-                .with_route(crate::backend::ModelProvider::Kimi, kimi_key)
-                .with_failover(failover);
+            if crate::route_plan::discovery_is_disabled(&env) {
+                return Err(BridgeError::DiscoveryDisabled);
+            }
+            let unified =
+                crate::route_plan::render_unified_config(&route, codex_available, &key_for)
+                    .with_failover(failover);
             let unified = integration_upstreams
                 .as_ref()
                 .map_or(unified.clone(), |upstreams| {
@@ -404,19 +410,27 @@ impl ForegroundRuntime {
                 .with_unified_gateway(unified)
                 // #1257: the gateway refuses any model outside the launch's
                 // allowlist, so the pin holds even though discovery is on.
-                .with_allowed_models(plan.allowed_models.clone());
+                .with_allowed_models(route.allowlist.clone());
             let config = integration_upstreams
                 .as_ref()
                 .map_or(config.clone(), |upstreams| {
                     config.with_integration_test_codex_upstream(upstreams)
                 });
             let bridge = BridgeHandle::start(config)?;
-            apply_unified_overlay(
-                &mut env,
-                &bridge,
-                plan.model_selection.as_ref(),
-                &plan.allowed_models,
-            )?;
+            // The user's own headers survive below the gateway's, so read them
+            // before the overlay's scrub removes the key.
+            let ambient_headers = env
+                .iter()
+                .find(|(key, _)| env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"))
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            crate::route_plan::render_unified_env(
+                &route,
+                bridge.base_url(),
+                bridge.bearer_token(),
+                ambient_headers.as_deref(),
+            )
+            .apply(&mut env);
             let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), startup_notices)
         } else if is_codex_via_claude(plan) {
@@ -1259,71 +1273,6 @@ fn apply_route_context(env: &mut Vec<(String, String)>, plan: &LaunchPlan) {
     set_env(env, ROUTE_CONTEXT_ENV, &context.to_string());
 }
 
-fn apply_unified_overlay(
-    env: &mut Vec<(String, String)>,
-    bridge: &BridgeHandle,
-    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
-    allowed: &[String],
-) -> Result<(), BridgeError> {
-    if env.iter().any(|(key, value)| {
-        env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            && (value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
-    }) {
-        return Err(BridgeError::DiscoveryDisabled);
-    }
-    // Replace only the base URL. Unlike direct DeepSeek and Codex routes, the
-    // Claude credential stays untouched so saved claude.ai OAuth/API-key auth
-    // reaches the native Claude upstream through this gateway.
-    env.retain(|(key, _)| !env_key_eq(key, "ANTHROPIC_BASE_URL"));
-    env.push((
-        "ANTHROPIC_BASE_URL".to_string(),
-        bridge.base_url().to_string(),
-    ));
-    let custom = env
-        .iter()
-        .find(|(key, _)| env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"))
-        .map(|(_, value)| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    env.retain(|(key, _)| !env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"));
-    let gateway_header = format!("{UNIFIED_GATEWAY_TOKEN_HEADER}: {}", bridge.bearer_token());
-    let custom_headers = custom
-        .map(|headers| format!("{gateway_header}\n{headers}"))
-        .unwrap_or(gateway_header);
-    env.push(("ANTHROPIC_CUSTOM_HEADERS".to_string(), custom_headers));
-    set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
-    set_env(env, "CLUD_GATEWAY_TOKEN", bridge.bearer_token());
-    push_default(env, "API_TIMEOUT_MS", BRIDGE_API_TIMEOUT_MS);
-    // #1257: a pinned launch constrains the auxiliary slots too, unlike the
-    // descriptor-driven direct route where they are independent role rows. On
-    // this gateway route the slot value is the row's *discovery* id: Claude
-    // Code classifies a raw wire id like `~anthropic/claude-sonnet-latest` as
-    // an unknown provider id and falls back to a built-in Anthropic row --
-    // exactly the spend the pin exists to stop. Discovery itself stays on
-    // here because clud proxies the catalog and can filter it; an ambient
-    // `CLAUDE_CODE_SUBAGENT_MODEL` wins only when the allowlist admits it,
-    // mirroring the direct route's single precedence rule.
-    if let Some(pinned) = crate::provider_catalog::model_allowlist_slot(allowed, selection) {
-        let discovery = crate::provider_catalog::model_by_any_id(&pinned)
-            .and_then(|row| row.discovery_id)
-            .unwrap_or(&pinned)
-            .to_string();
-        let ambient_subagent = env
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
-            .map(|(_, value)| value.trim().to_string())
-            .filter(|value| {
-                !value.is_empty() && crate::provider_catalog::model_allowlist_allows(allowed, value)
-            });
-        let subagent = ambient_subagent.unwrap_or_else(|| discovery.clone());
-        set_env(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", &discovery);
-        set_env(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", &discovery);
-        set_env(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", &discovery);
-        set_env(env, "ANTHROPIC_DEFAULT_FABLE_MODEL", &discovery);
-        set_env(env, "CLAUDE_CODE_SUBAGENT_MODEL", &subagent);
-    }
-    Ok(())
-}
-
 fn set_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
     env.retain(|(candidate, _)| !env_key_eq(candidate, key));
     env.push((key.to_string(), value.to_string()));
@@ -1797,12 +1746,6 @@ fn remove_user_settings_argument(command: &mut Vec<String>) {
             return;
         }
         index += 1;
-    }
-}
-
-fn push_default(env: &mut Vec<(String, String)>, key: &str, value: &str) {
-    if !env.iter().any(|(candidate, _)| env_key_eq(candidate, key)) {
-        env.push((key.to_string(), value.to_string()));
     }
 }
 
