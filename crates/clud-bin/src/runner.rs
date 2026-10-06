@@ -6,7 +6,7 @@
 //! the OLE drag-drop registration.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::backend::Backend;

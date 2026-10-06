@@ -27,7 +27,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use fs4::fs_std::FileExt;
 use serde_json::Value;
