@@ -429,6 +429,15 @@ selection and its sources so routing can be audited without a paid request.
   offline catalog, and only for a refused id makes one free `GET /credits`
   call. With no credit left it says so instead of offering the paid variant:
   a key's spending limit (`limit_remaining`) is a cap, not money.
+- **Mid-session limits are named at launch (#1845).** A free id that passes
+  the probe can still hit OpenRouter's per-minute or per-day caps, or an
+  upstream error, later in a long session. On the direct route, Claude Code
+  reports that as `API returned an empty or malformed response (HTTP 200)`:
+  the stream ends after one event, and the non-streaming retry gets a JSON
+  body that is not a Message. clud is not in that request path, so every
+  `:free` launch prints one note naming that symptom and the paid id. Turning
+  the error into a proper Anthropic error would belong to the `--unified`
+  gateway.
 
 ### Anthropic-compatible credential preflight
 
