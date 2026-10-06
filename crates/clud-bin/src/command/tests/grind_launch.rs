@@ -216,3 +216,23 @@ fn grind_launches_the_workflow_session_on_every_non_anthropic_claude_route() {
         );
     }
 }
+
+/// #1808: the OpenRouter route clears the Claude-harness gate, but the
+/// session-shape refusals still apply to it: `/grind` needs one foreground
+/// interactive PTY whatever provider the session talks to.
+#[test]
+fn grind_on_openrouter_still_refuses_detached_and_subprocess_sessions() {
+    let url = "https://github.com/zackees/clud/issues";
+    let target = third_party_claude_route(ModelProvider::OpenRouter);
+    let args = parse(&["clud", "--openrouter", "grind", url]);
+    assert_eq!(grind_launch_error(&args, target), None);
+    for (flag, needle) in [
+        ("--detach", "foreground interactive PTY"),
+        ("--subprocess", "interactive PTY"),
+    ] {
+        let args = parse(&["clud", "--openrouter", flag, "grind", url]);
+        let error = grind_launch_error(&args, target)
+            .unwrap_or_else(|| panic!("{flag}: OpenRouter grind must be refused"));
+        assert!(error.contains(needle), "{flag}: {error}");
+    }
+}
