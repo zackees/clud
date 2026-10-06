@@ -162,6 +162,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "clud-os-debug",
         skill_md: include_str!("../assets/skills/clud-os-debug/SKILL.md"),
     },
+    BundledSkill {
+        name: "video-use",
+        skill_md: include_str!("../assets/skills/video-use/SKILL.md"),
+    },
 ];
 
 /// Bundled skills that have been retired. Entries stay here after the
@@ -388,7 +392,9 @@ fn install_explicit_invocation_policies(base: &Path) -> Result<(), InstallError>
         "grind-land",
         "grind-cron",
     ];
-    for (name, policy) in std::iter::once(("do", DO_POLICY))
+    const VIDEO_USE_POLICY: &str = include_str!("../assets/skills/video-use/agents/openai.yaml");
+    for (name, policy) in [("do", DO_POLICY), ("video-use", VIDEO_USE_POLICY)]
+        .into_iter()
         .chain(GRIND_SKILLS.iter().map(|name| (*name, GRIND_POLICY)))
     {
         let skill_dir = base.join(name);

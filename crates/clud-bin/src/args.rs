@@ -641,6 +641,10 @@ pub enum Command {
         /// Reinstall the pinned video-use checkout and its Python deps, then exit.
         #[arg(long)]
         update: bool,
+        /// Print the pinned video-use checkout path (installing it first if
+        /// missing), then exit. The explicit-only `/video-use` skill uses it.
+        #[arg(long, conflicts_with = "update")]
+        path: bool,
     },
     /// Install clud's bundled skills, agent types and workflows now, the same
     /// files a launch installs. `--home` targets another home directory; the

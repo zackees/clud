@@ -699,8 +699,18 @@ Claude session and nowhere else
   a TTY, one masked prompt whose answer is stored; otherwise an error. clud
   sets the key in its own environment immediately before spawning the
   harness, which inherits it; it never appears in the plan or `--dry-run`.
-- **Never automatic.** Nothing is written to `~/.claude/skills` or
-  `~/.codex/skills`, and video-use has no `BUNDLED_SKILLS` row.
+- **Never automatic.** The upstream skill is never written to
+  `~/.claude/skills` or `~/.codex/skills`.
+- **On demand: `/video-use` (#1866).** A second entry point for an ordinary
+  session: the bundled bridge skill `assets/skills/video-use/` is
+  explicit-only (`disable-model-invocation: true` for Claude, whose docs say
+  the description then stays out of context; `allow_implicit_invocation:
+  false` in `agents/openai.yaml` for Codex), so it costs no context until the
+  user types `/video-use`. It runs `clud video --path`, which installs the
+  pinned checkout if needed and prints it, then follows that checkout's
+  `SKILL.md`. The key comes from an ambient `ELEVENLABS_API_KEY`; otherwise
+  the user runs `clud video` once. See
+  [DD-164](../DESIGN_DECISIONS.md#dd-164-video-use-is-an-explicit-only-bundled-bridge-skill).
 
 ## Ownership
 

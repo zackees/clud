@@ -1,0 +1,3 @@
+# managed-by: clud
+policy:
+  allow_implicit_invocation: false
