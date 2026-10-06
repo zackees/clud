@@ -695,6 +695,30 @@ def test_a_fresh_openrouter_grind_launch_is_pinned_to_its_resolved_model() -> No
     assert data["command"][-1] == f"/grind {url}"
 
 
+def test_openrouter_free_ids_are_checked_against_the_offline_catalog() -> None:
+    """#1833: a `:free` id is a cost promise. The embedded catalog proves the
+    nemotron free row is free; an id it cannot prove free is refused before
+    any vault read, request or saved default."""
+    free = _run(
+        "--dry-run", "--openrouter", "--model", "nvidia/nemotron-3-ultra-550b-a55b:free", "-p", "hi"
+    )
+    assert free.returncode == 0, free.stderr
+    assert json.loads(free.stdout)["free_check"] == "free"
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free: free (named on the command line)" in (
+        free.stderr
+    )
+    unknown = _run("--dry-run", "--openrouter", "--model", "acme/not-a-model:free", "-p", "hi")
+    assert unknown.returncode == 2, (unknown.stdout, unknown.stderr)
+    assert unknown.stdout == ""
+    assert "cannot confirm it is free" in unknown.stderr
+    paid = _run(
+        "--dry-run", "--openrouter", "--model", "nvidia/nemotron-3-ultra-550b-a55b", "-p", "hi"
+    )
+    assert paid.returncode == 0, paid.stderr
+    assert json.loads(paid.stdout)["free_check"] == "not_requested"
+    assert "per million input/output tokens (named on the command line)" in paid.stderr
+
+
 def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:
     for argv in [
         ("--dry-run", "--codex", "do"),
