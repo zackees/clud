@@ -70,9 +70,40 @@ That route launches DeepSeek *through Claude* without selecting native `dsh`.
 Unknown auth status keeps the existing picker/default behavior. `clud run`
 normalizes to the same path; explicit flags, saved routing, and dry runs win.
 
-DeepSeek Harness is PATH-only in this first integration. clud does not install
-the developer preview automatically; an explicit missing selection reports
-the upstream `npx @deepseek-ai/dsh web` guidance.
+## DeepSeek Harness install and providers
+
+Issue #1829 makes `dsh` a first-class install target ([DD-160](../DESIGN_DECISIONS.md#dd-160-deepseek-harness-is-a-clud-managed-npm-prefix-driven-by-a-launch-overlay)).
+`--harness dsh` is an alias of `--harness deepseek`. `src/dsh_harness.rs` owns
+the contract:
+
+- **Install.** Discovery checks PATH first, then
+  `~/.clud/harnesses/dsh/<version>/node_modules/.bin/dsh` (`dsh.cmd` on
+  Windows). A user-managed `dsh` on PATH always wins and is never touched. A
+  missing `dsh` on a terminal gets the same `[y/N]` prompt as Claude and Codex
+  (default No); non-interactive launches name `clud dsh-update`, which installs
+  or confirms the reviewed release explicitly. The install runs
+  `npm install --prefix <staging>` for the pinned `@deepseek-ai/dsh` and a
+  pinned private `node` package, verifies `dsh --version`, and renames the
+  staging directory into place, so a failure leaves no partial prefix. Only npm
+  is required from the system; global npm, the system Node, shell startup files
+  and `$DSH_HOME` are never written.
+- **Runtime.** A managed `dsh` runs with its prefix's `.bin` first on PATH, so
+  it boots on the private Node 24 even where the system has Node 20 (below
+  dsh's floor) or Node 26 (which fails dsh's native addon).
+- **Keys.** `ForegroundRuntime::start` hands the child `DEEPSEEK_API_KEY`, or
+  `OPENROUTER_API_KEY` for an OpenRouter launch, from clud's vault. An ambient
+  value wins. Keys go only into the child-local environment, never into dsh's
+  `.credentials.yaml`. The credential preflight runs for OpenRouter and for an
+  explicit `--deepseek`; a bare `--harness dsh` still runs on a key dsh stores
+  itself.
+- **OpenRouter.** `clud --openrouter --harness dsh` appends
+  `--patch ~/.clud/harnesses/dsh/patches/openrouter-<model>.yml`, which the
+  runtime writes before spawn. The overlay makes dsh's built-in `openrouter`
+  route active with `api: anthropic-messages`, the descriptor's
+  `https://openrouter.ai/api` base URL, `apiKeyEnv: OPENROUTER_API_KEY`, and
+  the resolved model declared explicitly (so an ID outside dsh's catalog still
+  resolves). `--model` and the saved OpenRouter model reach dsh through the
+  ordinary OpenRouter selection. The user's own dsh profiles are never edited.
 
 ## Foreground Codex-through-Claude bridge
 

@@ -261,6 +261,13 @@ fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
             }
             backend_bootstrap::run_trusted_codex_update()
         }
+        args::Command::DshUpdate => {
+            if !args.passthrough.is_empty() {
+                eprintln!("dsh-update accepts no passthrough arguments");
+                return Some(2);
+            }
+            clud::dsh_harness::run_update()
+        }
         // Credential management is self-contained and must never resolve a backend,
         // start a daemon, or forward secrets to a harness.
         args::Command::Auth { subcommand } => {
@@ -797,7 +804,8 @@ fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLau
         std::process::exit(2);
     }
     if launch_target.effective_harness == backend::Backend::DeepSeek {
-        if let Some(option) = args.unsupported_deepseek_harness_option() {
+        let clud_routes_model = launch_target.model_provider == backend::ModelProvider::OpenRouter;
+        if let Some(option) = args.unsupported_deepseek_harness_option(clud_routes_model) {
             eprintln!(
                 "unsupported option for DeepSeek Harness: {option}; pass native dsh options after --"
             );
@@ -1078,6 +1086,19 @@ fn store_inline_api_key(args: &mut args::Args) {
     }
 }
 
+/// A dsh launch borrows clud's key only for a provider clud passes through
+/// (#1829): OpenRouter always, DeepSeek when the user asked for it by flag.
+/// A bare `--harness deepseek` keeps working on a key dsh stores itself.
+fn dsh_needs_clud_credential(launch_target: backend::ResolvedLaunchTarget) -> bool {
+    match launch_target.model_provider {
+        backend::ModelProvider::OpenRouter => true,
+        backend::ModelProvider::DeepSeek => {
+            launch_target.provider_source == backend::PreferenceSource::Cli
+        }
+        _ => false,
+    }
+}
+
 /// Provider credentials must exist before foreground or daemon-backed work
 /// is accepted. DeepSeek Harness owns its own provider credentials, so only
 /// clud-managed Claude/Codex routes use this preflight.
@@ -1085,7 +1106,9 @@ fn store_inline_api_key(args: &mut args::Args) {
 /// intentionally remain vault-free -- `launch_preflight_target` returns
 /// `None` for every dry run regardless of provider.
 fn preflight_provider_credentials(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
-    if launch_target.effective_harness == backend::Backend::DeepSeek {
+    if launch_target.effective_harness == backend::Backend::DeepSeek
+        && !dsh_needs_clud_credential(launch_target)
+    {
         return;
     }
     let Some(descriptor) =

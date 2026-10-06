@@ -154,7 +154,9 @@ Two shapes stay silent. A mid-session `/model` pick of the Pro row in an
 otherwise Claude-provider unified session — no launch-time signal can see a
 choice made after launch, so that gap needs a gateway-side check. And the
 native DeepSeek harness (`--harness deepseek`, `dsh`), which owns its own
-provider configuration and takes no `--model`; clud emits no notice there.
+provider configuration and takes no `--model` (except OpenRouter, see
+[launch-targets](launch-targets.md#deepseek-harness-install-and-providers));
+clud emits no notice there.
 
 ### Adding a cataloged model
 

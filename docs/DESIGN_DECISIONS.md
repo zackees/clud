@@ -6471,3 +6471,35 @@ rewrite project-owned hook commands or claim to alter Claude's renderer.
 tool call, with a count instead of one warning per hook. Native runtime
 deduplication and delivery of failures to the agent remain upstream work.
 See [hook-dispatch.md](architecture/hook-dispatch.md#native-hook-dependency-failures-1739).
+
+## DD-160: DeepSeek Harness is a clud-managed npm prefix driven by a launch overlay
+
+**Context.** #942 left `dsh` PATH-only: upstream ships it only as an npm
+developer preview (`npx @deepseek-ai/dsh web`), and clud did not want to
+change global npm state. #1829 needs `clud --harness dsh` and
+`clud --openrouter --harness dsh` to work on a clean machine with keys clud
+already holds.
+
+**Decision.** Install a pinned `@deepseek-ai/dsh` plus a pinned private
+`node` package into a versioned prefix under `~/.clud/harnesses/dsh/`.
+Pass provider keys only through the child environment. Select OpenRouter with
+a clud-owned overlay passed through dsh's own `--patch` flag.
+
+**Why not the alternatives.**
+- *`npx` on every launch* resolves a moving tag and re-downloads on a cold
+  cache. *Global npm* changes state the user owns. A versioned private prefix
+  can be pinned, verified, rolled back, and left alone when the user has their
+  own `dsh`.
+- *The system Node* is unreliable: dsh 0.2.0-rc.2 requires
+  `^22.19.0 || >=24.0.0`, and under Node 26 its native addon fails at boot even
+  though `engines` admits it. The private Node 24 removes both failure modes
+  and needs only npm from the host.
+- *Writing `$DSH_HOME/.credentials.yaml` or the user's profile* would create a
+  second copy of a secret clud cannot rotate, and would edit files the user
+  owns. dsh documents env precedence per run and `--patch` overlays applied
+  after every profile layer, so neither write is needed.
+- *A fork* was the fallback if upstream could not be pointed at OpenRouter
+  without UI interaction. It was not needed: the overlay alone selects dsh's
+  built-in `openrouter` route, verified end to end against a mock of the
+  Anthropic Messages endpoint.
+

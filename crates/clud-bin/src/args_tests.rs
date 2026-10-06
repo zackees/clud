@@ -310,6 +310,15 @@ fn test_harness_flag_is_typed_and_not_forwarded() {
             vec!["clud", "--harness", "deepseek"],
             HarnessSelection::DeepSeek,
         ),
+        // #1829: `dsh` is the executable's own name and must parse too.
+        (
+            vec!["clud", "--openrouter", "--harness", "dsh"],
+            HarnessSelection::DeepSeek,
+        ),
+        (
+            vec!["clud", "--openrouter", "--harness=dsh"],
+            HarnessSelection::DeepSeek,
+        ),
     ] {
         let args = parse(&raw);
         assert_eq!(args.harness, Some(expected));
@@ -331,7 +340,10 @@ fn deepseek_harness_rejects_clud_options_it_cannot_translate() {
         (vec!["clud", "--allow-plan-mode"], "--allow-plan-mode"),
     ] {
         let args = parse(&argv);
-        assert_eq!(args.unsupported_deepseek_harness_option(), Some(expected));
+        assert_eq!(
+            args.unsupported_deepseek_harness_option(false),
+            Some(expected)
+        );
     }
     let args = parse(&[
         "clud",
@@ -342,8 +354,32 @@ fn deepseek_harness_rejects_clud_options_it_cannot_translate() {
         "--",
         "--verbose",
     ]);
-    assert_eq!(args.unsupported_deepseek_harness_option(), None);
+    assert_eq!(args.unsupported_deepseek_harness_option(false), None);
     assert_eq!(args.passthrough, ["--verbose"]);
+}
+
+#[test]
+fn deepseek_harness_accepts_model_only_when_clud_routes_the_model() {
+    let args = parse(&[
+        "clud",
+        "--openrouter",
+        "--harness",
+        "dsh",
+        "--model",
+        "openai/gpt-5",
+    ]);
+    assert_eq!(args.unsupported_deepseek_harness_option(true), None);
+    assert_eq!(
+        args.unsupported_deepseek_harness_option(false),
+        Some("--model")
+    );
+}
+
+#[test]
+fn dsh_update_is_a_dispatched_subcommand() {
+    let args = parse(&["clud", "dsh-update"]);
+    assert!(matches!(args.command, Some(Command::DshUpdate)));
+    assert!(args.passthrough.is_empty());
 }
 
 #[test]

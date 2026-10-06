@@ -294,9 +294,70 @@ jobs:
             --mount "type=bind,src=$PWD/ci/installer_distro_guest.sh,dst=/guest.sh,readonly" \
             '${{ matrix.image }}' sh /guest.sh '${{ matrix.distro }}' "$CANDIDATE_VERSION" "$CANDIDATE_SHA256"
 
+  candidate-dsh:
+    # #1829: clud installs DeepSeek Harness into its private prefix from an
+    # empty HOME and drives the real dsh against a mock OpenRouter endpoint.
+    name: Managed DeepSeek Harness on ${{ matrix.runner }} (system Node ${{ matrix.node }})
+    needs: candidate-build
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            node: '20'
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            node: '26'
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            node: '24'
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            node: '24'
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-${{ matrix.target }}
+          path: candidate
+      # The system Node only has to supply npm: dsh runs on the private
+      # Node 24 clud installs beside it, even where the system has Node 20
+      # (below dsh's floor) or Node 26 (which fails dsh's native addon).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install acceptance dependencies
+        shell: bash
+        run: python -m pip install pytest==9.0.3 running-process==4.10.1
+      - name: Expose the exact candidate binary
+        shell: bash
+        run: |
+          binary=$(find candidate -maxdepth 1 -type f -name 'clud-*' ! -name '*.json' | head -1)
+          test -n "$binary"
+          if [ "$RUNNER_OS" != Windows ]; then chmod +x "$binary"; fi
+          echo "CLUD_TEST_BINARY=$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")" >> "$GITHUB_ENV"
+      - name: Install and drive DeepSeek Harness from an empty HOME
+        shell: bash
+        env:
+          DSH_MANAGED_ACCEPTANCE: '1'
+        run: |
+          before=$(npm ls -g --depth=0 --parseable | sort)
+          python -m pytest -q tests/test_dsh_managed_install.py
+          after=$(npm ls -g --depth=0 --parseable | sort)
+          test "$before" = "$after" || { echo "global npm state changed"; exit 1; }
+
   candidate-aggregate:
     name: Require six exact PR candidate hosts
-    needs: [catalog-unit, resolver-unit, catalog-site, candidate-build, candidate-catalog, candidate-host, candidate-nixos, candidate-distros]
+    needs: [catalog-unit, resolver-unit, catalog-site, candidate-build, candidate-catalog, candidate-host, candidate-nixos, candidate-distros, candidate-dsh]
     if: always() && github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci-full') || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: ubuntu-24.04
     steps:
@@ -323,9 +384,10 @@ jobs:
           CANDIDATE_HOST: ${{ needs.candidate-host.result }}
           CANDIDATE_NIXOS: ${{ needs.candidate-nixos.result }}
           CANDIDATE_DISTROS: ${{ needs.candidate-distros.result }}
+          CANDIDATE_DSH: ${{ needs.candidate-dsh.result }}
           SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          for result in "$CATALOG_UNIT" "$RESOLVER_UNIT" "$CATALOG_SITE" "$CANDIDATE_BUILD" "$CANDIDATE_CATALOG" "$CANDIDATE_HOST" "$CANDIDATE_NIXOS" "$CANDIDATE_DISTROS"; do
+          for result in "$CATALOG_UNIT" "$RESOLVER_UNIT" "$CATALOG_SITE" "$CANDIDATE_BUILD" "$CANDIDATE_CATALOG" "$CANDIDATE_HOST" "$CANDIDATE_NIXOS" "$CANDIDATE_DISTROS" "$CANDIDATE_DSH"; do
             test "$result" = success
           done
           version=$(python -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')

@@ -439,6 +439,14 @@ fn build_launch_plan_for_target_at(
         } else if args.passthrough.is_empty() {
             cmd.push("web".to_string());
         }
+        // #1829: an OpenRouter launch selects dsh's OpenRouter route through
+        // a clud-owned overlay; the runtime writes the file before spawn.
+        if let Some(patch) = crate::dsh_harness::plan_patch_path(
+            target.model_provider,
+            crate::dsh_harness::openrouter_model(model_selection.as_ref()),
+        ) {
+            cmd.extend(["--patch".to_string(), patch.to_string_lossy().into_owned()]);
+        }
     }
 
     if backend.settings_surface() == crate::backend::SettingsSurface::CodexConfigOverrides {
@@ -732,6 +740,7 @@ fn build_launch_plan_for_target_at(
         Some(Command::Auth { .. })
         | Some(Command::Models { .. })
         | Some(Command::CodexUpdate)
+        | Some(Command::DshUpdate)
         | Some(Command::CodexAuth { .. })
         | Some(Command::DeepseekAuth { .. })
         | Some(Command::Attach { .. })

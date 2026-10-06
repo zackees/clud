@@ -246,6 +246,10 @@ CLI surface and backend resolution:
   `docs/architecture/provider-selection.md`.
 - `harness_picker.rs` - installed Claude/Codex/DeepSeek discovery plus the
   three-second bare-launch selector and its pure choice/countdown model.
+- `dsh_harness.rs` - DeepSeek Harness managed install (`clud dsh-update`),
+  private Node runtime, child key passthrough, and the OpenRouter `--patch`
+  overlay (#1829). See
+  [`launch-targets.md`](../../../docs/architecture/launch-targets.md#deepseek-harness-install-and-providers).
 - `provider_catalog.rs` - the single registry mapping stable clud model IDs,
   gateway discovery IDs, provider wire IDs, compatibility aliases, and
   independent effort/context capability metadata.
@@ -782,6 +786,8 @@ Quick lookup, which file owns a given subcommand:
   provider/harness, prompt, and markers) +
   `loop_spec` (task resolution) + `loop_artifacts` (artifact files) +
   `runner.rs` (iteration loop) + `loop_check` (DONE/BLOCKED scan).
+- `clud dsh-update` -> `dsh_harness::run_update` (managed DeepSeek Harness
+  install, #1829).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` -> all
   in `daemon/` (dispatched from `daemon::handle_special_command`).
 - `clud gc list` / `prune` / `purge` / `all` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
