@@ -119,11 +119,14 @@ pub fn price_notice(wire_id: &str, catalog: &Catalog, source: &str) -> Option<St
     };
     let origin = match source {
         "cli" => "named on the command line".to_string(),
-        "provider_setting" => "saved default from an earlier --model; pass --model to change it"
-            .to_string(),
+        "provider_setting" => {
+            "saved default from an earlier --model; pass --model to change it".to_string()
+        }
         other => other.replace('_', " "),
     };
-    Some(format!("[clud] OpenRouter model {wire_id}: {price} ({origin})"))
+    Some(format!(
+        "[clud] OpenRouter model {wire_id}: {price} ({origin})"
+    ))
 }
 
 /// How a launch probe of a free id ended.
@@ -262,14 +265,16 @@ mod tests {
                 output: 2.0
             }
         );
-        let message =
-            refusal("acme/priced:free", &priced, &catalog).expect("priced :free refused");
+        let message = refusal("acme/priced:free", &priced, &catalog).expect("priced :free refused");
         assert!(message.contains("$1.00/$2.00"), "{message}");
         let unknown = check("acme/missing:free", &catalog);
         assert_eq!(unknown, FreeCheck::Unknown);
         let message =
             refusal("acme/missing:free", &unknown, &catalog).expect("unknown :free refused");
-        assert!(message.contains("`acme/missing` is a paid model"), "{message}");
+        assert!(
+            message.contains("`acme/missing` is a paid model"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -319,17 +324,20 @@ mod notice_tests {
     #[test]
     fn every_catalogued_launch_names_its_price_and_origin() {
         let catalog = catalog();
-        let paid = price_notice("nvidia/nemotron-3-ultra-550b-a55b", &catalog, "provider_setting")
-            .expect("catalogued");
-        assert!(paid.contains("$0.50/$2.20"), "{paid}");
-        assert!(paid.contains("saved default"), "{paid}");
-        let free = price_notice(
-            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        let paid = price_notice(
+            "nvidia/nemotron-3-ultra-550b-a55b",
             &catalog,
-            "cli",
+            "provider_setting",
         )
         .expect("catalogued");
-        assert!(free.contains(": free (named on the command line)"), "{free}");
+        assert!(paid.contains("$0.50/$2.20"), "{paid}");
+        assert!(paid.contains("saved default"), "{paid}");
+        let free = price_notice("nvidia/nemotron-3-ultra-550b-a55b:free", &catalog, "cli")
+            .expect("catalogued");
+        assert!(
+            free.contains(": free (named on the command line)"),
+            "{free}"
+        );
         assert_eq!(price_notice("not/in-catalog", &catalog, "cli"), None);
     }
 }
