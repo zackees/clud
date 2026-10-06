@@ -24,3 +24,6 @@ the dedicated session; this skill loads the same workflow into the current one.
    the user to run `clud video` once (it stores the key in clud's vault and
    provides it to that session) or to export the variable and relaunch. Never
    ask the user to paste a key into the chat.
+
+If the task turns into a code change rather than an edit of media, keep the
+RED -> GREEN rule: a focused failing test first, then the fix.
