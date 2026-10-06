@@ -400,7 +400,7 @@ pub fn ensure_helper_on_session_path() {
     let InstallProbe::HelperPresent { path } = probe_current_install() else {
         return;
     };
-    let Some(home) = helper_home() else {
+    let Some(home) = crate::home::user_home() else {
         return;
     };
     let Ok(dir) = expose_helper_at(&home, &path) else {
@@ -415,17 +415,6 @@ pub fn ensure_helper_on_session_path() {
 
 /// Under the user's home: the helper-only PATH directory.
 const HELPER_BIN_SUBDIR: &str = ".clud/state/helper-bin";
-
-fn helper_home() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-}
 
 /// Place the scanner names alone in the helper-only directory under `home`
 /// as aliases of `clud` (hardlink, then symlink, then copy; see
@@ -466,7 +455,7 @@ fn path_with_appended(path_env: &str, dir: &Path) -> Option<String> {
 fn hook_home_dir() -> Option<PathBuf> {
     std::env::var_os("CLUD_HOOK_HOME")
         .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+        .or_else(crate::home::user_home)
 }
 
 #[cfg(test)]

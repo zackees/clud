@@ -134,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
 
     from ci.banned_cross_tools import main as check_banned_cross_tools
     from ci.banned_empty_harnesses import main as check_banned_empty_harnesses
+    from ci.banned_home_dir import main as check_banned_home_dir
     from ci.banned_hook_paths import main as check_banned_hook_paths
     from ci.banned_imports import main as check_banned_imports
     from ci.banned_legacy_deletion import main as check_banned_legacy_deletion
@@ -169,6 +170,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     # The interpreter is `python` everywhere; clud's shim makes that name work
     # on Linux, macOS and Windows; the versioned name does not exist on Windows.
     if check_banned_python3() != 0:
+        return 1
+    # #1836: the user's home is resolved only in home.rs; a second resolver
+    # disagreed with it on Windows in #1829.
+    if check_banned_home_dir() != 0:
         return 1
     # #1334: committed hook configs must resolve clud's helpers from PATH,
     # never a machine-local binary or a `target/` build output.

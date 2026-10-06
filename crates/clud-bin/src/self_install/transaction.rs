@@ -286,9 +286,7 @@ fn approved_destination() -> Result<PathBuf, String> {
     {
         let local = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData/Local"))
-            })
+            .or_else(|| crate::home::user_home().map(|home| home.join("AppData/Local")))
             .ok_or("cannot locate per-user local app data")?;
         if !local.is_absolute() {
             return Err("per-user local app data must be absolute".into());

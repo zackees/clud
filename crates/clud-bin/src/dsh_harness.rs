@@ -59,13 +59,10 @@ pub fn managed_executable(home: &Path, windows: bool) -> PathBuf {
     bin_dir(&managed_prefix(home)).join(executable_name(windows))
 }
 
-/// The home every managed-dsh path hangs off. It must match backend
-/// discovery (`InstallPathEnv`: `HOME`, then `USERPROFILE`), so an install and
-/// the next lookup agree even where the OS profile folder differs, as it does
-/// on Windows (#1829).
+/// The home every managed-dsh path hangs off: clud's one home resolver, so
+/// the install and backend discovery always agree (#1829, #1836).
 pub fn managed_home() -> Option<PathBuf> {
-    let env = crate::backend_bootstrap::InstallPathEnv::current();
-    env.home.or(env.user_profile).or_else(dirs::home_dir)
+    crate::home::user_home()
 }
 
 fn home_dir() -> Result<PathBuf, String> {

@@ -221,7 +221,7 @@ pub fn default_codex_config_overrides() -> Vec<String> {
 }
 
 pub fn home_dir_path() -> Result<PathBuf, SettingsError> {
-    home_dir().ok_or(SettingsError::NoHomeDir)
+    crate::home::user_home().ok_or(SettingsError::NoHomeDir)
 }
 
 pub fn seeded_global_settings_document() -> Value {
@@ -371,7 +371,7 @@ pub fn merged_settings_document(global: &Value, local: Option<&Value>) -> Value 
 pub fn load_or_init_codex_config_overrides(
     write_default: bool,
 ) -> Result<Vec<String>, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_or_init_codex_config_overrides_at(&home, write_default)
 }
 
@@ -404,7 +404,7 @@ pub fn load_default_backend() -> Result<Option<Backend>, SettingsError> {
 /// not provider-routing policy, so it deliberately lives outside
 /// `backend.default` and `harness.default`.
 pub fn load_last_launcher_harness() -> Result<Option<Backend>, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_last_launcher_harness_at(&home)
 }
 
@@ -418,7 +418,7 @@ pub fn load_last_launcher_harness_at(home: &Path) -> Result<Option<Backend>, Set
 }
 
 pub fn save_last_launcher_harness(backend: Backend) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_last_launcher_harness_at(&home, backend)
 }
 
@@ -463,7 +463,7 @@ pub fn save_codex_cli_login_import_at(
 }
 
 pub fn load_default_model_provider() -> Result<Option<ModelProvider>, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_default_model_provider_at(&home)
 }
 
@@ -476,13 +476,13 @@ pub fn load_default_model_provider_at(home: &Path) -> Result<Option<ModelProvide
 }
 
 pub fn load_global_launch_preferences() -> Result<GlobalLaunchPreferences, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_global_launch_preferences_at(&home)
 }
 
 pub fn load_global_launch_preferences_read_only() -> Result<GlobalLaunchPreferences, SettingsError>
 {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     let document = read_settings_or_legacy(&home)?;
     Ok(global_launch_preferences_from_document(&document))
 }
@@ -490,7 +490,7 @@ pub fn load_global_launch_preferences_read_only() -> Result<GlobalLaunchPreferen
 /// Read global launch preferences and every configured provider profile from
 /// one document snapshot without seeding or writing defaults.
 pub fn load_launch_preferences_read_only() -> Result<LaunchPreferencesSnapshot, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_launch_preferences_read_only_at(&home)
 }
 
@@ -659,7 +659,7 @@ fn global_launch_preferences_from_document(document: &Value) -> GlobalLaunchPref
 }
 
 pub fn save_default_backend(backend: Backend) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_default_backend_at(&home, backend)
 }
 
@@ -677,7 +677,7 @@ pub fn save_global_launch_setup_selection(
     backend: Backend,
     scope: LaunchSetupScope,
 ) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_global_launch_setup_selection_at(&home, backend, scope)
 }
 
@@ -701,7 +701,7 @@ pub fn save_global_launch_preferences(
     harness: Option<HarnessSelection>,
     scope: LaunchSetupScope,
 ) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_global_launch_preferences_at(&home, provider, harness, scope)
 }
 
@@ -723,7 +723,7 @@ pub fn save_global_launch_preferences_at(
 }
 
 pub fn save_settings_patch(patch: GlobalSettingsPatch) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_settings_patch_at(&home, patch)
 }
 
@@ -799,7 +799,7 @@ fn save_settings_transaction_at(
 }
 
 pub fn load_auto_fix_hooks_enabled() -> Result<bool, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_auto_fix_hooks_enabled_at(&home)
 }
 
@@ -815,7 +815,7 @@ pub fn load_auto_fix_hooks_enabled_at(home: &Path) -> Result<bool, SettingsError
 }
 
 pub fn save_auto_fix_hooks_enabled(enabled: bool) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_auto_fix_hooks_enabled_at(&home, enabled)
 }
 
@@ -829,7 +829,7 @@ pub fn save_auto_fix_hooks_enabled_at(home: &Path, enabled: bool) -> Result<(), 
 /// PR-wait fail-fast git command improvements (`clud settings` toggle).
 /// On by default (DD-065) — see `GIT_PR_WAIT_FAIL_FAST_NOTE`.
 pub fn load_pr_wait_fail_fast_enabled() -> Result<bool, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_pr_wait_fail_fast_enabled_at(&home)
 }
 
@@ -845,7 +845,7 @@ pub fn load_pr_wait_fail_fast_enabled_at(home: &Path) -> Result<bool, SettingsEr
 }
 
 pub fn save_pr_wait_fail_fast_enabled(enabled: bool) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_pr_wait_fail_fast_enabled_at(&home, enabled)
 }
 
@@ -861,7 +861,7 @@ pub fn save_pr_wait_fail_fast_enabled_at(home: &Path, enabled: bool) -> Result<(
 /// `git.gh_read_broker` (#1743): route session `gh api` GETs through the
 /// daemon read broker. On by default — see `GIT_GH_READ_BROKER_NOTE`.
 pub fn load_gh_read_broker_enabled() -> Result<bool, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_gh_read_broker_enabled_at(&home)
 }
 
@@ -881,7 +881,7 @@ pub fn load_gh_read_broker_enabled_at(home: &Path) -> Result<bool, SettingsError
 /// it, background refreshes are deferred until the window resets. `None`
 /// when unset; the broker then uses 10.
 pub fn load_gh_read_broker_reserve_pct() -> Result<Option<u64>, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_gh_read_broker_reserve_pct_at(&home)
 }
 
@@ -909,7 +909,7 @@ pub fn save_gh_read_broker_enabled_at(home: &Path, enabled: bool) -> Result<(), 
 /// daemon reads it each tick, and `CLUD_GC_DELETE_REMOTE_BRANCHES` overrides
 /// it. See docs/architecture/gc-and-registry.md.
 pub fn load_gc_delete_remote_branches() -> Result<bool, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_gc_delete_remote_branches_at(&home)
 }
 
@@ -933,7 +933,7 @@ pub fn gc_delete_remote_branches_from(document: &Value) -> bool {
 /// `clud gc list` warns. Warn-only: size never deletes pinned work. `0`
 /// disables; absent or not a non-negative integer means the default.
 pub fn load_worktrees_warn_bytes() -> Result<u64, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_worktrees_warn_bytes_at(&home)
 }
 
@@ -967,7 +967,7 @@ pub fn worktrees_warn_bytes_from(document: &Value) -> u64 {
 /// only deleter of session temp. `0` disables; absent or not a non-negative
 /// integer means the default.
 pub fn load_tmp_warn_bytes() -> Result<u64, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_tmp_warn_bytes_at(&home)
 }
 
@@ -998,7 +998,7 @@ pub fn tmp_warn_bytes_from(document: &Value) -> u64 {
 /// daemon evicts the oldest entries (never one younger than an hour). `0`
 /// disables; absent or not a non-negative integer means the default.
 pub fn load_trash_max_bytes() -> Result<u64, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_trash_max_bytes_at(&home)
 }
 
@@ -1023,7 +1023,7 @@ pub fn trash_max_bytes_from(document: &Value) -> u64 {
 /// Warn-only; the size cap is `cache.max_bytes` (DD-144, DD-145). `0`
 /// disables; absent or not a non-negative integer means the default.
 pub fn load_cache_warn_bytes() -> Result<u64, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_cache_warn_bytes_at(&home)
 }
 
@@ -1144,7 +1144,7 @@ pub fn safe_rm_extra_roots_from(document: &Value) -> (Vec<SafeRmExtraRootEntry>,
 /// writer for a key the hook already resolves — deliberately not a second
 /// source of truth. A repo's own `.clud/settings.json` still overrides it.
 pub fn load_block_cd() -> Result<crate::repo_clud_config::BlockCd, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_block_cd_at(&home)
 }
 
@@ -1163,7 +1163,7 @@ pub fn load_block_cd_at(home: &Path) -> Result<crate::repo_clud_config::BlockCd,
 /// This preference is intentionally global: a project-local setting could make
 /// a normal invocation unexpectedly require a desktop companion binary.
 pub fn load_web_term_enabled() -> Result<bool, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_web_term_enabled_at(&home)
 }
 
@@ -1179,7 +1179,7 @@ pub fn load_web_term_enabled_at(home: &Path) -> Result<bool, SettingsError> {
 }
 
 pub fn save_web_term_enabled(enabled: bool) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_web_term_enabled_at(&home, enabled)
 }
 
@@ -1192,7 +1192,7 @@ pub fn save_web_term_enabled_at(home: &Path, enabled: bool) -> Result<(), Settin
 pub fn load_launch_setup_scope(
     backend: Backend,
 ) -> Result<Option<LaunchSetupScope>, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_launch_setup_scope_at(&home, backend)
 }
 
@@ -1218,7 +1218,7 @@ pub fn save_launch_setup_scope(
     backend: Backend,
     scope: LaunchSetupScope,
 ) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_launch_setup_scope_at(&home, backend, scope)
 }
 
@@ -1233,7 +1233,7 @@ pub fn save_launch_setup_scope_at(
 }
 
 pub fn load_shell_disable_powershell_for_backend(backend: Backend) -> Result<bool, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_shell_disable_powershell_for_backend_at(&home, backend)
 }
 
@@ -1248,7 +1248,7 @@ pub fn load_shell_disable_powershell_for_backend_at(
 }
 
 pub fn save_shell_disable_powershell(enabled: bool) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_shell_disable_powershell_at(&home, enabled)
 }
 
@@ -1266,7 +1266,7 @@ pub fn save_shell_disable_powershell_for_backend(
     backend: Backend,
     enabled: Option<bool>,
 ) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_shell_disable_powershell_for_backend_at(&home, backend, enabled)
 }
 
@@ -1314,7 +1314,7 @@ fn resolve_shell_disable_powershell(document: &Value, backend: Backend) -> bool 
 }
 
 pub fn save_rust_optimize_settings(settings: &RustOptimizeSettings) -> Result<(), SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     save_rust_optimize_settings_at(&home, settings)
 }
 
@@ -1366,7 +1366,7 @@ impl Default for CpuBannerSettings {
 }
 
 pub fn load_cpu_banner_settings() -> Result<CpuBannerSettings, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_cpu_banner_settings_at(&home)
 }
 
@@ -1416,7 +1416,7 @@ impl Default for ToastSettings {
 }
 
 pub fn load_toast_settings() -> Result<ToastSettings, SettingsError> {
-    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SettingsError::NoHomeDir)?;
     load_toast_settings_at(&home)
 }
 
@@ -1733,23 +1733,6 @@ fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
 
 struct LockGuard {
     _file: File,
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = std::env::var_os("USERPROFILE") {
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    if let Some(path) = std::env::var_os("HOME") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

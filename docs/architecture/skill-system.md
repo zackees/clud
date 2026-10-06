@@ -32,7 +32,7 @@ disjoint names. Full rationale in
 `ci/banned_skill_sources.py` (run by `bash lint`) enforces the invariant:
 
 1. Skill bodies may only be `include_str!`'d from `assets/skills/`.
-2. Only `skills.rs` / `skills_home.rs` may build a backend skills path.
+2. Only `skills.rs` may build a backend skills path; it joins onto `home::user_home` (#1836).
 3. No second skill source tree at the repo root.
 
 Rule 1 alone would have caught the original bug. A line-scoped
@@ -48,7 +48,7 @@ escape in the tree.
 | Source tree | `crates/clud-bin/assets/skills/<name>/` | Holds `SKILL.md` plus contributor `README.md` files. The only source of skill bodies. |
 | `BUNDLED_SKILLS` | `skills.rs` | Compile-time `include_str!` registry of every shipped skill. |
 | `PURGED_BUNDLED_SKILLS` | `skills.rs` | Retired names swept from *every* backend's skills dir. |
-| Home resolution | `crates/clud-bin/src/skills_home.rs` | Resolves the user home dir that `skills.rs` joins onto. |
+| Home resolution | `crates/clud-bin/src/home.rs` | clud's one home resolver, which `skills.rs` joins onto (#1836). |
 | Launch setup gate | `launch_setup.rs` | Selects session-only vs global setup and dispatches setup actions. |
 | Source lint | `ci/banned_skill_sources.py` | Fails `bash lint` if a second tree or installer appears. |
 

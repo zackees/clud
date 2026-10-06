@@ -1269,7 +1269,7 @@ fn declared_hook_denial(
             &payload.command,
             shell_dialect_for_tool(&payload.tool_name),
             &payload.cwd,
-            home_dir().as_deref(),
+            crate::home::user_home().as_deref(),
         )
     };
     let touched = crate::clud_hook_roots::containment_paths(named, cd_targets, &payload.cwd);
@@ -1293,7 +1293,9 @@ fn declared_hook_denial(
             continue;
         };
 
-        if kind != RootKind::Parent && tier_b_gated_in_codex(&repo_root, home_dir().as_deref()) {
+        if kind != RootKind::Parent
+            && tier_b_gated_in_codex(&repo_root, crate::home::user_home().as_deref())
+        {
             let notice = format!(
                 "[clud] not running the hooks of {} {:?}: this codex project is not \
                  trusted yet. Trust the project in ~/.codex/config.toml (or run `clud \
@@ -1372,7 +1374,7 @@ fn block_cd_denial(
         return None;
     }
     let repo_root = nearest_repo_root(&payload.cwd);
-    let home = home_dir();
+    let home = crate::home::user_home();
     // Only `"auto"` needs to know what the hooks look like; an explicit
     // `true` has already decided.
     let scan = match (&repo_root, setting) {
@@ -3608,20 +3610,6 @@ fn py_string_repr(value: &str) -> String {
 #[path = "block_bad_cmd_io.rs"]
 mod block_bad_cmd_io;
 use block_bad_cmd_io::*;
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = std::env::var_os("USERPROFILE") {
-            if !path.to_string_lossy().is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    std::env::var_os("HOME")
-        .filter(|path| !path.to_string_lossy().is_empty())
-        .map(PathBuf::from)
-}
 
 #[cfg(test)]
 mod tests {

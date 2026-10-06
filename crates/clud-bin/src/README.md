@@ -246,6 +246,10 @@ CLI surface and backend resolution:
   `docs/architecture/provider-selection.md`.
 - `harness_picker.rs` - installed Claude/Codex/DeepSeek discovery plus the
   three-second bare-launch selector and its pure choice/countdown model.
+- `home.rs` - the only resolver of the user's home directory
+  (`user_home`; Windows `USERPROFILE` > `HOME` > OS, else `HOME` > OS).
+  Library `home_dir` calls and raw `USERPROFILE` reads are banned elsewhere
+  ([DD-161](../../../docs/DESIGN_DECISIONS.md#dd-161-the-users-home-directory-has-exactly-one-resolver)).
 - `dsh_harness.rs` - DeepSeek Harness managed install (`clud dsh-update`),
   private Node runtime, child key passthrough, and the OpenRouter `--patch`
   overlay (#1829). See

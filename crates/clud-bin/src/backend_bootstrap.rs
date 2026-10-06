@@ -124,11 +124,13 @@ impl InstallLocation {
                     .join("bin")
                     .join("codex.exe")
             }),
-            Self::ManagedDsh { windows } => env
-                .home
-                .as_ref()
-                .or(env.user_profile.as_ref())
-                .map(|home| crate::dsh_harness::managed_executable(home, *windows)),
+            Self::ManagedDsh { windows } => crate::home::resolve(
+                *windows,
+                env.user_profile.clone().map(Into::into),
+                env.home.clone().map(Into::into),
+                || None,
+            )
+            .map(|home| crate::dsh_harness::managed_executable(&home, *windows)),
         }
     }
 }
@@ -1349,7 +1351,11 @@ ln -sfn releases/0.156.0 "$root/current"
             );
             assert_eq!(
                 spec.fallback_path(&path_env()).unwrap(),
-                crate::dsh_harness::managed_executable(Path::new("/home/me"), windows)
+                // Windows resolves USERPROFILE first, like every clud path.
+                crate::dsh_harness::managed_executable(
+                    Path::new(if windows { "C:/Users/me" } else { "/home/me" }),
+                    windows
+                )
             );
             assert!(spec.prompt().contains(crate::dsh_harness::DSH_VERSION));
             assert!(spec.prompt().ends_with("[y/N]"));

@@ -474,7 +474,7 @@ fn latest_refresh_stamp() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CLUD_SOLDR_LATEST_STAMP") {
         return Some(PathBuf::from(path));
     }
-    dirs::home_dir().map(|home| home.join(".clud/cache/soldr/latest-check"))
+    crate::home::user_home().map(|home| home.join(".clud/cache/soldr/latest-check"))
 }
 
 fn claim_latest_refresh(now: SystemTime) -> bool {

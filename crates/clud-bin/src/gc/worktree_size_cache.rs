@@ -279,7 +279,7 @@ pub fn tmp_launch_warning_at(home: &Path, now_unix: i64) -> Option<String> {
 
 /// Launch side for `~/.clud/tmp`: never fails, never walks.
 pub fn tmp_launch_warning() -> Option<String> {
-    let home = crate::gc::session_tmp::home_dir()?;
+    let home = crate::home::user_home()?;
     tmp_launch_warning_at(&home, now_unix())
 }
 
@@ -361,7 +361,7 @@ pub fn clud_cache_launch_warning_at(home: &Path, now_unix: i64) -> Option<String
 
 /// Launch side for `~/.clud/cache`: never fails, never walks.
 pub fn clud_cache_launch_warning() -> Option<String> {
-    let home = crate::gc::session_tmp::home_dir()?;
+    let home = crate::home::user_home()?;
     clud_cache_launch_warning_at(&home, now_unix())
 }
 
@@ -374,7 +374,7 @@ pub fn now_unix() -> i64 {
 
 /// Launch side: the banner line, if any. Never fails, never walks.
 pub fn launch_warning() -> Option<String> {
-    let home = crate::gc::session_tmp::home_dir()?;
+    let home = crate::home::user_home()?;
     launch_warning_at(&home, now_unix())
 }
 

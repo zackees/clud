@@ -35,10 +35,6 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::Backend;
 
-#[path = "skills_home.rs"]
-mod skills_home;
-use skills_home::home_dir;
-
 const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 
 /// One bundled skill: the directory name and the literal `SKILL.md` body.
@@ -325,7 +321,7 @@ pub struct LegacyPurgeReport {
 /// [`InstallError::NoHomeDir`] only when the home dir itself cannot be
 /// resolved.
 pub fn ensure_installed() -> Result<Vec<(&'static SkillBackend, InstallReport)>, InstallError> {
-    let home = home_dir().ok_or(InstallError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(InstallError::NoHomeDir)?;
     ensure_installed_at(&home)
 }
 
@@ -348,7 +344,7 @@ pub fn ensure_installed_at(
 pub fn ensure_installed_for_backend(
     backend: Backend,
 ) -> Result<Option<(&'static SkillBackend, InstallReport)>, InstallError> {
-    let home = home_dir().ok_or(InstallError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(InstallError::NoHomeDir)?;
     ensure_installed_for_backend_at(&home, backend)
 }
 

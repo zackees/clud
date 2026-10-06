@@ -552,7 +552,7 @@ fn warn_if_clud_cache_oversized() {
     use crate::gc::worktree_size_cache::{
         clud_cache_dir_for, clud_cache_list_warning, DEFAULT_CACHE_WARN_BYTES,
     };
-    let Some(home) = crate::gc::session_tmp::home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         return;
     };
     let warn_bytes =

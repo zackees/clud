@@ -849,8 +849,8 @@ fn default_db_path() -> Result<PathBuf, RegistryError> {
             return Ok(p);
         }
         // Fallback: %USERPROFILE%\AppData\Local\clud\sessions.redb
-        if let Some(home) = std::env::var_os("USERPROFILE") {
-            let mut p = PathBuf::from(home);
+        if let Some(home) = crate::home::user_home() {
+            let mut p = home;
             p.push("AppData");
             p.push("Local");
             p.push("clud");

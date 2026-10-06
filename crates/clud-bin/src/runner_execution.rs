@@ -621,7 +621,7 @@ mod tests {
     /// runner tests don't trigger a real 9 MB network fetch. Mirrors what
     /// `git_bash_resolver::resolve_or_fetch_with` writes on a successful
     /// fetch — the directory tree plus the sibling `.complete` sentinel.
-    fn warm_cache_vendored_bash(home: &Path) -> PathBuf {
+    fn warm_cache_vendored_bash(home: &Path) -> std::path::PathBuf {
         let manifest = crate::shell::git_bash_resolver::embedded_manifest().unwrap();
         let sha = &manifest.git_bash_bin.sha256;
         let extraction = crate::shell::git_bash_resolver::extraction_dir(home, sha);

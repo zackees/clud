@@ -6,7 +6,7 @@
 //! the OLE drag-drop registration.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::backend::Backend;
@@ -411,7 +411,7 @@ pub fn child_env() -> Vec<(String, String)> {
 ///
 /// `Backend::Claude` is the case that actually changes behavior today.
 pub fn child_env_for_backend(backend: Backend) -> Vec<(String, String)> {
-    let home = clud_home_dir();
+    let home = crate::home::user_home();
     child_env_for_backend_at(backend, home.as_deref())
 }
 
@@ -678,23 +678,6 @@ mod tests {
             Some(user_owned.as_str())
         );
     }
-}
-
-fn clud_home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = std::env::var_os("USERPROFILE") {
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    if let Some(path) = std::env::var_os("HOME") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
 }
 
 pub fn get_terminal_size() -> (u16, u16) {

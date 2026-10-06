@@ -97,7 +97,7 @@ fn log_report(report: &session_state::SweepReport) {
 }
 
 fn state_dir() -> Option<PathBuf> {
-    Some(home_dir()?.join(".clud").join("state"))
+    Some(crate::home::user_home()?.join(".clud").join("state"))
 }
 
 fn read_sentinel(path: &std::path::Path) -> Option<SystemTime> {
@@ -115,17 +115,6 @@ fn write_sentinel(path: &std::path::Path, now: SystemTime) -> std::io::Result<()
         .map_err(|_| std::io::Error::other("system clock before UNIX epoch"))?
         .as_secs();
     fs::write(path, secs.to_string())
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
 }
 
 #[cfg(test)]

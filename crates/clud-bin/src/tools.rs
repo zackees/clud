@@ -312,20 +312,9 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
 /// `uv` tries to use it, which is the right failure mode (a misconfigured
 /// host should not silently scribble into a relative path).
 pub fn clud_uv_cache_dir() -> PathBuf {
-    home_dir()
+    crate::home::user_home()
         .map(|h| h.join(".clud/cache/uv"))
         .unwrap_or_else(|| PathBuf::from("/nonexistent/clud-uv-cache-no-home"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
 }
 
 #[cfg(test)]

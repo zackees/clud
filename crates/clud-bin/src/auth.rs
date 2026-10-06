@@ -213,7 +213,7 @@ fn status_row(provider: AuthProvider) -> serde_json::Value {
             "configured": true,
         }),
         AuthProvider::Codex => {
-            let configured = dirs::home_dir()
+            let configured = crate::home::user_home()
                 .and_then(|home| crate::codex_auth::load_at(&home).ok().flatten())
                 .is_some()
                 || std::env::var("OPENAI_API_KEY")

@@ -921,7 +921,7 @@ fn discover_repo_clud_config_raw(start: &Path) -> Option<RawRepoCludConfig> {
 }
 
 fn discover_user_clud_config_raw() -> Option<RawRepoCludConfig> {
-    let home = dirs::home_dir()?;
+    let home = crate::home::user_home()?;
     let candidate = home.join(".clud").join("settings.json");
     if !candidate.is_file() {
         return None;

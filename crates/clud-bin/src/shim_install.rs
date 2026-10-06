@@ -32,7 +32,7 @@ pub fn alias_names() -> Vec<String> {
 /// cannot be resolved — callers degrade silently (the launch path
 /// just skips shim install).
 pub fn shims_dir() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(SHIMS_SUBDIR))
+    crate::home::user_home().map(|h| h.join(SHIMS_SUBDIR))
 }
 
 /// Testable variant — install all aliases under `home_root` as links to
@@ -115,7 +115,7 @@ pub fn prepare_session_shims_at(
 /// delivery, but before the backend is spawned so every launch path inherits
 /// the same aliases.
 pub fn prepare_current_session() -> std::io::Result<bool> {
-    let Some(home) = home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         return Ok(false);
     };
     let current_exe = std::env::current_exe()?;
@@ -135,17 +135,6 @@ pub fn prepare_current_session() -> std::io::Result<bool> {
         }
     }
     Ok(true)
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
 }
 
 /// Whether `exe` is `clud` itself (any case, `.exe` or not) and so a valid
@@ -254,7 +243,7 @@ fn install_rm_with(
 /// start and the first one after an upgrade relinks the dir. Best effort and
 /// silent: a failure leaves the dir for the next launch.
 pub fn refresh_running_session_aliases() {
-    let (Some(home), Ok(exe)) = (home_dir(), std::env::current_exe()) else {
+    let (Some(home), Ok(exe)) = (crate::home::user_home(), std::env::current_exe()) else {
         return;
     };
     let var = |key: &str| std::env::var_os(key);

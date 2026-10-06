@@ -223,6 +223,14 @@ distro package, a container image, the pre-clud `install`), mark the line
 `python-name-lint: allow`, or put `python-name-lint: allow-next-line` above
 a line that ends in a `\` continuation.
 
+### Home directory: `home::user_home` only
+
+Resolve the user's home with `crate::home::user_home()` (`clud::home::user_home()`
+from a binary). `dirs::home_dir`, `std::env::home_dir` and raw `USERPROFILE`
+reads are banned elsewhere by `ci/banned_home_dir.py` (`bash lint`) and the
+`ban_dirs_home_dir` Dylint lint: a second resolver disagrees on Windows
+([DD-161](docs/DESIGN_DECISIONS.md#dd-161-the-users-home-directory-has-exactly-one-resolver)).
+
 ### Cross-cutting registries — extend in all required places
 
 Several features have a "single source of truth" registry that must be updated alongside the code change. Forgetting any of these causes silent misbehavior (passthrough instead of dispatch) or surprising failures (banned-import lint, missing bundled file). The full list:

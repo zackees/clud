@@ -210,7 +210,8 @@ pub(crate) fn parse_scope_answer(answer: &str) -> WriteScope {
 /// to install today. Used by the pre-install announcement and the dry-run
 /// preview so the user knows the destination before any network I/O.
 fn planned_soldr_install_target() -> Result<PathBuf, String> {
-    let home = home_dir().ok_or_else(|| "could not resolve user home directory".to_string())?;
+    let home = crate::home::user_home()
+        .ok_or_else(|| "could not resolve user home directory".to_string())?;
     let target_dir = global_bin_dir(&home);
     let asset = soldr_asset_for_current_platform("0.0.0")?; // version unused for binary_name
     Ok(target_dir.join(asset.binary_name))
@@ -407,7 +408,8 @@ fn ensure_soldr_installed(version: &str) -> Result<String, String> {
     if let Ok(path) = which::which("soldr") {
         return Ok(format!("soldr already installed at {}", path.display()));
     }
-    let home = home_dir().ok_or_else(|| "could not resolve user home directory".to_string())?;
+    let home = crate::home::user_home()
+        .ok_or_else(|| "could not resolve user home directory".to_string())?;
     let target_dir = global_bin_dir(&home);
     fs::create_dir_all(&target_dir)
         .map_err(|error| format!("create {}: {error}", target_dir.display()))?;
@@ -674,23 +676,6 @@ fn soldr_asset_for_current_platform(version: &str) -> Result<SoldrAsset, String>
         extension,
         binary_name,
     })
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = env::var_os("USERPROFILE") {
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    if let Some(path) = env::var_os("HOME") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

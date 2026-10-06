@@ -6503,3 +6503,32 @@ a clud-owned overlay passed through dsh's own `--patch` flag.
   built-in `openrouter` route, verified end to end against a mock of the
   Anthropic Messages endpoint.
 
+## DD-161: the user's home directory has exactly one resolver
+
+**Context.** #1829 shipped a Windows-only bug: the managed DeepSeek Harness
+installed under `dirs::home_dir()` (the Windows Known Folder profile) while
+backend discovery searched `USERPROFILE`, so with an isolated home the launch
+fell back to a bare `dsh`. Only native CI caught it. An audit (#1836) found 26
+library `home_dir` calls and about 20 private helpers re-implementing "where is
+home", with small differences: empty values honored or not, `USERPROFILE`
+checked first even on Unix, an OS fallback or none.
+
+**Decision.** `crates/clud-bin/src/home.rs::user_home` is the only resolver:
+on Windows `USERPROFILE`, then `HOME`, then the OS profile folder; elsewhere
+`HOME`, then the OS lookup; empty values are ignored. That is the precedence
+`clud_settings` already used, so `~/.clud` does not move for anyone. Two
+guards hold the line: `ci/banned_home_dir.py` in `bash lint` bans
+`dirs::home_dir`-style calls and raw `USERPROFILE` reads (every Windows-correct
+copy of the rule must read it), and the `ban_dirs_home_dir` Dylint lint bans
+the calls by resolved path, which also catches renamed imports.
+
+**Why both guards.** Dylint runs off the PR path (`_dylint.yml`, `ci-full`),
+which is how #1829's bug reached native CI. The text guard runs locally and on
+every PR; Dylint covers what text cannot see.
+
+**Exceptions.** `InstallPathEnv` snapshots the raw variables so bootstrap
+tests can inject them, and its consumers resolve through `home::resolve`.
+`crates/tap` is a one-dependency binary that cannot link clud. A helper with a
+distinct meaning, such as `hook_home_dir`'s `CLUD_HOOK_HOME` override, may
+wrap the resolver but never re-derive it.
+
