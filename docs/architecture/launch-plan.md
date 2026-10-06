@@ -43,8 +43,15 @@ pub struct LaunchPlan {
     pub stream_json_progress: bool,     // claude subprocess-mode loop only
     pub codex_model: Option<String>,    // legacy bridge compatibility field
     pub model_selection: Option<ResolvedModelSelection>, // normalized provider/model/effort/context
+    pub route: Option<ResolvedRoute>,   // every routing decision, resolved once (#1855)
 }
 ```
+
+`ResolvedRoute` (`crates/clud-bin/src/route_plan.rs`, #1855) is the one place a
+launch's backend, upstreams, model slots, allowlist, discovery, context window,
+effort capability, upstream routing, timeout and launch checks are decided.
+Each backend renders it; none re-derives it. It is additive and omitted when
+absent, so a pre-#1855 payload still round-trips.
 
 `LoopMarkers { done_path, blocked_path }` and
 `RepeatSchedule { interval_secs }` live in the same module. All three derive

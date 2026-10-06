@@ -1710,6 +1710,11 @@ fn print_dry_run_and_exit(
         // selection -- the runtime prints a green startup line for the
         // inherited case (#1257).
         "pinned_from_previous_selection": plan.pinned_from_previous_selection,
+        // #1855: every routing decision this launch made, resolved once and
+        // carried on the plan. The audit surface the migration is validated
+        // against: slots, allowlist, context, effort and check verdicts are
+        // the same values the backends render.
+        "route": plan.route,
         // #1833: what the offline catalog says about a `:free` id.
         "free_check": plan.model_selection.as_ref()
             .and_then(|selection| selection.wire_model.as_deref())

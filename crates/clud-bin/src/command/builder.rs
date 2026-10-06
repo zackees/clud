@@ -885,7 +885,7 @@ fn build_launch_plan_for_target_at(
         }
     }
 
-    LaunchPlan {
+    let mut plan = LaunchPlan {
         unsafe_mode: args.unsafe_mode,
         command: cmd,
         iterations,
@@ -914,7 +914,16 @@ fn build_launch_plan_for_target_at(
         provider_only: args.provider_only.clone(),
         coauthor: crate::attribution::resolve_from_env(args.coauthor.as_deref()),
         pinned_from_previous_selection: args.model_pin_is_from_previous_selection(),
-    }
+        route: None,
+    };
+    // #1855: the route is resolved once, here, from the plan it describes --
+    // so every backend renderer and `--dry-run` read one decision instead of
+    // re-deriving their own copy of it.
+    plan.route = Some(crate::route_plan::resolve(
+        &plan,
+        &crate::route_plan::Ambient::from_process(),
+    ));
+    plan
 }
 
 fn codex_hook_hash(command: &str) -> String {

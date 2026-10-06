@@ -38,6 +38,7 @@ fn cross_route_plan() -> LaunchPlan {
         provider_only: Vec::new(),
         pinned_from_previous_selection: false,
         coauthor: crate::attribution::Coauthor::default(),
+        route: None,
     }
 }
 

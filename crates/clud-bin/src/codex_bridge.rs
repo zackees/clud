@@ -106,7 +106,7 @@ struct StatusUsageState {
 
 type SharedStatusUsage = Arc<Mutex<StatusUsageState>>;
 
-const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
+pub(crate) const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
 pub const UNIFIED_GATEWAY_TOKEN_HEADER: &str = "X-Clud-Gateway-Token";
 
 /// A launch-scoped multiplexer configuration. Secret material is intentionally

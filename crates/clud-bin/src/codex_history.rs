@@ -25,7 +25,8 @@ pub const BRIDGE_SESSION_CONVERSATION: &str = "bridge-session";
 /// every request. Codex additionally retains opaque Responses items, so that
 /// canonical history is valid only while consecutive requests stay on the
 /// Codex route. Crossing any provider boundary starts a new route epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConversationRoute {
     Claude,
     Codex,

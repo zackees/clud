@@ -16,11 +16,18 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-// Direct requests are not monitored by clud; do not lengthen Claude Code's
-// documented per-request default. The bridge budget is a separate DD-028
-// decision and must not change as a side effect of direct-route policy.
-const DIRECT_API_TIMEOUT_MS: &str = "600000";
-const BRIDGE_API_TIMEOUT_MS: &str = "3000000";
+// #1855: the timeouts, the scrub lists and the bridge's injected role rows are
+// routing *decisions*, so they live in `route_plan` beside the resolver that
+// owns them. These aliases keep this module's render call sites reading the
+// same names they always did.
+use crate::route_plan::{
+    ANTHROPIC_COMPAT_SCRUB as ANTHROPIC_COMPAT_CONFLICTING,
+    BRIDGE_TIMEOUT_MS as BRIDGE_API_TIMEOUT_MS,
+    CODEX_BRIDGE_OPUS_MODEL as CODEX_VIA_CLAUDE_OPUS_MODEL,
+    CODEX_BRIDGE_SONNET_MODEL as CODEX_VIA_CLAUDE_SONNET_MODEL,
+    CODEX_VIA_CLAUDE_SCRUB as CODEX_VIA_CLAUDE_CONFLICTING,
+    DIRECT_TIMEOUT_MS as DIRECT_API_TIMEOUT_MS,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexCliImportChoice {
@@ -1067,59 +1074,6 @@ fn unified_startup_notices(
     notices
 }
 
-/// Shared union scrub const used by every Anthropic-compat provider's overlay
-/// (issue #937 Phase 2, #936 "Generalization" -> 1d). This is the union of:
-///
-/// - the DeepSeek connector's original list, plus
-/// - `ANTHROPIC_SMALL_FAST_MODEL` and `ANTHROPIC_DEFAULT_FABLE_MODEL`, plus
-/// - the legacy `*_NAME` variants of every default-model slot.
-///
-/// The additions are an intended hardening delta, not a no-op refactor: a
-/// review finding on #936 noted the original list let an ambient value in any
-/// of these slots survive into the DeepSeek child and misroute model
-/// selection. `ANTHROPIC_CUSTOM_MODEL_OPTION*` stays a separate prefix scrub
-/// below, not a literal entry here, since it has no fixed suffix.
-///
-/// `CLAUDE_CODE_EFFORT_LEVEL` is deliberately NOT on this list (DD-059): an
-/// ambient user value is preserved so the harness's own `/effort` control
-/// stays authoritative, and clud no longer injects its own pin -- the catalog
-/// default effort travels on the harness's `--effort` session flag instead.
-const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_SMALL_FAST_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL",
-    "ANTHROPIC_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
-    "CLAUDE_CODE_SUBAGENT_MODEL",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-];
-
-/// Claude Code's role aliases are process-wide configuration. On the direct
-/// Codex-through-Claude route they must name bridge discovery rows, rather
-/// than the harness's unavailable Anthropic defaults. Keep these IDs aligned
-/// with the Codex rows in `provider_catalog.rs`.
-const CODEX_VIA_CLAUDE_OPUS_MODEL: &str = "clud-claude-codex-sol";
-const CODEX_VIA_CLAUDE_SONNET_MODEL: &str = "clud-claude-codex-terra";
-const CODEX_VIA_CLAUDE_CONFLICTING: &[&str] = &[
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-];
-
 /// Machine-readable launch identity for bundled skills. This is child-local,
 /// route-owned data: a user-provided value never decides which models a skill
 /// is allowed to delegate to.
@@ -1181,16 +1135,12 @@ fn model_pin_notices(plan: &LaunchPlan, color: bool) -> Vec<String> {
 /// substitutions are sent by clud's own overlay, so refusing them at the
 /// bridge would refuse clud's own configuration. An empty pin stays empty:
 /// unconstrained launches are byte-for-byte the pre-#1257 behavior.
+/// The boundary this bridge serves (#1257): the launch's pin, widened by the
+/// two role rows the bridge injects itself, so DD-038's substitutions are
+/// inside the boundary by construction. The decision lives in `route_plan`;
+/// this is the render-site alias.
 fn codex_via_claude_bridge_allowlist(plan: &LaunchPlan) -> Vec<String> {
-    let mut allowed = plan.allowed_models.clone();
-    if !allowed.is_empty() {
-        for role in [CODEX_VIA_CLAUDE_OPUS_MODEL, CODEX_VIA_CLAUDE_SONNET_MODEL] {
-            if !allowed.iter().any(|entry| entry.eq_ignore_ascii_case(role)) {
-                allowed.push(role.to_string());
-            }
-        }
-    }
-    allowed
+    crate::route_plan::codex_bridge_allowlist(plan)
 }
 
 /// The image-capability warning for a launch whose model cannot accept images,
@@ -2268,6 +2218,7 @@ mod tests {
             provider_only: Vec::new(),
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
+            route: None,
         }
     }
 

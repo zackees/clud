@@ -47,6 +47,7 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             provider_only: Vec::new(),
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
+            route: None,
         },
         kind: SessionKind::Subprocess,
         name: Some("sample".to_string()),
