@@ -672,6 +672,8 @@ def test_openrouter_grind_refuses_unsupported_sessions(argv: tuple[str, ...], ne
     assert result.returncode == 2, (result.stdout, result.stderr)
     assert result.stdout == ""
     assert needle in result.stderr
+
+
 def test_a_fresh_openrouter_grind_launch_is_pinned_to_its_resolved_model() -> None:
     """#1809: with no `--model` and nothing saved, the catalog default is the
     launch's pin (DD-077), so a direct OpenRouter `/grind` session has gateway

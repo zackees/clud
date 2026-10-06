@@ -235,6 +235,8 @@ fn grind_on_openrouter_still_refuses_detached_and_subprocess_sessions() {
             .unwrap_or_else(|| panic!("{flag}: OpenRouter grind must be refused"));
         assert!(error.contains(needle), "{flag}: {error}");
     }
+}
+
 /// #1809: the OpenRouter `/grind` session is a plain interactive harness
 /// session: no headless flag, no clud-side repetition, and no stream-json
 /// progress rendering.
