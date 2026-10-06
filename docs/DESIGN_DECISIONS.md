@@ -6532,3 +6532,27 @@ tests can inject them, and its consumers resolve through `home::resolve`.
 distinct meaning, such as `hook_home_dir`'s `CLUD_HOOK_HOME` override, may
 wrap the resolver but never re-derive it.
 
+## DD-162: Codex launches default to auto review for approvals
+
+**Context.** Codex can send approval requests (sandbox escapes, blocked
+network, MCP prompts) to an auto-review subagent instead of the user. The
+config key is `approvals_reviewer = "auto_review"` (default `"user"`). The
+`--approve-for-me` flag also sets `approval_policy="on-request"` and
+`sandbox_mode="workspace-write"` (#1847).
+
+**Decision.** Every Codex-harness launch emits
+`-c approvals_reviewer="auto_review"` after the configured `config_overrides`
+and before the subcommand, so the interactive TUI, `exec` and `resume` all get
+it. clud sets only the reviewer, never `--approve-for-me`: the approval policy
+and sandbox stay with YOLO (DD-002) or `--safe`.
+
+**Why it is harmless under YOLO.** `--dangerously-bypass-approvals-and-sandbox`
+raises no approval requests, so the reviewer is idle. It takes effect on
+`--safe` launches, which otherwise stop and wait for the user.
+
+**Opt-out.** A reviewer the user already chose wins: an `approvals_reviewer=`
+entry in the clud settings `codex.config_overrides`, or passthrough
+`-c`/`--config approvals_reviewer=…`, `--approve-for-me` or `--not-so-yolo`.
+Like other clud `-c` overrides, the injected value takes precedence over
+`~/.codex/config.toml`.
+

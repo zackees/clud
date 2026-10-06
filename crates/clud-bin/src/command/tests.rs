@@ -54,6 +54,8 @@ fn codex_prefix() -> Vec<String> {
         "codex".to_string(),
         "-c".to_string(),
         DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE.to_string(),
+        "-c".to_string(),
+        r#"approvals_reviewer="auto_review""#.to_string(),
     ]
 }
 
