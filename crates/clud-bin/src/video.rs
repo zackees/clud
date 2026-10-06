@@ -103,7 +103,7 @@ pub fn write_plugin_wrapper(home: &Path, checkout: &Path) -> Result<PathBuf, Str
         .map_err(|e| format!("cannot create {}: {e}", manifest_dir.display()))?;
     std::fs::write(manifest_dir.join("plugin.json"), plugin_manifest())
         .map_err(|e| format!("cannot write the plugin manifest: {e}"))?;
-    let skills = dir.join("skills");
+    let skills = dir.join("skills"); // skill-source-lint: allow (plugin wrapper, not a backend skills dir; DD-163)
     std::fs::create_dir_all(&skills)
         .map_err(|e| format!("cannot create {}: {e}", skills.display()))?;
     let link = skills.join(SKILL_NAME);

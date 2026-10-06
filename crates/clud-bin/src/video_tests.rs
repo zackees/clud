@@ -67,7 +67,7 @@ fn video_plugin_wrapper_layout_and_no_harness_skill_writes() {
     let wrapper = write_plugin_wrapper(home.path(), &checkout).unwrap();
     assert_eq!(wrapper, plugin_dir(home.path()));
     assert!(wrapper.join(".claude-plugin/plugin.json").is_file());
-    let skill = wrapper.join("skills").join(SKILL_NAME);
+    let skill = wrapper.join("skills").join(SKILL_NAME); // skill-source-lint: allow (plugin wrapper)
     assert!(skill.join("SKILL.md").is_file());
     assert!(
         skill.join("helpers/render.py").is_file(),
