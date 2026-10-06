@@ -5150,3 +5150,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "route_snapshots_tests.rs"]
+mod route_snapshots_tests;
