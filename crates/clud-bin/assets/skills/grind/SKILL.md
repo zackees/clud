@@ -493,6 +493,11 @@ two), whether or not every goal merged:
    - `auto`: report the feature PR as merged, or as "waiting for review".
      Once it merged, run `clud grind reconcile` again so every issue it
      closed loses the `grind:on-feature` label.
+
+   Then make the status comment final: PATCH the run's
+   `<!-- grind:v1 status run=<run-id> -->` comment (section 4) so each
+   child's line shows its outcome (merged with its PR, blocked, parked,
+   deferred or failed with the reason) and none still reads `running`.
 2. **File problems (router only).** Gather every `problems` item from each
    workflow result (each goal entry's `problems`, including the
    `goal: 'run'` entry for problems no goal owns, `feature.problems`, the
