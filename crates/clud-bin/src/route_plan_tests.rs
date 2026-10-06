@@ -719,6 +719,60 @@ fn a_provider_only_pin_is_the_routes_upstream_routing() {
     );
 }
 
+/// C14/D20: the bridge renders its slots and boundary from the route, and the
+/// config it hands `BridgeConfig` is exactly that boundary.
+#[test]
+fn the_codex_bridge_renders_its_slots_and_boundary_from_the_route() {
+    let mut plan = plan(ModelProvider::Codex, Backend::Claude);
+    plan.codex_model = Some("codex-terra".to_string());
+    plan.allowed_models = vec!["codex-terra".to_string()];
+    let route = resolve(&plan, &Ambient::default());
+
+    let render = render_codex_bridge(
+        &route,
+        CodexBridgeRequest {
+            default_model: crate::codex_model::ModelSpec::parse("codex-terra").ok(),
+            selected_model_cli_id: Some("codex-terra"),
+        },
+    );
+    assert_eq!(render.allowed_models, route.allowlist);
+    assert_eq!(render.selected_model_cli_id.as_deref(), Some("codex-terra"));
+
+    let overlay = render_codex_bridge_env(&route, "http://gateway.invalid", "fixture-token");
+    let mut child = Vec::new();
+    overlay.apply(&mut child);
+    let value = |key: &str| {
+        child
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
+    };
+    let opus = route.slots.opus.as_ref().expect("the bridge pins opus");
+    assert_eq!(
+        value("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        Some(opus.wire_id.as_str())
+    );
+    assert_eq!(
+        value("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"),
+        opus.display_name.as_deref()
+    );
+    let sonnet = route.slots.sonnet.as_ref().expect("the bridge pins sonnet");
+    assert_eq!(
+        value("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        Some(sonnet.wire_id.as_str())
+    );
+    // The process-wide ceiling the catalog proves across every Codex row.
+    assert_eq!(value("CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("1050000"));
+    assert_eq!(
+        value("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+        Some("1")
+    );
+    assert_eq!(value("API_TIMEOUT_MS"), Some("3000000"));
+    // Haiku is deliberately left alone: the bridge has no Codex tier for it.
+    assert_eq!(value("ANTHROPIC_DEFAULT_HAIKU_MODEL"), None);
+    assert_eq!(value("ANTHROPIC_AUTH_TOKEN"), Some("fixture-token"));
+}
+
 /// The unified route lists every upstream it may serve, and the direct route
 /// exactly one. Which of them can answer right now is a launch-time credential
 /// probe, deliberately not a resolution input.
