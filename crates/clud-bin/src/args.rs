@@ -543,6 +543,21 @@ pub enum Command {
     CodexUpdate,
     /// Install or confirm DeepSeek Harness in clud's private npm prefix.
     DshUpdate,
+    /// Run a CI job locally under bosn and show only the verdict and the
+    /// failing steps' diagnostics (#1839).
+    Ci {
+        /// Workflow job id, e.g. `test-linux-x64-unit`; omit for the PR plan.
+        job: Option<String>,
+        /// Also print log lines matching this regex (e.g. a test module).
+        #[arg(long)]
+        filter: Option<String>,
+        /// Workflow file, when not `.github/workflows/ci.yml`.
+        #[arg(long)]
+        workflow: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage provider credentials. Claude authentication remains owned by
     /// Claude Code and is reported as externally managed.
     Auth {
@@ -1400,6 +1415,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "models",
     "codex-update",
     "dsh-update",
+    "ci",
     "codex-auth",
     "deepseek-auth",
     "run",

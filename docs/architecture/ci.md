@@ -71,6 +71,23 @@ checkout (uncommitted work included), so each run tests exactly the tree you
 have. Local CI is a pre-push check within the [budget below](#local-ci-budget),
 not the edit loop: the PR's GitHub Actions run is the CI of record.
 
+**Prefer `clud ci`** (#1839). It wraps the same bosn run, waits, and prints a
+one-line verdict plus only the failing steps' diagnostics (rustc/clippy errors
+with their `-->` location, failing tests and panics, ruff findings),
+ANSI-stripped. An `incomplete` run whose runnable jobs all passed is reported
+as a pass, because act cannot run reusable workflows. A stale bosn daemon gets
+a one-line fix instead of a refusal.
+
+```bash
+clud ci                                          # the PR plan
+clud ci static-checks                            # formatting, ruff, guards
+clud ci lint-linux-x64                           # clippy and doc-tests
+clud ci test-linux-x64-unit --filter openrouter_free   # plus matching test lines
+clud ci test-linux-x64-unit --json               # verdict, failing steps, diagnostics
+```
+
+The raw bosn commands below remain available:
+
 ```bash
 docker info
 bosn ci run --workspace . --trigger pr --wait              # the PR's jobs: static, build, clippy, dylint, Linux unit

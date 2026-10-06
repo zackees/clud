@@ -790,6 +790,8 @@ Quick lookup, which file owns a given subcommand:
   provider/harness, prompt, and markers) +
   `loop_spec` (task resolution) + `loop_artifacts` (artifact files) +
   `runner.rs` (iteration loop) + `loop_check` (DONE/BLOCKED scan).
+- `clud ci [JOB] [--filter RE] [--json]` -> `ci_local::run` (local bosn run with a
+  compact verdict and failing-step diagnostics, #1839).
 - `clud dsh-update` -> `dsh_harness::run_update` (managed DeepSeek Harness
   install, #1829).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` -> all
