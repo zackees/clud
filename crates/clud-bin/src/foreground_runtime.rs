@@ -902,7 +902,7 @@ fn prepare_dsh_child(
     };
     crate::dsh_harness::prepare_child(
         &facts,
-        dirs::home_dir().as_deref(),
+        crate::dsh_harness::managed_home().as_deref(),
         env,
         &|name| std::env::var(name).ok(),
         &vault,

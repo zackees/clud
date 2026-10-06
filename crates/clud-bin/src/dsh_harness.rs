@@ -59,8 +59,17 @@ pub fn managed_executable(home: &Path, windows: bool) -> PathBuf {
     bin_dir(&managed_prefix(home)).join(executable_name(windows))
 }
 
+/// The home every managed-dsh path hangs off. It must match backend
+/// discovery (`InstallPathEnv`: `HOME`, then `USERPROFILE`), so an install and
+/// the next lookup agree even where the OS profile folder differs, as it does
+/// on Windows (#1829).
+pub fn managed_home() -> Option<PathBuf> {
+    let env = crate::backend_bootstrap::InstallPathEnv::current();
+    env.home.or(env.user_profile).or_else(dirs::home_dir)
+}
+
 fn home_dir() -> Result<PathBuf, String> {
-    dirs::home_dir().ok_or_else(|| "home directory unavailable".to_string())
+    managed_home().ok_or_else(|| "home directory unavailable".to_string())
 }
 
 /// The bin directory to put first on the child's PATH when `executable` is a
@@ -343,7 +352,7 @@ pub fn plan_patch_path(provider: ModelProvider, wire_model: Option<&str>) -> Opt
     if provider != ModelProvider::OpenRouter {
         return None;
     }
-    let home = dirs::home_dir()?;
+    let home = managed_home()?;
     Some(openrouter_patch_path(&home, wire_model?))
 }
 

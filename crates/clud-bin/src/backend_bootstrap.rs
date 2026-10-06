@@ -661,7 +661,7 @@ fn run_backend_installer(spec: &BackendInstallSpec) -> Result<(), String> {
             cmd_fallback,
         } => run_windows_powershell_installer(command, cmd_fallback, spec.backend),
         InstallerPlan::ManagedDsh => {
-            let home = dirs::home_dir().ok_or("home directory unavailable")?;
+            let home = crate::dsh_harness::managed_home().ok_or("home directory unavailable")?;
             crate::dsh_harness::install(&home).map(|_| ())
         }
     }
@@ -751,7 +751,7 @@ fn run_interactive_command(command: CommandSpec, cwd: Option<PathBuf>) -> Result
 fn verify_backend(backend: Backend, path: &Path) -> Result<(), String> {
     // A managed dsh runs on its private Node, which `--version` must see too.
     if backend == Backend::DeepSeek {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::dsh_harness::managed_home() {
             if crate::dsh_harness::managed_bin_for(path, &home).is_some() {
                 return crate::dsh_harness::verify(path);
             }
