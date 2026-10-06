@@ -233,17 +233,27 @@ mod tests {
             panic!("the guardrail refusal must block");
         };
         assert!(message.contains(GUARDRAILS_URL), "{message}");
-        assert!(message.contains("`nvidia/nemotron-3-ultra-550b-a55b`"), "{message}");
+        assert!(
+            message.contains("`nvidia/nemotron-3-ultra-550b-a55b`"),
+            "{message}"
+        );
     }
 
     #[test]
     fn rate_limits_and_server_errors_never_block() {
         for (status, body) in [
-            (429, r#"{"error":{"message":"Rate limit exceeded: free-models-per-min"}}"#),
+            (
+                429,
+                r#"{"error":{"message":"Rate limit exceeded: free-models-per-min"}}"#,
+            ),
             (502, "bad gateway"),
             (400, r#"{"error":{"message":"max_tokens too small"}}"#),
         ] {
-            assert_eq!(classify(FREE, status, body), ProbeVerdict::Proceed, "{status}");
+            assert_eq!(
+                classify(FREE, status, body),
+                ProbeVerdict::Proceed,
+                "{status}"
+            );
         }
         let no_endpoint = r#"{"error":{"message":"No endpoints found for x:free."}}"#;
         assert!(matches!(
