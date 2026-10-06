@@ -368,6 +368,55 @@ pub fn run_update() -> i32 {
     }
 }
 
+/// The checkout `clud video --path` reports: media tools must be present, and
+/// the managed install is created first if missing. `installer` is
+/// [`install`] in production and injected in tests.
+pub fn checkout_for_path(
+    home: &Path,
+    missing_tools: &[&str],
+    installer: &mut dyn FnMut(&Path) -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    if !missing_tools.is_empty() {
+        return Err(missing_media_tools_message(
+            missing_tools,
+            std::env::consts::OS,
+        ));
+    }
+    installer(home)?;
+    Ok(checkout_dir(home))
+}
+
+/// `clud video --path` (#1866): print the pinned checkout, installing it on
+/// first use. The explicit-only `/video-use` skill calls this so the pinned
+/// SHA lives only in this module.
+pub fn run_path() -> i32 {
+    let Some(home) = crate::home::user_home() else {
+        eprintln!("[clud] error: home directory unavailable");
+        return 1;
+    };
+    let missing = missing_media_tools(&|tool| which::which(tool).is_ok());
+    let mut installer = |home: &Path| {
+        if !is_installed(home) {
+            eprintln!(
+                "[clud] installing video-use {} into {}",
+                &VIDEO_USE_SHA[..7],
+                checkout_dir(home).display()
+            );
+        }
+        install(home, false)
+    };
+    match checkout_for_path(&home, &missing, &mut installer) {
+        Ok(checkout) => {
+            println!("{}", checkout.display());
+            0
+        }
+        Err(error) => {
+            eprintln!("[clud] video-use unavailable: {error}");
+            1
+        }
+    }
+}
+
 /// Everything a real (non-dry-run) `clud video` launch needs before the
 /// harness starts: media tools, the managed install, and the key. Returns the
 /// key, which the caller places only in the child environment.

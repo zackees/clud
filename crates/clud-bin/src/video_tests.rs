@@ -26,6 +26,30 @@ fn no_prompt() -> Result<String, ()> {
 }
 
 #[test]
+fn video_path_reports_the_checkout_after_installing() {
+    let home = Path::new("/h");
+    let mut installs = 0;
+    let path = checkout_for_path(home, &[], &mut |_| {
+        installs += 1;
+        Ok(PathBuf::from("/wrapper"))
+    })
+    .unwrap();
+    assert_eq!(path, checkout_dir(home));
+    assert_eq!(installs, 1);
+}
+
+#[test]
+fn video_path_fails_actionably_without_media_tools_or_install() {
+    let home = Path::new("/h");
+    let error =
+        checkout_for_path(home, &["ffmpeg"], &mut |_| panic!("must not install")).unwrap_err();
+    assert!(error.contains("ffmpeg"), "{error}");
+    let error =
+        checkout_for_path(home, &[], &mut |_| Err("uv was not found on PATH".into())).unwrap_err();
+    assert!(error.contains("uv was not found"), "{error}");
+}
+
+#[test]
 fn video_paths_live_under_clud_extern_never_harness_skills() {
     let home = Path::new("/h");
     assert_eq!(

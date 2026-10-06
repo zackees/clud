@@ -119,12 +119,16 @@ fn run(mut args: args::Args) {
     std::process::exit(exit_code);
 }
 
-/// `clud video [DIR] [--update]` (#1851): `--update` reinstalls the pinned
+/// `clud video [DIR] [--update | --path]` (#1851, #1866): `--path` prints the
+/// checkout and exits; `--update` reinstalls the pinned
 /// video-use checkout and exits; otherwise the session runs in `DIR`.
 fn enter_video_command(args: &args::Args) {
-    let Some(args::Command::Video { dir, update }) = &args.command else {
+    let Some(args::Command::Video { dir, update, path }) = &args.command else {
         return;
     };
+    if *path {
+        std::process::exit(clud::video::run_path());
+    }
     if *update {
         std::process::exit(clud::video::run_update());
     }

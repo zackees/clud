@@ -6579,3 +6579,23 @@ provider, because it routes no model traffic.
 **Rejected.** A bundled skill (auto-triggers everywhere); tracking upstream
 `main` (unreviewed shell instructions on every launch); a `clud auth`
 provider row for ElevenLabs (that registry describes model routes).
+
+## DD-164: /video-use is an explicit-only bundled bridge skill
+
+**Context.** DD-163 kept video-use out of ordinary sessions, but the user also
+wanted to bind it on demand from any Claude session, without its description
+occupying context in general jobs (#1866).
+
+**Decision.** A small bundled `video-use` skill with
+`disable-model-invocation: true` (Claude Code: "Description not in context,
+full skill loads when invoked") and the Codex `agents/openai.yaml` policy
+`allow_implicit_invocation: false`, installed by the one skill installer
+(DD-039). Its body runs `clud video --path`, which installs and prints the
+pinned checkout, then follows that checkout's `SKILL.md`. The pin stays only
+in `video.rs`; the bridge never copies upstream instructions. This amends
+DD-163's "no `BUNDLED_SKILLS` row": the row is a bridge, not the upstream
+skill, and it never auto-triggers.
+
+**Rejected.** Bundling upstream's `SKILL.md` (a second, drifting copy of the
+pin); a model-invocable skill (its description costs context in every
+session).
