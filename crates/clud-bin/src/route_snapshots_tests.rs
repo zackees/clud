@@ -429,10 +429,16 @@ fn render_config(scenario: &Scenario) -> String {
 /// YAML. The patch is written under a scratch home so the real one is never
 /// touched, and the scratch directory removes itself.
 fn render_dsh(scenario: &Scenario) -> String {
+    let route = crate::route_plan::resolve(
+        &scenario.plan,
+        &crate::route_plan::Ambient::from_child_env(&scenario.ambient),
+    );
+    let render = crate::route_plan::render_dsh(&route);
     let facts = crate::dsh_harness::ChildFacts {
         executable: "dsh",
-        provider: scenario.plan.model_provider(),
-        wire_model: crate::dsh_harness::openrouter_model(scenario.plan.model_selection.as_ref()),
+        provider: render.provider,
+        wire_model: render.wire_model.as_deref(),
+        base_url: render.base_url.as_deref(),
     };
     let home = tempfile::tempdir().expect("scratch home");
     let mut env = scenario.ambient.clone();

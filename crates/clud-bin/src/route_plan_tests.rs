@@ -820,4 +820,26 @@ fn the_deepseek_native_route_names_its_environment_credential() {
         &Ambient::default(),
     );
     assert_eq!(openrouter.credential_env(), Some("OPENROUTER_API_KEY"));
+
+    // The render says the same thing, and never a vault id: this is the
+    // assertion that fails if dsh ever silently switches to the vault path.
+    let render = render_dsh(&openrouter);
+    assert_eq!(render.key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+    assert_eq!(
+        render.base_url.as_deref(),
+        Some("https://openrouter.ai/api")
+    );
+    assert_eq!(
+        render.wire_model.as_deref(),
+        Some("~anthropic/claude-sonnet-latest")
+    );
+    assert!(render
+        .key_env
+        .as_deref()
+        .is_some_and(|var| var.ends_with("_API_KEY")));
+    assert_eq!(
+        openrouter.upstreams[0].credential.vault_identifiers(),
+        None,
+        "dsh's credential is the environment, not clud's vault"
+    );
 }

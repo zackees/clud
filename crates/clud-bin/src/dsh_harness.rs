@@ -359,6 +359,9 @@ pub struct ChildFacts<'a> {
     pub executable: &'a str,
     pub provider: ModelProvider,
     pub wire_model: Option<&'a str>,
+    /// The base URL the OpenRouter overlay names. It comes from the launch's
+    /// resolved route, so dsh never re-derives it here.
+    pub base_url: Option<&'a str>,
 }
 
 /// Prepare the dsh child's environment and overlay (#1829):
@@ -399,12 +402,11 @@ pub fn prepare_child(
         let model = facts
             .wire_model
             .ok_or("no OpenRouter model resolved for DeepSeek Harness")?;
+        // A clean-room acceptance run points dsh at a local mock; otherwise
+        // the route's own base URL is the only source.
         let base_url = test_openrouter_base_url(ambient)
-            .or_else(|| {
-                crate::provider_registry::descriptor_for(ModelProvider::OpenRouter)
-                    .map(|descriptor| descriptor.anthropic_base_url.to_string())
-            })
-            .ok_or("OpenRouter descriptor missing")?;
+            .or_else(|| facts.base_url.map(str::to_string))
+            .ok_or("no OpenRouter base URL on the resolved route")?;
         write_openrouter_patch(&openrouter_patch_path(home, model), model, &base_url)?;
     }
     Ok(())
@@ -553,6 +555,7 @@ mod tests {
             executable,
             provider,
             wire_model: Some("~anthropic/claude-sonnet-latest"),
+            base_url: Some("https://openrouter.ai/api"),
         }
     }
 
