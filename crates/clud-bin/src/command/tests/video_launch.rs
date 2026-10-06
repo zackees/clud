@@ -3,6 +3,7 @@
 //! ordinary launch.
 
 use super::*;
+use crate::args::Command;
 
 fn plugin_dir_arg(p: &LaunchPlan) -> Option<&str> {
     p.command
