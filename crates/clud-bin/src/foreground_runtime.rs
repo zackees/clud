@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 // owns them. These aliases keep this module's render call sites reading the
 // same names they always did.
 use crate::route_plan::{
-    ANTHROPIC_COMPAT_SCRUB as ANTHROPIC_COMPAT_CONFLICTING,
     BRIDGE_TIMEOUT_MS as BRIDGE_API_TIMEOUT_MS,
     CODEX_BRIDGE_OPUS_MODEL as CODEX_VIA_CLAUDE_OPUS_MODEL,
     CODEX_BRIDGE_SONNET_MODEL as CODEX_VIA_CLAUDE_SONNET_MODEL,
@@ -446,18 +445,22 @@ impl ForegroundRuntime {
             // it documents that invariant rather than silently defaulting.
             let descriptor = crate::provider_registry::descriptor_for(plan.model_provider())
                 .expect("is_anthropic_compat_via_claude already proved a descriptor resolves");
-            let secret = store
-                .get()
+            // The route decides where the credential comes from; the read is
+            // the one place a secret enters this launch.
+            let route = crate::route_plan::route_of(
+                plan,
+                &crate::route_plan::Ambient::from_child_env(&env),
+            );
+            let source = route
+                .upstreams
+                .first()
+                .map(|upstream| upstream.credential.clone())
+                .ok_or(BridgeError::AnthropicCompatCredentials)?;
+            let secret = crate::route_plan::read_credential(&source, store)
                 .map_err(|_| BridgeError::AnthropicCompatCredentials)?
                 .ok_or(BridgeError::AnthropicCompatCredentials)?;
             refuse_blocked_free_model(descriptor, plan, &secret)?;
-            apply_anthropic_compat_overlay(
-                &mut env,
-                &secret,
-                descriptor,
-                plan.model_selection.as_ref(),
-                &plan.allowed_models,
-            );
+            crate::route_plan::render_direct_env(&route, &secret).apply(&mut env);
             apply_provider_only(&mut env, descriptor, &plan.provider_only)?;
             // #1257: discovery is off under a pin, so say why once instead of
             // leaving the picker silently short of gateway rows.
@@ -1200,242 +1203,6 @@ pub(crate) fn per_turn_effort_capability(
     let row = catalog.model_by_id(wire_model)?;
     row.supports_reasoning_effort
         .then(|| format!("{wire_model}=per_turn_effort"))
-}
-
-/// The OpenRouter-descriptor arm of the per-turn-effort injection (#1528).
-///
-/// OpenRouter's descriptor route is the only one clud reaches that carries
-/// this capability claim: Kimi's and DeepSeek's direct descriptors point at
-/// their own vendor endpoints, which never see this message shape, so they
-/// must not be told the harness may send it. `apply_anthropic_compat_overlay`
-/// itself is only on the direct Anthropic-compat route (its production caller
-/// is the `is_anthropic_compat_via_claude` arm of `start_with_secret_store`);
-/// unified mode builds its own gateway env and never reaches this or that
-/// function, so the unified path is untouched.
-///
-/// `catalog` is a closure so the descriptor and flip gates run before the
-/// catalog is resolved: a shipped-dark or non-OpenRouter launch reads nothing.
-fn inject_per_turn_effort(
-    env: &mut Vec<(String, String)>,
-    descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
-    wire_model: &str,
-    enabled: bool,
-    catalog: impl FnOnce() -> crate::openrouter_catalog::Catalog,
-) {
-    if descriptor.provider != ModelProvider::OpenRouter || !enabled {
-        return;
-    }
-    if let Some(capability) = per_turn_effort_capability(&catalog(), wire_model, enabled) {
-        push_default(env, "CLAUDE_CODE_MODEL_CAPABILITIES", &capability);
-    }
-}
-
-/// Provider-neutral child-env overlay for any Anthropic-compatible API-key
-/// provider (#936/#937 Phase 2, replacing the DeepSeek-only
-/// `apply_deepseek_overlay`). `descriptor` supplies the base URL and the
-/// subagent/haiku wire model; the default wire model when `selection` is
-/// `None` comes from the catalog's reviewed default for the descriptor's
-/// provider, not a hardcoded literal.
-///
-/// `allowed` is the launch's model allowlist (#1257). Empty keeps every slot
-/// on the descriptor's own role mapping; non-empty makes the pin a cost
-/// boundary that covers the auxiliary slots and discovery too, because an
-/// OpenRouter key bills every model id sent with it.
-#[expect(
-    clippy::too_many_lines,
-    reason = "complexity ratchet baseline (zackees/ci.yml#229); split this function"
-)]
-fn apply_anthropic_compat_overlay(
-    env: &mut Vec<(String, String)>,
-    secret: &str,
-    descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
-    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
-    allowed: &[String],
-) {
-    // Read before the scrub below, which removes the key outright: #1257's
-    // one precedence rule is that a user-set subagent slot wins *inside* the
-    // allowlist, and after the scrub there would be nothing left to evaluate
-    // that rule against.
-    let ambient_subagent = env
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
-        .map(|(_, value)| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    // Unconditionally case-insensitive (unlike `env_key_eq`, which mirrors
-    // real per-OS env-var uniqueness semantics for the Codex overlay above):
-    // this is a security guarantee against leaking an ambient Anthropic key
-    // into the child, not an OS-semantics match, and it must hold the same
-    // way on every platform.
-    env.retain(|(key, _)| {
-        !ANTHROPIC_COMPAT_CONFLICTING
-            .iter()
-            .any(|candidate| key.eq_ignore_ascii_case(candidate))
-            && !key
-                .to_ascii_uppercase()
-                .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
-    });
-    if descriptor.provider == ModelProvider::OpenRouter {
-        env.retain(|(key, _)| !key.eq_ignore_ascii_case("OPENROUTER_API_KEY"));
-    }
-    let model = direct_wire_model(descriptor.provider, selection).expect(
-        "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
-         -- add a `provider_default: true` row in provider_catalog.rs",
-    );
-    let role_models = descriptor.role_models;
-    // A served subagent name (#1192) replaces the descriptor's compiled-in one.
-    let subagent_wire_id = crate::server_settings::provider_subagent_model(descriptor.provider)
-        .unwrap_or(descriptor.subagent_wire_id);
-    // #1257: the allowlist governs every slot, not just the main conversation.
-    // `None` means unconstrained, so the descriptor's role mapping below stays
-    // authoritative and the overlay is byte-for-byte what it was.
-    let constrained = crate::provider_catalog::model_allowlist_slot(allowed, selection);
-    // Precedence, decided once: clud owns the boundary and the user chooses
-    // inside it. An ambient `CLAUDE_CODE_SUBAGENT_MODEL` therefore wins only
-    // on a constrained launch and only when the allowlist admits it; an
-    // unconstrained launch keeps scrubbing it, exactly as before (#1257).
-    let ambient_subagent = ambient_subagent
-        .as_deref()
-        .filter(|_| constrained.is_some())
-        .filter(|value| crate::provider_catalog::model_allowlist_allows(allowed, value));
-    let model = constrained.as_deref().unwrap_or(model);
-    let (opus_model, sonnet_model, haiku_model, subagent_model, fable_model) = match constrained
-        .as_deref()
-    {
-        Some(constrained) => (
-            constrained,
-            constrained,
-            constrained,
-            ambient_subagent.unwrap_or(constrained),
-            Some(constrained),
-        ),
-        None => (
-            role_models.map_or(model, |roles| roles.opus),
-            role_models.map_or(model, |roles| roles.sonnet),
-            role_models.map_or(subagent_wire_id, |roles| roles.haiku),
-            ambient_subagent
-                .unwrap_or_else(|| role_models.map_or(subagent_wire_id, |roles| roles.subagent)),
-            role_models.and_then(|roles| roles.fable),
-        ),
-    };
-    env.extend([
-        (
-            "ANTHROPIC_BASE_URL".to_string(),
-            descriptor.anthropic_base_url.to_string(),
-        ),
-        ("ANTHROPIC_AUTH_TOKEN".to_string(), secret.to_string()),
-        ("ANTHROPIC_MODEL".to_string(), model.to_string()),
-        (
-            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-            opus_model.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-            sonnet_model.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-            haiku_model.to_string(),
-        ),
-        (
-            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-            subagent_model.to_string(),
-        ),
-    ]);
-    match fable_model {
-        Some(fable) => env.push((
-            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
-            fable.to_string(),
-        )),
-        None if role_models.is_none() => env.push((
-            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
-            model.to_string(),
-        )),
-        None => {}
-    }
-    if descriptor.explicitly_empty_anthropic_api_key {
-        env.push(("ANTHROPIC_API_KEY".to_string(), String::new()));
-    }
-    // #1257: discovery only adds rows and cannot subtract them (DD-054), so a
-    // constrained launch does not ask for it at all rather than advertising a
-    // set the allowlist would then have to be enforced against after the fact.
-    // The launch notice in `start_with_secret_store` says so out loud.
-    if descriptor.enable_gateway_model_discovery && allowed.is_empty() {
-        env.push((
-            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
-            "1".to_string(),
-        ));
-    }
-    // Catalog data, not a hardcoded `model.ends_with("[1m]")` check (#937
-    // Phase 2, #936 "Generalization" -> 1e): exact wire-ID lookup so an
-    // auto-context wire model never falls back to a same-family row's window
-    // via `cli_id`/alias matching.
-    if let Some(window) = crate::provider_catalog::model_by_wire_id(model)
-        .and_then(|entry| entry.claude_compact_window)
-    {
-        env.push((
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
-            window.to_string(),
-        ));
-    }
-    // Exact window from the served datasheet section (#1258), consulted only
-    // when neither catalog field knows this wire ID: a reviewed
-    // `claude_max_context_tokens` wins outright (see `effective_context_window`),
-    // and an ID in neither source emits nothing — unchanged behavior.
-    // Deliberately `push_default`: an ambient user-set value survives (this
-    // key is not in ANTHROPIC_COMPAT_CONFLICTING, same spirit as DD-059
-    // preserving CLAUDE_CODE_EFFORT_LEVEL). `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-    // is NOT set on this route — with the real window learned the harness
-    // derives its own threshold, and per-provider compact thresholds
-    // (DeepSeek/Kimi) remain a reviewed decision.
-    if let Some(window) = crate::server_settings::effective_context_window(model) {
-        push_default(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS", &window.to_string());
-    }
-    // #1528: Claude Code keeps the prompt cache across a mid-session effort
-    // change only when its client-side `per_turn_effort` capability is on for
-    // the launched wire ID. There is no wire field, header, or discovery row
-    // for it: the harness resolves it from its baked catalog, gateway-served
-    // capability metadata, or this env var. OpenRouter publishes the *gate*
-    // under its own name -- `supports_reasoning_effort`, derived from its
-    // `reasoning_effort` token -- while the injected token is Claude Code's
-    // vocabulary, which clud does not get to rename. This overlay owns that
-    // mapping.
-    //
-    // OpenRouter publishes nothing about per-turn *delivery*, so the gate says
-    // only "this model accepts an effort setting", not "a mid-session change
-    // keeps the cache". That claim is a property of OpenRouter's Messages
-    // endpoint and ships dark behind the `per_turn_effort` server setting
-    // (`crates/clud-bin/assets/server-settings.json`) until a recorded live
-    // endpoint check confirms both acceptance and the honored level.
-    //
-    // The read stays lazy and offline (#1528): the helper short-circuits on
-    // the descriptor and the flip before the catalog closure runs, and
-    // `catalog_cached_or_embedded` resolves the daemon-state cache and the
-    // always-present embedded copy without a fetch -- so this adds neither
-    // egress nor a launch delay.
-    //
-    // `push_default`, so an ambient `CLAUDE_CODE_MODEL_CAPABILITIES` the user
-    // already sets is preserved rather than overwritten -- the same precedence
-    // this overlay gives `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. That key is
-    // deliberately NOT in `ANTHROPIC_COMPAT_CONFLICTING`, which would scrub it.
-    inject_per_turn_effort(
-        env,
-        descriptor,
-        model,
-        crate::server_settings::per_turn_effort_enabled(),
-        crate::openrouter_catalog::catalog_cached_or_embedded,
-    );
-    // #1263: the direct route is the one launch shape where clud is *not* in
-    // the request path -- Claude Code talks to the provider itself, so clud
-    // can neither see the model stream nor time it out. The only lever here is
-    // the harness's own client timeout, and until now this overlay was the one
-    // route that never set it: a direct `--openrouter` launch silently
-    // inherited the harness's undocumented default, and clud neither set nor
-    // logged it. A hung request then stalled with nothing anywhere watching.
-    //
-    // `push_default`, so an explicit `API_TIMEOUT_MS` from the user's
-    // environment still wins (the same precedence DD-059 gives
-    // `CLAUDE_CODE_EFFORT_LEVEL`). The launch notice names the effective value.
-    push_default(env, "API_TIMEOUT_MS", DIRECT_API_TIMEOUT_MS);
 }
 
 fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, BridgeError> {
@@ -2657,6 +2424,20 @@ mod tests {
         assert!(rendered.contains("terra"), "{rendered}");
     }
 
+    /// The direct route for the overlay tests: the same decision the
+    /// production builder makes, from the inputs those tests already have.
+    fn direct_route(
+        descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
+        selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
+        allowed: &[String],
+        env: &[(String, String)],
+    ) -> crate::route_plan::ResolvedRoute {
+        let mut plan = plan(descriptor.provider, Backend::Claude);
+        plan.model_selection = selection.cloned();
+        plan.allowed_models = allowed.to_vec();
+        crate::route_plan::resolve(&plan, &crate::route_plan::Ambient::from_child_env(env))
+    }
+
     fn deepseek_descriptor() -> &'static crate::provider_registry::AnthropicCompatProvider {
         crate::provider_registry::descriptor_for(ModelProvider::DeepSeek)
             .expect("DeepSeek must have an Anthropic-compat descriptor")
@@ -2677,13 +2458,11 @@ mod tests {
     #[test]
     fn golden_anthropic_compat_overlay_default_selection() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &env),
             "ds-golden-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
         let mut pairs = env.clone();
         pairs.sort();
@@ -2750,13 +2529,11 @@ mod tests {
         .unwrap();
         assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro"));
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), Some(&selection), &[], &env),
             "ds-golden-secret",
-            deepseek_descriptor(),
-            Some(&selection),
-            &[],
-        );
+        )
+        .apply(&mut env);
         let mut pairs = env.clone();
         pairs.sort();
         assert_eq!(
@@ -2837,13 +2614,11 @@ mod tests {
             ),
         ];
         let mut env = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &env),
             "ds-golden-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         for (key, _) in &base {
             assert_eq!(
                 lookup(&env, key),
@@ -2872,13 +2647,11 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &child),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut child);
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "anthropic_api_key"), None);
@@ -2917,13 +2690,11 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), Some(&selection), &[], &env),
             "ds-test-secret",
-            deepseek_descriptor(),
-            Some(&selection),
-            &[],
-        );
+        )
+        .apply(&mut env);
         assert_eq!(lookup(&env, "ANTHROPIC_MODEL"), Some("deepseek-v4-pro"));
         assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), None);
         assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
@@ -3148,13 +2919,11 @@ mod tests {
     #[test]
     fn deepseek_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &[], &env),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         let runtime = ForegroundRuntime {
             env,
             bridge: None,
@@ -3481,13 +3250,11 @@ mod tests {
     #[test]
     fn golden_kimi_overlay_default_selection() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(kimi_descriptor(), None, &[], &env),
             "kimi-golden-secret",
-            kimi_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut env);
         let mut pairs = env.clone();
         pairs.sort();
         assert_eq!(
@@ -3561,13 +3328,11 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(kimi_descriptor(), None, &[], &child),
             "kimi-test-secret",
-            kimi_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut child);
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "ANTHROPIC_API_KEY"), None);
@@ -3653,7 +3418,11 @@ mod tests {
     #[test]
     fn kimi_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_anthropic_compat_overlay(&mut env, "kimi-test-secret", kimi_descriptor(), None, &[]);
+        crate::route_plan::render_direct_env(
+            &direct_route(kimi_descriptor(), None, &[], &env),
+            "kimi-test-secret",
+        )
+        .apply(&mut env);
         let runtime = ForegroundRuntime {
             env,
             bridge: None,
@@ -3705,13 +3474,11 @@ mod tests {
             ),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(openrouter_descriptor(), None, &[], &child),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            None,
-            &[],
-        );
+        )
+        .apply(&mut child);
 
         assert_eq!(
             lookup(&child, "ANTHROPIC_BASE_URL"),
@@ -3833,13 +3600,16 @@ mod tests {
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
             "4242".to_string(),
         )];
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(
+                openrouter_descriptor(),
+                Some(&openrouter_selection("xiaomi/mimo-v2.6-flash")),
+                &[],
+                &env,
+            ),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            Some(&openrouter_selection("xiaomi/mimo-v2.6-flash")),
-            &[],
-        );
+        )
+        .apply(&mut env);
         // An explicit user-set window is never clobbered (DD-059's spirit).
         assert_eq!(lookup(&env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some("4242"));
     }
@@ -3908,83 +3678,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn per_turn_effort_injection_respects_the_flip_and_the_descriptor() {
-        let wire = "deepseek/deepseek-v4.1-flash";
-        let gated = per_turn_effort_catalog(wire, true);
-
-        let mut enabled_env = Vec::new();
-        inject_per_turn_effort(
-            &mut enabled_env,
-            openrouter_descriptor(),
-            wire,
-            true,
-            || catalog_from(&gated),
-        );
-        assert_eq!(
-            lookup(&enabled_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            Some(format!("{wire}=per_turn_effort").as_str())
-        );
-
-        let mut disabled_env = Vec::new();
-        inject_per_turn_effort(
-            &mut disabled_env,
-            openrouter_descriptor(),
-            wire,
-            false,
-            || catalog_from(&gated),
-        );
-        assert_eq!(
-            lookup(&disabled_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            None
-        );
-
-        // Kimi and DeepSeek direct routes hit vendor endpoints, not
-        // OpenRouter's Messages API, so the claim must never reach them --
-        // not even with the flip on and an admitting row.
-        for descriptor in [deepseek_descriptor(), kimi_descriptor()] {
-            let mut vendor_env = Vec::new();
-            inject_per_turn_effort(&mut vendor_env, descriptor, wire, true, || {
-                catalog_from(&gated)
-            });
-            assert_eq!(
-                lookup(&vendor_env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-                None,
-                "{}",
-                descriptor.display_name
-            );
-        }
-    }
-
-    #[test]
-    fn per_turn_effort_injection_preserves_an_ambient_user_value() {
-        let wire = "deepseek/deepseek-v4.1-flash";
-        let mut env = vec![(
-            "CLAUDE_CODE_MODEL_CAPABILITIES".to_string(),
-            "user/chosen-model=per_turn_effort".to_string(),
-        )];
-        inject_per_turn_effort(&mut env, openrouter_descriptor(), wire, true, || {
-            catalog_from(&per_turn_effort_catalog(wire, true))
-        });
-        // `push_default`, not overwrite: the user's own claim survives.
-        assert_eq!(
-            lookup(&env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            Some("user/chosen-model=per_turn_effort")
-        );
-        // And with nothing admitting the row, an ambient value is untouched.
-        let mut ungated = vec![(
-            "CLAUDE_CODE_MODEL_CAPABILITIES".to_string(),
-            "user/chosen-model=per_turn_effort".to_string(),
-        )];
-        inject_per_turn_effort(&mut ungated, openrouter_descriptor(), wire, true, || {
-            catalog_from(&per_turn_effort_catalog(wire, false))
-        });
-        assert_eq!(
-            lookup(&ungated, "CLAUDE_CODE_MODEL_CAPABILITIES"),
-            Some("user/chosen-model=per_turn_effort")
-        );
-    }
-
     /// The overlay itself is dark today (the built-in flip is `false`), and it
     /// must not have started emitting the key on any route.
     #[test]
@@ -3995,7 +3688,11 @@ mod tests {
             kimi_descriptor(),
         ] {
             let mut env = Vec::new();
-            apply_anthropic_compat_overlay(&mut env, "secret", descriptor, None, &[]);
+            crate::route_plan::render_direct_env(
+                &direct_route(descriptor, None, &[], &env),
+                "secret",
+            )
+            .apply(&mut env);
             assert_eq!(
                 lookup(&env, "CLAUDE_CODE_MODEL_CAPABILITIES"),
                 None,
@@ -4008,13 +3705,16 @@ mod tests {
     #[test]
     fn anthropic_compat_overlay_emits_no_window_for_an_id_in_neither_source() {
         let mut env = Vec::new();
-        apply_anthropic_compat_overlay(
-            &mut env,
+        crate::route_plan::render_direct_env(
+            &direct_route(
+                openrouter_descriptor(),
+                Some(&openrouter_selection("nonexistent/model-v9")),
+                &[],
+                &env,
+            ),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            Some(&openrouter_selection("nonexistent/model-v9")),
-            &[],
-        );
+        )
+        .apply(&mut env);
         assert_eq!(lookup(&env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), None);
         assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
     }
@@ -4136,13 +3836,11 @@ mod tests {
             ),
         ];
         let mut child = base.clone();
-        apply_anthropic_compat_overlay(
-            &mut child,
+        crate::route_plan::render_direct_env(
+            &direct_route(openrouter_descriptor(), None, &[pin.to_string()], &child),
             "openrouter-vault-secret",
-            openrouter_descriptor(),
-            None,
-            &[pin.to_string()],
-        );
+        )
+        .apply(&mut child);
         for key in [
             "ANTHROPIC_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -4181,13 +3879,11 @@ mod tests {
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
             "deepseek-v4-pro".to_string(),
         )];
-        apply_anthropic_compat_overlay(
-            &mut admitted,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &allowed, &admitted),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &allowed,
-        );
+        )
+        .apply(&mut admitted);
         assert_eq!(
             lookup(&admitted, "CLAUDE_CODE_SUBAGENT_MODEL"),
             Some("deepseek-v4-pro")
@@ -4198,13 +3894,11 @@ mod tests {
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
             "claude-opus-5".to_string(),
         )];
-        apply_anthropic_compat_overlay(
-            &mut rejected,
+        crate::route_plan::render_direct_env(
+            &direct_route(deepseek_descriptor(), None, &allowed, &rejected),
             "ds-test-secret",
-            deepseek_descriptor(),
-            None,
-            &allowed,
-        );
+        )
+        .apply(&mut rejected);
         assert_eq!(
             lookup(&rejected, "CLAUDE_CODE_SUBAGENT_MODEL"),
             Some("deepseek-flash"),
