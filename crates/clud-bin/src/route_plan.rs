@@ -28,6 +28,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, ModelProvider, RoutingMode};
+use crate::codex_bridge::UNIFIED_GATEWAY_TOKEN_HEADER;
 use crate::codex_history::ConversationRoute;
 use crate::command::LaunchPlan;
 
@@ -206,9 +207,23 @@ pub struct SlotModel {
     /// The catalog row's human-readable name, for the two role aliases Claude
     /// Code displays (`ANTHROPIC_DEFAULT_*_MODEL_NAME`).
     pub display_name: Option<String>,
+    /// Write `wire_id` as it stands, even on a gateway route that would
+    /// otherwise substitute the row's discovery id. An ambient
+    /// `CLAUDE_CODE_SUBAGENT_MODEL` the user set is an exact spelling the
+    /// harness already resolved; clud admits it, it does not rewrite it
+    /// (#1257).
+    pub verbatim: bool,
 }
 
 impl SlotModel {
+    /// The slot for an ambient id the user set: written exactly as given.
+    pub fn verbatim(id: &str) -> Option<Self> {
+        Self::of(id).map(|slot| Self {
+            verbatim: true,
+            ..slot
+        })
+    }
+
     /// The slot a named id resolves to, or `None` when nothing names it.
     pub fn of(id: &str) -> Option<Self> {
         let id = id.trim();
@@ -220,11 +235,13 @@ impl SlotModel {
                 wire_id: id.to_string(),
                 discovery_id: row.discovery_id.map(str::to_string),
                 display_name: Some(row.display_name.to_string()),
+                verbatim: false,
             },
             None => Self {
                 wire_id: id.to_string(),
                 discovery_id: None,
                 display_name: None,
+                verbatim: false,
             },
         })
     }
@@ -519,8 +536,42 @@ fn descriptor_slots(
         opus: SlotModel::of(opus),
         sonnet: SlotModel::of(sonnet),
         haiku: SlotModel::of(haiku),
-        subagent: SlotModel::of(subagent),
+        subagent: if ambient_subagent == Some(subagent) {
+            SlotModel::verbatim(subagent)
+        } else {
+            SlotModel::of(subagent)
+        },
         fable: fable.and_then(SlotModel::of),
+    }
+}
+
+/// The pinned slot decision for a launch whose provider has no descriptor of
+/// its own. The gateway serves rows from every provider it holds a route for,
+/// so a pin is a boundary over the allowlist rather than over the descriptor.
+fn pinned_slots(
+    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
+    allowlist: &[String],
+    ambient: &Ambient,
+) -> SlotModels {
+    let Some(pinned) = crate::provider_catalog::model_allowlist_slot(allowlist, selection) else {
+        return SlotModels::default();
+    };
+    let subagent = ambient
+        .subagent_model
+        .as_deref()
+        .filter(|value| crate::provider_catalog::model_allowlist_allows(allowlist, value))
+        .unwrap_or(&pinned);
+    SlotModels {
+        main: SlotModel::of(&pinned),
+        opus: SlotModel::of(&pinned),
+        sonnet: SlotModel::of(&pinned),
+        haiku: SlotModel::of(&pinned),
+        fable: SlotModel::of(&pinned),
+        subagent: if subagent == pinned {
+            SlotModel::of(&pinned)
+        } else {
+            SlotModel::verbatim(subagent)
+        },
     }
 }
 
@@ -751,7 +802,7 @@ fn unified_plan(
     // divergence #1 is that today's gateway copy does not make it at all.
     let slots = match crate::provider_registry::descriptor_for(provider) {
         Some(descriptor) => descriptor_slots(descriptor, selection, &allowlist, ambient),
-        None => SlotModels::default(),
+        None => pinned_slots(selection, &allowlist, ambient),
     };
     let discovery = if allowlist.is_empty() {
         DiscoveryPolicy::On
@@ -1137,6 +1188,94 @@ pub fn render_codex_bridge_env(
     }
     if let Some(millis) = route.timeout_ms {
         overlay.set_default("API_TIMEOUT_MS", &millis.to_string());
+    }
+    overlay
+}
+
+/// The unified gateway's configuration, built from the route's upstreams.
+///
+/// `codex_available` is a credential probe, not a routing decision: it says
+/// whether Codex's own auth resolves at this moment, which is why it stays an
+/// input rather than something the route asserts.
+pub fn render_unified_config(
+    route: &ResolvedRoute,
+    codex_available: bool,
+    key_for: &dyn Fn(ModelProvider) -> Option<String>,
+) -> crate::codex_bridge::UnifiedGatewayConfig {
+    // Insertion order is part of the gateway's Debug view and of the order its
+    // `/v1/models` rows appear in, so the two Anthropic-compatible providers
+    // keep the order this gateway has always built them in.
+    let mut config = crate::codex_bridge::UnifiedGatewayConfig::new(
+        key_for(ModelProvider::DeepSeek),
+        codex_available,
+    )
+    .with_openrouter(key_for(ModelProvider::OpenRouter));
+    for upstream in &route.upstreams {
+        if matches!(
+            upstream.provider,
+            ModelProvider::Claude
+                | ModelProvider::Codex
+                | ModelProvider::DeepSeek
+                | ModelProvider::OpenRouter
+        ) {
+            continue;
+        }
+        config = config.with_route(upstream.provider, key_for(upstream.provider));
+    }
+    config
+}
+
+/// The unified gateway's child environment.
+///
+/// The slot block is written only on a pinned launch. That is today's
+/// behaviour, not the intended one: an unpinned gateway launch sets no slot at
+/// all, so the descriptor's role mappings never reach it (divergence #1b,
+/// fixed in #1861). The pin's value is the row's *discovery* id, because
+/// Claude Code classifies a raw wire id as an unknown provider id and falls
+/// back to a built-in Anthropic row -- exactly the spend the pin exists to
+/// stop.
+pub fn render_unified_env(
+    route: &ResolvedRoute,
+    base_url: &str,
+    bearer_token: &str,
+    ambient_custom_headers: Option<&str>,
+) -> EnvOverlay {
+    let mut overlay = EnvOverlay::new(&route.scrub);
+    overlay.set("ANTHROPIC_BASE_URL", base_url);
+    // The gateway's own header must come first, and whatever the user already
+    // set is kept below it.
+    let gateway_header = format!("{UNIFIED_GATEWAY_TOKEN_HEADER}: {bearer_token}");
+    let headers = ambient_custom_headers
+        .map(|existing| format!("{gateway_header}\n{existing}"))
+        .unwrap_or(gateway_header);
+    overlay.set("ANTHROPIC_CUSTOM_HEADERS", &headers);
+    overlay.set("CLUD_GATEWAY_TOKEN", bearer_token);
+    if matches!(
+        route.discovery,
+        DiscoveryPolicy::On | DiscoveryPolicy::Filtered(_)
+    ) {
+        overlay.set("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+    }
+    if let Some(millis) = route.timeout_ms {
+        overlay.set_default("API_TIMEOUT_MS", &millis.to_string());
+    }
+    if !route.allowlist.is_empty() {
+        for (slot, key) in [
+            (&route.slots.opus, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            (&route.slots.sonnet, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            (&route.slots.haiku, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            (&route.slots.fable, "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            (&route.slots.subagent, "CLAUDE_CODE_SUBAGENT_MODEL"),
+        ] {
+            if let Some(slot) = slot {
+                let id = if slot.verbatim {
+                    &slot.wire_id
+                } else {
+                    slot.discovery_id.as_deref().unwrap_or(&slot.wire_id)
+                };
+                overlay.set(key, id);
+            }
+        }
     }
     overlay
 }
