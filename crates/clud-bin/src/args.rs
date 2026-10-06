@@ -390,14 +390,16 @@ impl Args {
     /// Codex and therefore cannot be translated honestly to DeepSeek Harness.
     /// Backend passthrough remains available after `--` for native `dsh`
     /// options.
-    pub fn unsupported_deepseek_harness_option(&self) -> Option<&'static str> {
+    /// `allow_model` is true for an OpenRouter launch, where clud selects the
+    /// model through its dsh overlay (#1829).
+    pub fn unsupported_deepseek_harness_option(&self, allow_model: bool) -> Option<&'static str> {
         if self.message.is_some() {
             Some("--message")
         } else if self.continue_session {
             Some("--continue")
         } else if self.resume.is_some() {
             Some("--resume")
-        } else if self.model.is_some() {
+        } else if self.model.is_some() && !allow_model {
             Some("--model")
         } else if self.effort.is_some() {
             Some("--effort")
@@ -539,6 +541,8 @@ pub enum Command {
     },
     /// Install or update Codex through CLUD's verified standalone-installer path.
     CodexUpdate,
+    /// Install or confirm DeepSeek Harness in clud's private npm prefix.
+    DshUpdate,
     /// Manage provider credentials. Claude authentication remains owned by
     /// Claude Code and is reported as externally managed.
     Auth {
@@ -1395,6 +1399,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "auth",
     "models",
     "codex-update",
+    "dsh-update",
     "codex-auth",
     "deepseek-auth",
     "run",

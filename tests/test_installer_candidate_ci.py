@@ -42,9 +42,7 @@ def artifact(tmp_path, *, target=TARGET, source_sha=SOURCE_SHA, payload=None):
         "size_bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
-    (tmp_path / "provenance.json").write_text(
-        json.dumps(metadata), encoding="utf-8"
-    )
+    (tmp_path / "provenance.json").write_text(json.dumps(metadata), encoding="utf-8")
     return metadata
 
 
@@ -112,13 +110,9 @@ def test_aggregate_rejects_missing_skipped_and_mismatched_host_evidence() -> Non
     with pytest.raises(ValueError, match="missing"):
         require_evidence(rows[:-1], SOURCE_SHA, VERSION)
     with pytest.raises(ValueError, match="did not succeed"):
-        require_evidence(
-            [*rows[:-1], {**rows[-1], "result": "skipped"}], SOURCE_SHA, VERSION
-        )
+        require_evidence([*rows[:-1], {**rows[-1], "result": "skipped"}], SOURCE_SHA, VERSION)
     with pytest.raises(ValueError, match="source"):
-        require_evidence(
-            [*rows[:-1], {**rows[-1], "source_sha": "b" * 40}], SOURCE_SHA, VERSION
-        )
+        require_evidence([*rows[:-1], {**rows[-1], "source_sha": "b" * 40}], SOURCE_SHA, VERSION)
 
 
 def test_fixture_binds_all_six_artifacts_and_prior_release(tmp_path, monkeypatch) -> None:
@@ -184,6 +178,16 @@ def test_pr_workflow_requires_real_nixos_and_linux_distributions() -> None:
     assert "CANDIDATE_DISTROS" in workflow
 
 
+def test_pr_workflow_gates_on_the_managed_dsh_lane() -> None:
+    workflow = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "installer-check.yml"
+    ).read_text(encoding="utf-8")
+    assert "candidate-dsh:" in workflow
+    assert "tests/test_dsh_managed_install.py" in workflow
+    assert "DSH_MANAGED_ACCEPTANCE: '1'" in workflow
+    assert '"$CANDIDATE_DSH"' in workflow
+
+
 def test_native_candidate_installs_by_name_and_writes_host_evidence(
     installer_target,  # noqa: F811
 ) -> None:
@@ -196,11 +200,7 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
     metadata = verify_artifact(Path(artifact_dir), target, source_sha, version)
     os_name, arch, _kind, _suffix = TARGETS[target]
     actual_os = (
-        "windows"
-        if sys.platform == "win32"
-        else "darwin"
-        if sys.platform == "darwin"
-        else "linux"
+        "windows" if sys.platform == "win32" else "darwin" if sys.platform == "darwin" else "linux"
     )
     actual_arch = platform.machine().lower()
     actual_arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(actual_arch, actual_arch)
@@ -227,9 +227,7 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
     assert installed.returncode == 0, installed.stderr.decode(errors="replace")
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == metadata["sha256"]
     fixture_asset = (
-        Path(os.environ["CLUD_INSTALLER_CI_FIXTURE_DIR"])
-        / "assets"
-        / metadata["filename"]
+        Path(os.environ["CLUD_INSTALLER_CI_FIXTURE_DIR"]) / "assets" / metadata["filename"]
     )
     # Removing the fixture asset by rename proves same-version reuse reads the
     # running candidate rather than taking the transport branch.
@@ -276,8 +274,8 @@ def test_native_candidate_installs_by_name_and_writes_host_evidence(
             '$u=[Environment]::GetEnvironmentVariable("Path","User"); '
             '$m=[Environment]::GetEnvironmentVariable("Path","Machine"); '
             '$env:Path="$u;$m"; '
-            '$c=Get-Command clud -CommandType Application -ErrorAction Stop; '
-            'Write-Output $c.Source; Write-Output (& $c.Source --version)'
+            "$c=Get-Command clud -CommandType Application -ErrorAction Stop; "
+            "Write-Output $c.Source; Write-Output (& $c.Source --version)"
         )
         lookup = run_process(
             ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],

@@ -28,7 +28,7 @@ const CODEX_TRUSTED_INSTALLER_SHA256: &str =
     "150e3cf675682efeaac115aa3747add3f27887896d04ce6d0b56478d8b428bf6";
 const CODEX_WINDOWS_POWERSHELL_INSTALL_COMMAND: &str =
     "irm https://chatgpt.com/codex/install.ps1 | iex";
-const DEEPSEEK_RUN_COMMAND: &str = "npx @deepseek-ai/dsh web";
+const DEEPSEEK_PROMPT: &str = "DeepSeek Harness is not installed.";
 
 const MIN_UNIFIED_CLAUDE_CODE_VERSION: ClaudeCodeVersion = ClaudeCodeVersion {
     major: 2,
@@ -87,15 +87,23 @@ pub enum InstallerPlan {
         command: &'static str,
         cmd_fallback: Option<&'static str>,
     },
-    Unsupported,
+    /// clud's private npm prefix for DeepSeek Harness (#1829).
+    ManagedDsh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallLocation {
-    HomeLocalBin { executable: &'static str },
-    UserProfileLocalBin { executable: &'static str },
+    HomeLocalBin {
+        executable: &'static str,
+    },
+    UserProfileLocalBin {
+        executable: &'static str,
+    },
     LocalAppDataCodexBin,
-    PathOnly,
+    /// The versioned clud-managed dsh prefix (#1829).
+    ManagedDsh {
+        windows: bool,
+    },
 }
 
 impl InstallLocation {
@@ -116,7 +124,11 @@ impl InstallLocation {
                     .join("bin")
                     .join("codex.exe")
             }),
-            Self::PathOnly => None,
+            Self::ManagedDsh { windows } => env
+                .home
+                .as_ref()
+                .or(env.user_profile.as_ref())
+                .map(|home| crate::dsh_harness::managed_executable(home, *windows)),
         }
     }
 }
@@ -231,16 +243,25 @@ impl BackendInstallSpec {
                 platform,
                 product_name: "DeepSeek Harness",
                 vendor_name: "DeepSeek AI",
-                installer_kind: "npm developer preview",
-                prompt_text: "DeepSeek Harness is not installed.",
-                manual_install_command: DEEPSEEK_RUN_COMMAND,
-                installer: InstallerPlan::Unsupported,
-                fallback_location: InstallLocation::PathOnly,
+                installer_kind: "clud-managed npm prefix",
+                prompt_text: DEEPSEEK_PROMPT,
+                manual_install_command: crate::dsh_harness::UPDATE_COMMAND,
+                installer: InstallerPlan::ManagedDsh,
+                fallback_location: InstallLocation::ManagedDsh {
+                    windows: platform == InstallPlatform::Windows,
+                },
             },
         }
     }
 
     pub fn prompt(&self) -> String {
+        if self.backend == Backend::DeepSeek {
+            return format!(
+                "{} Install DeepSeek AI's dsh {} into clud's private prefix now? [y/N]",
+                self.prompt_text,
+                crate::dsh_harness::DSH_VERSION
+            );
+        }
         self.prompt_text.to_string()
     }
 
@@ -412,17 +433,6 @@ where
 
     if dry_run {
         return Ok(backend.executable_name().to_string());
-    }
-
-    // DeepSeek Harness is currently a rapidly changing npm developer preview.
-    // Upstream documents npx execution rather than a stable native installer,
-    // so clud reports that exact path instead of mutating global npm state.
-    if backend == Backend::DeepSeek {
-        return Err(BackendBootstrapError::BackendMissingNonInteractive {
-            backend,
-            product_name: spec.product_name,
-            install_command: spec.manual_install_command,
-        });
     }
 
     if !interactive {
@@ -650,10 +660,10 @@ fn run_backend_installer(spec: &BackendInstallSpec) -> Result<(), String> {
             command,
             cmd_fallback,
         } => run_windows_powershell_installer(command, cmd_fallback, spec.backend),
-        InstallerPlan::Unsupported => Err(format!(
-            "automatic installation is unavailable; run {}",
-            spec.manual_install_command
-        )),
+        InstallerPlan::ManagedDsh => {
+            let home = crate::dsh_harness::managed_home().ok_or("home directory unavailable")?;
+            crate::dsh_harness::install(&home).map(|_| ())
+        }
     }
 }
 
@@ -738,7 +748,15 @@ fn run_interactive_command(command: CommandSpec, cwd: Option<PathBuf>) -> Result
     }
 }
 
-fn verify_backend(_backend: Backend, path: &Path) -> Result<(), String> {
+fn verify_backend(backend: Backend, path: &Path) -> Result<(), String> {
+    // A managed dsh runs on its private Node, which `--version` must see too.
+    if backend == Backend::DeepSeek {
+        if let Some(home) = crate::dsh_harness::managed_home() {
+            if crate::dsh_harness::managed_bin_for(path, &home).is_some() {
+                return crate::dsh_harness::verify(path);
+            }
+        }
+    }
     let command = vec![path.to_string_lossy().to_string(), "--version".to_string()];
     let (exit_code, output) = run_captured_command(command)
         .map_err(|err| format!("failed to run {} --version: {err}", path.display()))?;
@@ -1314,18 +1332,27 @@ ln -sfn releases/0.156.0 "$root/current"
     }
 
     #[test]
-    fn deepseek_install_spec_is_path_only_with_official_npx_guidance() {
+    fn deepseek_install_spec_is_a_managed_prefix_with_clud_update_guidance() {
         for platform in [
             InstallPlatform::MacOs,
             InstallPlatform::Linux,
             InstallPlatform::Windows,
         ] {
             let spec = BackendInstallSpec::for_backend(Backend::DeepSeek, platform);
+            let windows = platform == InstallPlatform::Windows;
             assert_eq!(spec.product_name, "DeepSeek Harness");
-            assert_eq!(spec.manual_install_command, DEEPSEEK_RUN_COMMAND);
-            assert_eq!(spec.installer, InstallerPlan::Unsupported);
-            assert_eq!(spec.fallback_location, InstallLocation::PathOnly);
-            assert_eq!(spec.fallback_path(&path_env()), None);
+            assert_eq!(spec.manual_install_command, "clud dsh-update");
+            assert_eq!(spec.installer, InstallerPlan::ManagedDsh);
+            assert_eq!(
+                spec.fallback_location,
+                InstallLocation::ManagedDsh { windows }
+            );
+            assert_eq!(
+                spec.fallback_path(&path_env()).unwrap(),
+                crate::dsh_harness::managed_executable(Path::new("/home/me"), windows)
+            );
+            assert!(spec.prompt().contains(crate::dsh_harness::DSH_VERSION));
+            assert!(spec.prompt().ends_with("[y/N]"));
         }
     }
 
@@ -1427,20 +1454,67 @@ ln -sfn releases/0.156.0 "$root/current"
     }
 
     #[test]
-    fn deepseek_missing_even_interactively_reports_guidance_without_installing() {
+    fn deepseek_missing_interactively_prompts_and_installs_on_yes() {
         let mut host = MockHost::default();
-        let err = resolve_with(Backend::DeepSeek, false, true, "y\n", &mut host).unwrap_err();
-        assert_eq!(
-            err,
-            BackendBootstrapError::BackendMissingNonInteractive {
-                backend: Backend::DeepSeek,
-                product_name: "DeepSeek Harness",
-                install_command: DEEPSEEK_RUN_COMMAND,
-            }
-        );
-        assert!(err.to_string().contains("npx @deepseek-ai/dsh web"));
+        let _ = resolve_with(Backend::DeepSeek, false, true, "y\n", &mut host);
+        assert_eq!(host.installer_runs, vec![Backend::DeepSeek]);
+    }
+
+    #[test]
+    fn deepseek_missing_interactively_declined_installs_nothing() {
+        for answer in ["n\n", "\n"] {
+            let mut host = MockHost::default();
+            let err = resolve_with(Backend::DeepSeek, false, true, answer, &mut host).unwrap_err();
+            assert!(matches!(
+                err,
+                BackendBootstrapError::BackendInstallDeclined { .. }
+            ));
+            assert!(err.to_string().contains("clud dsh-update"));
+            assert!(host.installer_runs.is_empty());
+        }
+    }
+
+    #[test]
+    fn deepseek_missing_noninteractively_names_the_managed_install() {
+        let mut host = MockHost::default();
+        let err = resolve_with(Backend::DeepSeek, false, false, "y\n", &mut host).unwrap_err();
+        assert!(err.to_string().contains("clud dsh-update"));
         assert!(host.installer_runs.is_empty());
-        assert!(host.verified.is_empty());
+    }
+
+    #[test]
+    fn deepseek_dry_run_neither_prompts_nor_installs() {
+        let mut host = MockHost::default();
+        let (path, _) = resolve_with(Backend::DeepSeek, true, true, "y\n", &mut host).unwrap();
+        assert_eq!(path, "dsh");
+        assert!(host.installer_runs.is_empty());
+    }
+
+    #[test]
+    fn deepseek_in_the_managed_prefix_only_is_used_without_a_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("dsh");
+        std::fs::write(&managed, b"managed").unwrap();
+        let mut host = MockHost {
+            native_path: Some(managed.clone()),
+            ..MockHost::default()
+        };
+        let (path, transcript) =
+            resolve_with(Backend::DeepSeek, false, true, "", &mut host).unwrap();
+        assert_eq!(PathBuf::from(path), managed);
+        assert!(transcript.is_empty());
+        assert!(host.installer_runs.is_empty());
+    }
+
+    #[test]
+    fn deepseek_on_path_wins_over_the_managed_prefix() {
+        let mut host = MockHost {
+            find_results: VecDeque::from([Some(PathBuf::from("/usr/local/bin/dsh"))]),
+            native_path: Some(PathBuf::from("/never/used")),
+            ..MockHost::default()
+        };
+        let (path, _) = resolve_with(Backend::DeepSeek, false, true, "", &mut host).unwrap();
+        assert_eq!(path, "/usr/local/bin/dsh");
     }
 
     #[test]

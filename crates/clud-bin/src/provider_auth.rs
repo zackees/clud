@@ -445,10 +445,18 @@ fn sanitize_provider_message(message: &str, key: &str) -> String {
         .collect()
 }
 
+/// Integration tests point the key probe at a local stand-in so a canary key
+/// never reaches a real provider. Honoured only with the debug-only test vault.
+pub const TEST_CREDENTIAL_PROBE_URL_ENV: &str = "CLUD_TEST_CREDENTIAL_PROBE_URL";
+
 fn probe_provider_key(descriptor: &AnthropicCompatProvider, key: &str) -> ProbeOutcome {
-    let url = descriptor.credential_probe_url;
+    let url: String = test_vault_active()
+        .then(|| std::env::var(TEST_CREDENTIAL_PROBE_URL_ENV).ok())
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| descriptor.credential_probe_url.to_string());
     let secret = Zeroizing::new(key.to_owned());
-    probe_with_deadline(Duration::from_secs(5), move || probe_key_at(url, &secret))
+    probe_with_deadline(Duration::from_secs(5), move || probe_key_at(&url, &secret))
 }
 
 fn probe_with_deadline(

@@ -45,6 +45,7 @@ pub mod crash_report;
 pub mod ctrl_c_track;
 pub mod daemon;
 pub mod dashboard_auth;
+pub mod dsh_harness;
 pub mod extern_cli;
 pub mod extern_root;
 

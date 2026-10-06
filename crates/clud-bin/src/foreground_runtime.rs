@@ -245,6 +245,7 @@ impl ForegroundRuntime {
         // DeepSeek Harness launch needs no clud vault or bridge setup at all.
         if plan.effective_harness() == Backend::DeepSeek {
             apply_route_context(&mut env, plan);
+            prepare_dsh_child(plan, &mut env)?;
             for notice in &pin_notices {
                 eprintln!("{notice}");
             }
@@ -874,6 +875,40 @@ impl fmt::Debug for ForegroundRuntime {
             .field("environment_entries", &self.env.len())
             .finish()
     }
+}
+
+/// #1829: hand the dsh child clud's provider key, its private Node and, for
+/// OpenRouter, the overlay its `--patch` argument names.
+fn prepare_dsh_child(
+    plan: &LaunchPlan,
+    env: &mut Vec<(String, String)>,
+) -> Result<(), BridgeError> {
+    let selection = plan.model_selection.as_ref();
+    let facts = crate::dsh_harness::ChildFacts {
+        executable: plan.command.first().map(String::as_str).unwrap_or("dsh"),
+        provider: plan.model_provider(),
+        wire_model: crate::dsh_harness::openrouter_model(selection),
+    };
+    let vault = |provider: ModelProvider| {
+        use crate::provider_auth::SecretStore as _;
+        let descriptor = crate::provider_registry::descriptor_for(provider)?;
+        crate::provider_auth::NativeSecretStore::new_for(
+            descriptor.vault_service,
+            descriptor.vault_account,
+        )
+        .ok()?
+        .get()
+        .ok()
+        .flatten()
+    };
+    crate::dsh_harness::prepare_child(
+        &facts,
+        crate::dsh_harness::managed_home().as_deref(),
+        env,
+        &|name| std::env::var(name).ok(),
+        &vault,
+    )
+    .map_err(|error| BridgeError::Settings(format!("DeepSeek Harness setup failed: {error}")))
 }
 
 pub fn with_foreground_runtime<ResultValue>(
