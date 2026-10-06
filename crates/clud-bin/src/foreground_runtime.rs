@@ -451,6 +451,7 @@ impl ForegroundRuntime {
                 plan.model_selection.as_ref(),
                 &plan.allowed_models,
             );
+            apply_provider_only(&mut env, descriptor, &plan.provider_only)?;
             // #1257: discovery is off under a pin, so say why once instead of
             // leaving the picker silently short of gateway rows.
             let mut notices = Vec::new();
@@ -953,6 +954,27 @@ pub fn launch_context_plan_facts(plan: &LaunchPlan) -> crate::launch_context::Pl
 
 /// The wire model the direct overlay launches: the selection's, else the
 /// provider's reviewed catalog default.
+/// `--provider-only`: hand OpenRouter's `provider` routing object to Claude
+/// Code through `CLAUDE_CODE_EXTRA_BODY`, keeping any other keys already set.
+fn apply_provider_only(
+    env: &mut Vec<(String, String)>,
+    descriptor: &crate::provider_registry::AnthropicCompatProvider,
+    slugs: &[String],
+) -> Result<(), BridgeError> {
+    if slugs.is_empty() || descriptor.provider != ModelProvider::OpenRouter {
+        return Ok(());
+    }
+    let key = crate::openrouter_routing::EXTRA_BODY_ENV;
+    let existing = env
+        .iter()
+        .find(|(candidate, _)| env_key_eq(candidate, key))
+        .map(|(_, value)| value.clone());
+    let body = crate::openrouter_routing::extra_body(existing.as_deref(), slugs)
+        .map_err(BridgeError::Model)?;
+    set_env(env, key, &body);
+    Ok(())
+}
+
 /// #1833: a free OpenRouter id whose every endpoint the workspace guardrail
 /// excludes would fail on the first turn with a bare 400. Probe it once, only
 /// for an id the catalog proved free (so the probe never bills), and refuse
@@ -2243,6 +2265,7 @@ mod tests {
             failover: None,
             failover_allow_metered: false,
             allowed_models: Vec::new(),
+            provider_only: Vec::new(),
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
         }
@@ -4121,6 +4144,28 @@ mod tests {
     // slot (haiku, subagent, fable) and the rows discovery may advertise,
     // not just the main conversation model.
     // -----------------------------------------------------------------
+
+    #[test]
+    fn provider_only_hands_openrouter_routing_to_the_harness() {
+        let only = vec!["parasail/fp8".to_string()];
+        let mut env = vec![(
+            "CLAUDE_CODE_EXTRA_BODY".to_string(),
+            r#"{"top_k":5}"#.to_string(),
+        )];
+        apply_provider_only(&mut env, openrouter_descriptor(), &only).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(lookup(&env, "CLAUDE_CODE_EXTRA_BODY").unwrap()).unwrap();
+        assert_eq!(body["top_k"], 5);
+        assert_eq!(
+            body["provider"],
+            serde_json::json!({"only": ["parasail/fp8"], "allow_fallbacks": false})
+        );
+        // No flag, or another provider: the environment is untouched.
+        let mut untouched = Vec::new();
+        apply_provider_only(&mut untouched, openrouter_descriptor(), &[]).unwrap();
+        apply_provider_only(&mut untouched, kimi_descriptor(), &only).unwrap();
+        assert!(untouched.is_empty());
+    }
 
     #[test]
     fn a_pinned_openrouter_overlay_pins_every_slot_and_turns_discovery_off() {

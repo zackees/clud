@@ -88,6 +88,10 @@ pub struct LaunchPlan {
     /// old worker payloads readable.
     #[serde(default)]
     pub allowed_models: Vec<String>,
+    /// OpenRouter upstream providers every request must use, fallbacks off
+    /// (`--provider-only`); empty leaves OpenRouter's routing alone.
+    #[serde(default)]
+    pub provider_only: Vec<String>,
     /// True when `allowed_models` came from the *previous* model selection
     /// (no `--model` / `--allow-model` on the command line), not from an
     /// explicit pin (#1257). The runtime announces exactly that case as a
@@ -146,6 +150,7 @@ mod tests {
             failover: None,
             failover_allow_metered: false,
             allowed_models: Vec::new(),
+            provider_only: Vec::new(),
             pinned_from_previous_selection: false,
             coauthor: crate::attribution::Coauthor::default(),
         }

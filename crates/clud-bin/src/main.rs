@@ -788,6 +788,24 @@ fn resolve_launch_target<'a>(
     (launch_target, provider_profile)
 }
 
+/// `--provider-only` pins OpenRouter's upstream routing, which only the direct
+/// `--openrouter` route can hand to the harness.
+fn validate_provider_only(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
+    if args.provider_only.is_empty() {
+        return;
+    }
+    if launch_target.model_provider != backend::ModelProvider::OpenRouter
+        || launch_target.routing_mode != backend::RoutingMode::Direct
+    {
+        eprintln!("[clud] error: --provider-only applies only to a direct --openrouter launch");
+        std::process::exit(2);
+    }
+    if let Some(error) = clud::openrouter_routing::invalid_slug(&args.provider_only) {
+        eprintln!("[clud] error: {error}");
+        std::process::exit(2);
+    }
+}
+
 fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
     if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
         eprintln!("{error}");
@@ -799,6 +817,7 @@ fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLau
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
+    validate_provider_only(args, launch_target);
     if let Some(error) = command::grind_launch_error(args, launch_target) {
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
@@ -1622,6 +1641,9 @@ fn print_dry_run_and_exit(
         // model this launch may reach, not just the one it starts on
         // (#1257).
         "allowed_models": plan.allowed_models,
+        // OpenRouter upstream providers every request is pinned to, fallbacks
+        // off (`--provider-only`).
+        "provider_only": plan.provider_only,
         // Whether that boundary was typed or inherited from the previous
         // selection -- the runtime prints a green startup line for the
         // inherited case (#1257).

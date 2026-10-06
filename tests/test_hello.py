@@ -719,6 +719,28 @@ def test_openrouter_free_ids_are_checked_against_the_offline_catalog() -> None:
     assert "per million input/output tokens (named on the command line)" in paid.stderr
 
 
+def test_provider_only_pins_openrouter_upstream_routing() -> None:
+    """`--provider-only` reaches the plan for a direct OpenRouter launch and is
+    refused everywhere else, or for a malformed slug, before any session."""
+    model = ("--model", "deepseek/deepseek-v4.1-flash")
+    pinned = _run(
+        "--dry-run", "--openrouter", *model, "--provider-only", "parasail/fp8", "-p", "hi"
+    )
+    assert pinned.returncode == 0, pinned.stderr
+    assert json.loads(pinned.stdout)["provider_only"] == ["parasail/fp8"]
+    plain = _run("--dry-run", "--openrouter", *model, "-p", "hi")
+    assert plain.returncode == 0, plain.stderr
+    assert json.loads(plain.stdout)["provider_only"] == []
+    for argv, needle in [
+        (("--provider-only", "parasail/fp8"), "only to a direct --openrouter launch"),
+        (("--openrouter", *model, "--provider-only", "Parasail"), "not an OpenRouter provider"),
+    ]:
+        refused = _run("--dry-run", *argv, "-p", "hi")
+        assert refused.returncode == 2, (refused.stdout, refused.stderr)
+        assert refused.stdout == ""
+        assert needle in refused.stderr
+
+
 def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:
     for argv in [
         ("--dry-run", "--codex", "do"),

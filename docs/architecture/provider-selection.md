@@ -317,6 +317,17 @@ remains the frontend and receives the resolved main-model wire ID through its
    does not implement a separate pre-launch OpenRouter picker, and cannot
    restrict the picker to the discovered set.
 
+`--provider-only <slug>` (repeatable) pins every request of a direct
+`clud --openrouter` launch to the named upstream providers, for example
+`clud --openrouter --model deepseek/deepseek-v4.1-flash --provider-only
+parasail/fp8`. clud passes OpenRouter's `provider` object (`{"only": [...],
+"allow_fallbacks": false}`) to Claude Code through `CLAUDE_CODE_EXTRA_BODY`,
+which Claude Code merges into every request; other keys already in that
+variable are kept. Fallbacks are always off, so a request fails rather than
+rerouting to another provider or price. Any other route, or a malformed
+slug, is refused with exit 2, and `--dry-run` reports the pin as
+`provider_only`.
+
 A live `clud --openrouter --model <id>` also becomes OpenRouter's saved
 default (`providers.openrouter.model` in `~/.clud/settings.json`), so the next
 plain `clud --openrouter` resolves it with `model_source: provider_setting`
