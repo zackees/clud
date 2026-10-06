@@ -105,3 +105,27 @@ fn replaced_checkout_does_not_keep_its_grant() {
     fs::create_dir_all(sibling.join(".git")).unwrap();
     assert!(load(&state, "session-a", &[launch]).is_empty());
 }
+
+/// macOS temp dirs live under `/var`, a symlink to `/private/var`. `grant`
+/// canonicalizes the sibling, so a launch root reached through a symlink must
+/// still count as its neighbor.
+#[cfg(unix)]
+#[test]
+fn sibling_through_a_symlinked_parent_is_still_eligible() {
+    let (tmp, _, _, _) = setup();
+    let link = tmp.path().with_extension("link");
+    std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
+    let launch = link.join("launch");
+    let sibling = link.join("sibling");
+    let state = tmp.path().join("state");
+    grant(
+        &sibling,
+        "approved cleanup",
+        "session-a",
+        std::slice::from_ref(&launch),
+        &state,
+    )
+    .unwrap();
+    assert_eq!(load(&state, "session-a", &[launch]).len(), 1);
+    let _ = fs::remove_file(&link);
+}
