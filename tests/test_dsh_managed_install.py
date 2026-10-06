@@ -2,9 +2,10 @@
 
 Runs only with ``DSH_MANAGED_ACCEPTANCE=1``, a compiled candidate
 (``CLUD_TEST_BINARY``) and npm on the host, which the installer-check
-``candidate-dsh`` lane provides. Each test starts from an empty HOME. The OpenRouter round trip boots the real managed
-dsh against a local mock of OpenRouter's Anthropic Messages endpoint, so it
-proves the key, model and route without a paid request.
+``candidate-dsh`` lane provides. Each test starts from an empty HOME. The
+OpenRouter round trip boots the real managed dsh against a local mock of
+OpenRouter's Anthropic Messages endpoint, so it proves the key, model and
+route without a paid request.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -104,16 +106,16 @@ def test_launch_plan_resolves_the_managed_dsh(installed: dict[str, str]) -> None
 
 
 class _MockOpenRouter(BaseHTTPRequestHandler):
-    requests: list[dict] = []
+    requests: ClassVar[list[dict]] = []
 
-    def do_GET(self) -> None:  # noqa: N802 - http.server API
+    def do_GET(self) -> None:
         # clud's credential preflight probe (`/api/v1/key`).
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"data": {}}')
 
-    def do_POST(self) -> None:  # noqa: N802 - http.server API
+    def do_POST(self) -> None:
         length = int(self.headers.get("content-length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         self.requests.append(
