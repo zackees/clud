@@ -98,6 +98,19 @@ pub struct Ambient {
 }
 
 impl Ambient {
+    /// Read the ambient values from a child environment. The pinned launcher
+    /// hands the runtime the environment the child will inherit, which is the
+    /// one the precedence rule has to be evaluated against.
+    pub fn from_child_env(env: &[(String, String)]) -> Self {
+        Self {
+            subagent_model: env
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("CLAUDE_CODE_SUBAGENT_MODEL"))
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        }
+    }
+
     /// Read the ambient values from this process.
     pub fn from_process() -> Self {
         Self {
@@ -279,6 +292,65 @@ pub struct LaunchCheck {
     pub verdict: String,
 }
 
+/// How one scrubbed key matches a candidate environment key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubMode {
+    /// Case-insensitive on every platform. This is a security guarantee -- an
+    /// ambient Anthropic key must never leak into a child billed to another
+    /// provider's key -- not a mirror of per-OS env-var uniqueness.
+    AnyCase,
+    /// Per-OS environment-variable uniqueness, which is what the bridge
+    /// overlays have always used.
+    OsSemantics,
+    /// Every key starting with this prefix: `ANTHROPIC_CUSTOM_MODEL_OPTION`
+    /// has no fixed suffix and would otherwise survive a model rewrite.
+    Prefix,
+}
+
+/// One key a renderer removes from the child environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrubKey {
+    pub key: String,
+    pub mode: ScrubMode,
+}
+
+impl ScrubKey {
+    pub fn any_case(key: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            mode: ScrubMode::AnyCase,
+        }
+    }
+
+    pub fn os_semantics(key: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            mode: ScrubMode::OsSemantics,
+        }
+    }
+
+    pub fn matches(&self, candidate: &str) -> bool {
+        match self.mode {
+            ScrubMode::AnyCase => candidate.eq_ignore_ascii_case(&self.key),
+            ScrubMode::OsSemantics => os_env_key_eq(candidate, &self.key),
+            ScrubMode::Prefix => candidate
+                .to_ascii_uppercase()
+                .starts_with(&self.key.to_ascii_uppercase()),
+        }
+    }
+}
+
+/// The per-OS rule for whether two environment-variable spellings name the
+/// same variable.
+pub fn os_env_key_eq(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 /// Everything one launch decided, decided once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRoute {
@@ -298,8 +370,8 @@ pub struct ResolvedRoute {
     /// The effective per-request timeout, in milliseconds. `None` means this
     /// backend does not set one.
     pub timeout_ms: Option<u64>,
-    /// Env keys every renderer of this route removes.
-    pub scrub: Vec<String>,
+    /// Env keys every renderer of this route removes, and how each matches.
+    pub scrub: Vec<ScrubKey>,
     pub checks: Vec<LaunchCheck>,
 }
 
@@ -470,33 +542,38 @@ fn upstream_for(
     }
 }
 
-fn scrub_list(backend: RouteBackend, provider: ModelProvider) -> Vec<String> {
-    let mut keys: Vec<String> = match backend {
+fn scrub_list(backend: RouteBackend, provider: ModelProvider) -> Vec<ScrubKey> {
+    let mut keys: Vec<ScrubKey> = match backend {
+        // The direct overlay's rule is case-insensitive on every platform.
         RouteBackend::Direct => ANTHROPIC_COMPAT_SCRUB
             .iter()
-            .map(|k| k.to_string())
+            .map(|key| ScrubKey::any_case(key))
             .collect(),
+        // The bridge overlays keep the per-OS uniqueness rule.
         RouteBackend::CodexBridge => CODEX_VIA_CLAUDE_SCRUB
             .iter()
-            .map(|k| k.to_string())
+            .map(|key| ScrubKey::os_semantics(key))
             .collect(),
         // The gateway replaces only its own two keys; it deliberately leaves
         // the Claude credential in place so native auth reaches the upstream.
         RouteBackend::Unified => vec![
-            "ANTHROPIC_BASE_URL".to_string(),
-            "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+            ScrubKey::os_semantics("ANTHROPIC_BASE_URL"),
+            ScrubKey::os_semantics("ANTHROPIC_CUSTOM_HEADERS"),
         ],
         RouteBackend::Native | RouteBackend::DeepSeekNative => Vec::new(),
     };
     // The direct route additionally drops this provider's own ambient key:
     // an OpenRouter child must never inherit one from the parent shell.
     if backend == RouteBackend::Direct && provider == ModelProvider::OpenRouter {
-        keys.push("OPENROUTER_API_KEY".to_string());
+        keys.push(ScrubKey::any_case("OPENROUTER_API_KEY"));
     }
     // Only the overlays that rewrite the model slots drop the user's own
     // custom model options; the gateway leaves them alone entirely.
     if matches!(backend, RouteBackend::Direct | RouteBackend::CodexBridge) {
-        keys.push(CUSTOM_MODEL_OPTION_PREFIX.to_string());
+        keys.push(ScrubKey {
+            key: CUSTOM_MODEL_OPTION_PREFIX.to_string(),
+            mode: ScrubMode::Prefix,
+        });
     }
     keys
 }
@@ -569,6 +646,13 @@ fn launch_checks(
             verdict: provider_only_verdict,
         },
     ]
+}
+
+/// The route a plan carries, resolving it on demand for a payload built
+/// before #1855. Production always carries one; this fallback is what keeps an
+/// older daemon payload launchable.
+pub fn route_of(plan: &LaunchPlan, ambient: &Ambient) -> ResolvedRoute {
+    plan.route.clone().unwrap_or_else(|| resolve(plan, ambient))
 }
 
 /// Resolve the route against the process's cached catalog.
@@ -779,13 +863,19 @@ pub fn resolve_with_catalog(
         discovery,
         context: context_policy(main_wire.as_deref()),
         effort: EffortPolicy {
-            per_turn_capability: main_wire.as_deref().and_then(|wire| {
-                crate::foreground_runtime::per_turn_effort_capability(
-                    catalog,
-                    wire,
-                    per_turn_effort_enabled,
-                )
-            }),
+            // Only OpenRouter publishes the underlying gate. DeepSeek and Kimi
+            // direct routes hit their own vendor endpoints, so the claim must
+            // never reach them (#1528).
+            per_turn_capability: (provider == ModelProvider::OpenRouter)
+                .then_some(main_wire.as_deref())
+                .flatten()
+                .and_then(|wire| {
+                    crate::foreground_runtime::per_turn_effort_capability(
+                        catalog,
+                        wire,
+                        per_turn_effort_enabled,
+                    )
+                }),
         },
         upstream_routing: provider_routing(provider, &plan.provider_only),
         timeout_ms: match backend {
@@ -808,6 +898,131 @@ pub fn resolve_with_catalog(
         });
     route.checks = launch_checks(&route, free.as_deref(), &plan.provider_only);
     route
+}
+
+/// One environment variable a renderer writes, and whether an ambient value
+/// already present wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvEntry {
+    pub key: String,
+    pub value: String,
+    /// `true` keeps an ambient value the user already set: the renderer only
+    /// fills the key when the child environment does not name it at all.
+    pub default: bool,
+}
+
+/// A route rendered into a child environment. Every renderer produces one of
+/// these, so the scrub happens in exactly one place.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvOverlay {
+    pub scrub: Vec<ScrubKey>,
+    pub entries: Vec<EnvEntry>,
+}
+
+impl EnvOverlay {
+    pub fn new(scrub: &[ScrubKey]) -> Self {
+        Self {
+            scrub: scrub.to_vec(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Write `key`, replacing any existing spelling of it.
+    pub fn set(&mut self, key: &str, value: &str) {
+        self.entries.push(EnvEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+            default: false,
+        });
+    }
+
+    /// Write `key` only when the child environment does not already name it,
+    /// so an explicit ambient value keeps winning (the DD-059 precedence the
+    /// direct overlay has always given `API_TIMEOUT_MS` and friends).
+    pub fn set_default(&mut self, key: &str, value: &str) {
+        self.entries.push(EnvEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+            default: true,
+        });
+    }
+
+    /// Apply the route to a child environment: scrub exactly the keys this
+    /// route owns, then write its entries in order. The overlay is a value, so
+    /// a caller can render a route without touching any environment at all.
+    pub fn apply(&self, env: &mut Vec<(String, String)>) {
+        for key in &self.scrub {
+            env.retain(|(candidate, _)| !key.matches(candidate));
+        }
+        for entry in &self.entries {
+            if entry.default && env.iter().any(|(key, _)| os_env_key_eq(key, &entry.key)) {
+                continue;
+            }
+            env.retain(|(key, _)| !os_env_key_eq(key, &entry.key));
+            env.push((entry.key.clone(), entry.value.clone()));
+        }
+    }
+}
+
+/// Read the secret a route's upstream needs. The route itself never carries
+/// one: it names where the credential comes from, and this is the single read.
+pub fn read_credential(
+    source: &CredentialSource,
+    store: &dyn crate::provider_auth::SecretStore,
+) -> Result<Option<String>, crate::provider_auth::SecretStoreError> {
+    match source {
+        CredentialSource::Vault(_) => store.get(),
+        CredentialSource::Env(var) => Ok(std::env::var(var).ok()),
+        CredentialSource::Harness | CredentialSource::CodexAuth => Ok(None),
+    }
+}
+
+/// The direct route's child environment: the descriptor's base URL, the vault
+/// secret, and the slot, discovery, context, effort and timeout decisions the
+/// resolver already made. Nothing here decides anything.
+pub fn render_direct_env(route: &ResolvedRoute, secret: &str) -> EnvOverlay {
+    let descriptor = crate::provider_registry::descriptor_for(route.provider)
+        .expect("a direct route always has a descriptor");
+    let mut overlay = EnvOverlay::new(&route.scrub);
+    if let Some(upstream) = route.upstreams.first() {
+        overlay.set("ANTHROPIC_BASE_URL", &upstream.base_url);
+    }
+    overlay.set("ANTHROPIC_AUTH_TOKEN", secret);
+    for (key, slot) in [
+        ("ANTHROPIC_MODEL", &route.slots.main),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", &route.slots.opus),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", &route.slots.sonnet),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", &route.slots.haiku),
+        ("CLAUDE_CODE_SUBAGENT_MODEL", &route.slots.subagent),
+    ] {
+        if let Some(slot) = slot {
+            overlay.set(key, &slot.wire_id);
+        }
+    }
+    if let Some(fable) = &route.slots.fable {
+        overlay.set("ANTHROPIC_DEFAULT_FABLE_MODEL", &fable.wire_id);
+    }
+    if descriptor.explicitly_empty_anthropic_api_key {
+        overlay.set("ANTHROPIC_API_KEY", "");
+    }
+    if matches!(route.discovery, DiscoveryPolicy::On) {
+        overlay.set("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+    }
+    // Pushed, not defaulted: the compact threshold is clud's reviewed value
+    // for this wire id. The window below keeps an ambient user value.
+    if let Some(window) = route.context.auto_compact_window {
+        overlay.set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", &window.to_string());
+    }
+    if let Some(tokens) = route.context.max_tokens {
+        overlay.set_default("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &tokens.to_string());
+    }
+    if let Some(capability) = &route.effort.per_turn_capability {
+        overlay.set_default("CLAUDE_CODE_MODEL_CAPABILITIES", capability);
+    }
+    if let Some(millis) = route.timeout_ms {
+        overlay.set_default("API_TIMEOUT_MS", &millis.to_string());
+    }
+    overlay
 }
 
 /// OpenRouter's upstream routing object, when the launch asked for one.

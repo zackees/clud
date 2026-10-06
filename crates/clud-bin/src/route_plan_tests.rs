@@ -336,6 +336,99 @@ fn the_per_turn_capability_is_identical_on_direct_and_unified() {
     assert_eq!(gated_off.effort.per_turn_capability, None);
 }
 
+/// The per-turn capability reaches OpenRouter's route only: DeepSeek and Kimi
+/// direct routes hit their own vendor endpoints, so a claim about OpenRouter's
+/// Messages API must never reach them (#1528).
+#[test]
+fn only_openrouter_routes_advertise_the_per_turn_capability() {
+    fn gated_catalog(wire: &str, effort: bool) -> crate::openrouter_catalog::Catalog {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-10-05T00:00:00Z",
+            "source": "https://openrouter.ai/api/v1/models",
+            "models": [{
+                "id": wire,
+                "name": wire,
+                "provider": "nvidia",
+                "context_length": 262_144,
+                "input_price_per_token": 1e-6,
+                "output_price_per_token": 2e-6,
+                "cached_input_price_per_token": null,
+                "supports_tools": true,
+                "supports_text_input": true,
+                "supports_text_output": true,
+                "supports_reasoning": true,
+                "supports_reasoning_effort": effort,
+                "supports_vision": false,
+                "eligible_for_coding": true,
+                "ineligibility_reasons": [],
+            }],
+        });
+        crate::openrouter_catalog::Catalog::parse(json.to_string().as_bytes())
+            .expect("fixture catalog parses")
+    }
+
+    let wire = "deepseek/deepseek-v4.1-flash";
+    let catalog = gated_catalog(wire, true);
+    let mut openrouter = with_selection(
+        plan(ModelProvider::OpenRouter, Backend::Claude),
+        "openrouter-claude-sonnet",
+        ModelProvider::OpenRouter,
+    );
+    openrouter.model_selection.as_mut().unwrap().wire_model = Some(wire.to_string());
+    let route = resolve_with_catalog(&openrouter, &Ambient::default(), &catalog, true);
+    assert_eq!(
+        route.effort.per_turn_capability.as_deref(),
+        Some(format!("{wire}=per_turn_effort").as_str())
+    );
+
+    // The flip is off: nothing is advertised even for an admitting row.
+    let dark = resolve_with_catalog(&openrouter, &Ambient::default(), &catalog, false);
+    assert_eq!(dark.effort.per_turn_capability, None);
+
+    // A row that does not admit the gate advertises nothing either.
+    let ungated = resolve_with_catalog(
+        &openrouter,
+        &Ambient::default(),
+        &gated_catalog(wire, false),
+        true,
+    );
+    assert_eq!(ungated.effort.per_turn_capability, None);
+
+    for descriptor in crate::provider_registry::ANTHROPIC_COMPAT_PROVIDERS {
+        if descriptor.provider == ModelProvider::OpenRouter {
+            continue;
+        }
+        let mut plan = plan(descriptor.provider, Backend::Claude);
+        plan.model_selection = Some(selection_for(descriptor.provider, wire));
+        let route = resolve_with_catalog(&plan, &Ambient::default(), &catalog, true);
+        assert_eq!(
+            route.effort.per_turn_capability, None,
+            "{} must never carry an OpenRouter capability",
+            descriptor.display_name
+        );
+    }
+}
+
+/// A selection whose wire spelling is `wire`, bypassing catalog validation:
+/// these tests are about what a route does with an id, not about what the CLI
+/// would accept.
+fn selection_for(
+    provider: ModelProvider,
+    wire: &str,
+) -> crate::provider_catalog::ResolvedModelSelection {
+    crate::provider_catalog::ResolvedModelSelection {
+        provider,
+        model: None,
+        wire_model: Some(wire.to_string()),
+        effort: None,
+        context_window: None,
+        model_source: None,
+        effort_source: None,
+        context_window_source: None,
+    }
+}
+
 /// A8: resolving twice from the same inputs gives equal values, and the route
 /// survives the JSON round trip a daemon worker performs.
 #[test]
@@ -472,20 +565,34 @@ fn each_backend_scrubs_the_keys_it_owns() {
         &plan(ModelProvider::OpenRouter, Backend::Claude),
         &Ambient::default(),
     );
-    assert!(direct.scrub.iter().any(|key| key == "OPENROUTER_API_KEY"));
-    assert!(direct.scrub.iter().any(|key| key == "ANTHROPIC_API_KEY"));
+    assert!(direct
+        .scrub
+        .iter()
+        .any(|key| key.key == "OPENROUTER_API_KEY"));
+    assert!(direct
+        .scrub
+        .iter()
+        .any(|key| key.key == "ANTHROPIC_API_KEY"));
     assert!(!direct
         .scrub
         .iter()
-        .any(|key| key == "CLAUDE_CODE_EFFORT_LEVEL"));
+        .any(|key| key.key == "CLAUDE_CODE_EFFORT_LEVEL"));
+    // The direct overlay's rule is the security guarantee, not OS semantics.
+    assert!(direct
+        .scrub
+        .iter()
+        .all(|key| key.mode == ScrubMode::AnyCase || key.mode == ScrubMode::Prefix));
 
     let unified = resolve(&unified(ModelProvider::Claude), &Ambient::default());
-    assert!(unified.scrub.iter().any(|key| key == "ANTHROPIC_BASE_URL"));
+    assert!(unified
+        .scrub
+        .iter()
+        .any(|key| key.key == "ANTHROPIC_BASE_URL"));
     assert!(
         !unified
             .scrub
             .iter()
-            .any(|key| key == "ANTHROPIC_AUTH_TOKEN"),
+            .any(|key| key.key == "ANTHROPIC_AUTH_TOKEN"),
         "the gateway keeps the Claude credential so native auth reaches the upstream"
     );
 
@@ -493,7 +600,123 @@ fn each_backend_scrubs_the_keys_it_owns() {
         &plan(ModelProvider::Claude, Backend::Claude),
         &Ambient::default(),
     );
-    assert_eq!(native.scrub, Vec::<String>::new());
+    assert_eq!(native.scrub, Vec::<ScrubKey>::new());
+}
+
+/// The prefix rule: `ANTHROPIC_CUSTOM_MODEL_OPTION` has no fixed suffix, so a
+/// rewrite that only matched exact keys would leave the user's own options
+/// behind.
+#[test]
+fn the_custom_model_option_prefix_matches_every_suffix() {
+    let prefix = ScrubKey {
+        key: CUSTOM_MODEL_OPTION_PREFIX.to_string(),
+        mode: ScrubMode::Prefix,
+    };
+    assert!(prefix.matches("ANTHROPIC_CUSTOM_MODEL_OPTION"));
+    assert!(prefix.matches("anthropic_custom_model_option_sonnet"));
+    assert!(prefix.matches("ANTHROPIC_CUSTOM_MODEL_OPTION_HAIKU_NAME"));
+    assert!(!prefix.matches("ANTHROPIC_DEFAULT_HAIKU_MODEL"));
+}
+
+/// C15: a renderer removes every key the route owns, writes its entries, and
+/// never touches the environment it was handed a reference to.
+#[test]
+fn the_overlay_applies_the_scrub_and_never_mutates_its_parent() {
+    let route = resolve(
+        &plan(ModelProvider::OpenRouter, Backend::Claude),
+        &Ambient::default(),
+    );
+    let parent = vec![
+        (
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            "ambient-subagent".to_string(),
+        ),
+        ("ANTHROPIC_API_KEY".to_string(), "sk-ambient".to_string()),
+        ("UNCHANGED".to_string(), "yes".to_string()),
+    ];
+    let untouched = parent.clone();
+    let mut child = parent.clone();
+    render_direct_env(&route, "fixture-secret").apply(&mut child);
+
+    assert_eq!(parent, untouched, "the parent environment was mutated");
+    assert_eq!(
+        child
+            .iter()
+            .find(|(key, _)| key == "UNCHANGED")
+            .map(|(_, value)| value.as_str()),
+        Some("yes")
+    );
+    // OpenRouter needs the key present but empty: merely removing an inherited
+    // one makes Claude Code fall back to Anthropic.
+    assert_eq!(
+        child
+            .iter()
+            .find(|(key, _)| key == "ANTHROPIC_API_KEY")
+            .map(|(_, value)| value.as_str()),
+        Some("")
+    );
+    assert!(!child.iter().any(|(_, value)| value == "sk-ambient"));
+    assert_eq!(
+        child
+            .iter()
+            .filter(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN")
+            .count(),
+        1
+    );
+    // The route owns the subagent slot, so the ambient spelling is replaced by
+    // the resolved one rather than surviving.
+    assert_eq!(
+        child
+            .iter()
+            .find(|(key, _)| key == "CLAUDE_CODE_SUBAGENT_MODEL")
+            .map(|(_, value)| value.as_str()),
+        Some("~anthropic/claude-opus-latest")
+    );
+}
+
+/// C18: the timeout is the route's, and an ambient value still wins.
+#[test]
+fn the_direct_timeout_comes_from_the_route() {
+    let route = resolve(
+        &plan(ModelProvider::DeepSeek, Backend::Claude),
+        &Ambient::default(),
+    );
+    assert_eq!(route.timeout_ms, Some(600_000));
+    let mut child = Vec::new();
+    render_direct_env(&route, "fixture-secret").apply(&mut child);
+    assert_eq!(
+        child
+            .iter()
+            .find(|(key, _)| key == "API_TIMEOUT_MS")
+            .map(|(_, value)| value.as_str()),
+        Some("600000")
+    );
+
+    let mut ambient = vec![("API_TIMEOUT_MS".to_string(), "120000".to_string())];
+    render_direct_env(&route, "fixture-secret").apply(&mut ambient);
+    assert_eq!(
+        ambient
+            .iter()
+            .find(|(key, _)| key == "API_TIMEOUT_MS")
+            .map(|(_, value)| value.as_str()),
+        Some("120000")
+    );
+}
+
+/// C17: `--provider-only` renders into `CLAUDE_CODE_EXTRA_BODY`, merging the
+/// keys already there.
+#[test]
+fn a_provider_only_pin_is_the_routes_upstream_routing() {
+    let mut plan = plan(ModelProvider::OpenRouter, Backend::Claude);
+    plan.provider_only = vec!["deepinfra".to_string()];
+    let route = resolve(&plan, &Ambient::default());
+    assert_eq!(
+        route.upstream_routing,
+        Some(ProviderRouting {
+            only: vec!["deepinfra".to_string()],
+            allow_fallbacks: false,
+        })
+    );
 }
 
 /// The unified route lists every upstream it may serve, and the direct route
