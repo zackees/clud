@@ -68,7 +68,13 @@ mod tests {
 
     #[test]
     fn provider_slugs_are_validated() {
-        for good in ["parasail", "parasail/fp8", "deepinfra/bf16", "z-ai", "a.b_c"] {
+        for good in [
+            "parasail",
+            "parasail/fp8",
+            "deepinfra/bf16",
+            "z-ai",
+            "a.b_c",
+        ] {
             assert!(valid_slug(good), "{good}");
         }
         for bad in ["", "/fp8", "parasail/", "Parasail", "para sail", "x;y"] {
