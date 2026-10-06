@@ -918,6 +918,12 @@ fn refuse_unproven_free_model(args: &args::Args, launch_target: backend::Resolve
     if let Some(notice) = clud::openrouter_free::price_notice(wire, &catalog, &source) {
         eprintln!("{notice}");
     }
+    // Free ids hit OpenRouter's caps mid-session, which Claude Code reports
+    // as a malformed HTTP 200 response; say so before the session starts
+    // (#1845).
+    if let Some(notice) = clud::openrouter_free::free_limits_notice(wire) {
+        eprintln!("{notice}");
+    }
 }
 
 fn validate_model_boundaries(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {

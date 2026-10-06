@@ -129,6 +129,25 @@ pub fn price_notice(wire_id: &str, catalog: &Catalog, source: &str) -> Option<St
     ))
 }
 
+/// The launch line warning that a `:free` id is rate-limited mid-session.
+///
+/// OpenRouter caps free ids per minute and per day. When a cap or an upstream
+/// provider error lands after a long session has started, the stream ends
+/// after one event and the non-streaming retry gets HTTP 200 with a JSON body
+/// that is not an Anthropic Message, which Claude Code shows as `API returned
+/// an empty or malformed response (HTTP 200)` (#1845). clud is not in the
+/// request path on the direct route, so it can only say so before the session
+/// starts. `None` for any id that is not `:free`.
+pub fn free_limits_notice(wire_id: &str) -> Option<String> {
+    let paid = wire_id.strip_suffix(FREE_SUFFIX)?;
+    Some(format!(
+        "[clud] note: {wire_id} is rate-limited by OpenRouter (per-minute and per-day caps). \
+         A cap or upstream error mid-session surfaces in Claude Code as \
+         \"API returned an empty or malformed response (HTTP 200)\"; \
+         use the paid `{paid}` for long or /loop sessions."
+    ))
+}
+
 /// How a launch probe of a free id ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProbeVerdict {
@@ -602,5 +621,23 @@ mod notice_tests {
             "{free}"
         );
         assert_eq!(price_notice("not/in-catalog", &catalog, "cli"), None);
+    }
+
+    #[test]
+    fn a_free_launch_warns_that_mid_session_limits_look_like_a_malformed_response() {
+        let notice = free_limits_notice("nvidia/nemotron-3-ultra-550b-a55b:free").expect("free id");
+        assert!(
+            notice.contains("empty or malformed response (HTTP 200)"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("`nvidia/nemotron-3-ultra-550b-a55b`"),
+            "{notice}"
+        );
+        assert!(notice.contains("/loop"), "{notice}");
+        assert_eq!(
+            free_limits_notice("nvidia/nemotron-3-ultra-550b-a55b"),
+            None
+        );
     }
 }
