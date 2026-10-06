@@ -139,31 +139,202 @@ pub enum ProbeVerdict {
     Blocked(String),
 }
 
-/// Map a probe's HTTP status and error body to a verdict. Only an
-/// endpoint-exclusion refusal blocks: a free model's 429 or a 5xx says
-/// nothing about whether the id can be served.
-pub fn classify(wire_id: &str, status: u16, body: &str, paid_note: &str) -> ProbeVerdict {
+/// One reason OpenRouter gave for excluding endpoints, as it sent it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExclusionReason {
+    /// Machine reason, e.g. `free-model-training-violation-by-guardrail`.
+    pub reason: String,
+    /// Where OpenRouter says the setting lives.
+    pub configure_url: Option<String>,
+}
+
+/// An endpoint-exclusion refusal, parsed from either OpenRouter error shape:
+/// chat completions (`{"error":{"message",…,"metadata"}}`) or the Anthropic
+/// `/messages` surface Claude Code uses (`{"type":"error","error":{…}}`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal {
+    /// OpenRouter's own message, verbatim.
+    pub message: String,
+    /// `metadata.ineligibility_reasons`, empty when OpenRouter sent none.
+    pub reasons: Vec<ExclusionReason>,
+    /// True for "no endpoint serves this id" rather than a policy filter.
+    pub no_endpoint: bool,
+}
+
+/// The account's prepaid credit, from `GET /api/v1/credits`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CreditBalance {
+    pub total_credits: f64,
+    pub total_usage: f64,
+}
+
+impl CreditBalance {
+    pub fn remaining(&self) -> f64 {
+        self.total_credits - self.total_usage
+    }
+}
+
+/// Parse a probe's error reply into a [`Refusal`] when it is an
+/// endpoint-exclusion refusal. A free model's 429, a 5xx, or any other error
+/// says nothing about whether the id can be served, so it yields `None` and
+/// the launch proceeds (#1833).
+pub fn classify(status: u16, body: &str) -> Option<Refusal> {
     let lower = body.to_ascii_lowercase();
-    if lower.contains("guardrail") || lower.contains("data policy") {
-        return ProbeVerdict::Blocked(format!(
-            "OpenRouter excluded every endpoint for `{wire_id}`: free endpoints are served by \
-             providers that may train on prompts, and your workspace guardrail (\"Free model \
-             training\") or privacy settings block them. Allow it at {GUARDRAILS_URL}. Without \
-             `{FREE_SUFFIX}`, {paid_note}."
+    let policy = lower.contains("guardrail") || lower.contains("data policy");
+    let no_endpoint = status == 404 && lower.contains("no endpoints");
+    if !policy && !no_endpoint {
+        return None;
+    }
+    let error = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("error").cloned());
+    let message = error
+        .as_ref()
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(body)
+        .trim()
+        .to_string();
+    let reasons = error
+        .as_ref()
+        .and_then(|error| error.pointer("/metadata/ineligibility_reasons"))
+        .and_then(serde_json::Value::as_array)
+        .map(|reasons| {
+            reasons
+                .iter()
+                .filter_map(|entry| {
+                    Some(ExclusionReason {
+                        reason: entry.get("reason")?.as_str()?.to_string(),
+                        configure_url: entry
+                            .get("configure_url")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Refusal {
+        message,
+        reasons,
+        no_endpoint: no_endpoint && !policy,
+    })
+}
+
+/// Parse `GET /api/v1/credits`.
+pub fn parse_credits(body: &str) -> Option<CreditBalance> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let data = value.get("data")?;
+    Some(CreditBalance {
+        total_credits: data.get("total_credits")?.as_f64()?,
+        total_usage: data.get("total_usage")?.as_f64()?,
+    })
+}
+
+/// Up to `limit` other `:free` catalog ids from a different vendor than
+/// `wire_id`, offline. A guardrail that blocks free endpoints which train on
+/// prompts leaves free models from providers that do not train routable
+/// (observed in #1838: nvidia/poolside/liquid blocked, cohere and apodex
+/// served), and the catalog cannot say which providers train, so these are
+/// suggestions, not promises.
+pub fn free_alternatives(wire_id: &str, catalog: &Catalog, limit: usize) -> Vec<String> {
+    let vendor = wire_id.split('/').next().unwrap_or_default();
+    catalog
+        .models()
+        .iter()
+        .filter(|model| model.id.ends_with(FREE_SUFFIX))
+        .filter(|model| model.id.split('/').next() != Some(vendor))
+        .filter(|model| check(&model.id, catalog) == FreeCheck::Free)
+        .map(|model| model.id.clone())
+        .take(limit)
+        .collect()
+}
+
+/// What dropping `:free` would take: its price, or, when the account has no
+/// credit left, that it cannot run at all. A key's spending limit is a cap,
+/// not money, so only the account balance is consulted (#1838).
+fn paid_hint(wire_id: &str, catalog: &Catalog, credit: Option<CreditBalance>) -> String {
+    let paid = wire_id.trim_end_matches(FREE_SUFFIX);
+    match credit {
+        Some(credit) if credit.remaining() <= 0.0 => format!(
+            "the paid `{paid}` needs OpenRouter credit, and the account balance is \
+             ${:.2} (${:.2} bought, ${:.2} used; a key's spending limit is not credit). \
+             Add credit at {CREDITS_URL}",
+            credit.remaining(),
+            credit.total_credits,
+            credit.total_usage
+        ),
+        _ => paid_alternative(wire_id, catalog),
+    }
+}
+
+/// Where the user adds OpenRouter credit.
+pub const CREDITS_URL: &str = "https://openrouter.ai/settings/credits";
+
+/// The launch error for a refused free id. OpenRouter's own reason and
+/// settings link are relayed verbatim rather than restated, because a
+/// guardrail's data-policy flags do not appear in its list view: the list can
+/// say "No policies" while a flag blocks free endpoints that train (#1838).
+pub fn explain(
+    wire_id: &str,
+    refusal: &Refusal,
+    catalog: &Catalog,
+    credit: Option<CreditBalance>,
+) -> String {
+    let mut lines = Vec::new();
+    if refusal.no_endpoint {
+        lines.push(format!(
+            "OpenRouter has no endpoint serving `{wire_id}` right now."
+        ));
+    } else {
+        lines.push(format!(
+            "OpenRouter refused every endpoint for `{wire_id}`: {}",
+            refusal.message
+        ));
+        for reason in &refusal.reasons {
+            match &reason.configure_url {
+                Some(url) => {
+                    lines.push(format!("  reason: {} (configure at {url})", reason.reason))
+                }
+                None => lines.push(format!("  reason: {}", reason.reason)),
+            }
+        }
+        if refusal.reasons.is_empty() {
+            lines.push(format!("  check your guardrails at {GUARDRAILS_URL}"));
+        }
+        if refusal
+            .reasons
+            .iter()
+            .any(|reason| reason.reason.contains("guardrail"))
+        {
+            lines.push(
+                "Open the guardrail's edit view (not the list) and enable free endpoints that \
+                 train on request data, and that publish prompts if shown, then save. The list \
+                 can say \"No policies\" while one of these flags blocks the model, and the \
+                 account Privacy page cannot override a stricter guardrail."
+                    .to_string(),
+            );
+        }
+    }
+    let alternatives = free_alternatives(wire_id, catalog, 4);
+    if !alternatives.is_empty() {
+        lines.push(format!(
+            "Free models from providers that do not train on prompts may still route: {}.",
+            alternatives.join(", ")
         ));
     }
-    if status == 404 && lower.contains("no endpoints") {
-        return ProbeVerdict::Blocked(format!(
-            "OpenRouter has no endpoint serving `{wire_id}` right now. Without \
-             `{FREE_SUFFIX}`, {paid_note}."
-        ));
-    }
-    ProbeVerdict::Proceed
+    lines.push(format!(
+        "Without `{FREE_SUFFIX}`, {}.",
+        paid_hint(wire_id, catalog, credit)
+    ));
+    lines.join("\n")
 }
 
 /// Send one `max_tokens: 1` request for `wire_id` with the vault `key`.
-/// Runs only for ids [`check`] proved free, so it never bills.
-pub fn probe(wire_id: &str, key: &str, paid_note: &str) -> ProbeVerdict {
+/// Runs only for ids [`check`] proved free, so it never bills. Only when the
+/// id is refused does it make one more free call, to `/credits`, so the
+/// explanation never suggests a paid model the account cannot pay for.
+pub fn probe(wire_id: &str, key: &str, catalog: &Catalog) -> ProbeVerdict {
     let agent = ureq::AgentBuilder::new()
         .timeout(PROBE_TIMEOUT)
         .redirects(0)
@@ -173,7 +344,7 @@ pub fn probe(wire_id: &str, key: &str, paid_note: &str) -> ProbeVerdict {
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "ping"}],
     });
-    match agent
+    let refused = match agent
         .post(PROBE_URL)
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json")
@@ -182,11 +353,31 @@ pub fn probe(wire_id: &str, key: &str, paid_note: &str) -> ProbeVerdict {
         Err(ureq::Error::Status(status, response)) => {
             let mut text = String::new();
             let _ = response.into_reader().take(8192).read_to_string(&mut text);
-            classify(wire_id, status, &text, paid_note)
+            classify(status, &text)
         }
-        _ => ProbeVerdict::Proceed,
-    }
+        _ => None,
+    };
+    let Some(refusal) = refused else {
+        return ProbeVerdict::Proceed;
+    };
+    let credit = agent
+        .get(CREDITS_PROBE_URL)
+        .set("Authorization", &format!("Bearer {key}"))
+        .call()
+        .ok()
+        .and_then(|response| {
+            let mut text = String::new();
+            response
+                .into_reader()
+                .take(8192)
+                .read_to_string(&mut text)
+                .ok()?;
+            parse_credits(&text)
+        });
+    ProbeVerdict::Blocked(explain(wire_id, &refusal, catalog, credit))
 }
+
+const CREDITS_PROBE_URL: &str = "https://openrouter.ai/api/v1/credits";
 
 #[cfg(test)]
 mod tests_support {
@@ -219,6 +410,8 @@ mod tests_support {
                 row("nvidia/nemotron-3-ultra-550b-a55b:free", 0.0, 0.0),
                 row("nvidia/nemotron-3-ultra-550b-a55b", 5e-7, 2.2e-6),
                 row("acme/priced:free", 1e-6, 2e-6),
+                row("cohere/north-mini-code:free", 0.0, 0.0),
+                row("nvidia/nemotron-3.5-lightning:free", 0.0, 0.0),
             ],
         });
         Catalog::parse(json.to_string().as_bytes()).expect("fixture catalog parses")
@@ -277,19 +470,93 @@ mod tests {
         );
     }
 
+    /// Captured verbatim from OpenRouter on 2026-10-06 (#1838): chat
+    /// completions, with the reason metadata the old message ignored.
+    const GUARDRAIL_404: &str = r#"{"error":{"message":"0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. We removed them for the following reasons (an endpoint may have matched multiple reasons):\nFree model training violation (guardrail): 1 endpoint excluded; configurable at https://openrouter.ai/workspaces/default/guardrails","code":404,"metadata":{"input_endpoint_count":1,"ineligibility_reasons":[{"reason":"free-model-training-violation-by-guardrail","endpoint_count":1,"configure_url":"https://openrouter.ai/workspaces/default/guardrails"}],"routing_funnel":[{"step":"Initial Endpoints","endpoint_count":1}],"failed_routing_step":"Filter by Guardrails"}}}"#;
+
+    /// The same refusal on the Anthropic `/messages` surface Claude Code uses.
+    const GUARDRAIL_MESSAGES_404: &str = r#"{"type":"error","error":{"type":"not_found_error","message":"0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy.","metadata":{"ineligibility_reasons":[{"reason":"free-model-training-violation-by-guardrail","endpoint_count":1,"configure_url":"https://openrouter.ai/workspaces/default/guardrails"}],"failed_routing_step":"Filter by Guardrails"}}}"#;
+
+    const CREDITS_EMPTY: &str = r#"{"data":{"total_credits":50,"total_usage":50.201787564}}"#;
+
+    fn blocked(status: u16, body: &str) -> Refusal {
+        classify(status, body).expect("an endpoint-exclusion refusal")
+    }
+
     #[test]
-    fn the_guardrail_refusal_blocks_with_the_fix() {
-        let body = r#"{"error":{"code":400,"message":"0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. Free model training violation (guardrail): 1 endpoint excluded"}}"#;
-        let note = paid_alternative(FREE, &catalog());
-        assert!(note.contains("$0.50/$2.20"), "{note}");
-        let ProbeVerdict::Blocked(message) = classify(FREE, 400, body, &note) else {
-            panic!("the guardrail refusal must block");
-        };
-        assert!(message.contains(GUARDRAILS_URL), "{message}");
+    fn the_guardrail_refusal_relays_openrouters_reason_and_url() {
+        let refusal = blocked(404, GUARDRAIL_404);
+        assert_eq!(
+            refusal.reasons,
+            [ExclusionReason {
+                reason: "free-model-training-violation-by-guardrail".into(),
+                configure_url: Some(GUARDRAILS_URL.into()),
+            }]
+        );
+        let message = explain(FREE, &refusal, &catalog(), None);
         assert!(
-            message.contains("`nvidia/nemotron-3-ultra-550b-a55b`"),
+            message.contains("free-model-training-violation-by-guardrail"),
             "{message}"
         );
+        assert!(
+            message.contains(&format!("configure at {GUARDRAILS_URL}")),
+            "{message}"
+        );
+        assert!(
+            message.contains("0 endpoints out of 1 requested"),
+            "{message}"
+        );
+        assert!(message.contains("edit view"), "{message}");
+        assert!(message.contains("\"No policies\""), "{message}");
+        assert!(message.contains("$0.50/$2.20"), "{message}");
+    }
+
+    #[test]
+    fn the_messages_surface_refusal_classifies_the_same() {
+        assert_eq!(
+            blocked(404, GUARDRAIL_MESSAGES_404).reasons,
+            blocked(404, GUARDRAIL_404).reasons
+        );
+    }
+
+    #[test]
+    fn an_empty_balance_replaces_the_paid_price_with_an_add_credit_hint() {
+        let credit = parse_credits(CREDITS_EMPTY).expect("credits parse");
+        assert!(credit.remaining() < 0.0);
+        let message = explain(FREE, &blocked(404, GUARDRAIL_404), &catalog(), Some(credit));
+        assert!(message.contains(CREDITS_URL), "{message}");
+        assert!(message.contains("$-0.20"), "{message}");
+        assert!(message.contains("not credit"), "{message}");
+        assert!(!message.contains("bills $0.50"), "{message}");
+    }
+
+    #[test]
+    fn a_funded_account_keeps_the_paid_price() {
+        let credit = parse_credits(r#"{"data":{"total_credits":50,"total_usage":10}}"#).unwrap();
+        let message = explain(FREE, &blocked(404, GUARDRAIL_404), &catalog(), Some(credit));
+        assert!(message.contains("bills $0.50/$2.20"), "{message}");
+    }
+
+    #[test]
+    fn an_unknown_reason_is_relayed_verbatim_without_the_guardrail_advice() {
+        let body = r#"{"error":{"message":"0 endpoints match your data policy","metadata":{"ineligibility_reasons":[{"reason":"brand-new-reason"}]}}}"#;
+        let message = explain(FREE, &blocked(400, body), &catalog(), None);
+        assert!(message.contains("reason: brand-new-reason"), "{message}");
+        assert!(!message.contains("edit view"), "{message}");
+    }
+
+    #[test]
+    fn alternatives_come_from_the_offline_catalog_and_skip_the_blocked_vendor() {
+        let alternatives = free_alternatives(FREE, &catalog(), 4);
+        assert_eq!(alternatives, ["cohere/north-mini-code:free"]);
+        let message = explain(FREE, &blocked(404, GUARDRAIL_404), &catalog(), None);
+        assert!(message.contains("cohere/north-mini-code:free"), "{message}");
+    }
+
+    #[test]
+    fn no_key_shaped_text_reaches_the_message() {
+        let message = explain(FREE, &blocked(404, GUARDRAIL_404), &catalog(), None);
+        assert!(!message.contains("sk-or-"), "{message}");
     }
 
     #[test]
@@ -302,17 +569,13 @@ mod tests {
             (502, "bad gateway"),
             (400, r#"{"error":{"message":"max_tokens too small"}}"#),
         ] {
-            assert_eq!(
-                classify(FREE, status, body, ""),
-                ProbeVerdict::Proceed,
-                "{status}"
-            );
+            assert_eq!(classify(status, body), None, "{status}");
         }
         let no_endpoint = r#"{"error":{"message":"No endpoints found for x:free."}}"#;
-        assert!(matches!(
-            classify(FREE, 404, no_endpoint, ""),
-            ProbeVerdict::Blocked(_)
-        ));
+        let refusal = blocked(404, no_endpoint);
+        assert!(refusal.no_endpoint);
+        let message = explain(FREE, &refusal, &catalog(), None);
+        assert!(message.contains("no endpoint serving"), "{message}");
     }
 }
 

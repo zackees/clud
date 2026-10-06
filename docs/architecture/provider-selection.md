@@ -393,6 +393,32 @@ without a restart -- and can be failed over automatically. See
 No normalized field may contain credentials. Dry-run output exposes the
 selection and its sources so routing can be audited without a paid request.
 
+### OpenRouter `:free` models
+
+`crates/clud-bin/src/openrouter_free.rs` owns this (#1833, #1838).
+
+- **Proven free or refused.** A `:free` id must match a zero-priced row in
+  the offline catalog. A priced or unknown `:free` id is refused before
+  launch, so a stale or mistyped id never bills.
+- **One launch probe.** Before the session starts, clud sends one
+  `max_tokens: 1` request with the stored key. Only an endpoint-exclusion
+  refusal stops the launch; a free model's 429 or a 5xx lets it proceed.
+- **OpenRouter's reason is relayed, not restated.** The error prints
+  OpenRouter's message and each `metadata.ineligibility_reasons[]` entry with
+  its `configure_url` verbatim, from either the chat-completions or the
+  `/messages` error shape.
+- **Guardrail flags hide behind "No policies".** A guardrail carries its own
+  free-endpoint data flags (train on request data, publish prompts) that the
+  guardrail *list* does not show. The list can read "No policies" while a flag
+  excludes every free endpoint whose provider trains on prompts (nvidia,
+  poolside, liquid in #1838), and the account Privacy page cannot override a
+  stricter guardrail. The fix is the guardrail's edit view. No request field
+  (`provider.data_collection`, `zdr`, provider order) bypasses the filter.
+- **Alternatives and credit.** The error suggests other `:free` ids from the
+  offline catalog, and only for a refused id makes one free `GET /credits`
+  call. With no credit left it says so instead of offering the paid variant:
+  a key's spending limit (`limit_remaining`) is a cap, not money.
+
 ### Anthropic-compatible credential preflight
 
 Live DeepSeek, Kimi, and OpenRouter launches read their separate native-vault
