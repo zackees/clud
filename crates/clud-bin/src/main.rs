@@ -837,6 +837,7 @@ fn resolve_model_selection(
                 std::process::exit(2);
             }
         };
+    refuse_unproven_free_model(args, launch_target);
     // #1304: an explicit `--openrouter --model <id>` becomes the saved default
     // the next plain `clud --openrouter` reuses. Saved before the credential
     // preflight so the choice survives even a launch that stops for a key.
@@ -855,6 +856,28 @@ fn resolve_model_selection(
                 eprintln!("[clud] warning: could not save the OpenRouter model: {error}")
             }
         }
+    }
+}
+
+/// #1833: a `:free` OpenRouter id is a cost promise. Refuse it, before the
+/// selection is saved as the default, unless the offline catalog proves the
+/// row is free; `--dry-run` refuses the same way.
+fn refuse_unproven_free_model(args: &args::Args, launch_target: backend::ResolvedLaunchTarget) {
+    if launch_target.model_provider != backend::ModelProvider::OpenRouter {
+        return;
+    }
+    let Some(wire) = args
+        .resolved_model_selection
+        .as_ref()
+        .and_then(|selection| selection.wire_model.as_deref())
+    else {
+        return;
+    };
+    let verdict =
+        clud::openrouter_free::check(wire, &openrouter_catalog::catalog_cached_or_embedded());
+    if let Some(message) = clud::openrouter_free::refusal(wire, &verdict) {
+        eprintln!("[clud] error: {message}");
+        std::process::exit(2);
     }
 }
 
@@ -1568,6 +1591,14 @@ fn print_dry_run_and_exit(
         // selection -- the runtime prints a green startup line for the
         // inherited case (#1257).
         "pinned_from_previous_selection": plan.pinned_from_previous_selection,
+        // #1833: what the offline catalog says about a `:free` id.
+        "free_check": plan.model_selection.as_ref()
+            .and_then(|selection| selection.wire_model.as_deref())
+            .filter(|_| plan.model_provider() == backend::ModelProvider::OpenRouter)
+            .map(|wire| clud::openrouter_free::check(
+                wire,
+                &openrouter_catalog::catalog_cached_or_embedded(),
+            ).as_str()),
         "coauthor": plan.coauthor,
         // Routing must be auditable without a paid request, and a ladder
         // is routing: it decides which account serves the turn after the
