@@ -976,8 +976,7 @@ fn refuse_blocked_free_model(
     if crate::openrouter_free::check(wire, &catalog) != crate::openrouter_free::FreeCheck::Free {
         return Ok(());
     }
-    let paid_note = crate::openrouter_free::paid_alternative(wire, &catalog);
-    match crate::openrouter_free::probe(wire, secret, &paid_note) {
+    match crate::openrouter_free::probe(wire, secret, &catalog) {
         crate::openrouter_free::ProbeVerdict::Blocked(message) => Err(BridgeError::Model(message)),
         crate::openrouter_free::ProbeVerdict::Proceed => Ok(()),
     }
