@@ -157,7 +157,8 @@ pub struct CludSubscriptionCredentials {
 
 impl CludSubscriptionCredentials {
     pub fn from_home() -> Result<Self, UpstreamError> {
-        let home = dirs_home().ok_or(UpstreamError::Credentials("no home directory"))?;
+        let home =
+            crate::home::user_home().ok_or(UpstreamError::Credentials("no home directory"))?;
         let credentials = match codex_auth::load_fresh_at(&home) {
             Ok(credentials) => credentials,
             Err(error) if error == "no clud ChatGPT subscription login" => {
@@ -276,7 +277,7 @@ impl CodexCliCredentials {
     pub fn from_codex_home() -> Result<Self, UpstreamError> {
         let home = std::env::var_os("CODEX_HOME")
             .map(std::path::PathBuf::from)
-            .or_else(|| dirs_home().map(|home| home.join(".codex")))
+            .or_else(|| crate::home::user_home().map(|home| home.join(".codex")))
             .ok_or(UpstreamError::Credentials("no Codex home directory"))?;
         let raw = std::fs::read(home.join("auth.json"))
             .map_err(|_| UpstreamError::Credentials("Codex auth.json is not readable"))?;
@@ -403,12 +404,6 @@ pub(super) fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(std::path::PathBuf::from)
-}
-
 impl std::fmt::Debug for CodexCliCredentials {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("CodexCliCredentials").finish()
@@ -433,7 +428,7 @@ impl ResolvedCredentials {
     /// returns credentials, so it cannot pin a token for the harness lifetime;
     /// each request still calls `resolve_default` through `build_pipeline`.
     pub fn preflight_default() -> Result<(), CodexBridgeCredentialError> {
-        let Some(home) = dirs_home() else {
+        let Some(home) = crate::home::user_home() else {
             return Err(CodexBridgeCredentialError::Unreadable);
         };
         Self::preflight_with(

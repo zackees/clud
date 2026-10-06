@@ -204,7 +204,7 @@ fn login_shell() -> String {
 
 #[cfg(unix)]
 fn posix_bootstrap_env(shell: &str) -> Vec<(String, String)> {
-    let home = dirs::home_dir()
+    let home = crate::home::user_home()
         .or_else(|| std::env::var_os("HOME").map(Into::into))
         .unwrap_or_else(|| std::path::PathBuf::from("/"));
     let mut env = vec![

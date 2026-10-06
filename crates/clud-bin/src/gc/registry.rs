@@ -528,7 +528,7 @@ impl Registry {
 /// Resolve the default DB path: `~/.clud/data.redb`. `CLUD_DATA_DB`
 /// overrides.
 pub fn default_data_db_path() -> Result<PathBuf, GcError> {
-    let home = dirs::home_dir().ok_or(GcError::NoDefaultPath)?;
+    let home = crate::home::user_home().ok_or(GcError::NoDefaultPath)?;
     Ok(home.join(".clud").join("data.redb"))
 }
 

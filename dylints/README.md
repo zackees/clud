@@ -5,6 +5,10 @@ workspace build because they use rustc internals and pin their own nightly.
 
 - `ban_manual_slash_normalize` bans hand-rolled `.replace('\\', "/")` path
   separator rewrites and directs callers to `clud::path_norm`.
+- `ban_dirs_home_dir` bans `dirs::home_dir`, `std::env::home_dir` and their
+  kin outside `crates/clud-bin/src/home.rs`, directing callers to
+  `clud::home::user_home` (#1836). `ci/banned_home_dir.py` enforces the same
+  rule in `bash lint` on every PR, because this lane runs off the PR path.
 
 Run locally:
 

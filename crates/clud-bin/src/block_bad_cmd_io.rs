@@ -196,7 +196,7 @@ pub(super) fn float_env_duration(name: &str, default: f64) -> Duration {
 }
 
 pub fn log_path() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(LOG_REL_PATH))
+    crate::home::user_home().map(|home| home.join(LOG_REL_PATH))
 }
 
 pub(super) fn append_log(message: &str) {

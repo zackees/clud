@@ -195,7 +195,7 @@ impl Roots {
     /// or empty, the nearest git checkout of `cwd` (the cwd outside a repo).
     /// Relative and unresolvable entries are dropped: a root must exist.
     pub fn resolve(env_value: Option<&OsStr>, cwd: &Path) -> Self {
-        Self::resolve_with_home(env_value, cwd, home_dir().as_deref())
+        Self::resolve_with_home(env_value, cwd, crate::home::user_home().as_deref())
     }
 
     /// [`Roots::resolve`] with an explicit home: `$HOME` and its ancestors
@@ -535,7 +535,8 @@ impl Roots {
         if !std::fs::symlink_metadata(dir.join(".git")).is_ok_and(|m| m.is_dir()) {
             return None;
         }
-        let home = home_dir().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
+        let home =
+            crate::home::user_home().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
         if home.as_ref().is_some_and(|home| home.starts_with(&dir)) {
             return None;
         }
@@ -618,7 +619,7 @@ impl Roots {
                 for line in text.lines() {
                     if let Some(path) = line.strip_prefix("worktree ") {
                         if let Ok(path) = crate::path_norm::canonicalize_plain(path.trim()) {
-                            let home = home_dir()
+                            let home = crate::home::user_home()
                                 .and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
                             if home.as_ref().is_some_and(|home| home.starts_with(&path)) {
                                 continue;
@@ -860,7 +861,7 @@ pub struct Context {
 impl Context {
     pub fn from_env() -> Result<(Self, Roots), String> {
         let cwd = std::env::current_dir().map_err(|e| format!("cannot resolve cwd: {e}"))?;
-        let home = home_dir();
+        let home = crate::home::user_home();
         let trash_root = crate::daemon::default_trash_dir()
             .map_err(|e| format!("cannot resolve the clud trash: {e}"))?;
         let audit_dir = crate::daemon::default_state_dir()
@@ -928,13 +929,6 @@ fn effective_uid() -> Option<u32> {
 #[cfg(not(unix))]
 fn effective_uid() -> Option<u32> {
     None
-}
-
-fn home_dir() -> Option<PathBuf> {
-    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(key)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
 }
 
 /// One path's outcome, for output and the audit record.
@@ -1550,7 +1544,7 @@ pub fn session_roots_value(cwd: &Path) -> Option<String> {
     if let Some(tmp) = crate::gc::session_tmp::session_tmp_dir() {
         roots.push(tmp);
     }
-    let home = home_dir().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
+    let home = crate::home::user_home().and_then(|h| crate::path_norm::canonicalize_plain(h).ok());
     let roots: Vec<PathBuf> = roots
         .into_iter()
         .filter(|p| p.is_absolute() && p.is_dir())

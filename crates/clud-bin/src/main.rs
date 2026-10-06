@@ -661,7 +661,7 @@ fn apply_session_history_picker(
         return;
     }
     let environment = clud::daemon::default_state_dir().map(|state_dir| {
-        let home = dirs::home_dir().unwrap_or_default();
+        let home = clud::home::user_home().unwrap_or_default();
         clud::session_history::launch::Environment {
             state_dir,
             claude_dir: clud::session_history::import::claude_config_dir(&home),
@@ -2122,7 +2122,7 @@ use main_helpers::{
 fn install_assets(home: Option<&std::path::Path>) -> i32 {
     let Some(home) = home
         .map(std::path::Path::to_path_buf)
-        .or_else(dirs::home_dir)
+        .or_else(clud::home::user_home)
     else {
         eprintln!("[clud] error: could not resolve a home directory; pass --home");
         return 2;

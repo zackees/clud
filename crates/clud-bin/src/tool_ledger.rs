@@ -230,18 +230,7 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 fn state_root() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".clud").join("state"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
+    crate::home::user_home().map(|h| h.join(".clud").join("state"))
 }
 
 #[cfg(test)]

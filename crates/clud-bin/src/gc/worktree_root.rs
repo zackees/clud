@@ -42,7 +42,7 @@ pub fn worktree_root_for(home: &Path) -> PathBuf {
 /// home exactly like [`super::session_tmp::session_tmp_dir`], so the two
 /// roots are always siblings.
 pub fn worktree_root() -> Option<PathBuf> {
-    Some(worktree_root_for(&super::session_tmp::home_dir()?))
+    Some(worktree_root_for(&crate::home::user_home()?))
 }
 
 /// Create `<home>/.clud/tmp-wt` idempotently.
@@ -61,7 +61,7 @@ pub fn ensure_worktree_root() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    ensure_worktree_root_at(&super::session_tmp::home_dir()?).ok()
+    ensure_worktree_root_at(&crate::home::user_home()?).ok()
 }
 
 /// The infix between the repo slug and the suffix, shared with

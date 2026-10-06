@@ -52,7 +52,7 @@ const CLUD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `pip install --upgrade clud` lands on a new cache dir, leaving
 /// the old one orphaned (to be GC'd lazily in Phase 3).
 pub fn runtime_cache_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = crate::home::user_home()?;
     Some(
         home.join(".clud")
             .join(RUNTIME_SUBDIR)
@@ -256,7 +256,8 @@ fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
 /// Windows 8.3 short-name tilde expansion. Returns `false` if home
 /// dir resolution fails or either path is not canonicalizable.
 pub fn exe_is_under_clud_runtime(exe: &Path) -> bool {
-    let Some(runtime_root) = dirs::home_dir().map(|h| h.join(".clud").join(RUNTIME_SUBDIR)) else {
+    let Some(runtime_root) = crate::home::user_home().map(|h| h.join(".clud").join(RUNTIME_SUBDIR))
+    else {
         return false;
     };
     exe_is_under_runtime_root(exe, &runtime_root)

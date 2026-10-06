@@ -38,7 +38,7 @@ pub const AUDIT_LOG_FILE: &str = "gc-audit.jsonl";
 pub fn audit_log_path() -> Option<PathBuf> {
     let state_dir = match std::env::var(ENV_STATE_DIR) {
         Ok(v) if !v.is_empty() => PathBuf::from(v),
-        _ => home_dir()?.join(".clud").join("state"),
+        _ => crate::home::user_home()?.join(".clud").join("state"),
     };
     Some(state_dir.join(AUDIT_LOG_FILE))
 }
@@ -85,23 +85,6 @@ pub fn record_at(log_path: &Path, site: &str, path: &Path, rule: &str) {
         return;
     };
     let _ = file.write_all(format!("{line}\n").as_bytes());
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(path) = std::env::var_os("USERPROFILE") {
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    if let Some(path) = std::env::var_os("HOME") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

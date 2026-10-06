@@ -9,6 +9,7 @@ members = [
     "testbins/probe-target",
 ]
 exclude = [
+    "dylints/ban_dirs_home_dir",
     "dylints/ban_manual_slash_normalize",
     # Phase-1 web-terminal fidelity spike (zackees/clud#929). Kept out of the
     # workspace so its Tauri/wry tree + portable-pty spawning don't perturb the

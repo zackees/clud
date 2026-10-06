@@ -333,7 +333,7 @@ pub fn run_setup(
     verbose: bool,
     out: &mut dyn Write,
 ) -> Result<SetupReport, SetupError> {
-    let home = home_dir().ok_or(SetupError::NoHomeDir)?;
+    let home = crate::home::user_home().ok_or(SetupError::NoHomeDir)?;
     run_setup_at(&home, scope, backend, verbose, out)
 }
 
@@ -357,23 +357,6 @@ pub fn run_setup_at(
         }
     }
     Ok(report)
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(p) = std::env::var_os("USERPROFILE") {
-            if !p.is_empty() {
-                return Some(PathBuf::from(p));
-            }
-        }
-    }
-    if let Some(p) = std::env::var_os("HOME") {
-        if !p.is_empty() {
-            return Some(PathBuf::from(p));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

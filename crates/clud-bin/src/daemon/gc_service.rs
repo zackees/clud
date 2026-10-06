@@ -1021,7 +1021,7 @@ fn refresh_session_tmp_size_cache() {
     if cfg!(test) {
         return;
     }
-    let Some(home) = crate::gc::session_tmp::home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         return;
     };
     let warn_bytes = crate::clud_settings::load_tmp_warn_bytes()
@@ -1040,7 +1040,7 @@ fn refresh_clud_cache_size_cache() {
     if cfg!(test) {
         return;
     }
-    let Some(home) = crate::gc::session_tmp::home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         return;
     };
     let warn_bytes = crate::clud_settings::load_cache_warn_bytes()

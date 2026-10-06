@@ -900,7 +900,7 @@ fn existing_codex_instructions(args: &Args) -> Option<String> {
                     std::env::var_os("HOME")
                         .map(|home| std::path::PathBuf::from(home).join(".codex"))
                 })
-                .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))?;
+                .or_else(|| crate::home::user_home().map(|home| home.join(".codex")))?;
             let path = config_dir.join("config.toml");
             let text = std::fs::read_to_string(path).ok()?;
             text.parse::<toml::Value>()

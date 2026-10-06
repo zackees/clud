@@ -269,7 +269,7 @@ pub fn real_program(name: &str) -> Option<PathBuf> {
     real_program_with(
         name,
         &|key| std::env::var_os(key),
-        home_for_env().as_deref(),
+        crate::home::user_home().as_deref(),
     )
 }
 
@@ -300,11 +300,6 @@ pub fn real_program_with(
         return None;
     }
     Some(target)
-}
-
-fn home_for_env() -> Option<PathBuf> {
-    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(key).map(PathBuf::from)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

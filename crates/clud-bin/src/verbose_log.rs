@@ -39,7 +39,7 @@ pub fn log(message: impl std::fmt::Display) {
 }
 
 pub fn display_path(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::home::user_home() {
         if let Ok(rest) = path.strip_prefix(&home) {
             return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
         }
@@ -58,7 +58,7 @@ fn default_log_dir() -> io::Result<PathBuf> {
     if let Ok(path) = std::env::var(ENV_VERBOSE_LOG_DIR) {
         return Ok(PathBuf::from(path));
     }
-    let home = dirs::home_dir()
+    let home = crate::home::user_home()
         .ok_or_else(|| io::Error::other("no home directory; cannot resolve verbose log dir"))?;
     Ok(home.join(".clud").join("state").join("verbose"))
 }
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn display_path_strips_home_prefix() {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = crate::home::user_home() else {
             return;
         };
         let path = home

@@ -18,7 +18,9 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 DYLINT_VERSION = "6.0.3"
 DYLINT_NIGHTLY = "nightly-2026-05-28"
-LINT_DIR = ROOT / "dylints" / "ban_manual_slash_normalize"
+#: Every Dylint lint crate. Each carries its own nightly pin, lockfile and
+#: linker config, so each must satisfy the same lockstep.
+LINT_DIRS = sorted(p.parent for p in (ROOT / "dylints").glob("*/Cargo.toml"))
 WORKFLOW = ROOT / ".github" / "workflows" / "_dylint.yml"
 # One triple per OS family: the workspace gates by OS, not architecture.
 DYLINT_CROSS_TARGETS = ("x86_64-pc-windows-msvc", "aarch64-apple-darwin")
@@ -34,14 +36,16 @@ def _workflow_text() -> str:
 
 
 def test_dylint_stack_versions_stay_in_lockstep() -> None:
-    assert not (LINT_DIR / "rust-toolchain.toml").exists()
-    assert (LINT_DIR / "rust-toolchain").exists()
-    lint_manifest = _toml(LINT_DIR / "Cargo.toml")
-    toolchain = _toml(LINT_DIR / "rust-toolchain")
+    assert [p.name for p in LINT_DIRS] == ["ban_dirs_home_dir", "ban_manual_slash_normalize"]
+    for lint_dir in LINT_DIRS:
+        assert not (lint_dir / "rust-toolchain.toml").exists(), lint_dir
+        assert (lint_dir / "rust-toolchain").exists(), lint_dir
+        lint_manifest = _toml(lint_dir / "Cargo.toml")
+        toolchain = _toml(lint_dir / "rust-toolchain")
+        assert lint_manifest["dependencies"]["dylint_linting"] == DYLINT_VERSION, lint_dir
+        assert toolchain["toolchain"]["channel"] == DYLINT_NIGHTLY, lint_dir
     workflow = _workflow_text()
 
-    assert lint_manifest["dependencies"]["dylint_linting"] == DYLINT_VERSION
-    assert toolchain["toolchain"]["channel"] == DYLINT_NIGHTLY
     assert "env -u RUSTUP_TOOLCHAIN soldr dylint prepare" in workflow
     assert "env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets" in workflow
     assert 'SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS: "1"' in workflow
@@ -72,8 +76,9 @@ def test_full_local_lint_runs_the_custom_dylint() -> None:
 
 def test_dylint_lockfile_matches_the_pinned_version() -> None:
     """The lockfile is committed, so it can drift from Cargo.toml silently."""
-    lock = (LINT_DIR / "Cargo.lock").read_text(encoding="utf-8")
-    assert f'name = "dylint_linting"\nversion = "{DYLINT_VERSION}"' in lock
+    for lint_dir in LINT_DIRS:
+        lock = (lint_dir / "Cargo.lock").read_text(encoding="utf-8")
+        assert f'name = "dylint_linting"\nversion = "{DYLINT_VERSION}"' in lock, lint_dir
 
 
 def test_dylint_workflow_runs_one_plain_invocation_per_target() -> None:
@@ -145,12 +150,13 @@ def test_lint_crate_links_through_dylint_link() -> None:
     copying the artifact and retrying. Verified against Dylint 6.0.3, so this
     is not something a version bump makes redundant.
     """
-    config = LINT_DIR / ".cargo" / "config.toml"
-    assert config.exists(), "lint crate must configure the dylint-link linker"
-    # Parsed, not substring-matched: the file carries a long comment *about*
-    # the directive, so `"linker=dylint-link" in text` would still pass with
-    # the directive commented out — resurrecting the exact failure this
-    # guards. `cfg(all())` rather than a concrete triple so it applies on
-    # whatever host builds the lint.
-    parsed = _toml(config)
-    assert parsed["target"]["cfg(all())"]["rustflags"] == ["-C", "linker=dylint-link"]
+    for lint_dir in LINT_DIRS:
+        config = lint_dir / ".cargo" / "config.toml"
+        assert config.exists(), f"{lint_dir.name} must configure the dylint-link linker"
+        # Parsed, not substring-matched: the file carries a long comment *about*
+        # the directive, so `"linker=dylint-link" in text` would still pass with
+        # the directive commented out — resurrecting the exact failure this
+        # guards. `cfg(all())` rather than a concrete triple so it applies on
+        # whatever host builds the lint.
+        parsed = _toml(config)
+        assert parsed["target"]["cfg(all())"]["rustflags"] == ["-C", "linker=dylint-link"]

@@ -79,7 +79,7 @@ fn kitty_pictures_dir() -> io::Result<PathBuf> {
     if let Some(path) = dirs::picture_dir() {
         candidates.push(path.join("clud-kitty-pastes"));
     }
-    if let Some(path) = dirs::home_dir() {
+    if let Some(path) = crate::home::user_home() {
         let fallback = path.join("Pictures").join("clud-kitty-pastes");
         if !candidates.contains(&fallback) {
             candidates.push(fallback);

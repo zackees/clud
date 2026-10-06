@@ -209,7 +209,7 @@ pub fn env_overrides() -> Vec<(String, String)> {
 fn state_dir() -> Option<PathBuf> {
     match std::env::var(crate::daemon::ENV_STATE_DIR) {
         Ok(v) if !v.is_empty() => Some(PathBuf::from(v)),
-        _ => dirs::home_dir().map(|home| home.join(".clud").join("state")),
+        _ => crate::home::user_home().map(|home| home.join(".clud").join("state")),
     }
 }
 

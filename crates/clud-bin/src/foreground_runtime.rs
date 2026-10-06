@@ -518,7 +518,7 @@ impl ForegroundRuntime {
             bridge.set_status_usage_writer(std::sync::Arc::clone(writer));
         }
         if let Some(injection) = statusline {
-            let home = dirs::home_dir();
+            let home = crate::home::user_home();
             runtime.inject_statusline(plan, injection, home.as_deref())?;
         }
         Ok(runtime)

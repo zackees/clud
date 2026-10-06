@@ -51,7 +51,7 @@ pub const PURGED_TOOLS: &[PurgedTool] = &[];
 /// Resolve `~/.clud/tools/`. Returns `None` if the home directory cannot be
 /// determined; callers degrade silently in that case.
 pub fn tools_root() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(TOOLS_ROOT))
+    crate::home::user_home().map(|h| h.join(TOOLS_ROOT))
 }
 
 /// Path on disk where a bundled tool with the given relative path is
@@ -65,7 +65,7 @@ pub fn target_path_at(home: &Path, rel_path: &str) -> PathBuf {
 /// Cheap on the steady state (one stat + at most one read per tool). All
 /// failures degrade silently to stderr `[clud] note: …` lines.
 pub fn ensure_installed() {
-    let Some(home) = home_dir() else {
+    let Some(home) = crate::home::user_home() else {
         return;
     };
     ensure_installed_at(&home);
@@ -216,17 +216,6 @@ pub struct PurgeReport {
     pub preserved_user: usize,
     pub missing: usize,
     pub errors: usize,
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
 }
 
 #[cfg(test)]
