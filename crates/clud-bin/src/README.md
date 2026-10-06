@@ -254,6 +254,9 @@ CLI surface and backend resolution:
   private Node runtime, child key passthrough, and the OpenRouter `--patch`
   overlay (#1829). See
   [`launch-targets.md`](../../../docs/architecture/launch-targets.md#deepseek-harness-install-and-providers).
+- `video.rs` - `clud video`: browser-use/video-use as a session-scoped Claude
+  plugin, never a global skill (#1851). See
+  [`launch-targets.md`](../../../docs/architecture/launch-targets.md#clud-video-video-use-as-a-session-scoped-plugin-1851).
 - `provider_catalog.rs` - the single registry mapping stable clud model IDs,
   gateway discovery IDs, provider wire IDs, compatibility aliases, and
   independent effort/context capability metadata.
@@ -794,6 +797,9 @@ Quick lookup, which file owns a given subcommand:
   compact verdict and failing-step diagnostics, #1839).
 - `clud dsh-update` -> `dsh_harness::run_update` (managed DeepSeek Harness
   install, #1829).
+- `clud video [DIR] [--update]` -> `video.rs` (pinned video-use checkout,
+  plugin wrapper, ffmpeg and ElevenLabs-key preconditions); `command/builder.rs`
+  adds `--plugin-dir` and the seed prompt (#1851).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` -> all
   in `daemon/` (dispatched from `daemon::handle_special_command`).
 - `clud gc list` / `prune` / `purge` / `all` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to

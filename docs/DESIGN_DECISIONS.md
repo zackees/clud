@@ -6556,3 +6556,26 @@ entry in the clud settings `codex.config_overrides`, or passthrough
 Like other clud `-c` overrides, the injected value takes precedence over
 `~/.codex/config.toml`.
 
+
+## DD-163: video-use is a session-scoped plugin pinned to a reviewed SHA
+
+**Context.** browser-use/video-use is a Claude Code skill whose documented
+install symlinks it into `~/.claude/skills/`. A skill there, or a bundled clud
+skill, is eligible to trigger in every session. The user asked for video-use
+only under a dedicated subcommand (#1851). It is also a fast-moving
+third-party repo that tells the agent to run shell commands and spends paid
+ElevenLabs credits.
+
+**Decision.** `clud video` keeps a checkout pinned to one reviewed commit
+under `~/.clud/extern/video-use/<sha>/`, wraps it in a clud-owned plugin
+directory, and passes that wrapper to the Claude harness with the
+session-only `--plugin-dir`. No `BUNDLED_SKILLS` row, no write to
+`~/.claude/skills` or `~/.codex/skills`, so DD-039's single installer is
+untouched. Bumping the pin is a reviewed change. The command is Claude-only,
+because `--plugin-dir` is a Claude Code feature. The ElevenLabs key is a
+plain vault secret (`clud.elevenlabs/api-key-v1`), not a `clud auth`
+provider, because it routes no model traffic.
+
+**Rejected.** A bundled skill (auto-triggers everywhere); tracking upstream
+`main` (unreviewed shell instructions on every launch); a `clud auth`
+provider row for ElevenLabs (that registry describes model routes).

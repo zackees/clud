@@ -1,7 +1,7 @@
 use super::builder::{
     build_launch_plan, build_launch_plan_at, build_launch_plan_for_target, grind_launch_error,
     interactive_builtin_resume_error, next_run_at_millis, parse_repeat_interval,
-    plan_mode_suppression_notice, repeat_implies_no_done_warning,
+    plan_mode_suppression_notice, repeat_implies_no_done_warning, video_launch_error,
 };
 use super::prompts::{
     build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, is_github_url,
@@ -937,6 +937,9 @@ mod codex_native_routes;
 
 #[path = "tests/grind_launch.rs"]
 mod grind_launch;
+
+#[path = "tests/video_launch.rs"]
+mod video_launch;
 
 #[path = "tests/loop_contract.rs"]
 mod loop_contract;

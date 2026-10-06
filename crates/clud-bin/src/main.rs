@@ -82,6 +82,7 @@ fn run(mut args: args::Args) {
         std::process::exit(code);
     }
     resolve_do_target(&mut args);
+    enter_video_command(&args);
 
     let launch = resolve_launch(&mut args);
     let auto_fix_hooks = resolve_auto_fix_hooks(&args, launch);
@@ -108,6 +109,7 @@ fn run(mut args: args::Args) {
     if args.dry_run {
         print_dry_run_and_exit(&args, &plan, launch.target);
     }
+    prepare_video_launch(&args);
     emit_launch_notices(&args, launch.target);
     let exit_code = launch_and_clean_up(&args, &plan, interrupted.as_ref(), job_orphan_reaper);
     drop(foreground_checkout_presence);
@@ -115,6 +117,43 @@ fn run(mut args: args::Args) {
         lease.release();
     }
     std::process::exit(exit_code);
+}
+
+/// `clud video [DIR] [--update]` (#1851): `--update` reinstalls the pinned
+/// video-use checkout and exits; otherwise the session runs in `DIR`.
+fn enter_video_command(args: &args::Args) {
+    let Some(args::Command::Video { dir, update }) = &args.command else {
+        return;
+    };
+    if *update {
+        std::process::exit(clud::video::run_update());
+    }
+    if let Some(dir) = dir {
+        if let Err(error) = std::env::set_current_dir(dir) {
+            eprintln!("[clud] error: cannot enter {}: {error}", dir.display());
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Media tools, the managed install and the ElevenLabs key for a real
+/// `clud video` launch. Runs after the dry-run exit, so `--dry-run` never
+/// installs anything or reads the vault. The key is placed in this process's
+/// environment only now, immediately before the harness child inherits it.
+fn prepare_video_launch(args: &args::Args) {
+    if !matches!(args.command, Some(args::Command::Video { .. })) {
+        return;
+    }
+    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+    match clud::video::prepare_launch(interactive) {
+        Ok(key) => unsafe {
+            std::env::set_var(clud::video::ELEVENLABS_ENV, key);
+        },
+        Err(error) => {
+            eprintln!("[clud] error: {error}");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn start_checkout_presence(
@@ -829,7 +868,9 @@ fn validate_launch_target(args: &args::Args, launch_target: backend::ResolvedLau
         std::process::exit(2);
     }
     validate_provider_only(args, launch_target);
-    if let Some(error) = command::grind_launch_error(args, launch_target) {
+    if let Some(error) = command::grind_launch_error(args, launch_target)
+        .or_else(|| command::video_launch_error(args, launch_target))
+    {
         eprintln!("[clud] error: {error}");
         std::process::exit(2);
     }
