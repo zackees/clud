@@ -1,0 +1,880 @@
+⭐ Run Main Clippy
+  🐳  docker exec cmd=[mkdir -p -- /var/run/act/workflow] user= workdir=/
+  🐳  docker exec cmd=[mkdir -p -- /var/run/act/workflow] user= workdir=/
+  🐳  docker exec cmd=[bash -e /var/run/act/workflow/4] user= workdir=
++ bash -c ulimit -v 13000000; exec "$@" clud-xbuild cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+    0.60 [1m[92m   Compiling[0m proc-macro2 v1.0.106
+    0.60 [1m[92m   Compiling[0m unicode-ident v1.0.24
+    0.60 [1m[92m   Compiling[0m quote v1.0.45
+    0.60 [1m[92m   Compiling[0m libc v0.2.189
+    0.60 [1m[92m    Checking[0m cfg-if v1.0.4
+    0.60 [1m[92m    Checking[0m bitflags v2.11.1
+    0.61 [1m[92m    Checking[0m memchr v2.8.0
+    0.61 [1m[92m   Compiling[0m version_check v0.9.5
+    0.62 [1m[92m   Compiling[0m thiserror v2.0.18
+    0.62 [1m[92m    Checking[0m typenum v1.20.0
+    0.62 [1m[92m   Compiling[0m getrandom v0.4.2
+    0.62 [1m[92m   Compiling[0m crossbeam-utils v0.8.21
+    0.62 [1m[92m   Compiling[0m anyhow v1.0.102
+    0.62 [1m[92m   Compiling[0m autocfg v1.5.0
+    0.63 [1m[92m   Compiling[0m libm v0.2.16
+    0.64 [1m[92m    Checking[0m subtle v2.6.1
+    2.09 [1m[92m    Checking[0m fastrand v2.4.1
+    2.13 soldr[cache] unicode_ident [33m[MISS][0m
+    2.49 [1m[92m   Compiling[0m serde_core v1.0.228
+    2.53 soldr[cache] fastrand [33m[MISS][0m
+    2.69 [1m[92m   Compiling[0m hashbrown v0.17.1
+    2.74 soldr[cache] build_script_build [33m[MISS][0m
+    2.74 [1m[92m    Checking[0m smallvec v1.15.1
+    2.85 [1m[92m   Compiling[0m equivalent v1.0.2
+    2.85 soldr[cache] build_script_build [33m[MISS][0m
+    2.85 soldr[cache] build_script_build [33m[MISS][0m
+    2.85 soldr[cache] memchr [33m[MISS][0m
+    2.92 [1m[92m    Checking[0m stable_deref_trait v1.2.1
+    2.92 [1m[92m   Compiling[0m generic-array v0.14.7
+    2.95 soldr[cache] cfg_if [33m[MISS][0m
+    2.96 soldr[cache] version_check [33m[MISS][0m
+    3.16 soldr[cache] build_script_build [33m[MISS][0m
+    3.18 [1m[92m   Compiling[0m rustix v1.1.4
+    3.25 [1m[92m    Checking[0m once_cell v1.21.4
+    3.26 soldr[cache] subtle [33m[MISS][0m
+    3.26 soldr[cache] bitflags [33m[MISS][0m
+    3.47 soldr[cache] equivalent [33m[MISS][0m
+    3.47 [1m[92m    Checking[0m linux-raw-sys v0.12.1
+    3.55 [1m[92m   Compiling[0m either v1.15.0
+    3.57 soldr[cache] typenum [33m[MISS][0m
+    3.67 soldr[cache] build_script_build [33m[MISS][0m
+    3.70 [1m[92m    Checking[0m log v0.4.29
+    3.72 [1m[92m    Checking[0m aho-corasick v1.1.4
+    3.77 soldr[cache] stable_deref_trait [33m[MISS][0m
+    3.77 soldr[cache] smallvec [33m[MISS][0m
+    3.87 soldr[cache] build_script_build [33m[MISS][0m
+    3.87 soldr[cache] build_script_build [33m[MISS][0m
+    3.97 soldr[cache] build_script_build [33m[MISS][0m
+    4.17 soldr[cache] log [33m[MISS][0m
+    4.20 [1m[92m    Checking[0m cpufeatures v0.2.17
+    4.24 [1m[92m    Checking[0m regex-syntax v0.8.10
+    4.28 soldr[cache] once_cell [33m[MISS][0m
+    4.31 [1m[92m   Compiling[0m itertools v0.13.0
+    4.38 soldr[cache] either [33m[MISS][0m
+    4.38 soldr[cache] build_script_build [33m[MISS][0m
+    4.58 soldr[cache] crossbeam_utils [33m[MISS][0m
+    4.68 [1m[92m   Compiling[0m semver v1.0.28
+    4.68 soldr[cache] autocfg [33m[MISS][0m
+    4.78 soldr[cache] build_script_build [33m[MISS][0m
+    4.78 [1m[92m   Compiling[0m serde v1.0.228
+    4.89 soldr[cache] proc_macro2 [33m[MISS][0m
+    5.09 [1m[92m   Compiling[0m indexmap v2.14.0
+    5.09 soldr[cache] cpufeatures [33m[MISS][0m
+    5.09 soldr[cache] hashbrown [33m[MISS][0m
+    5.11 [1m[92m    Checking[0m allocator-api2 v0.2.21
+    5.39 soldr[cache] build_script_build [33m[MISS][0m
+    5.49 soldr[cache] proc_macro2 [33m[MISS][0m
+    5.90 soldr[cache] semver [33m[MISS][0m
+    5.90 [1m[92m   Compiling[0m rustc_version v0.4.1
+    6.07 [1m[92m   Compiling[0m find-msvc-tools v0.1.9
+    6.10 soldr[cache] aho_corasick [33m[MISS][0m
+    6.34 [1m[92m    Checking[0m foldhash v0.2.0
+    6.41 soldr[cache] linux_raw_sys [33m[MISS][0m
+    6.51 soldr[cache] libm [33m[MISS][0m
+    6.53 [1m[92m   Compiling[0m parking_lot_core v0.9.12
+    6.68 [1m[92m    Checking[0m crypto-common v0.1.7
+    6.71 soldr[cache] generic_array [33m[MISS][0m
+    7.51 [1m[92m    Checking[0m block-buffer v0.10.4
+    7.52 soldr[cache] libc [33m[MISS][0m
+    7.52 soldr[cache] allocator_api2 [33m[MISS][0m
+    8.62 [1m[92m    Checking[0m regex-automata v0.4.14
+    8.62 soldr[cache] regex_syntax [33m[MISS][0m
+    8.83 soldr[cache] foldhash [33m[MISS][0m
+    8.84 soldr[cache] anyhow [33m[MISS][0m
+    8.84 [1m[92m   Compiling[0m shlex v1.3.0
+    8.90 [1m[92m    Checking[0m itoa v1.0.18
+    8.94 soldr[cache] find_msvc_tools [33m[MISS][0m
+    9.14 soldr[cache] crypto_common [33m[MISS][0m
+    9.14 soldr[cache] build_script_build [33m[MISS][0m
+    9.19 [1m[92m   Compiling[0m beef v0.5.2
+    9.26 [1m[92m   Compiling[0m lazy_static v1.5.0
+    9.29 [1m[92m   Compiling[0m fnv v1.0.7
+    9.35 soldr[cache] serde_core [33m[MISS][0m
+    9.35 soldr[cache] indexmap [33m[MISS][0m
+    9.44 [1m[92m    Checking[0m scopeguard v1.2.0
+    9.45 soldr[cache] getrandom [33m[MISS][0m
+    9.45 soldr[cache] equivalent [33m[MISS][0m
+    9.45 soldr[cache] block_buffer [33m[MISS][0m
+    9.46 [1m[92m    Checking[0m digest v0.10.7
+    9.70 [1m[92m   Compiling[0m bytes v1.11.1
+    9.74 [1m[92m   Compiling[0m num-traits v0.2.19
+    9.74 [1m[92m    Checking[0m pin-project-lite v0.2.17
+    9.75 soldr[cache] itoa [33m[MISS][0m
+    9.75 soldr[cache] beef [33m[MISS][0m
+    9.75 soldr[cache] cfg_if [33m[MISS][0m
+    9.80 [1m[92m   Compiling[0m logos-codegen v0.15.1
+    9.83 [1m[92m   Compiling[0m cc v1.2.60
+    9.85 soldr[cache] rustc_version [33m[MISS][0m
+    9.85 soldr[cache] shlex [33m[MISS][0m
+    9.95 soldr[cache] lazy_static [33m[MISS][0m
+   10.03 [1m[92m    Checking[0m lock_api v0.4.14
+   10.05 soldr[cache] build_script_build [33m[MISS][0m
+   10.05 soldr[cache] scopeguard [33m[MISS][0m
+   10.10 [1m[92m    Checking[0m crossbeam-epoch v0.9.18
+   10.15 soldr[cache] fnv [33m[MISS][0m
+   10.25 soldr[cache] pin_project_lite [33m[MISS][0m
+   10.27 [1m[92m   Compiling[0m rayon-core v1.13.0
+   10.35 soldr[cache] digest [33m[MISS][0m
+   10.43 [1m[92m   Compiling[0m unicode-width v0.1.14
+   10.45 soldr[cache] itertools [33m[MISS][0m
+   10.56 soldr[cache] build_script_build [33m[MISS][0m
+   10.87 soldr[cache] proc_macro2 [33m[MISS][0m
+   10.97 soldr[cache] build_script_build [33m[MISS][0m
+   10.97 soldr[cache] hashbrown [33m[MISS][0m
+   10.97 soldr[cache] parking_lot_core [33m[MISS][0m
+   11.03 [1m[92m   Compiling[0m foldhash v0.1.5
+   11.08 [1m[92m   Compiling[0m heck v0.5.0
+   11.44 [1m[92m    Checking[0m tinyvec_macros v0.1.1
+   11.45 [1m[92m    Checking[0m parking_lot v0.12.5
+   11.48 soldr[cache] bytes [33m[MISS][0m
+   11.48 soldr[cache] lock_api [33m[MISS][0m
+   11.65 [1m[92m    Checking[0m crossbeam-deque v0.8.6
+   11.68 soldr[cache] autocfg_8c2a67d5312a5e31_0 [33m[MISS][0m
+   11.68 soldr[cache] crossbeam_epoch [33m[MISS][0m
+   11.88 soldr[cache] build_script_build [33m[MISS][0m
+   11.88 soldr[cache] build_script_build [33m[MISS][0m
+   12.06 [1m[92m   Compiling[0m prettyplease v0.2.37
+   12.29 soldr[cache] unicode_width [33m[MISS][0m
+   12.39 [1m[92m    Checking[0m tinyvec v1.12.0
+   12.40 soldr[cache] tinyvec_macros [33m[MISS][0m
+   12.55 [1m[92m    Checking[0m parking v2.2.1
+   12.60 soldr[cache] parking_lot [33m[MISS][0m
+   12.71 soldr[cache] autocfg_8c2a67d5312a5e31_1 [33m[MISS][0m
+   12.93 soldr[cache] crossbeam_deque [33m[MISS][0m
+   13.20 [1m[92m   Compiling[0m hashbrown v0.15.5
+   13.23 soldr[cache] build_script_build [33m[MISS][0m
+   13.23 soldr[cache] foldhash [33m[MISS][0m
+   13.34 [1m[92m   Compiling[0m syn v2.0.117
+   13.44 soldr[cache] quote [33m[MISS][0m
+   13.44 soldr[cache] build_script_build [33m[MISS][0m
+   13.66 [1m[92m   Compiling[0m fixedbitset v0.5.7
+   13.74 soldr[cache] parking [33m[MISS][0m
+   13.89 [1m[92m    Checking[0m bstr v1.12.1
+   13.94 soldr[cache] regex_automata [33m[MISS][0m
+   14.14 soldr[cache] regex_syntax [33m[MISS][0m
+   14.14 soldr[cache] linux_raw_sys [33m[MISS][0m
+   14.40 [1m[92m    Checking[0m unicode-normalization v0.1.25
+   14.42 [1m[92m    Checking[0m memmap2 v0.9.11
+   14.44 soldr[cache] bitflags [33m[MISS][0m
+   14.44 soldr[cache] tinyvec [33m[MISS][0m
+   14.54 soldr[cache] fastrand [33m[MISS][0m
+   14.59 [1m[92m   Compiling[0m zmij v1.0.21
+   14.64 soldr[cache] heck [33m[MISS][0m
+   14.85 soldr[cache] num_traits [33m[MISS][0m
+   14.85 [1m[92m    Checking[0m futures-core v0.3.32
+   15.05 soldr[cache] once_cell [33m[MISS][0m
+   15.13 [1m[92m    Checking[0m gix-trace v0.1.21
+   15.15 soldr[cache] memmap2 [33m[MISS][0m
+   15.23 [1m[92m   Compiling[0m multimap v0.10.1
+   15.25 soldr[cache] rayon_core [33m[MISS][0m
+   15.53 [1m[92m    Checking[0m prodash v31.0.0
+   15.55 soldr[cache] libc [33m[MISS][0m
+   15.55 soldr[cache] bstr [33m[MISS][0m
+   15.61 [1m[92m    Checking[0m sha1 v0.10.7
+   15.65 soldr[cache] log [33m[MISS][0m
+   15.65 soldr[cache] fixedbitset [33m[MISS][0m
+   15.69 [1m[92m   Compiling[0m petgraph v0.8.3
+   15.75 soldr[cache] hashbrown [33m[MISS][0m
+   15.75 soldr[cache] futures_core [33m[MISS][0m
+   15.76 [1m[92m   Compiling[0m thiserror v1.0.69
+   15.83 [1m[92m    Checking[0m option-ext v0.2.0
+   15.85 soldr[cache] gix_trace [33m[MISS][0m
+   15.87 [1m[92m    Checking[0m gix-utils v0.3.5
+   15.95 [1m[92m    Checking[0m downcast-rs v1.2.1
+   15.95 soldr[cache] unicode_normalization [33m[MISS][0m
+   15.95 soldr[cache] multimap [33m[MISS][0m
+   16.03 [1m[92m   Compiling[0m cfg_aliases v0.1.1
+   16.06 soldr[cache] either [33m[MISS][0m
+   16.09 [1m[92m   Compiling[0m serde_json v1.0.149
+   16.16 soldr[cache] getrandom [33m[MISS][0m
+   16.26 soldr[cache] build_script_build [33m[MISS][0m
+   16.29 [1m[92m    Checking[0m arrayvec v0.7.6
+   16.36 soldr[cache] sha1 [33m[MISS][0m
+   16.43 [1m[92m    Checking[0m rayon v1.12.0
+   16.46 [1m[92m    Checking[0m getrandom v0.2.17
+   16.46 soldr[cache] downcast_rs [33m[MISS][0m
+   16.46 soldr[cache] prodash [33m[MISS][0m
+   16.54 [1m[92m    Checking[0m gix-features v0.49.0
+   16.56 soldr[cache] gix_utils [33m[MISS][0m
+   16.56 soldr[cache] option_ext [33m[MISS][0m
+   16.56 [1m[92m    Checking[0m utf8parse v0.2.2
+   16.60 [1m[92m   Compiling[0m nix v0.28.0
+   16.66 soldr[cache] cfg_aliases [33m[MISS][0m
+   16.88 [1m[92m   Compiling[0m crc32fast v1.5.0
+   16.96 soldr[cache] arrayvec [33m[MISS][0m
+   16.96 soldr[cache] build_script_build [33m[MISS][0m
+   17.01 [1m[92m   Compiling[0m winnow v1.0.1
+   17.04 [1m[92m    Checking[0m simd-adler32 v0.3.9
+   17.06 soldr[cache] build_script_build [33m[MISS][0m
+   17.06 soldr[cache] indexmap [33m[MISS][0m
+   17.16 soldr[cache] zmij [33m[MISS][0m
+   17.16 [1m[92m   Compiling[0m cfg_aliases v0.2.1
+   17.23 [1m[92m    Checking[0m futures-io v0.3.33
+   17.25 [1m[92m    Checking[0m byteorder v1.5.0
+   17.26 soldr[cache] gix_features [33m[MISS][0m
+   17.26 soldr[cache] rustix [33m[MISS][0m
+   17.28 [1m[92m   Compiling[0m heapless v0.8.0
+   17.33 [1m[92m    Checking[0m anstyle-parse v1.0.0
+   17.36 [1m[92m   Compiling[0m blake3 v1.8.7
+   17.36 soldr[cache] getrandom [33m[MISS][0m
+   17.36 soldr[cache] utf8parse [33m[MISS][0m
+   17.36 soldr[cache] cc [33m[MISS][0m
+   17.53 [1m[92m    Checking[0m gix-error v0.2.5
+   17.57 soldr[cache] cfg_aliases [33m[MISS][0m
+   17.60 [1m[92m    Checking[0m event-listener v5.4.2
+   17.67 soldr[cache] simd_adler32 [33m[MISS][0m
+   17.77 soldr[cache] futures_io [33m[MISS][0m
+   17.83 [1m[92m    Checking[0m hash32 v0.3.1
+   17.87 soldr[cache] byteorder [33m[MISS][0m
+   17.95 [1m[92m    Checking[0m anstyle-query v1.1.5
+   17.97 soldr[cache] build_script_build [33m[MISS][0m
+   18.01 [1m[92m    Checking[0m anstyle v1.0.14
+   18.07 soldr[cache] anstyle_parse [33m[MISS][0m
+   18.57 soldr[cache] build_script_build [33m[MISS][0m
+   18.79 soldr[cache] build_script_build [33m[MISS][0m
+   18.86 [1m[92m   Compiling[0m toml_datetime v1.1.1+spec-1.1.0
+   18.89 soldr[cache] gix_error [33m[MISS][0m
+   19.04 [1m[92m    Checking[0m colorchoice v1.0.5
+   19.16 [1m[92m    Checking[0m is_terminal_polyfill v1.70.2
+   19.23 soldr[cache] hash32 [33m[MISS][0m
+   19.29 [1m[92m    Checking[0m event-listener-strategy v0.5.4
+   19.33 soldr[cache] event_listener [33m[MISS][0m
+   19.53 soldr[cache] anstyle_query [33m[MISS][0m
+   19.53 soldr[cache] petgraph [33m[MISS][0m
+   19.63 soldr[cache] build_script_build [33m[MISS][0m
+   19.74 soldr[cache] serde_json [33m[MISS][0m
+   19.80 [1m[92m    Checking[0m dirs-sys v0.5.0
+   19.83 [1m[92m    Checking[0m gix-validate v0.11.3
+   19.85 soldr[cache] anstyle [33m[MISS][0m
+   19.85 soldr[cache] colorchoice [33m[MISS][0m
+   19.93 [1m[92m    Checking[0m anstream v1.0.0
+   19.95 soldr[cache] is_terminal_polyfill [33m[MISS][0m
+   20.00 [1m[92m    Checking[0m sha2 v0.10.9
+   20.05 soldr[cache] rayon [33m[MISS][0m
+   20.08 [1m[92m    Checking[0m serial2 v0.2.36
+   20.10 [1m[92m   Compiling[0m regex v1.12.3
+   20.15 soldr[cache] event_listener_strategy [33m[MISS][0m
+   20.15 soldr[cache] regex_automata [33m[MISS][0m
+   20.16 [1m[92m    Checking[0m concurrent-queue v2.5.0
+   20.24 [1m[92m   Compiling[0m zerocopy v0.8.52
+   20.25 soldr[cache] anyhow [33m[MISS][0m
+   20.25 soldr[cache] crc32fast [33m[MISS][0m
+   20.33 [1m[92m    Checking[0m constant_time_eq v0.4.2
+   20.35 soldr[cache] dirs_sys [33m[MISS][0m
+   20.36 [1m[92m    Checking[0m litemap v0.8.2
+   20.43 [1m[92m   Compiling[0m winapi v0.3.9
+   20.45 soldr[cache] bytes [33m[MISS][0m
+   20.46 [1m[92m    Checking[0m winnow v0.7.15
+   20.54 [1m[92m   Compiling[0m toml_parser v1.1.2+spec-1.1.0
+   20.55 soldr[cache] toml_datetime [33m[MISS][0m
+   20.55 soldr[cache] winnow [33m[MISS][0m
+   20.63 [1m[92m    Checking[0m writeable v0.6.3
+   20.65 soldr[cache] gix_validate [33m[MISS][0m
+   20.86 soldr[cache] anstream [33m[MISS][0m
+   20.86 [1m[92m    Checking[0m shell-words v1.1.1
+   20.98 [1m[92m    Checking[0m adler2 v2.0.1
+   21.05 [1m[92m    Checking[0m toml_write v0.1.2
+   21.06 soldr[cache] serial2 [33m[MISS][0m
+   21.06 soldr[cache] concurrent_queue [33m[MISS][0m
+   21.06 soldr[cache] sha2 [33m[MISS][0m
+   21.06 [1m[92m    Checking[0m cpufeatures v0.3.0
+   21.14 [1m[92m    Checking[0m clap_lex v1.1.0
+   21.15 [1m[92m   Compiling[0m doctest-file v1.1.1
+   21.16 soldr[cache] heapless [33m[MISS][0m
+   21.16 soldr[cache] constant_time_eq [33m[MISS][0m
+   21.34 [1m[92m    Checking[0m strsim v0.11.1
+   21.36 soldr[cache] writeable [33m[MISS][0m
+   21.38 [1m[92m    Checking[0m faster-hex v0.10.0
+   21.46 soldr[cache] litemap [33m[MISS][0m
+   21.53 [1m[92m    Checking[0m dirs v6.0.0
+   21.56 soldr[cache] shell_words [33m[MISS][0m
+   21.62 [1m[92m    Checking[0m miniz_oxide v0.8.9
+   21.66 [1m[92m   Compiling[0m tempfile v3.27.0
+   21.66 soldr[cache] adler2 [33m[MISS][0m
+   21.66 soldr[cache] rustix [33m[MISS][0m
+   21.86 soldr[cache] cpufeatures [33m[MISS][0m
+   22.03 [1m[92m    Checking[0m sysinfo v0.30.13
+   22.04 [1m[92m    Checking[0m futures-lite v2.6.1
+   22.06 soldr[cache] clap_lex [33m[MISS][0m
+   22.06 soldr[cache] toml_write [33m[MISS][0m
+   22.13 [1m[92m    Checking[0m sha1-checked v0.10.0
+   22.13 [1m[92m    Checking[0m jiff-core v0.1.0
+   22.16 soldr[cache] nix [33m[MISS][0m
+   22.16 soldr[cache] regex [33m[MISS][0m
+   22.27 soldr[cache] build_script_build [33m[MISS][0m
+   22.27 [1m[92m   Compiling[0m icu_normalizer_data v2.2.0
+   22.33 [1m[92m    Checking[0m utf8_iter v1.0.4
+   22.37 soldr[cache] dirs [33m[MISS][0m
+   22.37 soldr[cache] faster_hex [33m[MISS][0m
+   22.37 soldr[cache] strsim [33m[MISS][0m
+   22.37 [1m[92m    Checking[0m clap_builder v4.6.0
+   22.39 [1m[92m   Compiling[0m icu_properties_data v2.2.0
+   22.68 soldr[cache] build_script_build [33m[MISS][0m
+   23.08 soldr[cache] blake3 [33m[MISS][0m
+   23.27 [1m[92m    Checking[0m flate2 v1.1.9
+   23.33 soldr[cache] miniz_oxide [33m[MISS][0m
+   23.63 soldr[cache] sysinfo [33m[MISS][0m
+   23.64 [1m[92m   Compiling[0m ring v0.17.14
+   23.83 soldr[cache] toml_parser [33m[MISS][0m
+   23.83 [1m[92m   Compiling[0m toml_edit v0.25.11+spec-1.1.0
+   23.87 [1m[92m    Checking[0m num-integer v0.1.46
+   23.88 [1m[92m    Checking[0m block-padding v0.3.3
+   23.93 soldr[cache] utf8_iter [33m[MISS][0m
+   23.93 soldr[cache] sha1_checked [33m[MISS][0m
+   24.03 soldr[cache] build_script_build [33m[MISS][0m
+   24.04 [1m[92m   Compiling[0m memoffset v0.9.1
+   24.07 [1m[92m    Checking[0m zeroize v1.8.2
+   24.13 soldr[cache] winapi [33m[MISS][0m
+   24.26 [1m[92m    Checking[0m async-task v4.7.1
+   24.33 soldr[cache] futures_lite [33m[MISS][0m
+   24.33 soldr[cache] winnow [33m[MISS][0m
+   24.34 [1m[92m    Checking[0m slab v0.4.12
+   24.40 [1m[92m    Checking[0m atomic-waker v1.1.2
+   24.44 soldr[cache] tempfile [33m[MISS][0m
+   24.44 soldr[cache] build_script_build [33m[MISS][0m
+   24.50 [1m[92m    Checking[0m interprocess v2.4.2
+   24.54 soldr[cache] doctest_file [33m[MISS][0m
+   24.56 [1m[92m    Checking[0m jiff v0.2.35
+   24.61 [1m[92m    Checking[0m inout v0.1.4
+   24.64 soldr[cache] jiff_core [33m[MISS][0m
+   24.64 soldr[cache] block_padding [33m[MISS][0m
+   24.74 soldr[cache] flate2 [33m[MISS][0m
+   24.84 [1m[92m    Checking[0m rustls-pki-types v1.14.1
+   24.84 soldr[cache] zeroize [33m[MISS][0m
+   24.88 [1m[92m    Checking[0m async-channel v2.5.0
+   24.94 soldr[cache] num_integer [33m[MISS][0m
+   24.97 [1m[92m    Checking[0m fdeflate v0.3.7
+   25.04 soldr[cache] async_task [33m[MISS][0m
+   25.14 soldr[cache] build_script_build [33m[MISS][0m
+   25.14 soldr[cache] slab [33m[MISS][0m
+   25.16 [1m[92m   Compiling[0m nix v0.29.0
+   25.24 [1m[92m    Checking[0m piper v0.2.5
+   25.24 soldr[cache] atomic_waker [33m[MISS][0m
+   25.53 [1m[92m    Checking[0m rand_core v0.6.4
+   25.55 soldr[cache] icu_normalizer_data [33m[MISS][0m
+   25.55 soldr[cache] inout [33m[MISS][0m
+   25.63 [1m[92m   Compiling[0m syn v3.0.3
+   25.65 soldr[cache] icu_properties_data [33m[MISS][0m
+   26.07 [1m[92m   Compiling[0m async-io v2.6.0
+   26.14 [1m[92m    Checking[0m zune-core v0.5.1
+   26.15 soldr[cache] async_channel [33m[MISS][0m
+   26.15 soldr[cache] interprocess [33m[MISS][0m
+   26.24 [1m[92m    Checking[0m endi v1.1.1
+   26.25 soldr[cache] rustls_pki_types [33m[MISS][0m
+   26.46 [1m[92m   Compiling[0m radium v0.7.0
+   26.56 soldr[cache] autocfg_623de9e2db0c873b_0 [33m[MISS][0m
+   26.63 [1m[92m    Checking[0m static_assertions v1.1.0
+   26.66 soldr[cache] piper [33m[MISS][0m
+   26.74 [1m[92m    Checking[0m pxfm v0.1.29
+   26.76 soldr[cache] fdeflate [33m[MISS][0m
+   26.94 [1m[92m    Checking[0m png v0.18.1
+   26.96 soldr[cache] rand_core [33m[MISS][0m
+   27.37 [1m[92m    Checking[0m blocking v1.6.2
+   27.46 soldr[cache] tempfile [33m[MISS][0m
+   27.87 soldr[cache] zune_core [33m[MISS][0m
+   27.87 [1m[92m    Checking[0m zune-jpeg v0.5.15
+   28.27 soldr[cache] build_script_build [33m[MISS][0m
+   28.27 soldr[cache] endi [33m[MISS][0m
+   28.46 [1m[92m    Checking[0m cipher v0.4.4
+   28.47 soldr[cache] static_assertions [33m[MISS][0m
+   28.68 soldr[cache] build_script_build [33m[MISS][0m
+   29.19 soldr[cache] clap_builder [33m[MISS][0m
+   29.23 [1m[92m    Checking[0m num-bigint v0.4.6
+   29.35 [1m[92m   Compiling[0m proc-macro-crate v3.5.0
+   29.43 soldr[cache] toml_edit [33m[MISS][0m
+   29.58 [1m[92m    Checking[0m async-lock v3.4.2
+   29.63 soldr[cache] blocking [33m[MISS][0m
+   29.73 soldr[cache] build_script_build [33m[MISS][0m
+   29.75 [1m[92m    Checking[0m gix-chunk v0.7.3
+   29.77 [1m[92m    Checking[0m polling v3.11.0
+   29.83 soldr[cache] memoffset [33m[MISS][0m
+   29.85 [1m[92m    Checking[0m errno v0.3.14
+   29.93 soldr[cache] autocfg_623d15dfbd29382b_0 [33m[MISS][0m
+   30.09 [1m[92m    Checking[0m tracing-core v0.1.36
+   30.13 soldr[cache] cipher [33m[MISS][0m
+   30.16 [1m[92m    Checking[0m tap v1.0.1
+   30.23 soldr[cache] png [33m[MISS][0m
+   30.54 [1m[92m   Compiling[0m synstructure v0.13.2
+   30.56 [1m[92m   Compiling[0m thiserror-impl v2.0.18
+   30.64 soldr[cache] syn [33m[MISS][0m
+   30.64 soldr[cache] zune_jpeg [33m[MISS][0m
+   30.68 [1m[92m   Compiling[0m prost-derive v0.14.3
+   30.74 soldr[cache] build_script_build [33m[MISS][0m
+   30.84 [1m[92m   Compiling[0m serde_derive v1.0.228
+   30.84 soldr[cache] gix_chunk [33m[MISS][0m
+   30.95 soldr[cache] errno [33m[MISS][0m
+   30.98 [1m[92m   Compiling[0m miette-derive v7.6.0
+   31.05 soldr[cache] async_lock [33m[MISS][0m
+   31.14 [1m[92m   Compiling[0m displaydoc v0.2.5
+   31.15 soldr[cache] polling [33m[MISS][0m
+   31.15 soldr[cache] tap [33m[MISS][0m
+   31.16 [1m[92m   Compiling[0m zerovec-derive v0.11.3
+   31.50 [1m[92m   Compiling[0m thiserror-impl v1.0.69
+   31.55 soldr[cache] proc_macro_crate [33m[MISS][0m
+   31.55 soldr[cache] tracing_core [33m[MISS][0m
+   31.56 [1m[92m   Compiling[0m bytemuck_derive v1.10.2
+   31.63 [1m[92m   Compiling[0m clap_derive v4.6.1
+   31.65 soldr[cache] zerocopy [33m[MISS][0m
+   31.65 soldr[cache] jiff [33m[MISS][0m
+   31.75 [1m[92m   Compiling[0m zvariant_utils v2.1.0
+   31.85 soldr[cache] num_bigint [33m[MISS][0m
+   32.63 [1m[92m   Compiling[0m enumflags2_derive v0.7.12
+   32.66 soldr[cache] pxfm [33m[MISS][0m
+   33.94 [1m[92m    Checking[0m gix-date v0.15.6
+   35.78 soldr[cache] synstructure [33m[MISS][0m
+   35.78 [1m[92m   Compiling[0m zerofrom-derive v0.1.7
+   36.88 [1m[92m   Compiling[0m yoke-derive v0.8.2
+   36.88 soldr[cache] displaydoc [33m[MISS][0m
+   44.20 [1m[92m   Compiling[0m miette v7.6.0
+   44.27 soldr[cache] miette_derive [33m[MISS][0m
+   44.34 [1m[92m   Compiling[0m logos-derive v0.15.1
+   44.38 soldr[cache] logos_codegen [33m[MISS][0m
+   44.46 [1m[92m    Checking[0m ppv-lite86 v0.2.21
+   44.48 soldr[cache] zerovec_derive [33m[MISS][0m
+   45.59 soldr[cache] prost_derive [33m[MISS][0m
+   45.59 [1m[92m   Compiling[0m prost v0.14.3
+   46.09 soldr[cache] gix_date [33m[MISS][0m
+   46.39 soldr[cache] thiserror_impl [33m[MISS][0m
+   47.64 soldr[cache] zvariant_utils [33m[MISS][0m
+   48.04 soldr[cache] thiserror_impl [33m[MISS][0m
+   48.70 [1m[92m   Compiling[0m zvariant_derive v4.2.0
+   48.75 soldr[cache] ppv_lite86 [33m[MISS][0m
+   48.96 [1m[92m    Checking[0m rand_chacha v0.3.1
+   49.05 soldr[cache] prettyplease [33m[MISS][0m
+   49.38 [1m[92m    Checking[0m gix-actor v0.41.2
+   49.46 soldr[cache] syn [33m[MISS][0m
+   49.56 soldr[cache] serde_derive [33m[MISS][0m
+   49.65 [1m[92m    Checking[0m moxcms v0.8.1
+   49.67 soldr[cache] enumflags2_derive [33m[MISS][0m
+   49.74 [1m[92m    Checking[0m gix-hash v0.26.0
+   49.77 soldr[cache] thiserror [33m[MISS][0m
+   49.85 [1m[92m    Checking[0m bytemuck v1.25.0
+   49.87 soldr[cache] bytemuck_derive [33m[MISS][0m
+   49.93 [1m[92m    Checking[0m filedescriptor v0.8.3
+   49.97 soldr[cache] thiserror [33m[MISS][0m
+   50.16 [1m[92m    Checking[0m gix-path v0.12.3
+   50.18 soldr[cache] thiserror [33m[MISS][0m
+   50.39 soldr[cache] rand_chacha [33m[MISS][0m
+   50.43 [1m[92m   Compiling[0m tracing-attributes v0.1.31
+   50.45 [1m[92m    Checking[0m prost-types v0.14.3
+   50.49 soldr[cache] prost [33m[MISS][0m
+   50.56 [1m[92m   Compiling[0m futures-macro v0.3.32
+   50.63 soldr[cache] miette [33m[MISS][0m
+   50.65 [1m[92m    Checking[0m nonempty v0.12.0
+   50.73 soldr[cache] gix_actor [33m[MISS][0m
+   51.08 [1m[92m    Checking[0m gix-hashtable v0.16.0
+   51.14 soldr[cache] gix_hash [33m[MISS][0m
+   51.23 [1m[92m    Checking[0m untrusted v0.9.0
+   51.24 soldr[cache] prost [33m[MISS][0m
+   51.24 soldr[cache] bytemuck [33m[MISS][0m
+   51.48 [1m[92m    Checking[0m portable-pty v0.9.0
+   51.54 soldr[cache] filedescriptor [33m[MISS][0m
+   51.56 [1m[92m    Checking[0m toml_datetime v0.6.11
+   51.64 soldr[cache] serde [33m[MISS][0m
+   51.87 [1m[92m   Compiling[0m logos v0.15.1
+   51.94 soldr[cache] logos_derive [33m[MISS][0m
+   51.96 [1m[92m    Checking[0m serde_spanned v0.6.9
+   52.04 soldr[cache] gix_path [33m[MISS][0m
+   52.25 soldr[cache] gix_hashtable [33m[MISS][0m
+   52.25 [1m[92m    Checking[0m enumflags2 v0.7.12
+   52.37 [1m[92m   Compiling[0m unicode-segmentation v1.13.2
+   52.45 soldr[cache] nonempty [33m[MISS][0m
+   52.53 [1m[92m   Compiling[0m signal-hook v0.3.18
+   52.55 soldr[cache] untrusted [33m[MISS][0m
+   53.13 [1m[92m    Checking[0m running-process-platform-internal v4.10.15
+   53.16 soldr[cache] portable_pty [33m[MISS][0m
+   53.44 [1m[92m   Compiling[0m by_address v1.2.1
+   53.46 soldr[cache] prost_types [33m[MISS][0m
+   53.53 [1m[92m   Compiling[0m ref-cast v1.0.25
+   53.56 soldr[cache] toml_datetime [33m[MISS][0m
+   53.81 [1m[92m    Checking[0m toml_edit v0.22.27
+   53.86 soldr[cache] serde_spanned [33m[MISS][0m
+   54.07 [1m[92m    Checking[0m rand_core v0.9.5
+   54.10 [1m[92m    Checking[0m percent-encoding v2.3.2
+   54.17 soldr[cache] logos [33m[MISS][0m
+   54.17 soldr[cache] enumflags2 [33m[MISS][0m
+   55.14 [1m[92m   Compiling[0m palette v0.7.6
+   55.17 soldr[cache] build_script_build [33m[MISS][0m
+   56.45 [1m[92m    Checking[0m futures-sink v0.3.33
+   56.48 soldr[cache] moxcms [33m[MISS][0m
+   56.53 [1m[92m   Compiling[0m inotify-sys v0.1.8
+   56.58 soldr[cache] running_process_platform_internal [33m[MISS][0m
+   56.64 [1m[92m    Checking[0m byteorder-lite v0.1.0
+   56.73 soldr[cache] unicode_segmentation [33m[MISS][0m
+   56.75 [1m[92m    Checking[0m futures-task v0.3.32
+   56.83 soldr[cache] yoke_derive [33m[MISS][0m
+   56.83 soldr[cache] zvariant_derive [33m[MISS][0m
+   56.84 [1m[92m    Checking[0m zvariant v4.2.0
+   57.14 [1m[92m   Compiling[0m convert_case v0.10.0
+   57.15 soldr[cache] rand_core [33m[MISS][0m
+   57.23 [1m[92m   Compiling[0m palette_derive v0.7.6
+   57.26 soldr[cache] percent_encoding [33m[MISS][0m
+   57.26 soldr[cache] by_address [33m[MISS][0m
+   57.48 [1m[92m    Checking[0m gix-commitgraph v0.38.0
+   57.56 soldr[cache] futures_sink [33m[MISS][0m
+   57.97 [1m[92m    Checking[0m image v0.25.10
+   58.06 soldr[cache] byteorder_lite [33m[MISS][0m
+   58.26 [1m[92m    Checking[0m gix-object v0.63.0
+   58.27 soldr[cache] futures_task [33m[MISS][0m
+   58.37 soldr[cache] build_script_build [33m[MISS][0m
+   58.43 [1m[92m    Checking[0m gix-fs v0.22.0
+   58.48 soldr[cache] build_script_main [33m[MISS][0m
+   58.48 [1m[92m    Checking[0m safe_arch v0.9.3
+   58.58 soldr[cache] build_script_build [33m[MISS][0m
+   58.79 [1m[92m    Checking[0m clap v4.6.1
+   58.88 soldr[cache] clap_derive [33m[MISS][0m
+   58.95 [1m[92m   Compiling[0m prost-reflect v0.16.3
+   58.98 soldr[cache] prost_types [33m[MISS][0m
+   59.17 [1m[92m   Compiling[0m protox-parse v0.9.0
+   59.18 soldr[cache] convert_case [33m[MISS][0m
+   59.25 [1m[92m   Compiling[0m prost-build v0.14.3
+   59.28 soldr[cache] futures_macro [33m[MISS][0m
+   59.28 soldr[cache] gix_commitgraph [33m[MISS][0m
+   59.29 [1m[92m    Checking[0m futures-util v0.3.32
+   59.48 soldr[cache] zerofrom_derive [33m[MISS][0m
+   59.48 [1m[92m    Checking[0m zerofrom v0.1.7
+   59.63 [1m[92m    Checking[0m rand v0.8.7
+   59.68 soldr[cache] gix_fs [33m[MISS][0m
+   59.86 [1m[92m   Compiling[0m async-trait v0.1.92
+   59.89 soldr[cache] clap [33m[MISS][0m
+soldr: cargo diagnostic capture still running after 60s (no wall-clock deadline configured)
+   60.18 [1m[92m    Checking[0m toml v0.8.23
+   60.19 soldr[cache] toml_edit [33m[MISS][0m
+   60.34 [1m[92m   Compiling[0m serde_repr v0.1.21
+   60.40 soldr[cache] safe_arch [33m[MISS][0m
+   60.66 [1m[92m   Compiling[0m zbus_macros v4.4.0
+   60.70 soldr[cache] ring [33m[MISS][0m
+   60.86 [1m[92m    Checking[0m num-rational v0.4.2
+   60.90 soldr[cache] gix_object [33m[MISS][0m
+   60.98 [1m[92m    Checking[0m tracing v0.1.44
+   61.03 soldr[cache] tracing_attributes [33m[MISS][0m
+   61.13 soldr[cache] nix [33m[MISS][0m
+   61.13 [1m[92m    Checking[0m wyz v0.5.1
+   61.20 [1m[92m    Checking[0m yoke v0.8.2
+   61.24 soldr[cache] zerofrom [33m[MISS][0m
+   61.93 [1m[92m    Checking[0m async-fs v2.2.0
+   61.94 soldr[cache] image [33m[MISS][0m
+   61.94 soldr[cache] toml [33m[MISS][0m
+   62.26 [1m[92m    Checking[0m signal-hook-registry v1.4.8
+   62.34 soldr[cache] rand [33m[MISS][0m
+   62.46 [1m[92m    Checking[0m zbus_names v3.0.0
+   62.54 soldr[cache] zvariant [33m[MISS][0m
+   62.85 soldr[cache] num_rational [33m[MISS][0m
+   62.85 [1m[92m   Compiling[0m ref-cast-impl v1.0.25
+   62.95 soldr[cache] tracing [33m[MISS][0m
+   63.26 [1m[92m    Checking[0m async-executor v1.14.0
+   63.26 soldr[cache] wyz [33m[MISS][0m
+   63.36 soldr[cache] yoke [33m[MISS][0m
+   63.37 [1m[92m    Checking[0m zerovec v0.11.6
+   63.59 [1m[92m    Checking[0m zerotrie v0.2.4
+   63.67 soldr[cache] palette_derive [33m[MISS][0m
+   63.70 [1m[92m    Checking[0m num-iter v0.1.46
+   63.78 soldr[cache] async_fs [33m[MISS][0m
+   63.86 [1m[92m    Checking[0m async-broadcast v0.7.2
+   63.88 soldr[cache] async_io [33m[MISS][0m
+   64.04 [1m[92m   Compiling[0m nix v0.31.2
+   64.08 soldr[cache] signal_hook_registry [33m[MISS][0m
+   64.47 [1m[92m    Checking[0m terminal_size v0.4.4
+   64.49 soldr[cache] radium [33m[MISS][0m
+   64.65 [1m[92m    Checking[0m ordered-stream v0.2.0
+   64.69 soldr[cache] zbus_names [33m[MISS][0m
+   64.87 [1m[92m    Checking[0m num-complex v0.4.6
+   64.93 soldr[cache] async_executor [33m[MISS][0m
+   65.39 [1m[92m    Checking[0m hmac v0.12.1
+   65.43 soldr[cache] zerotrie [33m[MISS][0m
+   65.68 [1m[92m    Checking[0m sysinfo v0.37.2
+   65.74 soldr[cache] num_iter [33m[MISS][0m
+   65.91 [1m[92m    Checking[0m tinystr v0.8.3
+   65.94 soldr[cache] zerovec [33m[MISS][0m
+   66.23 [1m[92m    Checking[0m potential_utf v0.1.5
+   66.25 soldr[cache] async_broadcast [33m[MISS][0m
+   66.44 [1m[92m    Checking[0m mio v1.2.0
+   66.45 soldr[cache] futures_util [33m[MISS][0m
+   66.45 soldr[cache] terminal_size [33m[MISS][0m
+   66.47 [1m[92m    Checking[0m xdg-home v1.3.0
+   67.10 [1m[92m    Checking[0m fast-srgb8 v1.0.0
+   67.16 soldr[cache] serde_repr [33m[MISS][0m
+   67.17 [1m[92m    Checking[0m same-file v1.0.6
+   67.26 soldr[cache] ordered_stream [33m[MISS][0m
+   67.38 [1m[92m    Checking[0m hex v0.4.3
+   67.41 [1m[92m   Compiling[0m wasmparser v0.221.3
+   67.46 soldr[cache] num_complex [33m[MISS][0m
+   67.46 soldr[cache] hmac [33m[MISS][0m
+   67.64 [1m[92m    Checking[0m icu_collections v2.2.0
+   67.68 soldr[cache] potential_utf [33m[MISS][0m
+   67.76 [1m[92m    Checking[0m icu_locale_core v2.2.0
+   67.78 soldr[cache] tinystr [33m[MISS][0m
+   67.78 soldr[cache] prost_build [33m[MISS][0m
+   67.78 [1m[92m   Compiling[0m rustls v0.23.40
+   67.98 [1m[92m    Checking[0m funty v2.0.0
+   67.98 soldr[cache] fast_srgb8 [33m[MISS][0m
+   68.09 soldr[cache] xdg_home [33m[MISS][0m
+   68.20 [1m[92m    Checking[0m walkdir v2.5.0
+   68.29 soldr[cache] same_file [33m[MISS][0m
+   68.34 [1m[92m    Checking[0m hkdf v0.12.4
+   68.39 soldr[cache] mio [33m[MISS][0m
+   68.48 [1m[92m    Checking[0m num v0.4.3
+   68.49 soldr[cache] sysinfo [33m[MISS][0m
+   68.70 soldr[cache] ref_cast_impl [33m[MISS][0m
+   68.80 soldr[cache] hex [33m[MISS][0m
+   68.91 soldr[cache] build_script_build [33m[MISS][0m
+   68.91 [1m[92m    Checking[0m gix-revwalk v0.34.0
+   69.08 [1m[92m    Checking[0m rustls-webpki v0.103.13
+   69.11 soldr[cache] icu_collections [33m[MISS][0m
+   69.31 soldr[cache] build_script_build [33m[MISS][0m
+   69.34 [1m[92m    Checking[0m wide v0.8.3
+   69.48 [1m[92m    Checking[0m gix-tempfile v24.0.0
+   69.51 soldr[cache] walkdir [33m[MISS][0m
+   69.60 [1m[92m   Compiling[0m derive_more-impl v2.1.1
+   69.61 soldr[cache] hkdf [33m[MISS][0m
+   69.72 soldr[cache] num [33m[MISS][0m
+   69.76 [1m[92m    Checking[0m bitvec v1.0.1
+   69.81 [1m[92m    Checking[0m icu_provider v2.2.0
+   69.82 soldr[cache] funty [33m[MISS][0m
+   69.82 soldr[cache] build_script_build [33m[MISS][0m
+   69.82 soldr[cache] icu_locale_core [33m[MISS][0m
+   69.87 [1m[92m    Checking[0m form_urlencoded v1.2.2
+   70.01 [1m[92m    Checking[0m rand_xoshiro v0.7.0
+   70.03 soldr[cache] ref_cast [33m[MISS][0m
+   70.19 [1m[92m    Checking[0m rand v0.9.4
+   70.21 [1m[92m    Checking[0m aes v0.8.4
+   70.24 soldr[cache] protox_parse [33m[MISS][0m
+   70.24 soldr[cache] signal_hook [33m[MISS][0m
+   70.45 [1m[92m    Checking[0m cbc v0.1.2
+   70.54 soldr[cache] gix_revwalk [33m[MISS][0m
+   70.66 [1m[92m    Checking[0m webpki-roots v1.0.7
+   70.74 soldr[cache] gix_tempfile [33m[MISS][0m
+   70.74 soldr[cache] inotify_sys [33m[MISS][0m
+   70.78 [1m[92m    Checking[0m gethostname v1.1.0
+   71.18 [1m[92m    Checking[0m wasmi_core v0.40.0
+   71.24 [1m[92m    Checking[0m ordered-float v5.3.0
+   71.25 soldr[cache] rand_xoshiro [33m[MISS][0m
+   71.25 soldr[cache] webpki [33m[MISS][0m
+   71.25 soldr[cache] icu_provider [33m[MISS][0m
+   71.26 [1m[92m    Checking[0m icu_normalizer v2.2.0
+   71.61 [1m[92m    Checking[0m icu_properties v2.2.0
+   71.65 soldr[cache] form_urlencoded [33m[MISS][0m
+   71.94 [1m[92m    Checking[0m filetime v0.2.29
+   71.95 soldr[cache] webpki_roots [33m[MISS][0m
+   72.12 [1m[92m    Checking[0m core_maths v0.1.1
+   72.16 soldr[cache] rand [33m[MISS][0m
+   72.16 soldr[cache] gethostname [33m[MISS][0m
+   72.19 [1m[92m    Checking[0m is-docker v0.2.0
+   72.30 [1m[92m    Checking[0m instant v0.1.13
+   72.36 soldr[cache] aes [33m[MISS][0m
+   72.41 [1m[92m    Checking[0m bumpalo v3.20.2
+   72.46 soldr[cache] cbc [33m[MISS][0m
+   72.89 [1m[92m   Compiling[0m zip v2.4.2
+   72.96 soldr[cache] ordered_float [33m[MISS][0m
+   73.24 [1m[92m   Compiling[0m redb v2.6.3
+   73.27 soldr[cache] icu_normalizer [33m[MISS][0m
+   73.34 [1m[92m   Compiling[0m litrs v1.0.0
+   73.38 soldr[cache] wasmi_core [33m[MISS][0m
+   73.58 soldr[cache] filetime [33m[MISS][0m
+   73.59 [1m[92m    Checking[0m bitflags v1.3.2
+   73.66 [1m[92m    Checking[0m x11rb-protocol v0.13.2
+   73.70 soldr[cache] core_maths [33m[MISS][0m
+   73.80 soldr[cache] is_docker [33m[MISS][0m
+   73.86 [1m[92m    Checking[0m notify-types v1.0.1
+   73.90 soldr[cache] instant [33m[MISS][0m
+   73.95 [1m[92m    Checking[0m is-wsl v0.4.0
+   74.00 soldr[cache] wide [33m[MISS][0m
+   74.29 [1m[92m    Checking[0m zopfli v0.8.3
+   74.33 soldr[cache] bumpalo [33m[MISS][0m
+   74.43 soldr[cache] build_script_build [33m[MISS][0m
+   74.43 [1m[92m    Checking[0m ttf-parser v0.25.1
+   74.58 [1m[92m    Checking[0m inotify v0.10.2
+   74.63 soldr[cache] bitflags [33m[MISS][0m
+   74.73 soldr[cache] build_script_build [33m[MISS][0m
+   74.75 [1m[92m    Checking[0m wasmi_ir v0.40.0
+   75.07 [1m[92m    Checking[0m idna_adapter v1.2.2
+   75.14 soldr[cache] icu_properties [33m[MISS][0m
+   75.54 [1m[92m    Checking[0m webpki-roots v0.26.11
+   75.54 soldr[cache] notify_types [33m[MISS][0m
+   75.64 soldr[cache] bitvec [33m[MISS][0m
+   75.68 [1m[92m    Checking[0m gix-lock v24.0.0
+   75.74 soldr[cache] is_wsl [33m[MISS][0m
+   76.23 [1m[92m    Checking[0m gix-traverse v0.60.0
+   76.25 soldr[cache] zopfli [33m[MISS][0m
+   76.47 [1m[92m   Compiling[0m document-features v0.2.12
+   76.55 soldr[cache] litrs [33m[MISS][0m
+   76.61 [1m[92m    Checking[0m derive_more v2.1.1
+   76.65 soldr[cache] derive_more_impl [33m[MISS][0m
+   76.66 [1m[92m    Checking[0m signal-hook-mio v0.2.5
+   76.75 soldr[cache] inotify [33m[MISS][0m
+   76.75 soldr[cache] winnow [33m[MISS][0m
+   76.82 [1m[92m    Checking[0m idna v1.1.0
+   76.85 soldr[cache] idna_adapter [33m[MISS][0m
+   76.85 soldr[cache] webpki_roots [33m[MISS][0m
+   77.15 soldr[cache] gix_lock [33m[MISS][0m
+   77.32 [1m[92m    Checking[0m gix-bitmap v0.3.3
+   77.35 soldr[cache] gix_traverse [33m[MISS][0m
+   77.44 [1m[92m    Checking[0m vte v0.15.0
+   77.45 soldr[cache] derive_more [33m[MISS][0m
+   77.63 [1m[92m    Checking[0m dirs-sys v0.4.1
+   77.66 soldr[cache] signal_hook_mio [33m[MISS][0m
+   77.93 [1m[92m    Checking[0m globset v0.4.18
+   77.96 soldr[cache] ttf_parser [33m[MISS][0m
+   78.18 soldr[cache] zbus_macros [33m[MISS][0m
+   78.18 [1m[92m    Checking[0m crash-context v0.6.3
+   78.30 [1m[92m    Checking[0m wasmi_collections v0.40.0
+   78.38 soldr[cache] toml_parser [33m[MISS][0m
+   78.55 [1m[92m    Checking[0m quantette v0.5.1
+   78.59 soldr[cache] palette [33m[MISS][0m
+   78.69 soldr[cache] idna [33m[MISS][0m
+   78.70 [1m[92m    Checking[0m url v2.5.8
+   78.94 [1m[92m    Checking[0m ascii v1.1.0
+   78.99 soldr[cache] gix_bitmap [33m[MISS][0m
+   79.03 [1m[92m    Checking[0m env_home v0.1.0
+   79.10 soldr[cache] vte [33m[MISS][0m
+   79.26 [1m[92m    Checking[0m toml_writer v1.1.1+spec-1.1.0
+   79.33 soldr[cache] dirs_sys [33m[MISS][0m
+   79.49 [1m[92m    Checking[0m chunked_transfer v1.5.0
+   79.53 soldr[cache] crash_context [33m[MISS][0m
+   79.56 [1m[92m    Checking[0m httpdate v1.0.3
+   79.64 soldr[cache] nix [33m[MISS][0m
+   79.84 soldr[cache] globset [33m[MISS][0m
+   79.84 [1m[92m    Checking[0m pathdiff v0.2.3
+   79.97 [1m[92m    Checking[0m zbus v4.4.0
+   80.04 soldr[cache] async_trait [33m[MISS][0m
+   80.28 [1m[92m    Checking[0m base64 v0.22.1
+   80.34 soldr[cache] wasmi_collections [33m[MISS][0m
+   80.54 [1m[92m    Checking[0m unicode-width v0.2.2
+   80.54 soldr[cache] env_home [33m[MISS][0m
+   80.65 soldr[cache] ascii [33m[MISS][0m
+   80.96 soldr[cache] toml_writer [33m[MISS][0m
+   80.97 [1m[92m    Checking[0m multi-stash v0.2.0
+   81.05 [1m[92m       81.06 soldr[cache] httpdate [33m[MISS][0m
+Checking   81.06 soldr[cache] url [33m[MISS][0m
+[0m spin v0.9.9
+   81.13 [1m[92m    Checking[0m tiny_http v0.12.0
+   81.16 [1m[92m    Checking[0m open v5.3.5
+   81.16 soldr[cache] chunked_transfer [33m[MISS][0m
+   81.16 soldr[cache] pathdiff [33m[MISS][0m
+   81.26 soldr[cache] document_features [33m[MISS][0m
+   81.27 [1m[92m    Checking[0m crossterm v0.29.0
+   81.36 [1m[92m    Checking[0m x11rb v0.13.2
+   81.36 soldr[cache] x11rb_protocol [33m[MISS][0m
+   81.47 [1m[92m    Checking[0m gix-index v0.54.0
+   81.55 [1m[92m    Checking[0m vt100 v0.16.2
+   81.55 [1m[92m    Checking[0m which v7.0.3
+   81.56 soldr[cache] fnv [33m[MISS][0m
+   81.56 soldr[cache] unicode_width [33m[MISS][0m
+   81.56 soldr[cache] base64 [33m[MISS][0m
+   81.56 soldr[cache] toml_datetime [33m[MISS][0m
+   81.66 [1m[92m    Checking[0m ignore v0.4.25
+   81.66 soldr[cache] multi_stash [33m[MISS][0m
+   81.71 [1m[92m    Checking[0m icy_sixel v0.5.0
+   81.76 soldr[cache] quantette [33m[MISS][0m
+   81.77 [1m[92m    Checking[0m ctrlc v3.5.2
+   81.77 [1m[92m    Checking[0m crash-handler v0.7.0
+   81.86 soldr[cache] open [33m[MISS][0m
+   81.86 soldr[cache] spin [33m[MISS][0m
+   82.01 [1m[92m    Checking[0m dirs v5.0.1
+   82.06 [1m[92m    Checking[0m fontdue v0.9.4
+   82.07 soldr[cache] tiny_http [33m[MISS][0m
+   82.07 soldr[cache] wasmi_ir [33m[MISS][0m
+   82.15 [1m[92m    Checking[0m ureq v2.12.1
+   82.17 soldr[cache] rustls [33m[MISS][0m
+   82.25 [1m[92m    Checking[0m notify v7.0.0
+   82.27 soldr[cache] which [33m[MISS][0m
+   82.47 soldr[cache] crossterm [33m[MISS][0m
+   82.54 [1m[92m    Checking[0m fs4 v0.13.1
+   82.57 soldr[cache] vt100 [33m[MISS][0m
+   82.57 soldr[cache] toml_edit [33m[MISS][0m
+   82.67 soldr[cache] icy_sixel [33m[MISS][0m
+   82.69 [1m[92m    Checking[0m ryu v1.0.23
+   82.72 [1m[92m    Checking[0m unsafe-libyaml v0.2.11
+   82.77 soldr[cache] ctrlc [33m[MISS][0m
+   82.77 soldr[cache] dirs [33m[MISS][0m
+   82.79 [1m[92m    Checking[0m mock-agent v2.8.27 (/home/actrunner/work/src/src/testbins/mock-agent)
+   82.82 [1m[92m    Checking[0m arboard v3.6.1
+   82.87 soldr[cache] ignore [33m[MISS][0m
+   82.87 soldr[cache] crash_handler [33m[MISS][0m
+   82.87 soldr[cache] gix_index [33m[MISS][0m
+   82.87 soldr[cache] x11rb [33m[MISS][0m
+   83.04 [1m[92m    Checking[0m probe-dll v2.8.27 (/home/actrunner/work/src/src/testbins/probe-dll)
+   83.07 soldr[cache] fs4 [33m[MISS][0m
+   83.14 [1m[92m    Checking[0m probe-target v2.8.27 (/home/actrunner/work/src/src/testbins/probe-target)
+   83.17 soldr[cache] notify [33m[MISS][0m
+   83.17 soldr[cache] fontdue [33m[MISS][0m
+   83.27 soldr[cache] ryu [33m[MISS][0m
+   83.37 soldr[cache] regex [33m[MISS][0m
+   83.37 soldr[cache] ready [33m[MISS][0m
+   83.47 soldr[cache] ureq [33m[MISS][0m
+   83.57 soldr[cache] probe_dll [33m[MISS][0m
+   83.67 soldr[cache] probe_dll [33m[MISS][0m
+   83.78 soldr[cache] zip [33m[MISS][0m
+   83.78 soldr[cache] probe_target [33m[MISS][0m
+   83.78 soldr[cache] arboard [33m[MISS][0m
+   83.88 soldr[cache] probe_target [33m[MISS][0m
+   83.90 [1m[92m    Checking[0m serde_yaml v0.9.34+deprecated
+   83.91 [1m[92m    Checking[0m wasmi v0.40.0
+   83.98 soldr[cache] unsafe_libyaml [33m[MISS][0m
+   83.98 soldr[cache] wasmparser [33m[MISS][0m
+   83.98 soldr[cache] mock_agent [33m[MISS][0m
+   84.08 soldr[cache] mock_agent [33m[MISS][0m
+   84.68 soldr[cache] serde_yaml [33m[MISS][0m
+   84.88 soldr[cache] redb [33m[MISS][0m
+   85.61 [1m[92m    Checking[0m secret-service v4.0.0
+   85.68 soldr[cache] zbus [33m[MISS][0m
+   85.82 [1m[92m   Compiling[0m protox v0.9.1
+   85.89 soldr[cache] prost_reflect [33m[MISS][0m
+   86.48 [1m[92m    Checking[0m keyring v3.6.3
+   86.53 soldr[cache] secret_service [33m[MISS][0m
+   86.60 [1m[92m   Compiling[0m running-process-protocol v4.10.15
+   86.60 [1m[92m   Compiling[0m clud v2.8.27 (/home/actrunner/work/src/src/crates/clud-bin)
+   86.63 soldr[cache] wasmi [33m[MISS][0m
+   86.63 soldr[cache] protox [33m[MISS][0m
+   86.83 soldr[cache] keyring [33m[MISS][0m
+   87.43 soldr[cache] build_script_build [33m[MISS][0m
+   87.53 soldr[cache] build_script_build [33m[MISS][0m
+   88.74 [1m[92m    Checking[0m running-process v4.10.15
+   88.83 soldr[cache] running_process_protocol [33m[MISS][0m
+   90.84 [1m[92m    Checking[0m daemon-stub v2.8.27 (/home/actrunner/work/src/src/testbins/daemon-stub)
+   90.84 [1m[92m    Checking[0m tap-gate v2.8.27 (/home/actrunner/work/src/src/crates/tap)
+   90.93 soldr[cache] running_process [33m[MISS][0m
+   91.03 soldr[cache] cli [33m[MISS][0m
+   91.13 soldr[cache] daemon_stub [33m[MISS][0m
+   91.13 soldr[cache] daemon_stub [33m[MISS][0m
+   91.13 soldr[cache] tap [33m[MISS][0m
+   91.23 soldr[cache] tap [33m[MISS][0m
+soldr: cargo diagnostic capture still running after 120s (no wall-clock deadline configured)
+  121.16 soldr[cache] clud [33m[MISS][0m
+  121.46 soldr[cache] clud_kittyterm_paste [33m[MISS][0m
+  121.46 soldr[cache] clud_ctrlc_probe [33m[MISS][0m
+  121.56 soldr[cache] clud_kittyterm_paste [33m[MISS][0m
+  121.56 soldr[cache] clud_ctrlc_probe [33m[MISS][0m
+  121.86 soldr[cache] clud [33m[MISS][0m
+  121.86 soldr[cache] clud [33m[MISS][0m
+  122.13 [1m[91merror[E0063][0m[1m: missing field `provider_only` in initializer of `clud::command::LaunchPlan`[0m
+  122.13   [1m[94m--> [0mcrates/clud-bin/tests/integration/api/api_session_lifecycle.rs:20:5
+  122.13    [1m[94m|[0m
+  122.13 [1m[94m20[0m [1m[94m|[0m     LaunchPlan {
+  122.13    [1m[94m|[0m     [1m[91m^^^^^^^^^^[0m [1m[91mmissing `provider_only`[0m
+  122.13 
+  122.13 [1m[91merror[E0063][0m[1m: missing field `provider_only` in initializer of `clud::command::LaunchPlan`[0m
+  122.13   [1m[94m--> [0mcrates/clud-bin/tests/integration/api/api_turn_controller.rs:28:5
+  122.13    [1m[94m|[0m
+  122.13 [1m[94m28[0m [1m[94m|[0m     LaunchPlan {
+  122.13    [1m[94m|[0m     [1m[91m^^^^^^^^^^[0m [1m[91mmissing `provider_only`[0m
+  122.13 
+  122.13 [1mFor more information about this error, try `rustc --explain E0063`.[0m
+  122.13 [1m[91merror[0m: could not compile `clud` (test "integration") due to 2 previous errors
+  122.13 [1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+  140.69 soldr[cache] clud [33m[MISS][0m
+soldr: pruned 329 orphan .rmeta file(s) under /home/actrunner/work/src/src/target after failed cargo build (soldr#410)
+soldr: logs for this build session:
+  build log                 /tmp/setup-soldr-soldr/logs/builds/20261006T155815Z-home-actrunner-work-src-src.xml
+  zccache session stats     /tmp/setup-soldr-soldr/cache/zccache/logs/last-session-stats.json
+  compile journal           /tmp/setup-soldr-soldr/cache/zccache/daemon-state/embedded-v1/v1.15.0/logs/compile_journal.jsonl
+  archived compile journal  /tmp/setup-soldr-soldr/cache/zccache/history/1292498439029569684/compile_journal.jsonl
+  (all log locations: soldr logs paths)
+  ❌  Failure - Main Clippy [2m22.343404867s]
+exitcode '101': failure

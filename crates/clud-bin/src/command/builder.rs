@@ -750,6 +750,7 @@ fn build_launch_plan_for_target_at(
         | Some(Command::Models { .. })
         | Some(Command::CodexUpdate)
         | Some(Command::DshUpdate)
+        | Some(Command::Ci { .. })
         | Some(Command::CodexAuth { .. })
         | Some(Command::DeepseekAuth { .. })
         | Some(Command::Attach { .. })

@@ -1748,3 +1748,30 @@ fn api_key_shape_detection() {
     assert!(!looks_like_api_key("pk-0123456789abcdef0123"));
     assert!(!looks_like_api_key("sk-12345"));
 }
+
+#[test]
+fn ci_is_a_dispatched_subcommand_with_its_flags() {
+    let args = parse(&[
+        "clud",
+        "ci",
+        "test-linux-x64-unit",
+        "--filter",
+        "openrouter_free",
+        "--json",
+    ]);
+    match args.command {
+        Some(Command::Ci {
+            job,
+            filter,
+            json,
+            workflow,
+        }) => {
+            assert_eq!(job.as_deref(), Some("test-linux-x64-unit"));
+            assert_eq!(filter.as_deref(), Some("openrouter_free"));
+            assert!(json);
+            assert_eq!(workflow, None);
+        }
+        other => panic!("expected ci, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}

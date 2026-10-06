@@ -31,7 +31,8 @@ Install soldr: `./install` (puts it in this repo's `.venv`) or `./install --glob
 ### Local validation before GitHub Actions
 
 **Mandatory for agents: run all local tests and lint through `bosn ci`**
-(`bosn ci run --workspace . --trigger pr --wait`), which replays the workflow
+(`bosn ci run --workspace . --trigger pr --wait`, or `clud ci [JOB] [--filter RE]`
+for the verdict plus only the failing steps' diagnostics), which replays the workflow
 under act2 in an isolated engine. Do not run tests or lint on the host or in a
 direct Bosn build task: those paths can interfere with the system `clud`. If
 act cannot represent an affected job (notably native Windows or macOS

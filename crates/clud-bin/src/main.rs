@@ -261,6 +261,17 @@ fn dispatch_credential_command(args: &args::Args) -> Option<i32> {
             }
             backend_bootstrap::run_trusted_codex_update()
         }
+        args::Command::Ci {
+            job,
+            filter,
+            workflow,
+            json,
+        } => clud::ci_local::run(&clud::ci_local::CiOptions {
+            job: job.clone(),
+            filter: filter.clone(),
+            workflow: workflow.clone(),
+            json: *json,
+        }),
         args::Command::DshUpdate => {
             if !args.passthrough.is_empty() {
                 eprintln!("dsh-update accepts no passthrough arguments");

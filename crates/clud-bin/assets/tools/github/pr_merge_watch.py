@@ -3619,7 +3619,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--no-retry", action="store_true", help="disable backoff/retry on cancel API calls"
     )
-    ns = p.parse_args(argv)
+    # #1839: the tool runner forwards a `--` placed after the PR number as
+    # data (`1835 -- --no-cancel`), and argparse then reads every later flag as a
+    # positional and exits 64 -- in the background, silently wasting a CI
+    # wait. This tool takes no passthrough, so a literal `--` is only ever
+    # that forwarding separator.
+    ns = p.parse_args([arg for arg in argv if arg != "--"])
     command_cap = _env_int("CLUD_TOOL_COMMAND_TIMEOUT_SECS", 0)
     if command_cap > 0:
         ns.timeout = min(ns.timeout, max(1, command_cap - 60))
