@@ -105,3 +105,22 @@ def test_feature_branch_gets_an_opening_commit_before_the_draft_pr() -> None:
     text = _read("grind")
     assert "GitHub refuses a\n   PR with no commits" in text
     assert "commit --allow-empty" in text
+
+
+def test_workflow_maps_role_models_onto_each_agent() -> None:
+    """#1810: the Models answers reach `agent().model`; the lander shares the
+    integrator's model and prework the planner's."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "const MODELS = args.models || {}" in text
+    assert (
+        "const m = MODELS[role === 'lander' ? 'integrator' : role === 'prework' ? 'planner' : role]"
+        in text
+    )
+    assert "if (m) o.model = m" in text
+
+
+def test_router_warns_that_a_wire_id_escapes_a_gateway_pin() -> None:
+    """#1810: under a direct gateway pin only tier aliases stay inside it."""
+    text = " ".join(_read("grind").split())
+    assert "the tier aliases `opus`, `sonnet` and `haiku` resolve to the pinned id" in text
+    assert "billed outside the pin" in text

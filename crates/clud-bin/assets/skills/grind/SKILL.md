@@ -251,7 +251,12 @@ after it, by the main session or anyone else.
   for planner and reviewer only). A typed answer may name a model per role.
   The session model is whatever this session is running on (for
   `clud --deepseek` or another provider, the model that route resolved);
-  never assume a fixed model name.
+  never assume a fixed model name. On a direct gateway route
+  (`--openrouter`, `--deepseek`, `--kimi`) the launch is pinned (DD-077):
+  the tier aliases `opus`, `sonnet` and `haiku` resolve to the pinned id, so
+  offer the mixes as aliases. A typed full wire id is sent to the gateway
+  as is and is billed outside the pin, which clud cannot refuse on that
+  route; record such an answer only after saying so in the question.
 - **Local CI**, asked only when both hold:
   - `docker info` succeeds. Otherwise print
     "Docker/github actions disabled due to no docker running" and set CI off.
