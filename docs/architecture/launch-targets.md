@@ -667,6 +667,41 @@ unified gateway are separate scopes because they use different protocol and
 routing contracts. Clud does not delete Claude Code-owned cached login state;
 users encountering an auth conflict must run `/logout` once in Claude Code.
 
+## `clud video`: video-use as a session-scoped plugin (#1851)
+
+`clud video [DIR] [--update]` (`video.rs`) runs the third-party
+[browser-use/video-use](https://github.com/browser-use/video-use) skill in one
+Claude session and nowhere else
+([DD-163](../DESIGN_DECISIONS.md#dd-163-video-use-is-a-session-scoped-plugin-pinned-to-a-reviewed-sha)).
+
+- **Managed checkout.** `~/.clud/extern/video-use/<VIDEO_USE_SHA>/`: a
+  `git fetch --depth 1` of the pinned commit into a sibling staging dir,
+  verified (`HEAD` equals the pin, `SKILL.md` present, `uv sync` succeeded,
+  then a `.clud-verified` marker), and renamed into place. Python deps live in
+  that checkout's private `.venv`. `--update` forces a reinstall and exits.
+- **Plugin wrapper.** `~/.clud/extern/video-use-plugin/` holds
+  `.claude-plugin/plugin.json` (`name: clud-video-use`) and
+  `skills/video-use`, a symlink to the checkout (a copy without `.git` where
+  links fail). Claude Code discovers plugin skills at
+  `<plugin>/skills/<name>/SKILL.md`; `claude plugin validate` accepts the
+  layout, and a session follows the symlink.
+- **Launch.** `command/builder.rs` adds `--plugin-dir <wrapper>` and a
+  `/video-use ...` seed prompt (inventory, propose, wait for the user's OK)
+  only for `Command::Video`; a plain launch has neither. `video_launch_error`
+  refuses non-Claude harnesses, because `--plugin-dir` is a Claude Code flag.
+  `DIR` becomes the session's working directory.
+- **Preconditions** (real launches only, after the `--dry-run` exit, so a dry
+  run installs nothing and reads no vault): `ffmpeg`/`ffprobe` on PATH (one
+  message with a platform install hint; clud never runs a package manager),
+  the managed install, and the ElevenLabs key.
+- **Key.** An ambient `ELEVENLABS_API_KEY` wins; then the native vault at
+  `clud.elevenlabs/api-key-v1` (the debug-only test vault in tests); then, on
+  a TTY, one masked prompt whose answer is stored; otherwise an error. clud
+  sets the key in its own environment immediately before spawning the
+  harness, which inherits it; it never appears in the plan or `--dry-run`.
+- **Never automatic.** Nothing is written to `~/.claude/skills` or
+  `~/.codex/skills`, and video-use has no `BUNDLED_SKILLS` row.
+
 ## Ownership
 
 - `backend.rs`: typed dimensions, precedence, validation, notice policy.

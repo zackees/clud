@@ -70,6 +70,22 @@ pub fn grind_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&
     None
 }
 
+/// `clud video` (#1851) loads video-use through Claude Code's session-only
+/// `--plugin-dir`, which no other harness has, and needs an interactive
+/// session for the skill's propose-then-approve flow.
+pub fn video_launch_error(args: &Args, target: ResolvedLaunchTarget) -> Option<&'static str> {
+    if !matches!(args.command, Some(Command::Video { .. })) {
+        return None;
+    }
+    if !matches!(target.effective_harness, Backend::Claude) {
+        return Some("`clud video` requires the Claude harness, whose `--plugin-dir` loads video-use for this session only; use `--harness claude`");
+    }
+    if args.subprocess {
+        return Some("`clud video` requires an interactive PTY; remove `--subprocess`");
+    }
+    None
+}
+
 /// Returns true when this harness consumes the launch prompt headlessly.
 ///
 /// `loop` and explicit `-p` prompts are orchestrated/unattended for every
@@ -745,6 +761,21 @@ fn build_launch_plan_for_target_at(
             let url = url.as_deref().unwrap_or("");
             task_summary = Some(format!("grind {url}"));
             push_prompt_interactive(&mut cmd, build_grind_prompt(url));
+        }
+        Some(Command::Video { .. }) => {
+            // Session-scoped plugin: never a global skill install (DD-163).
+            let home = crate::home::user_home().unwrap_or_default();
+            task_summary = Some("video".to_string());
+            cmd.push("--plugin-dir".to_string());
+            cmd.push(
+                crate::video::plugin_dir(&home)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if seed_interactive_builtin {
+                let checkout = crate::video::checkout_dir(&home);
+                push_prompt_interactive(&mut cmd, crate::video::seed_prompt(&checkout));
+            }
         }
         Some(Command::Auth { .. })
         | Some(Command::Models { .. })

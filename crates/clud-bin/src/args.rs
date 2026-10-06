@@ -632,6 +632,16 @@ pub enum Command {
     Grind {
         url: Option<String>,
     },
+    /// Edit videos with browser-use/video-use (#1851). Loads the pinned
+    /// video-use skill as a plugin for this one Claude session only; ordinary
+    /// `clud` sessions never see it.
+    Video {
+        /// Directory holding the source videos (default: current directory).
+        dir: Option<std::path::PathBuf>,
+        /// Reinstall the pinned video-use checkout and its Python deps, then exit.
+        #[arg(long)]
+        update: bool,
+    },
     /// Install clud's bundled skills, agent types and workflows now, the same
     /// files a launch installs. `--home` targets another home directory; the
     /// real-harness tests (#1323) use it to populate an isolated config.
@@ -1398,6 +1408,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "fix",
     "do",
     "grind",
+    "video",
     "wasm",
     "attach",
     "kill",

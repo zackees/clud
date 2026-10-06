@@ -2089,3 +2089,17 @@ def test_fix_hooks_dry_run_plans_without_writing(tmp_path: Path) -> None:
     assert "matcher `Bash`" in result.stdout
     assert "add Codex project trust" not in result.stdout
     assert not (home / ".codex" / "config.toml").exists()
+
+
+def test_video_dry_run_loads_plugin_only_for_that_session() -> None:
+    """#1851: `clud video` names the video-use plugin wrapper; a plain launch does not."""
+    result = _run("--dry-run", "video", env_overrides={"ELEVENLABS_API_KEY": "canary-1851"})
+    assert result.returncode == 0, result.stderr
+    command = json.loads(result.stdout)["command"]
+    index = command.index("--plugin-dir")
+    assert command[index + 1].replace("\\", "/").endswith(".clud/extern/video-use-plugin")
+    assert command[-1].startswith("/video-use ")
+    assert "canary-1851" not in result.stdout + result.stderr
+
+    plain = _run("--dry-run", "-p", "hello")
+    assert "--plugin-dir" not in json.loads(plain.stdout)["command"]

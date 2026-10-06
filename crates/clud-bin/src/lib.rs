@@ -122,6 +122,7 @@ pub mod stream_json;
 pub mod subprocess;
 #[cfg(test)]
 pub(crate) mod test_env;
+pub mod video;
 
 pub mod kitty_term;
 pub mod symbols;
