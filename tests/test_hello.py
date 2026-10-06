@@ -741,6 +741,70 @@ def test_provider_only_pins_openrouter_upstream_routing() -> None:
         assert needle in refused.stderr
 
 
+def _dry_run_route(*args: str) -> dict:
+    result = _run("--dry-run", *args, "-p", "hi")
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_dry_run_exposes_the_resolved_route() -> None:
+    """#1855: one `route` object carries every routing decision the launch made
+    -- backend, slots, allowlist, context, effort, upstream routing and the
+    launch checks with their verdicts -- so routing is auditable without a
+    paid request."""
+    route = _dry_run_route("--openrouter")["route"]
+    assert route["backend"] == "direct"
+    assert route["provider"] == "openrouter"
+    assert route["slots"]["main"]["wire_id"] == "~anthropic/claude-sonnet-latest"
+    # The catalog's reviewed window for the reviewed Sonnet row.
+    assert route["context"]["max_tokens"] == 1000000
+    assert "per_turn_capability" in route["effort"]
+    assert route["upstream_routing"] is None
+    assert route["timeout_ms"] == 600000
+    assert [check["name"] for check in route["checks"]] == [
+        "openrouter_free_cost",
+        "provider_only",
+    ]
+    assert all(check["verdict"] for check in route["checks"])
+    # The upstream is the descriptor's, and the credential it names is an
+    # identifier -- never a key.
+    assert route["upstreams"][0]["base_url"] == "https://openrouter.ai/api"
+    assert route["upstreams"][0]["credential"] == {
+        "source": "vault",
+        "value": "openrouter",
+    }
+
+
+def test_dry_run_route_reflects_a_pin_and_provider_only() -> None:
+    pinned = _dry_run_route(
+        "--openrouter",
+        "--allow-model",
+        "openrouter-claude-sonnet",
+        "--provider-only",
+        "parasail/fp8",
+    )["route"]
+    assert pinned["allowlist"] == ["openrouter-claude-sonnet"]
+    # A pin turns discovery off: clud does not advertise rows the boundary
+    # would then have to be enforced against (DD-054).
+    assert pinned["discovery"]["policy"] == "off"
+    slots = ("main", "opus", "sonnet", "haiku", "fable", "subagent")
+    assert len({pinned["slots"][slot]["wire_id"] for slot in slots}) == 1
+    assert pinned["upstream_routing"] == {"only": ["parasail/fp8"], "allow_fallbacks": False}
+
+
+def test_a_plain_claude_launch_resolves_to_the_native_backend() -> None:
+    """A plain Claude launch has no provider overlay, so it re-derives nothing;
+    the route says so instead of inventing slots it never sets."""
+    route = _dry_run_route("--claude")["route"]
+    assert route["backend"] == "native"
+    assert route["upstreams"] == []
+    assert all(
+        route["slots"][slot] is None
+        for slot in ("main", "opus", "sonnet", "haiku", "fable", "subagent")
+    )
+    assert route["scrub"] == []
+
+
 def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:
     for argv in [
         ("--dry-run", "--codex", "do"),
