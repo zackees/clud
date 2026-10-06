@@ -102,11 +102,51 @@ fn daemon_version_disposition(info: &DaemonInfo) -> DaemonVersionDisposition {
     let Some(running) = info.version.as_deref() else {
         return DaemonVersionDisposition::ReplaceOlder;
     };
-    match compare_versions(running, env!("CARGO_PKG_VERSION")) {
+    let by_version = match compare_versions(running, env!("CARGO_PKG_VERSION")) {
         Some(Ordering::Equal) => DaemonVersionDisposition::Match,
         Some(Ordering::Less) => DaemonVersionDisposition::ReplaceOlder,
         Some(Ordering::Greater) | None => DaemonVersionDisposition::RefuseNewerOrUnknown,
+    };
+    with_deleted_executable(by_version, daemon_executable_deleted(info.pid))
+}
+
+/// #1841: every build between releases reports the same version, so a
+/// reinstall can leave the old daemon running a binary that no longer exists
+/// on disk while it still compares equal. It then misreads newer requests
+/// (checkout claims got an empty reply). A deleted executable can never be
+/// the build the current client runs, so it is stale with certainty, and
+/// unlike a build-id comparison this cannot make two live builds keep
+/// replacing each other's daemon.
+fn with_deleted_executable(
+    by_version: DaemonVersionDisposition,
+    executable_deleted: bool,
+) -> DaemonVersionDisposition {
+    if by_version == DaemonVersionDisposition::Match && executable_deleted {
+        DaemonVersionDisposition::ReplaceOlder
+    } else {
+        by_version
     }
+}
+
+/// Whether the daemon's executable has been deleted or replaced on disk.
+/// Linux only: `/proc/<pid>/exe` names a removed file with a ` (deleted)`
+/// suffix. macOS and Windows have no cheap equivalent and report `false`.
+fn daemon_executable_deleted(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .map(|target| exe_link_is_deleted(&target.to_string_lossy()))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn exe_link_is_deleted(link_target: &str) -> bool {
+    link_target.ends_with(" (deleted)")
 }
 
 pub struct ForegroundClientLease {
