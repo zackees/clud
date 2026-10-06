@@ -621,6 +621,58 @@ def test_grind_is_refused_on_the_codex_harness() -> None:
     assert "requires the Claude harness" in result.stderr
 
 
+def test_openrouter_grind_dry_run_is_one_credential_free_claude_session() -> None:
+    """#1808: `clud --openrouter grind --dry-run` resolves the OpenRouter
+    route onto the Claude harness as one interactive `/grind` session, with
+    the catalog default model, and never reads the vault or the environment's
+    key (this HOME has no stored key, so a vault read would hang or error)."""
+    env_key = "sk-or-v1-" + "fedcba9876543210" * 2
+    url = "https://github.com/zackees/clud/issues/1807"
+    result = _run(
+        "--dry-run",
+        "--openrouter",
+        "grind",
+        url,
+        env_overrides={"OPENROUTER_API_KEY": env_key},
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_provider"] == "openrouter"
+    assert data["effective_harness"] == "claude"
+    assert data["provider_source"] == "cli"
+    selection = data["model_selection"]
+    assert selection["provider"] == "openrouter"
+    assert selection["wire_model"] == "~anthropic/claude-sonnet-latest"
+    assert selection["model_source"]
+    assert selection["wire_model"] in data["allowed_models"]
+    assert data["command"][-1] == f"/grind {url}"
+    assert "-p" not in data["command"]
+    assert data["iterations"] == 1
+    assert data["loop_markers"] is None
+    assert env_key not in result.stdout
+    assert env_key not in result.stderr
+    assert "sk-" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("argv", "needle"),
+    [
+        (
+            ("--openrouter", "--harness", "codex"),
+            "OpenRouter provider cannot use the Codex harness",
+        ),
+        (("--openrouter", "--detach"), "requires a foreground interactive PTY"),
+        (("--openrouter", "--subprocess"), "requires an interactive PTY"),
+    ],
+)
+def test_openrouter_grind_refuses_unsupported_sessions(argv: tuple[str, ...], needle: str) -> None:
+    """#1808: each refusal exits 2 before any session or vault access."""
+    result = _run("--dry-run", *argv, "grind", "https://github.com/zackees/clud/issues")
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert result.stdout == ""
+    assert needle in result.stderr
+
+
 def test_do_missing_target_never_consumes_piped_input_or_prompts() -> None:
     for argv in [
         ("--dry-run", "--codex", "do"),
