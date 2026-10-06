@@ -119,6 +119,11 @@ everything first:
 - **Models** for planner, worker, reviewer and integrator (the lander shares
   the integrator's). The default is the session's own model, whatever route
   resolved it; an unchanged default is omitted so the agent inherits it.
+  `grind-run.js` maps `args.models` onto each `agent()`'s `model`. On a
+  direct gateway route the launch is pinned (DD-077) and every
+  `ANTHROPIC_DEFAULT_*` slot carries the pinned id, so a tier alias stays
+  inside the pin; a full wire id passes straight to the gateway, outside
+  it, because the direct route has no bridge to refuse it (#1810).
 - **Local CI**: offered only when `docker info` succeeds and
   `.github/workflows/ci.yml` exists. Otherwise the router prints why
   ("Docker/github actions disabled due to no docker running", or that
