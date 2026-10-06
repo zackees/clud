@@ -175,7 +175,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             command_without_deletion_policy(&initial),
-            ["codex", "exec", "--json", "-m", "gpt-test", "hello"]
+            [
+                "codex",
+                "-c",
+                r#"approvals_reviewer="auto_review""#,
+                "exec",
+                "--json",
+                "-m",
+                "gpt-test",
+                "hello"
+            ]
         );
         let resumed = build_turn_plan(
             // This is the CLI-shaped resume input the HTTP/lifecycle slice
@@ -199,7 +208,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             command_without_deletion_policy(&resumed),
-            ["codex", "exec", "resume", "--json", "thread-123", "hello"]
+            [
+                "codex",
+                "-c",
+                r#"approvals_reviewer="auto_review""#,
+                "exec",
+                "resume",
+                "--json",
+                "thread-123",
+                "hello"
+            ]
         );
     }
 
