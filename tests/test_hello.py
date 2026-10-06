@@ -1617,6 +1617,8 @@ def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert 'project_doc_fallback_filenames=["CODEX.md"]' in data["command"]
+    # #1847: Codex launches route approvals to Codex auto review.
+    assert 'approvals_reviewer="auto_review"' in data["command"]
 
 
 def test_dry_run_pty_override() -> None:

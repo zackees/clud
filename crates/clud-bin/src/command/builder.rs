@@ -16,6 +16,11 @@ use super::prompts::{
 };
 use super::types::{HeadlessSession, HeadlessTurnRequest, LaunchPlan, LoopMarkers, RepeatSchedule};
 
+/// #1847 / DD-162: route Codex approval requests to its auto-review subagent
+/// instead of the user. It only matters when approvals are not bypassed
+/// (`--safe`); YOLO launches raise no approval requests.
+const CODEX_APPROVALS_REVIEWER_KEY: &str = "approvals_reviewer";
+const CODEX_AUTO_REVIEW_CONFIG: &str = r#"approvals_reviewer="auto_review""#;
 const CODEX_PROJECT_DOC_FALLBACK_KEY: &str = "project_doc_fallback_filenames";
 const CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG: &str = r#"project_doc_fallback_filenames=["CODEX.md"]"#;
 const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
@@ -453,6 +458,10 @@ fn build_launch_plan_for_target_at(
         for override_value in &args.codex_config_overrides {
             cmd.push("-c".to_string());
             cmd.push(override_value.clone());
+        }
+        if !codex_reviewer_already_chosen(&args.codex_config_overrides, &passthrough) {
+            cmd.push("-c".to_string());
+            cmd.push(CODEX_AUTO_REVIEW_CONFIG.to_string());
         }
         if !has_codex_project_doc_fallback_override(&args.codex_config_overrides) {
             if let Some(fallback_config) = codex_project_doc_fallback_config(cwd) {
@@ -965,12 +974,33 @@ fn gateway_model_selection(
 }
 
 fn has_codex_project_doc_fallback_override(overrides: &[String]) -> bool {
-    overrides.iter().any(|value| {
-        value
-            .trim_start()
-            .strip_prefix(CODEX_PROJECT_DOC_FALLBACK_KEY)
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-    })
+    overrides
+        .iter()
+        .any(|value| codex_override_sets_key(value, CODEX_PROJECT_DOC_FALLBACK_KEY))
+}
+
+fn codex_override_sets_key(value: &str, key: &str) -> bool {
+    value
+        .trim_start()
+        .strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// #1847: the user already picked a Codex approvals reviewer, through clud's
+/// `config_overrides` or backend passthrough (`-c`/`--config` with the key,
+/// or Codex's `--approve-for-me` / `--not-so-yolo`), so clud's auto-review
+/// default must not override it.
+fn codex_reviewer_already_chosen(overrides: &[String], passthrough: &[String]) -> bool {
+    let sets_reviewer = |value: &str| codex_override_sets_key(value, CODEX_APPROVALS_REVIEWER_KEY);
+    overrides.iter().any(|value| sets_reviewer(value))
+        || passthrough.iter().enumerate().any(|(index, arg)| {
+            matches!(arg.as_str(), "--approve-for-me" | "--not-so-yolo")
+                || arg.strip_prefix("--config=").is_some_and(sets_reviewer)
+                || (matches!(arg.as_str(), "-c" | "--config")
+                    && passthrough
+                        .get(index + 1)
+                        .is_some_and(|value| sets_reviewer(value)))
+        })
 }
 
 fn codex_project_doc_fallback_config(cwd: &Path) -> Option<&'static str> {

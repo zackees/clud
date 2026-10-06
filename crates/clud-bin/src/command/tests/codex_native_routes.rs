@@ -310,3 +310,86 @@ fn unresolved_do_target_has_a_safe_interactive_plan_fallback() {
         );
     }
 }
+
+const AUTO_REVIEW: &str = r#"approvals_reviewer="auto_review""#;
+
+fn reviewer_values(p: &LaunchPlan) -> Vec<&str> {
+    codex_config_values(p)
+        .into_iter()
+        .filter(|value| value.starts_with("approvals_reviewer"))
+        .collect()
+}
+
+/// #1847: every Codex launch routes approvals to Codex auto review, and the
+/// override precedes the subcommand so `exec` and `resume` inherit it.
+#[test]
+fn test_codex_enables_auto_review_on_interactive_exec_and_resume() {
+    for raw in [
+        &["clud", "--codex"][..],
+        &["clud", "--codex", "-p", "hello"][..],
+        &["clud", "--codex", "-c"][..],
+        &["clud", "--codex", "--safe"][..],
+    ] {
+        let p = plan(raw);
+        assert_eq!(reviewer_values(&p), [AUTO_REVIEW], "{raw:?}");
+        let reviewer = p.command.iter().position(|arg| arg == AUTO_REVIEW).unwrap();
+        if let Some(sub) = p
+            .command
+            .iter()
+            .position(|arg| arg == "exec" || arg == "resume")
+        {
+            assert!(reviewer < sub, "{raw:?}");
+        }
+    }
+}
+
+#[test]
+fn test_claude_harness_does_not_get_codex_auto_review() {
+    let p = plan(&["clud", "--claude", "-p", "hello"]);
+    assert!(!p
+        .command
+        .iter()
+        .any(|arg| arg.contains("approvals_reviewer")));
+}
+
+#[test]
+fn test_codex_auto_review_respects_settings_override() {
+    let mut args = parse(&["clud", "--codex"]);
+    args.codex_config_overrides = vec![r#"approvals_reviewer="user""#.to_string()];
+    let p = build_launch_plan(&args, Backend::Codex, "codex");
+    assert_eq!(reviewer_values(&p), [r#"approvals_reviewer="user""#]);
+}
+
+#[test]
+fn test_codex_auto_review_respects_passthrough_choice() {
+    for raw in [
+        &[
+            "clud",
+            "--codex",
+            "--",
+            "-c",
+            r#"approvals_reviewer="user""#,
+        ][..],
+        &[
+            "clud",
+            "--codex",
+            "--",
+            "--config",
+            r#"approvals_reviewer="user""#,
+        ][..],
+        &[
+            "clud",
+            "--codex",
+            "--",
+            r#"--config=approvals_reviewer="user""#,
+        ][..],
+        &["clud", "--codex", "--", "--approve-for-me"][..],
+    ] {
+        let p = plan(raw);
+        assert!(
+            !p.command.iter().any(|arg| arg == AUTO_REVIEW),
+            "{raw:?}: {:?}",
+            p.command
+        );
+    }
+}
