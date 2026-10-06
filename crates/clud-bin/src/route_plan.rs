@@ -197,8 +197,15 @@ pub struct UpstreamRoute {
 /// a row Claude Code can classify.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotModel {
+    /// The spelling the direct route writes verbatim.
     pub wire_id: String,
+    /// The gateway discovery id, when the row has one. Claude Code classifies
+    /// a raw wire id as an unknown provider id and falls back to a built-in
+    /// Anthropic row, which is exactly the spend a pin exists to stop.
     pub discovery_id: Option<String>,
+    /// The catalog row's human-readable name, for the two role aliases Claude
+    /// Code displays (`ANTHROPIC_DEFAULT_*_MODEL_NAME`).
+    pub display_name: Option<String>,
 }
 
 impl SlotModel {
@@ -212,10 +219,12 @@ impl SlotModel {
             Some(row) => Self {
                 wire_id: id.to_string(),
                 discovery_id: row.discovery_id.map(str::to_string),
+                display_name: Some(row.display_name.to_string()),
             },
             None => Self {
                 wire_id: id.to_string(),
                 discovery_id: None,
+                display_name: None,
             },
         })
     }
@@ -672,6 +681,11 @@ struct BackendPlan {
     slots: SlotModels,
     allowlist: Vec<String>,
     discovery: DiscoveryPolicy,
+    /// A backend-level context decision that is not keyed on one wire id. The
+    /// Codex bridge's process-wide override is the only one today: Claude Code
+    /// 2.1.223+ makes its context override process-wide, so the catalog has to
+    /// prove one common ceiling across every switchable Codex row.
+    context: Option<ContextPolicy>,
 }
 
 /// The direct route: one descriptor, one key, clud not in the request path.
@@ -701,6 +715,7 @@ fn direct_plan(
         slots,
         allowlist,
         discovery,
+        context: None,
     }
 }
 
@@ -748,6 +763,7 @@ fn unified_plan(
         slots,
         allowlist,
         discovery,
+        context: None,
     }
 }
 
@@ -777,6 +793,10 @@ fn codex_bridge_plan(plan: &LaunchPlan) -> BackendPlan {
         slots,
         allowlist: codex_bridge_allowlist(plan),
         discovery: DiscoveryPolicy::On,
+        context: Some(ContextPolicy {
+            max_tokens: crate::provider_catalog::common_claude_context_tokens(ModelProvider::Codex),
+            auto_compact_window: None,
+        }),
     }
 }
 
@@ -815,6 +835,7 @@ fn deepseek_native_plan(
         },
         allowlist: Vec::new(),
         discovery: DiscoveryPolicy::Off,
+        context: None,
     }
 }
 
@@ -843,6 +864,7 @@ pub fn resolve_with_catalog(
             slots: SlotModels::default(),
             allowlist: Vec::new(),
             discovery: DiscoveryPolicy::Off,
+            context: None,
         },
     };
     let BackendPlan {
@@ -850,6 +872,7 @@ pub fn resolve_with_catalog(
         slots,
         allowlist,
         discovery,
+        context,
     } = planned;
     // The main wire id the context and effort policies are keyed on: the
     // slot's own spelling, which is what every renderer actually writes.
@@ -861,7 +884,7 @@ pub fn resolve_with_catalog(
         slots,
         allowlist,
         discovery,
-        context: context_policy(main_wire.as_deref()),
+        context: context.unwrap_or_else(|| context_policy(main_wire.as_deref())),
         effort: EffortPolicy {
             // Only OpenRouter publishes the underlying gate. DeepSeek and Kimi
             // direct routes hit their own vendor endpoints, so the claim must
@@ -1018,6 +1041,99 @@ pub fn render_direct_env(route: &ResolvedRoute, secret: &str) -> EnvOverlay {
     }
     if let Some(capability) = &route.effort.per_turn_capability {
         overlay.set_default("CLAUDE_CODE_MODEL_CAPABILITIES", capability);
+    }
+    if let Some(millis) = route.timeout_ms {
+        overlay.set_default("API_TIMEOUT_MS", &millis.to_string());
+    }
+    overlay
+}
+
+/// The values the Codex bridge config needs that are a *request* rather than a
+/// routing decision: which model and effort the launch asked to default to,
+/// and the cli id Claude Code's `/model` will report back.
+pub struct CodexBridgeRequest<'a> {
+    pub default_model: Option<crate::codex_model::ModelSpec>,
+    pub selected_model_cli_id: Option<&'a str>,
+}
+
+/// The Codex bridge's configuration, read from the route. Every field is a
+/// value the route already decided; `max_body_bytes` and friends keep their
+/// `BridgeConfig` defaults at the call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexBridgeRender {
+    pub default_model: Option<crate::codex_model::ModelSpec>,
+    pub selected_model_cli_id: Option<String>,
+    pub allowed_models: Vec<String>,
+}
+
+/// Render the bridge configuration from the route plus the launch's request.
+/// The boundary is the route's: a pinned launch widens it with the two rows
+/// the bridge injects itself, and that widening was decided once in the
+/// resolver.
+pub fn render_codex_bridge(
+    route: &ResolvedRoute,
+    request: CodexBridgeRequest<'_>,
+) -> CodexBridgeRender {
+    CodexBridgeRender {
+        default_model: request.default_model,
+        selected_model_cli_id: request.selected_model_cli_id.map(str::to_string),
+        allowed_models: route.allowlist.clone(),
+    }
+}
+
+/// Whether the child environment forbids the non-essential traffic model
+/// discovery needs. Every gateway route refuses the launch rather than
+/// silently serving an unfiltered catalog (#998).
+pub fn discovery_is_disabled(env: &[(String, String)]) -> bool {
+    env.iter().any(|(key, value)| {
+        os_env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            && (value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
+    })
+}
+
+/// The Codex-via-Claude bridge's child environment: the bridge's loopback
+/// address and bearer, the two role aliases the bridge can actually serve,
+/// discovery, the process-wide context ceiling and the bridge timeout.
+pub fn render_codex_bridge_env(
+    route: &ResolvedRoute,
+    base_url: &str,
+    bearer_token: &str,
+) -> EnvOverlay {
+    let mut overlay = EnvOverlay::new(&route.scrub);
+    overlay.set("ANTHROPIC_BASE_URL", base_url);
+    overlay.set("ANTHROPIC_AUTH_TOKEN", bearer_token);
+    // The built-in `opus` and `sonnet` aliases also select models for Claude
+    // Code workflows and subagents. The bridge cannot serve Anthropic model
+    // IDs, so bind them to honest, advertised Codex rows. Haiku is
+    // deliberately left alone: it is used for Claude Code side work and has no
+    // corresponding Codex tier policy.
+    for (key, name_key, slot) in [
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            &route.slots.opus,
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            &route.slots.sonnet,
+        ),
+    ] {
+        if let Some(slot) = slot {
+            overlay.set(key, &slot.wire_id);
+            if let Some(name) = &slot.display_name {
+                overlay.set(name_key, name);
+            }
+        }
+    }
+    if matches!(
+        route.discovery,
+        DiscoveryPolicy::On | DiscoveryPolicy::Filtered(_)
+    ) {
+        overlay.set("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+    }
+    if let Some(tokens) = route.context.max_tokens {
+        overlay.set("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &tokens.to_string());
     }
     if let Some(millis) = route.timeout_ms {
         overlay.set_default("API_TIMEOUT_MS", &millis.to_string());

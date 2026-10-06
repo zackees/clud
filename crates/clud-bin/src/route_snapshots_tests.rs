@@ -418,7 +418,7 @@ fn render_config(scenario: &Scenario) -> String {
         }
         Backend4::CodexBridge => {
             let selection = codex_selection_from_plan(&scenario.plan).expect("codex selection");
-            let allowed = codex_via_claude_bridge_allowlist(&scenario.plan);
+            let allowed = crate::route_plan::codex_bridge_allowlist(&scenario.plan);
             format!("  bridge.default_model={selection:?}\n  bridge.allowed_models={allowed:?}\n")
         }
         Backend4::Direct | Backend4::DeepSeekNative => String::new(),

@@ -24,7 +24,6 @@ use crate::route_plan::{
     BRIDGE_TIMEOUT_MS as BRIDGE_API_TIMEOUT_MS,
     CODEX_BRIDGE_OPUS_MODEL as CODEX_VIA_CLAUDE_OPUS_MODEL,
     CODEX_BRIDGE_SONNET_MODEL as CODEX_VIA_CLAUDE_SONNET_MODEL,
-    CODEX_VIA_CLAUDE_SCRUB as CODEX_VIA_CLAUDE_CONFLICTING,
     DIRECT_TIMEOUT_MS as DIRECT_API_TIMEOUT_MS,
 };
 
@@ -425,18 +424,35 @@ impl ForegroundRuntime {
             // the first turn: by the time a request is in flight the user has
             // already waited, and the message would arrive wrapped in the
             // harness's own API-error framing.
-            let selection = codex_selection_from_plan(plan)?;
+            if crate::route_plan::discovery_is_disabled(&env) {
+                return Err(BridgeError::DiscoveryDisabled);
+            }
+            let route = crate::route_plan::route_of(
+                plan,
+                &crate::route_plan::Ambient::from_child_env(&env),
+            );
+            let render = crate::route_plan::render_codex_bridge(
+                &route,
+                crate::route_plan::CodexBridgeRequest {
+                    default_model: codex_selection_from_plan(plan)?,
+                    selected_model_cli_id: plan
+                        .model_selection
+                        .as_ref()
+                        .and_then(|selection| selection.model.as_deref()),
+                },
+            );
             let bridge = BridgeHandle::start(
                 BridgeConfig::default()
-                    .with_default_model(selection.clone())
-                    .with_selected_model_cli_id(
-                        plan.model_selection
-                            .as_ref()
-                            .and_then(|selection| selection.model.clone()),
-                    )
-                    .with_allowed_models(codex_via_claude_bridge_allowlist(plan)),
+                    .with_default_model(render.default_model)
+                    .with_selected_model_cli_id(render.selected_model_cli_id)
+                    .with_allowed_models(render.allowed_models),
             )?;
-            apply_cross_route_overlay(&mut env, &bridge)?;
+            crate::route_plan::render_codex_bridge_env(
+                &route,
+                bridge.base_url(),
+                bridge.bearer_token(),
+            )
+            .apply(&mut env);
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), Vec::new())
         } else if is_anthropic_compat_via_claude(plan) {
@@ -1133,19 +1149,6 @@ fn model_pin_notices(plan: &LaunchPlan, color: bool) -> Vec<String> {
     }]
 }
 
-/// The bridge boundary for the codex-via-claude route (#1257): the launch's
-/// pin plus this route's own injected role rows -- DD-038's opus/sonnet
-/// substitutions are sent by clud's own overlay, so refusing them at the
-/// bridge would refuse clud's own configuration. An empty pin stays empty:
-/// unconstrained launches are byte-for-byte the pre-#1257 behavior.
-/// The boundary this bridge serves (#1257): the launch's pin, widened by the
-/// two role rows the bridge injects itself, so DD-038's substitutions are
-/// inside the boundary by construction. The decision lives in `route_plan`;
-/// this is the render-site alias.
-fn codex_via_claude_bridge_allowlist(plan: &LaunchPlan) -> Vec<String> {
-    crate::route_plan::codex_bridge_allowlist(plan)
-}
-
 /// The image-capability warning for a launch whose model cannot accept images,
 /// or `None` when there is nothing to warn about (#1200).
 ///
@@ -1223,78 +1226,6 @@ fn codex_selection_from_plan(plan: &LaunchPlan) -> Result<Option<ModelSpec>, Bri
         .map(ModelSpec::parse)
         .transpose()
         .map_err(|error| BridgeError::Model(error.to_string()))
-}
-
-fn apply_cross_route_overlay(
-    env: &mut Vec<(String, String)>,
-    bridge: &BridgeHandle,
-) -> Result<(), BridgeError> {
-    if env.iter().any(|(key, value)| {
-        env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            && (value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
-    }) {
-        return Err(BridgeError::DiscoveryDisabled);
-    }
-    env.retain(|(key, _)| {
-        !CODEX_VIA_CLAUDE_CONFLICTING
-            .iter()
-            .any(|conflicting| env_key_eq(key, conflicting))
-            && !env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            && !key
-                .to_ascii_uppercase()
-                .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
-    });
-    env.push((
-        "ANTHROPIC_BASE_URL".to_string(),
-        bridge.base_url().to_string(),
-    ));
-    env.push((
-        "ANTHROPIC_AUTH_TOKEN".to_string(),
-        bridge.bearer_token().to_string(),
-    ));
-    // The built-in `opus` and `sonnet` aliases also select models for Claude
-    // Code workflows and subagents. The bridge cannot serve Anthropic model
-    // IDs, so bind them to honest, advertised Codex rows. This deliberately
-    // leaves Haiku alone: it is used for Claude Code side work and has no
-    // corresponding Codex tier policy.
-    env.extend([
-        (
-            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-            CODEX_VIA_CLAUDE_OPUS_MODEL.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".to_string(),
-            "Codex Sol (OpenAI)".to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-            CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME".to_string(),
-            "Codex Terra (OpenAI)".to_string(),
-        ),
-    ]);
-    // Claude Code 2.1.223+ discovers every provider-scoped row from the
-    // bridge. Its context override is process-wide, so the catalog must prove
-    // that every switchable Codex row has one common real ceiling.
-    let context_tokens = crate::provider_catalog::common_claude_context_tokens(
-        ModelProvider::Codex,
-    )
-    .ok_or_else(|| {
-        BridgeError::Model(
-            "Codex Claude-discovery models need one explicit common context-token ceiling"
-                .to_string(),
-        )
-    })?;
-    set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
-    set_env(
-        env,
-        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-        &context_tokens.to_string(),
-    );
-    push_default(env, "API_TIMEOUT_MS", BRIDGE_API_TIMEOUT_MS);
-    Ok(())
 }
 
 fn apply_route_context(env: &mut Vec<(String, String)>, plan: &LaunchPlan) {
@@ -4071,12 +4002,12 @@ mod tests {
     fn codex_via_claude_folds_its_role_rows_into_the_boundary_without_dupes() {
         // Unconstrained stays unconstrained: no boundary, no injected rows.
         let mut route = plan(ModelProvider::Codex, Backend::Claude);
-        assert!(codex_via_claude_bridge_allowlist(&route).is_empty());
+        assert!(crate::route_plan::codex_bridge_allowlist(&route).is_empty());
         // A pin gains the route's own injected role rows (DD-038), or the
         // bridge would refuse clud's own configuration.
         route.allowed_models = vec!["gpt-5.6-luna".to_string()];
         assert_eq!(
-            codex_via_claude_bridge_allowlist(&route),
+            crate::route_plan::codex_bridge_allowlist(&route),
             vec![
                 "gpt-5.6-luna".to_string(),
                 CODEX_VIA_CLAUDE_OPUS_MODEL.to_string(),
@@ -4089,7 +4020,7 @@ mod tests {
             "gpt-5.6-luna".to_string(),
         ];
         assert_eq!(
-            codex_via_claude_bridge_allowlist(&route),
+            crate::route_plan::codex_bridge_allowlist(&route),
             vec![
                 CODEX_VIA_CLAUDE_SONNET_MODEL.to_string(),
                 "gpt-5.6-luna".to_string(),
