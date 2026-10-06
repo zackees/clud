@@ -124,3 +124,13 @@ def test_router_warns_that_a_wire_id_escapes_a_gateway_pin() -> None:
     text = " ".join(_read("grind").split())
     assert "the tier aliases `opus`, `sonnet` and `haiku` resolve to the pinned id" in text
     assert "billed outside the pin" in text
+
+
+def test_finish_makes_the_status_comment_final() -> None:
+    """#1812: a live OpenRouter run left `#1818: running` in its status
+    comment, because only section 4 mentioned the final edit."""
+    text = _read("grind")
+    finish = text[text.index("## 5. Finish") :]
+    flat = " ".join(finish.split())
+    assert "Then make the status comment final" in flat
+    assert "none still reads `running`" in flat
