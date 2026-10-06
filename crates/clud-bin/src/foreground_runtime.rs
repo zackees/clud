@@ -442,6 +442,7 @@ impl ForegroundRuntime {
                 .get()
                 .map_err(|_| BridgeError::AnthropicCompatCredentials)?
                 .ok_or(BridgeError::AnthropicCompatCredentials)?;
+            refuse_blocked_free_model(descriptor, plan, &secret)?;
             apply_anthropic_compat_overlay(
                 &mut env,
                 &secret,
@@ -917,6 +918,36 @@ pub fn launch_context_plan_facts(plan: &LaunchPlan) -> crate::launch_context::Pl
 
 /// The wire model the direct overlay launches: the selection's, else the
 /// provider's reviewed catalog default.
+/// #1833: a free OpenRouter id whose every endpoint the workspace guardrail
+/// excludes would fail on the first turn with a bare 400. Probe it once, only
+/// for an id the catalog proved free (so the probe never bills), and refuse
+/// the launch with the fix instead.
+fn refuse_blocked_free_model(
+    descriptor: &crate::provider_registry::AnthropicCompatProvider,
+    plan: &LaunchPlan,
+    secret: &str,
+) -> Result<(), BridgeError> {
+    if descriptor.provider != ModelProvider::OpenRouter {
+        return Ok(());
+    }
+    let Some(wire) = plan
+        .model_selection
+        .as_ref()
+        .and_then(|selection| selection.wire_model.as_deref())
+    else {
+        return Ok(());
+    };
+    let catalog = crate::openrouter_catalog::catalog_cached_or_embedded();
+    if crate::openrouter_free::check(wire, &catalog) != crate::openrouter_free::FreeCheck::Free {
+        return Ok(());
+    }
+    let paid_note = crate::openrouter_free::paid_alternative(wire, &catalog);
+    match crate::openrouter_free::probe(wire, secret, &paid_note) {
+        crate::openrouter_free::ProbeVerdict::Blocked(message) => Err(BridgeError::Model(message)),
+        crate::openrouter_free::ProbeVerdict::Proceed => Ok(()),
+    }
+}
+
 fn direct_wire_model(
     provider: ModelProvider,
     selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
