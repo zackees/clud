@@ -69,6 +69,14 @@ helper extraction and local coverage gaps do not justify `ci-full` or
 When the prompt says PLAN-ONLY, skip steps 2-5 and only classify:
 
 - Read each child (`gh issue view <n> --comments`) and the code it names.
+  Run one plain command per call: clud's hook refuses `cd`, shell loops
+  and command substitution for the planner, so read the children one by
+  one. If a read is refused, try a plainer form; classify from titles
+  alone only as a last resort, and then set `confident` to false and report
+  the refused command as a `tooling` problem.
+- Keep it short: classification reads the issues and only the code needed
+  to place each child, not a whole plan. A planner that never returns
+  stalls the run, and nothing times it out.
 - Classify each child as a **bug** (a self-contained fix to existing
   behaviour, independent of the other children, landing as its own PR into
   the default branch) or a **feature** (one part of a single cohesive

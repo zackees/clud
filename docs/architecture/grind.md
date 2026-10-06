@@ -146,8 +146,9 @@ carries its parent session's id (`tests/harness/test_grind_facts.py`), so
 every agent resolves its own run. Two runs, in one repo or two, never share
 or clobber facts, and one run finishing cannot change another's caps. A
 session with no file, or with a file older than 72 hours (a crashed run the
-session-temp sweep has not removed yet; `clud grind-facts path` refreshes a
-live one, and `/grind-cron` asks for it every tick), gets the strictest caps
+session-temp sweep has not removed yet; every hook lookup and
+`clud grind-facts path` refresh a live one, and `/grind-cron` asks for it
+every tick), gets the strictest caps
 (sequential, no CI), and the hook log says why
 (`crates/clud-bin/src/grind_facts.rs`,
 [DD-103](../DESIGN_DECISIONS.md#dd-103-grind-run-facts-are-keyed-by-session-id-and-live-under-cludtmpgrind)).
@@ -222,6 +223,12 @@ this is the contract.
   into `<main>` whose `grind/meta-<X>-…` head names the top meta or one of
   its sub-metas, since a group's feature branch carries its sub-meta's
   number. A feature PR under a different top meta does not block.
+- **Abandoned feature PRs.** A stalled or ended run leaves its feature PR
+  open (#1819). The router marks a blocking PR *abandoned* when no goal
+  landed on it and no run owning it (`clud grind-facts owner <pr>`) has
+  made a tool call in 30 minutes; the hook refreshes a run's facts file on
+  every lookup, so its age is that run's silence. The question round then
+  offers to close it and run the feature stage. A live PR always blocks.
 - `grind-run.js` enforces the deferral and the no-overlap rule, not just the
   router.
 - **Closing the top meta.** The chosen group's feature PR carries

@@ -55,7 +55,7 @@ def test_question_round_fits_two_ask_user_question_calls() -> None:
     # U12: every item, at most 4 per call.
     assert items == [
         "Dirty repo",
-        "Regroup",
+        "Regroup or Blocking feature PR",
         "Mode",
         "Models",
         "Local CI",
@@ -64,7 +64,8 @@ def test_question_round_fits_two_ask_user_question_calls() -> None:
         "Problem reporting",
     ], items
     for item in items:
-        assert f"- **{item}" in round_, item
+        for alternative in item.split(" or "):
+            assert f"- **{alternative}" in round_, alternative
 
 
 def test_carry_is_offered_only_with_a_feature_stage() -> None:

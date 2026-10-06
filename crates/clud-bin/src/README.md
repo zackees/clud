@@ -802,7 +802,7 @@ Quick lookup, which file owns a given subcommand:
   `/grind` launch (#1803); the gate keys that exemption on the same
   `args::is_reconcile` predicate. See
   [grind.md](../../../docs/architecture/grind.md#never-losing-issues-in-feature-mode).
-- `clud grind-facts path|clear` -> `grind_facts.rs` (dispatched early in
+- `clud grind-facts path|clear|task|owner` -> `grind_facts.rs` (dispatched early in
   `main.rs`): this session's `/grind` run-facts file,
   `~/.clud/tmp/grind/<session_id>.json`, which the hook's grind caps read by
   the payload's `session_id` (#1337); see
