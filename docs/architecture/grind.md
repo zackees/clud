@@ -609,6 +609,14 @@ The rationale is in
 - Exactly **one** integrator runs at a time. It is the only role that
   builds, so builds never overlap and caches stay warm. No `bosn` wrapper is
   needed or allowed.
+  **bosn substitute** (#1818). CLAUDE.md's "run through `bosn ci`" rule
+  applies to interactive sessions, not grind roles: the grind-integrator's
+  caps hook denies `bosn`, so the integrator never runs it. Inside a run it
+  runs the run's chosen scripts (`./lint`, `./test`, or the planner's verify
+  commands) directly, in the background when they may exceed 600s and never
+  piped through `tail`. The pre-push full-PR bosn / local-gate pass is not
+  run by the integrator; GitHub CI on the PR is the CI of record.
+  Native-platform coverage gaps are reported, never claimed as covered.
 - The planner declares `depends_on`. An isolated goal rebases onto
   `origin/<base>` (`<main>` in the bug stage, the feature branch in the
   feature stage). A dependent goal waits until its dependency merges, then
