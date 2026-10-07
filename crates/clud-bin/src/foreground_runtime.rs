@@ -924,11 +924,15 @@ fn prepare_dsh_child(
     plan: &LaunchPlan,
     env: &mut Vec<(String, String)>,
 ) -> Result<(), BridgeError> {
-    let selection = plan.model_selection.as_ref();
+    // The route decides the model, the key variable and the base URL; dsh
+    // itself owns everything else about its provider configuration.
+    let route = crate::route_plan::route_of(plan, &crate::route_plan::Ambient::from_child_env(env));
+    let render = crate::route_plan::render_dsh(&route);
     let facts = crate::dsh_harness::ChildFacts {
         executable: plan.command.first().map(String::as_str).unwrap_or("dsh"),
-        provider: plan.model_provider(),
-        wire_model: crate::dsh_harness::openrouter_model(selection),
+        provider: render.provider,
+        wire_model: render.wire_model.as_deref(),
+        base_url: render.base_url.as_deref(),
     };
     let vault = |provider: ModelProvider| {
         use crate::provider_auth::SecretStore as _;

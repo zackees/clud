@@ -1280,6 +1280,28 @@ pub fn render_unified_env(
     overlay
 }
 
+/// The DeepSeek-native harness's render. `dsh` owns its own provider
+/// configuration, so the route contributes exactly three things: the model to
+/// serve, the environment variable its key travels in, and the base URL of the
+/// OpenRouter overlay clud writes for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DshRender {
+    pub provider: ModelProvider,
+    pub wire_model: Option<String>,
+    pub key_env: Option<String>,
+    pub base_url: Option<String>,
+}
+
+pub fn render_dsh(route: &ResolvedRoute) -> DshRender {
+    let upstream = route.upstreams.first();
+    DshRender {
+        provider: upstream.map_or(route.provider, |upstream| upstream.provider),
+        wire_model: route.slots.main.as_ref().map(|slot| slot.wire_id.clone()),
+        key_env: route.credential_env().map(str::to_string),
+        base_url: upstream.map(|upstream| upstream.base_url.clone()),
+    }
+}
+
 /// OpenRouter's upstream routing object, when the launch asked for one.
 /// Validation of the slugs themselves stays where the refusal is printed.
 fn provider_routing(provider: ModelProvider, slugs: &[String]) -> Option<ProviderRouting> {
