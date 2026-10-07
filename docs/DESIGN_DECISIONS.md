@@ -6661,3 +6661,31 @@ descriptor and no pin, so there is nothing to decide.
 **Rejected.** Keeping the two slot decisions (that is the split #1852 deletes);
 applying the descriptor only when the provider is the launch's own (the
 gateway's whole point is that one process serves several providers).
+
+## DD-167: the unified gateway injects `--provider-only` itself
+
+**Context.** `--provider-only` pins OpenRouter's upstream routing. Until now it
+was refused unless the launch was a *direct* `--openrouter` one, because clud
+not in the request path has only one way to hand the object over:
+`CLAUDE_CODE_EXTRA_BODY`, which the harness merges into its own requests
+(#1833/#1852 divergence #2). On `--unified` clud *is* in the request path — it
+proxies every turn — so the refusal was a limitation of where the object was
+rendered, not of the mechanism.
+
+**Decision.** The refusal now requires only that the launch name OpenRouter. The
+resolver's `ProviderRouting` is the single value either renderer produces: the
+direct route writes it into `CLAUDE_CODE_EXTRA_BODY` as before, and
+`UnifiedGatewayConfig::with_upstream_routing` injects the same
+`{"only": [...], "allow_fallbacks": false}` object into every request the
+gateway forwards to OpenRouter. Requests to any other upstream are untouched —
+the injection is keyed on the attempt's provider, not on the launch.
+
+**Consequences.** `--unified --model <openrouter row> --provider-only <slug>` is
+now valid and pinned identically to the direct route. A body that is not a JSON
+object is forwarded untouched rather than refused: the pin is a routing hint and
+the upstream's own error names the problem better than a clud-side refusal
+would.
+
+**Rejected.** Refusing `--provider-only` on unified and documenting the
+asymmetry (it is exactly the accidental per-route difference #1852 exists to
+remove); a second gateway-only flag for the same object.

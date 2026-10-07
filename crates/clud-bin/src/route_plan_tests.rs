@@ -708,6 +708,43 @@ fn a_free_wire_id_is_classified_from_the_offline_catalog() {
     assert!(refusal.contains("cannot confirm it is free"), "{refusal}");
 }
 
+/// B11/C17: `--provider-only` produces one `ProviderRouting` value, valid on
+/// both routes that can carry it and refused -- naming the backend -- where
+/// they cannot.
+#[test]
+fn provider_only_is_one_value_on_direct_and_unified() {
+    let mut direct = plan(ModelProvider::OpenRouter, Backend::Claude);
+    direct.provider_only = vec!["parasail/fp8".to_string()];
+    let mut unified = direct.clone();
+    unified.routing_mode = RoutingMode::Unified;
+
+    let direct = resolve(&direct, &Ambient::default());
+    let unified = resolve(&unified, &Ambient::default());
+    assert_eq!(direct.upstream_routing, unified.upstream_routing);
+
+    let catalog = catalog();
+    for route in [&direct, &unified] {
+        let check = evaluate(route, &catalog)
+            .into_iter()
+            .find(|verdict| verdict.check.name == "provider_only")
+            .expect("classified");
+        assert_eq!(check.check.applicability, Applicability::Applies);
+        assert_eq!(check.refusal, None);
+    }
+
+    // A backend that cannot carry the object refuses it, and the refusal names
+    // the check.
+    let mut bridge = plan(ModelProvider::Codex, Backend::Claude);
+    bridge.provider_only = vec!["parasail/fp8".to_string()];
+    let bridge = resolve(&bridge, &Ambient::default());
+    let refusal = first_refusal(&bridge, &catalog).expect("the bridge refuses the pin");
+    assert!(refusal.starts_with("provider_only:"), "{refusal}");
+    assert!(
+        refusal.contains("only to an OpenRouter launch clud routes"),
+        "{refusal}"
+    );
+}
+
 /// The scrub list each backend owns, including the prefix rule.
 #[test]
 fn each_backend_scrubs_the_keys_it_owns() {

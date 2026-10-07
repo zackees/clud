@@ -125,6 +125,10 @@ pub struct UnifiedGatewayConfig {
     /// Ordered fallback routes. Empty by default, so a launch that did not ask
     /// for failover keeps exactly today's behavior and today's spend.
     failover: FailoverLadder,
+    /// `--provider-only` (#1863): the OpenRouter upstream routing object every
+    /// request forwarded to OpenRouter must carry. `None` leaves OpenRouter's
+    /// own routing alone, which is the pre-#1863 behavior everywhere.
+    upstream_routing: Option<crate::route_plan::ProviderRouting>,
     /// Which routes can serve right now. Shared across connections because a
     /// route drained on one turn must stay drained for the next one, and
     /// launch-scoped because a wedged account in this session must never
@@ -140,6 +144,7 @@ impl UnifiedGatewayConfig {
             codex_available,
             anthropic_base_url: ANTHROPIC_MESSAGES_BASE_URL.to_string(),
             failover: FailoverLadder::default(),
+            upstream_routing: None,
             route_ledger: Arc::new(Mutex::new(RouteLedger::new())),
         }
         .with_route(ModelProvider::DeepSeek, deepseek_api_key)
@@ -215,6 +220,37 @@ impl UnifiedGatewayConfig {
     pub fn with_failover(mut self, failover: FailoverLadder) -> Self {
         self.failover = failover;
         self
+    }
+
+    /// The upstream routing object this gateway must inject (#1863).
+    pub fn with_upstream_routing(
+        mut self,
+        routing: Option<crate::route_plan::ProviderRouting>,
+    ) -> Self {
+        self.upstream_routing = routing;
+        self
+    }
+
+    /// The body to forward for `provider`: the client's own bytes, or -- for an
+    /// OpenRouter route with a `--provider-only` pin -- the same document with
+    /// `provider` merged in. A body that is not a JSON object is forwarded
+    /// untouched rather than refused: the pin is a routing hint, not a
+    /// validation gate, and the upstream's own error is more useful.
+    fn routed_body(&self, provider: ModelProvider, body: &[u8]) -> Option<Vec<u8>> {
+        if provider != ModelProvider::OpenRouter {
+            return None;
+        }
+        let routing = self.upstream_routing.as_ref()?;
+        let mut document: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(body).ok()?;
+        document.insert(
+            "provider".to_string(),
+            serde_json::json!({
+                "only": routing.only,
+                "allow_fallbacks": routing.allow_fallbacks,
+            }),
+        );
+        serde_json::to_vec(&serde_json::Value::Object(document)).ok()
     }
 
     /// Point every unified proxy destination at the deterministic foreground
@@ -2017,6 +2053,9 @@ fn dispatch_unified_attempt(
             let route = unified
                 .route_for(provider)
                 .expect("guarded by route_for above");
+            // #1863: the gateway can honour `--provider-only` itself, because
+            // it owns the request path.
+            let routed = unified.routed_body(provider, payload);
             serve_unified_anthropic_proxy(
                 stream,
                 turn.conversations,
@@ -2024,7 +2063,7 @@ fn dispatch_unified_attempt(
                 attempt.route,
                 &route.base_url,
                 "/v1/messages",
-                payload,
+                routed.as_deref().unwrap_or(payload),
                 turn.headers,
                 Some(&route.api_key),
                 config.stream_idle_timeout,
@@ -2130,6 +2169,13 @@ fn finish_without_failover(
         Some(route) => (route.base_url.as_str(), Some(route.api_key.as_str())),
         None => (unified.anthropic_base_url.as_str(), None),
     };
+    let provider = match route {
+        ConversationRoute::DeepSeek => ModelProvider::DeepSeek,
+        ConversationRoute::Kimi => ModelProvider::Kimi,
+        ConversationRoute::OpenRouter => ModelProvider::OpenRouter,
+        ConversationRoute::Claude | ConversationRoute::Codex => ModelProvider::Claude,
+    };
+    let routed = unified.routed_body(provider, payload);
     serve_unified_anthropic_proxy(
         stream,
         conversations,
@@ -2137,7 +2183,7 @@ fn finish_without_failover(
         route,
         base_url,
         "/v1/messages",
-        payload,
+        routed.as_deref().unwrap_or(payload),
         headers,
         key,
         config.stream_idle_timeout,
