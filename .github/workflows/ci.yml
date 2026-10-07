@@ -68,6 +68,7 @@ jobs:
       mode: ${{ steps.mode.outputs.tier }}
       source_ref: ${{ steps.source.outputs.ref }}
       reuse: ${{ steps.reuse.outputs.reuse }}
+      reuse_evidence: ${{ steps.reuse.outputs.evidence_json }}
       would_reuse: ${{ steps.reuse.outputs.would_reuse }}
       reuse_reason: ${{ steps.reuse.outputs.reason }}
       reuse_pr: ${{ steps.reuse.outputs.pr }}
@@ -130,7 +131,7 @@ jobs:
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
           repository: zackees/ci.yml
-          ref: 6067b7daf48e41f15d31655502425668eeefcd1c
+          ref: e306cc60e101aa52cfa2d94e9f90833780742abb
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
@@ -539,7 +540,21 @@ jobs:
       - test-macos-x64
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     steps:
+      - name: Checkout verified source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ needs.static.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+        with:
+          enable-cache: false
       - name: Default-branch reuse evidence
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -559,91 +574,15 @@ jobs:
               echo 'No job was skipped; every selected job ran in full.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-      # `always()` plus explicit result inspection is required: a failing
-      # `needs` would otherwise skip this job and leave the check pending
-      # forever rather than reporting red.
-      #
-      # Skips are permitted only outside the resolved mode's required cells,
-      # plus a MINIMAL lane the static job skipped as attested (GATE-008/010):
-      # MINIMAL maps exactly that case to success. WINDOWS and FULL read raw
-      # results, and full labels never trust, so they cannot see one.
-      # Explicit result lists ensure a malformed condition cannot green a
-      # run that never built or tested a required target.
+      # The shared verifier derives required jobs from this workflow and
+      # independently verifies local attestations and default-branch reuse.
       - name: Check results
         env:
           RESULTS: ${{ toJSON(needs) }}
-          MODE: ${{ needs.static.outputs.mode }}
-          STATIC: ${{ needs.static.result }}
-          WINDOWS: >-
-            ${{ needs.dylint.result }}
-            ${{ needs.build-windows-x64.result }}
-            ${{ needs.test-windows-x64.result }}
-          MINIMAL: >-
-            ${{ needs.static.result }}
-            ${{ needs.static.outputs.skip_static-checks == 'true' && needs.static-checks.result == 'skipped' && 'success' || needs.static-checks.result }}
-            ${{ needs.static.outputs.skip_dylint == 'true' && needs.dylint.result == 'skipped' && 'success' || needs.dylint.result }}
-            ${{ needs.static.outputs.skip_lint-linux-x64 == 'true' && needs.lint-linux-x64.result == 'skipped' && 'success' || needs.lint-linux-x64.result }}
-            ${{ needs.static.outputs.skip_build-linux-x64 == 'true' && needs.build-linux-x64.result == 'skipped' && 'success' || needs.build-linux-x64.result }}
-            ${{ needs.static.outputs.skip_test-linux-x64-unit == 'true' && needs.test-linux-x64-unit.result == 'skipped' && 'success' || needs.test-linux-x64-unit.result }}
-          EXTENDED: >-
-            ${{ needs.test-linux-x64-integration.result }}
-            ${{ needs.build-windows-x64.result }}
-            ${{ needs.test-windows-x64.result }}
-          FULL: >-
-            ${{ needs.dylint.result }}
-            ${{ needs.test-linux-x64-harness.result }}
-            ${{ needs.build-macos-arm.result }}
-            ${{ needs.test-macos-arm.result }}
-            ${{ needs.build-linux-arm.result }}
-            ${{ needs.test-linux-arm.result }}
-            ${{ needs.build-windows-arm.result }}
-            ${{ needs.test-windows-arm.result }}
-            ${{ needs.build-macos-x64.result }}
-            ${{ needs.test-macos-x64.result }}
+          REUSE_EVIDENCE: ${{ needs.static.outputs.reuse_evidence }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "$RESULTS"
-          if echo "$RESULTS" | grep -qE '"result": *"(failure|cancelled)"'; then
-            echo "::error::one or more CI jobs failed or were cancelled"
-            exit 1
-          fi
-          case "$MODE" in minimal|extended|full|windows) ;; *)
-            echo "::error::CI mode was not resolved (got '$MODE')"
-            exit 1;;
-          esac
-          # ci-windows (#1310) skips Linux integration and the other targets,
-          # but still requires every minimal lane (#1652): no merge queue
-          # exists (#1651), so this run is the only pre-merge Linux test of
-          # the PR head SHA. Same-run results; no cross-run lookup.
-          if [ "$MODE" = "windows" ]; then
-            for result in $MINIMAL $WINDOWS; do
-              if [ "$result" != "success" ]; then
-                echo "::error::a ci-windows lane did not run to success (got '$result')"
-                exit 1
-              fi
-            done
-            echo "ci-windows: minimal Linux + Windows x64 lanes passed (macOS not run)"
-            exit 0
-          fi
-          for result in $MINIMAL; do
-            if [ "$result" != "success" ]; then
-              echo "::error::a minimal lane did not run to success (got '$result')"
-              exit 1
-            fi
-          done
-          if [ "$MODE" = "extended" ] || [ "$MODE" = "full" ]; then
-            for result in $EXTENDED; do
-              if [ "$result" != "success" ]; then
-                echo "::error::an extended lane did not run to success (got '$result')"
-                exit 1
-              fi
-            done
-          fi
-          if [ "$MODE" = "full" ]; then
-            for result in $FULL; do
-              if [ "$result" != "success" ]; then
-                echo "::error::a full-tier lane did not run to success (got '$result')"
-                exit 1
-              fi
-            done
-          fi
+          printf '%s\n' "$RESULTS" >needs.json
+          printf '%s\n' "${REUSE_EVIDENCE:-null}" >reuse-check.json
+          uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint gate --repo . --workflow-plan ci.yml --needs needs.json --default-branch-reuse reuse-check.json --attested-workflow ci.yml --event "$GITHUB_EVENT_PATH"

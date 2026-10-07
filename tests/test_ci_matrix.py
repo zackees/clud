@@ -79,10 +79,8 @@ def test_full_and_release_include_both_hosted_macos_architectures():
     arm = workflow.split("\n  build-macos-arm:\n", 1)[1].split("\n  test-macos-arm:\n", 1)[0]
     assert "if: needs.static.outputs.mode == 'full'" in arm
     gate = workflow.split("\n  ci-ok:\n", 1)[1]
-    extended = gate.split("EXTENDED: >-", 1)[1].split("FULL: >-", 1)[0]
-    full_gate = gate.split("FULL: >-", 1)[1]
-    assert "needs.test-macos-arm.result" not in extended
-    assert "needs.test-macos-arm.result" in full_gate
+    assert "- test-macos-arm" in gate
+    assert "- test-macos-x64" in gate
 
 
 def test_release_keeps_six_wheels_and_builds_two_separate_static_linux_assets() -> None:
@@ -164,7 +162,6 @@ def test_harness_suite_runs_in_full_mode_and_is_gated():
     assert "suite: harness" in block
     gate = text.split("\n  ci-ok:\n", 1)[1]
     assert "- test-linux-x64-harness" in gate
-    assert "${{ needs.test-linux-x64-harness.result }}" in gate.split("FULL:", 1)[1]
     run_tests = CI_YML.with_name("_run-tests.yml").read_text(encoding="utf-8")
     assert "@anthropic-ai/claude-code@" in run_tests
     assert "if: inputs.suite == 'harness'" in run_tests
@@ -182,7 +179,7 @@ def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
         assert match, name
         block = match.group(1)
         assert "suite: [unit, integration]" in block, name
-        assert f"${{{{ needs.test-{name}.result }}}}" in gate, name
+        assert f"- test-{name}" in gate, name
 
     unit = text.split("\n  test-linux-x64-unit:\n", 1)[1].split(
         "\n  test-linux-x64-integration:\n", 1
@@ -193,14 +190,8 @@ def test_each_target_executes_both_test_suites_and_gate_checks_every_target():
     assert "suite: unit" in unit
     assert "suite: integration" in integration
     assert "if: needs.static.outputs.mode != 'minimal'" in integration
-    # Wrapped in the attested-skip mapping (GATE-008/010), not a bare result.
-    assert "needs.test-linux-x64-unit.result" in gate
-    assert "${{ needs.test-linux-x64-integration.result }}" in gate
-    minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
-    extended = gate.split("EXTENDED: >-", 1)[1].split("FULL: >-", 1)[0]
-    assert "needs.test-linux-x64-unit.result" in minimal
-    assert "needs.test-linux-x64-integration.result" not in minimal
-    assert "needs.test-linux-x64-integration.result" in extended
+    assert "- test-linux-x64-unit" in gate
+    assert "- test-linux-x64-integration" in gate
 
 
 def test_unknown_ci_label_fails_closed():
@@ -215,15 +206,15 @@ def test_workflow_binds_dispatch_and_labels_to_mode():
     assert "CANDIDATE_SHA: ${{ inputs.candidate_sha }}" in text
     assert "EVENT_SHA: ${{ github.sha }}" in text
     assert "run: python -m ci.ci_matrix" in text
-    assert "MODE: ${{ needs.static.outputs.mode }}" in text
-    assert 'case "$MODE" in minimal|extended|full|windows)' in text
+    assert "mode: ${{ steps.mode.outputs.tier }}" in text
+    assert "--workflow-plan ci.yml" in text
 
 
 def test_every_build_waits_for_mode_and_full_is_complete():
     text = CI_YML.read_text(encoding="utf-8")
     dylint = text.split("\n  dylint:\n", 1)[1].split("\n  build-linux-x64:\n", 1)[0]
     assert "mode == 'full'" not in dylint
-    assert "dylint.result" in text.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
+    assert "- dylint" in text.split("\n  ci-ok:\n", 1)[1]
     dylint_workflow = (CI_YML.parent / "_dylint.yml").read_text(encoding="utf-8")
     assert "runs-on: ubuntu-24.04" in dylint_workflow
     assert "matrix:" not in dylint_workflow
@@ -231,8 +222,7 @@ def test_every_build_waits_for_mode_and_full_is_complete():
         block = text.split(f"\n  build-{name}:\n", 1)[1].split("\n  test-", 1)[0]
         assert "    needs: static\n" in block, name
         assert "    if: needs.static.outputs.mode" in block, name
-    assert "${{ needs.dylint.result }}" in text
-    assert 'if [ "$MODE" = "full" ]; then' in text
+    assert "--workflow-plan ci.yml" in text
 
 
 def test_every_target_cross_compiles_on_linux():
@@ -495,11 +485,16 @@ def test_ci_windows_mode_runs_and_gates_on_the_routine_linux_lanes():
     windows = text.split("\n  build-windows-x64:\n", 1)[1].split("\n\n", 1)[0]
     assert "needs.static.outputs.mode == 'windows'" in windows
     gate = text.split("\n  ci-ok:\n", 1)[1]
-    branch = gate.split('if [ "$MODE" = "windows" ]; then', 1)[1].split("\n          fi\n", 1)[0]
-    # MINIMAL carries static, dylint, Linux clippy/build/unit; WINDOWS the x64 lanes.
-    assert "for result in $MINIMAL $WINDOWS; do" in branch
-    assert "$STATIC $WINDOWS" not in branch
-    assert branch.rstrip().endswith("exit 0")
+    for job in (
+        "static",
+        "dylint",
+        "lint-linux-x64",
+        "build-linux-x64",
+        "test-linux-x64-unit",
+        "build-windows-x64",
+        "test-windows-x64",
+    ):
+        assert f"- {job}" in gate, job
 
 
 def test_linux_x64_clippy_runs_beside_the_build_not_inside_it():
@@ -524,8 +519,6 @@ def test_linux_x64_clippy_runs_beside_the_build_not_inside_it():
     assert "clippy: true" not in build
     gate = text.split("\n  ci-ok:\n", 1)[1]
     assert "- lint-linux-x64" in gate
-    minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
-    assert "needs.lint-linux-x64.result" in minimal
     reusable = (CI_YML.parent / "_build-target.yml").read_text(encoding="utf-8")
     assert "inputs.compile &&" in reusable
     setup = (CI_YML.parent.parent / "actions" / "setup-build" / "action.yml").read_text(
@@ -574,11 +567,11 @@ REUSE_SKIP_JOBS = (
 WRITER_JOBS = ("dylint", "build-linux-x64")
 
 
-def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
+def test_attested_skip_is_wired_to_the_shared_verifier() -> None:
     """zackees/ci.yml GATE-008/010: an attested PR head skips exactly the
     routine Linux lanes the local bosn plan runs. Each skip job consumes its
-    static `skip_<job>` output, and `CI OK` maps an attested skip to success
-    in MINIMAL only, so a skip elsewhere still fails closed."""
+    static `skip_<job>` output. `CI OK` independently verifies the proof
+    through the same pinned shared tool."""
     root = CI_YML.parent.parent.parent
     text = CI_YML.read_text(encoding="utf-8")
     trust = (root / "local-gate.toml").read_text(encoding="utf-8")
@@ -590,8 +583,8 @@ def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
     assert pin, "ci_lint checkout must be pinned to a commit"
     assert f"zackees/ci.yml@{pin.group(1)} ci-lint local-gate run" in trust
     gate = text.split("\n  ci-ok:\n", 1)[1]
-    minimal = gate.split("MINIMAL: >-", 1)[1].split("EXTENDED: >-", 1)[0]
-    rest = gate.split("MINIMAL: >-", 1)[0] + gate.split("EXTENDED: >-", 1)[1]
+    assert f"zackees/ci.yml@{pin.group(1)} ci-lint gate" in gate
+    assert "--attested-workflow ci.yml" in gate
     for job in ATTESTED_SKIP_JOBS:
         if job in REUSE_SKIP_JOBS:
             # Attestation OR a verified default-branch reuse.
@@ -607,11 +600,8 @@ def test_attested_skip_is_wired_and_gated_only_as_success_in_minimal() -> None:
         assert f"needs.static.outputs.skip_{job} != 'true'" in block, job
         assert f'"ci.yml:{job}"' in trust, job
         assert f"ci.yml:{job}:" in attestations, job
-        assert (
-            f"needs.static.outputs.skip_{job} == 'true' && needs.{job}.result == 'skipped'"
-            f" && 'success' || needs.{job}.result" in minimal
-        ), job
-        assert f"skip_{job}" not in rest, job
+        assert f"- {job}" in gate, job
+        assert f"skip_{job}" not in gate, job
     # A label that selects lanes the local plan does not run must never trust.
     for label in ("ci-test", "ci-windows", "ci-full", "ci:full"):
         assert f'"{label}"' in trust.split("full-labels", 1)[1].split("\n", 1)[0], label
