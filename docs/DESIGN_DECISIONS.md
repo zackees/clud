@@ -6599,3 +6599,35 @@ skill, and it never auto-triggers.
 **Rejected.** Bundling upstream's `SKILL.md` (a second, drifting copy of the
 pin); a model-invocable skill (its description costs context in every
 session).
+
+## DD-165: a gateway route gets the same context window and per-turn effort as a direct route
+
+**Context.** #1852 found that the unified gateway route set neither
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` nor `CLAUDE_CODE_MODEL_CAPABILITIES`, while
+the direct route set both for the very same wire id (divergences #3 and #4).
+Claude Code therefore clamped every gateway model at its own 200k default and
+never advertised the per-turn effort capability, so the same model behaved
+differently depending on which route reached it. The unified overlay was
+written before `ResolvedRoute` (#1855) existed and re-derived its own — smaller
+— subset of the launch's decisions.
+
+**Decision.** Once the resolver owns the context window and the effort
+capability, every renderer writes them: `render_unified_env` now emits
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` (`set_default`, so an ambient user value
+still wins), `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (set, since it is clud's
+reviewed threshold for the wire id) and `CLAUDE_CODE_MODEL_CAPABILITIES`
+exactly as `render_direct_env` does. This is a deliberate behaviour change on
+the gateway route, and it is the first thing the migration fixes rather than
+preserves.
+
+**Consequences.** A gateway launch whose model has a catalogued window now
+reports the real one. A gateway launch that names no model at all still writes
+nothing, because an unpinned gateway launch sets no slot and so has no wire id
+to key either policy on; #1861 removes that gap by giving the unpinned case the
+descriptor's role mappings. The per-turn capability stays dark until the
+`per_turn_effort` server setting is flipped, so the visible change is the
+context window.
+
+**Rejected.** Keeping the gateway's smaller overlay and documenting the
+difference (that is the split #1852 exists to delete); keying the gateway's
+context on the harness default (it would keep the 200k clamp).
