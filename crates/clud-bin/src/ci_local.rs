@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use serde_json::Value;
 
 /// Lines of diagnostics shown per failing step.
@@ -58,30 +59,47 @@ impl Verdict {
     }
 }
 
+#[derive(Deserialize)]
+struct DiagnosticReport {
+    conclusion: String,
+    reason: Option<String>,
+    jobs: JobCounts,
+}
+
+#[derive(Deserialize)]
+struct JobCounts {
+    succeeded: u64,
+    failed: u64,
+    cancelled: u64,
+}
+
 /// Classify `bosn ci report --json`.
 pub fn verdict(report: &Value) -> Verdict {
-    let jobs = report.get("jobs");
-    let count = |key: &str| {
-        jobs.and_then(|jobs| jobs.get(key))
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
+    let report: DiagnosticReport = match serde_json::from_value(report.clone()) {
+        Ok(report) => report,
+        Err(error) => {
+            return Verdict::Fail {
+                succeeded: 0,
+                failed: 0,
+                reason: Some(format!("invalid diagnostic report: {error}")),
+            };
+        }
     };
-    let (succeeded, failed, cancelled) = (count("succeeded"), count("failed"), count("cancelled"));
-    let conclusion = report
-        .get("conclusion")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let reason = report
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let JobCounts {
+        succeeded,
+        failed,
+        cancelled,
+    } = report.jobs;
     let clean = failed == 0 && cancelled == 0 && succeeded > 0;
-    match conclusion {
+    let reason = report
+        .reason
+        .or_else(|| (!report.conclusion.is_empty()).then_some(report.conclusion.clone()));
+    match report.conclusion.as_str() {
         "success" if clean => Verdict::Pass { succeeded },
         _ => Verdict::Fail {
             succeeded,
-            failed: failed + cancelled,
-            reason: reason.or_else(|| (!conclusion.is_empty()).then(|| conclusion.to_string())),
+            failed: failed.saturating_add(cancelled),
+            reason,
         },
     }
 }
