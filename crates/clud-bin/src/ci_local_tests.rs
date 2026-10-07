@@ -62,6 +62,22 @@ fn success_requires_jobs_to_succeed_without_failure_or_cancellation() {
 }
 
 #[test]
+fn malformed_job_counts_cannot_turn_a_success_report_into_a_pass() {
+    for jobs in [
+        serde_json::json!({"succeeded": 2, "cancelled": 0}),
+        serde_json::json!({"succeeded": 2, "failed": 0}),
+        serde_json::json!({"succeeded": 2, "failed": "unknown", "cancelled": 0}),
+        serde_json::json!({"succeeded": 2, "failed": 0, "cancelled": null}),
+        serde_json::json!({"succeeded": 2, "failed": -1, "cancelled": 0}),
+    ] {
+        let report = serde_json::json!({"conclusion": "success", "jobs": jobs});
+        let result = verdict(&report);
+        assert!(!result.passed(), "malformed report passed: {report}");
+        assert!(!result.line().starts_with("PASS:"), "{result:?}");
+    }
+}
+
+#[test]
 fn the_failing_step_is_found_with_its_logs_selector() {
     assert_eq!(
         failed_steps(&json(SHOW_FAILURE)),
