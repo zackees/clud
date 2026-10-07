@@ -729,7 +729,14 @@ fn every_check_is_classified_for_every_backend() {
             .iter()
             .map(|check| check.name.as_str())
             .collect();
-        assert_eq!(names, vec!["openrouter_free_cost", "provider_only"]);
+        assert_eq!(
+            names,
+            vec![
+                "request_path_features",
+                "openrouter_free_cost",
+                "provider_only"
+            ]
+        );
         for check in &route.checks {
             assert!(!check.verdict.is_empty(), "{} has no verdict", check.name);
         }

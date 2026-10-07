@@ -22,6 +22,7 @@ re-explaining.
 | [architecture/launch-setup.md](architecture/launch-setup.md) | ~70 | Session-only vs global launch setup, persistent setup actions, selected-backend gating |
 | [architecture/gc-and-registry.md](architecture/gc-and-registry.md) | ~250 | always-on `clud __daemon` single-owner redb model, session cap registry, worktree scanner, GC subcommands |
 | [architecture/windows-quirks.md](architecture/windows-quirks.md) | ~300 | Windows-only platform code: trampoline, BatBadBat `.cmd` rewrite, console modes, Shift+Enter key translation, `IDropTarget`, `CREATE_NO_WINDOW`, ARM whisper carveout |
+| [architecture/route-plan.md](architecture/route-plan.md) | ~140 | `ResolvedRoute`: the one place a launch's backend, upstreams, slots, allowlist, discovery, context, effort, timeouts, scrub list and launch checks are decided; every backend renders it, launch checks run before the backend branch, and request-path features stay gateway-side (#1852) |
 | [architecture/launch-plan.md](architecture/launch-plan.md) | ~180 | `LaunchPlan` as the single source of truth: construction, consumers, `--dry-run` JSON |
 | [architecture/launch-targets.md](architecture/launch-targets.md) | ~540 | Independent model-provider and harness resolution, sticky settings, foreground bridge lifecycle, compatibility; DeepSeek direct provider (credential trust boundary, preflight, child overlay, no bridge) |
 | [architecture/provider-selection.md](architecture/provider-selection.md) | ~120 | #900's compatible launch grammar, direct-vs-unified routing mode, provider-neutral model catalog, modifier normalization, and plan/repeat propagation |
@@ -67,6 +68,7 @@ re-explaining.
 - **"Where does the argv that clud runs come from?"** -> [launch-plan.md](architecture/launch-plan.md)
 - **"How do provider and harness preferences resolve?"** -> [launch-targets.md](architecture/launch-targets.md)
 - **"Which model ID is stable, and how do effort/context reach a worker?"** -> [provider-selection.md](architecture/provider-selection.md)
+- **"Where is a launch's routing decided, and what does `--dry-run` show?"** -> [route-plan.md](architecture/route-plan.md)
 - **"How do I change a value in installed builds without a release?"** -> [server-settings.md](architecture/server-settings.md)
 - **"How does one Claude session switch safely among providers?"** -> [unified-gateway.md](architecture/unified-gateway.md)
 - **"How does Codex run through Claude, and how do I roll it back?"** -> [codex-via-claude.md](architecture/codex-via-claude.md)

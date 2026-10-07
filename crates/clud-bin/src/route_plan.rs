@@ -655,30 +655,97 @@ pub fn evaluate(
     route: &ResolvedRoute,
     catalog: &crate::openrouter_catalog::Catalog,
 ) -> Vec<CheckVerdict> {
-    let backend = route.backend;
+    vec![
+        request_path_verdict(route.backend),
+        free_cost_verdict(route, catalog),
+        provider_only_verdict(route),
+    ]
+}
+
+/// Request-path features (failover, retries, error translation, catalog
+/// filtering) need clud in the request path. Recording that as a check is how
+/// `--dry-run` can show a user why `--unified` recovers from an upstream error
+/// and `--openrouter` cannot (#1852, D21).
+fn request_path_verdict(backend: RouteBackend) -> CheckVerdict {
+    let applicability = match backend {
+        RouteBackend::Unified | RouteBackend::CodexBridge => Applicability::Applies,
+        RouteBackend::DeepSeekNative => Applicability::NotApplicable(
+            "the DeepSeek harness owns its own request path".to_string(),
+        ),
+        RouteBackend::Direct | RouteBackend::Native => Applicability::NotApplicable(
+            "clud is not in the request path on a direct route".to_string(),
+        ),
+    };
+    let verdict = match applicability {
+        Applicability::Applies => {
+            "failover, retries, error translation and catalog filtering run in clud".to_string()
+        }
+        _ => "not offered here; the direct route has no clud egress by design".to_string(),
+    };
+    CheckVerdict {
+        check: LaunchCheck {
+            name: "request_path_features".to_string(),
+            applicability,
+            verdict,
+        },
+        refusal: None,
+    }
+}
+
+/// #1833: a `:free` id is a cost promise the offline catalog has to prove. The
+/// refusal is about the id, not the backend, so every backend that can bill it
+/// is refused.
+fn free_cost_verdict(
+    route: &ResolvedRoute,
+    catalog: &crate::openrouter_catalog::Catalog,
+) -> CheckVerdict {
     let openrouter = route.provider == ModelProvider::OpenRouter;
-    let wire = route.slots.main.as_ref().map(|slot| slot.wire_id.as_str());
-    let free = wire.filter(|_| openrouter).map(|wire| {
-        let verdict = crate::openrouter_free::check(wire, catalog);
-        (wire.to_string(), verdict)
+    let wire = route
+        .slots
+        .main
+        .as_ref()
+        .map(|slot| slot.wire_id.as_str())
+        .filter(|_| openrouter);
+    let free = wire.map(|wire| {
+        (
+            wire.to_string(),
+            crate::openrouter_free::check(wire, catalog),
+        )
     });
-    let free_applicability = if openrouter && free.is_some() {
-        // A `:free` promise is about the id, not the backend: every backend
-        // that can bill it must prove it (B10).
+    let applicability = if free.is_some() {
         Applicability::Applies
     } else if openrouter {
         Applicability::NotApplicable("the launch names no model".to_string())
     } else {
         Applicability::NotApplicable("the launch does not name an OpenRouter model".to_string())
     };
-    let free_verdict = match &free {
-        Some((wire, verdict)) => match crate::openrouter_free::refusal(wire, verdict, catalog) {
-            Some(refusal) => format!("refused: {refusal}"),
-            None => format!("proved free by the offline catalog ({})", verdict.as_str()),
-        },
-        None => "no `:free` wire id on this launch".to_string(),
+    let refusal = free
+        .as_ref()
+        .and_then(|(wire, verdict)| crate::openrouter_free::refusal(wire, verdict, catalog));
+    let verdict = match (&free, &refusal) {
+        (_, Some(refusal)) => format!("refused: {refusal}"),
+        (Some((_, verdict)), None) => {
+            format!("proved free by the offline catalog ({})", verdict.as_str())
+        }
+        (None, None) => "no `:free` wire id on this launch".to_string(),
     };
-    let provider_only_applicability = if route.upstream_routing.is_none() {
+    CheckVerdict {
+        check: LaunchCheck {
+            name: "openrouter_free_cost".to_string(),
+            applicability,
+            verdict,
+        },
+        refusal,
+    }
+}
+
+/// OpenRouter's upstream routing object. Only an OpenRouter launch clud routes
+/// can carry it: the direct route writes `CLAUDE_CODE_EXTRA_BODY`, the gateway
+/// injects it per request, and nothing else can receive it.
+fn provider_only_verdict(route: &ResolvedRoute) -> CheckVerdict {
+    let backend = route.backend;
+    let openrouter = route.provider == ModelProvider::OpenRouter;
+    let applicability = if route.upstream_routing.is_none() {
         Applicability::NotApplicable("no --provider-only slugs on this launch".to_string())
     } else if matches!(
         backend,
@@ -694,49 +761,32 @@ pub fn evaluate(
             "only OpenRouter publishes an upstream routing object".to_string(),
         )
     };
-    let provider_only_refusal =
-        matches!(provider_only_applicability, Applicability::Unsupported(_)).then(|| {
-            match provider_only_applicability.clone() {
-                Applicability::Unsupported(reason) => reason,
-                _ => unreachable!("guarded by the matches! above"),
-            }
-        });
-    let provider_only_verdict = match provider_only_refusal.as_deref() {
-        Some(_) => "refused before launch".to_string(),
-        None => match (route.upstream_routing.as_ref(), backend) {
-            (Some(routing), RouteBackend::Direct) => {
-                format!(
-                    "rendered into CLAUDE_CODE_EXTRA_BODY for {:?}",
-                    routing.only
-                )
-            }
-            (Some(_), RouteBackend::Unified) => {
-                "the gateway injects provider.only per request (#1863)".to_string()
-            }
-            (Some(_), _) => "refused before launch".to_string(),
-            (None, _) => "nothing to pin".to_string(),
-        },
+    let refusal = match &applicability {
+        Applicability::Unsupported(reason) => Some(reason.clone()),
+        _ => None,
     };
-    vec![
-        CheckVerdict {
-            check: LaunchCheck {
-                name: "openrouter_free_cost".to_string(),
-                applicability: free_applicability,
-                verdict: free_verdict,
-            },
-            refusal: free.as_ref().and_then(|(wire, verdict)| {
-                crate::openrouter_free::refusal(wire, verdict, catalog)
-            }),
+    let verdict = match (&refusal, route.upstream_routing.as_ref(), backend) {
+        (Some(_), _, _) => "refused before launch".to_string(),
+        (None, Some(routing), RouteBackend::Direct) => {
+            format!(
+                "rendered into CLAUDE_CODE_EXTRA_BODY for {:?}",
+                routing.only
+            )
+        }
+        (None, Some(_), RouteBackend::Unified) => {
+            "the gateway injects provider.only per request (#1863)".to_string()
+        }
+        (None, Some(_), _) => "refused before launch".to_string(),
+        (None, None, _) => "nothing to pin".to_string(),
+    };
+    CheckVerdict {
+        check: LaunchCheck {
+            name: "provider_only".to_string(),
+            applicability,
+            verdict,
         },
-        CheckVerdict {
-            check: LaunchCheck {
-                name: "provider_only".to_string(),
-                applicability: provider_only_applicability,
-                verdict: provider_only_verdict,
-            },
-            refusal: provider_only_refusal,
-        },
-    ]
+        refusal,
+    }
 }
 
 /// The first refusal any check produces, with the check's name, or `None` when
