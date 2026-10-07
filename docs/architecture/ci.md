@@ -222,8 +222,8 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e ci-lint local-gate run
-git push --force-with-lease
+uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate push --sha <stamped-head>
 ```
 
 The gate refuses an uncommitted tree. On a cold commit it invokes
@@ -241,12 +241,12 @@ must match that profile. Hosted skips obey the PR base's lane age limits
 The provider must emit qualified identities for skipped jobs as well as
 completed jobs; a missing identity refuses proof.
 
-This branch is the adoption candidate for
-[ci.yml#362](https://github.com/zackees/ci.yml/issues/362). It requires the
-qualified act2 capability release and verified corresponding Bosn artifact
-pins; the installed Bosn 0.1.15 / act2.10 combination cannot qualify it.
-The source resolver accounts for eight concrete jobs and 96 checks across the
-full routine union, but real local/hosted skip qualification is still pending.
+The [ci.yml#362](https://github.com/zackees/ci.yml/issues/362) pilot uses
+public Bosn 0.1.18 and act2.15 with verified execution pins. Clud PR #1886
+proved the generic local gate, unchanged local reuse, exact publication and
+five hosted routine-job skips in run `37609104548`. This enrollment uses the
+shared verifier correction from ci.yml PR #382; no Clud receipt parser is
+part of enforcement.
 The legacy receipt script and its existing tests remain during qualification;
 they are outside the generic gate's execution path.
 
@@ -271,16 +271,21 @@ than ahead of them, so an unattested PR's build starts ~25 s sooner. The cost
 is that a lint failure no longer cancels the build lanes before they start;
 `CI OK` still fails.
 
-It fails closed. Every lane runs remotely, as before, when the head is
-unattested or its stamp no longer matches (any amend or rebase after the gate
-ran), on a fork or a non-writer author, with a `ci-test`/`ci-windows`/`ci-full`
-label, when the PR touches a surface (`ci/**`, either declaration, the
-workflows and the local actions they use), and for the 1-in-10 audit sample.
-The policy is read from the PR's **base**, so a PR cannot loosen its own gate.
-Pushes to `main` never skip (the post-merge catch), and release dispatches
-never read attestations. The gate runs in `shadow` mode: an unattested head is
-reported, never failed. Plain `bosn ci run` remains valid; it just earns no
-skip.
+The prerequisite and skip decisions are separate. Once this declaration
+is on the PR base, `mode = "enforce"` refuses an ordinary head without a
+valid tree-bound local pass before the dependent remote lanes start. The
+base owns mode and author exemptions; a head cannot weaken either. Missing,
+unreadable or malformed base policy refuses verification. The default bot
+authors remain exempt from the prerequisite and receive remote coverage.
+
+Passing the prerequisite does not guarantee remote skips. Forks, non-writer
+authors, expanded `ci-test`/`ci-windows`/`ci-full` coverage, changes to CI
+surfaces and the 1-in-10 audit sample run the selected remote lanes. A fork
+still needs a local pass unless its author is exempt. Native-only lanes stay
+remote. ACT replay always executes its checks before producing proof.
+Default-branch pushes use the separate verified PR-tree reuse mechanism;
+release dispatches do not consume local attestations. Plain `bosn ci run`
+remains useful for focused checks but does not stamp or publish a pass.
 
 #### Validation evidence (2026-10-03)
 

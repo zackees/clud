@@ -48,11 +48,12 @@ zackees/ci.yml, not patched here. The commands and limits are in
 same bosn run through the shared ci-lint verifier and, on a pass, stamps the commit so the PR skips the routine
 Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
 commit everything, then
-`uvx --from git+https://github.com/zackees/ci.yml@96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e ci-lint local-gate run`
-and `git push --force-with-lease`. The ci.yml#362 adoption candidate additionally
-requires the qualified act2 capability release and verified Bosn artifact pins;
-Bosn 0.1.15 / act2.10 cannot attest this path. Don't amend or rebase after stamping: that
-invalidates the stamp and the PR simply runs every lane. Plain `bosn ci run`
+`uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate run`
+then publish the exact stamped head with
+`uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate push --sha <stamped-head>`.
+Use Bosn 0.1.18 with act2.15 and its verified execution pins. Ordinary PRs
+require proof under the base policy; do not amend or rebase after stamping.
+A changed tree requires another gate run. Plain `bosn ci run`
 stays valid for `--job static-checks` and focused jobs.
 
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
