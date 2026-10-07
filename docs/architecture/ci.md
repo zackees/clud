@@ -343,9 +343,11 @@ ambiguous or mismatched evidence refuses the skip. Local attestation skips
 use a separate proof path through `--attested-workflow ci.yml`.
 
 The mode job and `CI OK` record the reason, tree and proving PR/run in their
-summaries. This enforcement was introduced in PR #1887; the shared final
-consumer is part of the ci.yml#362 pilot and still requires its new hosted
-qualification evidence.
+summaries. Default-branch reuse enforcement predates PR #1887, which
+introduced the enforced local prerequisite. PR #1889 migrated the final
+consumer to the shared verifier and passed hosted run `37699034850` with
+all selected jobs executing because its CI surfaces changed. An ordinary
+attested follow-up still needs to prove the shared consumer's hosted skips.
 
 ### Manual Windows probes (ignored tests)
 
