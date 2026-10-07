@@ -3,7 +3,7 @@
 #
 # Before pushing, from a clean, committed tree:
 #
-#   uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate run
+#   uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint local-gate run
 #
 # runs the PR plan once under bosn ci -> act2 (the same run CLAUDE.md
 # already requires) and, on success, amends HEAD's message with a tree-bound
@@ -110,8 +110,9 @@ lanes = ["unit"]
 # non-writer author, a ci-test/ci-windows/ci-full label, a head not
 # attested for its exact tree, a change to a surface (this file, the
 # workflows and the local actions they use), or the 1-in-10 audit sample
-# all run the lanes as before. Pushes to main always run them (the
-# post-merge catch), and release dispatches never read attestations.
+# all run the lanes as before. Main pushes use separate verified PR-tree
+# reuse for validation jobs; cache writers still run. Release dispatches
+# never read local attestations.
 [gate.trust]
 mode = "enforce"
 skip = [

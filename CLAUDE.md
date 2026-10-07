@@ -48,9 +48,9 @@ zackees/ci.yml, not patched here. The commands and limits are in
 same bosn run through the shared ci-lint verifier and, on a pass, stamps the commit so the PR skips the routine
 Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
 commit everything, then
-`uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate run`
+`uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint local-gate run`
 then publish the exact stamped head with
-`uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate push --sha <stamped-head>`.
+`uvx --from git+https://github.com/zackees/ci.yml@e306cc60e101aa52cfa2d94e9f90833780742abb ci-lint local-gate push --sha <stamped-head>`.
 Use Bosn 0.1.18 with act2.15 and its verified execution pins. Ordinary PRs
 require proof under the base policy; do not amend or rebase after stamping.
 A changed tree requires another gate run. Plain `bosn ci run`
