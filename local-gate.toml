@@ -3,7 +3,7 @@
 #
 # Before pushing, from a clean, committed tree:
 #
-#   uvx --from git+https://github.com/zackees/ci.yml@96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e ci-lint local-gate run
+#   uvx --from git+https://github.com/zackees/ci.yml@6067b7daf48e41f15d31655502425668eeefcd1c ci-lint local-gate run
 #
 # runs the PR plan once under bosn ci -> act2 (the same run CLAUDE.md
 # already requires) and, on success, amends HEAD's message with a tree-bound
@@ -12,9 +12,10 @@
 [gate]
 run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json"]
 verify = "ci.yml:static"
-# Opt-in: an unattested PR head is reported, never failed. It simply runs
-# every lane remotely, as before.
-mode = "shadow"
+# An ordinary PR head must pass the shared local gate before publication.
+# The hosted verifier reads this requirement from the PR base. Default bot
+# exemptions still receive a full remote run.
+mode = "enforce"
 
 # Bosn's full run keeps its parallel schedule when three or more lanes miss.
 # The shared ci-lint verifier derives checks from these workflows and
