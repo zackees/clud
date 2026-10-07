@@ -127,12 +127,14 @@ jobs:
           echo '::error::A PR candidate must be one dev-profile direct executable.'
           exit 1
 
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ inputs.source_ref || github.sha }}
 
-      - uses: ./.github/actions/setup-build
+      - name: Set up build
+        uses: ./.github/actions/setup-build
         with:
           target: ${{ inputs.target }}
           strategy: ${{ inputs.strategy }}

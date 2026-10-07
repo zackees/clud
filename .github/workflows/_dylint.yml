@@ -38,11 +38,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ inputs.source_ref || github.sha }}
-      - uses: zackees/setup-soldr@v0
+      - name: Set up soldr
+        uses: zackees/setup-soldr@v0
         with:
           cache: true
           # setup-soldr#559: a failed or cancelled job saves no build outputs
