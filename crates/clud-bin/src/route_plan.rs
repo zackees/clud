@@ -1227,13 +1227,18 @@ pub fn render_unified_config(
 
 /// The unified gateway's child environment.
 ///
-/// The slot block is written only on a pinned launch. That is today's
-/// behaviour, not the intended one: an unpinned gateway launch sets no slot at
-/// all, so the descriptor's role mappings never reach it (divergence #1b,
-/// fixed in #1861). The pin's value is the row's *discovery* id, because
-/// Claude Code classifies a raw wire id as an unknown provider id and falls
-/// back to a built-in Anthropic row -- exactly the spend the pin exists to
-/// stop.
+/// Every slot the route decided is written, pinned or not: the resolver gives
+/// an unpinned launch the descriptor's role mappings and the served subagent
+/// model, and gives a pinned one the pin. Until #1861 this block was written
+/// only when the launch was pinned, so an unpinned gateway launch ignored
+/// `role_models` and `server_settings::provider_subagent_model` entirely
+/// (divergence #1b).
+///
+/// A pinned value is the row's *discovery* id, because Claude Code classifies
+/// a raw wire id as an unknown provider id and falls back to a built-in
+/// Anthropic row -- exactly the spend the pin exists to stop. An admitted
+/// ambient subagent is written verbatim instead: the user's spelling already
+/// resolved, and clud admits it rather than rewriting it.
 pub fn render_unified_env(
     route: &ResolvedRoute,
     base_url: &str,
@@ -1272,22 +1277,20 @@ pub fn render_unified_env(
     if let Some(capability) = &route.effort.per_turn_capability {
         overlay.set_default("CLAUDE_CODE_MODEL_CAPABILITIES", capability);
     }
-    if !route.allowlist.is_empty() {
-        for (slot, key) in [
-            (&route.slots.opus, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
-            (&route.slots.sonnet, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
-            (&route.slots.haiku, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-            (&route.slots.fable, "ANTHROPIC_DEFAULT_FABLE_MODEL"),
-            (&route.slots.subagent, "CLAUDE_CODE_SUBAGENT_MODEL"),
-        ] {
-            if let Some(slot) = slot {
-                let id = if slot.verbatim {
-                    &slot.wire_id
-                } else {
-                    slot.discovery_id.as_deref().unwrap_or(&slot.wire_id)
-                };
-                overlay.set(key, id);
-            }
+    for (slot, key) in [
+        (&route.slots.opus, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        (&route.slots.sonnet, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        (&route.slots.haiku, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        (&route.slots.fable, "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+        (&route.slots.subagent, "CLAUDE_CODE_SUBAGENT_MODEL"),
+    ] {
+        if let Some(slot) = slot {
+            let id = if slot.verbatim {
+                &slot.wire_id
+            } else {
+                slot.discovery_id.as_deref().unwrap_or(&slot.wire_id)
+            };
+            overlay.set(key, id);
         }
     }
     overlay

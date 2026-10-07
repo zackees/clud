@@ -256,6 +256,11 @@ fn unified_scenarios() -> Vec<Scenario> {
         "openrouter-claude-sonnet",
         None,
     ));
+    // Divergence #1b, fixed in #1861: an unpinned gateway launch whose
+    // provider has a descriptor now carries that descriptor's role mappings.
+    // Before the fix this scenario wrote no slot at all.
+    let mut unpinned = unified(ModelProvider::DeepSeek);
+    unpinned.model_selection = Some(selection(ModelProvider::DeepSeek, "deepseek-v4-pro", None));
     vec![
         scenario(
             "unified/claude/default",
@@ -267,6 +272,12 @@ fn unified_scenarios() -> Vec<Scenario> {
             "unified/openrouter/--model-pin",
             Backend4::Unified,
             pinned,
+            vec![],
+        ),
+        scenario(
+            "unified/deepseek/unpinned",
+            Backend4::Unified,
+            unpinned,
             vec![],
         ),
     ]
@@ -690,9 +701,12 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
 /// default. Divergence #4 (fixed in #1860): `CLAUDE_CODE_MODEL_CAPABILITIES`
 /// is written the same way; it is absent here only because the per-turn-effort
 /// setting ships dark.
-/// `// divergence #1b, fixed in #1861`: an unpinned gateway launch still sets
-/// no slot at all, so `unified/claude/default` has no wire id to key a context
-/// window on.
+/// `unified/claude/default` still writes no slot: a native Claude launch has
+/// no descriptor and no pin, so there is nothing to bind, and no wire id to
+/// key a context window on. `unified/deepseek/unpinned` is the #1861 fix -- it
+/// carries the descriptor's role mappings. Divergence #1 is fixed in #1861:
+/// the *slot decision* is now one function, and only the id namespace each
+/// renderer asks for differs.
 const UNIFIED_GOLDEN: &str = r#"--- unified/claude/default [unified]
   ANTHROPIC_BASE_URL=http://gateway.invalid
   ANTHROPIC_CUSTOM_HEADERS=X-Clud-Gateway-Token: <gateway-token>
@@ -714,6 +728,20 @@ const UNIFIED_GOLDEN: &str = r#"--- unified/claude/default [unified]
   CLAUDE_CODE_SUBAGENT_MODEL=clud-claude-openrouter-sonnet
   CLUD_GATEWAY_TOKEN=<gateway-token>
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"openrouter","routing_mode":"unified","version":1}
+  gateway=UnifiedGatewayConfig { configured_routes: ["deepseek", "openrouter", "kimi"], codex_available: true, failover_rungs: 0 }
+--- unified/deepseek/unpinned [unified]
+  ANTHROPIC_BASE_URL=http://gateway.invalid
+  ANTHROPIC_CUSTOM_HEADERS=X-Clud-Gateway-Token: <gateway-token>
+  ANTHROPIC_DEFAULT_FABLE_MODEL=clud-claude-deepseek-v4-pro-0813
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=clud-claude-deepseek-flash
+  ANTHROPIC_DEFAULT_OPUS_MODEL=clud-claude-deepseek-v4-pro-0813
+  ANTHROPIC_DEFAULT_SONNET_MODEL=clud-claude-deepseek-v4-pro-0813
+  API_TIMEOUT_MS=3000000
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+  CLAUDE_CODE_SUBAGENT_MODEL=clud-claude-deepseek-flash
+  CLUD_GATEWAY_TOKEN=<gateway-token>
+  CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"deepseek","routing_mode":"unified","version":1}
   gateway=UnifiedGatewayConfig { configured_routes: ["deepseek", "openrouter", "kimi"], codex_available: true, failover_rungs: 0 }
 "#;
 

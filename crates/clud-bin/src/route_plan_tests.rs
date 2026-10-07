@@ -245,6 +245,90 @@ fn unpinned_slots_follow_each_descriptor_role_table() {
     }
 }
 
+/// A3/A2 at the render site, the regression #1861 fixes: an *unpinned*
+/// gateway launch now carries the descriptor's role mappings and the served
+/// subagent model. Before the fix the gateway wrote no slot at all here.
+#[test]
+fn an_unpinned_gateway_launch_carries_the_descriptor_role_mappings() {
+    let mut plan = unified(ModelProvider::DeepSeek);
+    plan.model_selection = Some(selection_for(
+        ModelProvider::DeepSeek,
+        "deepseek-v4-pro[1m]",
+    ));
+    let route = resolve(&plan, &Ambient::default());
+    assert!(route.allowlist.is_empty(), "this launch is unpinned");
+    assert_eq!(
+        route.slots.main.as_ref().map(|slot| slot.wire_id.as_str()),
+        Some("deepseek-v4-pro[1m]")
+    );
+
+    let mut child = Vec::new();
+    render_unified_env(&route, "http://gateway.invalid", "token", None).apply(&mut child);
+    let value = |key: &str| {
+        child
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
+    };
+    // Single-profile provider: every role is the main row except haiku and
+    // subagent, which take the served subagent model.
+    assert_eq!(
+        value("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        Some("clud-claude-deepseek-v4-pro-0813")
+    );
+    assert_eq!(
+        value("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        Some("clud-claude-deepseek-flash")
+    );
+    assert_eq!(
+        value("CLAUDE_CODE_SUBAGENT_MODEL"),
+        Some("clud-claude-deepseek-flash")
+    );
+    assert_eq!(
+        value("ANTHROPIC_DEFAULT_FABLE_MODEL"),
+        Some("clud-claude-deepseek-v4-pro-0813")
+    );
+}
+
+/// C14: cross-renderer slot parity. The direct route writes `wire_id` and the
+/// gateway writes `discovery_id`; both must name the same catalog row, so a
+/// gateway launch cannot serve a different model than the direct one it
+/// mirrors.
+#[test]
+fn direct_and_gateway_slots_name_the_same_catalog_rows() {
+    let mut plan = plan(ModelProvider::DeepSeek, Backend::Claude);
+    plan.model_selection = Some(selection_for(
+        ModelProvider::DeepSeek,
+        "deepseek-v4-pro[1m]",
+    ));
+    let mut unified_plan = plan.clone();
+    unified_plan.routing_mode = RoutingMode::Unified;
+
+    let direct = resolve(&plan, &Ambient::default());
+    let gateway = resolve(&unified_plan, &Ambient::default());
+    assert_eq!(gateway.slots, direct.slots);
+
+    for slot in [
+        &gateway.slots.opus,
+        &gateway.slots.sonnet,
+        &gateway.slots.haiku,
+        &gateway.slots.fable,
+        &gateway.slots.subagent,
+    ] {
+        let slot = slot.as_ref().expect("the gateway carries every slot");
+        let written = slot.discovery_id.as_deref().unwrap_or(&slot.wire_id);
+        let via_wire = crate::provider_catalog::model_by_any_id(&slot.wire_id);
+        let via_discovery = crate::provider_catalog::model_by_any_id(written);
+        assert_eq!(
+            via_wire.map(|row| row.cli_id),
+            via_discovery.map(|row| row.cli_id),
+            "{} and {} must name one row",
+            slot.wire_id,
+            written
+        );
+    }
+}
+
 /// A4: the credential is descriptor-derived. No test can make the resolver
 /// invent a vault identifier, because it never carries one.
 #[test]

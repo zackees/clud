@@ -6631,3 +6631,33 @@ context window.
 **Rejected.** Keeping the gateway's smaller overlay and documenting the
 difference (that is the split #1852 exists to delete); keying the gateway's
 context on the harness default (it would keep the 200k clamp).
+
+## DD-166: an unpinned gateway launch uses the provider's role mappings
+
+**Context.** #1257 gave a *pinned* launch a boundary that covers every Claude
+Code slot. The unified gateway implemented only that half: it wrote the slot
+block when the launch was pinned and wrote nothing otherwise, so an unpinned
+gateway launch ignored the provider descriptor's `role_models` and
+`server_settings::provider_subagent_model` entirely (divergence #1b in #1852).
+The direct route has always honoured them, so the same DeepSeek launch served
+one set of role models on `--deepseek` and the harness's Anthropic defaults on
+an equivalent gateway route — including the fable slot, which the gateway
+never bound at all.
+
+**Decision.** Once `ResolvedRoute` owns the slot decision (#1855), the gateway
+renders every slot the route decided, pinned or not: an unpinned launch gets
+the descriptor's role mappings and the served subagent model, a pinned one gets
+the pin, and an admitted ambient `CLAUDE_CODE_SUBAGENT_MODEL` is written
+verbatim. `SlotModel::verbatim` carries that last distinction in the route, so
+the renderer does not re-derive it. This is a deliberate behaviour change and
+the second divergence the migration fixes rather than preserves.
+
+**Consequences.** A gateway launch now serves the provider's intended role
+models, and `--unified` and the equivalent direct route name the same catalog
+rows (`wire_id` on one, `discovery_id` on the other, which is C14's parity
+check). A native Claude gateway launch still binds nothing: it has no
+descriptor and no pin, so there is nothing to decide.
+
+**Rejected.** Keeping the two slot decisions (that is the split #1852 deletes);
+applying the descriptor only when the provider is the launch's own (the
+gateway's whole point is that one process serves several providers).
