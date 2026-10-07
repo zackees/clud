@@ -220,20 +220,29 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@689d235ff88c209f1961c625b99cf32b23627ae1 ci-lint local-gate run
 git push --force-with-lease
 ```
 
-The gate refuses an uncommitted tree. On a cold commit it runs the same full
-`bosn ci run --workspace . --trigger pr --wait` plan through
-[`ci/local_gate.py`](../../ci/local_gate.py). The wrapper checks Bosn's
-structured result for the exact clean head and workspace, the act engine,
-and act2.3 or later (available in bosn 0.1.12). It requires each routine job's
-successful `Main` execution steps, all three unit shards, and `CI OK` before
-issuing a tree-bound receipt. Boolean status codes and malformed job trees
-cannot prove a pass. Gate commands use `uv run --no-project --isolated` so
-an ancestor checkout's virtual environment cannot select older gate tools.
-That receipt seeds separate static, Dylint, Clippy,
+The gate refuses an uncommitted tree. On a cold commit it invokes
+`bosn ci run --workspace . --trigger pr --wait --json` directly. Clud declares
+workflow selections and lane mappings in `local-gate.toml`; the shared ci-lint
+resolver derives checks from the original workflow source and validates the
+terminal Bosn report. No clud executable or repository receipt parser is
+required. Qualified caller/matrix identities distinguish all three unit
+shards and repeated reusable build jobs. Missing, failed, ambiguous or
+incompatible evidence cannot produce a lane pass or attestation.
+
+This branch is the adoption candidate for
+[ci.yml#362](https://github.com/zackees/ci.yml/issues/362). It requires the
+qualified act2 capability release and verified corresponding Bosn artifact
+pins; the installed Bosn 0.1.15 / act2.10 combination cannot qualify it.
+The source resolver accounts for eight concrete jobs and 96 checks across the
+full routine union, but real local/hosted skip qualification is still pending.
+The legacy receipt script and its existing tests remain during qualification;
+they are outside the generic gate's execution path.
+
+The validated report seeds separate static, Dylint, Clippy,
 build, and unit cache entries. Root Python test changes invalidate static
 and unit while retaining the Rust-only Dylint, Clippy, and build passes;
 other changes conservatively invalidate every lane. With fewer than three

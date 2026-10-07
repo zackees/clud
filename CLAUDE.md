@@ -45,11 +45,13 @@ act-only workarounds (zackees/ci.yml ACT-003): a local gap is filed in
 zackees/ci.yml, not patched here. The commands and limits are in
 [`docs/architecture/ci.md`](docs/architecture/ci.md#local-validation-before-remote-ci).
 **Run the pre-push full PR pass through the local gate**, which wraps that
-same bosn run and, on a pass, stamps the commit so the PR skips the routine
+same bosn run through the shared ci-lint verifier and, on a pass, stamps the commit so the PR skips the routine
 Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
 commit everything, then
-`uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run`
-and `git push --force-with-lease`. Don't amend or rebase after stamping: that
+`uvx --from git+https://github.com/zackees/ci.yml@689d235ff88c209f1961c625b99cf32b23627ae1 ci-lint local-gate run`
+and `git push --force-with-lease`. The ci.yml#362 adoption candidate additionally
+requires the qualified act2 capability release and verified Bosn artifact pins;
+Bosn 0.1.15 / act2.10 cannot attest this path. Don't amend or rebase after stamping: that
 invalidates the stamp and the PR simply runs every lane. Plain `bosn ci run`
 stays valid for `--job static-checks` and focused jobs.
 
