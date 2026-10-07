@@ -429,6 +429,65 @@ fn selection_for(
     }
 }
 
+/// A6/A7 at the render site, the regression #1860 fixes: a gateway route now
+/// writes the same context window and per-turn capability the direct route
+/// writes for the same wire id. Before the fix the unified overlay wrote
+/// neither, so the harness clamped every gateway model at its own default.
+#[test]
+fn the_gateway_renders_the_same_context_and_effort_as_the_direct_route() {
+    let mut direct = with_selection(
+        plan(ModelProvider::OpenRouter, Backend::Claude),
+        "openrouter-claude-sonnet",
+        ModelProvider::OpenRouter,
+    );
+    direct.allowed_models = vec!["openrouter-claude-sonnet".to_string()];
+    let mut unified = direct.clone();
+    unified.routing_mode = RoutingMode::Unified;
+
+    let direct = resolve(&direct, &Ambient::default());
+    let unified = resolve(&unified, &Ambient::default());
+
+    let value = |route: &ResolvedRoute, key: &str| -> Option<String> {
+        let mut env = Vec::new();
+        match route.backend {
+            RouteBackend::Unified => {
+                render_unified_env(route, "http://gateway.invalid", "token", None)
+            }
+            _ => render_direct_env(route, "token"),
+        }
+        .apply(&mut env);
+        env.iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.clone())
+    };
+
+    assert_eq!(direct.context.max_tokens, Some(1_000_000));
+    assert_eq!(unified.context, direct.context);
+    assert_eq!(
+        value(&unified, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+        value(&direct, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+        "the gateway must not clamp where the direct route does not"
+    );
+    assert_eq!(
+        value(&unified, "CLAUDE_CODE_MODEL_CAPABILITIES"),
+        value(&direct, "CLAUDE_CODE_MODEL_CAPABILITIES")
+    );
+    // The fixture catalog admits the gate and this test resolves with it on,
+    // so both routes advertise the same token -- and with the gate off (the
+    // shipped default) neither does.
+    assert_eq!(
+        value(&unified, "CLAUDE_CODE_MODEL_CAPABILITIES").as_deref(),
+        Some("~anthropic/claude-sonnet-latest=per_turn_effort")
+    );
+    let mut dark = direct.clone();
+    dark.effort.per_turn_capability = None;
+    let mut env = Vec::new();
+    render_direct_env(&dark, "token").apply(&mut env);
+    assert!(env
+        .iter()
+        .all(|(key, _)| key != "CLAUDE_CODE_MODEL_CAPABILITIES"));
+}
+
 /// A8: resolving twice from the same inputs gives equal values, and the route
 /// survives the JSON round trip a daemon worker performs.
 #[test]

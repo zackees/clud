@@ -684,11 +684,15 @@ const DIRECT_GOLDEN: &str = r#"--- direct/deepseek/default [direct]
 /// `role_models` and the served subagent model never reach this route.
 /// `// divergence #1, fixed in #1861`: pinned, the slots take the row's
 /// *discovery* id, where the direct route writes the raw wire id.
-/// `// divergence #3, fixed in #1860`: no `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
-/// and no `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, so the harness falls back to its
-/// 200k default for every gateway route.
-/// `// divergence #4, fixed in #1860`: no `CLAUDE_CODE_MODEL_CAPABILITIES`,
-/// so the per-turn effort capability is never advertised.
+/// Divergence #3 (fixed in #1860): the gateway route now writes
+/// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` from the same resolver value the direct
+/// route uses, so a gateway model is no longer clamped at the harness's 200k
+/// default. Divergence #4 (fixed in #1860): `CLAUDE_CODE_MODEL_CAPABILITIES`
+/// is written the same way; it is absent here only because the per-turn-effort
+/// setting ships dark.
+/// `// divergence #1b, fixed in #1861`: an unpinned gateway launch still sets
+/// no slot at all, so `unified/claude/default` has no wire id to key a context
+/// window on.
 const UNIFIED_GOLDEN: &str = r#"--- unified/claude/default [unified]
   ANTHROPIC_BASE_URL=http://gateway.invalid
   ANTHROPIC_CUSTOM_HEADERS=X-Clud-Gateway-Token: <gateway-token>
@@ -706,6 +710,7 @@ const UNIFIED_GOLDEN: &str = r#"--- unified/claude/default [unified]
   ANTHROPIC_DEFAULT_SONNET_MODEL=clud-claude-openrouter-sonnet
   API_TIMEOUT_MS=3000000
   CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
   CLAUDE_CODE_SUBAGENT_MODEL=clud-claude-openrouter-sonnet
   CLUD_GATEWAY_TOKEN=<gateway-token>
   CLUD_ROUTE_CONTEXT={"delegation":{"cost_policy":"prefer_the_cheapest_harness_supported_worker; escalate_only_when_needed","roles":"use_harness_native_model_selection"},"harness":"claude","model_provider":"openrouter","routing_mode":"unified","version":1}

@@ -1259,6 +1259,19 @@ pub fn render_unified_env(
     if let Some(millis) = route.timeout_ms {
         overlay.set_default("API_TIMEOUT_MS", &millis.to_string());
     }
+    // Divergences #3 and #4, fixed here (#1860): the gateway route used to set
+    // neither of these, so the harness clamped every gateway model at its own
+    // 200k default and never advertised the per-turn effort capability the
+    // direct route advertises for the very same wire id.
+    if let Some(window) = route.context.auto_compact_window {
+        overlay.set("CLAUDE_CODE_AUTO_COMPACT_WINDOW", &window.to_string());
+    }
+    if let Some(tokens) = route.context.max_tokens {
+        overlay.set_default("CLAUDE_CODE_MAX_CONTEXT_TOKENS", &tokens.to_string());
+    }
+    if let Some(capability) = &route.effort.per_turn_capability {
+        overlay.set_default("CLAUDE_CODE_MODEL_CAPABILITIES", capability);
+    }
     if !route.allowlist.is_empty() {
         for (slot, key) in [
             (&route.slots.opus, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
