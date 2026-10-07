@@ -30,6 +30,21 @@ CI_YML = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.
 BUILD_YML = CI_YML.with_name("_build-target.yml")
 
 
+def test_final_gate_uses_shared_source_and_independent_skip_proofs() -> None:
+    """#362: the adopter declares policy; ci-lint owns skip acceptance."""
+    text = CI_YML.read_text(encoding="utf-8")
+    gate = text.split("\n  ci-ok:\n", 1)[1]
+    assert "ci-lint gate" in gate
+    assert "--workflow-plan ci.yml" in gate
+    assert "--attested-workflow ci.yml" in gate
+    assert "--default-branch-reuse reuse-check.json" in gate
+    assert "--event \"$GITHUB_EVENT_PATH\"" in gate
+    assert "REUSE_EVIDENCE: ${{ needs.static.outputs.reuse_evidence }}" in gate
+    assert "reuse_evidence: ${{ steps.reuse.outputs.evidence_json }}" in text
+    assert "MINIMAL:" not in gate
+    assert "for result in" not in gate
+
+
 @pytest.mark.parametrize(
     "path",
     [
