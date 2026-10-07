@@ -274,8 +274,9 @@ is that a lint failure no longer cancels the build lanes before they start;
 The prerequisite and skip decisions are separate. Once this declaration
 is on the PR base, `mode = "enforce"` refuses an ordinary head without a
 valid tree-bound local pass before the dependent remote lanes start. The
-base owns mode and author exemptions; a head cannot weaken either. Missing,
-unreadable or malformed base policy refuses verification. The default bot
+base owns mode and author exemptions; a head cannot weaken either. An
+unavailable base commit or unreadable/malformed policy refuses verification.
+A readable base with no gate declaration permits initial enrollment. The default bot
 authors remain exempt from the prerequisite and receive remote coverage.
 
 Passing the prerequisite does not guarantee remote skips. Forks, non-writer

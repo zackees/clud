@@ -59,7 +59,8 @@ stays valid for `--job static-checks` and focused jobs.
 **Local CI budget** ([details](docs/architecture/ci.md#local-ci-budget)):
 local CI is a pre-push check, not the edit loop. Run the full PR plan at most
 once per change. The PR's GitHub CI is the CI of record. Don't wait in a busy
-bosn queue: cancel your own run (`bosn ci cancel RUN`) and push. Never
+bosn queue: cancel your own queued run (`bosn ci cancel RUN`) and wait for
+capacity before qualifying the head. Publish only a valid stamped head. Never
 `pkill`/`pgrep -f` bosn runs, because the pattern also kills other sessions'
 runs.
 
