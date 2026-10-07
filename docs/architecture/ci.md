@@ -220,7 +220,7 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@329bc01af81a4685a8fd66f8248a11526554144c ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@6b5433e5c905f53de70138921d096f902a0ccf76 ci-lint local-gate run
 git push --force-with-lease
 ```
 
@@ -232,6 +232,12 @@ terminal Bosn report. No clud executable or repository receipt parser is
 required. Qualified caller/matrix identities distinguish all three unit
 shards and repeated reusable build jobs. Missing, failed, ambiguous or
 incompatible evidence cannot produce a lane pass or attestation.
+The shared verifier queries the running Bosn daemon's effective execution
+pins before reuse and publication. Every result key and terminal receipt
+must match that profile. Hosted skips obey the PR base's lane age limits
+(default 24 hours); reuse keeps the original execution timestamp.
+The provider must emit qualified identities for skipped jobs as well as
+completed jobs; a missing identity refuses proof.
 
 This branch is the adoption candidate for
 [ci.yml#362](https://github.com/zackees/ci.yml/issues/362). It requires the

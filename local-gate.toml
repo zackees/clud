@@ -3,7 +3,7 @@
 #
 # Before pushing, from a clean, committed tree:
 #
-#   uvx --from git+https://github.com/zackees/ci.yml@329bc01af81a4685a8fd66f8248a11526554144c ci-lint local-gate run
+#   uvx --from git+https://github.com/zackees/ci.yml@6b5433e5c905f53de70138921d096f902a0ccf76 ci-lint local-gate run
 #
 # runs the PR plan once under bosn ci -> act2 (the same run CLAUDE.md
 # already requires) and, on success, amends HEAD's message with a tree-bound
@@ -55,6 +55,7 @@ workflow = "ci.yml"
 mode = "minimal"
 report-source = "stdout"
 qualified = true
+provider-query = ["bosn", "ci", "runners", "list", "--json"]
 
 [[gate.replay.selections]]
 lane = "static"

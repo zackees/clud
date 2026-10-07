@@ -130,7 +130,7 @@ jobs:
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
           repository: zackees/ci.yml
-          ref: 329bc01af81a4685a8fd66f8248a11526554144c
+          ref: 6b5433e5c905f53de70138921d096f902a0ccf76
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
