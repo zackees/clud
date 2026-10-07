@@ -353,6 +353,72 @@ fn every_descriptor_provider_resolves_to_its_own_vault_identifiers() {
     }
 }
 
+/// A5, the guard half: the copies step 6 deleted cannot come back. Each one
+/// was a second place the same decision was made, and neither copy was visible
+/// from the other -- which is how the two pin implementations drifted apart in
+/// the first place (#1852).
+#[test]
+fn the_deleted_duplicates_cannot_return() {
+    let sources = [
+        (
+            "failover.rs",
+            include_str!("failover.rs"),
+            "fn route_for(provider: ModelProvider)",
+        ),
+        (
+            "codex_bridge.rs",
+            include_str!("codex_bridge.rs"),
+            "fn conversation_route_for(",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "OPENROUTER_VAULT_SERVICE",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "KIMI_VAULT_ACCOUNT",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "const ANTHROPIC_COMPAT_CONFLICTING",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "const CODEX_VIA_CLAUDE_CONFLICTING",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "fn apply_anthropic_compat_overlay(",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "fn apply_unified_overlay(",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "fn apply_cross_route_overlay(",
+        ),
+        (
+            "foreground_runtime.rs",
+            include_str!("foreground_runtime.rs"),
+            "fn codex_via_claude_bridge_allowlist(",
+        ),
+    ];
+    for (file, source, needle) in sources {
+        assert!(
+            !source.contains(needle),
+            "{file} carries {needle:?} again; that decision belongs to `route_plan`"
+        );
+    }
+}
+
 /// A5: one route mapping, total over providers.
 #[test]
 fn every_provider_maps_to_exactly_one_conversation_route() {

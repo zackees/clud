@@ -102,17 +102,6 @@ impl fmt::Display for LadderError {
     }
 }
 
-/// The route a provider is served on inside the gateway, if any.
-fn route_for(provider: ModelProvider) -> Option<ConversationRoute> {
-    match provider {
-        ModelProvider::Claude => Some(ConversationRoute::Claude),
-        ModelProvider::Codex => Some(ConversationRoute::Codex),
-        ModelProvider::DeepSeek => Some(ConversationRoute::DeepSeek),
-        ModelProvider::OpenRouter => Some(ConversationRoute::OpenRouter),
-        ModelProvider::Kimi => Some(ConversationRoute::Kimi),
-    }
-}
-
 /// An ordered list of fallback routes plus the consent that governs it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FailoverLadder {
@@ -159,17 +148,14 @@ impl FailoverLadder {
             // A catalog row that is not Claude names a provider namespace clud
             // owns, so the replayed body must carry that row's wire ID.
             Some(entry) if entry.provider != ModelProvider::Claude => {
-                let Some(route) = route_for(entry.provider) else {
-                    return Err(LadderError::Unroutable {
-                        spec: name.to_string(),
-                        provider: entry.provider.as_str(),
-                    });
-                };
                 Ok(FailoverRung {
                     spec: name.to_string(),
                     wire_id: entry.wire_id.to_string(),
                     provider: entry.provider,
-                    route,
+                    // The one provider-to-route mapping (#1864). It is total,
+                    // which is why this arm can no longer produce an
+                    // `Unroutable` rung.
+                    route: crate::route_plan::conversation_route(entry.provider),
                     cost: CostOwner::for_provider(entry.provider),
                 })
             }
@@ -283,9 +269,17 @@ mod tests {
         // #937 Phase 4 gave Kimi its unified route; before that a `kimi-k3`
         // rung failed at parse time with `Unroutable`. Every provider must now
         // map to its own route, so no rung can be accepted and then fail.
+        let mut seen = Vec::new();
         for provider in ModelProvider::ALL {
-            assert!(route_for(*provider).is_some(), "{provider:?} has no route");
+            let route = crate::route_plan::conversation_route(*provider);
+            assert!(
+                !seen.contains(&route),
+                "{} shares a route with another provider",
+                provider.as_str()
+            );
+            seen.push(route);
         }
+        assert_eq!(seen.len(), ModelProvider::ALL.len());
         let ladder = FailoverLadder::parse("kimi-k3", true).unwrap();
         assert_eq!(ladder.rungs()[0].route, ConversationRoute::Kimi);
     }
