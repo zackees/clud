@@ -698,7 +698,14 @@ fn a_free_wire_id_is_classified_from_the_offline_catalog() {
         .find(|check| check.name == "openrouter_free_cost")
         .expect("the check is classified");
     assert_eq!(check.applicability, Applicability::Applies);
-    assert!(check.verdict.contains("unknown"), "{}", check.verdict);
+    assert!(check.verdict.starts_with("refused:"), "{}", check.verdict);
+    // The refusal is what the launch fails with, and it names the fix.
+    let verdict = evaluate(&route, &catalog())
+        .into_iter()
+        .find(|verdict| verdict.check.name == "openrouter_free_cost")
+        .expect("the check is evaluated");
+    let refusal = verdict.refusal.expect("an uncatalogued `:free` id refuses");
+    assert!(refusal.contains("cannot confirm it is free"), "{refusal}");
 }
 
 /// The scrub list each backend owns, including the prefix rule.

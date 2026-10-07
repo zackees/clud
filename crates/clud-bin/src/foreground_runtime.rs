@@ -312,13 +312,20 @@ impl ForegroundRuntime {
         mut env: Vec<(String, String)>,
         store: &dyn crate::provider_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
+        // Every launch check runs once, here, against the route and before
+        // any backend branch: a refusal must not depend on which renderer was
+        // about to run (#1862).
+        let route =
+            crate::route_plan::route_of(plan, &crate::route_plan::Ambient::from_child_env(&env));
+        if let Some(refusal) = crate::route_plan::first_refusal(
+            &route,
+            &crate::openrouter_catalog::catalog_cached_or_embedded(),
+        ) {
+            return Err(BridgeError::Model(refusal));
+        }
         let (bridge, claude_settings, mut startup_notices) = if is_unified(plan) {
             let integration_upstreams =
                 crate::codex_bridge::unified_integration_upstreams_from_process();
-            let route = crate::route_plan::route_of(
-                plan,
-                &crate::route_plan::Ambient::from_child_env(&env),
-            );
             // Optional routes must never block native Claude. Resolve only
             // availability metadata here; the actual credentials stay inside
             // the launch-scoped bridge and are not serialized into the plan.
@@ -441,10 +448,6 @@ impl ForegroundRuntime {
             if crate::route_plan::discovery_is_disabled(&env) {
                 return Err(BridgeError::DiscoveryDisabled);
             }
-            let route = crate::route_plan::route_of(
-                plan,
-                &crate::route_plan::Ambient::from_child_env(&env),
-            );
             let render = crate::route_plan::render_codex_bridge(
                 &route,
                 crate::route_plan::CodexBridgeRequest {
@@ -477,10 +480,6 @@ impl ForegroundRuntime {
                 .expect("is_anthropic_compat_via_claude already proved a descriptor resolves");
             // The route decides where the credential comes from; the read is
             // the one place a secret enters this launch.
-            let route = crate::route_plan::route_of(
-                plan,
-                &crate::route_plan::Ambient::from_child_env(&env),
-            );
             let source = route
                 .upstreams
                 .first()
