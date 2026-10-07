@@ -220,7 +220,7 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@689d235ff88c209f1961c625b99cf32b23627ae1 ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@329bc01af81a4685a8fd66f8248a11526554144c ci-lint local-gate run
 git push --force-with-lease
 ```
 
