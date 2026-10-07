@@ -74,8 +74,10 @@ not the edit loop: the PR's GitHub Actions run is the CI of record.
 **Prefer `clud ci`** (#1839). It wraps the same bosn run, waits, and prints a
 one-line verdict plus only the failing steps' diagnostics (rustc/clippy errors
 with their `-->` location, failing tests and panics, ruff findings),
-ANSI-stripped. An `incomplete` run whose runnable jobs all passed is reported
-as a pass, because act cannot run reusable workflows. A stale bosn daemon gets
+ANSI-stripped. An `incomplete` run or engine error is reported as a failed run
+even when the observed jobs succeeded; missing coverage or failed cleanup
+cannot supply a pass. This diagnostic command does not issue attestations:
+the shared CI tool verifies eligibility separately. A stale bosn daemon gets
 a one-line fix instead of a refusal.
 
 ```bash
@@ -220,20 +222,35 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e ci-lint local-gate run
 git push --force-with-lease
 ```
 
-The gate refuses an uncommitted tree. On a cold commit it runs the same full
-`bosn ci run --workspace . --trigger pr --wait` plan through
-[`ci/local_gate.py`](../../ci/local_gate.py). The wrapper checks Bosn's
-structured result for the exact clean head and workspace, the act engine,
-and act2.3 or later (available in bosn 0.1.12). It requires each routine job's
-successful `Main` execution steps, all three unit shards, and `CI OK` before
-issuing a tree-bound receipt. Boolean status codes and malformed job trees
-cannot prove a pass. Gate commands use `uv run --no-project --isolated` so
-an ancestor checkout's virtual environment cannot select older gate tools.
-That receipt seeds separate static, Dylint, Clippy,
+The gate refuses an uncommitted tree. On a cold commit it invokes
+`bosn ci run --workspace . --trigger pr --wait --json` directly. Clud declares
+workflow selections and lane mappings in `local-gate.toml`; the shared ci-lint
+resolver derives checks from the original workflow source and validates the
+terminal Bosn report. No clud executable or repository receipt parser is
+required. Qualified caller/matrix identities distinguish all three unit
+shards and repeated reusable build jobs. Missing, failed, ambiguous or
+incompatible evidence cannot produce a lane pass or attestation.
+The shared verifier queries the running Bosn daemon's effective execution
+pins before reuse and publication. Every result key and terminal receipt
+must match that profile. Hosted skips obey the PR base's lane age limits
+(default 24 hours); reuse keeps the original execution timestamp.
+The provider must emit qualified identities for skipped jobs as well as
+completed jobs; a missing identity refuses proof.
+
+This branch is the adoption candidate for
+[ci.yml#362](https://github.com/zackees/ci.yml/issues/362). It requires the
+qualified act2 capability release and verified corresponding Bosn artifact
+pins; the installed Bosn 0.1.15 / act2.10 combination cannot qualify it.
+The source resolver accounts for eight concrete jobs and 96 checks across the
+full routine union, but real local/hosted skip qualification is still pending.
+The legacy receipt script and its existing tests remain during qualification;
+they are outside the generic gate's execution path.
+
+The validated report seeds separate static, Dylint, Clippy,
 build, and unit cache entries. Root Python test changes invalidate static
 and unit while retaining the Rust-only Dylint, Clippy, and build passes;
 other changes conservatively invalidate every lane. With fewer than three

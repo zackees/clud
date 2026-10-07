@@ -84,7 +84,8 @@ jobs:
       skip_test-linux-x64-unit: ${{ steps.gate.outputs.skip_test-linux-x64-unit || steps.reuse_skip.outputs.skip_test-linux-x64-unit }}
       skip_static-checks: ${{ steps.gate.outputs.skip_static-checks || steps.reuse_skip.outputs.skip_static-checks }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
@@ -106,7 +107,8 @@ jobs:
             echo 'PROVENANCE_VERIFIED=true' >> "$GITHUB_ENV"
           fi
           echo "ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Resolve CI mode and candidate SHA
@@ -123,11 +125,12 @@ jobs:
       # install, and it reads the base commit's policy from the full history
       # checked out above. It fails closed (every skip_* stays unset) on any
       # reason code but `trusted`.
-      - uses: actions/checkout@v4
+      - name: Checkout ci-lint
+        uses: actions/checkout@v4
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
           repository: zackees/ci.yml
-          ref: 60d373290b8463bc08b6c4835234d79740c2bb61
+          ref: 96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
@@ -208,15 +211,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ needs.static.outputs.source_ref }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: astral-sh/setup-uv@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           version: "0.12.19"
           # Local-runner signal (ACT=true; act2 keeps RUNNER_ENVIRONMENT

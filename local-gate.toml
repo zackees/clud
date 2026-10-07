@@ -3,47 +3,104 @@
 #
 # Before pushing, from a clean, committed tree:
 #
-#   uvx --from git+https://github.com/zackees/ci.yml@60d373290b8463bc08b6c4835234d79740c2bb61 ci-lint local-gate run
+#   uvx --from git+https://github.com/zackees/ci.yml@96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e ci-lint local-gate run
 #
 # runs the PR plan once under bosn ci -> act2 (the same run CLAUDE.md
 # already requires) and, on success, amends HEAD's message with a tree-bound
 # `Local-Gate:` trailer plus one `Ci-Attestation:` per gate in
 # ci-attestations.yml. The static job then lets the routine Linux lanes skip.
 [gate]
-run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate"]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json"]
 verify = "ci.yml:static"
 # Opt-in: an unattested PR head is reported, never failed. It simply runs
 # every lane remotely, as before.
 mode = "shadow"
 
 # Bosn's full run keeps its parallel schedule when three or more lanes miss.
-# ci/local_gate.py validates every actual job and step before issuing a receipt.
+# The shared ci-lint verifier derives checks from these workflows and
+# validates the terminal Bosn report before seeding lane passes.
 [gate.full-run]
 receipt = "lane-passes-v1"
 min-misses = 3
 
 [gate.lanes.static]
-run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "static"]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "static-checks"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.dylint]
-run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "dylint"]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "dylint"]
 exclude = ["tests/test_*.py"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.clippy]
-run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "clippy"]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "lint-linux-x64"]
 exclude = ["tests/test_*.py"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.build]
-run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "build"]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "build-linux-x64"]
 exclude = ["tests/test_*.py"]
 tools = ["bosn", "docker", "uv", "python"]
 
 [gate.lanes.unit]
-run = ["uv", "run", "--no-project", "--isolated", "--with", "running-process==4.10.1", "python", "-m", "ci.local_gate", "--lane", "unit"]
+run = ["bosn", "ci", "run", "--workspace", ".", "--trigger", "pr", "--wait", "--json", "--job", "test-linux-x64-unit"]
 tools = ["bosn", "docker", "uv", "python"]
+
+
+# Shared execution proof; clud declares mappings, never parses runner receipts.
+# Requires the qualified act2 capability release and corresponding Bosn pins.
+[gate.replay]
+repository = "zackees/clud"
+workflow = "ci.yml"
+mode = "minimal"
+report-source = "stdout"
+qualified = true
+provider-query = ["bosn", "ci", "runners", "list", "--json"]
+
+[[gate.replay.selections]]
+lane = "static"
+job = "static-checks"
+event = "pull_request"
+
+[[gate.replay.selections]]
+lane = "dylint"
+job = "dylint"
+event = "pull_request"
+
+[[gate.replay.selections]]
+lane = "clippy"
+job = "lint-linux-x64"
+event = "pull_request"
+
+[[gate.replay.selections]]
+lane = "build"
+job = "build-linux-x64"
+event = "pull_request"
+
+[[gate.replay.selections]]
+lane = "unit"
+job = "test-linux-x64-unit"
+event = "pull_request"
+
+[[gate.replay.jobs]]
+source-job = "ci.yml:static"
+lanes = ["static", "dylint", "clippy", "build", "unit"]
+
+[[gate.replay.jobs]]
+source-job = "ci.yml:static-checks"
+lanes = ["static"]
+
+[[gate.replay.jobs]]
+source-job = "_dylint.yml:dylint"
+lanes = ["dylint"]
+
+[[gate.replay.jobs]]
+source-job = "_build-target.yml:build"
+lanes = ["clippy", "build", "unit"]
+
+[[gate.replay.jobs]]
+source-job = "_run-tests.yml:test"
+lanes = ["unit"]
 
 # GATE-008: an attested PR head skips the remote routine Linux lanes. They
 # would rerun exactly the bosn plan that just passed, about 5 minutes of PR
