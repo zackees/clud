@@ -1997,7 +1997,7 @@ impl UnifiedAttempt {
         };
         Self {
             provider: entry.provider,
-            route: conversation_route_for(entry.provider),
+            route: crate::route_plan::conversation_route(entry.provider),
             model: Some(
                 resolved
                     .codex_effort_suffix
@@ -2406,18 +2406,6 @@ fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
         .filter(|entry| config.provider_available(entry.provider))
         .filter_map(|entry| entry.discovery_id)
         .collect()
-}
-
-/// The conversation route a catalog provider is served on. Every route
-/// change starts a new history epoch, so each provider needs its own.
-fn conversation_route_for(provider: ModelProvider) -> ConversationRoute {
-    match provider {
-        ModelProvider::Claude => ConversationRoute::Claude,
-        ModelProvider::Codex => ConversationRoute::Codex,
-        ModelProvider::DeepSeek => ConversationRoute::DeepSeek,
-        ModelProvider::Kimi => ConversationRoute::Kimi,
-        ModelProvider::OpenRouter => ConversationRoute::OpenRouter,
-    }
 }
 
 /// Proxy an Anthropic-compatible Messages response without buffering its body.
