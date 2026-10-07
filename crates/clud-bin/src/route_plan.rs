@@ -1259,7 +1259,9 @@ pub fn render_unified_config(
         }
         config = config.with_route(upstream.provider, key_for(upstream.provider));
     }
-    config
+    // #1863: the gateway owns the request path, so it honours --provider-only
+    // itself instead of refusing it.
+    config.with_upstream_routing(route.upstream_routing.clone())
 }
 
 /// The unified gateway's child environment.

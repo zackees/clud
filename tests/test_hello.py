@@ -732,13 +732,39 @@ def test_provider_only_pins_openrouter_upstream_routing() -> None:
     assert plain.returncode == 0, plain.stderr
     assert json.loads(plain.stdout)["provider_only"] == []
     for argv, needle in [
-        (("--provider-only", "parasail/fp8"), "only to a direct --openrouter launch"),
+        (("--provider-only", "parasail/fp8"), "only to an OpenRouter launch"),
         (("--openrouter", *model, "--provider-only", "Parasail"), "not an OpenRouter provider"),
     ]:
         refused = _run("--dry-run", *argv, "-p", "hi")
         assert refused.returncode == 2, (refused.stdout, refused.stderr)
         assert refused.stdout == ""
         assert needle in refused.stderr
+
+
+def test_provider_only_works_on_the_unified_gateway() -> None:
+    """#1863: the gateway owns the request path, so it injects the same object
+    the direct route hands the harness through CLAUDE_CODE_EXTRA_BODY."""
+    unified = _dry_run_route(
+        "--unified",
+        "--model",
+        "openrouter-claude-sonnet",
+        "--provider-only",
+        "parasail/fp8",
+    )["route"]
+    assert unified["backend"] == "unified"
+    assert unified["upstream_routing"] == {
+        "only": ["parasail/fp8"],
+        "allow_fallbacks": False,
+    }
+    # The direct route builds the identical value: one decision, two renderers.
+    direct = _dry_run_route(
+        "--openrouter", "--provider-only", "parasail/fp8"
+    )["route"]
+    assert direct["upstream_routing"] == unified["upstream_routing"]
+    # And where the object cannot be carried, the check says so.
+    bridge = _dry_run_route("--codex")["route"]
+    checks = {check["name"]: check for check in bridge["checks"]}
+    assert checks["provider_only"]["applicability"]["state"] == "not_applicable"
 
 
 def _dry_run_route(*args: str) -> dict:
