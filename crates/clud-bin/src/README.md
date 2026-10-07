@@ -204,6 +204,11 @@ Entry and orchestration:
   replacement and unified provider-route epoch changes atomic; see
   [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md) and
   [unified-gateway.md](../../../docs/architecture/unified-gateway.md).
+- `route_plan.rs` - the one place a launch's routing is decided: `ResolvedRoute`
+  (backend, upstreams, slots, allowlist, discovery, context, effort, upstream
+  routing, timeout, scrub list, launch checks), the pure resolver, and every
+  backend's renderer. Launch checks run from it before the backend branch. See
+  [route-plan.md](../../../docs/architecture/route-plan.md) (#1852).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
   bridge or unified gateway, preflights direct Codex bridge credentials before

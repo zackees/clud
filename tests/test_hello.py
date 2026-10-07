@@ -788,9 +788,18 @@ def test_dry_run_exposes_the_resolved_route() -> None:
     assert route["upstream_routing"] is None
     assert route["timeout_ms"] == 600000
     assert [check["name"] for check in route["checks"]] == [
+        "request_path_features",
         "openrouter_free_cost",
         "provider_only",
     ]
+    # D21: the request-path features are named, and the direct route says why
+    # they are not offered here.
+    request_path = route["checks"][0]
+    assert request_path["applicability"] == {
+        "state": "not_applicable",
+        "reason": "clud is not in the request path on a direct route",
+    }
+    assert "no clud egress by design" in request_path["verdict"]
     assert all(check["verdict"] for check in route["checks"])
     # The upstream is the descriptor's, and the credential it names is an
     # identifier -- never a key.

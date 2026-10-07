@@ -328,6 +328,10 @@ rerouting to another provider or price. Any other route, or a malformed
 slug, is refused with exit 2, and `--dry-run` reports the pin as
 `provider_only`.
 
+Once a launch is resolved, every routing decision it made — backend, upstreams,
+slots, allowlist, discovery, context, effort, timeouts and the launch checks —
+lives in one `ResolvedRoute`: see [route-plan.md](route-plan.md).
+
 A live `clud --openrouter --model <id>` also becomes OpenRouter's saved
 default (`providers.openrouter.model` in `~/.clud/settings.json`), so the next
 plain `clud --openrouter` resolves it with `model_source: provider_setting`
