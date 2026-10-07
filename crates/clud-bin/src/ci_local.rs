@@ -7,8 +7,9 @@
 //! (`ci report --json`, `ci show --json`, `ci logs --job --step`), prints a
 //! one-line verdict, and on failure only the failing steps' diagnostics.
 //!
-//! "incomplete" with every runnable job passed is act being unable to run
-//! reusable workflows, not a failure; it is reported as a pass with that note.
+//! Incomplete runs and engine errors never become a pass, even when their
+//! observed jobs succeeded. Attestation eligibility belongs to shared ci-lint;
+//! this command only displays the producer's diagnostic outcome.
 
 use std::path::{Path, PathBuf};
 
@@ -19,15 +20,11 @@ const MAX_DIAGNOSTIC_LINES: usize = 40;
 /// Lines shown for `--filter` matches.
 const MAX_FILTER_LINES: usize = 60;
 
-/// The act limitation bosn reports as `incomplete`.
-const REUSABLE_WORKFLOW_GAP: &str = "reusable workflows require qualified execution identity";
-
 /// The verdict for a finished run, from `bosn ci report --json`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     Pass {
         succeeded: u64,
-        note: Option<String>,
     },
     Fail {
         succeeded: u64,
@@ -43,16 +40,9 @@ impl Verdict {
 
     pub fn line(&self) -> String {
         match self {
-            Self::Pass {
-                succeeded,
-                note: None,
-            } => {
+            Self::Pass { succeeded } => {
                 format!("PASS: {succeeded} job(s) succeeded")
             }
-            Self::Pass {
-                succeeded,
-                note: Some(note),
-            } => format!("PASS: {succeeded}/{succeeded} runnable job(s) succeeded ({note})"),
             Self::Fail {
                 succeeded,
                 failed,
@@ -86,31 +76,8 @@ pub fn verdict(report: &Value) -> Verdict {
         .and_then(Value::as_str)
         .map(str::to_string);
     let clean = failed == 0 && cancelled == 0 && succeeded > 0;
-    // Every job ran and passed, but bosn still ended `incomplete`/`error` for
-    // an engine reason (act's reusable-workflow gap, a Docker cleanup
-    // timeout). That says nothing about the code under test.
-    let covered = report
-        .get("coverage_complete")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     match conclusion {
-        "success" if clean => Verdict::Pass {
-            succeeded,
-            note: None,
-        },
-        "incomplete" if clean && reason.as_deref() == Some(REUSABLE_WORKFLOW_GAP) => {
-            Verdict::Pass {
-                succeeded,
-                note: Some("act cannot run reusable workflows; not a failure".to_string()),
-            }
-        }
-        "incomplete" | "error" if clean && covered => Verdict::Pass {
-            succeeded,
-            note: Some(format!(
-                "bosn reported '{}' after every job passed; not a code failure",
-                reason.as_deref().unwrap_or(conclusion)
-            )),
-        },
+        "success" if clean => Verdict::Pass { succeeded },
         _ => Verdict::Fail {
             succeeded,
             failed: failed + cancelled,

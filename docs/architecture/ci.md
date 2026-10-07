@@ -74,8 +74,10 @@ not the edit loop: the PR's GitHub Actions run is the CI of record.
 **Prefer `clud ci`** (#1839). It wraps the same bosn run, waits, and prints a
 one-line verdict plus only the failing steps' diagnostics (rustc/clippy errors
 with their `-->` location, failing tests and panics, ruff findings),
-ANSI-stripped. An `incomplete` run whose runnable jobs all passed is reported
-as a pass, because act cannot run reusable workflows. A stale bosn daemon gets
+ANSI-stripped. An `incomplete` run or engine error is reported as a failed run
+even when the observed jobs succeeded; missing coverage or failed cleanup
+cannot supply a pass. This diagnostic command does not issue attestations:
+the shared CI tool verifies eligibility separately. A stale bosn daemon gets
 a one-line fix instead of a refusal.
 
 ```bash
@@ -220,7 +222,7 @@ Run it through the [zackees/ci.yml](https://github.com/zackees/ci.yml/blob/main/
 local gate instead of calling bosn directly:
 
 ```bash
-uvx --from git+https://github.com/zackees/ci.yml@6b5433e5c905f53de70138921d096f902a0ccf76 ci-lint local-gate run
+uvx --from git+https://github.com/zackees/ci.yml@96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e ci-lint local-gate run
 git push --force-with-lease
 ```
 

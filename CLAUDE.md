@@ -48,7 +48,7 @@ zackees/ci.yml, not patched here. The commands and limits are in
 same bosn run through the shared ci-lint verifier and, on a pass, stamps the commit so the PR skips the routine
 Linux lanes (~5 min of CI; [attested skip](docs/architecture/ci.md#attested-skip-gate-008010)):
 commit everything, then
-`uvx --from git+https://github.com/zackees/ci.yml@6b5433e5c905f53de70138921d096f902a0ccf76 ci-lint local-gate run`
+`uvx --from git+https://github.com/zackees/ci.yml@96ba9f2df5b6c16d4fc933ee9dc2dbab7c47b46e ci-lint local-gate run`
 and `git push --force-with-lease`. The ci.yml#362 adoption candidate additionally
 requires the qualified act2 capability release and verified Bosn artifact pins;
 Bosn 0.1.15 / act2.10 cannot attest this path. Don't amend or rebase after stamping: that

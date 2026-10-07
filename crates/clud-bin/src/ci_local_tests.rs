@@ -12,12 +12,15 @@ fn json(text: &str) -> Value {
 }
 
 #[test]
-fn an_incomplete_run_with_every_job_passed_is_a_pass_with_a_note() {
+fn an_incomplete_run_with_every_job_passed_is_not_a_pass() {
     let verdict = verdict(&json(REPORT_INCOMPLETE));
-    assert!(verdict.passed(), "{verdict:?}");
+    assert!(!verdict.passed(), "{verdict:?}");
     let line = verdict.line();
-    assert!(line.starts_with("PASS: 2/2"), "{line}");
-    assert!(line.contains("act cannot run reusable workflows"), "{line}");
+    assert!(!line.starts_with("PASS:"), "{line}");
+    assert!(
+        line.contains("reusable workflows require qualified execution identity"),
+        "{line}"
+    );
 }
 
 #[test]
@@ -40,6 +43,22 @@ fn incomplete_for_any_other_reason_is_not_a_pass() {
         "jobs": {"succeeded": 2, "failed": 0, "cancelled": 0},
     });
     assert!(!verdict(&report).passed());
+}
+
+#[test]
+fn success_requires_jobs_to_succeed_without_failure_or_cancellation() {
+    for (succeeded, failed, cancelled, passed) in [
+        (2, 0, 0, true),
+        (0, 0, 0, false),
+        (2, 1, 0, false),
+        (2, 0, 1, false),
+    ] {
+        let report = serde_json::json!({
+            "conclusion": "success",
+            "jobs": {"succeeded": succeeded, "failed": failed, "cancelled": cancelled},
+        });
+        assert_eq!(verdict(&report).passed(), passed, "{report}");
+    }
 }
 
 #[test]
@@ -128,7 +147,7 @@ fn strip_ansi_removes_color_codes() {
 
 /// Docker cleanup timing out after every job passed (captured 2026-10-06).
 #[test]
-fn an_engine_error_after_full_coverage_is_a_pass_with_a_note() {
+fn an_engine_error_after_full_coverage_is_not_a_pass() {
     let report = serde_json::json!({
         "conclusion": "error",
         "reason": "engine cleanup failed: Docker CLI exceeded its deadline",
@@ -136,7 +155,7 @@ fn an_engine_error_after_full_coverage_is_a_pass_with_a_note() {
         "jobs": {"succeeded": 2, "failed": 0, "cancelled": 0},
     });
     let verdict = verdict(&report);
-    assert!(verdict.passed(), "{verdict:?}");
+    assert!(!verdict.passed(), "{verdict:?}");
     assert!(
         verdict.line().contains("engine cleanup failed"),
         "{}",
