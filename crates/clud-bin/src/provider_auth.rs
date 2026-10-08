@@ -64,9 +64,8 @@ impl fmt::Display for SecretStoreError {
             Self::Malformed => {
                 formatter.write_str("API key is malformed; re-enter a key without whitespace")
             }
-            Self::InsecureFile => formatter.write_str(
-                "the credential file is readable by other users; run `chmod 600` on it",
-            ),
+            Self::InsecureFile => formatter
+                .write_str("the credential file is readable by other users; run `chmod 600` on it"),
         }
     }
 }
@@ -940,11 +939,23 @@ fn run_with_probe(
                     0
                 }
                 Err(PreflightError::Malformed { fingerprint }) => {
-                    write_credential_status(stdout, store.backend(), *json, "malformed", &fingerprint);
+                    write_credential_status(
+                        stdout,
+                        store.backend(),
+                        *json,
+                        "malformed",
+                        &fingerprint,
+                    );
                     2
                 }
                 Err(PreflightError::Rejected { fingerprint, .. }) => {
-                    write_credential_status(stdout, store.backend(), *json, "rejected", &fingerprint);
+                    write_credential_status(
+                        stdout,
+                        store.backend(),
+                        *json,
+                        "rejected",
+                        &fingerprint,
+                    );
                     2
                 }
                 Err(_) => {

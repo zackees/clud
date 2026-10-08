@@ -118,7 +118,9 @@ fn env_var_is_a_read_only_last_resort() {
 #[test]
 fn a_working_vault_wins_and_clears_a_stale_file() {
     let dir = tempfile::tempdir().unwrap();
-    chain(LockedVault, &dir, no_env).set("sk-or-v1-stalestalestale").unwrap();
+    chain(LockedVault, &dir, no_env)
+        .set("sk-or-v1-stalestalestale")
+        .unwrap();
     let store = chain(WorkingVault::default(), &dir, env_has_key);
     // The vault is empty, so the file copy still serves the read...
     assert_eq!(
