@@ -53,6 +53,8 @@ fn vault_target(service: &str, account: &str) -> String {
 pub enum SecretStoreError {
     Unavailable,
     Malformed,
+    /// The fallback credential file is readable by other users (#1891).
+    InsecureFile,
 }
 
 impl fmt::Display for SecretStoreError {
@@ -62,6 +64,9 @@ impl fmt::Display for SecretStoreError {
             Self::Malformed => {
                 formatter.write_str("API key is malformed; re-enter a key without whitespace")
             }
+            Self::InsecureFile => formatter.write_str(
+                "the credential file is readable by other users; run `chmod 600` on it",
+            ),
         }
     }
 }
@@ -74,16 +79,62 @@ pub trait SecretStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError>;
     fn set(&self, secret: &str) -> Result<(), SecretStoreError>;
     fn delete(&self) -> Result<(), SecretStoreError>;
+
+    /// Which backend served the most recent successful operation, for
+    /// `auth status` and login messages. Plain stores are the native vault.
+    fn backend(&self) -> CredentialBackend {
+        CredentialBackend::NativeVault
+    }
+}
+
+/// Where a provider credential lives (#1891).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialBackend {
+    NativeVault,
+    File,
+    Env,
+}
+
+impl CredentialBackend {
+    /// Stable machine-readable `source` value in `auth status --json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeVault => "native_vault",
+            Self::File => "file",
+            Self::Env => "env",
+        }
+    }
+
+    /// Human-readable name used in status and login messages.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::NativeVault => "native credential vault",
+            Self::File => "owner-only credential file (~/.clud/credentials)",
+            Self::Env => "environment variable",
+        }
+    }
 }
 
 /// Production adapter for the OS-native encrypted credential vault,
 /// parameterized on the vault identifiers so multiple providers (DeepSeek,
 /// and Kimi in Phase 2) can each hold a distinct record with no shared
-/// global state.
-pub struct NativeSecretStore {
+/// global state. It is the first link of [`NativeSecretStore`]'s chain.
+pub struct OsVaultStore {
     service: &'static str,
     account: &'static str,
 }
+
+impl OsVaultStore {
+    pub fn new(service: &'static str, account: &'static str) -> Self {
+        Self { service, account }
+    }
+}
+
+/// The production credential store: the OS-native vault first, then an
+/// owner-only file and, for reads, the provider's API-key environment
+/// variable (#1891), so a headless host with no unlocked Secret Service
+/// still works. See [`crate::credential_chain`].
+pub type NativeSecretStore = crate::credential_chain::FallbackSecretStore<OsVaultStore>;
 
 impl NativeSecretStore {
     /// DeepSeek-scoped convenience constructor. Kept with its exact prior
@@ -97,7 +148,25 @@ impl NativeSecretStore {
     /// General constructor taking explicit vault identifiers. Two instances
     /// built with different identifiers are fully independent records.
     pub fn new_for(service: &'static str, account: &'static str) -> Result<Self, SecretStoreError> {
-        Ok(Self { service, account })
+        let env_var = provider_registry::ANTHROPIC_COMPAT_PROVIDERS
+            .iter()
+            .find(|descriptor| {
+                descriptor.vault_service == service && descriptor.vault_account == account
+            })
+            .map(|descriptor| descriptor.api_key_env);
+        // The debug-only test vault already stands in for the native one, and
+        // its tests must not read the developer's real `~/.clud`.
+        let file = (!test_vault_active())
+            .then(crate::credential_chain::default_credentials_dir)
+            .flatten()
+            .map(|dir| test_vault_path(&dir, service, account));
+        Ok(crate::credential_chain::FallbackSecretStore::new(
+            OsVaultStore::new(service, account),
+            service,
+            account,
+            file,
+            env_var,
+        ))
     }
 }
 
@@ -286,7 +355,7 @@ mod windows_vault {
     }
 }
 
-impl SecretStore for NativeSecretStore {
+impl SecretStore for OsVaultStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError> {
         if let Some(dir) = test_vault_dir() {
             return match std::fs::read_to_string(test_vault_path(&dir, self.service, self.account))
@@ -378,9 +447,11 @@ impl PreflightError {
                 "{} credentials are not configured; run `{}`",
                 descriptor.display_name, descriptor.login_command
             ),
-            Self::Unavailable => {
-                "the native credential vault is unavailable; retry after unlocking it".to_string()
-            }
+            Self::Unavailable => format!(
+                "no usable credential store for {}: the native credential vault is unavailable \
+                 and ~/.clud/credentials could not be used; run `{}` or set {}",
+                descriptor.display_name, descriptor.login_command, descriptor.api_key_env
+            ),
             Self::Cancelled => {
                 format!("{} credential entry was cancelled", descriptor.display_name)
             }
@@ -515,23 +586,28 @@ fn probe_key_at(url: &str, key: &str) -> ProbeOutcome {
 }
 
 /// Store an API key passed on the command line (`clud --deepseek <API_KEY>`)
-/// in `descriptor`'s native-vault record. Returns whether the stored value
-/// changed, so the caller only announces a real update.
+/// in `descriptor`'s credential record. Returns the backend that took it when
+/// the stored value changed, so the caller only announces a real update.
 pub fn store_inline_api_key(
     descriptor: &'static AnthropicCompatProvider,
     key: &str,
-) -> Result<bool, SecretStoreError> {
+) -> Result<Option<CredentialBackend>, SecretStoreError> {
     let store = NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)?;
-    store_inline_api_key_with(&store, key)
+    Ok(store_inline_api_key_with(&store, key)?.then(|| store.backend()))
 }
 
 /// The one line printed when a command-line key replaces the stored one
 /// (#1304). Shows only the last four characters.
-pub fn inline_key_saved_notice(descriptor: &AnthropicCompatProvider, key: &str) -> String {
+pub fn inline_key_saved_notice(
+    descriptor: &AnthropicCompatProvider,
+    key: &str,
+    backend: CredentialBackend,
+) -> String {
     format!(
-        "[clud] saved {} key {} to the native credential vault",
+        "[clud] saved {} key {} to the {}",
         descriptor.display_name,
-        crate::secret_redaction::mask_key(key)
+        crate::secret_redaction::mask_key(key),
+        backend.describe()
     )
 }
 
@@ -679,7 +755,7 @@ pub fn run_for(
         Ok(store) => store,
         Err(error) => {
             eprintln!(
-                "{}-auth: {error}; retry after unlocking the vault",
+                "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                 descriptor.settings_id
             );
             return 2;
@@ -768,13 +844,19 @@ fn handle_secret_key(
     }
 }
 
-fn write_credential_status(stdout: &mut dyn Write, json: bool, status: &str, fingerprint: &str) {
+fn write_credential_status(
+    stdout: &mut dyn Write,
+    backend: CredentialBackend,
+    json: bool,
+    status: &str,
+    fingerprint: &str,
+) {
     if json {
         let _ = writeln!(
             stdout,
             "{}",
             serde_json::json!({
-                "source": "native_vault",
+                "source": backend.as_str(),
                 "configured": true,
                 "status": status,
                 "fingerprint": fingerprint,
@@ -783,7 +865,8 @@ fn write_credential_status(stdout: &mut dyn Write, json: bool, status: &str, fin
     } else {
         let _ = writeln!(
             stdout,
-            "source: native credential vault\nstatus: {status}\nstored key: {fingerprint}"
+            "source: {}\nstatus: {status}\nstored key: {fingerprint}",
+            backend.describe()
         );
     }
 }
@@ -814,16 +897,24 @@ fn run_with_probe(
             };
             match store.set(&secret) {
                 Ok(()) => {
+                    if store.backend() == CredentialBackend::File {
+                        eprintln!(
+                            "{}-auth: the native credential vault is unavailable; \
+                             using the owner-only fallback file instead",
+                            descriptor.settings_id
+                        );
+                    }
                     let _ = writeln!(
                         stdout,
-                        "{} API key stored in the native credential vault",
-                        descriptor.display_name
+                        "{} API key stored in the {}",
+                        descriptor.display_name,
+                        store.backend().describe()
                     );
                     0
                 }
                 Err(error) => {
                     eprintln!(
-                        "{}-auth: {error}; retry after unlocking the vault",
+                        "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                         descriptor.settings_id
                     );
                     2
@@ -836,23 +927,24 @@ fn run_with_probe(
                     let _ = writeln!(
                         stdout,
                         "{}",
-                        serde_json::json!({"source": "native_vault", "configured": true})
+                        serde_json::json!({"source": store.backend().as_str(), "configured": true})
                     );
                     0
                 }
                 Ok(()) => {
                     let _ = writeln!(
                         stdout,
-                        "source: native credential vault\nstatus: configured"
+                        "source: {}\nstatus: configured",
+                        store.backend().describe()
                     );
                     0
                 }
                 Err(PreflightError::Malformed { fingerprint }) => {
-                    write_credential_status(stdout, *json, "malformed", &fingerprint);
+                    write_credential_status(stdout, store.backend(), *json, "malformed", &fingerprint);
                     2
                 }
                 Err(PreflightError::Rejected { fingerprint, .. }) => {
-                    write_credential_status(stdout, *json, "rejected", &fingerprint);
+                    write_credential_status(stdout, store.backend(), *json, "rejected", &fingerprint);
                     2
                 }
                 Err(_) => {
@@ -863,20 +955,21 @@ fn run_with_probe(
                 let _ = writeln!(
                     stdout,
                     "{}",
-                    serde_json::json!({"source": "native_vault", "configured": false})
+                    serde_json::json!({"source": store.backend().as_str(), "configured": false})
                 );
                 1
             }
             Ok(None) => {
                 let _ = writeln!(
                     stdout,
-                    "source: native credential vault\nstatus: login required"
+                    "source: {}\nstatus: login required",
+                    store.backend().describe()
                 );
                 1
             }
             Err(error) => {
                 eprintln!(
-                    "{}-auth: {error}; retry after unlocking the vault",
+                    "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                     descriptor.settings_id
                 );
                 2
@@ -890,14 +983,14 @@ fn run_with_probe(
             Ok(()) => {
                 let _ = writeln!(
                     stdout,
-                    "{} API key removed from the native credential vault",
+                    "{} API key removed from the native credential vault and fallback file",
                     descriptor.display_name
                 );
                 0
             }
             Err(error) => {
                 eprintln!(
-                    "{}-auth: {error}; retry after unlocking the vault",
+                    "{}-auth: {error}; unlock the vault or check ~/.clud/credentials",
                     descriptor.settings_id
                 );
                 2
@@ -1321,7 +1414,7 @@ mod tests {
             ),
             Ok(())
         );
-        let notice = inline_key_saved_notice(descriptor, new);
+        let notice = inline_key_saved_notice(descriptor, new, CredentialBackend::NativeVault);
         assert_eq!(
             notice,
             "[clud] saved OpenRouter key ****wxyz to the native credential vault"
@@ -1404,7 +1497,9 @@ mod tests {
         );
         assert_eq!(
             PreflightError::Unavailable.describe(descriptor),
-            "the native credential vault is unavailable; retry after unlocking it"
+            "no usable credential store for DeepSeek: the native credential vault is \
+             unavailable and ~/.clud/credentials could not be used; run `clud auth login \
+             deepseek` or set DEEPSEEK_API_KEY"
         );
         assert_eq!(
             PreflightError::Cancelled.describe(descriptor),
