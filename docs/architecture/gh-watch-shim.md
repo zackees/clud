@@ -23,7 +23,9 @@ valid `CLUD_EXE` the watch runs on the real executable unchanged. The
 upgrade is fail-fast only: it passes `--cancel-on fail`, so review activity
 or a closed PR ends the watch without cancelling anything, and a failure
 cancels only the failing run and older runs of its workflow, judged by the
-watcher's supersession rule (#1742). Unsupported
+watcher's supersession rule (#1742). The failing run is spared while any of
+its jobs is still in progress, so sibling jobs keep their results
+(obs-rust/obs-studio#13). Unsupported
 flags fail explicitly so the shim cannot silently change a future CLI's
 output or wait contract.
 
