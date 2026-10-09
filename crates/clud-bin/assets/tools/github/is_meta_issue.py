@@ -12,8 +12,11 @@ Usage:
   is_meta_issue.py <issue> [--repo OWNER/REPO]
 
 <issue> is an issue number or a https://github.com/OWNER/REPO/issues/N URL
-(the URL supplies the repo). Without --repo or a URL, the repo is resolved
-with `gh repo view --json nameWithOwner`.
+(the URL supplies the repo). Without --repo or a URL, the repo is the one
+`git remote get-url origin` names. `gh repo view` is asked only when origin
+is not a github.com URL: in a fork without `gh repo set-default` it resolves
+to the *upstream* (parent) repository, which answered obsproject/obs-studio#4
+for a bare `4` in an obs-rust/obs-studio checkout (obs-rust/obs-studio#13).
 
 An issue is meta when it has native GitHub sub-issues or its body carries a
 task list (`- [ ]` / `- [x]` lines) referencing other issues or PRs.
@@ -51,6 +54,11 @@ _TASK_LINE = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+")
 _ISSUE_URL = re.compile(r"https?://github\.com/([\w.-]+)/([\w.-]+)/(?:issues|pull)/(\d+)")
 _REF = re.compile(r"(?<![\w/.-])(?:([\w.-]+)/([\w.-]+))?#(\d+)\b")
 _ARG_URL = re.compile(r"^https?://github\.com/([\w.-]+)/([\w.-]+)/issues/(\d+)/?(?:[?#].*)?$")
+_GITHUB_REMOTE = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]+@)?github\.com(?::\d+)?[:/]"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
 
 
 class GhError(Exception):
@@ -199,7 +207,35 @@ def parse_issue_arg(issue: str, repo: str | None) -> tuple[str | None, int]:
     raise UsageError(f"not an issue number or issue URL: {issue!r}")
 
 
+def github_repo_from_url(url: str) -> str | None:
+    """`owner/name` of a github.com remote URL (https, ssh, scp-style), or None."""
+    m = _GITHUB_REMOTE.match(url.strip())
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def _git_origin_url() -> str | None:
+    """`git remote get-url origin`, or None when git fails or has no origin."""
+    try:
+        res = RunningProcess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            stderr=PIPE,
+            text=True,
+            timeout=GH_TIMEOUT,
+        )
+    except (OSError, TimeoutError, TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    return (res.stdout or "").strip() or None
+
+
 def _resolve_repo() -> str:
+    """The repo a bare issue number names: origin's, else gh's default."""
+    origin = _git_origin_url()
+    repo = github_repo_from_url(origin) if origin else None
+    if repo:
+        return repo
     out = _gh_checked("repo", "view", "--json", "nameWithOwner")
     try:
         name = json.loads(out)["nameWithOwner"]
@@ -218,7 +254,7 @@ class _Parser(argparse.ArgumentParser):
 def main(argv: list[str] | None = None) -> int:
     parser = _Parser(prog="is_meta_issue.py", description="Is a GitHub issue a meta issue?")
     parser.add_argument("issue", help="issue number or https://github.com/o/r/issues/N URL")
-    parser.add_argument("--repo", help="OWNER/REPO (defaults to the URL's or the cwd's repo)")
+    parser.add_argument("--repo", help="OWNER/REPO (default: the URL's repo, else origin's)")
     try:
         ns = parser.parse_args(sys.argv[1:] if argv is None else argv)
         if ns.repo is not None and not re.fullmatch(r"[\w.-]+/[\w.-]+", ns.repo):
