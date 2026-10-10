@@ -1009,6 +1009,19 @@ fn bare_resume_gives_registered_builtins_precedence_over_optional_session_value(
 }
 
 #[test]
+fn inline_key_split_survives_value_named_like_subcommand() {
+    let args = parse(&[
+        "clud",
+        "--name",
+        "test",
+        "--deepseek=sk-0123456789abcdefghij",
+    ]);
+    assert!(args.deepseek);
+    assert_eq!(args.session_name.as_deref(), Some("test"));
+    assert!(args.passthrough.is_empty(), "{:?}", args.passthrough);
+}
+
+#[test]
 fn bare_resume_does_not_swallow_following_flag() {
     let long = parse(&["clud", "--resume", "--model", "opus"]);
     assert_eq!(long.resume, Some(None));
