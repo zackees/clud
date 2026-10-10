@@ -1549,7 +1549,9 @@ fn normalize_known_option_dashes(raw: &[String]) -> Vec<String> {
 /// registered subcommands precedence by spelling a bare resume as an explicit
 /// empty value for clap, then normalize that empty value back to `Some(None)`.
 /// A session actually named like a subcommand remains addressable with
-/// `--resume=<session>`.
+/// `--resume=<session>`. A following flag (`--resume --model opus`) is never a
+/// session id either, so it gets the same treatment; otherwise the splitter
+/// would take the flag as resume's value (#1899).
 fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
     let mut normalized = raw.to_vec();
     for i in 1..raw.len() {
@@ -1558,9 +1560,10 @@ fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
             break;
         }
         if matches!(arg, "--resume" | "-r")
-            && raw
-                .get(i + 1)
-                .is_some_and(|next| TOP_LEVEL_SUBCOMMANDS.contains(&next.as_str()))
+            && raw.get(i + 1).is_some_and(|next| {
+                TOP_LEVEL_SUBCOMMANDS.contains(&next.as_str())
+                    || (next.starts_with('-') && next.len() > 1)
+            })
         {
             normalized[i] = "--resume=".to_string();
         }

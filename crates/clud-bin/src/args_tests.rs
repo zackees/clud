@@ -1009,6 +1009,18 @@ fn bare_resume_gives_registered_builtins_precedence_over_optional_session_value(
 }
 
 #[test]
+fn bare_resume_does_not_swallow_following_flag() {
+    let long = parse(&["clud", "--resume", "--model", "opus"]);
+    assert_eq!(long.resume, Some(None));
+    assert_eq!(long.model.as_deref(), Some("opus"));
+    assert!(long.passthrough.is_empty(), "{:?}", long.passthrough);
+    let short = parse(&["clud", "-r", "-p", "hi"]);
+    assert_eq!(short.resume, Some(None));
+    assert_eq!(short.prompt.as_deref(), Some("hi"));
+    assert!(short.passthrough.is_empty(), "{:?}", short.passthrough);
+}
+
+#[test]
 fn resume_session_named_like_subcommand_requires_unambiguous_equals_form() {
     let args = parse(&["clud", "--codex", "--resume=do"]);
     assert_eq!(
