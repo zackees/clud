@@ -275,6 +275,32 @@ fn origin_of_follows_a_worktree_gitdir_file() {
 }
 
 #[test]
+fn origin_of_reads_config_through_worktree_commondir() {
+    let tmp = TempDir::new().unwrap();
+    let root = repo(tmp.path(), "myrepo");
+    let wt_git = root.join(".git").join("worktrees").join("wt");
+    fs::create_dir_all(&wt_git).unwrap();
+    fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    let worktree = tmp.path().join("wt");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}", wt_git.display()),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".git").join("config"),
+        "[remote \"origin\"]\n\turl = https://example.com/myrepo.git\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        origin_of(&worktree),
+        Some("https://example.com/myrepo.git".to_string())
+    );
+}
+
+#[test]
 fn extern_dir_for_finds_sibling_then_legacy() {
     let tmp = TempDir::new().unwrap();
     let root = repo(tmp.path(), "myrepo");
