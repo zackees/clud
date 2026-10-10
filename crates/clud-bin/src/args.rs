@@ -1554,8 +1554,13 @@ fn normalize_known_option_dashes(raw: &[String]) -> Vec<String> {
 /// would take the flag as resume's value (#1899).
 fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
     let mut normalized = raw.to_vec();
+    let mut skip_value = false;
     for i in 1..raw.len() {
         let arg = raw[i].as_str();
+        let consumes_next = takes_next_value(arg) && !matches!(arg, "--resume" | "-r");
+        if std::mem::replace(&mut skip_value, consumes_next) {
+            continue;
+        }
         if arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg) {
             break;
         }
@@ -1571,6 +1576,12 @@ fn normalize_bare_resume_before_subcommand(raw: &[String]) -> Vec<String> {
     normalized
 }
 
+/// True when `arg` is a clud value flag spelled without `=`, so the next token
+/// is its value rather than a flag or subcommand.
+fn takes_next_value(arg: &str) -> bool {
+    SPLITTER_VALUE_FLAGS.contains(&arg) || SPLITTER_SHORT_VALUE_FLAGS.contains(&arg)
+}
+
 /// Provider flags that accept an inline API key.
 const INLINE_KEY_PROVIDER_FLAGS: &[&str] = &["--deepseek", "--kimi", "--openrouter"];
 
@@ -1584,9 +1595,14 @@ const INLINE_KEY_PROVIDER_FLAGS: &[&str] = &["--deepseek", "--kimi", "--openrout
 fn split_inline_key_assignments(raw: &[String]) -> Result<Vec<String>, String> {
     let mut normalized = Vec::with_capacity(raw.len() + 1);
     let mut in_clud_flags = true;
+    let mut skip_value = false;
     for (index, arg) in raw.iter().enumerate() {
-        if index > 0 && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str())) {
+        // A value flag's value (`--name test`) is never a subcommand (#1900).
+        let is_value = std::mem::replace(&mut skip_value, in_clud_flags && takes_next_value(arg));
+        if index > 0 && !is_value && (arg == "--" || TOP_LEVEL_SUBCOMMANDS.contains(&arg.as_str()))
+        {
             in_clud_flags = false;
+            skip_value = false;
         }
         let assignment = arg.split_once('=').filter(|(flag, _)| {
             in_clud_flags && index > 0 && INLINE_KEY_PROVIDER_FLAGS.contains(flag)
