@@ -144,6 +144,8 @@ impl FailoverLadder {
         let catalog = provider_catalog::model_by_cli_id(name)
             .or_else(|| provider_catalog::model_by_wire_id(name))
             .or_else(|| provider_catalog::model_by_any_id(name));
+        let inferred = provider_catalog::inferred_provider_from_wire(name)
+            .filter(|provider| *provider != ModelProvider::Claude);
         match catalog {
             // A catalog row that is not Claude names a provider namespace clud
             // owns, so the replayed body must carry that row's wire ID.
@@ -157,6 +159,19 @@ impl FailoverLadder {
                     // `Unroutable` rung.
                     route: crate::route_plan::conversation_route(entry.provider),
                     cost: CostOwner::for_provider(entry.provider),
+                })
+            }
+            // An uncataloged ID with a provider's wire prefix (`gpt-5.5`,
+            // `deepseek-v4-flash-0901`) still belongs to that provider, the same
+            // inference `--model` uses (#1902).
+            _ if inferred.is_some() => {
+                let provider = inferred.unwrap_or(ModelProvider::Claude);
+                Ok(FailoverRung {
+                    spec: name.to_string(),
+                    wire_id: name.to_string(),
+                    provider,
+                    route: crate::route_plan::conversation_route(provider),
+                    cost: CostOwner::for_provider(provider),
                 })
             }
             // Everything else is an ordinary Claude model ID. Anthropic owns
@@ -246,6 +261,17 @@ mod tests {
     use super::*;
     use crate::route_health::RouteVerdict;
     use std::time::Duration;
+
+    #[test]
+    fn uncataloged_prefixed_wire_ids_keep_their_provider() {
+        let ladder = FailoverLadder::parse("deepseek-v4-flash-0901,gpt-5.5", false).unwrap();
+        let deepseek = &ladder.rungs()[0];
+        assert_eq!(deepseek.provider, ModelProvider::DeepSeek);
+        assert_eq!(deepseek.cost, CostOwner::Metered);
+        assert!(!ladder.withheld_for_consent().is_empty());
+        assert_eq!(ladder.rungs()[1].provider, ModelProvider::Codex);
+        assert_ne!(ladder.rungs()[1].route, ConversationRoute::Claude);
+    }
 
     #[test]
     fn a_catalog_rung_carries_its_provider_wire_id_and_an_unknown_id_stays_claude() {
