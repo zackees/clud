@@ -381,20 +381,25 @@ fn merge_claude_append_prompt(passthrough: &[String], unsafe_mode: bool) -> (Str
 }
 
 fn take_codex_developer_instructions(passthrough: &mut Vec<String>) -> Option<String> {
+    let parse = |value: &str| {
+        value
+            .strip_prefix("developer_instructions=")
+            .and_then(parse_codex_instruction_override)
+    };
     let mut found = None;
     let mut index = 0;
-    while index + 1 < passthrough.len() {
-        if passthrough[index] == "-c" {
-            if let Some(value) = passthrough[index + 1]
-                .strip_prefix("developer_instructions=")
-                .and_then(parse_codex_instruction_override)
-            {
-                found = Some(value);
-                passthrough.drain(index..index + 2);
-                continue;
-            }
+    while index < passthrough.len() {
+        // Codex takes `-c <kv>`, `--config <kv>` and `--config=<kv>` (#1901).
+        let (value, width) = match passthrough[index].as_str() {
+            "-c" | "--config" => (passthrough.get(index + 1).and_then(|v| parse(v)), 2),
+            arg => (arg.strip_prefix("--config=").and_then(parse), 1),
+        };
+        if let Some(value) = value {
+            found = Some(value);
+            passthrough.drain(index..index + width);
+        } else {
+            index += 1;
         }
-        index += 1;
     }
     found
 }
