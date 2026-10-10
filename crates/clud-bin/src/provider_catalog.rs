@@ -549,7 +549,7 @@ pub fn supported_context_windows(provider: ModelProvider) -> &'static [&'static 
     provider_context_windows(provider)
 }
 
-fn split_effort_suffix(raw: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_effort_suffix(raw: &str) -> (&str, Option<&str>) {
     raw.rsplit_once('@').map_or((raw, None), |(model, effort)| {
         (model.trim(), Some(effort.trim()))
     })
