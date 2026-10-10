@@ -27,7 +27,10 @@ pub fn default_credentials_dir() -> Option<PathBuf> {
 /// fake that always reports `Unavailable`.
 pub struct FallbackSecretStore<V> {
     vault: V,
+    // Read only by tests, which assert each store's vault identity.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by provider_auth tests"))]
     pub(crate) service: &'static str,
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by provider_auth tests"))]
     pub(crate) account: &'static str,
     file: Option<PathBuf>,
     env_var: Option<&'static str>,
@@ -36,7 +39,7 @@ pub struct FallbackSecretStore<V> {
 }
 
 impl<V: SecretStore> FallbackSecretStore<V> {
-    pub fn new(
+    pub fn from_parts(
         vault: V,
         service: &'static str,
         account: &'static str,

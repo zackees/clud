@@ -48,7 +48,7 @@ fn chain<V: SecretStore>(
     dir: &tempfile::TempDir,
     lookup: fn(&str) -> Option<String>,
 ) -> FallbackSecretStore<V> {
-    FallbackSecretStore::new(
+    FallbackSecretStore::from_parts(
         vault,
         "clud.openrouter",
         "api-key-v1",
@@ -60,7 +60,7 @@ fn chain<V: SecretStore>(
 
 #[test]
 fn locked_vault_without_a_fallback_still_fails_as_before() {
-    let store = FallbackSecretStore::new(LockedVault, "s", "a", None, None);
+    let store = FallbackSecretStore::from_parts(LockedVault, "s", "a", None, None);
     assert_eq!(store.get(), Err(SecretStoreError::Unavailable));
     assert_eq!(store.set(KEY), Err(SecretStoreError::Unavailable));
 }

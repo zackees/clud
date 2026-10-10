@@ -159,7 +159,7 @@ impl NativeSecretStore {
             .then(crate::credential_chain::default_credentials_dir)
             .flatten()
             .map(|dir| test_vault_path(&dir, service, account));
-        Ok(crate::credential_chain::FallbackSecretStore::new(
+        Ok(crate::credential_chain::FallbackSecretStore::from_parts(
             OsVaultStore::new(service, account),
             service,
             account,
