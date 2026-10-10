@@ -319,7 +319,10 @@ fn remote_origin_url(text: &str) -> Option<String> {
         if !in_origin_section {
             continue;
         }
-        let (key, value) = line.split_once('=')?;
+        // A valueless boolean key (`mirror`) is legal git config (#1905).
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         if key.trim().eq_ignore_ascii_case("url") {
             let value = value.trim().trim_matches('"').to_string();
             if !value.is_empty() {
@@ -333,7 +336,8 @@ fn remote_origin_url(text: &str) -> Option<String> {
 fn section_is_origin(header: &str) -> bool {
     let inner = header.trim_start_matches('[').trim_end_matches(']').trim();
     let Some((section, rest)) = inner.split_once(['.', ' ']) else {
-        return inner.eq_ignore_ascii_case("remote");
+        // A bare `[remote]` header has no subsection, so it is not origin.
+        return false;
     };
     if !section.eq_ignore_ascii_case("remote") {
         return false;
