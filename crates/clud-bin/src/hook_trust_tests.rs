@@ -252,6 +252,15 @@ fn origin_of_accepts_both_section_spellings_and_quotes() {
 }
 
 #[test]
+fn remote_origin_url_skips_valueless_keys_and_bare_remote_headers() {
+    assert_eq!(
+        remote_origin_url("[remote \"origin\"]\n\tmirror\n\turl = https://evil/x.git\n"),
+        Some("https://evil/x.git".to_string())
+    );
+    assert_eq!(remote_origin_url("[remote]\n\turl = https://nope\n"), None);
+}
+
+#[test]
 fn origin_of_follows_a_worktree_gitdir_file() {
     let tmp = TempDir::new().unwrap();
     let root = repo(tmp.path(), "myrepo");
