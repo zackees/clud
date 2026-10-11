@@ -6689,3 +6689,38 @@ would.
 **Rejected.** Refusing `--provider-only` on unified and documenting the
 asymmetry (it is exactly the accidental per-route difference #1852 exists to
 remove); a second gateway-only flag for the same object.
+
+## DD-168: hand-written waits are refused; a short standalone `sleep` is not
+
+**Context.** One session (#1880) produced four hand-written wait loops; two ran
+for 7 hours. Each invented a completion check on a stand-in (its own process
+line, a word cut off by `tail`, a status string) and nothing made it give up.
+Every wait that used `run_in_background` and the harness's completion
+notification, or a tool with its own deadline, worked. Transcript analysis
+found counted `for i in $(seq …)` loops with `sleep` and chained
+`sleep N && gh run list` (a loop split across turns) as the commonest shapes.
+
+**Decision.** `block_bad_cmd` refuses waiting constructs in shell commands for
+every agent: `while`/`until`/infinite `for`, any loop that sleeps, unbounded
+`tail -f`, `watch`, and a `sleep` chained to a GitHub status read. A single
+`sleep` outside a loop stays **allowed up to 60 s** when nothing in the same
+command polls; longer, `infinity` or a non-literal duration is refused. The
+refusal names the replacement. The only escape is the audited
+`CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`.
+
+**Why 60 s.** A short pause has real uses that are not waits on a stand-in
+(letting a just-started server bind before one `curl`, rate-limit spacing) and
+cannot run away: it ends by itself. Banning it would push agents to
+overrides for harmless commands, eroding the override trail's signal. Above a
+minute a `sleep` is almost always a poll interval or "wait for CI", which is
+exactly what background + notify replaces; a non-literal length cannot be
+judged, so it fails closed. A `sleep` of any length beside a `gh` status read
+is refused, because that pair is one iteration of a poll.
+
+**Rejected.** Teaching a coding rule for loops (the four failures had four
+different bugs). Banning every `sleep` (see above). A `clud wait --file F
+--contains X --timeout` primitive: no need remains — background + notify plus
+`clud ci`, `bosn ci run --wait` and `pr_merge_watch` cover every wait the
+session and the transcript scan found. Allowing bounded `for` loops with
+`sleep`: the bound is routinely hours of iterations.
+

@@ -1886,6 +1886,12 @@ fn evaluate_command_into(
         }
     }
 
+    // #1880: every hand-written wait, PR-related or not, for every agent.
+    if let Some(reason) = hand_written_wait_reason(command_text, dialect, evaluation) {
+        evaluation.reason = Some(reason);
+        return;
+    }
+
     for segment in split_shell_segments(command_text, dialect) {
         let segment = segment.trim();
         if segment.is_empty() {
@@ -2047,9 +2053,11 @@ fn blocking_pr_wait_reason(
         }
     }
 
-    let is_loop = segments
-        .iter()
-        .any(|segment| is_polling_loop_head(segment, dialect));
+    // #1880: a counted `for` loop that sleeps, and a `sleep` chained before
+    // a status read (a loop split across turns), poll just the same.
+    let is_loop = segments.iter().any(|segment| {
+        is_polling_loop_head(segment, dialect) || is_sleep_segment(segment, dialect)
+    });
     if !is_loop {
         return None;
     }
@@ -2062,7 +2070,7 @@ fn blocking_pr_wait_reason(
         let words = command_words(&inner);
         if gh_poll_target(&words) {
             return Some(format!(
-                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead."
+                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead. {WAIT_REPLACEMENT}"
             ));
         }
     }
@@ -2071,7 +2079,7 @@ fn blocking_pr_wait_reason(
     for (index, word) in words.iter().enumerate() {
         if program_name(word) == "gh" && gh_poll_target(&words[index..]) {
             return Some(format!(
-                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead."
+                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead. {WAIT_REPLACEMENT}"
             ));
         }
     }
@@ -2095,6 +2103,17 @@ fn is_polling_loop_head(segment: &str, dialect: ShellDialect) -> bool {
         }
         ShellDialect::Cmd => false,
     }
+}
+
+/// A `sleep`/`Start-Sleep` segment, including a loop body's `do sleep 30`.
+fn is_sleep_segment(segment: &str, dialect: ShellDialect) -> bool {
+    let mut words = command_words(segment);
+    if dialect == ShellDialect::Posix && words.first().is_some_and(|word| word == "do") {
+        words.remove(0);
+    }
+    words
+        .first()
+        .is_some_and(|word| matches!(program_name(word).as_str(), "sleep" | "start-sleep"))
 }
 
 fn native_gh_waiter(words: &[String]) -> bool {
@@ -2122,14 +2141,43 @@ fn gh_poll_target(words: &[String]) -> bool {
     {
         return true;
     }
-    positionals.starts_with(&["pr", "view"])
-        && words.iter().any(|word| {
-            word.eq_ignore_ascii_case("statusCheckRollup")
-                || word.to_ascii_lowercase().contains("statuscheckrollup")
-        })
-        && words
+    // #1880 category F: REST reads of run, job, check and Pages build status.
+    if positionals.first() == Some(&"api") {
+        return positionals.iter().skip(1).any(|endpoint| {
+            let endpoint = endpoint.to_ascii_lowercase();
+            [
+                "actions/runs",
+                "actions/jobs",
+                "check-runs",
+                "statuses",
+                "pages/builds",
+            ]
             .iter()
-            .any(|word| word == "--json" || word.starts_with("--json="))
+            .any(|needle| endpoint.contains(needle))
+        });
+    }
+    positionals.starts_with(&["pr", "view"]) && pr_view_json_polls_status(words)
+}
+
+/// `gh pr view --json` naming a field agents poll: the check rollup, or
+/// (#1880 category D) `mergeStateStatus`, `mergeable` or `state`.
+fn pr_view_json_polls_status(words: &[String]) -> bool {
+    let mut fields = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        if word == "--json" {
+            if let Some(value) = words.get(index + 1) {
+                fields.extend(value.split(','));
+            }
+        } else if let Some(value) = word.strip_prefix("--json=") {
+            fields.extend(value.split(','));
+        }
+    }
+    fields.iter().any(|field| {
+        matches!(
+            field.trim().to_ascii_lowercase().as_str(),
+            "statuscheckrollup" | "mergestatestatus" | "mergeable" | "state"
+        )
+    })
 }
 
 fn gh_positionals(arguments: &[String]) -> Vec<&str> {
@@ -3537,6 +3585,14 @@ mod block_bad_cmd_stale_upstream;
 #[path = "block_bad_cmd_repeat.rs"]
 mod block_bad_cmd_repeat;
 
+#[path = "block_bad_cmd_wait_loop.rs"]
+mod block_bad_cmd_wait_loop;
+use block_bad_cmd_wait_loop::{hand_written_wait_reason, WAIT_REPLACEMENT};
+
+#[cfg(test)]
+#[path = "block_bad_cmd_wait_loop_tests.rs"]
+mod block_bad_cmd_wait_loop_tests;
+
 /// The `/grind` role-cap denial for this call, if its agent is a capped role,
 /// or the feature-branch-mode router caps for any other caller while
 /// the session's run facts record a feature.
@@ -4303,7 +4359,35 @@ mod tests {
             let reason = evaluation
                 .reason
                 .unwrap_or_else(|| panic!("{command} should be denied"));
-            assert!(reason.contains("pr_merge_watch.py"), "{reason}");
+            assert!(reason.contains("pr_merge_watch.py"), "{command}: {reason}");
+        }
+    }
+
+    /// zackees/clud#1880 gap rows: the shapes the transcript analysis found
+    /// passing this guard (categories A, C, D, E, F), verbatim.
+    #[test]
+    fn blocks_issue_1880_polling_gap_rows() {
+        for command in [
+            // A: bounded `seq` loop around `gh pr checks`.
+            r#"for i in $(seq 1 38); do p=$(gh pr checks 1857 | grep -cE "pending|queued"); [ "$p" = 0 ] && break; sleep 14; done"#,
+            // E: bounded loop around a workflow run.
+            r#"for i in $(seq 1 19); do s=$(gh run view 38054481154 --json status,conclusion -q '.status+" "+.conclusion'); case "$s" in completed*) break;; esac; sleep 30; done"#,
+            // F: `gh api` polling of pages builds and run jobs.
+            "for i in $(seq 1 12); do st=$(gh api repos/zackees/clud/pages/builds/latest --jq .status); [ \"$st\" = built ] && break; sleep 20; done",
+            "until [ \"$(gh api repos/zackees/clud/actions/runs/123/jobs --jq '.jobs[0].status')\" = completed ]; do sleep 30; done",
+            "while true; do gh api repos/zackees/clud/commits/abc/check-runs; sleep 30; done",
+            // D: merge-state polling, then merge.
+            "for i in $(seq 1 30); do st=$(gh pr view 515 --json mergeStateStatus -q .mergeStateStatus); [ \"$st\" = CLEAN ] && break; sleep 30; done; gh pr merge 515",
+            // C: the loop split across turns, one chained sleep at a time.
+            "git push origin feat/x && sleep 25 && gh run list --limit 1 --json status,conclusion",
+            "sleep 30 && gh pr checks 1857",
+            "gh pr merge 515 --squash; sleep 10; gh pr view 515 --json state",
+        ] {
+            let reason = evaluate_command(command, None, false, &[])
+                .reason
+                .unwrap_or_else(|| panic!("{command} should be denied"));
+            assert!(reason.contains("pr_merge_watch"), "{reason}");
+            assert!(reason.contains("run_in_background"), "{reason}");
         }
     }
 
@@ -5934,7 +6018,7 @@ mod tests {
         assert_eq!(OverrideOutcome::NotAttempted.rejection_reason(), None);
     }
 
-    fn temp_env(key: &str, value: &str, f: impl FnOnce()) {
+    pub(super) fn temp_env(key: &str, value: &str, f: impl FnOnce()) {
         let _guard = OVERRIDE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var(key).ok();
         std::env::set_var(key, value);

@@ -202,6 +202,16 @@ Policy: [zackees/ci.yml#229](https://github.com/zackees/ci.yml/issues/229)
 
 The only narrowly permitted Rust exception is a test that must use raw `std::process::Command` because `running_process::NativeProcess` would change the behavior under test. Such a test requires a documented, filename-specific exemption in `ci/banned_imports.py`; do not add an exemption for ordinary tests or production code.
 
+### Waiting: background + notify, never a loop
+
+Never poll. To wait, run the command in the background and wait for the notification.
+clud's `block_bad_cmd` hook refuses hand-written waits for the main agent and
+every sub-agent (`while`/`until`, a `for` loop that sleeps, a `sleep` chained
+to a `gh` status read, `tail -f`, `watch`); use `run_in_background`, or a tool
+with its own deadline (`clud ci`, `bosn ci run --wait`, `pr_merge_watch`)
+([#1880](https://github.com/zackees/clud/issues/1880),
+[DD-168](docs/DESIGN_DECISIONS.md#dd-168-hand-written-waits-are-refused-a-short-standalone-sleep-is-not)).
+
 ### One binary: `clud` is multicall
 
 clud ships exactly one executable, `clud`, so installation stays trivial. At
