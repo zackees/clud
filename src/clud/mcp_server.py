@@ -25,6 +25,7 @@ a blocking read — the same non-blocking-streaming rationale that clud's
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import os
 import shlex
@@ -98,23 +99,33 @@ async def _stream_and_capture(proc: asyncio.subprocess.Process, ctx: Context) ->
         nonlocal total, log_count
         if stream is None:
             return
+        # One incremental decoder and line carry per stream, so a character or
+        # line split across reads is not mangled (#1916).
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        carry = ""
+        logging = True
         while True:
             chunk = await stream.read(8192)
-            if not chunk:
-                break
-            text = chunk.decode("utf-8", "replace")
+            text = decoder.decode(chunk, final=not chunk)
             if total < _RESULT_CHAR_CAP:
                 parts.append(text)
                 total += len(text)
-            for line in text.splitlines():
-                if log_count >= _LOG_LINE_CAP:
-                    return
-                if line.strip():
-                    log_count += 1
-                    try:
-                        await ctx.info(f"[{label}] {line}")
-                    except Exception:  # logging must never kill a run
-                        return
+            carry += text
+            lines = carry.split("\n")
+            carry = "" if not chunk else lines.pop()
+            for line in lines:
+                # Stop forwarding logs at the cap or on a logging failure, but
+                # keep reading until EOF so the child's pipe never fills and
+                # blocks it (#1914).
+                if not logging or log_count >= _LOG_LINE_CAP or not line.strip():
+                    continue
+                log_count += 1
+                try:
+                    await ctx.info(f"[{label}] {line.rstrip()}")
+                except Exception:  # logging must never kill a run
+                    logging = False
+            if not chunk:
+                break
 
     await asyncio.gather(_pump(proc.stdout, "stdout"), _pump(proc.stderr, "stderr"))
     return "".join(parts)[:_RESULT_CHAR_CAP]
