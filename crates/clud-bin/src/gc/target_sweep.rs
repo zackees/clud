@@ -134,10 +134,9 @@ pub fn sweep_roots_at(
     let rule = format!("target-sweep stale>{}d", threshold.as_secs() / 86_400);
     for root in roots {
         for target in find_target_dirs(root) {
-            let Ok(meta) = fs::metadata(&target) else {
+            let Some(mtime) = newest_build_mtime(&target) else {
                 continue;
             };
-            let Ok(mtime) = meta.modified() else { continue };
             // Clock skew (future mtime) → skip; treat as fresh.
             let Ok(age) = now.duration_since(mtime) else {
                 continue;
@@ -172,6 +171,30 @@ pub fn sweep_roots_at(
     report
 }
 
+/// Newest mtime among `target/` and two levels below it. A directory's own
+/// mtime moves only when a direct child is added or removed, so an incremental
+/// build under `target/debug/...` leaves `target/` looking old (#1911). The
+/// profile dirs and their `deps/`, `.fingerprint/` and `build/` children do
+/// change on every build that produces output.
+fn newest_build_mtime(target: &Path) -> Option<SystemTime> {
+    let mut newest = fs::metadata(target).ok()?.modified().ok()?;
+    let mut consider = |path: &Path| {
+        if let Ok(mtime) = fs::symlink_metadata(path).and_then(|meta| meta.modified()) {
+            newest = newest.max(mtime);
+        }
+    };
+    for child in fs::read_dir(target).into_iter().flatten().flatten() {
+        let path = child.path();
+        consider(&path);
+        if child.file_type().is_ok_and(|kind| kind.is_dir()) {
+            for grandchild in fs::read_dir(&path).into_iter().flatten().flatten() {
+                consider(&grandchild.path());
+            }
+        }
+    }
+    Some(newest)
+}
+
 fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     let Ok(entries) = fs::read_dir(path) else {
@@ -195,6 +218,28 @@ mod tests {
     use std::io::Write;
     use std::time::Duration as StdDuration;
     use tempfile::tempdir;
+
+    #[test]
+    fn recent_build_output_below_target_keeps_it_fresh() {
+        let tmp = tempdir().unwrap();
+        let target = make_crate_with_target(tmp.path(), "c");
+        let now = SystemTime::now() + StdDuration::from_secs(4 * 24 * 60 * 60);
+        let debug = target.join("debug");
+        fs::create_dir_all(&debug).unwrap();
+        File::create(debug.join("foo")).unwrap();
+        let recent = filetime::FileTime::from_system_time(now - StdDuration::from_secs(3600));
+        filetime::set_file_mtime(debug.join("foo"), recent).unwrap();
+
+        let report = sweep_roots_at(
+            &[tmp.path().to_path_buf()],
+            now,
+            StdDuration::from_secs(3 * 24 * 60 * 60),
+            false,
+        );
+
+        assert_eq!(report.targets_removed, 0);
+        assert!(target.exists());
+    }
 
     /// Build `<root>/<crate_name>/{Cargo.toml, target/payload.o}` and return
     /// the target dir path.
