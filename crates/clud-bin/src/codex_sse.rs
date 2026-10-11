@@ -34,6 +34,38 @@ pub struct SseFrame {
     pub data: String,
 }
 
+/// Decode and remove the longest prefix of `pending` that is valid UTF-8,
+/// replacing truly invalid bytes with U+FFFD. An incomplete sequence at the
+/// very end stays in `pending` for the next read.
+fn take_complete_utf8(pending: &mut Vec<u8>) -> String {
+    let mut text = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(valid) => {
+                text.push_str(valid);
+                pending.clear();
+                return text;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                text.push_str(std::str::from_utf8(&pending[..valid_up_to]).unwrap_or_default());
+                match error.error_len() {
+                    // Invalid bytes: replace them and keep decoding.
+                    Some(len) => {
+                        text.push('\u{FFFD}');
+                        pending.drain(..valid_up_to + len);
+                    }
+                    // An incomplete sequence at the end: wait for more bytes.
+                    None => {
+                        pending.drain(..valid_up_to);
+                        return text;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Byte-level SSE framing.
 ///
 /// Line terminators are normalised to `\n` on ingest (the SSE spec treats
@@ -44,6 +76,9 @@ pub struct SseFrame {
 pub struct FrameDecoder {
     buffer: String,
     pending_cr: bool,
+    /// The incomplete UTF-8 tail of the last read, held for the next one so
+    /// a character split across TCP reads is not replaced with U+FFFD (#1915).
+    pending_bytes: Vec<u8>,
 }
 
 impl FrameDecoder {
@@ -53,7 +88,8 @@ impl FrameDecoder {
 
     /// Feed bytes; return every frame that is now complete.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<SseFrame> {
-        let text = String::from_utf8_lossy(bytes);
+        self.pending_bytes.extend_from_slice(bytes);
+        let text = take_complete_utf8(&mut self.pending_bytes);
         self.absorb(&text, false);
         self.drain(false)
     }
@@ -62,6 +98,11 @@ impl FrameDecoder {
     /// line still has one frame's worth of buffered data, and dropping it would
     /// silently truncate the turn.
     pub fn finish(&mut self) -> Vec<SseFrame> {
+        if !self.pending_bytes.is_empty() {
+            let tail =
+                String::from_utf8_lossy(&std::mem::take(&mut self.pending_bytes)).into_owned();
+            self.absorb(&tail, true);
+        }
         if self.pending_cr {
             self.buffer.push('\n');
             self.pending_cr = false;
