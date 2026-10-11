@@ -173,6 +173,10 @@ Entry and orchestration:
   input, OS-native credential vault adapter parameterized on the vault
   service/account identifiers, injectable in-memory test store, and secret-free
   status/error surfaces.
+- `credential_chain.rs` - the vault-first credential chain behind
+  `NativeSecretStore` (#1891): native vault, then an owner-only
+  `~/.clud/credentials` file, then the provider's API-key env var (read only).
+  See [DD-168](../../../docs/DESIGN_DECISIONS.md#dd-168-api-key-credentials-fall-back-to-an-owner-only-file-and-the-env-var).
 - `provider_registry.rs` - the `AnthropicCompatProvider` descriptor table
   (#937/#939): per-provider vault identifiers, base URL, CLI flag, optional
   Claude role-model profile, and child-env behavior for providers that speak

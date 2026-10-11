@@ -6689,3 +6689,29 @@ would.
 **Rejected.** Refusing `--provider-only` on unified and documenting the
 asymmetry (it is exactly the accidental per-route difference #1852 exists to
 remove); a second gateway-only flag for the same object.
+
+## DD-168: API-key credentials fall back to an owner-only file and the env var
+
+**Context:** zackees/clud#1891. On a headless Linux host (SSH, no desktop
+session) the Secret Service is missing, or its login collection stays locked
+because unlocking needs a GUI prompter. The native vault then reports
+`Unavailable`, so OpenRouter, Kimi and DeepSeek could not be used at all.
+`OPENROUTER_API_KEY` in the environment was only scrubbed and re-injected from
+the vault, never read.
+
+**Decision:** `NativeSecretStore` is a chain (`credential_chain.rs`): the
+native vault, then an owner-only file at
+`~/.clud/credentials/<service>--<account>.secret` (file `0600`, directory
+`0700`, and a file other users can read is refused), then the descriptor's
+`api_key_env` variable, which is read only and never persisted. A working vault
+always wins, and a vault write removes any file copy so a stale key cannot
+shadow it. The fallback is automatic, and login and status say which backend
+holds the key. DD-082's preflight runs unchanged on whatever the chain returns.
+
+**Rationale:** clud must operate where agents are commonly run: servers,
+containers, CI and SSH sessions. An owner-only file is the same trust model as
+`~/.clud/codex-auth.json` and as gh, aws and npm's fallbacks. Requiring an
+opt-in flag would leave the error the user hit unchanged.
+
+**Rejected.** Shipping keyring auto-unlock or PAM changes (that changes the
+host's auth stack); an opt-in-only file store; persisting an env-var key.

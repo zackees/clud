@@ -43,6 +43,7 @@ pub mod console_surrogates;
 pub mod console_title;
 pub mod cpu_banner;
 pub mod crash_report;
+pub mod credential_chain;
 pub mod ctrl_c_track;
 pub mod daemon;
 pub mod dashboard_auth;

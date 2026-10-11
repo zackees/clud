@@ -1190,11 +1190,11 @@ fn store_inline_api_key(args: &mut args::Args) {
         return;
     };
     match provider_auth::store_inline_api_key(descriptor, key.expose()) {
-        Ok(true) => eprintln!(
+        Ok(Some(backend)) => eprintln!(
             "{}",
-            provider_auth::inline_key_saved_notice(descriptor, key.expose())
+            provider_auth::inline_key_saved_notice(descriptor, key.expose(), backend)
         ),
-        Ok(false) => {}
+        Ok(None) => {}
         Err(error) => {
             eprintln!(
                 "{}: could not store the API key passed on the command line: {error}",
