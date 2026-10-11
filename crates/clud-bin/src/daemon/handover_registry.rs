@@ -20,6 +20,10 @@ use std::path::{Path, PathBuf};
 
 const REGISTRY_FILE: &str = "handover-registry.json";
 
+/// Serializes the read-modify-write in [`register`] and [`prune`], so a
+/// concurrent prune cannot drop a PID that was just registered (#1912).
+static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(super) fn registry_path(state_dir: &Path) -> PathBuf {
     state_dir.join(REGISTRY_FILE)
 }
@@ -53,14 +57,18 @@ pub(super) fn save(state_dir: &Path, pids: &BTreeSet<u32>) -> std::io::Result<()
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serialize(pids))?;
-    // Windows cannot rename onto an existing path; clear any stale target.
-    let _ = std::fs::remove_file(&path);
+    // `rename` replaces an existing target atomically on every platform
+    // (MoveFileExW with REPLACE_EXISTING on Windows). Deleting the target
+    // first opened a window where `load` saw no registry at all (#1912).
     std::fs::rename(&tmp, &path)
 }
 
 /// Record `origin_pid` as protected (idempotent). Called when a detached
 /// session is created, with the launching daemon's own PID.
 pub(super) fn register(state_dir: &Path, origin_pid: u32) {
+    let _guard = REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut set = load(state_dir);
     if set.insert(origin_pid) {
         let _ = save(state_dir, &set);
@@ -72,6 +80,9 @@ pub(super) fn register(state_dir: &Path, origin_pid: u32) {
 /// `live_origins` is the set of originator PIDs currently present on
 /// CLUD-tagged processes (the sweep already enumerates these).
 pub(super) fn prune(state_dir: &Path, live_origins: &BTreeSet<u32>) {
+    let _guard = REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let set = load(state_dir);
     let kept: BTreeSet<u32> = set.intersection(live_origins).copied().collect();
     if kept.len() != set.len() {
@@ -92,6 +103,28 @@ mod tests {
         register(tmp.path(), 100); // idempotent
                                    // A fresh load (models a successor daemon reading the persisted file).
         assert_eq!(load(tmp.path()), BTreeSet::from([100, 200]));
+    }
+
+    #[test]
+    fn concurrent_saves_never_expose_a_missing_registry() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        register(&dir, 100);
+        let writer_dir = dir.clone();
+        let writer = std::thread::spawn(move || {
+            for pid in 1000..1500 {
+                register(&writer_dir, pid);
+                prune(&writer_dir, &BTreeSet::from([100]));
+            }
+        });
+        while !writer.is_finished() {
+            assert!(
+                load(&dir).contains(&100),
+                "a save exposed an empty registry"
+            );
+        }
+        writer.join().unwrap();
+        assert_eq!(load(&dir), BTreeSet::from([100]));
     }
 
     #[test]
