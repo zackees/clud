@@ -122,12 +122,14 @@ fn classify(path: &Path, embedded: &str) -> Existing {
     }
 }
 
-/// Whitespace-tolerant equality: collapses runs of whitespace (incl. CRLF
-/// vs LF differences) into single spaces and trims the ends. Kept local to
-/// this module so the tool-install pipeline stays independent of the
-/// bundled-skill one in [`skills`](crate::skills).
+/// Line-ending-tolerant equality: CRLF vs LF and trailing whitespace are
+/// ignored, but leading indentation is kept because it is meaningful in the
+/// bundled Python tools (#1907). Kept local to this module so the
+/// tool-install pipeline stays independent of the bundled-skill one in
+/// [`skills`](crate::skills).
 fn normalize(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let lines: Vec<&str> = s.lines().map(str::trim_end).collect();
+    lines.join("\n").trim_end().to_string()
 }
 
 fn write_install(path: &Path, tool: &BundledTool) {
@@ -250,9 +252,15 @@ mod tests {
     }
 
     #[test]
-    fn normalize_collapses_whitespace_runs() {
-        assert_eq!(normalize("a  b\n\nc"), "a b c");
-        assert_eq!(normalize("a b c"), "a b c");
+    fn normalize_ignores_trailing_whitespace_and_blank_tail() {
+        assert_eq!(normalize("a  \nb\n\n"), normalize("a\nb"));
+    }
+
+    #[test]
+    fn normalize_keeps_python_indentation_changes() {
+        let old = "# managed-by: clud\nif a:\n    b()\nc()\n";
+        let new = "# managed-by: clud\nif a:\n    b()\n    c()\n";
+        assert_ne!(normalize(old), normalize(new));
     }
 
     #[test]
