@@ -55,7 +55,9 @@ pub fn maybe_sweep_at(
     if let Some(last) = read_sentinel(sentinel_path) {
         match now.duration_since(last) {
             Ok(age) if age < MIN_INTERVAL => return Ok(None),
-            Err(_) => return Ok(None),
+            // A sentinel dated in the future (clock was ahead) is invalid:
+            // sweep now and rewrite it, or the sweep stays off until real
+            // time catches up (#1910).
             _ => {}
         }
     }
@@ -186,6 +188,18 @@ mod tests {
         assert_eq!(report.targets_removed, 1);
         assert!(!target.exists());
         assert!(sentinel.exists());
+    }
+
+    #[test]
+    fn future_sentinel_is_repaired_instead_of_skipping() {
+        let tmp = tempdir().unwrap();
+        let sentinel = tmp.path().join("state").join(SENTINEL_FILE);
+        let now = SystemTime::now();
+        write_sentinel(&sentinel, now + Duration::from_secs(30 * 24 * 60 * 60)).unwrap();
+        assert!(maybe_sweep_at(&sentinel, &[], Duration::from_secs(1), now)
+            .unwrap()
+            .is_some());
+        assert!(read_sentinel(&sentinel).unwrap() <= now);
     }
 
     #[test]
