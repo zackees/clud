@@ -410,6 +410,7 @@ fn install_explicit_invocation_policies(base: &Path) -> Result<(), InstallError>
         match std::fs::read_to_string(&path) {
             Ok(existing) if !existing.contains(MANAGED_BY_CLUD_MARKER) => continue,
             Ok(existing) if normalize(&existing) == normalize(policy) => continue,
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => continue,
             _ => {
                 std::fs::create_dir_all(&agents_dir)?;
                 std::fs::write(&path, policy)?;
@@ -452,10 +453,15 @@ pub fn install_to(base: &Path, skills: &[BundledSkill]) -> Result<InstallReport,
         let skill_md = skill_dir.join("SKILL.md");
         match std::fs::read_to_string(&skill_md) {
             // Never installed here: write it.
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 std::fs::create_dir_all(&skill_dir)?;
                 std::fs::write(&skill_md, skill.skill_md)?;
                 report.installed.push(skill.name);
+            }
+            // Present but unreadable (non-UTF-8, permissions): it is not ours
+            // to overwrite, so leave it alone (#1906).
+            Err(_) => {
+                report.skipped_existing.push(skill.name);
             }
             // A copy the user has taken ownership of (marker stripped, or
             // hand-authored): never touch it.

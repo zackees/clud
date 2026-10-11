@@ -179,6 +179,27 @@ fn refresh_never_touches_a_copy_whose_marker_the_user_removed() {
 }
 
 #[test]
+fn install_never_overwrites_a_non_utf8_user_skill() {
+    let dir = tempdir().unwrap();
+    let managed = [BundledSkill {
+        name: "alpha",
+        skill_md: "<!-- managed-by: clud -->\nnew body\n",
+    }];
+    let alpha_dir = dir.path().join("alpha");
+    std::fs::create_dir_all(&alpha_dir).unwrap();
+    std::fs::write(alpha_dir.join("SKILL.md"), b"caf\xe9\n").unwrap();
+
+    let report = install_to(dir.path(), &managed).unwrap();
+
+    assert!(report.installed.is_empty());
+    assert_eq!(report.skipped_existing, vec!["alpha"]);
+    assert_eq!(
+        std::fs::read(alpha_dir.join("SKILL.md")).unwrap(),
+        b"caf\xe9\n"
+    );
+}
+
+#[test]
 fn bundled_skills_all_carry_the_ownership_marker() {
     // Refresh keys on the marker; a bundled skill without one would be
     // installed and then never updated again.
