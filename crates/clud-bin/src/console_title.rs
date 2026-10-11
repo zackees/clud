@@ -807,6 +807,13 @@ mod tests {
     }
 
     // ─── OscTitleStripper ──────────────────────────────────────────────
+    #[test]
+    fn parameterless_osc_passes_through_with_either_terminator() {
+        let mut s = OscTitleStripper::new();
+        assert_eq!(s.process(b"\x1b]104\x07"), b"\x1b]104\x07");
+        let mut s = OscTitleStripper::new();
+        assert_eq!(s.process(b"\x1b]112\x1b\\after"), b"\x1b]112\x1b\\after");
+    }
 
     #[test]
     fn osc_stripper_passthrough_for_plain_bytes() {

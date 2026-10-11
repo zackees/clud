@@ -64,14 +64,21 @@ impl OscTitleStripper {
                     };
                     self.digits.clear()
                 } else if byte == 0x07 {
+                    // Only titles 0/2 are stripped; a parameterless OSC such
+                    // as a 104 reset passes through intact (#1909).
+                    if self.digits != b"0" && self.digits != b"2" {
+                        out.extend_from_slice(&[0x1b, b']']);
+                        out.extend_from_slice(&self.digits);
+                        out.push(0x07);
+                    }
                     self.digits.clear();
                     self.state = OscState::Normal
                 } else {
                     out.extend_from_slice(&[0x1b, b']']);
                     out.extend_from_slice(&self.digits);
-                    if byte != 0x1b {
-                        out.push(byte)
-                    };
+                    // Keep the ESC of an ST terminator, or the terminal never
+                    // sees the sequence end (#1909).
+                    out.push(byte);
                     self.digits.clear();
                     self.state = if byte == 0x1b {
                         OscState::PassthroughAfterEsc
