@@ -8301,13 +8301,28 @@ Connection: close
             "listener shutdown must tear down a queued socket: {queued_result:?}"
         );
         bridge.shutdown().unwrap();
-        assert!(TcpStream::connect(addr).is_err());
 
-        let addr_after_drop = {
+        // Probing a released ephemeral port is racy: a test running in
+        // parallel can bind it, so the connect succeeds (#1929). Prove drop
+        // closes the listener through a socket it had already accepted.
+        let mut held = {
             let bridge = BridgeHandle::start(BridgeConfig::default()).unwrap();
-            bridge.socket_addr()
+            TcpStream::connect(bridge.socket_addr()).unwrap()
         };
-        assert!(TcpStream::connect(addr_after_drop).is_err());
+        held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let held_result = held.read(&mut byte);
+        assert!(
+            matches!(held_result, Ok(0))
+                || held_result.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::NotConnected
+                    )
+                }),
+            "dropping the bridge must close its sockets: {held_result:?}"
+        );
     }
 
     #[test]
