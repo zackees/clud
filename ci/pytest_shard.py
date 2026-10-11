@@ -59,7 +59,14 @@ def load_weights(path: Path = WEIGHTS_PATH) -> dict[str, float]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return {str(name): float(seconds) for name, seconds in raw.items()}
+    # A parseable file of the wrong shape only costs balance, never the run.
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(name): float(seconds)
+        for name, seconds in raw.items()
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+    }
 
 
 def assign_files(
