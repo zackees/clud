@@ -210,6 +210,29 @@ the range would include the whole rebase delta). The denial names the correct
 `git/review_range.py`. A fresh upstream, a branch with no upstream, and any other
 command are untouched. Code: `block_bad_cmd_stale_upstream.rs`.
 
+### Hand-written wait guard (#1880)
+
+Never poll. To wait, run the command in the background and wait for the notification.
+
+For every shell call, from the main agent or any sub-agent (the rule reads
+`tool_input.command` and never consults `agent_id`/`agent_type`), the scan
+refuses: `while`/`until`/`select` loops and `for ((;;))`; a `for`/`foreach`
+loop whose body sleeps; `tail -f`/`-F`/`--follow` and `Get-Content -Wait`
+not wrapped in `timeout`; `watch`; a `sleep` in the same command as a `gh`
+status read; and a standalone `sleep` over 60 s or of non-literal length
+(DD-168). A `for` loop over a finite list with no `sleep`, a one-shot
+`pgrep`/`gh` snapshot and a short `sleep` stay allowed. Process-list waits
+(`while pgrep -f …`, `while ps … | grep …`) fall to the loop rule. The refusal
+names the replacement: `run_in_background` plus the completion notification,
+or a waiter with its own deadline (`clud ci`, `bosn ci run --wait`,
+`pr_merge_watch`). The only escape is the audited
+`CLUD_BAD_CMD_OVERRIDE=hand-written-wait:<reason>`; the rule only tightens.
+Code: `block_bad_cmd_wait_loop.rs`; fixtures from the issue's session in
+`block_bad_cmd_wait_loop_tests.rs` (including a sub-agent payload). The PR-
+specific polling rule (`blocking_pr_wait_reason`) now also covers counted
+`for … sleep` loops, chained `sleep && gh …`, `gh api` run/job/check/Pages
+reads and `gh pr view --json mergeStateStatus|mergeable|state`.
+
 ### Repeated-call guard (#1674)
 
 For every `PreToolUse` call that carries a `session_id`, the scan hashes the
