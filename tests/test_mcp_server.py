@@ -191,6 +191,25 @@ def test_run_streams_output_and_appends_exit_code(
     assert "[clud exited with code 0]" in result
 
 
+def test_run_drains_output_past_the_log_cap(bridge, tmp_path: Path, monkeypatch) -> None:
+    lines = "".join(f"{n:06d} " + "x" * 92 + "\n" for n in range(5000))
+    fake = _fake_clud(tmp_path, lines)
+    monkeypatch.setenv("CLUD_BIN", fake)
+    result = asyncio.run(bridge.run("hello", _FakeCtx(), timeout=60))
+    assert "004999 " in result
+    assert "[clud exited with code 0]" in result
+
+
+def test_run_keeps_a_character_split_across_reads(
+    bridge, tmp_path: Path, monkeypatch
+) -> None:
+    fake = _fake_clud(tmp_path, "a" * 8191 + "\u00e9\n")
+    monkeypatch.setenv("CLUD_BIN", fake)
+    result = asyncio.run(bridge.run("hello", _FakeCtx()))
+    assert "\u00e9" in result
+    assert "\ufffd" not in result
+
+
 def test_run_rejects_unknown_backend(
     bridge, tmp_path: Path, monkeypatch
 ) -> None:
