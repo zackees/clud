@@ -158,6 +158,21 @@ the codebase stays portable.
   `console_setup.rs` fails if `fn main` drops the call or a selector module
   calls crossterm's enable again.
 
+- **Deferred wrap (#1942)**: For the session, the guard also ORs
+  `DISABLE_NEWLINE_AUTO_RETURN` (0x0008) into the stdout mode
+  (`PTY_SESSION_OUTPUT_MODE_BITS`). Without it, conhost wraps eagerly. A
+  character in the last column moves the cursor to the next line, and on
+  the bottom row it scrolls the screen. A relayed fullscreen TUI such as
+  Claude Code's alternate-screen UI draws full-width rows and assumes VT's
+  deferred wrap. Each eager wrap shifted Windows Terminal's screen by a line
+  the child never repaired, which left fragments of neighbouring lines in
+  the left columns. The bit stays session-scoped because it also stops LF
+  from implying CR, and clud's own non-PTY output relies on that. A console
+  that rejects the bit still gets VT processing. Regression tests:
+  `tests/integration/pty/console_wrap.rs` (native) and
+  `tests/integration/pty/screen_fidelity.rs` (relay fidelity across a
+  resize).
+
 - **File**: `crates/clud-bin/src/console_setup.rs:85`
   (`enable_console_vt_output`) over the testable `enable_vt_processing` at
   `:92`; `ConsoleVtGuard` at `:110`, constructed at `:140`
