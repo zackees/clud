@@ -145,6 +145,8 @@ fn daemon_executable_deleted(pid: u32) -> bool {
     }
 }
 
+// Read only by the Linux `/proc/<pid>/exe` probe above (and its tests).
+#[cfg(any(target_os = "linux", test))]
 fn exe_link_is_deleted(link_target: &str) -> bool {
     link_target.ends_with(" (deleted)")
 }
