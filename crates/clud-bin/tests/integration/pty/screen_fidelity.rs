@@ -142,7 +142,17 @@ fn cell_mismatches(want: &vt100::Screen, got: &vt100::Screen) -> Vec<String> {
     for row in 0..RESIZED_ROWS {
         for col in 0..RESIZED_COLS {
             let (w, g) = (want.cell(row, col).unwrap(), got.cell(row, col).unwrap());
-            if (w.contents(), w.bgcolor()) != (g.contents(), g.bgcolor()) {
+            // ConPTY re-renders a never-written cell as a written space; both
+            // display as the same blank.
+            let text = |c: &vt100::Cell| {
+                let s = c.contents();
+                if s == " " {
+                    String::new()
+                } else {
+                    s.to_string()
+                }
+            };
+            if (text(w), w.bgcolor()) != (text(g), g.bgcolor()) {
                 out.push(format!(
                     "r{row} c{col}: want {:?}/{:?} got {:?}/{:?}",
                     w.contents(),
