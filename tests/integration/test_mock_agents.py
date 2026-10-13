@@ -478,6 +478,15 @@ def fake_anthropic_upstreams():
             server.close()
 
 
+def _drop_scrub_lists(value: object) -> object:
+    """Return a dry-run plan without its `scrub` key lists."""
+    if isinstance(value, dict):
+        return {k: _drop_scrub_lists(v) for k, v in value.items() if k != "scrub"}
+    if isinstance(value, list):
+        return [_drop_scrub_lists(v) for v in value]
+    return value
+
+
 class TestCodexBridgeForeground:
     """Issue #626: Codex provider through the Claude foreground harness."""
 
@@ -1011,7 +1020,9 @@ class TestCodexBridgeForeground:
         )
         assert result.returncode == 0, result.stderr
         assert not probe_path.exists()
-        combined = result.stdout + result.stderr
+        # The plan names the keys it scrubs; naming a key is not emitting it.
+        plan = _drop_scrub_lists(json.loads(result.stdout))
+        combined = json.dumps(plan) + result.stderr
         assert "ANTHROPIC_AUTH_TOKEN" not in combined
         assert "Bearer " not in combined
 

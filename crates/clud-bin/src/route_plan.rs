@@ -610,8 +610,11 @@ fn scrub_list(backend: RouteBackend, provider: ModelProvider) -> Vec<ScrubKey> {
             .map(|key| ScrubKey::any_case(key))
             .collect(),
         // The bridge overlays keep the per-OS uniqueness rule.
+        // It also drops the user's traffic switch: discovery was already
+        // refused when it is on, and any other value must not reach the child.
         RouteBackend::CodexBridge => CODEX_VIA_CLAUDE_SCRUB
             .iter()
+            .chain(std::iter::once(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .map(|key| ScrubKey::os_semantics(key))
             .collect(),
         // The gateway replaces only its own two keys; it deliberately leaves

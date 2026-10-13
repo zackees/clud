@@ -486,7 +486,13 @@ fn render_dsh(scenario: &Scenario) -> String {
         let relative = patch
             .strip_prefix(home.path())
             .expect("patch lives under the scratch home");
-        rendered.push_str(&format!("  dsh.patch_path={}\n", relative.display()));
+        // The golden is OS-neutral: Windows joins components with `\`.
+        let relative = relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        rendered.push_str(&format!("  dsh.patch_path={relative}\n"));
         for line in
             crate::dsh_harness::openrouter_patch_yaml(wire, "https://openrouter.ai/api").lines()
         {
