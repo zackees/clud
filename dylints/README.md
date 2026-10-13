@@ -9,6 +9,20 @@ workspace build because they use rustc internals and pin their own nightly.
   kin outside `crates/clud-bin/src/home.rs`, directing callers to
   `clud::home::user_home` (#1836). `ci/banned_home_dir.py` enforces the same
   rule in `bash lint` on every PR, because this lane runs off the PR path.
+- `enforce_platform_boundary` denies host-platform selection outside
+  `crates/clud-bin/src/platform/`, the same boundary soldr, zccache and
+  fbuild enforce (#1946). That covers host keys (`windows`, `unix`,
+  `target_os`, ...) in `#[cfg]`/`#[cfg_attr]`/`cfg!`/`cfg_if!`/`cfg_select!`,
+  and paths into `libc`, `windows_sys`, `windows`, `winapi`, `nix` and
+  `mach2`. It is a pre-expansion pass, so inactive host branches count and
+  the Linux run sees Windows and macOS code. Existing debt is admitted by
+  per-file counts in `src/baseline.txt`; one occurrence over a file's count
+  fails. Move code behind the boundary and lower the count in the same
+  change, and bump the crate's `version` with any baseline edit, because the
+  Dylint cache hashes the manifest, not the baseline. To regenerate it, set
+  `DUMP` to `true` in `src/lib.rs` (and disable the test that forbids it),
+  run the Dylint workflow, and keep, per key, the largest count any single
+  process printed on its `CLUD_PLATFORM_BOUNDARY` lines.
 
 Run locally:
 

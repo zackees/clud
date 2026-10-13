@@ -69,8 +69,11 @@ jobs:
         run: |
           soldr rustup component add --toolchain nightly-2026-05-28 rustfmt
           soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
+          soldr --no-cache cargo fmt --manifest-path dylints/enforce_platform_boundary/Cargo.toml --all -- --check
       - name: Test dylint crate
-        run: RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
+        run: |
+          RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
+          RUSTUP_TOOLCHAIN=nightly-2026-05-28 soldr --no-cache cargo test --manifest-path dylints/enforce_platform_boundary/Cargo.toml
       - name: Run dylint over workspace
         run: env -u RUSTUP_TOOLCHAIN soldr dylint --all -- --workspace --all-targets
       # Late lints only see code that compiles for the checked target, so the
