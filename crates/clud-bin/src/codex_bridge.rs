@@ -8309,7 +8309,9 @@ Connection: close
             let bridge = BridgeHandle::start(BridgeConfig::default()).unwrap();
             TcpStream::connect(bridge.socket_addr()).unwrap()
         };
-        held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // macOS refuses setsockopt with EINVAL once the peer has already
+        // closed the socket; the read below still observes the close.
+        let _ = held.set_read_timeout(Some(Duration::from_secs(5)));
         let held_result = held.read(&mut byte);
         assert!(
             matches!(held_result, Ok(0))
