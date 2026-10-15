@@ -33,9 +33,9 @@ use windows::Win32::System::Ole::{
 use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::Shell::SHCreateMemStream;
 
-use super::tests::make_dropfiles_wide;
-use super::win::{copy_cf_hdrop_bytes, new_drop_target};
-use super::{DropInjector, DROPEFFECT_COPY_BITS, DROPEFFECT_NONE_BITS};
+use super::{copy_cf_hdrop_bytes, new_drop_target};
+use crate::dnd::console_drop_target::tests::make_dropfiles_wide;
+use crate::dnd::console_drop_target::{DropInjector, DROPEFFECT_COPY_BITS, DROPEFFECT_NONE_BITS};
 
 /// What Explorer offers: every effect.
 const ANY_EFFECT: DROPEFFECT =
@@ -687,8 +687,8 @@ fn copy_returns_none_when_get_data_fails() {
 
 #[test]
 fn a_real_drop_types_the_paths_into_the_console_input_buffer() {
-    use crate::dnd::injectors::console_input_injector;
-    use crate::dnd::injectors::win_tests::{
+    use crate::platform::dnd::injectors::console_input_injector;
+    use crate::platform::dnd::injectors::win_tests::{
         conin, conin_resolver, console_lock, drain, flush, typed_text,
     };
 

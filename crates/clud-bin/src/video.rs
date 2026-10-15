@@ -127,14 +127,8 @@ fn remove_any(path: &Path) {
     }
 }
 
-#[cfg(unix)]
 fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(windows)]
-fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
+    crate::platform::video::link_dir(target, link)
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {

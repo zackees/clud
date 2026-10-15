@@ -3,7 +3,7 @@ use crate::dnd::dropfiles::DROPFILES_HEADER_SIZE;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 
-pub(super) fn make_dropfiles_wide(paths: &[&str]) -> Vec<u8> {
+pub(crate) fn make_dropfiles_wide(paths: &[&str]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&(DROPFILES_HEADER_SIZE as u32).to_le_bytes());
     out.extend_from_slice(&0i32.to_le_bytes()); // pt.x

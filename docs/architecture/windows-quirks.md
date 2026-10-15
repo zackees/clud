@@ -348,7 +348,7 @@ the codebase stays portable.
   - **Anything else** (legacy conhost, unknown hosts):
     `GetConsoleWindow()` only; no process snapshot is taken.
 
-- **File**: `crates/clud-bin/src/dnd/console_drop_target.rs:386`
+- **File**: `crates/clud-bin/src/dnd/console_drop_target.rs` (COM wiring in `crates/clud-bin/src/platform/windows/dnd/console_drop_target.rs`)
   (`register_console_drop_target`, Windows); `:394` (POSIX stub);
   `ConsoleDropTargetGuard` at `:335`; platform-agnostic dispatch at `:413`
   (`dispatch_dropfiles_to_injector`) and the effect decision at `:448`
