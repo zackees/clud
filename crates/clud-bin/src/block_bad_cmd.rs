@@ -3707,6 +3707,39 @@ mod tests {
     // previously let an "unset" test race a concurrent "set" test, flaking CI.
     static OVERRIDE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// The harness only runs this hook for tools its matcher names, so a rule
+    /// keyed on a tool missing from `GUARDED_TOOLS` is dead code (#1949: the
+    /// matcher was `Bash` alone). Each rule's own predicate decides here.
+    #[test]
+    fn every_rule_tool_reaches_the_dispatcher() {
+        use crate::clud_hooks_compile::GUARDED_TOOLS;
+        let facts = block_bad_cmd_grind_caps::RunFacts::default();
+        let candidates = [
+            "Bash", "PowerShell", "ScheduleWakeup", "Monitor", "Agent", "Workflow",
+            "AskUserQuestion", "Write", "Edit", "MultiEdit", "NotebookEdit", "Read",
+            "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite", "ToolSearch",
+        ];
+        for tool in candidates {
+            let ruled = block_bad_cmd_gate::gates_tool(tool)
+                || creates_agents(tool)
+                || tool == block_bad_cmd_loop_stop::SCHEDULE_WAKEUP
+                // The wait-loop refusal scans `tool_input.command`, which
+                // Monitor carries as well as Bash.
+                || tool == "Monitor"
+                || block_bad_cmd_grind_caps::tool_reason(
+                    block_bad_cmd_grind_caps::PLANNER,
+                    tool,
+                    &facts,
+                )
+                .is_some();
+            assert_eq!(
+                GUARDED_TOOLS.contains(&tool),
+                ruled,
+                "{tool}: GUARDED_TOOLS and the rules disagree"
+            );
+        }
+    }
+
     #[test]
     fn rm_identity_check_is_limited_to_shell_tools() {
         for tool in ["Bash", "PowerShell", "pwsh", "cmd", "shell_command"] {

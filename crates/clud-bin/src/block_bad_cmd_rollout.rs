@@ -396,7 +396,10 @@ pub fn ensure_helper_on_session_path() {
     let path_env = std::env::var("PATH").unwrap_or_default();
     if let Some(found) = crate::shim_resolve::which(&native_helper_name(), &path_env) {
         if let InstallProbe::HelperPresent { path } = probe_current_install() {
-            refresh_owned_helper(&found, &path, crate::home::user_home().as_deref());
+            let owned = refresh_owned_helper(&found, &path, crate::home::user_home().as_deref());
+            if let Some(warning) = foreign_helper_warning(&found, &path, owned) {
+                eprintln!("{warning}");
+            }
         }
         return;
     }
@@ -420,7 +423,10 @@ pub fn ensure_helper_on_session_path() {
 /// owns its location: beside the running binary, or the helper-only
 /// directory. An upgrade replaces `clud` but not these aliases, and the hook
 /// then runs the old build's rules (#1949: the `/loop` stop guard never ran).
-/// A helper anywhere else belongs to someone else and is left alone.
+/// A helper anywhere else belongs to someone else and is left alone. A
+/// `clud-shim` left beside `clud` by a pre-#1551 install is refreshed too;
+/// the interpreter and tool names (`python`, `rm`, ...) never are, because
+/// beside `clud` in a virtualenv they are the real programs.
 /// Returns whether `found` was in a clud-owned location.
 fn refresh_owned_helper(found: &Path, clud: &Path, home: Option<&Path>) -> bool {
     let Some(dir) = found.parent() else {
@@ -436,6 +442,7 @@ fn refresh_owned_helper(found: &Path, clud: &Path, home: Option<&Path>) -> bool 
     for name in [
         crate::multicall::CMD_SCAN,
         crate::multicall::LEGACY_CMD_SCAN,
+        crate::multicall::SHIM,
     ] {
         let target = dir.join(crate::shim_registry::file_name(name));
         if name == crate::multicall::CMD_SCAN || target.is_file() {
@@ -445,6 +452,23 @@ fn refresh_owned_helper(found: &Path, clud: &Path, home: Option<&Path>) -> bool 
         }
     }
     true
+}
+
+/// The launch warning for a `clud-cmd-scan` that PATH finds first but that is
+/// not the running `clud` and sits where clud may not replace it: every hook
+/// in the session would run that other build's rules, silently (#1954).
+fn foreign_helper_warning(found: &Path, clud: &Path, owned: bool) -> Option<String> {
+    let current = clud.canonicalize().ok()?;
+    if owned || crate::alias_link::is_alias_of(&current, found) {
+        return None;
+    }
+    Some(format!(
+        "clud: warning: {} is first on PATH and is not this clud ({}); \
+         its hooks will enforce that build's rules. Remove it or put {} first.",
+        found.display(),
+        clud.display(),
+        clud.parent().map_or_else(String::new, |dir| dir.display().to_string())
+    ))
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -798,6 +822,42 @@ mod tests {
             "clud-v2-longer"
         );
         assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "someone-else");
+    }
+
+    /// #1954: a pre-#1551 `clud-shim` sat stale beside `clud`; it is
+    /// refreshed with the scanner, but the real `python` there is not.
+    #[test]
+    fn refresh_covers_a_stale_clud_shim_and_never_an_interpreter() {
+        let tmp = tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let clud = install.join(crate::shim_registry::file_name("clud"));
+        write(&clud, "clud-v2-longer");
+        let scan = install.join(native_helper_name());
+        write(&scan, "clud-v1");
+        let shim = install.join(crate::shim_registry::file_name(crate::multicall::SHIM));
+        write(&shim, "clud-v1");
+        let python = install.join(crate::shim_registry::file_name("python"));
+        write(&python, "real-python");
+
+        assert!(refresh_owned_helper(&scan, &clud, None));
+
+        assert_eq!(std::fs::read_to_string(&shim).unwrap(), "clud-v2-longer");
+        assert_eq!(std::fs::read_to_string(&python).unwrap(), "real-python");
+    }
+
+    #[test]
+    fn a_foreign_helper_first_on_path_is_warned_about() {
+        let tmp = tempdir().unwrap();
+        let clud = tmp.path().join("install").join(crate::shim_registry::file_name("clud"));
+        write(&clud, "clud-v2");
+        let foreign = tmp.path().join("elsewhere").join(native_helper_name());
+        write(&foreign, "clud-v1");
+        let warning = foreign_helper_warning(&foreign, &clud, false).unwrap();
+        assert!(warning.contains(&foreign.display().to_string()), "{warning}");
+        assert_eq!(foreign_helper_warning(&foreign, &clud, true), None);
+        let alias = tmp.path().join("install").join(native_helper_name());
+        crate::alias_link::install_alias(&clud, &alias).unwrap();
+        assert_eq!(foreign_helper_warning(&alias, &clud, false), None);
     }
 
     #[test]

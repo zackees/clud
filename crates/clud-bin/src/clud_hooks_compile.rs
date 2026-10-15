@@ -87,20 +87,40 @@ pub fn deletion_safety_fragment() -> Value {
         "permissions": { "deny": deny },
         "hooks": {
             "PreToolUse": [{
-                "matcher": "Bash",
-                "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
-            }, {
-                // #1949: the `/loop` first-round stop guard reads this tool,
-                // which a `Bash` matcher never delivers.
-                "matcher": SCHEDULE_WAKEUP_MATCHER,
+                "matcher": guarded_tools_matcher(),
                 "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
             }]
         }
     })
 }
 
-/// The harness tool that schedules or ends a dynamic `/loop` (#1949).
-pub const SCHEDULE_WAKEUP_MATCHER: &str = "ScheduleWakeup";
+/// Every tool a scanner rule inspects. The harness filters by matcher before
+/// the hook runs, so a rule for a tool missing here never fires: until
+/// #1954 the matcher was `Bash` alone, and the `/loop` stop guard, the grind
+/// write/agent/question caps, the recursive-agent guard and the Monitor wait
+/// refusal were dead in every repo without its own catch-all matcher.
+/// `block_bad_cmd`'s `every_rule_tool_reaches_the_dispatcher` keeps this in
+/// step with the rules.
+pub const GUARDED_TOOLS: &[&str] = &[
+    "Bash",
+    "PowerShell",
+    "ScheduleWakeup",
+    "Monitor",
+    "Agent",
+    "Workflow",
+    "AskUserQuestion",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+];
+
+/// [`GUARDED_TOOLS`] as one matcher; the harness reads it as an anchored
+/// regex over the tool name.
+#[must_use]
+pub fn guarded_tools_matcher() -> String {
+    GUARDED_TOOLS.join("|")
+}
 
 /// The command string a compiled line runs for `event`.
 #[must_use]
