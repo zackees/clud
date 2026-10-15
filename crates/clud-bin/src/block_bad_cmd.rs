@@ -135,6 +135,9 @@ pub struct HookPayloadView {
     /// session's id, which is how the `/grind` caps find the run's facts
     /// (#1337, `grind_facts`).
     pub session_id: Option<String>,
+    /// The session transcript the harness names, read only by the `/loop`
+    /// first-round stop guard (#1949).
+    pub transcript_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +503,24 @@ pub fn run_for_event(invocation: &HookInvocation) -> i32 {
         println!("{}", deny_json(&reason));
         eprintln!("[clud] {reason}");
         return 2;
+    }
+
+    // #1949: on a non-Claude route, refuse a `/loop` stop before the loop
+    // ever scheduled a second round. Refused once; a repeated stop passes.
+    if event == PRE_TOOL_USE_EVENT {
+        if let Some(reason) = block_bad_cmd_loop_stop::reason(
+            &payload.tool_name,
+            payload.tool_input.as_ref(),
+            || block_bad_cmd_loop_stop::read_transcript(payload.transcript_path.as_deref()),
+            block_bad_cmd_loop_stop::non_claude_route(
+                std::env::var("CLUD_ROUTE_CONTEXT").ok().as_deref(),
+            ),
+        ) {
+            append_log(&format!("LOOP-STOP-BLOCKED: {reason}"));
+            println!("{}", deny_json(&reason));
+            eprintln!("[clud] {reason}");
+            return 2;
+        }
     }
 
     // The `grind-*` agent types belong to the `grind-run` workflow, which
@@ -1632,6 +1653,12 @@ pub fn parse_payload_value(value: &Value, process_cwd: &Path) -> Option<HookPayl
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_string),
+        transcript_path: object
+            .get("transcript_path")
+            .or_else(|| object.get("transcriptPath"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
     })
 }
 
@@ -3585,6 +3612,9 @@ mod block_bad_cmd_stale_upstream;
 #[path = "block_bad_cmd_repeat.rs"]
 mod block_bad_cmd_repeat;
 
+#[path = "block_bad_cmd_loop_stop.rs"]
+mod block_bad_cmd_loop_stop;
+
 #[path = "block_bad_cmd_wait_loop.rs"]
 mod block_bad_cmd_wait_loop;
 use block_bad_cmd_wait_loop::{hand_written_wait_reason, WAIT_REPLACEMENT};
@@ -4102,6 +4132,7 @@ mod tests {
             agent_id: None,
             agent_type: None,
             session_id: None,
+            transcript_path: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, r#"C:\py\clud-block-bad-cmd.exe"#);
         assert_eq!(event["event"], "bad_cmd_denied");
@@ -4144,6 +4175,7 @@ mod tests {
             agent_id: None,
             agent_type: None,
             session_id: None,
+            transcript_path: None,
         };
         let event = bad_cmd_denied_event(&provenance, &payload, "");
         assert_eq!(event["match_mode"], "regex");
