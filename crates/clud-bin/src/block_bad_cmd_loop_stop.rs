@@ -141,35 +141,43 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn line(value: &Value) -> String {
-        format!("{value}\n")
+    const LOOP_ARGS: &str = "<command-message>loop</command-message>\n\
+        <command-name>/loop</command-name>\n\
+        <command-args>choose the next issue</command-args>";
+
+    fn entry(kind: &str, content: Value) -> String {
+        let message = json!({"role": kind, "content": content});
+        format!("{}\n", json!({"type": kind, "message": message}))
     }
 
     fn loop_command() -> String {
-        line(&json!({"type": "user", "message": {"role": "user", "content":
-            "<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>choose the next issue</command-args>"}}))
+        entry("user", json!(LOOP_ARGS))
     }
 
     fn wakeup(input: &Value) -> String {
-        line(&json!({"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "id": "toolu_1", "name": "ScheduleWakeup", "input": input}
-        ]}}))
+        let block = json!({
+            "type": "tool_use", "id": "t1", "name": "ScheduleWakeup", "input": input
+        });
+        entry("assistant", json!([block]))
     }
 
     fn result(text: &str) -> String {
-        line(&json!({"type": "user", "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "toolu_1", "content": text, "is_error": true}
-        ]}}))
+        let block = json!({"type": "tool_result", "tool_use_id": "t1", "content": text});
+        entry("user", json!([block]))
     }
 
     fn stop() -> Value {
         json!({"stop": true})
     }
 
+    /// The decision for a call on a route, against an in-memory transcript.
+    fn decide(tool: &str, input: &Value, transcript: &str, codex: bool) -> Option<String> {
+        reason(tool, Some(input), || Some(transcript.to_string()), codex)
+    }
+
     #[test]
     fn a_first_round_stop_on_a_codex_route_is_refused() {
-        let transcript = loop_command();
-        let reason = reason("ScheduleWakeup", Some(&stop()), || Some(transcript.clone()), true)
+        let reason = decide("ScheduleWakeup", &stop(), &loop_command(), true)
             .expect("first-round stop must be refused");
         assert!(reason.contains(RULE_ID), "{reason}");
         assert!(reason.contains("delaySeconds"), "{reason}");
@@ -177,58 +185,47 @@ mod tests {
 
     #[test]
     fn a_stop_after_the_loop_has_scheduled_goes_through() {
+        let scheduled = json!({"delaySeconds": 1200, "prompt": "/loop x", "reason": "r"});
         let transcript = loop_command()
-            + &wakeup(&json!({"delaySeconds": 1200, "prompt": "/loop x", "reason": "r"}))
+            + &wakeup(&scheduled)
             + &result("Next wakeup scheduled for 10:00")
             + &loop_command();
-        assert_eq!(
-            reason("ScheduleWakeup", Some(&stop()), || Some(transcript.clone()), true),
-            None
-        );
+        assert_eq!(decide("ScheduleWakeup", &stop(), &transcript, true), None);
     }
 
     #[test]
     fn a_repeated_stop_in_the_same_round_goes_through() {
-        let refused = format!("PreToolUse:ScheduleWakeup hook error: [{RULE_ID}] /loop is recurring");
+        let refused = format!("PreToolUse hook error: [{RULE_ID}] /loop is recurring");
         let transcript = loop_command() + &wakeup(&stop()) + &result(&refused);
-        assert_eq!(
-            reason("ScheduleWakeup", Some(&stop()), || Some(transcript.clone()), true),
-            None
-        );
+        assert_eq!(decide("ScheduleWakeup", &stop(), &transcript, true), None);
     }
 
     #[test]
     fn a_refusal_in_an_earlier_round_does_not_excuse_a_later_one() {
         let refused = format!("hook error: [{RULE_ID}] /loop is recurring");
-        let transcript =
-            loop_command() + &wakeup(&stop()) + &result(&refused) + &loop_command();
-        assert!(reason("ScheduleWakeup", Some(&stop()), || Some(transcript.clone()), true).is_some());
+        let transcript = loop_command() + &wakeup(&stop()) + &result(&refused) + &loop_command();
+        assert!(decide("ScheduleWakeup", &stop(), &transcript, true).is_some());
     }
 
     #[test]
     fn the_guard_stays_out_of_claude_routes_other_tools_and_scheduling_calls() {
         let transcript = loop_command();
         let schedule = json!({"delaySeconds": 60, "prompt": "/loop x", "reason": "r"});
-        assert_eq!(
-            reason("ScheduleWakeup", Some(&stop()), || Some(transcript.clone()), false),
-            None
-        );
-        assert_eq!(reason("Bash", Some(&stop()), || Some(transcript.clone()), true), None);
-        assert_eq!(
-            reason("ScheduleWakeup", Some(&schedule), || Some(transcript.clone()), true),
-            None
-        );
+        assert_eq!(decide("ScheduleWakeup", &stop(), &transcript, false), None);
+        assert_eq!(decide("Bash", &stop(), &transcript, true), None);
+        assert_eq!(decide("ScheduleWakeup", &schedule, &transcript, true), None);
     }
 
     #[test]
     fn without_a_loop_command_or_a_transcript_the_stop_goes_through() {
-        assert_eq!(reason("ScheduleWakeup", Some(&stop()), || Some(String::new()), true), None);
+        assert_eq!(decide("ScheduleWakeup", &stop(), "", true), None);
         assert_eq!(reason("ScheduleWakeup", Some(&stop()), || None, true), None);
     }
 
     #[test]
     fn the_route_context_names_the_provider() {
-        assert!(non_claude_route(Some(r#"{"model_provider":"codex","harness":"claude"}"#)));
+        let codex = r#"{"model_provider":"codex","harness":"claude"}"#;
+        assert!(non_claude_route(Some(codex)));
         assert!(!non_claude_route(Some(r#"{"model_provider":"claude"}"#)));
         assert!(!non_claude_route(Some("not json")));
         assert!(!non_claude_route(None));
