@@ -19,6 +19,10 @@ before exiting with the test-requested code.
   (timed + pipe modes, raw-mode on Unix TTYs), iteration counter for
   `clud loop` marker tests, helper-process tree spawning, terminal-size
   polling, scripted ANSI/stream-json emission, and the final JSON report.
+- `platform/` — the host boundary (#1953), the only place that selects a host:
+  `stdin_mode.rs` (raw-mode stdin: `termios` on Unix, VT console input on
+  Windows) and `tool_shell_probe.rs` (Windows PowerShell leak probe; Unix
+  reports it unsupported), one copy per tree in `unix/` and `windows/`.
 
 ## Behavior
 

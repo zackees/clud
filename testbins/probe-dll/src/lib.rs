@@ -1,27 +1,6 @@
-#[cfg(target_os = "windows")]
-const DLL_PROCESS_ATTACH: u32 = 1;
+//! Windows-only injectable probe DLL. The body lives in the host
+//! boundary: `platform/windows/dll_main.rs`, with a placeholder on Unix.
 
-#[cfg(target_os = "windows")]
-#[no_mangle]
-pub extern "system" fn DllMain(
-    _module: *mut core::ffi::c_void,
-    reason: u32,
-    _reserved: *mut core::ffi::c_void,
-) -> i32 {
-    if reason == DLL_PROCESS_ATTACH {
-        if let Ok(path) = std::env::var("CLUD_PROBE_DLL_SINK") {
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut file| {
-                    use std::io::Write;
-                    writeln!(file, "INJECTED pid={}", std::process::id())
-                });
-        }
-    }
-    1
-}
+mod platform;
 
-#[cfg(not(target_os = "windows"))]
-pub fn probe_dll_windows_only() {}
+pub use platform::dll_main::*;

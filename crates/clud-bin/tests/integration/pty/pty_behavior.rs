@@ -48,7 +48,7 @@ use crate::common::{
 #[test]
 fn cargo_build_output_reports_mock_agent_executable() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let exe = tmp.path().join(if cfg!(windows) {
+    let exe = tmp.path().join(if clud::platform::host::WINDOWS {
         "mock-agent.exe"
     } else {
         "mock-agent"
@@ -282,7 +282,7 @@ fn resize_impl_propagates_on_posix_and_noops_on_windows() {
     let first = &samples[0];
     let last = samples.last().expect("last sample");
 
-    if cfg!(unix) {
+    if clud::platform::host::UNIX {
         assert_eq!(
             last["cols"].as_u64(),
             Some(120),
@@ -317,7 +317,7 @@ fn resize_impl_propagates_on_posix_and_noops_on_windows() {
 fn resize_pty_updates_master_size_on_all_platforms() {
     require_pty_or_skip!("resize_pty_updates_master_size_on_all_platforms");
 
-    let argv: Vec<String> = if cfg!(windows) {
+    let argv: Vec<String> = if clud::platform::host::WINDOWS {
         // `ping -n 3 127.0.0.1` keeps the child alive ~2s without needing
         // a console for stdout, which is enough for a resize roundtrip.
         vec![

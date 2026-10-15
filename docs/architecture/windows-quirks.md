@@ -169,7 +169,7 @@ the codebase stays portable.
   the left columns. The bit stays session-scoped because it also stops LF
   from implying CR, and clud's own non-PTY output relies on that. A console
   that rejects the bit still gets VT processing. Regression tests:
-  `tests/integration/pty/console_wrap.rs` (native) and
+  `tests/integration/pty/platform/windows/console_wrap.rs` (native) and
   `tests/integration/pty/screen_fidelity.rs` (relay fidelity across a
   resize).
 

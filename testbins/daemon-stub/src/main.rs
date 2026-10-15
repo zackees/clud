@@ -26,6 +26,8 @@
 //! *without* `running-process`, because a `NativeProcess` would attach its own
 //! containment and set the very marker whose absence is under test.
 
+mod platform;
+
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::Path;
@@ -105,25 +107,7 @@ fn spawn_detached(pid_path: &Path) {
     // daemon declaration from whatever launched it.
     command.env_remove("RUNNING_PROCESS_IS_DAEMON");
 
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    platform::detach::detach(&mut command);
 
     // Deliberately never waited on: outliving its launcher is the entire
     // behaviour under test, and the launcher exits immediately below.
