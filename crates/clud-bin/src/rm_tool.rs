@@ -445,6 +445,26 @@ impl Roots {
         Err(refusal + &ledger_clause + OUTSIDE_HINT)
     }
 
+    /// A single file or symlink under `home` outside every root (#1956):
+    /// `Some(Ok(parent))` allows it, `Some(Err)` is a denylist refusal and
+    /// `None` leaves the caller's refusal standing (directories included).
+    fn home_file_grant(
+        &mut self,
+        path: &Path,
+        home: Option<&Path>,
+    ) -> Option<Result<PathBuf, String>> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        match home_files::check(path, &meta, home, self.owner_uid()) {
+            Ok(false) => None,
+            Err(refusal) => Some(Err(refusal)),
+            Ok(true) => {
+                self.ledger_grants
+                    .insert(path.to_path_buf(), home_files::GRANT_REASON.into());
+                Some(Ok(path.parent().map_or(path.to_path_buf(), Path::to_path_buf)))
+            }
+        }
+    }
+
     fn session_grant_for(&mut self, path: &Path) -> Option<Result<PathBuf, String>> {
         if let Some(grant) = self
             .session_grants
@@ -759,7 +779,10 @@ pub fn resolve(
             return Err("is your home directory or one of its ancestors".into());
         }
     }
-    let root = roots.containing(&path)?;
+    let root = match roots.containing(&path) {
+        Ok(root) => root,
+        Err(refusal) => roots.home_file_grant(&path, home).unwrap_or(Err(refusal))?,
+    };
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1709,6 +1732,9 @@ pub mod ledger;
 
 #[path = "rm_tool_extra_roots.rs"]
 pub mod extra_roots;
+
+#[path = "rm_tool_home_files.rs"]
+pub mod home_files;
 
 #[path = "rm_tool_session_grants.rs"]
 mod session_grants;

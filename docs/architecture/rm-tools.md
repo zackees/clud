@@ -158,6 +158,21 @@ files clud creates inside pre-existing directories.
   verified. `safe-mktemp` therefore fails there with exit 2 before creating
   anything, and the agent guidance omits it.
 
+### Single files under HOME (#1956)
+
+A regular file or symlink strictly under `$HOME`, owned by the caller on Unix,
+may be trashed even outside every root and without a ledger entry: the ledger
+records only `safe-mktemp`, so a file the agent wrote with Write, `cp` or
+`install` (a `.desktop` entry, an icon) could otherwise never be taken back.
+The rule never covers a directory: `safe-rm -r DIR` and `safe-rm DIR` outside
+the roots keep their refusal. A short denylist in
+`rm_tool_home_files::DENYLIST` stays refused, with a message naming it:
+`~/.ssh`, `~/.gnupg`, cloud and `gh` credentials, browser profiles, shell
+startup files, `.gitconfig`, `.git-credentials`, `.netrc` and similar. `.git`
+components are refused everywhere already. The audit record carries the
+reason `single file under $HOME (#1956)`
+([DD-172](../DESIGN_DECISIONS.md#dd-172-safe-rm-trashes-single-home-files-outside-the-roots-but-never-directories)).
+
 ### Override: `safe_rm.extra_roots` (#1668)
 
 Built. The escape hatch DD-135 names for what the ledger cannot cover: a
@@ -230,7 +245,7 @@ would match. A clone that contains an allowed root, is HOME or an ancestor of
 it, or whose `.git` is a file (a worktree or submodule) never qualifies. The
 decision is `rm_tool_clone::verdict` over probed facts. The command refuses
 a root itself, a system temp directory itself,
-anything outside these locations (a temp entry another user owns included), HOME and its ancestors, filesystem roots,
+anything outside these locations except a non-denylisted single file under HOME (a temp entry another user owns included), HOME and its ancestors, filesystem roots,
 `.git` components, and directory trees containing mounts. Symlinked parents
 are resolved before authorization; a final symlink is moved as a link.
 

@@ -6860,3 +6860,25 @@ fights the user's PATH. Documenting Codex as unguarded: the audit shows the
 loops are real. Removing the `-c` hook for clud launches: it keeps guarding a
 session whose user opted out of the global entry or whose files are malformed,
 at the cost of scanning a Bash call twice.
+
+
+## DD-172: safe-rm trashes single HOME files outside the roots, but never directories
+
+**Context (#1956).** The creation ledger records only `safe-mktemp`. A file an
+agent wrote under `$HOME` with Write, `cp` or `install` (a stale `.desktop`
+entry) was refused, so agents overwrote it in place or left a manual cleanup
+list for the user.
+
+**Decision.** Split the policy by what is deleted. A regular file or symlink
+strictly under `$HOME`, owned by the caller on Unix, is trashed (never purged
+by this rule alone) unless `rm_tool_home_files::DENYLIST` covers it.
+Directories, and so every recursive delete, keep the roots-or-ledger rule.
+
+**Why.** The damage that motivated the roots was recursive: one wrong `-r`
+removes a tree. A single file is bounded, recoverable from the trash for 72
+hours, and audited. The denylist covers the files whose loss or tampering is
+not bounded: keys, credentials and shell startup files.
+
+**Rejected.** Extending the ledger to every Write/Edit/redirect (more
+plumbing, and still misses files from earlier sessions). Allowing directories
+under `$HOME` too (reopens the recursive-delete risk the roots exist for).
