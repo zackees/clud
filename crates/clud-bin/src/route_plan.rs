@@ -370,7 +370,7 @@ impl ScrubKey {
 /// The per-OS rule for whether two environment-variable spellings name the
 /// same variable.
 pub fn os_env_key_eq(left: &str, right: &str) -> bool {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         left.eq_ignore_ascii_case(right)
     } else {
         left == right

@@ -132,9 +132,9 @@ fn classifying_a_hundred_thousand_entries_stays_inside_the_budget() {
     // run saw 471 ms of wall time where GitHub sees well under the limit.
     // CPU time counts only the work itself, so the same bound means the same
     // thing on every machine.
-    let start = thread_cpu_time();
+    let start = crate::platform::large_file_guard::thread_cpu_time();
     let out = super::index_pass::classify_entries(entries.into_iter());
-    let cpu = thread_cpu_time().saturating_sub(start);
+    let cpu = crate::platform::large_file_guard::thread_cpu_time().saturating_sub(start);
 
     assert!(
         !out.qualifying.is_empty(),
@@ -155,54 +155,13 @@ fn classifying_a_hundred_thousand_entries_stays_inside_the_budget() {
 /// a busy machine: wall time passes, this thread's CPU time does not.
 #[test]
 fn the_budget_clock_ignores_time_spent_off_cpu() {
-    let start = thread_cpu_time();
+    let start = crate::platform::large_file_guard::thread_cpu_time();
     std::thread::sleep(std::time::Duration::from_millis(300));
-    let cpu = thread_cpu_time().saturating_sub(start);
+    let cpu = crate::platform::large_file_guard::thread_cpu_time().saturating_sub(start);
     assert!(
         cpu < std::time::Duration::from_millis(100),
         "a 300 ms sleep consumed {cpu:?} of thread CPU time"
     );
-}
-
-/// CPU time consumed so far by the calling thread.
-#[cfg(unix)]
-fn thread_cpu_time() -> std::time::Duration {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `ts` is a valid, writable `timespec` for the duration of the
-    // call, and CLOCK_THREAD_CPUTIME_ID is supported on every unix target.
-    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
-    assert_eq!(rc, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID) failed");
-    std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
-}
-
-/// CPU time (kernel + user) consumed so far by the calling thread.
-#[cfg(windows)]
-fn thread_cpu_time() -> std::time::Duration {
-    use windows::Win32::Foundation::FILETIME;
-    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
-    let mut creation = FILETIME::default();
-    let mut exit = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    // SAFETY: `GetCurrentThread` returns a pseudo-handle that needs no
-    // closing, and all four out-pointers are stack `FILETIME`s valid for the
-    // duration of the call.
-    unsafe {
-        GetThreadTimes(
-            GetCurrentThread(),
-            &mut creation,
-            &mut exit,
-            &mut kernel,
-            &mut user,
-        )
-    }
-    .expect("GetThreadTimes on the current thread");
-    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
-    // FILETIME counts 100 ns intervals.
-    std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
 }
 
 /// The parser and the classifier agree on what a racily-clean entry means: a

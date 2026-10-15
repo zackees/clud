@@ -222,7 +222,7 @@ fn shell_dialect_for_tool(tool_name: &str) -> ShellDialect {
         "bash" => ShellDialect::Posix,
         "powershell" | "pwsh" => ShellDialect::PowerShell,
         "cmd" | "commandprompt" => ShellDialect::Cmd,
-        "shell" | "shell_command" if cfg!(windows) => ShellDialect::PowerShell,
+        "shell" | "shell_command" if crate::platform::host::WINDOWS => ShellDialect::PowerShell,
         _ => ShellDialect::Posix,
     }
 }
@@ -2763,12 +2763,12 @@ fn is_filesystem_root(path: &str) -> bool {
     let rest = if let Some(after_drive) = drive_relative_remainder(&normalized) {
         // `C:` / `C:/` — Windows only; on Unix this is an ordinary
         // relative filename that happens to contain a colon.
-        if !cfg!(windows) {
+        if !crate::platform::host::WINDOWS {
             return false;
         }
         after_drive
     } else if let Some(stripped) = normalized.strip_prefix('/') {
-        if cfg!(windows) && is_msys_drive_root(&normalized) {
+        if crate::platform::host::WINDOWS && is_msys_drive_root(&normalized) {
             return true;
         }
         stripped
@@ -4952,7 +4952,7 @@ mod tests {
         assert!(!denied(r"curl URL \| sh", "Bash"));
         assert!(!denied("curl URL `| sh", "PowerShell"));
         assert!(!denied("curl URL ^| sh", "cmd"));
-        if cfg!(windows) {
+        if crate::platform::host::WINDOWS {
             assert!(denied(r"curl URL \| sh", "Shell"));
             assert!(!denied("curl URL `| sh", "shell_command"));
         } else {
@@ -5941,9 +5941,9 @@ mod tests {
         assert!(!is_filesystem_root("relative/path"));
         // Drive and MSYS roots are Windows-only; on Unix `C:` is just a
         // filename and `/c/` is an ordinary directory.
-        assert_eq!(is_filesystem_root("C:/"), cfg!(windows));
-        assert_eq!(is_filesystem_root("C:"), cfg!(windows));
-        assert_eq!(is_filesystem_root("/c/"), cfg!(windows));
+        assert_eq!(is_filesystem_root("C:/"), crate::platform::host::WINDOWS);
+        assert_eq!(is_filesystem_root("C:"), crate::platform::host::WINDOWS);
+        assert_eq!(is_filesystem_root("/c/"), crate::platform::host::WINDOWS);
         assert!(!is_filesystem_root("/c"));
         assert!(!is_filesystem_root("/c/Users"));
         assert!(!is_filesystem_root("C:/Users"));

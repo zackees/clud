@@ -145,26 +145,8 @@ fn build_payload(cmd: &str) -> TelemetryPayload {
 /// invoked `clud log`. On Unix this is `getppid()`. On Windows we walk
 /// the toolhelp32 snapshot for the entry whose `th32ProcessID` matches
 /// our own PID and read its `th32ParentProcessID`.
-#[cfg(unix)]
 fn parent_pid() -> u32 {
-    // SAFETY: `getppid` is always-safe libc.
-    unsafe { libc::getppid() as u32 }
-}
-
-#[cfg(windows)]
-fn parent_pid() -> u32 {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-    let me = std::process::id();
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[Pid::from_u32(me)]),
-        true,
-        ProcessRefreshKind::nothing(),
-    );
-    sys.process(Pid::from_u32(me))
-        .and_then(|p| p.parent())
-        .map(|p| p.as_u32())
-        .unwrap_or(0)
+    crate::platform::log_event::parent_pid()
 }
 
 #[cfg(test)]

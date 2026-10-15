@@ -21,7 +21,7 @@ use std::path::PathBuf;
 /// The user's home directory, or `None` when nothing names one.
 pub fn user_home() -> Option<PathBuf> {
     resolve(
-        cfg!(windows),
+        crate::platform::host::WINDOWS,
         std::env::var_os("USERPROFILE"),
         std::env::var_os("HOME"),
         dirs::home_dir,

@@ -2,14 +2,29 @@
 
 pub mod alias_link;
 pub mod backend_bootstrap;
+pub mod block_bad_cmd_io;
+pub mod block_bad_cmd_repeat;
+#[cfg(test)]
+mod build_id;
 pub mod codex_auth;
+pub mod config;
 pub mod dnd;
 #[cfg(test)]
 pub mod gc_test_fs;
+#[cfg(test)]
+mod gh_broker;
+pub mod grind_scripts;
 pub mod host;
+#[cfg(test)]
+pub mod large_file_guard;
+pub mod log_event;
 pub mod login_env;
+#[cfg(test)]
+mod nounset;
+pub mod optimize;
 pub mod provider_auth;
 pub mod repo_worktree_reclaim_exec;
+pub mod runtime_cache;
 pub mod self_install;
 pub mod self_install_activation;
 pub mod session_registry;

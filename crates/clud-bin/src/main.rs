@@ -34,8 +34,10 @@ fn main() {
     run(parse_args());
 }
 
-#[cfg(windows)]
 fn parse_args() -> args::Args {
+    if !clud::platform::host::WINDOWS {
+        return args::Args::parse_with_passthrough();
+    }
     // Clap builds the complete nested command tree while parsing argv. Keep
     // only that work off Windows' small default main-thread stack so adding a
     // maintenance command cannot make even `clud --help` overflow, while the
@@ -47,11 +49,6 @@ fn parse_args() -> args::Args {
         .expect("spawn clud argument parser")
         .join()
         .expect("clud argument parser panicked")
-}
-
-#[cfg(not(windows))]
-fn parse_args() -> args::Args {
-    args::Args::parse_with_passthrough()
 }
 
 /// The whole `clud` launch, as an ordered list of phases.

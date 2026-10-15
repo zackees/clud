@@ -26,7 +26,7 @@ pub use types::{
 
 use inspect::inspect_current as inspect_current_impl;
 use prompts::{run_backend_prompt, run_validation_followups};
-use repairs::{apply_deterministic_repairs, deterministic_repair_actions};
+pub(crate) use repairs::{apply_deterministic_repairs, deterministic_repair_actions};
 use warnings::{print_dry_run_plan, print_report_warnings, uv_run_hook_warnings};
 
 #[cfg(test)]
@@ -180,4 +180,4 @@ pub fn run_fix_hooks(args: &Args, launch_target: ResolvedLaunchTarget) -> i32 {
 
 #[cfg(test)]
 #[path = "../hook_health_tests.rs"]
-mod tests;
+pub(crate) mod tests;

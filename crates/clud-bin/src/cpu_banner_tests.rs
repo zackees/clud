@@ -525,7 +525,7 @@ fn bench_sampler_cost_50_procs() {
         // `timeout` can resolve to GNU coreutils' timeout, which
         // rejects `/T` and exits instantly, collapsing the subtree
         // this bench is supposed to measure.
-        let command = if cfg!(windows) {
+        let command = if crate::platform::host::WINDOWS {
             CommandSpec::Argv(vec![
                 "ping".to_string(),
                 "-n".to_string(),

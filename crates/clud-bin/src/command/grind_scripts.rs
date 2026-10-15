@@ -226,16 +226,7 @@ fn repo_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
-#[cfg(unix)]
-fn is_executable(meta: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_meta: &std::fs::Metadata) -> bool {
-    false
-}
+use crate::platform::grind_scripts::is_executable;
 
 /// Gather [`ScriptFacts`] for the repo at `root`. Reads files; runs nothing.
 pub fn gather(root: &Path, windows: bool) -> ScriptFacts {
@@ -277,7 +268,7 @@ pub fn gather(root: &Path, windows: bool) -> ScriptFacts {
 pub fn run() -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let root = repo_root(&cwd);
-    print!("{}", render(&gather(&root, cfg!(windows))));
+    print!("{}", render(&gather(&root, crate::platform::host::WINDOWS)));
     0
 }
 

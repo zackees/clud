@@ -63,7 +63,7 @@ pub fn runtime_cache_dir() -> Option<PathBuf> {
 /// Filename for the cached binary inside [`runtime_cache_dir`].
 /// Includes the `.exe` extension on Windows.
 pub fn cached_clud_binary_name() -> &'static str {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         "clud.exe"
     } else {
         "clud"
@@ -213,37 +213,8 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
 /// its doc comment and `tests/integration/diagnostics/platform/windows/runtime_cache_hop_windows.rs`.
 fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-
-        let mut argv = Vec::with_capacity(args.len() + 1);
-        argv.push(
-            CString::new(cached.as_os_str().as_bytes())
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
-        );
-        for arg in args {
-            argv.push(
-                CString::new(arg.as_os_str().as_bytes())
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
-            );
-        }
-        let mut argv_ptrs = argv.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
-        argv_ptrs.push(std::ptr::null());
-
-        unsafe {
-            libc::execv(argv[0].as_ptr(), argv_ptrs.as_ptr());
-        }
-        Err(io::Error::last_os_error())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let code = crate::trampoline::relay_child_and_wait(cached, &args)?;
-        std::process::exit(code);
-    }
+    // Unix replaces the process image with `execv`; Windows relays and exits.
+    crate::platform::runtime_cache::reexec_from_cached_binary(cached, args)
 }
 
 /// True if `exe` resolves into a path under `~/.clud/runtime/`.
@@ -336,16 +307,7 @@ pub fn prepare_cached_clud_in(source: &Path, dir: &Path, binary_name: &str) -> i
     let temp_path = dir.join(&temp_name);
     fs::copy(source, &temp_path)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&temp_path)?.permissions();
-        // Preserve executable bit; `fs::copy` already copies mode on
-        // Unix but be defensive in case `source` came from a tarball
-        // extract that stripped it.
-        perms.set_mode(perms.mode() | 0o100);
-        fs::set_permissions(&temp_path, perms)?;
-    }
+    crate::platform::runtime_cache::ensure_owner_executable(&temp_path)?;
 
     fs::rename(&temp_path, &cached)?;
 
@@ -369,7 +331,7 @@ mod tests {
     #[test]
     fn cached_binary_name_matches_platform_extension() {
         let name = cached_clud_binary_name();
-        if cfg!(windows) {
+        if crate::platform::host::WINDOWS {
             assert_eq!(name, "clud.exe");
         } else {
             assert_eq!(name, "clud");

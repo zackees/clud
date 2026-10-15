@@ -200,25 +200,7 @@ fn split_editor_command(command: &str) -> Result<Vec<String>, String> {
     }
 }
 
-#[cfg(windows)]
-fn default_editor_command() -> Result<Vec<String>, String> {
-    Ok(vec!["notepad.exe".to_string()])
-}
-
-#[cfg(target_os = "macos")]
-fn default_editor_command() -> Result<Vec<String>, String> {
-    Ok(vec!["open".to_string(), "-t".to_string()])
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn default_editor_command() -> Result<Vec<String>, String> {
-    for candidate in ["xdg-open", "nano", "vi"] {
-        if which::which(candidate).is_ok() {
-            return Ok(vec![candidate.to_string()]);
-        }
-    }
-    Err("no editor found; set EDITOR or pass --editor <cmd>".to_string())
-}
+use crate::platform::config::default_editor_command;
 
 fn run_editor(argv: Vec<String>) -> Result<(), String> {
     let process = NativeProcess::new(ProcessConfig {

@@ -211,11 +211,7 @@ fn write_fast(path: &Path, bytes: &[u8], create_dir: bool) -> std::io::Result<()
     let temp = parent.join(format!(".tmp-{}-{nanos}", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    crate::platform::block_bad_cmd_repeat::set_owner_only_mode(&mut options);
     let result = options
         .open(&temp)
         .and_then(|mut file| file.write_all(bytes))
