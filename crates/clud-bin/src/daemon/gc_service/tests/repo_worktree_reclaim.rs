@@ -32,6 +32,11 @@ fn identity(root: &Path) {
     run_git(root, &["config", "user.name", "t"]);
     run_git(root, &["config", "commit.gpgsign", "false"]);
     run_git(root, &["config", "core.hooksPath", ""]);
+    // A commit may start auto-maintenance as a detached process (git 2.46+)
+    // that is still inside a worktree when the reclaim runs, so it is spared
+    // as "process inside" and the test flakes.
+    run_git(root, &["config", "maintenance.auto", "false"]);
+    run_git(root, &["config", "gc.auto", "0"]);
 }
 
 fn commit_file(dir: &Path, name: &str, body: &str, msg: &str) {
