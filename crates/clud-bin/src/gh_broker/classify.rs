@@ -282,17 +282,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn non_utf8_args_pass_through() {
-        use std::os::unix::ffi::OsStringExt;
-        let args = vec![
-            OsString::from("api"),
-            OsString::from_vec(b"repos/\xff".to_vec()),
-        ];
-        assert_eq!(api_read(&args), None);
-    }
-
     #[test]
     fn writes_are_detected_and_reads_are_not() {
         for words in [

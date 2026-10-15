@@ -77,7 +77,7 @@ fn is_truthy(raw: &str) -> bool {
 /// `WINELOADERNOEXEC` is a real Wine variable we should not set on a platform
 /// where Wine may actually be running) and empty when opted out.
 pub fn env_overrides() -> Vec<(String, String)> {
-    env_overrides_for(cfg!(windows), is_opted_out())
+    env_overrides_for(crate::platform::host::WINDOWS, is_opted_out())
 }
 
 /// Test seam — the platform and opt-out decisions are passed in so the policy

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 pub(in crate::hook_health) fn same_path(left: &Path, right: &Path) -> bool {
-    if cfg!(target_os = "windows") {
+    if crate::platform::host::WINDOWS {
         left.to_string_lossy()
             .eq_ignore_ascii_case(&right.to_string_lossy())
     } else {

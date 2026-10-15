@@ -86,9 +86,9 @@ impl RunRecord {
 }
 
 pub fn host_os() -> &'static str {
-    if cfg!(windows) {
+    if crate::platform::host::WINDOWS {
         "windows"
-    } else if cfg!(target_os = "macos") {
+    } else if crate::platform::host::MACOS {
         "macos"
     } else {
         "linux"
