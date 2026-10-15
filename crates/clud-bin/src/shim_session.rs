@@ -75,12 +75,9 @@ pub fn set_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
 }
 
 fn path_sep() -> char {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         ';'
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         ':'
     }
 }
@@ -116,7 +113,11 @@ pub fn activate_rm(env: &mut Vec<(String, String)>) {
     };
     let inherited_target = inherited(GH_SHIM_TARGET_KEY);
     let inherited_git = inherited(GIT_SHIM_TARGET_KEY);
-    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home_key = if crate::platform::host::WINDOWS {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
     let result = env
         .iter()
         .find(|(k, _)| k == home_key)
@@ -229,15 +230,15 @@ mod tests {
         let real_dir = temp.path().join("real");
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&real_dir).unwrap();
-        let name = if cfg!(windows) { "gh.exe" } else { "gh" };
+        let name = if crate::platform::host::WINDOWS {
+            "gh.exe"
+        } else {
+            "gh"
+        };
         std::fs::write(shim_dir.join(name), b"shim").unwrap();
         let real = real_dir.join(name);
         std::fs::write(&real, b"real").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::shim_fs::set_mode(&real, 0o755).unwrap();
         let path = std::env::join_paths([&shim_dir, &real_dir]).unwrap();
         let path = path.to_string_lossy();
         assert_eq!(
@@ -269,11 +270,7 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             let file = dir.join(&name);
             std::fs::write(&file, dir.to_string_lossy().as_bytes()).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            crate::platform::shim_fs::set_mode(&file, 0o755).unwrap();
         }
         let real = real_dir.join(&name).canonicalize().unwrap();
         let path = std::env::join_paths([&shim_dir, &interp_dir, &real_dir]).unwrap();

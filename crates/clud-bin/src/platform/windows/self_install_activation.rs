@@ -1,6 +1,6 @@
-//! Windows User Path edits and OS-built fresh-environment verification.
+//! Windows half of `crate::self_install::activation`: User Path edits and
+//! OS-built fresh-environment verification.
 
-use super::activation::{ActivationPlan, WindowsPathValue};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command; // running-process: command-builder
@@ -13,7 +13,20 @@ use winreg::RegKey;
 
 const USER_ENVIRONMENT: &str = "Environment";
 
-pub(super) fn plan(destination: &Path) -> Result<ActivationPlan, String> {
+/// The Windows activation plan: the HKCU User Path before and after.
+#[derive(Debug, Clone)]
+pub struct ActivationHost {
+    prior_user_path: Option<WindowsPathValue>,
+    next_user_path: WindowsPathValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WindowsPathValue {
+    bytes: Vec<u8>,
+    kind: RegType,
+}
+
+pub fn plan(destination: &Path) -> Result<ActivationHost, String> {
     let bin = destination.parent().ok_or("missing install directory")?;
     let directory = bin.to_str().ok_or("install directory is not UTF-8")?;
     if directory.contains([';', '\0', '\r', '\n']) {
@@ -50,8 +63,7 @@ pub(super) fn plan(destination: &Path) -> Result<ActivationPlan, String> {
             .map(|value| value.kind.clone())
             .unwrap_or(RegType::REG_EXPAND_SZ),
     };
-    Ok(ActivationPlan {
-        destination: destination.to_path_buf(),
+    Ok(ActivationHost {
         prior_user_path,
         next_user_path,
     })
@@ -125,8 +137,8 @@ fn read_user_path() -> Result<Option<WindowsPathValue>, String> {
     }))
 }
 
-pub(super) fn description(plan: &ActivationPlan) -> String {
-    let Some(bin) = plan.destination.parent() else {
+pub fn description(destination: &Path, plan: &ActivationHost) -> String {
+    let Some(bin) = destination.parent() else {
         return "invalid planned destination".into();
     };
     let before = plan
@@ -145,7 +157,11 @@ pub(super) fn description(plan: &ActivationPlan) -> String {
     )
 }
 
-pub(super) fn apply_and_verify(plan: &ActivationPlan, version: &str) -> Result<(), String> {
+pub fn apply_and_verify(
+    destination: &Path,
+    plan: &ActivationHost,
+    version: &str,
+) -> Result<(), String> {
     if read_user_path()? != plan.prior_user_path {
         return Err("User Path changed after consent".into());
     }
@@ -154,7 +170,7 @@ pub(super) fn apply_and_verify(plan: &ActivationPlan, version: &str) -> Result<(
         write_user_path(Some(&plan.next_user_path))?;
         broadcast();
     }
-    if let Err(error) = verify(plan, version) {
+    if let Err(error) = verify(destination, version) {
         if changed && read_user_path()? == Some(plan.next_user_path.clone()) {
             write_user_path(plan.prior_user_path.as_ref())?;
             broadcast();
@@ -205,17 +221,17 @@ fn broadcast() {
     }
 }
 
-fn verify(plan: &ActivationPlan, version: &str) -> Result<(), String> {
+fn verify(destination: &Path, version: &str) -> Result<(), String> {
     let output = run_baseline(
         "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $c=(Get-Command clud -CommandType Application -ErrorAction Stop).Source; [Console]::WriteLine($c); & clud --version",
     )?;
     let mut lines = output.trim().lines();
     let resolved = lines.next().unwrap_or_default().trim();
     let observed = lines.next().unwrap_or_default().trim();
-    if !same_path(Path::new(resolved), &plan.destination) {
+    if !same_path(Path::new(resolved), destination) {
         return Err(format!(
             "fresh User environment resolves clud to {resolved:?}, expected {}",
-            plan.destination.display()
+            destination.display()
         ));
     }
     if observed != format!("clud {version}") {

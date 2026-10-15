@@ -95,28 +95,13 @@ fn stage(method: Method, source: &Path, staging: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(unix)]
 fn symlink(source: &Path, staging: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(source, staging)
-}
-
-#[cfg(windows)]
-fn symlink(source: &Path, staging: &Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_file(source, staging)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn symlink(_source: &Path, _staging: &Path) -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    crate::platform::alias_link::symlink(source, staging)
 }
 
 fn copy(source: &Path, staging: &Path) -> io::Result<()> {
     std::fs::copy(source, staging)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o755))?;
-    }
+    crate::platform::shim_fs::set_mode(staging, 0o755)?;
     // Freshness compares size and mtime, so the copy carries the source's.
     if let Ok(modified) = std::fs::metadata(source).and_then(|meta| meta.modified()) {
         let _ = std::fs::OpenOptions::new()
@@ -176,18 +161,11 @@ pub fn is_alias_of(source: &Path, candidate: &Path) -> bool {
     }
 }
 
-#[cfg(unix)]
+/// Unix compares device and inode. Windows has no stable file-index API in
+/// std; a hardlink there is caught by [`is_fresh`]'s size and mtime
+/// comparison, and by the byte comparison in `shim_registry`.
 fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-
-/// Windows has no stable file-index API in std; a hardlink there is caught by
-/// [`is_fresh`]'s size and mtime comparison, and by the byte comparison in
-/// `shim_registry`.
-#[cfg(not(unix))]
-fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
-    false
+    crate::platform::alias_link::same_file(a, b)
 }
 
 #[cfg(test)]
@@ -199,11 +177,7 @@ mod tests {
     fn source_in(dir: &Path, body: &[u8]) -> PathBuf {
         let path = dir.join("clud");
         fs::write(&path, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::shim_fs::set_mode(&path, 0o755).unwrap();
         path
     }
 
@@ -228,7 +202,7 @@ mod tests {
         let placed = install_alias_with(&source, &target, &[Method::Symlink, Method::Copy]);
         match placed.unwrap() {
             // Windows without Developer Mode cannot symlink; the copy is the plan.
-            Placed::Made(Method::Copy) if cfg!(windows) => {}
+            Placed::Made(Method::Copy) if crate::platform::host::WINDOWS => {}
             Placed::Made(Method::Symlink) => {
                 assert!(fs::symlink_metadata(&target)
                     .unwrap()
@@ -256,13 +230,8 @@ mod tests {
             Placed::Unchanged,
             "a copy with the source's size and mtime is fresh"
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&target).unwrap().permissions().mode() & 0o111,
-                0o111
-            );
+        if let Some(mode) = crate::platform::shim_fs::mode_bits(&fs::metadata(&target).unwrap()) {
+            assert_eq!(mode & 0o111, 0o111);
         }
     }
 
