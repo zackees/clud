@@ -798,16 +798,13 @@ fn run_chain_spec(command: CommandSpec, stdin: &[u8]) -> Option<Vec<u8>> {
 /// with Git Bash, Claude Code's own shell there, and `None` means none was
 /// found: the command is never handed to `cmd.exe` instead (#1371).
 fn chain_spec(command: &str) -> Option<CommandSpec> {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         windows_chain_spec(
             command,
             std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH"),
             locate_git_bash,
         )
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         Some(CommandSpec::Argv(vec![
             "sh".into(),
             "-c".into(),
@@ -821,7 +818,6 @@ fn chain_spec(command: &str) -> Option<CommandSpec> {
 /// names an existing file wins, then whatever `locate_bash` finds. With no
 /// bash at all it returns `None` rather than falling back to `cmd.exe`: the
 /// command is POSIX shell, and `cmd` would silently mis-run it.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_chain_spec(
     command: &str,
     git_bash_env: Option<std::ffi::OsString>,
@@ -843,7 +839,6 @@ fn windows_chain_spec(
 /// which holds `git.exe` but not `bash.exe`), then the default install under
 /// `%ProgramFiles%`. Both resolve to `<Git>\bin\bash.exe`, the path
 /// `CLAUDE_CODE_GIT_BASH_PATH` names.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn git_bash_candidates(git_exe: Option<&Path>, program_files: Option<&Path>) -> Vec<PathBuf> {
     let beside_git = git_exe
         .and_then(Path::parent)
@@ -854,8 +849,7 @@ fn git_bash_candidates(git_exe: Option<&Path>, program_files: Option<&Path>) -> 
 }
 
 /// Git Bash when `CLAUDE_CODE_GIT_BASH_PATH` is unset: the Git for Windows
-/// install, then any `bash` on PATH.
-#[cfg(windows)]
+/// install, then any `bash` on PATH. Only called on Windows.
 fn locate_git_bash() -> Option<PathBuf> {
     let git = which::which("git").ok();
     let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);

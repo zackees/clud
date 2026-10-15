@@ -26,11 +26,9 @@
 //! resolution (`model`) is unaffected by this and still runs, in case a
 //! future backend picks the model back up.
 
-mod audio;
+pub(crate) mod audio;
 mod config;
 mod cues;
-#[cfg(target_os = "linux")]
-mod linux_capture;
 mod mode;
 mod model;
 mod recording;

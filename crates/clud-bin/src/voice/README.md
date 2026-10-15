@@ -9,8 +9,9 @@ F3 push-to-talk voice mode (issue #13). Captures microphone audio while F3 is he
 - `config.rs` — `VoiceConfig::from_env` reads `CLUD_VOICE`, `CLUD_WHISPER_MODEL`, `CLUD_VOICE_LANGUAGE`, `CLUD_VOICE_TEST_TRANSCRIPT`.
 - `recording.rs` — `ActiveRecording`: starts/stops the capture backend, runs VAD auto-stop, returns resampled samples.
 - `audio.rs` — sample-rate constants, VAD thresholds, mono downmix + linear resample to 16 kHz, silence/speech detection.
-- `cues.rs` — `play_cue(CueTone::Start|Stop)`: short sine-wave beep via `rodio` (BEL fallback on Linux).
-- `linux_capture.rs` — Linux-only `arecord` subprocess wrapper that streams S16_LE PCM into a shared sample buffer.
+- `cues.rs` — `play_cue(CueTone::Start|Stop)`: short sine-wave beep via `rodio` (BEL fallback on Linux), played by `crate::platform::voice::play_cue`.
+- `../platform/windows/voice.rs` — the cpal capture (`MicCapture`) and rodio cue shared by Windows and macOS (macOS includes it from `../platform/unix/voice/mod.rs`).
+- `../platform/unix/voice/linux_capture.rs` (moved under the platform boundary, #1953) — Linux-only `arecord` subprocess wrapper that streams S16_LE PCM into a shared sample buffer.
 - `model.rs` — model resolution, SHA-256-pinned auto-download to per-OS cache dir, background download thread. Kept for a future transcription backend; unrelated to the whisper-rs removal (no C++/CMake dependency).
 - `worker.rs` — `VoiceWorker` thread: hands audio to `transcribe_audio`, which is a stub (see module header), sends `WorkerEvent::Transcript|Error`.
 
@@ -20,7 +21,7 @@ F3 push-to-talk voice mode (issue #13). Captures microphone audio while F3 is he
 - `VoiceMode::from_env` (eager model resolve + background download): `mode.rs:33`
 - `InteractiveHooks for VoiceMode` (`on_f3_press`/`on_f3_release`/`on_tick`): `mode.rs:194`
 - `VoiceConfig::from_env`: `config.rs:13`
-- `ActiveRecording::start` (cpal): `recording.rs:39`
+- `ActiveRecording::start` (via `crate::platform::voice::MicCapture`): `recording.rs:30`
 - `ActiveRecording::start` (Linux/arecord): `recording.rs:86`
 - `ActiveRecording::synthetic` (test/no-mic bypass): `recording.rs:116`
 - `ActiveRecording::should_auto_stop` (VAD + hard cap): `recording.rs:150`
@@ -28,8 +29,8 @@ F3 push-to-talk voice mode (issue #13). Captures microphone audio while F3 is he
 - `downmix_and_resample`: `audio.rs:21`
 - `is_effectively_silent` / `has_speech_peak`: `audio.rs:59`, `audio.rs:66`
 - VAD constants (`MIN_CAPTURE_MS`, `MAX_SILENCE_PEAK`, `MIN_VAD_AFTER_SPEECH_MS`, `VAD_SILENCE_TAIL_MS`, `MAX_CAPTURE_MS`): `audio.rs:5`-`audio.rs:19`
-- `play_cue` + `CueTone`: `cues.rs:9`, `cues.rs:15`
-- `LinuxCapture::start` / `LinuxCapture::stop`: `linux_capture.rs:23`, `linux_capture.rs:74`
+- `play_cue` + `CueTone`: `cues.rs:12`, `cues.rs:4`
+- `LinuxCapture::start` / `LinuxCapture::stop`: `../platform/unix/voice/linux_capture.rs:23`, `../platform/unix/voice/linux_capture.rs:74`
 - `resolve_if_available`: `model.rs:53`
 - `ensure_downloaded_in_background`: `model.rs:72`
 - `default_cache_path`, `MODEL_FILENAME`, `MODEL_SHA256`: `model.rs:42`, `model.rs:26`, `model.rs:34`
