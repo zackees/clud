@@ -28,29 +28,7 @@ pub fn run(argv: &[OsString]) -> i32 {
 fn exec(label: &str, path: &Path, args: &[OsString]) -> i32 {
     let mut command = std::process::Command::new(path);
     command.args(args);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let error = command.exec();
-        eprintln!(
-            "clud {label} shim: failed to exec {}: {error}",
-            path.display()
-        );
-        126
-    }
-    #[cfg(not(unix))]
-    {
-        match command.status() {
-            Ok(status) => status.code().unwrap_or(1),
-            Err(error) => {
-                eprintln!(
-                    "clud {label} shim: failed to exec {}: {error}",
-                    path.display()
-                );
-                126
-            }
-        }
-    }
+    crate::platform::shim_main::exec(label, path, command)
 }
 
 /// #1486: run `path` with `args` as a child with inherited stdin, stdout and
@@ -72,7 +50,7 @@ fn run_child(
 ) -> i32 {
     let mut command = std::process::Command::new(path);
     command.args(args);
-    let mut child = match command.spawn() {
+    let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             eprintln!(
@@ -83,112 +61,7 @@ fn run_child(
             return 126;
         }
     };
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        let forwarding = unix_signals::Forwarding::install(child.id());
-        let status = child.wait();
-        drop(forwarding);
-        match status {
-            Ok(status) => match status.signal() {
-                Some(signal) => {
-                    recorder.record(128 + signal);
-                    unix_signals::reraise(signal);
-                    128 + signal
-                }
-                None => {
-                    let code = status.code().unwrap_or(1);
-                    recorder.record(code);
-                    code
-                }
-            },
-            Err(error) => {
-                eprintln!(
-                    "clud {label} shim: failed to wait for {}: {error}",
-                    path.display()
-                );
-                recorder.record(1);
-                1
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let code = match child.wait() {
-            Ok(status) => status.code().unwrap_or(1),
-            Err(error) => {
-                eprintln!(
-                    "clud {label} shim: failed to wait for {}: {error}",
-                    path.display()
-                );
-                1
-            }
-        };
-        recorder.record(code);
-        code
-    }
-}
-
-#[cfg(unix)]
-mod unix_signals {
-    //! Shell-style signal handling for [`super::run_child`].
-
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
-    use signal_hook::SigId;
-
-    pub struct Forwarding {
-        saved: Vec<(i32, libc::sighandler_t)>,
-        forwarders: Vec<SigId>,
-    }
-
-    impl Forwarding {
-        /// Ignore SIGINT/SIGQUIT and forward SIGTERM/SIGHUP to `child`.
-        /// Installed after the spawn, so the child keeps default dispositions.
-        pub fn install(child: u32) -> Self {
-            let pid = child as libc::pid_t;
-            let mut saved = Vec::new();
-            for signal in [SIGINT, SIGQUIT] {
-                // SAFETY: setting a disposition to SIG_IGN is always valid.
-                let old = unsafe { libc::signal(signal, libc::SIG_IGN) };
-                saved.push((signal, old));
-            }
-            let mut forwarders = Vec::new();
-            for signal in [SIGTERM, SIGHUP] {
-                // SAFETY: the action only calls kill(2), which is
-                // async-signal-safe, with values captured by copy.
-                let id = unsafe {
-                    signal_hook::low_level::register(signal, move || {
-                        libc::kill(pid, signal);
-                    })
-                };
-                if let Ok(id) = id {
-                    forwarders.push(id);
-                }
-            }
-            Forwarding { saved, forwarders }
-        }
-    }
-
-    impl Drop for Forwarding {
-        fn drop(&mut self) {
-            for id in self.forwarders.drain(..) {
-                signal_hook::low_level::unregister(id);
-            }
-            for (signal, old) in self.saved.drain(..) {
-                // SAFETY: restoring the disposition this guard replaced.
-                unsafe { libc::signal(signal, old) };
-            }
-        }
-    }
-
-    /// Die by `signal` with its default action, like the child did.
-    pub fn reraise(signal: i32) {
-        // SAFETY: default disposition, then raise(3) on this process.
-        unsafe {
-            libc::signal(signal, libc::SIG_DFL);
-            libc::raise(signal);
-        }
-    }
+    crate::platform::shim_main::wait_child(label, path, child, recorder)
 }
 
 /// #1486: one telemetry line per in-session `git` / `gh` invocation. A
@@ -284,7 +157,7 @@ mod rm_shim {
     }
 }
 
-mod gh_shim {
+pub(crate) mod gh_shim {
     //! In-session `gh` relay. `pr checks --watch` is upgraded to the bundled
     //! watcher, and `gh api` GETs may be answered by the daemon read broker
     //! (#1743, docs/architecture/gh-read-broker.md).
@@ -339,7 +212,7 @@ mod gh_shim {
         Some(exec(target, &replay, recorder))
     }
 
-    fn watch_words(args: &[OsString]) -> Result<Option<Vec<&str>>, i32> {
+    pub(crate) fn watch_words(args: &[OsString]) -> Result<Option<Vec<&str>>, i32> {
         let words: Option<Vec<&str>> = args.iter().map(|arg| arg.to_str()).collect();
         if let Some(words) = words {
             return Ok(is_watch(&words).then_some(words));
@@ -449,19 +322,6 @@ mod gh_shim {
 
     fn exec(path: &Path, args: &[OsString], recorder: &Recorder) -> i32 {
         super::run_child("gh", path, args, recorder)
-    }
-
-    #[cfg(all(test, unix))]
-    #[test]
-    fn non_utf8_watch_selector_fails_closed() {
-        use std::os::unix::ffi::OsStringExt;
-        let args = [
-            OsString::from("pr"),
-            OsString::from("checks"),
-            OsString::from_vec(b"branch-\xff".to_vec()),
-            OsString::from("--watch"),
-        ];
-        assert_eq!(watch_words(&args), Err(2));
     }
 }
 

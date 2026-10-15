@@ -571,10 +571,11 @@ mod tests {
     fn alias_names_are_platform_appropriate() {
         let names = alias_names();
         assert!(!names.is_empty());
-        #[cfg(windows)]
-        assert!(names.iter().any(|n| n.ends_with(".exe")));
-        #[cfg(not(windows))]
-        assert!(names.iter().all(|n| !n.ends_with(".exe")));
+        if crate::platform::host::WINDOWS {
+            assert!(names.iter().any(|n| n.ends_with(".exe")));
+        } else {
+            assert!(names.iter().all(|n| !n.ends_with(".exe")));
+        }
     }
 
     #[test]
@@ -653,11 +654,7 @@ mod tests {
         let python = bin.join(shim_registry::file_name("python3"));
         fs::write(&current_exe, b"clud").unwrap();
         fs::write(&python, b"python").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::shim_fs::set_mode(&python, 0o755).unwrap();
         let mut env = vec![("PATH".to_string(), bin.to_string_lossy().into_owned())];
 
         let prepared = prepare_session_shims_at(home.path(), &current_exe, &mut env).unwrap();

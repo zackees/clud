@@ -314,17 +314,25 @@ fn parse_first_version_triple(text: &str) -> Option<VersionTriple> {
 /// position 0). Modifies the *current process* env so spawned children
 /// inherit the change.
 fn prepend_path_entry(path_entry: &Path) {
-    let separator = if cfg!(windows) { ";" } else { ":" };
+    let separator = if crate::platform::host::WINDOWS {
+        ";"
+    } else {
+        ":"
+    };
     let existing = std::env::var_os("PATH").unwrap_or_default();
     let existing_str = existing.to_string_lossy();
     let path_entry_str = path_entry.to_string_lossy();
 
     // Idempotency: if PATH already starts with this dir, no-op.
     let already_leading = existing_str
-        .split(if cfg!(windows) { ';' } else { ':' })
+        .split(if crate::platform::host::WINDOWS {
+            ';'
+        } else {
+            ':'
+        })
         .next()
         .map(|first| {
-            if cfg!(windows) {
+            if crate::platform::host::WINDOWS {
                 first.eq_ignore_ascii_case(&path_entry_str)
             } else {
                 first == path_entry_str
@@ -742,7 +750,11 @@ mod tests {
         let _g = isolate_path_env();
         let shim = std::env::temp_dir().join("clud-shim-idempotent");
         std::fs::create_dir_all(&shim).unwrap();
-        let sep = if cfg!(windows) { ";" } else { ":" };
+        let sep = if crate::platform::host::WINDOWS {
+            ";"
+        } else {
+            ":"
+        };
         let other = std::env::temp_dir().join("other");
         std::fs::create_dir_all(&other).unwrap();
 
@@ -768,7 +780,11 @@ mod tests {
         }
         prepend_path_entry(&shim);
         let after = std::env::var("PATH").unwrap();
-        let sep = if cfg!(windows) { ';' } else { ':' };
+        let sep = if crate::platform::host::WINDOWS {
+            ';'
+        } else {
+            ':'
+        };
         let first = after.split(sep).next().unwrap();
         assert_eq!(
             first,

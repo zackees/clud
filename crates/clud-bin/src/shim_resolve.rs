@@ -176,12 +176,9 @@ pub fn candidate_names(want: &str) -> Vec<String> {
 }
 
 fn path_sep() -> char {
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         ';'
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         ':'
     }
 }
@@ -200,15 +197,15 @@ mod tests {
         let b = tmp.path().join("b");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
-        let name = if cfg!(windows) { "rm.exe" } else { "rm" };
+        let name = if crate::platform::host::WINDOWS {
+            "rm.exe"
+        } else {
+            "rm"
+        };
         for dir in [&a, &b] {
             let file = dir.join(name);
             std::fs::write(&file, b"shim").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            crate::platform::shim_fs::set_mode(file, 0o755).unwrap();
         }
         let path = std::env::join_paths([&a, &b]).unwrap();
         assert_eq!(which("rm", path.to_str().unwrap()), Some(a.join(name)));
@@ -313,18 +310,14 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
         // Put a fake python3 in dir b, none in dir a.
-        let exe_name = if cfg!(windows) {
+        let exe_name = if crate::platform::host::WINDOWS {
             "python3.exe"
         } else {
             "python3"
         };
         let py_in_b = b.join(exe_name);
         File::create(&py_in_b).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&py_in_b, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::shim_fs::set_mode(&py_in_b, 0o755).unwrap();
 
         let path_env = format!(
             "{}{}{}",

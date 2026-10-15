@@ -68,7 +68,11 @@ pub fn run(argv: &[OsString]) -> i32 {
         return 0;
     }
     let var = |key: &str| std::env::var_os(key);
-    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home_key = if crate::platform::host::WINDOWS {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
     let facts = Facts {
         self_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from(&argv0)),
         path: std::env::var_os("PATH").unwrap_or_default(),
@@ -266,11 +270,7 @@ mod tests {
     fn write_exe(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::platform::shim_fs::set_mode(path, 0o755).unwrap();
     }
 
     struct World {

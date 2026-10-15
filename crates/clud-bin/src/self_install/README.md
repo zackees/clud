@@ -11,8 +11,13 @@ version**. `transaction.rs` builds the read-only plan, verifies the selected
 source, and commits one executable. `activation.rs` builds the read-only
 shell plan shown before consent, updates owned Bash, zsh, or fish startup
 files, and proves fresh login and interactive name-based lookup.
-`activation_windows.rs` owns the HKCU User Path edit, change broadcast, and
-OS-built user-environment proof on Windows. A binary commit alone does not
+The host halves live behind the platform boundary (#1953):
+`platform/unix/self_install_activation.rs` owns the Bash, zsh, and fish
+startup-file edits and fresh-shell proof, and
+`platform/windows/self_install_activation.rs` owns the HKCU User Path edit,
+change broadcast, and OS-built user-environment proof on Windows.
+`platform/{unix,windows}/self_install.rs` hold the owner, mode, and
+reparse-point checks `transaction.rs` applies. A binary commit alone does not
 count as installer success.
 
 `catalog.rs` parses the bounded, duplicate-key rejecting v1 Catalog published
