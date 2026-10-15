@@ -180,7 +180,7 @@ pub fn child_env_policy_keys() -> Vec<&'static str> {
 /// the agent shells out to (Codex / Claude tool scripts, MCP servers,
 /// install probes …) so output doesn't mojibake against the user's OEM
 /// codepage. Paired with the `chcp 65001` prefix in
-/// `subprocess::render_windows_batch_command` (issue #168). Node itself
+/// `platform::subprocess::batch_shell_command` (issue #168). Node itself
 /// respects the console codepage and needs no dedicated env var.
 ///
 /// Then layers in, in order:
