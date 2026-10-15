@@ -35,13 +35,10 @@ fn state_dir_token(state_dir: &Path) -> String {
 /// bytes on macOS).
 pub(super) fn endpoint_for_state_dir(state_dir: &Path) -> io::Result<Endpoint> {
     let token = state_dir_token(state_dir);
-    #[cfg(windows)]
-    {
+    if crate::platform::host::WINDOWS {
         Endpoint::windows_pipe(RUNNING_PROCESS_SERVICE_NAME, format!("clud-rp-{token}"))
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         const SUN_PATH_BUDGET: usize = 90;
         let in_state_dir = state_dir.join("rp.sock");
         let path = if in_state_dir.as_os_str().len() <= SUN_PATH_BUDGET {

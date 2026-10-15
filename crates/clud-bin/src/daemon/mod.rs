@@ -68,8 +68,7 @@ pub use types::ENV_STATE_DIR;
 #[cfg(test)]
 pub use cpu_alert_publish::SAMPLE_INTERVAL as CPU_SAMPLE_INTERVAL_FOR_TEST;
 pub use cpu_alert_publish::{metrics_snapshot_path, MetricsSnapshot};
-#[cfg(windows)]
-pub(crate) use daemon_events::log_event as log_structured_event;
+pub use daemon_events::log_event as log_structured_event;
 pub use http::{
     spawn_dashboard_telemetry_only, DashboardState, TelemetryEntry, TelemetryIngest,
     TelemetryPidDetail, TelemetryPidSummary, TelemetryStore,

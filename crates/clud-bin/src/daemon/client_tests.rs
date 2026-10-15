@@ -470,8 +470,9 @@ fn a_matching_daemon_with_a_deleted_executable_is_replaced() {
 }
 
 /// The running test binary is on disk, so its own daemon-style check is false.
-#[cfg(target_os = "linux")]
 #[test]
 fn the_current_process_executable_is_not_deleted() {
-    assert!(!daemon_executable_deleted(std::process::id()));
+    if crate::platform::host::LINUX {
+        assert!(!daemon_executable_deleted(std::process::id()));
+    }
 }

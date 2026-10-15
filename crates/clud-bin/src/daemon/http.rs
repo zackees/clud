@@ -990,7 +990,11 @@ fn spawn_gh_route(
             let (status, bytes) = match read_body(&mut request) {
                 Ok(body) => {
                     let self_exe = std::env::current_exe().unwrap_or_default();
-                    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+                    let home_key = if crate::platform::host::WINDOWS {
+                        "USERPROFILE"
+                    } else {
+                        "HOME"
+                    };
                     let home = std::env::var_os(home_key).map(PathBuf::from);
                     match route {
                         GhRoute::Read => broker.handle_http(&body, &self_exe, home.as_deref()),

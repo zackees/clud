@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-#[cfg(not(windows))]
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+use crate::platform::host;
 use crate::process_identity::ProcessIdentity;
 
 #[derive(Clone, Default)]
@@ -47,8 +47,7 @@ impl ClientLeaseRegistry {
     }
 
     pub(super) fn prune_dead(&self) -> Vec<ProcessIdentity> {
-        #[cfg(windows)]
-        {
+        if host::WINDOWS {
             // Direct process handles avoid the Windows process-table refresh
             // that can block in WMI long enough to stall the daemon listener.
             // Probe outside the registry lock so concurrent acquire/release
@@ -59,15 +58,11 @@ impl ClientLeaseRegistry {
                 .filter(|identity| !identity.is_live())
                 .collect::<HashSet<_>>();
             self.prune_with(|identity| !dead.contains(identity))
-        }
-
-        #[cfg(not(windows))]
-        {
+        } else {
             self.prune_dead_batched()
         }
     }
 
-    #[cfg(not(windows))]
     fn prune_dead_batched(&self) -> Vec<ProcessIdentity> {
         let identities = self.snapshot();
         if identities.is_empty() {

@@ -60,7 +60,7 @@ pub(crate) fn wheel_with_pointer(
     let dir = root.join("wheels-v6").join("pypi").join(pkg);
     fs::create_dir_all(&dir).unwrap();
     let link = dir.join(&key);
-    std::os::unix::fs::symlink(Path::new("../../../archive-v0").join(id), &link).unwrap();
+    crate::platform::gc_test_fs::symlink(Path::new("../../../archive-v0").join(id), &link).unwrap();
     let pointer = dir.join(format!("{key}.{pointer_ext}"));
     write(&pointer, &format!("cache-policy archive={id}"));
     let lock = dir.join(format!("{key}.lock"));
