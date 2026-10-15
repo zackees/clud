@@ -73,7 +73,7 @@ fn isolated_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::Path
         r#"{"tokens":{"access_token":"native-codex-only"}}"#,
     )
     .unwrap();
-    let claude = bin.join(if cfg!(windows) {
+    let claude = bin.join(if clud::platform::host::WINDOWS {
         "claude.exe"
     } else {
         "claude"

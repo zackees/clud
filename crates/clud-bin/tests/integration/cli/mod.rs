@@ -3,5 +3,5 @@
 //! `cli::<module>::<test_name>`.
 
 mod codex_bridge_preflight_cli;
+mod platform;
 mod provider_selection_cli;
-mod shell_completion_guard;

@@ -10,6 +10,8 @@
 //! cases use paths that are never touched *because* they are refused, and the
 //! passthrough cases wrap `echo` and a shell exiting with a chosen code.
 
+mod platform;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -40,7 +42,11 @@ struct Run {
 /// Same precedence as `crates/clud-bin/tests/integration/common/exe.rs`.
 fn tap_binary() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLUD_TEST_BIN_DIR") {
-        let name = if cfg!(windows) { "tap.exe" } else { "tap" };
+        let name = if platform::host::WINDOWS {
+            "tap.exe"
+        } else {
+            "tap"
+        };
         let candidate = PathBuf::from(dir).join(name);
         if candidate.is_file() {
             return candidate;
@@ -107,10 +113,11 @@ fn bare(session_root: &Path, args: &[&str]) -> Run {
 ///
 /// `sh` and `echo` are not executables on Windows -- `echo` is a `cmd`
 /// builtin -- so spawning them by name fails with NotFound there.
-#[cfg(windows)]
-const SHELL: [&str; 2] = ["cmd", "/c"];
-#[cfg(not(windows))]
-const SHELL: [&str; 2] = ["sh", "-c"];
+const SHELL: [&str; 2] = if platform::host::WINDOWS {
+    ["cmd", "/c"]
+} else {
+    ["sh", "-c"]
+};
 
 /// Read one stream to EOF, mirroring `clud_hooks_run::drain`.
 fn drain(process: &NativeProcess, kind: StreamKind) -> String {

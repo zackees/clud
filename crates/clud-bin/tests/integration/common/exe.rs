@@ -62,6 +62,10 @@ fn bundled(name: &str) -> Option<PathBuf> {
 }
 
 fn exe_file_name(name: &str) -> String {
-    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let ext = if clud::platform::host::WINDOWS {
+        ".exe"
+    } else {
+        ""
+    };
     format!("{name}{ext}")
 }
