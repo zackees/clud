@@ -394,7 +394,10 @@ pub fn dangling_hook_program_warnings(repo_root: &Path, home: Option<&Path>) -> 
 /// The helper-only directory contains exactly one program.
 pub fn ensure_helper_on_session_path() {
     let path_env = std::env::var("PATH").unwrap_or_default();
-    if crate::shim_resolve::which(&native_helper_name(), &path_env).is_some() {
+    if let Some(found) = crate::shim_resolve::which(&native_helper_name(), &path_env) {
+        if let InstallProbe::HelperPresent { path } = probe_current_install() {
+            refresh_owned_helper(&found, &path, crate::home::user_home().as_deref());
+        }
         return;
     }
     let InstallProbe::HelperPresent { path } = probe_current_install() else {
@@ -410,6 +413,44 @@ pub fn ensure_helper_on_session_path() {
         // SAFETY: startup-only write, before the backend is spawned and
         // before any thread that reads the environment runs.
         unsafe { std::env::set_var("PATH", updated) };
+    }
+}
+
+/// Bring a `clud-cmd-scan` already on PATH up to the running `clud` when clud
+/// owns its location: beside the running binary, or the helper-only
+/// directory. An upgrade replaces `clud` but not these aliases, and the hook
+/// then runs the old build's rules (#1949: the `/loop` stop guard never ran).
+/// A helper anywhere else belongs to someone else and is left alone.
+/// Returns whether `found` was in a clud-owned location.
+fn refresh_owned_helper(found: &Path, clud: &Path, home: Option<&Path>) -> bool {
+    let Some(dir) = found.parent() else {
+        return false;
+    };
+    let beside_clud = clud
+        .parent()
+        .is_some_and(|clud_dir| same_dir(dir, clud_dir));
+    let helper_bin = home.is_some_and(|home| same_dir(dir, &home.join(HELPER_BIN_SUBDIR)));
+    if !beside_clud && !helper_bin {
+        return false;
+    }
+    for name in [
+        crate::multicall::CMD_SCAN,
+        crate::multicall::LEGACY_CMD_SCAN,
+    ] {
+        let target = dir.join(crate::shim_registry::file_name(name));
+        if name == crate::multicall::CMD_SCAN || target.is_file() {
+            // Best effort: on Windows a running helper cannot be replaced,
+            // and the existing one still works.
+            let _ = crate::alias_link::install_alias(clud, &target);
+        }
+    }
+    true
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 
@@ -728,6 +769,35 @@ mod tests {
             Some("python")
         );
         assert_eq!(hook_program("   "), None);
+    }
+
+    /// #1949: an upgrade replaced `clud` but left the `clud-cmd-scan` beside
+    /// it from the old build, which PATH found first, so every hook ran the
+    /// old rules. A helper clud owns is refreshed; anyone else's is not.
+    #[test]
+    fn a_stale_helper_clud_owns_is_refreshed_and_a_foreign_one_is_not() {
+        let tmp = tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let clud = install.join(crate::shim_registry::file_name("clud"));
+        write(&clud, "clud-v2-longer");
+        let beside = install.join(native_helper_name());
+        write(&beside, "clud-v1");
+        let home = tmp.path().join("home");
+        let helper_bin = home.join(HELPER_BIN_SUBDIR).join(native_helper_name());
+        write(&helper_bin, "clud-v1");
+        let foreign = tmp.path().join("elsewhere").join(native_helper_name());
+        write(&foreign, "someone-else");
+
+        assert!(refresh_owned_helper(&beside, &clud, Some(&home)));
+        assert!(refresh_owned_helper(&helper_bin, &clud, Some(&home)));
+        assert!(!refresh_owned_helper(&foreign, &clud, Some(&home)));
+
+        assert_eq!(std::fs::read_to_string(&beside).unwrap(), "clud-v2-longer");
+        assert_eq!(
+            std::fs::read_to_string(&helper_bin).unwrap(),
+            "clud-v2-longer"
+        );
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "someone-else");
     }
 
     #[test]
