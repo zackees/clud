@@ -136,17 +136,7 @@ pub fn run_plan_pty(
     // own IDropTarget across iterations. Issue #1360: the receiver is
     // shared across iterations; each iteration leases it through
     // `lease_shared_rx` instead of moving it, so drops reach every child.
-    #[cfg(windows)]
-    let (_dnd_pty_guard, dnd_rx) = if dnd_enabled {
-        crate::startup::try_register_console_drop_target_pty()
-    } else {
-        (None, None)
-    };
-    #[cfg(not(windows))]
-    let (_dnd_pty_guard, dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) = {
-        let _ = dnd_enabled;
-        (None, None)
-    };
+    let (_dnd_pty_guard, dnd_rx) = crate::platform::runner_execution::register_dnd_pty(dnd_enabled);
     let dnd_shared = dnd_rx.map(|rx| std::sync::Arc::new(std::sync::Mutex::new(rx)));
 
     let statusline = toast_cfg
@@ -326,26 +316,9 @@ pub fn run_plan_pty(
         // one PTY iteration, exactly like the receiver consumed by the pump.
         // Recreate it for every loop iteration so no detached core can keep
         // draining the console after its channel has been retired.
-        #[cfg(windows)]
-        let (console_input_rx, _console_input_guard) = if session::terminals_are_interactive() {
-            match crate::console_input::spawn_console_input_reader() {
-                Ok(mut handle) => {
-                    let rx = handle.take_receiver();
-                    (rx, Some(handle))
-                }
-                Err(e) => {
-                    eprintln!("[clud] note: console-input reader unavailable: {e}");
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
-        #[cfg(not(windows))]
-        let (console_input_rx, _console_input_guard): (
-            Option<std::sync::mpsc::Receiver<Vec<u8>>>,
-            Option<()>,
-        ) = (None, None);
+        // Off Windows both halves are `None` stubs.
+        let (console_input_rx, _console_input_guard) =
+            crate::platform::runner_execution::spawn_console_input_for_iteration();
 
         // Start TerminalInputCore first so it snapshots the true original
         // Windows console mode. VT input is layered on afterward and restored
@@ -410,16 +383,13 @@ pub fn run_plan_pty(
         }
         drop(raw_guard);
         drop(_console_guard);
-        // Windows-only: there the guard is a real `ConsoleInputHandle` whose
-        // Drop retires the reader's channel, and dropping it here is what
-        // scopes capture to one PTY iteration (#141, #575). Everywhere else
-        // the binding is the `Option<()>` stub declared above — `Copy`, so
-        // `drop()` is a no-op and trips `dropping_copy_types` under
-        // `-D warnings`. Note `let _ = guard` is NOT an alternative: a
-        // wildcard pattern does not move, so it would silently stop dropping
-        // the real handle on Windows.
-        #[cfg(windows)]
-        drop(_console_input_guard);
+        // Windows: the guard is a real `ConsoleInputHandle` whose Drop
+        // retires the reader's channel, and moving it out here is what scopes
+        // capture to one PTY iteration (#141, #575). Everywhere else it is an
+        // inert stub. Note `let _ = guard` is NOT an alternative: a wildcard
+        // pattern does not move, so it would silently stop dropping the real
+        // handle on Windows.
+        crate::platform::runner_execution::end_console_input_iteration(_console_input_guard);
         if let Some(bytes) = header_restore.as_deref() {
             runner_terminal::write_terminal_bytes(bytes);
         }
@@ -522,63 +492,8 @@ mod tests {
         assert_eq!(display_verbose_command(&command), "claude --model opus");
     }
 
-    /// Issue #168: Windows children get UTF-8 forced via Python env vars
-    /// so any Python helper the agent spawns emits and reads UTF-8.
-    /// IN_CLUD and ORIGINATOR vars must still be present, and PYTHONUTF8
-    /// must be exactly "1" (Python accepts 0/1 only).
-    #[cfg(windows)]
-    #[test]
-    fn child_env_sets_python_utf8_vars_on_windows() {
-        let env = child_env();
-        let lookup = |key: &str| -> Option<String> {
-            env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
-        };
-        assert_eq!(lookup("PYTHONIOENCODING").as_deref(), Some("utf-8"));
-        assert_eq!(lookup("PYTHONUTF8").as_deref(), Some("1"));
-        assert_eq!(lookup("IN_CLUD").as_deref(), Some("1"));
-        assert!(
-            lookup(running_process::ORIGINATOR_ENV_VAR).is_some(),
-            "ORIGINATOR var must still be set"
-        );
-        let pyio_count = env.iter().filter(|(k, _)| k == "PYTHONIOENCODING").count();
-        assert_eq!(pyio_count, 1, "PYTHONIOENCODING must appear exactly once");
-    }
-
-    /// Issue #753: the backend's shell snapshot must not capture Git-Bash
-    /// completion functions. Windows-only — see shell::completion_guard for
-    /// why this variable is deliberately not set elsewhere.
-    #[cfg(windows)]
-    #[test]
-    fn child_env_suppresses_git_bash_completions_on_windows() {
-        use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
-
-        // Guard the process-global opt-out so this test is order-independent.
-        let prior = std::env::var(OPT_OUT_KEY).ok();
-        std::env::remove_var(OPT_OUT_KEY);
-        let env = child_env();
-        match prior {
-            Some(v) => std::env::set_var(OPT_OUT_KEY, v),
-            None => std::env::remove_var(OPT_OUT_KEY),
-        }
-
-        assert_eq!(
-            env_lookup(&env, SUPPRESS_KEY).as_deref(),
-            Some("1"),
-            "{SUPPRESS_KEY} must be set so the login shell skips git-completion.bash"
-        );
-        let count = env.iter().filter(|(k, _)| k == SUPPRESS_KEY).count();
-        assert_eq!(count, 1, "{SUPPRESS_KEY} must appear exactly once");
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn child_env_leaves_wine_loader_alone_off_windows() {
-        use crate::shell::completion_guard::SUPPRESS_KEY;
-        // Only meaningful when the ambient env doesn't already carry it.
-        if std::env::var(SUPPRESS_KEY).is_err() {
-            assert_eq!(env_lookup(&child_env(), SUPPRESS_KEY), None);
-        }
-    }
+    // Host-specific `child_env` tests live in
+    // `platform/{windows,unix}/runner_execution.rs`.
 
     fn env_lookup(env: &[(String, String)], key: &str) -> Option<String> {
         env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())

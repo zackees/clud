@@ -96,7 +96,8 @@ does not matter; **how it detached** does.
 Every signal sits behind the `ProcessFacts` trait, is collected once per pass
 into a `FactsSnapshot`, and is then consulted as pure data. No reap-decision
 code calls Win32 — see [DD-024]. The trait, the precedence order and the
-per-platform producers live in `reaper_facts.rs`.
+per-platform producers live in `reaper_facts.rs` and
+`platform/{windows,unix}/reaper_facts.rs`.
 
 ### Which reaper consults the table
 

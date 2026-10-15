@@ -365,7 +365,7 @@ which test tier a change belongs in — lives in
   `cmd.exe -> node.exe` would orphan the real child. `TopologySnapshot` is one
   host walk reused across a whole sweep, and re-verifies `(pid, start_time)`
   for **every** target it kills, descendants included (#688).
-- `job_orphan_reaper.rs` - Windows foreground Job completion-port tracker.
+- `job_orphan_reaper.rs` - foreground Job reap decision model; the Windows completion-port tracker is in `platform/windows/job_orphan_reaper.rs`.
   The runner registers each backend root by PID + start time; a pure role
   planner recognizes the exact Claude/Codex host, direct tool shells, Git Bash
   handoffs, nested detachments, declared daemons, and the unconditional
