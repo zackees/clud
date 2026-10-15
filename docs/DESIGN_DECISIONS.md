@@ -6724,3 +6724,30 @@ different bugs). Banning every `sleep` (see above). A `clud wait --file F
 session and the transcript scan found. Allowing bounded `for` loops with
 `sleep`: the bound is routinely hours of iterations.
 
+
+## DD-169: the platform boundary has no exceptions
+
+**Context.** #1946 added `enforce_platform_boundary`, the pre-expansion lint
+soldr, zccache and fbuild use to confine host selection to one module. It
+landed with fbuild's model: a `baseline.txt` that admitted the 1054 existing
+occurrences in 159 files by per-file count. A count is a ratchet, not a
+boundary. Each file could keep its host branches indefinitely, and a new
+branch could replace a removed one in the same file without anyone noticing.
+
+**Decision.** #1953 moved every occurrence behind a boundary and deleted the
+baseline, the count machinery, and the harvest mode. The lint has no
+allowlist. A host may be named only in a `platform/mod.rs` selector or a
+concrete `windows/`, `unix/`, `linux/` or `macos/` tree under it: a crate's
+`src/platform/`, or a `platform/` directory in a test suite. Tests get no
+exception. Host-specific tests live in the concrete tree they exercise.
+
+**Why.** soldr and zccache start from zero, and that is the property that
+makes the single-host Dylint run trustworthy. Any exception class becomes
+the place new debt hides. A boundary module is enough under the one-binary
+rule (DD-121); a separate crate would add a workspace member and buy nothing.
+
+**Rejected.** Keeping the baseline and shrinking it over time: it never
+reaches zero by itself. An allowlist for tests: tests were 18% of the debt,
+and host-gated tests are exactly the code a Linux-only run never compiles.
+Facade files beside the selector that are allowed to `cfg`: that would be
+a second selector.

@@ -1,8 +1,6 @@
 [package]
 name = "enforce_platform_boundary"
-# Bump whenever the embedded baseline changes: setup-soldr's Dylint cache
-# hashes the manifest but not src/baseline.txt.
-version = "0.1.0"
+version = "0.2.0"
 description = "Confine host-platform selection and native APIs to clud's platform boundary"
 edition = "2021"
 publish = false
@@ -12,6 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 dylint_linting = "6.0.3"
+
+[dev-dependencies]
+dylint_testing = "6.0.3"
 
 [package.metadata.rust-analyzer]
 rustc_private = true

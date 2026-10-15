@@ -238,6 +238,17 @@ distro package, a container image, the pre-clud `install`), mark the line
 `python-name-lint: allow`, or put `python-name-lint: allow-next-line` above
 a line that ends in a `\` continuation.
 
+### Host-specific code: `platform/` only
+
+Name a host (`#[cfg(windows)]`, `cfg!(unix)`, `target_os`, ...) or a native
+API crate (`libc`, `windows_sys`, ...) only inside a platform boundary: a
+crate's `src/platform/mod.rs` selector or its `windows/`/`unix/` trees.
+Everywhere else, call `crate::platform::<area>` and branch on
+`crate::platform::host::*`. The `enforce_platform_boundary` Dylint lint has
+no baseline, no allowlist and no test exemption
+([platform-boundary.md](docs/architecture/platform-boundary.md),
+[DD-169](docs/DESIGN_DECISIONS.md#dd-169-the-platform-boundary-has-no-exceptions)).
+
 ### Home directory: `home::user_home` only
 
 Resolve the user's home with `crate::home::user_home()` (`clud::home::user_home()`
