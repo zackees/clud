@@ -467,7 +467,8 @@ fn foreign_helper_warning(found: &Path, clud: &Path, owned: bool) -> Option<Stri
          its hooks will enforce that build's rules. Remove it or put {} first.",
         found.display(),
         clud.display(),
-        clud.parent().map_or_else(String::new, |dir| dir.display().to_string())
+        clud.parent()
+            .map_or_else(String::new, |dir| dir.display().to_string())
     ))
 }
 
@@ -848,12 +849,18 @@ mod tests {
     #[test]
     fn a_foreign_helper_first_on_path_is_warned_about() {
         let tmp = tempdir().unwrap();
-        let clud = tmp.path().join("install").join(crate::shim_registry::file_name("clud"));
+        let clud = tmp
+            .path()
+            .join("install")
+            .join(crate::shim_registry::file_name("clud"));
         write(&clud, "clud-v2");
         let foreign = tmp.path().join("elsewhere").join(native_helper_name());
         write(&foreign, "clud-v1");
         let warning = foreign_helper_warning(&foreign, &clud, false).unwrap();
-        assert!(warning.contains(&foreign.display().to_string()), "{warning}");
+        assert!(
+            warning.contains(&foreign.display().to_string()),
+            "{warning}"
+        );
         assert_eq!(foreign_helper_warning(&foreign, &clud, true), None);
         let alias = tmp.path().join("install").join(native_helper_name());
         crate::alias_link::install_alias(&clud, &alias).unwrap();

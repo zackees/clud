@@ -3715,9 +3715,24 @@ mod tests {
         use crate::clud_hooks_compile::GUARDED_TOOLS;
         let facts = block_bad_cmd_grind_caps::RunFacts::default();
         let candidates = [
-            "Bash", "PowerShell", "ScheduleWakeup", "Monitor", "Agent", "Workflow",
-            "AskUserQuestion", "Write", "Edit", "MultiEdit", "NotebookEdit", "Read",
-            "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite", "ToolSearch",
+            "Bash",
+            "PowerShell",
+            "ScheduleWakeup",
+            "Monitor",
+            "Agent",
+            "Workflow",
+            "AskUserQuestion",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "Read",
+            "Grep",
+            "Glob",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "ToolSearch",
         ];
         for tool in candidates {
             let ruled = block_bad_cmd_gate::gates_tool(tool)
