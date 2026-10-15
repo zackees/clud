@@ -89,10 +89,18 @@ pub fn deletion_safety_fragment() -> Value {
             "PreToolUse": [{
                 "matcher": "Bash",
                 "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
+            }, {
+                // #1949: the `/loop` first-round stop guard reads this tool,
+                // which a `Bash` matcher never delivers.
+                "matcher": SCHEDULE_WAKEUP_MATCHER,
+                "hooks": [{ "type": "command", "command": DISPATCHER_BINARY }]
             }]
         }
     })
 }
+
+/// The harness tool that schedules or ends a dynamic `/loop` (#1949).
+pub const SCHEDULE_WAKEUP_MATCHER: &str = "ScheduleWakeup";
 
 /// The command string a compiled line runs for `event`.
 #[must_use]
