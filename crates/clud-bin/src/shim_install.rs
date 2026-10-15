@@ -168,10 +168,10 @@ pub fn rm_alias_names() -> Vec<String> {
 
 /// Alias names clud no longer serves. An install made them in its own alias
 /// dirs, and nothing relinks or removes a name the registry dropped, so each
-/// stayed behind as a full copy of an old build (`rm-file` / `rm-dir`,
+/// stayed behind as a full copy of an old build (the two deletion helpers
 /// retired by #1461, were 115 MB apiece; #1954). Append a name when the
 /// registry drops it.
-pub const RETIRED_ALIASES: &[&str] = &["rm-file", "rm-dir"];
+pub const RETIRED_ALIASES: &[&str] = &["rm-file", "rm-dir"]; // legacy-deletion-purge: allow
 
 /// Remove [`RETIRED_ALIASES`] from one of clud's own alias dirs. Best effort.
 fn purge_retired_aliases(dir: &Path) {
@@ -371,7 +371,7 @@ mod tests {
         fs::rename(&staged, path).unwrap();
     }
 
-    /// #1954: `rm-file` / `rm-dir` outlived their retirement as old-build
+    /// #1954: the retired deletion helpers outlived their retirement as old-build
     /// copies in both alias dirs, because only current names were managed.
     #[test]
     fn retired_aliases_are_purged_from_both_alias_dirs() {
